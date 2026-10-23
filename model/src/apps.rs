@@ -348,18 +348,18 @@ struct Observation {
 }
 
 /// What a process had used and held when the collector read its usage.
-#[derive(Clone, Copy)]
-struct Usage {
-    awake_ns_at_start: u64,
-    user_ns: u64,
-    system_ns: u64,
-    energy_nj: u64,
-    disk_read_bytes: u64,
-    disk_written_bytes: u64,
-    idle_wakeups: u64,
-    pageins: u64,
-    resident_bytes: u64,
-    footprint_bytes: u64,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Usage {
+    pub awake_ns_at_start: u64,
+    pub user_ns: u64,
+    pub system_ns: u64,
+    pub energy_nj: u64,
+    pub disk_read_bytes: u64,
+    pub disk_written_bytes: u64,
+    pub idle_wakeups: u64,
+    pub pageins: u64,
+    pub resident_bytes: u64,
+    pub footprint_bytes: u64,
 }
 
 /// What one process of the selected tick spent since the tick before, and what it held at

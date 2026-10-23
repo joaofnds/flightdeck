@@ -6,9 +6,8 @@ use collector::ring::{
     ProcessIdentity, ProgramBuffers, ProgramReference, RingReader, UsageAvailability,
 };
 use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
-use model::apps::{
-    Creation, Execs, Exits, Measurement, Processes, ProgramUnavailable, Stamp, Starts, Tick, Usages,
-};
+use model::apps::{Creation, Measurement, ProgramUnavailable, Stamp, Tick};
+use model::columns::{EventRow, ExitRow, Full, ProcessRow, Refusal, TickColumns};
 use model::programs::{Program, Programs};
 use persistence::{Error, NumberedEvent, Result};
 
@@ -28,107 +27,17 @@ pub struct Source<'source> {
 
 /// The columns of one tick of the ring.
 pub struct RingTick {
-    stamp: Stamp,
-    processes: ProcessColumns,
-    exits: ExitColumns,
-    starts: EventColumns,
-    execs: EventColumns,
-    /// The tick's events before they are put in the rule's orders.
-    exit_rows: Vec<ExitRow>,
-    start_rows: Vec<EventRow>,
-    exec_rows: Vec<EventRow>,
+    columns: TickColumns,
     executable_name: Box<[u8; PROGRAM_PATH_BYTES_MAX]>,
     app_path: Box<[u8; PROGRAM_PATH_BYTES_MAX]>,
-}
-
-/// The columns of a tick's processes.
-struct ProcessColumns {
-    pid: Vec<i32>,
-    creation: Vec<Option<Creation>>,
-    program: Vec<std::result::Result<u32, ProgramUnavailable>>,
-    usage: UsageColumns,
-    gpu_ns: Vec<Option<u64>>,
-    threads: Vec<Option<u64>>,
-}
-
-/// The columns of a tick's exits.
-struct ExitColumns {
-    number: Vec<u64>,
-    pid: Vec<i32>,
-    creation: Vec<Option<Creation>>,
-    usage: UsageColumns,
-}
-
-/// The columns of a tick's starts or of its execs.
-struct EventColumns {
-    number: Vec<u64>,
-    pid: Vec<i32>,
-    creation: Vec<Option<Creation>>,
-    program: Vec<std::result::Result<u32, ProgramUnavailable>>,
-}
-
-/// The columns of the usage of a tick's processes or of its exits.
-struct UsageColumns {
-    measurement: Vec<Measurement>,
-    awake_ns_at_start: Vec<u64>,
-    user_ns: Vec<u64>,
-    system_ns: Vec<u64>,
-    energy_nj: Vec<u64>,
-    disk_read_bytes: Vec<u64>,
-    disk_written_bytes: Vec<u64>,
-    idle_wakeups: Vec<u64>,
-    pageins: Vec<u64>,
-    resident_bytes: Vec<u64>,
-    footprint_bytes: Vec<u64>,
-}
-
-#[derive(Clone, Copy)]
-struct ExitRow {
-    number: u64,
-    pid: i32,
-    creation: Option<Creation>,
-    usage: std::result::Result<Usage, Measurement>,
-}
-
-#[derive(Clone, Copy)]
-struct EventRow {
-    number: u64,
-    pid: i32,
-    creation: Option<Creation>,
-    program: std::result::Result<u32, ProgramUnavailable>,
 }
 
 impl RingTick {
     /// Buffers for the ticks of a ring of at most `processes` processes a tick.
     #[must_use]
-    pub fn new(processes: usize) -> Self {
+    pub fn new(processes: u32) -> Self {
         Self {
-            stamp: Stamp {
-                recording: [0; 2],
-                boot: [0; 2],
-                run: [0; 2],
-                publication: 0,
-                continuous_ns: None,
-            },
-            processes: ProcessColumns {
-                pid: Vec::with_capacity(processes),
-                creation: Vec::with_capacity(processes),
-                program: Vec::with_capacity(processes),
-                usage: UsageColumns::new(processes),
-                gpu_ns: Vec::with_capacity(processes),
-                threads: Vec::with_capacity(processes),
-            },
-            exits: ExitColumns {
-                number: Vec::with_capacity(EVENTS_PER_TICK_MAX),
-                pid: Vec::with_capacity(EVENTS_PER_TICK_MAX),
-                creation: Vec::with_capacity(EVENTS_PER_TICK_MAX),
-                usage: UsageColumns::new(EVENTS_PER_TICK_MAX),
-            },
-            starts: EventColumns::new(EVENTS_PER_TICK_MAX),
-            execs: EventColumns::new(EVENTS_PER_TICK_MAX),
-            exit_rows: Vec::with_capacity(EVENTS_PER_TICK_MAX),
-            start_rows: Vec::with_capacity(EVENTS_PER_TICK_MAX),
-            exec_rows: Vec::with_capacity(EVENTS_PER_TICK_MAX),
+            columns: TickColumns::new(processes, model::u32_from_length(EVENTS_PER_TICK_MAX)),
             executable_name: Box::new([0; PROGRAM_PATH_BYTES_MAX]),
             app_path: Box::new([0; PROGRAM_PATH_BYTES_MAX]),
         }
@@ -137,10 +46,10 @@ impl RingTick {
     /// Reads the tick of `source` into the columns, and indexes in `programs` each dictionary
     /// entry the tick names that `programs` has not met. A refusal leaves the columns empty.
     pub fn capture(&mut self, source: &Source<'_>, programs: &mut Programs) -> Result<()> {
-        self.clear();
+        self.columns.clear();
         let captured = self.capture_tick(source, programs);
         if captured.is_err() {
-            self.clear();
+            self.columns.clear();
         }
         captured
     }
@@ -148,81 +57,48 @@ impl RingTick {
     /// The tick last captured, as the App rule reads it.
     #[must_use]
     pub fn tick(&self) -> Tick<'_> {
-        Tick {
-            stamp: self.stamp,
-            processes: Processes {
-                pid: &self.processes.pid,
-                creation: &self.processes.creation,
-                program: &self.processes.program,
-                usage: self.processes.usage.usages(),
-                gpu_ns: &self.processes.gpu_ns,
-                threads: &self.processes.threads,
-            },
-            exits: Exits {
-                number: &self.exits.number,
-                pid: &self.exits.pid,
-                creation: &self.exits.creation,
-                usage: self.exits.usage.usages(),
-            },
-            starts: Starts {
-                number: &self.starts.number,
-                pid: &self.starts.pid,
-                creation: &self.starts.creation,
-                program: &self.starts.program,
-            },
-            execs: Execs {
-                number: &self.execs.number,
-                pid: &self.execs.pid,
-                creation: &self.execs.creation,
-                program: &self.execs.program,
-            },
-        }
-    }
-
-    fn clear(&mut self) {
-        self.stamp.publication = 0;
-        self.stamp.continuous_ns = None;
-        self.processes.clear();
-        self.exits.clear();
-        self.starts.clear();
-        self.execs.clear();
-        self.exit_rows.clear();
-        self.start_rows.clear();
-        self.exec_rows.clear();
+        self.columns.tick()
     }
 
     fn capture_tick(&mut self, source: &Source<'_>, programs: &mut Programs) -> Result<()> {
-        validate(source, self.processes.pid.capacity())?;
+        validate(source, self.columns.processes_max())?;
         let identity = source
             .reader
             .identity()
             .ok_or(Error::Bound("ring tick run identity"))?;
-        self.stamp = Stamp {
+        self.columns.start(Stamp {
             recording: identity.recording.0,
             boot: identity.boot.0,
             run: identity.run.0,
             publication: source.publication,
             continuous_ns: source.tick.times.map(|times| times.continuous_ns),
-        };
+        });
         if source.reader.dictionary_capacity().is_none() {
-            self.capture_unidentified(source);
+            self.capture_unidentified(source)?;
+            self.columns.finish();
             return Ok(());
         }
+
         self.capture_processes(source, programs)?;
         self.capture_events(source, programs)?;
-        self.order_events();
+        self.columns.finish();
         Ok(())
     }
 
     /// The processes of a ring that records no identities, each with its usage and no program.
-    fn capture_unidentified(&mut self, source: &Source<'_>) {
+    fn capture_unidentified(&mut self, source: &Source<'_>) -> Result<()> {
         for process in &source.tick.processes {
-            self.processes
-                .push(process.pid, None, Err(ProgramUnavailable::Unsupported));
-            self.processes.usage.push(Ok(&process.usage));
-            self.processes.gpu_ns.push(None);
-            self.processes.threads.push(threads(process.task.threads));
+            let row = ProcessRow {
+                pid: process.pid,
+                creation: None,
+                program: Err(ProgramUnavailable::Unsupported),
+                usage: Ok(usage(&process.usage)),
+                gpu_ns: None,
+                threads: threads(process.task.threads),
+            };
+            self.columns.push_process(&row).map_err(process_refused)?;
         }
+        Ok(())
     }
 
     fn capture_processes(&mut self, source: &Source<'_>, programs: &mut Programs) -> Result<()> {
@@ -235,14 +111,7 @@ impl RingTick {
 
         let mut measured = 0;
         for (index, identity) in source.identities.iter().enumerate() {
-            if let Some(&previous) = self.processes.pid.last() {
-                if previous >= identity.pid {
-                    return Err(Error::Bound("ring tick identity order"));
-                }
-            }
             let program = self.program(source.reader, programs, &identity.identity)?;
-            self.processes
-                .push(identity.pid, creation(identity), program);
             let (usage, task_threads) = match identity.usage {
                 UsageAvailability::Measured => {
                     let process = source
@@ -254,7 +123,7 @@ impl RingTick {
                         return Err(Error::Bound("ring tick numeric association"));
                     }
                     measured += 1;
-                    (Ok(&process.usage), threads(process.task.threads))
+                    (Ok(usage(&process.usage)), threads(process.task.threads))
                 }
                 UsageAvailability::Refused => (Err(Measurement::Refused), None),
                 UsageAvailability::Gone => (Err(Measurement::Gone), None),
@@ -262,11 +131,15 @@ impl RingTick {
                     return Err(Error::Bound("ring tick process usage availability"));
                 }
             };
-            self.processes.usage.push(usage);
-            self.processes
-                .gpu_ns
-                .push(gpu_ns.get(index).copied().flatten());
-            self.processes.threads.push(task_threads);
+            let row = ProcessRow {
+                pid: identity.pid,
+                creation: creation(identity),
+                program,
+                usage,
+                gpu_ns: gpu_ns.get(index).copied().flatten(),
+                threads: task_threads,
+            };
+            self.columns.push_process(&row).map_err(process_refused)?;
         }
         if measured != source.tick.processes.len() {
             return Err(Error::Bound("ring tick unmatched numeric rows"));
@@ -293,16 +166,17 @@ impl RingTick {
                     if *pid != identity.pid {
                         return Err(Error::Bound("ring tick exit pid association"));
                     }
-                    self.exit_rows.push(ExitRow {
+                    let row = ExitRow {
                         number: numbered.number,
                         pid: *pid,
                         creation: creation(identity),
                         usage: match last {
-                            Ok(usage) => Ok(*usage),
+                            Ok(last) => Ok(usage(last)),
                             Err(Unreadable::Refused) => Err(Measurement::Refused),
                             Err(Unreadable::Gone) => Err(Measurement::Gone),
                         },
-                    });
+                    };
+                    self.columns.push_exit(&row).map_err(event_refused)?;
                     continue;
                 }
                 Event::Start { pid, .. } => (*pid, true),
@@ -321,34 +195,12 @@ impl RingTick {
                 program: self.program(source.reader, programs, &identity.identity)?,
             };
             if start {
-                self.start_rows.push(row);
+                self.columns.push_start(&row).map_err(event_refused)?;
             } else {
-                self.exec_rows.push(row);
+                self.columns.push_exec(&row).map_err(event_refused)?;
             }
         }
         Ok(())
-    }
-
-    /// Puts the exits and the program events in the orders the App rule reads them in.
-    fn order_events(&mut self) {
-        self.exit_rows
-            .sort_unstable_by_key(|row| (row.pid, row.creation.map(unique_id), row.number));
-        for row in &self.exit_rows {
-            self.exits.number.push(row.number);
-            self.exits.pid.push(row.pid);
-            self.exits.creation.push(row.creation);
-            self.exits
-                .usage
-                .push(row.usage.as_ref().map_err(|reason| *reason));
-        }
-
-        self.start_rows
-            .sort_unstable_by_key(|row| (row.pid, row.creation.map(unique_id), row.number));
-        self.starts.extend(&self.start_rows);
-
-        self.exec_rows
-            .sort_unstable_by_key(|row| (row.pid, row.number));
-        self.execs.extend(&self.exec_rows);
     }
 
     /// The program of `identity` as its entry in the run's dictionary, indexed in `programs`
@@ -405,148 +257,36 @@ impl RingTick {
     }
 }
 
-impl ProcessColumns {
-    fn push(
-        &mut self,
-        pid: i32,
-        creation: Option<Creation>,
-        program: std::result::Result<u32, ProgramUnavailable>,
-    ) {
-        self.pid.push(pid);
-        self.creation.push(creation);
-        self.program.push(program);
-    }
-
-    fn clear(&mut self) {
-        self.pid.clear();
-        self.creation.clear();
-        self.program.clear();
-        self.usage.clear();
-        self.gpu_ns.clear();
-        self.threads.clear();
+/// The usage the App rule reads, of the counters the collector read for a process.
+fn usage(read: &Usage) -> model::apps::Usage {
+    model::apps::Usage {
+        awake_ns_at_start: read.awake_ns_at_start,
+        user_ns: read.user_ns,
+        system_ns: read.system_ns,
+        energy_nj: read.energy_nj,
+        disk_read_bytes: read.disk_read_bytes,
+        disk_written_bytes: read.disk_written_bytes,
+        idle_wakeups: read.idle_wakeups,
+        pageins: read.pageins,
+        resident_bytes: read.resident_bytes,
+        footprint_bytes: read.footprint_bytes,
     }
 }
 
-impl ExitColumns {
-    fn clear(&mut self) {
-        self.number.clear();
-        self.pid.clear();
-        self.creation.clear();
-        self.usage.clear();
+/// The error of a process the columns refused, which `validate` and the ring's pid order rule
+/// out unless the ring breaks its own order.
+fn process_refused(refusal: Refusal) -> Error {
+    match refusal {
+        Refusal::Full => Error::Bound("ring tick identity capacity"),
+        Refusal::Order => Error::Bound("ring tick identity order"),
     }
 }
 
-impl EventColumns {
-    fn new(capacity: usize) -> Self {
-        Self {
-            number: Vec::with_capacity(capacity),
-            pid: Vec::with_capacity(capacity),
-            creation: Vec::with_capacity(capacity),
-            program: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn extend(&mut self, rows: &[EventRow]) {
-        for row in rows {
-            self.number.push(row.number);
-            self.pid.push(row.pid);
-            self.creation.push(row.creation);
-            self.program.push(row.program);
-        }
-    }
-
-    fn clear(&mut self) {
-        self.number.clear();
-        self.pid.clear();
-        self.creation.clear();
-        self.program.clear();
-    }
+/// The error of an event the columns refused, which `validate`'s bound on a tick's events
+/// rules out.
+fn event_refused(_: Full) -> Error {
+    Error::Bound("ring tick event bound")
 }
-
-impl UsageColumns {
-    fn new(capacity: usize) -> Self {
-        Self {
-            measurement: Vec::with_capacity(capacity),
-            awake_ns_at_start: Vec::with_capacity(capacity),
-            user_ns: Vec::with_capacity(capacity),
-            system_ns: Vec::with_capacity(capacity),
-            energy_nj: Vec::with_capacity(capacity),
-            disk_read_bytes: Vec::with_capacity(capacity),
-            disk_written_bytes: Vec::with_capacity(capacity),
-            idle_wakeups: Vec::with_capacity(capacity),
-            pageins: Vec::with_capacity(capacity),
-            resident_bytes: Vec::with_capacity(capacity),
-            footprint_bytes: Vec::with_capacity(capacity),
-        }
-    }
-
-    /// Adds a row of `usage`, or of zeros with the reason it was not read.
-    fn push(&mut self, usage: std::result::Result<&Usage, Measurement>) {
-        let (measurement, usage) = match usage {
-            Ok(usage) => (Measurement::Measured, *usage),
-            Err(reason) => (reason, UNREAD),
-        };
-        self.measurement.push(measurement);
-        self.awake_ns_at_start.push(usage.awake_ns_at_start);
-        self.user_ns.push(usage.user_ns);
-        self.system_ns.push(usage.system_ns);
-        self.energy_nj.push(usage.energy_nj);
-        self.disk_read_bytes.push(usage.disk_read_bytes);
-        self.disk_written_bytes.push(usage.disk_written_bytes);
-        self.idle_wakeups.push(usage.idle_wakeups);
-        self.pageins.push(usage.pageins);
-        self.resident_bytes.push(usage.resident_bytes);
-        self.footprint_bytes.push(usage.footprint_bytes);
-    }
-
-    fn clear(&mut self) {
-        self.measurement.clear();
-        self.awake_ns_at_start.clear();
-        self.user_ns.clear();
-        self.system_ns.clear();
-        self.energy_nj.clear();
-        self.disk_read_bytes.clear();
-        self.disk_written_bytes.clear();
-        self.idle_wakeups.clear();
-        self.pageins.clear();
-        self.resident_bytes.clear();
-        self.footprint_bytes.clear();
-    }
-
-    fn usages(&self) -> Usages<'_> {
-        Usages {
-            measurement: &self.measurement,
-            awake_ns_at_start: &self.awake_ns_at_start,
-            user_ns: &self.user_ns,
-            system_ns: &self.system_ns,
-            energy_nj: &self.energy_nj,
-            disk_read_bytes: &self.disk_read_bytes,
-            disk_written_bytes: &self.disk_written_bytes,
-            idle_wakeups: &self.idle_wakeups,
-            pageins: &self.pageins,
-            resident_bytes: &self.resident_bytes,
-            footprint_bytes: &self.footprint_bytes,
-        }
-    }
-}
-
-/// The values a row of usage the collector did not read holds, which the rule never reads.
-const UNREAD: Usage = Usage {
-    awake_ns_at_start: 0,
-    user_ns: 0,
-    system_ns: 0,
-    energy_nj: 0,
-    instructions: 0,
-    super_instructions: 0,
-    cycles: 0,
-    idle_wakeups: 0,
-    interrupt_wakeups: 0,
-    pageins: 0,
-    resident_bytes: 0,
-    footprint_bytes: 0,
-    disk_read_bytes: 0,
-    disk_written_bytes: 0,
-};
 
 fn validate(source: &Source<'_>, processes_max: usize) -> Result<()> {
     if source.publication == 0 {
@@ -582,10 +322,6 @@ fn creation(identity: &IdentityObservation) -> Option<Creation> {
             unique_id: creation.unique_id,
             pid_version: creation.pid_version,
         })
-}
-
-fn unique_id(creation: Creation) -> u64 {
-    creation.unique_id
 }
 
 fn unavailable(reason: IdentityUnavailable) -> ProgramUnavailable {
