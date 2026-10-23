@@ -245,10 +245,11 @@ pub fn empty_panels(route: &str) -> Result<Vec<Rc<Panel>>, String> {
         recent_first: 0,
         stride: 1,
     };
-    let specifications = specifications(route, &[])?;
+    let points: &[Value] = &[];
+    let specifications = specifications(route, points)?;
     let mut result = Vec::with_capacity(specifications.len());
     for specification in &specifications {
-        let mut panel = panels_panel(specification, &domain, &[], &coordinates)?;
+        let mut panel = panels_panel(specification, &domain, points, &coordinates)?;
         // No reading names the seconds a chart spans yet.
         panel.window = None;
         panel.detail_first = None;
@@ -272,10 +273,10 @@ fn panels_limit(route: &str, process: bool) -> usize {
 }
 
 /// The panel of `specification` with the cells its timeline kind adds.
-fn panels_panel(
+fn panels_panel<O: Observations + ?Sized>(
     specification: &Specification,
     domain: &Domain,
-    points: &[Value],
+    points: &O,
     coordinates: &Coordinates,
 ) -> Result<Panel, String> {
     let mut panel = panel(specification, points, coordinates)?;
@@ -667,16 +668,43 @@ fn quantity_text_small_digits(magnitude: f32) -> usize {
     (zeros + 1).clamp(2, 6)
 }
 
-fn panel(
+/// The observations a chart draws, oldest first: the trend points of a selection, or the
+/// seconds the store holds.
+trait Observations {
+    fn count(&self) -> usize;
+
+    /// The wall clock of observation `index`, in nanoseconds.
+    fn wall_ns(&self, index: usize) -> Result<u64, String>;
+
+    /// What `reading` reads at observation `index`, before its divisor.
+    fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String>;
+}
+
+impl Observations for [Value] {
+    fn count(&self) -> usize {
+        self.len()
+    }
+
+    fn wall_ns(&self, index: usize) -> Result<u64, String> {
+        integer(&self[index]["wall_ns"])
+    }
+
+    fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String> {
+        panel_reading_value(reading, &self[index])
+    }
+}
+
+fn panel<O: Observations + ?Sized>(
     specification: &Specification,
-    points: &[Value],
+    points: &O,
     coordinates: &Coordinates,
 ) -> Result<Panel, String> {
     let mut lines = Vec::with_capacity(specification.lines.len());
     for reading in &specification.lines {
-        let mut values = Vec::with_capacity(points.len());
-        for point in points {
-            values.push(panel_reading_value(reading, point)?.map(|value| value / reading.divisor));
+        let mut values = Vec::with_capacity(points.count());
+        for index in 0..points.count() {
+            let value = points.value(reading, index)?;
+            values.push(value.map(|value| value / reading.divisor));
         }
         lines.push(Line {
             name: reading.name.clone().into_owned(),
@@ -819,14 +847,14 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
 /// CPU activity across all cores and within each performance level, the slower level first
 /// as the prototype lists it. The level's name comes from `level_name`, since the Overview
 /// names a level alone and the CPU page names its cores.
-fn cpu(points: &[Value], level_name: fn(&PerformanceLevel) -> &str) -> Specification {
-    let levels = points
-        .last()
-        .and_then(crate::live_inventory::performance_levels);
+fn cpu(
+    levels: Option<&[PerformanceLevel; 2]>,
+    level_name: fn(&PerformanceLevel) -> &str,
+) -> Specification {
     let mut lines = vec![reading("cpu_percent", "All cores", "#5794f2", 1.0)];
     for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
         let mut line = reading("cpu_level_percent", "", color, 1.0);
-        line.name = level_line_name(levels.as_ref(), index, level_name);
+        line.name = level_line_name(levels, index, level_name);
         line.channel = Some(index);
         lines.push(line);
     }
@@ -861,14 +889,11 @@ fn cpu_temperature() -> Specification {
 
 /// The mean clock of each performance level while its cores were active, from the time they
 /// spent in each clock state.
-fn frequency(points: &[Value]) -> Specification {
-    let levels = points
-        .last()
-        .and_then(crate::live_inventory::performance_levels);
+fn frequency(levels: Option<&[PerformanceLevel; 2]>) -> Specification {
     let mut lines = Vec::with_capacity(2);
     for (index, color) in [(1, "#73bf69"), (0, "#b877d9")] {
         let mut line = reading("cpu_level_ghz", "", color, 1.0);
-        line.name = level_line_name(levels.as_ref(), index, cpu_level_cluster_cores);
+        line.name = level_line_name(levels, index, cpu_level_cluster_cores);
         line.channel = Some(index);
         lines.push(line);
     }
@@ -1067,11 +1092,14 @@ fn gpu_temperature() -> Specification {
 }
 
 fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
+    let levels = points
+        .last()
+        .and_then(crate::live_inventory::performance_levels);
     Ok(match route {
-        "overview" => overview(points),
+        "overview" => overview(levels.as_ref()),
         "cpu" => vec![
-            cpu(points, cpu_level_cores),
-            frequency(points),
+            cpu(levels.as_ref(), cpu_level_cores),
+            frequency(levels.as_ref()),
             load_average(),
             open_files(),
             cpu_temperature(),
@@ -1230,10 +1258,10 @@ fn fan_specification(points: &[Value]) -> Result<Specification, String> {
     Ok(specification)
 }
 
-fn pressure_cells(
+fn pressure_cells<O: Observations + ?Sized>(
     panel: &mut Panel,
     domain: &Domain,
-    points: &[Value],
+    points: &O,
     coordinates: &Coordinates,
 ) -> Result<(), String> {
     timeline_cells(panel, domain, points, coordinates, pressure_state)?;
@@ -1248,10 +1276,10 @@ fn pressure_cells(
     Ok(())
 }
 
-fn thermal_cells(
+fn thermal_cells<O: Observations + ?Sized>(
     panel: &mut Panel,
     domain: &Domain,
-    points: &[Value],
+    points: &O,
     coordinates: &Coordinates,
 ) -> Result<(), String> {
     timeline_cells(panel, domain, points, coordinates, thermal_state_cell)?;
@@ -1282,10 +1310,10 @@ fn thermal_state_cell(value: Option<f32>) -> Option<f32> {
     }
 }
 
-fn timeline_cells(
+fn timeline_cells<O: Observations + ?Sized>(
     panel: &mut Panel,
     domain: &Domain,
-    points: &[Value],
+    points: &O,
     coordinates: &Coordinates,
     state: impl Fn(Option<f32>) -> Option<f32>,
 ) -> Result<(), String> {
@@ -1293,8 +1321,8 @@ fn timeline_cells(
     let mut cells = vec![None; span];
     let mut selected = None;
 
-    for (index, point) in points.iter().enumerate() {
-        let second = integer(&point["wall_ns"])? / NANOSECONDS_PER_SECOND;
+    for index in 0..points.count() {
+        let second = points.wall_ns(index)? / NANOSECONDS_PER_SECOND;
         let cell = usize::try_from(second - domain.first).map_err(|error| error.to_string())?;
         assert!(cell < span);
         if Some(cell) != selected {
@@ -1331,11 +1359,11 @@ fn pressure_state(value: Option<f32>) -> Option<f32> {
     }
 }
 
-fn overview(points: &[Value]) -> Vec<Specification> {
+fn overview(levels: Option<&[PerformanceLevel; 2]>) -> Vec<Specification> {
     let mut network = network_throughput();
     network.title = "Network throughput";
     let mut result = vec![
-        cpu(points, cpu_level_name),
+        cpu(levels, cpu_level_name),
         gpu_activity(),
         memory(),
         system_power("live-power"),

@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use super::{Coordinates, Domain, Panel, Reading, Specification, reading, specification};
+use super::{
+    Coordinates, Domain, Observations, Panel, Reading, Specification, reading, specification,
+};
 
 pub(super) fn battery() -> Vec<Specification> {
     let mut charge = specification(
@@ -60,10 +62,10 @@ pub(super) fn value(reading: &Reading, value: &Value) -> Result<Option<f32>, Str
     super::number(value)
 }
 
-pub(super) fn charging_cells(
+pub(super) fn charging_cells<O: Observations + ?Sized>(
     panel: &mut Panel,
     domain: &Domain,
-    points: &[Value],
+    points: &O,
     coordinates: &Coordinates,
 ) -> Result<(), String> {
     super::timeline_cells(panel, domain, points, coordinates, |value| value)?;
