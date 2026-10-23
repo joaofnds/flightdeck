@@ -263,6 +263,9 @@ impl Held {
             .apps
             .push(|buffer| buffer.take(apps, previous.as_deref()));
         assert!(pushed);
+        if let Some(observation) = self.apps.newest().and_then(|apps| apps.observation) {
+            assert_eq!(observation.stamp.publication, second.publication);
+        }
 
         self.newest = Some(Newest {
             run: *run,

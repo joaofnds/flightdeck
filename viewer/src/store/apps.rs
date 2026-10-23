@@ -2,6 +2,7 @@
 //! ring's tick, ranked by the rule that ranks a sample's Apps.
 
 use std::cmp::Ordering;
+use std::fmt;
 use std::sync::Arc;
 
 use crate::live_app_history::CompactMeasure;
@@ -113,16 +114,7 @@ impl AppsSecond {
         let mut previous_index = 0;
         for app in apps {
             let name = fill_name(app, previous, &mut previous_index);
-            self.apps.push(AppRow {
-                name,
-                members: app.members,
-                membership_complete: app.membership_complete,
-                cpu_ns: CompactMeasure::capture(&app.cpu_ns),
-                energy_nj: CompactMeasure::capture(&app.energy_nj),
-                gpu_ns: CompactMeasure::capture(&app.gpu_ns),
-                disk_io_bytes: CompactMeasure::capture(&app.disk_io_bytes),
-                resident_bytes: CompactMeasure::capture(&app.resident_bytes),
-            });
+            self.apps.push(AppRow::new(app, name));
         }
         assert_eq!(self.apps.capacity(), capacity);
 
@@ -188,6 +180,39 @@ impl Default for AppsSecond {
             usage_refused: 0,
             usage_gone: 0,
             apps: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Display for Missing {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Missing::Unread => formatter.write_str("this second's Apps are not read yet"),
+            Missing::Refused(error) => formatter.write_str(error),
+            Missing::TooMany => write!(
+                formatter,
+                "this second holds more than {APPS_PER_SECOND_MAX} Apps"
+            ),
+        }
+    }
+}
+
+impl AppRow {
+    /// The totals of `app`, under `name`.
+    #[must_use]
+    pub fn new(app: &App, name: Arc<RankedApp>) -> Self {
+        assert_eq!(name.kind, app.key.kind);
+        assert_eq!(name.bytes, app.key.bytes);
+
+        Self {
+            name,
+            members: app.members,
+            membership_complete: app.membership_complete,
+            cpu_ns: CompactMeasure::capture(&app.cpu_ns),
+            energy_nj: CompactMeasure::capture(&app.energy_nj),
+            gpu_ns: CompactMeasure::capture(&app.gpu_ns),
+            disk_io_bytes: CompactMeasure::capture(&app.disk_io_bytes),
+            resident_bytes: CompactMeasure::capture(&app.resident_bytes),
         }
     }
 }

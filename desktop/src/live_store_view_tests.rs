@@ -5,7 +5,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use collector::machine::Pressure;
 use serde_json::json;
-use viewer::store::{BatterySecond, MachineSecond, MemorySecond, View};
+use viewer::apps::Stamp;
+use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedApp};
+use viewer::store::{AppRow, AppsSecond, BatterySecond, MachineSecond, MemorySecond, View};
 
 use super::super::LiveDashboard;
 use crate::data::Panel;
@@ -164,6 +166,22 @@ fn a_reading_that_arrives_after_the_view_redraws_no_machine_chart() {
     }
 }
 
+#[test]
+fn a_view_newer_than_the_readings_ranks_the_apps_of_its_newest_second() {
+    // Goal: Overview's top Apps show the newest second the store holds, as its charts do.
+    // Method: readings that end at 10,000 and rank no Apps, then a View whose newest second, at
+    // 10,005, holds one App that spent 0.75 s of CPU.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+
+    dashboard.take_view(ranked_view());
+
+    let (rankings, target) = dashboard.ranking_reading().unwrap();
+    let cpu = &rankings.metrics[0].entries[0];
+    assert_eq!(target.second, 10_005);
+    assert_eq!(cpu.app.name, "Brave Browser");
+    assert_eq!(cpu.amount, 750_000_000);
+}
+
 mod when_the_worker_has_not_read_the_page_yet {
     use super::*;
 
@@ -181,6 +199,20 @@ mod when_the_worker_has_not_read_the_page_yet {
         for panel in overview_panels(&view, levels().as_ref()).unwrap() {
             assert_eq!(drawn(&dashboard, &panel.id).lines, panel.lines);
         }
+    }
+
+    #[test]
+    fn the_view_ranks_the_apps_of_its_newest_second() {
+        // Goal: a window opened at launch shows the top Apps of the View's newest second rather
+        // than wait for the worker. Method: a newly opened Overview, then a View whose newest
+        // second, at 10,005, holds one App.
+        let mut dashboard = opening();
+
+        dashboard.take_view(ranked_view());
+
+        let (rankings, target) = dashboard.ranking_reading().unwrap();
+        assert_eq!(target.second, 10_005);
+        assert_eq!(rankings.metrics[0].entries[0].app.name, "Brave Browser");
     }
 
     #[test]
@@ -246,6 +278,24 @@ mod when_the_worker_has_not_read_the_page_yet {
             dashboard.status_at(UNIX_EPOCH + Duration::from_secs(10_006)),
             "Live"
         );
+    }
+}
+
+mod when_the_views_newest_second_holds_no_apps {
+    use super::*;
+
+    #[test]
+    fn the_top_apps_say_why() {
+        // Goal: top Apps the store has not read say so, rather than show an older second's Apps
+        // beside the charts of a newer one. Method: a View whose newest second holds no Apps,
+        // as a second read from a sealed minute holds none.
+        let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+
+        dashboard.take_view(newer_view());
+
+        let error = dashboard.ranking_reading().err();
+        let expected = "App totals unavailable: this second's Apps are not read yet";
+        assert_eq!(error.as_deref(), Some(expected));
     }
 }
 
@@ -499,6 +549,72 @@ fn chart_reading(dashboard: &LiveDashboard, id: &str) -> (Option<u64>, String) {
 /// The View of `newer_seconds`.
 fn newer_view() -> Arc<View> {
     Arc::new(view(1, &[], &newer_seconds()))
+}
+
+/// The View of `newer_seconds`, whose newest second holds one App, Brave Browser, that spent
+/// 0.75 s of CPU in it.
+fn ranked_view() -> Arc<View> {
+    let seconds = newer_seconds();
+    let mut view = view(1, &[], &seconds);
+    view.apps[2] = Arc::new(apps_of(&seconds[2], "Brave Browser", 750_000_000));
+    Arc::new(view)
+}
+
+/// The Apps of `second` when one bundle, named `name`, is all that ran, and spent `cpu_ns` of
+/// CPU time in the second that ends there and nothing else.
+pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
+    let measure = |known| Measure {
+        known,
+        measured_members: 1,
+        unavailable_members: 0,
+        overflowed: false,
+    };
+    let app = App {
+        key: Key {
+            kind: KeyKind::Bundle,
+            bytes: name.as_bytes().to_vec(),
+            display: name.into(),
+        },
+        display_name: name.into(),
+        members: 1,
+        live_members: 1,
+        membership_complete: true,
+        cpu_ns: measure(cpu_ns),
+        energy_nj: measure(0),
+        gpu_ns: measure(0),
+        disk_read_bytes: measure(0),
+        disk_written_bytes: measure(0),
+        disk_io_bytes: measure(0),
+        resident_bytes: measure(0),
+        footprint_bytes: measure(0),
+    };
+    let ranked = Arc::new(RankedApp {
+        kind: KeyKind::Bundle,
+        bytes: app.key.bytes.clone(),
+        display_name: app.display_name.clone(),
+    });
+
+    AppsSecond {
+        missing: None,
+        observation: Some(Observation {
+            recording: [1, 2],
+            stamp: Stamp {
+                boot: [3, 4],
+                run: [1, 2],
+                publication: second.publication,
+                continuous_ns: second.continuous_ns,
+                awake_ns: None,
+            },
+            run_tick: second.run_tick,
+            wall_ns: Some(second.wall_ns),
+        }),
+        elapsed_ns: Some(1_000_000_000),
+        membership_complete: true,
+        ungrouped_members: 0,
+        usage_refused: 0,
+        usage_gone: 0,
+        apps: vec![AppRow::new(&app, ranked)],
+    }
 }
 
 /// The seconds 9,999, 10,000 and 10,005, five seconds newer than the worker's readings.

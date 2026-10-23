@@ -16,6 +16,7 @@ use crate::data::Panel;
 use crate::hardware::Readings;
 use crate::live_inventory::PerformanceLevel;
 use crate::live_projection::held_projection;
+use crate::live_rankings::{Rankings, from_selected};
 use crate::live_source_mode::SourceMode;
 use crate::live_thermal_pressure::thermal_pressure_level_text;
 use crate::live_views::summary;
@@ -51,6 +52,8 @@ pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
     panels: Vec<Rc<Panel>>,
+    /// The top Apps of the View's newest second, or none before the first View.
+    rankings: Option<Rankings>,
     /// Why the last View the page took could not be drawn, reported once.
     failure: Option<String>,
 }
@@ -86,6 +89,7 @@ impl LiveDashboard {
                     self.store_panels = StorePanels {
                         version: Some(version),
                         panels,
+                        rankings: Some(draw_store_view_rankings(view)),
                         failure: None,
                     };
                 }
@@ -196,6 +200,15 @@ impl LiveDashboard {
         Some(view.seconds.last()?.wall_ns / NANOSECONDS_PER_SECOND)
     }
 
+    /// The top Apps of the newest second of the View the page draws, where it draws one, and
+    /// that second.
+    pub(crate) fn store_view_rankings(&self) -> Option<(&Rankings, u64)> {
+        let second = self.store_view_last_second()?;
+        let rankings = self.store_panels.rankings.as_ref()?;
+
+        Some((rankings, second))
+    }
+
     /// The readings Overview's readouts read of the newest second of the View the page draws,
     /// where it draws one, keyed as the worker's summary of a second keys them.
     pub(crate) fn store_view_summary(&self) -> Option<Value> {
@@ -211,6 +224,17 @@ impl LiveDashboard {
 
         Some(store_view_hardware_of(view.seconds.last()?))
     }
+}
+
+/// The top Apps of the newest second of `view`, ranked by the rule the worker ranks a second's
+/// Apps by.
+fn draw_store_view_rankings(view: &View) -> Rankings {
+    assert_eq!(view.apps.len(), view.seconds.len());
+    let Some(apps) = view.apps.last() else {
+        unreachable!("a View the page draws holds a second");
+    };
+
+    from_selected(apps.ranks().map_err(|missing| missing.to_string()))
 }
 
 /// The readings of `second` that Overview's readouts read, keyed as the worker's summary keys

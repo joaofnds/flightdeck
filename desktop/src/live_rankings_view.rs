@@ -160,7 +160,13 @@ impl LiveDashboard {
         .into_any_element()
     }
 
-    fn ranking_reading(&self) -> Result<(&TopApps, Target), String> {
+    pub(crate) fn ranking_reading(&self) -> Result<(&TopApps, Target), String> {
+        if let Some((rankings, second)) = self.store_view_rankings() {
+            let rankings = ranking_reading_ready(rankings)?;
+            let target = Target::exact(second, &rankings.selected)?;
+            return Ok((rankings, target));
+        }
+
         let snapshot = self
             .reading_snapshot()
             .ok_or(self.absent_reading("App totals unavailable while reading the selection"))?;
@@ -179,10 +185,7 @@ impl LiveDashboard {
             .rankings
             .as_deref()
             .ok_or("App totals unavailable at this observation")?;
-        let rankings = match rankings {
-            Rankings::Ready(rankings) => rankings,
-            Rankings::Unavailable(error) => return Err(format!("App totals unavailable: {error}")),
-        };
+        let rankings = ranking_reading_ready(rankings)?;
 
         identity_validate(&rankings.selected, &snapshot.selection["selected"])?;
         let second = snapshot.selection["second"]
@@ -300,6 +303,14 @@ impl LiveDashboard {
         self.request.executable = None;
         self.picker = None;
         self.navigate("apps", cx);
+    }
+}
+
+/// The top Apps `rankings` holds, or why the viewer could not rank them.
+fn ranking_reading_ready(rankings: &Rankings) -> Result<&TopApps, String> {
+    match rankings {
+        Rankings::Ready(rankings) => Ok(rankings),
+        Rankings::Unavailable(error) => Err(format!("App totals unavailable: {error}")),
     }
 }
 
