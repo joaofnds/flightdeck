@@ -144,7 +144,7 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
             bytes(memory.map(|memory| memory.compressed_bytes))
         }
         (None, "memory_total_bytes", None) => bytes(memory.map(|memory| memory.total_bytes)),
-        (None, "pressure", None) => memory.map(|memory| pressure_level(memory.pressure)),
+        (None, "pressure", None) => memory.map(|memory| f32::from(pressure_level(memory.pressure))),
         (None, "network_rx_bps", None) => narrow(network.map(|traffic| traffic.received_bps)),
         (None, "network_tx_bps", None) => narrow(network.map(|traffic| traffic.sent_bps)),
         (Some("storage"), "read_bps", None) => narrow(second.disk_read_bps),
@@ -159,12 +159,13 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
     Ok(value)
 }
 
-/// The level the recording writes for `pressure`, which the memory pressure chart reads.
-fn pressure_level(pressure: Pressure) -> f32 {
+/// The level the recording writes for `pressure`, which the memory pressure chart and readout
+/// read.
+pub(crate) fn pressure_level(pressure: Pressure) -> u8 {
     match pressure {
-        Pressure::Normal => 0.0,
-        Pressure::Warning => 1.0,
-        Pressure::Critical => 2.0,
+        Pressure::Normal => 0,
+        Pressure::Warning => 1,
+        Pressure::Critical => 2,
     }
 }
 

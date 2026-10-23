@@ -194,7 +194,12 @@ const FLOW: Specification = (
 const HEALTH: Specification = ("Health", Reading::Health, "", GREEN);
 
 pub fn cards(route: &str, selection: &Value) -> Vec<Card> {
-    let summary = matching_summary(selection);
+    cards_of_summary(route, matching_summary(selection))
+}
+
+/// The cards of `route` reading `summary`, the readings of one second keyed as the worker's
+/// summary keys them.
+pub fn cards_of_summary(route: &str, summary: &Value) -> Vec<Card> {
     cards_definitions(route)
         .iter()
         .map(|definition| card(summary, definition))

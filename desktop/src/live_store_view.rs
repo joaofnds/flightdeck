@@ -1,15 +1,18 @@
 //! The page drawn from the store's newest View, which the window takes each tick. Overview draws
-//! its machine charts from it while it follows the newest second, and a chosen second, a hover's
-//! reading and every other page draw from the worker's readings as before.
+//! its machine charts and readouts from it while it follows the newest second, and a chosen
+//! second, a hover's reading and every other page draw from the worker's readings as before.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, Global};
-use viewer::store::{Store, View};
+use serde_json::{Value, json};
+use viewer::store::{MachineSecond, Store, View};
 
 use super::LiveDashboard;
 use crate::data::Panel;
+use crate::live_inventory::PerformanceLevel;
+use crate::live_projection::held_projection;
 
 #[cfg(test)]
 #[path = "live_store_view_tests.rs"]
@@ -89,7 +92,7 @@ impl LiveDashboard {
 
     /// The machine charts of `view`, as the range zooms them.
     fn draw_store_view_panels(&self, view: &View) -> Result<Vec<Rc<Panel>>, String> {
-        let levels = self.store_view_levels();
+        let levels = draw_store_view_panels_levels(view);
         let mut panels = crate::live_projection::overview_panels(view, levels.as_ref())?;
 
         if let Some(window) = self.view_window() {
@@ -101,17 +104,9 @@ impl LiveDashboard {
         Ok(panels)
     }
 
-    /// The CPU's performance levels, which the store does not hold yet, as the worker's newest
-    /// reading names them.
-    fn store_view_levels(&self) -> Option<[crate::live_inventory::PerformanceLevel; 2]> {
-        let trends = self.snapshot.as_ref()?.selection["trends"].as_array()?;
-
-        crate::live_inventory::performance_levels(trends.last()?)
-    }
-
-    /// The View the page draws Overview's machine charts from: the store's newest, while the
-    /// page shows Overview's readings following the newest second, no hover's reading is shown,
-    /// and the View is no older than the readings.
+    /// The View the page draws Overview's machine charts and readouts from: the store's newest,
+    /// while the page shows Overview's readings following the newest second, no hover's reading
+    /// is shown, and the View is no older than the readings.
     fn drawn_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
             return None;
@@ -143,6 +138,42 @@ impl LiveDashboard {
 
         Some(view.seconds.last()?.wall_ns / NANOSECONDS_PER_SECOND)
     }
+
+    /// The readings Overview's readouts read of the newest second of the View the page draws,
+    /// where it draws one, keyed as the worker's summary of a second keys them.
+    pub(crate) fn store_view_summary(&self) -> Option<Value> {
+        let view = self.drawn_store_view()?;
+
+        Some(store_view_summary_of(view.seconds.last()?))
+    }
+}
+
+/// The readings of `second` that Overview's readouts read, keyed as the worker's summary keys
+/// them.
+fn store_view_summary_of(second: &MachineSecond) -> Value {
+    let memory = second.memory.as_ref();
+    let pressure = memory.map(|memory| held_projection::pressure_level(memory.pressure));
+
+    json!({
+        "cpu_celsius": second.cpu_celsius,
+        "cpu_percent": second.cpu_percent,
+        "gpu_celsius": second.gpu_celsius,
+        "gpu_active_percent": second.gpu_active_percent,
+        "pressure": pressure,
+        "power_watts": second.power_watts,
+        "storage": {"read_bps": second.disk_read_bps},
+        "network_rx_bps": second.network.map(|traffic| traffic.received_bps),
+    })
+}
+
+/// The CPU's performance levels as the newest second of `view` names them.
+fn draw_store_view_panels_levels(view: &View) -> Option<[PerformanceLevel; 2]> {
+    let [fastest, slower] = view.seconds.last()?.performance_levels.as_ref()?;
+    let level = |level: &collector::system::PerformanceLevel| {
+        PerformanceLevel::named(level.name.as_str(), level.logical_cpus)
+    };
+
+    Some([level(fastest), level(slower)])
 }
 
 /// Puts each of `drawn` in place of the page's chart of the same id among `panels`.

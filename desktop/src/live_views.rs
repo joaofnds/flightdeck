@@ -252,6 +252,9 @@ impl LiveDashboard {
         if self.request.route == "apps" {
             return crate::live_app_views::app_cards(self.current_app());
         }
+        if let Some(summary) = self.store_view_summary() {
+            return summary::cards_of_summary(&self.request.route, &summary);
+        }
         let selection = self
             .reading_snapshot()
             .map_or(&Value::Null, |snapshot| &snapshot.selection);

@@ -59,6 +59,19 @@ pub struct PerformanceLevel {
     pub logical_cpus: u32,
 }
 
+impl PerformanceLevel {
+    /// The level macOS names `name`, of `logical_cpus` logical CPUs.
+    #[must_use]
+    pub fn named(name: &str, logical_cpus: u32) -> Self {
+        Self {
+            name: name.to_owned(),
+            cores: format!("{name} cores"),
+            cluster_cores: format!("{} cores", name.to_lowercase()),
+            logical_cpus,
+        }
+    }
+}
+
 /// The Mac's two performance levels as `point` recorded them, fastest first, or none where
 /// the collector read no two levels or `point` holds no reading.
 #[must_use]
@@ -79,12 +92,7 @@ fn performance_levels_level(level: &Value) -> Option<PerformanceLevel> {
         return None;
     };
 
-    Some(PerformanceLevel {
-        name: name.to_owned(),
-        cores: format!("{name} cores"),
-        cluster_cores: format!("{} cores", name.to_lowercase()),
-        logical_cpus,
-    })
+    Some(PerformanceLevel::named(name, logical_cpus))
 }
 
 /// A logical CPU named by its performance level as the prototype names it, such as

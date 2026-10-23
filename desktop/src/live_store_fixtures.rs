@@ -81,7 +81,7 @@ pub fn selection(earlier: &[MachineSecond], trends: &[MachineSecond]) -> Value {
 }
 
 /// The trend point the viewer writes for `second`.
-fn trend_point(second: &MachineSecond) -> Value {
+pub fn trend_point(second: &MachineSecond) -> Value {
     let memory = second.memory.as_ref();
     let pressure = memory.map(|memory| match memory.pressure {
         Pressure::Normal => 0,
@@ -105,26 +105,39 @@ fn trend_point(second: &MachineSecond) -> Value {
         "storage": {"read_bps": second.disk_read_bps, "write_bps": second.disk_written_bps},
         "power_watts": second.power_watts,
         "soc_celsius": second.soc_celsius,
+        "cpu_celsius": second.cpu_celsius,
+        "gpu_celsius": second.gpu_celsius,
         "fan_rpm": second.fan_mean_rpm.map(|rpm| [rpm]),
         "thermal_pressure": second.thermal_pressure,
-        "performance_levels": levels_json()})
+        "performance_levels": levels_json("Super", "Performance")})
 }
 
 /// The performance levels every trend point names.
 pub fn levels() -> Option<[PerformanceLevel; 2]> {
-    performance_levels(&json!({"performance_levels": levels_json()}))
+    levels_named("Super", "Performance")
+}
+
+/// Six logical CPUs of the level named `fastest` and twelve of the level named `slower`, as
+/// the desktop reads them from a trend point.
+pub fn levels_named(fastest: &str, slower: &str) -> Option<[PerformanceLevel; 2]> {
+    performance_levels(&json!({"performance_levels": levels_json(fastest, slower)}))
 }
 
 /// The performance levels the store holds for every second, as `levels` names them.
 fn store_levels() -> [collector::system::PerformanceLevel; 2] {
+    store_levels_named("Super", "Performance")
+}
+
+/// The levels of `levels_named`, as the store holds them.
+pub fn store_levels_named(fastest: &str, slower: &str) -> [collector::system::PerformanceLevel; 2] {
     let level = |name: &str, logical_cpus| collector::system::PerformanceLevel {
         name: collector::system::FactText::new(name.as_bytes()).unwrap(),
         logical_cpus,
     };
 
-    [level("Super", 6), level("Performance", 12)]
+    [level(fastest, 6), level(slower, 12)]
 }
 
-fn levels_json() -> Value {
-    json!([{"name": "Super", "logical_cpus": 6}, {"name": "Performance", "logical_cpus": 12}])
+fn levels_json(fastest: &str, slower: &str) -> Value {
+    json!([{"name": fastest, "logical_cpus": 6}, {"name": slower, "logical_cpus": 12}])
 }

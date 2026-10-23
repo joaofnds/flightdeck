@@ -10,7 +10,10 @@ use crate::data::Panel;
 use crate::live_hover::{Origin, Preview, Target};
 use crate::live_projection::overview_panels;
 use crate::live_source::{Snapshot, Worker};
-use crate::live_store_fixtures::{levels, reading_at, selection, view};
+use crate::live_store_fixtures::{
+    levels, levels_named, reading_at, selection, store_levels_named, trend_point, view,
+};
+use crate::live_views::summary;
 
 #[test]
 fn a_view_newer_than_the_readings_draws_the_overviews_machine_charts() {
@@ -39,6 +42,40 @@ fn the_range_ends_at_the_views_newest_second() {
     let window = dashboard.view_window().unwrap();
     assert_eq!(window.first + window.span - 1, 10_005);
     assert_eq!(drawn(&dashboard, "live-cpu").window, Some(window));
+}
+
+#[test]
+fn a_view_newer_than_the_readings_fills_the_overviews_readouts() {
+    // Goal: Overview's readouts show the newest second the store holds, as its charts do.
+    // Method: readings that end at 10,000, then a View that ends at 10,005, whose readouts read
+    // as the worker's reading of 10,005 reads them.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+
+    dashboard.take_view(newer_view());
+
+    let expected = summary::cards("overview", &summary_selection(&reading_at(10_005, 0)));
+    assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
+}
+
+#[test]
+fn the_cpu_chart_names_the_levels_of_the_views_newest_second() {
+    // Goal: the View's own seconds name the CPU chart's levels, so the chart takes nothing from
+    // the worker's readings. Method: a View whose newest second names performance and
+    // efficiency cores, after readings that name super and performance cores.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    let mut newest = reading_at(10_005, 0);
+    newest.performance_levels = Some(store_levels_named("Performance", "Efficiency"));
+    let view = Arc::new(view(1, &[], &[reading_at(10_000, 0), newest]));
+
+    dashboard.take_view(Arc::clone(&view));
+
+    let levels = levels_named("Performance", "Efficiency");
+    let expected = overview_panels(&view, levels.as_ref()).unwrap();
+    let cpu = expected
+        .iter()
+        .find(|panel| panel.id == "live-cpu")
+        .unwrap();
+    assert_eq!(drawn(&dashboard, "live-cpu").lines, cpu.lines);
 }
 
 #[test]
@@ -127,6 +164,22 @@ mod when_a_hover_shows_an_earlier_second {
 
         assert!(!changed);
         assert_same_panels(&dashboard.panels, &before);
+    }
+
+    #[test]
+    fn the_readouts_show_the_hovered_second() {
+        // Goal: the readouts read the second under the pointer, which the worker read for the
+        // hover, rather than the View's newest. Method: show a hover's reading of 9,999, then
+        // take a View that ends at 10,005.
+        let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        let mut hover = preview(&dashboard);
+        hover.reading.selection = summary_selection(&reading_at(9_999, 0));
+        dashboard.preview = Some(hover);
+
+        dashboard.take_view(newer_view());
+
+        let expected = summary::cards("overview", &summary_selection(&reading_at(9_999, 0)));
+        assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
     }
 }
 
@@ -245,6 +298,24 @@ fn machine_panels(dashboard: &LiveDashboard, view: &View) -> Vec<Rc<Panel>> {
         panels.push(Rc::clone(found.unwrap()));
     }
     panels
+}
+
+/// What each of `cards` shows, in order.
+fn texts(cards: &[summary::Card]) -> Vec<(String, String, String, u32)> {
+    cards
+        .iter()
+        .map(|card| {
+            let label = card.label.clone();
+            (label, card.reading.clone(), card.note.clone(), card.color)
+        })
+        .collect()
+}
+
+/// The selection of `second` alone, which the worker's readings of that second summarize.
+fn summary_selection(second: &MachineSecond) -> serde_json::Value {
+    let mut selection = selection(&[], std::slice::from_ref(second));
+    selection["summary"] = trend_point(second);
+    selection
 }
 
 fn assert_same_panels(panels: &[Rc<Panel>], expected: &[Rc<Panel>]) {

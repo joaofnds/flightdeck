@@ -9,7 +9,7 @@ use crate::data::{Line, Panel};
 use crate::live_inventory::PerformanceLevel;
 
 #[path = "live_held_projection.rs"]
-mod held_projection;
+pub(crate) mod held_projection;
 
 pub use held_projection::overview_panels;
 #[path = "live_resource_projection.rs"]
