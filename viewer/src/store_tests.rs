@@ -188,9 +188,8 @@ mod when_the_folder_holds_no_recording {
 }
 
 mod when_the_live_span_lets_go_of_a_second {
-    use super::super::apps::TickApps;
     use super::super::{EARLIER_MAX, Held, SECONDS_MAX};
-    use super::{RUN, published, second_at, wall_seconds_of};
+    use super::{RUN, UNREAD, published, second_at, wall_seconds_of};
 
     #[test]
     fn the_store_keeps_the_first_second_of_each_ten_second_stretch() {
@@ -202,7 +201,7 @@ mod when_the_live_span_lets_go_of_a_second {
         let last = first + u64::try_from(SECONDS_MAX).unwrap() + 25;
 
         for wall_second in first..last {
-            assert!(held.take(&RUN, &second_at(wall_second), &TickApps::Unread));
+            assert!(held.take(&RUN, &second_at(wall_second), UNREAD));
         }
 
         let view = published(&mut held);
@@ -218,7 +217,7 @@ mod when_the_live_span_lets_go_of_a_second {
         let last = 1_000 + u64::try_from(SECONDS_MAX).unwrap() + let_go;
 
         for wall_second in 1_000..last {
-            assert!(held.take(&RUN, &second_at(wall_second), &TickApps::Unread));
+            assert!(held.take(&RUN, &second_at(wall_second), UNREAD));
         }
 
         let view = published(&mut held);
@@ -229,8 +228,7 @@ mod when_the_live_span_lets_go_of_a_second {
 
 mod when_a_second_reaches_the_store_twice {
     use super::super::Held;
-    use super::super::apps::TickApps;
-    use super::{RUN, published, second_at, wall_seconds_of};
+    use super::{RUN, UNREAD, published, second_at, wall_seconds_of};
     use collector::ring::{Identity, RunIdentity};
 
     #[test]
@@ -238,10 +236,10 @@ mod when_a_second_reaches_the_store_twice {
         // Goal: a tick the recording sealed and the ring still holds shows once. Method: take in
         // one run's second, then that second and the one before it again.
         let mut held = Held::new();
-        assert!(held.take(&RUN, &second_at(101), &TickApps::Unread));
+        assert!(held.take(&RUN, &second_at(101), UNREAD));
 
-        assert!(held.take(&RUN, &second_at(100), &TickApps::Unread));
-        assert!(held.take(&RUN, &second_at(101), &TickApps::Unread));
+        assert!(held.take(&RUN, &second_at(100), UNREAD));
+        assert!(held.take(&RUN, &second_at(101), UNREAD));
 
         let view = published(&mut held);
         assert_eq!(wall_seconds_of(&view.seconds), [101]);
@@ -257,20 +255,18 @@ mod when_a_second_reaches_the_store_twice {
             run: Identity([4, 4]),
             ..RUN
         };
-        assert!(held.take(&RUN, &second_at(101), &TickApps::Unread));
+        assert!(held.take(&RUN, &second_at(101), UNREAD));
 
-        assert!(held.take(&next, &second_at(5), &TickApps::Unread));
+        assert!(held.take(&next, &second_at(5), UNREAD));
 
         let view = published(&mut held);
         assert_eq!(wall_seconds_of(&view.seconds), [101, 5]);
     }
 }
 
-/// A run of a recording, as the tests that take seconds in directly name it.
 mod when_the_readings_break {
-    use super::super::apps::TickApps;
     use super::super::{Held, SECONDS_MAX};
-    use super::{RUN, published, second_at};
+    use super::{RUN, UNREAD, published, second_at};
     use collector::ring::{Identity, RunIdentity};
 
     #[test]
@@ -280,7 +276,7 @@ mod when_the_readings_break {
         let mut held = Held::new();
 
         for (wall_second, follows) in [(100, false), (101, true), (102, false), (103, true)] {
-            assert!(held.take(&RUN, &following(wall_second, follows), &TickApps::Unread));
+            assert!(held.take(&RUN, &following(wall_second, follows), UNREAD));
         }
 
         assert_eq!(segments_of(&published(&mut held).seconds), [0, 0, 1, 1]);
@@ -296,8 +292,8 @@ mod when_the_readings_break {
             ..RUN
         };
 
-        assert!(held.take(&RUN, &following(100, false), &TickApps::Unread));
-        assert!(held.take(&next, &following(5, true), &TickApps::Unread));
+        assert!(held.take(&RUN, &following(100, false), UNREAD));
+        assert!(held.take(&next, &following(5, true), UNREAD));
 
         assert_eq!(segments_of(&published(&mut held).seconds), [0, 1]);
     }
@@ -311,11 +307,7 @@ mod when_the_readings_break {
         let last = 1_030 + u64::try_from(SECONDS_MAX).unwrap();
 
         for wall_second in 1_000..last {
-            assert!(held.take(
-                &RUN,
-                &following(wall_second, wall_second != 1_015),
-                &TickApps::Unread
-            ));
+            assert!(held.take(&RUN, &following(wall_second, wall_second != 1_015), UNREAD));
         }
 
         assert_eq!(segments_of(&published(&mut held).earlier), [0, 0, 1]);
@@ -333,6 +325,11 @@ mod when_the_readings_break {
     }
 }
 
+/// What a second the tests take in directly holds of its Apps.
+const UNREAD: super::apps::TickApps<'static> =
+    super::apps::TickApps::Missing(&super::Missing::Unread);
+
+/// A run of a recording, as the tests that take seconds in directly name it.
 const RUN: collector::ring::RunIdentity = collector::ring::RunIdentity {
     recording: collector::ring::Identity([1, 1]),
     run: collector::ring::Identity([2, 2]),
@@ -365,8 +362,10 @@ fn wall_seconds_of(seconds: &[Arc<super::MachineSecond>]) -> Vec<u64> {
 }
 
 mod when_the_recording_holds_sealed_minutes {
+    use std::sync::Arc;
+
     use super::{Failure, Fixture, Store, View, held_through, view_where, wall_seconds_of};
-    use crate::store::MachineSecond;
+    use crate::store::{MachineSecond, Missing};
 
     #[test]
     fn the_store_holds_the_sealed_seconds_the_ring_no_longer_holds() {
@@ -417,6 +416,66 @@ mod when_the_recording_holds_sealed_minutes {
         let view = view_where(&from_recording, |view| held_through(view, 247));
         assert_eq!(seconds_of(&view), seconds_of(&expected));
         assert_eq!(view.seconds[3].cpu_percent, Some(50.0));
+    }
+
+    #[test]
+    fn a_store_built_from_the_recording_holds_the_apps_one_built_from_the_ring_holds() {
+        // Goal: a sealed second holds the Apps its tick gave a store that read it from the ring,
+        // so the page draws the same Apps whichever way the store took the second in. Method:
+        // follow two minutes' ticks with a store over the ring, seal both with their Apps,
+        // publish until the ring holds only the newest sealed tick, as the collector's two-minute
+        // ring holds ticks it sealed, start a second store, and compare the Apps the two hold.
+        let mut fixture = Fixture::new();
+        fixture.skip_run_ticks(57);
+        let from_ring = Store::start(&fixture.root).unwrap();
+        for second in 157..162 {
+            fixture.publish_with_system_rows(second);
+            view_where(&from_ring, |view| held_through(view, second));
+        }
+        let derive = crate::SealedApps::default();
+        fixture.seal_minute_derived(0, &derive);
+        fixture.seal_minute_derived(1, &derive);
+        fixture.skip_run_ticks(58);
+        for second in 240..247 {
+            fixture.publish_with_system_rows(second);
+        }
+
+        let from_recording = Store::start(&fixture.root).unwrap();
+
+        let expected = view_where(&from_ring, |view| held_through(view, 246));
+        let view = view_where(&from_recording, |view| held_through(view, 246));
+        assert_eq!(view.apps, expected.apps);
+        assert_eq!(view.apps[3].missing, None);
+        assert!(Arc::ptr_eq(
+            &view.apps[2].apps[0].name,
+            &view.apps[3].apps[0].name
+        ));
+    }
+
+    #[test]
+    fn a_sealed_second_older_than_the_live_span_holds_no_apps() {
+        // Goal: the store reads the Apps of the 18 minutes a live chart draws and none older,
+        // which keeps its launch short and its memory small. Method: seal a minute, seal another
+        // more than 18 minutes later, both with their Apps, publish until the ring holds neither,
+        // and start a store.
+        let mut fixture = Fixture::new();
+        let derive = crate::SealedApps::default();
+        fixture.publish_with_system_rows(100);
+        fixture.seal_minute_derived(0, &derive);
+        fixture.skip_run_ticks(59);
+        fixture.publish_with_system_rows(1_300);
+        fixture.seal_minute_derived(1, &derive);
+        fixture.skip_run_ticks(59);
+        for second in 1_400..1_408 {
+            fixture.publish_with_system_rows(second);
+        }
+
+        let store = Store::start(&fixture.root).unwrap();
+
+        let view = view_where(&store, |view| held_through(view, 1_407));
+        assert_eq!(wall_seconds_of(&view.seconds)[..2], [100, 1_300]);
+        assert_eq!(view.apps[0].missing, Some(Missing::Unread));
+        assert_eq!(view.apps[1].missing, None);
     }
 
     #[test]

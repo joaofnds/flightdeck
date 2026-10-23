@@ -132,8 +132,8 @@ impl Store {
         let thread = thread::Builder::new()
             .name(String::from("flightdeck-store"))
             .spawn(move || {
-                held.left_out = recording::load(&root, |run, second| {
-                    let taken = held.take(run, second, &TickApps::Unread);
+                held.left_out = recording::load(&root, |run, second, apps| {
+                    let taken = held.take(run, second, apps);
                     // No View is out before the store's first step, so every buffer is free.
                     assert!(taken);
                 });
@@ -225,7 +225,7 @@ impl Held {
     /// stretch. A second of the run no newer than the newest taken in is held already. Returns
     /// false and changes nothing where a span has no buffer to write, so the caller takes the
     /// second again at its next step.
-    fn take(&mut self, run: &RunIdentity, second: &MachineSecond, apps: &TickApps<'_>) -> bool {
+    fn take(&mut self, run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>) -> bool {
         if let Some(newest) = &self.newest {
             if newest.run == *run {
                 if second.publication <= newest.publication {
@@ -379,7 +379,7 @@ fn run(held: &mut Held, ring: &mut Ring, shared: &Shared) {
 fn step(held: &mut Held, ring: &mut Ring, waited: Result<(), Failure>, mailbox: &Mailbox<View>) {
     let mut failure = waited.err();
 
-    let read = ring.read(|run, second, apps| held.take(run, second, &apps));
+    let read = ring.read(|run, second, apps| held.take(run, second, apps));
     if let Err(read) = read {
         failure = Some(read);
     }

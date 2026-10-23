@@ -1,20 +1,27 @@
 //! Each App's totals at one second of the live span, as the App rule derives them from the
-//! ring's tick, ranked by the rule that ranks a sample's Apps.
+//! ring's tick or a sealed minute keeps them, ranked by the rule that ranks a sample's Apps.
 
 use std::cmp::Ordering;
 use std::fmt;
+use std::mem;
 use std::sync::Arc;
 
+use collector::ring::RunIdentity;
+
+use crate::apps::Stamp;
 use crate::live_app_history::CompactMeasure;
 use crate::live_app_response::{
-    App, Measure, Metric, Observation, Rankable, Ranked, RankedApp, Ranks, Sample, rank_apps,
+    App, KeyKind, Measure, Metric, Observation, Rankable, Ranked, RankedApp, Ranks, Sample,
+    rank_apps,
 };
+use crate::recording::{self, AppMinute, SampleRow};
 
 /// The Apps one second holds at most. The App rule finds about 470 Apps a tick on the user's
 /// M5 Pro, so a second past this bound holds none and says so.
 pub const APPS_PER_SECOND_MAX: usize = 2_048;
 
 /// Each App's totals at one second, and what the App rule found of the second as a whole.
+#[derive(Debug, PartialEq)]
 pub struct AppsSecond {
     /// Why the second holds no Apps, or `None` where it holds every App of its tick.
     pub missing: Option<Missing>,
@@ -32,7 +39,8 @@ pub struct AppsSecond {
 /// Why a second holds no Apps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Missing {
-    /// The second was read from a sealed minute, whose Apps the store does not read yet.
+    /// The second was read from a sealed minute older than the live span, or one that keeps no
+    /// Apps this build reads, so the store did not read its Apps.
     Unread,
     /// The App rule refused the tick, for this reason.
     Refused(String),
@@ -41,17 +49,29 @@ pub enum Missing {
 }
 
 /// What the store found of a tick's Apps as it takes the tick's second in.
-pub(super) enum TickApps<'sample> {
-    /// The second was read from a sealed minute, whose Apps the store does not read yet.
-    Unread,
+pub(super) enum TickApps<'tick> {
+    /// Why the store holds none of the tick's Apps.
+    Missing(&'tick Missing),
     /// The App rule's sample of the tick.
-    Derived(&'sample Sample),
+    Derived(&'tick Sample),
     /// Why the App rule refused the tick.
-    Refused(&'sample str),
+    Refused(&'tick str),
+    /// The Apps a loader read from the tick's sealed minute, which the store holds in place of
+    /// the buffer it takes them into.
+    Loaded(&'tick mut AppsSecond),
+}
+
+/// One observation's Apps as its sealed minute keeps them.
+pub(super) struct Kept<'minute> {
+    pub(super) run: &'minute RunIdentity,
+    pub(super) sample: &'minute SampleRow,
+    /// The observation's App rows, in key order.
+    pub(super) rows: &'minute [recording::AppRow],
+    pub(super) minute: &'minute AppMinute,
 }
 
 /// One App's totals at one second.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppRow {
     /// The App's key and name, one allocation for every second that names the App.
     pub name: Arc<RankedApp>,
@@ -79,12 +99,69 @@ impl AppsSecond {
 
     /// Holds what the store found of a tick's Apps, `apps`. An App the second `previous` holds
     /// keeps the name it holds there.
-    pub(super) fn take(&mut self, apps: &TickApps<'_>, previous: Option<&Self>) {
+    pub(super) fn take(&mut self, apps: TickApps<'_>, previous: Option<&Self>) {
         match apps {
-            TickApps::Unread => self.clear(Missing::Unread),
+            TickApps::Missing(missing) => self.clear(missing.clone()),
             TickApps::Derived(sample) => self.fill(sample, previous),
-            TickApps::Refused(error) => self.clear(Missing::Refused((*error).to_owned())),
+            TickApps::Refused(error) => self.clear(Missing::Refused(error.to_owned())),
+            TickApps::Loaded(loaded) => {
+                mem::swap(self, loaded);
+                assert!(self.apps.capacity() >= APPS_PER_SECOND_MAX);
+                self.take_names(previous);
+            }
         }
+    }
+
+    /// Gives each App that `previous` holds the name it holds there, so a second a loader read
+    /// shares its names with the seconds the store took in before it.
+    fn take_names(&mut self, previous: Option<&Self>) {
+        let previous = previous.map_or(&[][..], |previous| previous.apps.as_slice());
+        let mut previous_index = 0;
+        for row in &mut self.apps {
+            let name = &row.name;
+            if let Some(held) = previous_name(name.kind, &name.bytes, previous, &mut previous_index)
+            {
+                row.name = held;
+            }
+        }
+    }
+
+    /// Holds the Apps of the observation `kept`. An App that `previous` holds keeps the name it
+    /// holds there, so a loader keeps one name for every second of an App it reads.
+    pub(super) fn keep(&mut self, kept: &Kept<'_>, previous: Option<&Self>) {
+        if kept.rows.len() > APPS_PER_SECOND_MAX {
+            self.clear(Missing::TooMany);
+            return;
+        }
+
+        let capacity = self.apps.capacity();
+        let previous = previous.map_or(&[][..], |previous| previous.apps.as_slice());
+        self.apps.clear();
+        let mut previous_index = 0;
+        for row in kept.rows {
+            let bytes = kept.minute.key(row);
+            let name = match previous_name(row.kind, bytes, previous, &mut previous_index) {
+                Some(name) => name,
+                None => match RankedApp::new(row.kind, bytes.to_vec()) {
+                    Ok(name) => Arc::new(name),
+                    Err(error) => {
+                        self.clear(Missing::Refused(error.to_string()));
+                        return;
+                    }
+                },
+            };
+            self.apps.push(AppRow::kept(row, name));
+        }
+        assert_eq!(self.apps.capacity(), capacity);
+
+        let sample = kept.sample;
+        self.missing = None;
+        self.observation = Some(keep_observation(kept.run, sample));
+        self.elapsed_ns = sample.elapsed_ns;
+        self.membership_complete = sample.membership_complete;
+        self.ungrouped_members = sample.ungrouped_members;
+        self.usage_refused = sample.usage_refused;
+        self.usage_gone = sample.usage_gone;
     }
 
     /// Holds no Apps, for `missing`.
@@ -113,7 +190,8 @@ impl AppsSecond {
         self.apps.clear();
         let mut previous_index = 0;
         for app in apps {
-            let name = fill_name(app, previous, &mut previous_index);
+            let name = previous_name(app.key.kind, &app.key.bytes, previous, &mut previous_index)
+                .unwrap_or_else(|| app.ranked());
             self.apps.push(AppRow::new(app, name));
         }
         assert_eq!(self.apps.capacity(), capacity);
@@ -147,24 +225,44 @@ impl AppsSecond {
     }
 }
 
-/// The name of `app`: the one `previous` holds for its key, or a new one. `previous` is in key
-/// order, as a sample's Apps are, and `previous_index` is where the walk through it stands.
-fn fill_name(app: &App, previous: &[AppRow], previous_index: &mut usize) -> Arc<RankedApp> {
-    let key = app.key.kind.key(&app.key.bytes);
+/// The name `previous` holds for the App of key `kind` and `bytes`, where it holds the App.
+/// `previous` is in key order, as a sample's Apps are, and `previous_index` is where the walk
+/// through it stands.
+fn previous_name(
+    kind: KeyKind,
+    bytes: &[u8],
+    previous: &[AppRow],
+    previous_index: &mut usize,
+) -> Option<Arc<RankedApp>> {
+    let key = kind.key(bytes);
 
     for _ in 0..=previous.len() {
-        let Some(row) = previous.get(*previous_index) else {
-            break;
-        };
+        let row = previous.get(*previous_index)?;
 
         match row.name.kind.key(&row.name.bytes).cmp(&key) {
             Ordering::Less => *previous_index += 1,
-            Ordering::Equal => return Arc::clone(&row.name),
-            Ordering::Greater => break,
+            Ordering::Equal => return Some(Arc::clone(&row.name)),
+            Ordering::Greater => return None,
         }
     }
 
-    app.ranked()
+    None
+}
+
+/// The observation of `sample`, of run `run`, as the App rule names a tick it samples.
+fn keep_observation(run: &RunIdentity, sample: &SampleRow) -> Observation {
+    Observation {
+        recording: run.recording.0,
+        stamp: Stamp {
+            boot: run.boot.0,
+            run: run.run.0,
+            publication: sample.publication,
+            continuous_ns: sample.continuous_ns,
+            awake_ns: sample.awake_ns,
+        },
+        run_tick: sample.run_tick,
+        wall_ns: sample.wall_ns,
+    }
 }
 
 impl Default for AppsSecond {
@@ -213,6 +311,22 @@ impl AppRow {
             gpu_ns: CompactMeasure::capture(&app.gpu_ns),
             disk_io_bytes: CompactMeasure::capture(&app.disk_io_bytes),
             resident_bytes: CompactMeasure::capture(&app.resident_bytes),
+        }
+    }
+
+    /// The totals of `row`, under `name`.
+    fn kept(row: &recording::AppRow, name: Arc<RankedApp>) -> Self {
+        assert_eq!(name.kind, row.kind);
+
+        Self {
+            name,
+            members: row.members,
+            membership_complete: row.membership_complete,
+            cpu_ns: CompactMeasure::capture(&row.cpu_ns),
+            energy_nj: CompactMeasure::capture(&row.energy_nj),
+            gpu_ns: CompactMeasure::capture(&row.gpu_ns),
+            disk_io_bytes: CompactMeasure::capture(&row.disk_io_bytes),
+            resident_bytes: CompactMeasure::capture(&row.resident_bytes),
         }
     }
 }
