@@ -42,6 +42,8 @@ fn network_rates_are_bytes_per_second_of_the_continuous_clock() {
 
 #[test]
 fn a_mac_with_no_interface_moves_no_traffic() {
+    // Goal: a Mac with no interface draws no traffic rather than a gap. Method: two seconds a
+    // second apart, neither with an interface.
     let second = Machine::at(2).second_after(&Machine::at(1));
 
     let expected = Traffic {
@@ -53,6 +55,8 @@ fn a_mac_with_no_interface_moves_no_traffic() {
 
 #[test]
 fn app_memory_is_anonymous_memory_that_macos_may_not_purge() {
+    // Goal: the memory chart counts app memory as Activity Monitor does. Method: 800 bytes of
+    // anonymous memory, 300 of them purgeable.
     let machine = Machine::at(1).anonymous_and_purgeable(800, 300);
 
     let second = machine.first_second();
@@ -111,6 +115,8 @@ fn a_minutes_readings_pair_each_tick_with_its_own_rows() {
 
 #[test]
 fn power_heat_and_thermal_pressure_are_the_ticks_own_readings() {
+    // Goal: the power, heat and thermal pressure charts draw what the tick read, with no rate
+    // between seconds. Method: a tick that read 12.5 W, 45 °C and thermal pressure 2.
     let machine = Machine::at(1).smc(12.5, 45.0).thermal_pressure(2);
 
     let second = machine.first_second();
@@ -145,6 +151,8 @@ fn performance_levels_are_the_ticks_own() {
 
 #[test]
 fn fan_speed_is_the_mean_of_the_fans_the_tick_measured() {
+    // Goal: the fan chart draws one speed for the Mac however many fans it has. Method: three fans
+    // at 1,000, 2,000 and 3,000 rpm.
     let machine = Machine::at(1).fans(&[1_000.0, 2_000.0, 3_000.0]);
 
     let second = machine.first_second();
@@ -181,6 +189,8 @@ fn each_performance_level_reads_the_mean_busy_share_of_its_own_cpus() {
 
 #[test]
 fn disk_throughput_is_bytes_per_second_summed_over_the_disks() {
+    // Goal: the disk chart draws the Mac's throughput over all its disks. Method: two disks that
+    // read 1,000 and 500 bytes and wrote 300 and 200 over a second.
     let before = Machine::at(1).disks(&[(1, 0, 0), (2, 0, 0)]);
     let after = Machine::at(2).disks(&[(1, 1_000, 300), (2, 500, 200)]);
 
@@ -192,6 +202,8 @@ fn disk_throughput_is_bytes_per_second_summed_over_the_disks() {
 
 #[test]
 fn a_minutes_readings_pair_each_tick_with_its_own_gpu_states_and_fans() {
+    // Goal: each second reads only its own tick's GPU states and fans. Method: two publications
+    // with two GPU states each, the first with a fan and the second with none.
     let mut minute = MachineMinute::default();
     Machine::at(1)
         .gpu_states(&[10, 11])
@@ -211,6 +223,8 @@ fn a_minutes_readings_pair_each_tick_with_its_own_gpu_states_and_fans() {
 
 #[test]
 fn a_tick_without_a_wall_clock_has_no_second() {
+    // Goal: a tick the store cannot place on the clock draws nothing. Method: a tick with no
+    // clocks.
     let machine = Machine::at(1).without_clocks();
 
     let second = MachineSecond::of(&machine.reading(), None);
@@ -223,6 +237,8 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
     #[test]
     fn the_first_second_of_a_run_has_no_rates() {
+        // Goal: a run's first second draws no rate, since no earlier counter starts one. Method:
+        // one CPU's ticks with no previous reading.
         let second = Machine::at(1).cpus(&[(1, 1)]).first_second();
 
         assert!(!second.follows);
@@ -232,6 +248,8 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
     #[test]
     fn a_missed_publication_leaves_the_rates_unknown() {
+        // Goal: a rate never spans a publication the store did not read. Method: publications 1 and
+        // 3, whose run ticks and wall clocks follow each other.
         let before = Machine::at(1).cpus(&[(0, 0)]);
         let after = Machine::at(3)
             .run_tick(1)
@@ -246,6 +264,8 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
     #[test]
     fn a_missed_tick_leaves_the_rates_unknown() {
+        // Goal: a rate never spans a tick the collector missed. Method: consecutive publications at
+        // run ticks 0 and 5.
         let before = Machine::at(1).cpus(&[(0, 0)]);
         let after = Machine::at(2).run_tick(5).cpus(&[(10, 10)]);
 
@@ -256,6 +276,8 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
     #[test]
     fn a_wall_clock_more_than_a_second_later_leaves_the_rates_unknown() {
+        // Goal: a rate never spans more than a second of the wall clock. Method: consecutive
+        // publications two seconds apart.
         let before = Machine::at(1).cpus(&[(0, 0)]);
         let after = Machine::at(2).wall_ns(1_003 * SECOND_NS).cpus(&[(10, 10)]);
 
@@ -266,6 +288,8 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
     #[test]
     fn a_wall_clock_that_went_back_leaves_the_rates_unknown() {
+        // Goal: a wall clock set back never makes a rate. Method: a publication two seconds before
+        // the previous one by the wall clock.
         let before = Machine::at(2).cpus(&[(0, 0)]);
         let after = Machine::at(3).wall_ns(1_000 * SECOND_NS).cpus(&[(10, 10)]);
 
@@ -280,6 +304,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn a_cpu_counter_that_went_back_leaves_the_cpu_percent_unknown() {
+        // Goal: a counter that went back draws no CPU share rather than a wrong one. Method: a CPU
+        // whose busy ticks fall from 10 to 5.
         let before = Machine::at(1).cpus(&[(10, 10)]);
         let after = Machine::at(2).cpus(&[(5, 20)]);
 
@@ -291,6 +317,7 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn a_cpu_that_appeared_leaves_the_cpu_percent_unknown() {
+        // Goal: the CPU share compares the same CPUs in both seconds. Method: one CPU, then two.
         let before = Machine::at(1).cpus(&[(0, 0)]);
         let after = Machine::at(2).cpus(&[(10, 10), (10, 10)]);
 
@@ -301,6 +328,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn an_interface_that_appeared_leaves_the_traffic_unknown() {
+        // Goal: traffic compares the same interfaces in both seconds. Method: one interface, then
+        // two.
         let before = Machine::at(1).interfaces(&[(1, 0, 0)]);
         let after = Machine::at(2).interfaces(&[(1, 10, 10), (2, 10, 10)]);
 
@@ -311,6 +340,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn an_interface_replaced_by_another_leaves_the_traffic_unknown() {
+        // Goal: traffic never subtracts one interface's counters from another's. Method: interface
+        // 1, then interface 2 alone.
         let before = Machine::at(1).interfaces(&[(1, 0, 0)]);
         let after = Machine::at(2).interfaces(&[(2, 10, 10)]);
 
@@ -321,6 +352,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn an_index_taken_by_another_interface_leaves_the_traffic_unknown() {
+        // Goal: traffic compares an interface only with itself, known by its index and its name.
+        // Method: index 1 named en1, then named utun1.
         let before = Machine::at(1).interfaces(&[(1, 0, 0)]);
         let after = Machine::at(2)
             .interfaces(&[(1, 10, 10)])
@@ -333,6 +366,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn a_gpu_state_that_went_away_leaves_the_gpu_activity_unknown() {
+        // Goal: GPU activity compares the same states in both seconds. Method: three states, then
+        // two.
         let before = Machine::at(1).gpu_states(&[0, 0, 0]);
         let after = Machine::at(2).gpu_states(&[10, 10]);
 
@@ -343,6 +378,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn levels_that_do_not_cover_the_cpus_leave_each_levels_activity_unknown() {
+        // Goal: a level's activity is drawn only where the levels name every CPU. Method: two
+        // levels of one CPU each over three CPUs.
         let before = Machine::at(1).levels(1, 1).cpus(&[(0, 0), (0, 0), (0, 0)]);
         let after = Machine::at(2).levels(1, 1).cpus(&[(1, 1), (1, 1), (1, 1)]);
 
@@ -353,6 +390,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn a_disk_scan_that_did_not_complete_leaves_the_disk_throughput_unknown() {
+        // Goal: a partial scan draws no throughput rather than one missing some disks. Method: a
+        // disk read over a second whose scan was partial.
         let before = Machine::at(1).disks(&[(1, 0, 0)]);
         let after = Machine::at(2)
             .disks(&[(1, 1_000, 1_000)])
@@ -366,6 +405,9 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn a_disk_scan_taken_apart_from_its_tick_leaves_the_disk_throughput_unknown() {
+        // Goal: throughput divides by the time between two ticks, so it reads only a scan taken at
+        // its tick. Method: a scan stamped a second after the previous tick, in a tick half a
+        // second after it.
         let before = Machine::at(1).disks(&[(1, 0, 0)]);
         let after = Machine::at(2)
             .disks(&[(1, 1_000, 1_000)])
@@ -378,6 +420,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn a_fan_reading_that_is_no_speed_is_left_out_of_the_mean() {
+        // Goal: a fan reading that is no speed leaves the mean of the other fans as it is. Method:
+        // fans at 1,000 and 3,000 rpm beside a NaN and a negative reading.
         let machine = Machine::at(1).fans(&[1_000.0, f32::NAN, -5.0, 3_000.0]);
 
         let second = machine.first_second();
@@ -387,6 +431,7 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn a_tick_that_measured_no_fan_has_no_fan_speed() {
+        // Goal: a tick that read no fan draws a gap rather than 0 rpm. Method: a tick with no fan.
         let second = Machine::at(1).first_second();
 
         assert_eq!(second.fan_mean_rpm, None);
@@ -394,6 +439,8 @@ mod when_the_readings_do_not_match {
 
     #[test]
     fn purgeable_memory_above_anonymous_memory_leaves_app_memory_unknown() {
+        // Goal: app memory is never a count wrapped below zero. Method: 300 bytes of anonymous
+        // memory with 800 purgeable.
         let machine = Machine::at(1).anonymous_and_purgeable(300, 800);
 
         let second = machine.first_second();
