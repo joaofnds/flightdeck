@@ -96,18 +96,12 @@ impl<T> Span<T> {
     /// is full. Returns false and changes nothing when every buffer is held, so the caller
     /// takes the reading again at its next step.
     pub fn push(&mut self, fill: impl FnOnce(&mut T)) -> bool {
-        if self.held.len() == self.capacity {
-            if self.buffers.free() == 0 {
-                if !self.oldest_held_only_here() {
-                    return false;
-                }
-            }
+        if !self.has_room() {
+            return false;
+        }
 
+        if self.held.len() == self.capacity {
             drop(self.held.pop_front());
-        } else {
-            if self.buffers.free() == 0 {
-                return false;
-            }
         }
         assert!(self.held.len() < self.capacity);
 
@@ -117,6 +111,31 @@ impl<T> Span<T> {
 
         self.held.push_back(reading);
         true
+    }
+
+    /// Whether `push` finds a buffer to write: a free one, or the oldest reading's where the
+    /// span is full and no View holds it.
+    #[must_use]
+    pub fn has_room(&self) -> bool {
+        if self.buffers.free() > 0 {
+            return true;
+        }
+
+        if self.held.len() == self.capacity {
+            self.oldest_held_only_here()
+        } else {
+            false
+        }
+    }
+
+    /// The reading the next `push` lets go of, the oldest where the span is full.
+    #[must_use]
+    pub fn leaving(&self) -> Option<&T> {
+        if self.held.len() == self.capacity {
+            self.held.front().map(AsRef::as_ref)
+        } else {
+            None
+        }
     }
 
     /// Whether the oldest reading's buffer is free once the span lets go of it, since no View

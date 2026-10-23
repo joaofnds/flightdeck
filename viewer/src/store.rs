@@ -16,7 +16,10 @@ use std::time::Duration;
 pub use buffers::{Buffers, Mailbox, Span};
 pub use second::{MachineSecond, MemorySecond, Reading, Traffic, readings};
 
+use collector::ring::RunIdentity;
 use ring::Ring;
+
+use crate::session::EARLIER_STRIDE_SECONDS;
 
 #[cfg(test)]
 #[path = "store_tests.rs"]
@@ -29,6 +32,16 @@ const SECONDS_MAX: usize = 1_080;
 /// The seconds past the span a View the main thread holds may keep, after which the store
 /// takes no more seconds until the main thread lets go of it.
 const SECONDS_HELD_MAX: usize = 64;
+
+/// The older seconds of the loaded hour the store holds, one in every stretch of
+/// `EARLIER_STRIDE_SECONDS` past the live span: the hour and its lead-in, 3,660 seconds, less the
+/// live span's 1,080, is 258 stretches, and the stretch the live span cuts into is one more.
+const EARLIER_MAX: usize = 259;
+
+/// The older seconds past their span a View the main thread holds may keep. While it holds one,
+/// the live span lets go of at most `SECONDS_HELD_MAX` seconds, which start at most eight
+/// stretches.
+const EARLIER_HELD_MAX: usize = 8;
 
 /// The Views the store writes: the one in the mailbox, the one the main thread draws, the one
 /// it takes in place of that, and one to write.
@@ -46,8 +59,11 @@ pub struct View {
     /// Higher in each View than in the one before, since the store writes each View's buffer
     /// again.
     pub version: u64,
-    /// The seconds the store holds, oldest first.
+    /// The seconds of the live span, every second the store holds of the newest 18 minutes,
+    /// oldest first.
     pub seconds: Vec<Arc<MachineSecond>>,
+    /// The older seconds of the loaded hour, before `seconds`, oldest first.
+    pub earlier: Vec<Arc<MachineSecond>>,
     /// Why the store could not read the recording at its last step.
     pub failure: Option<Failure>,
 }
@@ -135,6 +151,9 @@ impl Drop for Store {
 /// What the store thread holds between steps.
 struct Held {
     span: Span<MachineSecond>,
+    earlier: Span<MachineSecond>,
+    /// The run and publication of the newest second taken in.
+    newest: Option<Newest>,
     views: Buffers<View>,
     version: u64,
     failure: Option<Failure>,
@@ -142,17 +161,26 @@ struct Held {
     unpublished: bool,
 }
 
+struct Newest {
+    run: RunIdentity,
+    publication: u64,
+}
+
 impl Held {
     fn new() -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
+        let earlier = Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, MachineSecond::default);
         let views = Buffers::new(VIEWS_MAX, || View {
             version: 0,
             seconds: Vec::with_capacity(SECONDS_MAX),
+            earlier: Vec::with_capacity(EARLIER_MAX),
             failure: None,
         });
 
         Self {
             span: Span::new(SECONDS_MAX, seconds),
+            earlier: Span::new(EARLIER_MAX, earlier),
+            newest: None,
             views,
             version: 0,
             failure: None,
@@ -160,22 +188,67 @@ impl Held {
         }
     }
 
+    /// Takes `second` of run `run` in after the newest, and keeps the second the live span lets
+    /// go of where it is the first of its stretch. A second of the run no newer than the newest
+    /// taken in is held already. Returns false and changes nothing where a span has no buffer
+    /// to write, so the caller takes the second again at its next step.
+    fn take(&mut self, run: &RunIdentity, second: &MachineSecond) -> bool {
+        if let Some(newest) = &self.newest {
+            if newest.run == *run {
+                if second.publication <= newest.publication {
+                    return true;
+                }
+            }
+        }
+
+        let leaving = self.span.leaving().copied();
+        let kept = leaving.filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
+        if !self.span.has_room() {
+            return false;
+        }
+        if kept.is_some() {
+            if !self.earlier.has_room() {
+                return false;
+            }
+        }
+
+        if let Some(kept) = kept {
+            let pushed = self.earlier.push(|buffer| *buffer = kept);
+            assert!(pushed);
+        }
+        let pushed = self.span.push(|buffer| *buffer = *second);
+        assert!(pushed);
+
+        self.newest = Some(Newest {
+            run: *run,
+            publication: second.publication,
+        });
+        self.unpublished = true;
+        true
+    }
+
     /// Hands the main thread a View of what the store holds, or leaves it to the next step
     /// where the main thread holds every View.
     fn publish(&mut self, mailbox: &Mailbox<View>) {
-        self.views.release(|view| view.seconds.clear());
+        self.views.release(|view| {
+            view.seconds.clear();
+            view.earlier.clear();
+        });
         let version = self.version + 1;
         let span = &self.span;
+        let earlier = &self.earlier;
         let failure = self.failure;
         let written = self.views.write(|view| {
             assert!(view.seconds.is_empty());
-            let capacity = view.seconds.capacity();
+            assert!(view.earlier.is_empty());
+            let capacity = (view.seconds.capacity(), view.earlier.capacity());
 
             view.version = version;
             view.seconds.extend(span.held().map(Arc::clone));
+            view.earlier.extend(earlier.held().map(Arc::clone));
             view.failure = failure;
 
-            assert_eq!(view.seconds.capacity(), capacity);
+            assert_eq!((view.seconds.capacity(), view.earlier.capacity()), capacity);
         });
         let Some(view) = written else {
             return;
@@ -185,6 +258,20 @@ impl Held {
         self.version = version;
         self.unpublished = false;
     }
+}
+
+/// Whether `second` starts a stretch of `EARLIER_STRIDE_SECONDS` after the stretch of `newest`.
+fn starts_stretch(newest: Option<&MachineSecond>, second: &MachineSecond) -> bool {
+    let Some(newest) = newest else {
+        return true;
+    };
+
+    stretch(newest) != stretch(second)
+}
+
+/// The stretch of `EARLIER_STRIDE_SECONDS` that holds `second`. Both divisions floor.
+fn stretch(second: &MachineSecond) -> u64 {
+    second.wall_ns / 1_000_000_000 / EARLIER_STRIDE_SECONDS
 }
 
 /// Steps until the store is dropped.
@@ -213,15 +300,7 @@ fn run(held: &mut Held, ring: &mut Ring, shared: &Shared) {
 fn step(held: &mut Held, ring: &mut Ring, waited: Result<(), Failure>, mailbox: &Mailbox<View>) {
     let mut failure = waited.err();
 
-    let span = &mut held.span;
-    let unpublished = &mut held.unpublished;
-    let read = ring.read(|second| {
-        let pushed = span.push(|buffer| *buffer = *second);
-        if pushed {
-            *unpublished = true;
-        }
-        pushed
-    });
+    let read = ring.read(|run, second| held.take(run, second));
     if let Err(read) = read {
         failure = Some(read);
     }

@@ -23,14 +23,6 @@ fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<View> {
     }
 }
 
-/// The whole wall-clock second of each second `view` holds.
-fn wall_seconds(view: &View) -> Vec<u64> {
-    view.seconds
-        .iter()
-        .map(|second| second.wall_ns / 1_000_000_000)
-        .collect()
-}
-
 #[test]
 fn a_store_holds_each_ticks_second_oldest_first() {
     // Goal: the store takes in every tick the ring holds when it starts. Method: publish three
@@ -43,7 +35,7 @@ fn a_store_holds_each_ticks_second_oldest_first() {
     let store = Store::start(&fixture.root).unwrap();
 
     let view = view_where(&store, |view| view.seconds.len() == 3);
-    assert_eq!(wall_seconds(&view), [100, 101, 102]);
+    assert_eq!(wall_seconds_of(&view.seconds), [100, 101, 102]);
 }
 
 #[test]
@@ -58,7 +50,7 @@ fn a_tick_published_later_reaches_a_view() {
     fixture.publish_with_system_rows(101);
 
     let view = view_where(&store, |view| view.seconds.len() == 2);
-    assert_eq!(wall_seconds(&view), [100, 101]);
+    assert_eq!(wall_seconds_of(&view.seconds), [100, 101]);
 }
 
 #[test]
@@ -92,7 +84,7 @@ fn each_view_has_a_higher_version_than_the_one_before() {
 }
 
 mod when_the_collector_starts_again {
-    use super::{Fixture, Store, view_where, wall_seconds};
+    use super::{Fixture, Store, view_where, wall_seconds_of};
 
     #[test]
     fn the_store_follows_the_new_run() {
@@ -108,7 +100,7 @@ mod when_the_collector_starts_again {
         second.publish_with_system_rows(101);
 
         let view = view_where(&store, |view| view.seconds.len() == 2);
-        assert_eq!(wall_seconds(&view), [100, 101]);
+        assert_eq!(wall_seconds_of(&view.seconds), [100, 101]);
     }
 }
 
@@ -127,4 +119,113 @@ mod when_the_folder_holds_no_recording {
         let view = view_where(&store, |view| view.failure.is_some());
         assert_eq!(view.failure, Some(Failure::Recording(ErrorKind::NotFound)));
     }
+}
+
+mod when_the_live_span_lets_go_of_a_second {
+    use super::super::{EARLIER_MAX, Held, SECONDS_MAX};
+    use super::{RUN, published, second_at, wall_seconds_of};
+
+    #[test]
+    fn the_store_keeps_the_first_second_of_each_ten_second_stretch() {
+        // Goal: a chart of the loaded hour draws one reading in every ten seconds past the live
+        // span, as the older tail draws them. Method: take in 25 seconds more than the live span
+        // holds, from a wall second that starts no stretch, and read the older seconds.
+        let mut held = Held::new();
+        let first = 1_005;
+        let last = first + u64::try_from(SECONDS_MAX).unwrap() + 25;
+
+        for wall_second in first..last {
+            assert!(held.take(&RUN, &second_at(wall_second)));
+        }
+
+        let view = published(&mut held);
+        assert_eq!(wall_seconds_of(&view.earlier), [1_005, 1_010, 1_020]);
+    }
+
+    #[test]
+    fn the_store_lets_go_of_the_oldest_stretch_past_the_loaded_hour() {
+        // Goal: the older seconds stay within their bound. Method: let the live span go of one
+        // stretch more than the older seconds hold, and read the oldest of them.
+        let mut held = Held::new();
+        let let_go = (u64::try_from(EARLIER_MAX).unwrap() + 1) * 10;
+        let last = 1_000 + u64::try_from(SECONDS_MAX).unwrap() + let_go;
+
+        for wall_second in 1_000..last {
+            assert!(held.take(&RUN, &second_at(wall_second)));
+        }
+
+        let view = published(&mut held);
+        assert_eq!(view.earlier.len(), EARLIER_MAX);
+        assert_eq!(wall_seconds_of(&view.earlier[..1]), [1_010]);
+    }
+}
+
+mod when_a_second_reaches_the_store_twice {
+    use super::super::Held;
+    use super::{RUN, published, second_at, wall_seconds_of};
+    use collector::ring::{Identity, RunIdentity};
+
+    #[test]
+    fn the_store_holds_it_once() {
+        // Goal: a tick the recording sealed and the ring still holds shows once. Method: take in
+        // one run's second, then that second and the one before it again.
+        let mut held = Held::new();
+        assert!(held.take(&RUN, &second_at(101)));
+
+        assert!(held.take(&RUN, &second_at(100)));
+        assert!(held.take(&RUN, &second_at(101)));
+
+        let view = published(&mut held);
+        assert_eq!(wall_seconds_of(&view.seconds), [101]);
+    }
+
+    #[test]
+    fn a_second_of_the_next_run_follows_it() {
+        // Goal: a collector that starts again numbers its publications afresh, so the store
+        // tells its seconds from the run's before by the run. Method: take in a second of one
+        // run, then a second of another run with a lower publication.
+        let mut held = Held::new();
+        let next = RunIdentity {
+            run: Identity([4, 4]),
+            ..RUN
+        };
+        assert!(held.take(&RUN, &second_at(101)));
+
+        assert!(held.take(&next, &second_at(5)));
+
+        let view = published(&mut held);
+        assert_eq!(wall_seconds_of(&view.seconds), [101, 5]);
+    }
+}
+
+/// A run of a recording, as the tests that take seconds in directly name it.
+const RUN: collector::ring::RunIdentity = collector::ring::RunIdentity {
+    recording: collector::ring::Identity([1, 1]),
+    run: collector::ring::Identity([2, 2]),
+    boot: collector::ring::Identity([3, 3]),
+};
+
+/// The second at whole wall second `wall_second`, which is also its publication.
+fn second_at(wall_second: u64) -> super::MachineSecond {
+    super::MachineSecond {
+        publication: wall_second,
+        run_tick: wall_second,
+        wall_ns: wall_second * 1_000_000_000,
+        ..super::MachineSecond::default()
+    }
+}
+
+/// The View `held` hands over next.
+fn published(held: &mut super::Held) -> Arc<View> {
+    let mailbox = super::Mailbox::new();
+    held.publish(&mailbox);
+    mailbox.take().unwrap()
+}
+
+/// The whole wall-clock second of each of `seconds`.
+fn wall_seconds_of(seconds: &[Arc<super::MachineSecond>]) -> Vec<u64> {
+    seconds
+        .iter()
+        .map(|second| second.wall_ns / 1_000_000_000)
+        .collect()
 }

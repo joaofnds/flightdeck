@@ -50,12 +50,12 @@ impl Ring {
         }
     }
 
-    /// Hands `push` the second of each tick the ring published since the last read, oldest
-    /// first, until the ring has no more or `push` refuses one, which the next read hands it
+    /// Hands `push` the run and the second of each tick the ring published since the last
+    /// read, oldest first, until the ring has no more or `push` refuses one, which the next read hands it
     /// again.
     pub(super) fn read(
         &mut self,
-        mut push: impl FnMut(&MachineSecond) -> bool,
+        mut push: impl FnMut(&RunIdentity, &MachineSecond) -> bool,
     ) -> Result<(), Failure> {
         let Some(source) = &mut self.source else {
             return Ok(());
@@ -76,7 +76,7 @@ impl Ring {
             let Some(second) = &self.pending else {
                 continue;
             };
-            if !push(second) {
+            if !push(&source.identity, second) {
                 return Ok(());
             }
             self.pending = None;
