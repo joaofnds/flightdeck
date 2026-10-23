@@ -31,6 +31,19 @@ jobs:
       - run: >-
           rustup toolchain install "$RUSTUP_TOOLCHAIN"
           --profile minimal --component rustfmt,clippy --no-self-update
+      # rust-cache hashes every toolchain rustup lists into its key, and runner images differ in
+      # the stable toolchain they carry, so a job that lands on another image builds cold. With
+      # only the pinned toolchain left, every image gives one key. The desktop job repeats this
+      # step through its anchor.
+      - &keep-only-the-pinned-toolchain
+        name: Remove every toolchain but the pinned one
+        run: |
+          for toolchain in $(rustup toolchain list --quiet); do
+            if [ "$toolchain" != "$RUSTUP_TOOLCHAIN-aarch64-apple-darwin" ]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done
+          [ "$(rustup toolchain list --quiet)" = "$RUSTUP_TOOLCHAIN-aarch64-apple-darwin" ]
       # Only main saves, so a branch starts from main's build and never evicts it.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -77,6 +90,7 @@ jobs:
       - run: >-
           rustup toolchain install "$RUSTUP_TOOLCHAIN"
           --profile minimal --component rustfmt,clippy --no-self-update
+      - *keep-only-the-pinned-toolchain
       # Both workspaces compile into the root target, as .cargo/config.toml sets build-dir, and
       # the action deletes from a listed workspace's target every crate that workspace does not
       # name. The desktop workspace names every crate the root one takes from crates.io, so list
