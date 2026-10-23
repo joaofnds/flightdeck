@@ -665,7 +665,7 @@ mod tests;
 #[cfg(test)]
 mod encoding_tests;
 
-mod battery;
+pub(crate) mod battery;
 pub(crate) mod core_frequency;
 mod storage;
 mod system;

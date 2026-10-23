@@ -18,23 +18,27 @@ pub(super) fn point(table: &Table, row: &[Option<String>], now: Option<u64>) -> 
         return Ok(Value::Null);
     }
 
-    let power = reading
-        .current_ma
-        .zip(reading.voltage_mv)
-        .map(|(current, voltage)| {
-            let magnitude = super::number(current.unsigned_abs());
-            let signed = if current < 0 { -magnitude } else { magnitude };
-
-            signed * super::number(voltage) / 1_000_000.0
-        });
-
     Ok(json!({"source_continuous_ns": reading.source_continuous_ns,
         "age_seconds": super::number(now - reading.source_continuous_ns) / 1_000_000_000.0,
-        "charge_percent": ratio(reading.charge_current, reading.charge_maximum),
+        "charge_percent": charge_percent(&reading),
         "health_percent": ratio(reading.full_charge_capacity, reading.design_capacity),
         "cycle_count": reading.cycle_count, "charging": reading.charging,
-        "external_power": reading.external_power, "power_watts": power,
+        "external_power": reading.external_power, "power_watts": power_watts(&reading),
         "adapter_watts": reading.adapter_watts}))
+}
+
+/// The charge `reading` found in the battery, as a share of what it holds when full.
+pub(crate) fn charge_percent(reading: &BatteryReading) -> Option<f64> {
+    ratio(reading.charge_current, reading.charge_maximum)
+}
+
+/// The battery's power as `reading` measured it, in watts, negative while it discharges.
+pub(crate) fn power_watts(reading: &BatteryReading) -> Option<f64> {
+    let (current, voltage) = reading.current_ma.zip(reading.voltage_mv)?;
+    let magnitude = super::number(current.unsigned_abs());
+    let signed = if current < 0 { -magnitude } else { magnitude };
+
+    Some(signed * super::number(voltage) / 1_000_000.0)
 }
 
 fn source(table: &Table, row: &[Option<String>]) -> Result<Option<BatteryReading>> {

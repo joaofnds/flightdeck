@@ -51,6 +51,8 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
         cpu_celsius: Some(61.5),
         gpu_celsius: Some(52.25),
         fan_mean_rpm: Some(1_200.5),
+        fan_rpm: [None; 2],
+        battery: None,
         thermal_pressure: Some(u8::try_from(wall_second % 5).unwrap()),
         performance_levels: Some(store_levels()),
     }

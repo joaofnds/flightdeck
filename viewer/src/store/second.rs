@@ -8,7 +8,7 @@ use collector::machine::{CPUTicks, Pressure};
 use collector::smc::FANS_MAX;
 use collector::system::PerformanceLevel;
 
-use crate::metrics::number;
+use crate::metrics::{battery, number};
 use crate::recording::{
     CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
 };
@@ -45,6 +45,11 @@ pub struct MachineSecond {
     pub cpu_celsius: Option<f32>,
     pub gpu_celsius: Option<f32>,
     pub fan_mean_rpm: Option<f32>,
+    /// The speeds of fans 0 and 1, the two the hardware figure draws.
+    pub fan_rpm: [Option<f32>; 2],
+    /// `None` where the tick holds no battery reading, or one older than the interval the
+    /// collector reads the battery at.
+    pub battery: Option<BatterySecond>,
     pub thermal_pressure: Option<u8>,
     /// The chip's two performance levels, level 0 the fastest, as the tick named them.
     pub performance_levels: Option<[PerformanceLevel; 2]>,
@@ -66,6 +71,15 @@ pub struct MemorySecond {
 pub struct Traffic {
     pub received_bps: f64,
     pub sent_bps: f64,
+}
+
+/// The battery at a second, as the collector last read it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BatterySecond {
+    /// The charge the battery holds, as a share of what it holds when full.
+    pub charge_percent: Option<f64>,
+    /// The battery's power in watts, negative while it discharges.
+    pub power_watts: Option<f64>,
 }
 
 /// The rows of one publication of a `MachineMinute`.
@@ -106,6 +120,8 @@ impl MachineSecond {
             cpu_celsius: reading.tick.cpu_celsius,
             gpu_celsius: reading.tick.gpu_celsius,
             fan_mean_rpm: fan_mean_rpm(reading.fans),
+            fan_rpm: fan_rpm(reading.fans),
+            battery: BatterySecond::of(reading.tick),
             thermal_pressure: reading.tick.thermal_pressure,
             performance_levels: reading.tick.performance_levels,
         };
@@ -137,6 +153,23 @@ impl MemorySecond {
             compressed_bytes: memory.compressed_bytes,
             pressure: memory.pressure,
         }
+    }
+}
+
+impl BatterySecond {
+    /// The battery as `tick` shows it, `None` where the tick holds no reading or one older than
+    /// the interval the collector reads the battery at, as the worker's summary leaves it out.
+    fn of(tick: &TickRow) -> Option<Self> {
+        let reading = tick.battery.as_ref()?;
+        let now = tick.continuous_ns?;
+        if !reading.is_fresh_at(now) {
+            return None;
+        }
+
+        Some(Self {
+            charge_percent: battery::charge_percent(reading),
+            power_watts: battery::power_watts(reading),
+        })
     }
 }
 
@@ -372,14 +405,11 @@ fn fan_mean_rpm(fans: &[FanRow]) -> Option<f32> {
     let mut sum = 0.0_f32;
     let mut count = 0_u8;
     for fan in fans.iter().take(usize::from(FANS_MAX)) {
-        if !fan.rpm.is_finite() {
+        let Some(rpm) = fan_speed(fan) else {
             continue;
-        }
-        if fan.rpm < 0.0 {
-            continue;
-        }
+        };
 
-        sum += fan.rpm;
+        sum += rpm;
         count += 1;
     }
     if count == 0 {
@@ -387,6 +417,32 @@ fn fan_mean_rpm(fans: &[FanRow]) -> Option<f32> {
     }
 
     Some(sum / f32::from(count))
+}
+
+/// The speeds of fans 0 and 1 as `fans` read them, each `None` where the tick read no speed of
+/// that fan.
+fn fan_rpm(fans: &[FanRow]) -> [Option<f32>; 2] {
+    let mut speeds = [None; 2];
+    for (fan_number, speed) in (0_u32..).zip(&mut speeds) {
+        let mut measured = fans.iter().take(usize::from(FANS_MAX));
+        *speed = measured
+            .find(|fan| fan.fan == fan_number)
+            .and_then(fan_speed);
+    }
+
+    speeds
+}
+
+/// The speed `fan` read, `None` where its reading is no speed.
+fn fan_speed(fan: &FanRow) -> Option<f32> {
+    if !fan.rpm.is_finite() {
+        return None;
+    }
+    if fan.rpm < 0.0 {
+        return None;
+    }
+
+    Some(fan.rpm)
 }
 
 /// The external traffic since `previous`, over `elapsed_ns` of the continuous clock. A Mac with

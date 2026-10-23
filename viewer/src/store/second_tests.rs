@@ -1,9 +1,10 @@
+use collector::battery::{BatteryReading, READ_INTERVAL_NS};
 use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::interfaces::{IFNAMSIZ, Interface, Name};
 use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::system::{FactText, PerformanceLevel};
 
-use super::{MachineSecond, MemorySecond, Reading, Traffic, readings};
+use super::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};
 use crate::recording::{
     CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
 };
@@ -161,6 +162,63 @@ fn fan_speed_is_the_mean_of_the_fans_the_tick_measured() {
 }
 
 #[test]
+fn each_fan_speed_is_the_ticks_reading_of_that_fan() {
+    // Goal: the hardware figure spins each of its two fans at the speed the tick read for it.
+    // Method: two fans at 1,200 and 1,500 rpm.
+    let machine = Machine::at(1).fans(&[1_200.0, 1_500.0]);
+
+    let second = machine.first_second();
+
+    assert_eq!(second.fan_rpm, [Some(1_200.0), Some(1_500.0)]);
+}
+
+#[test]
+fn a_fan_at_rest_reads_zero_rpm() {
+    // Goal: a fan macOS has stopped shows 0 rpm rather than no reading, as an idle Mac's fans
+    // often are. Method: fan 0 at rest and fan 1 at 1,500 rpm.
+    let machine = Machine::at(1).fans(&[0.0, 1_500.0]);
+
+    let second = machine.first_second();
+
+    assert_eq!(second.fan_rpm, [Some(0.0), Some(1_500.0)]);
+}
+
+#[test]
+fn a_fan_is_read_by_its_own_number() {
+    // Goal: each fan of the figure shows its own fan's speed, whatever order the rows come in.
+    // Method: the rows of fans 1 and 0, in that order.
+    let mut machine = Machine::at(1).fans(&[1_500.0, 1_200.0]);
+    machine.fans[0].fan = 1;
+    machine.fans[1].fan = 0;
+
+    let second = machine.first_second();
+
+    assert_eq!(second.fan_rpm, [Some(1_200.0), Some(1_500.0)]);
+}
+
+#[test]
+fn battery_charge_and_power_are_the_ticks_battery_reading() {
+    // Goal: the hardware figure shows the battery's charge and power at the second. Method: a
+    // reading taken at the tick, 40 of 80 units charged, giving 1,500 mA at 12,000 mV.
+    let reading = BatteryReading {
+        charge_current: Some(40),
+        charge_maximum: Some(80),
+        current_ma: Some(-1_500),
+        voltage_mv: Some(12_000),
+        ..BatteryReading::default()
+    };
+    let machine = Machine::at(1).battery_read_before(reading, 0);
+
+    let second = machine.first_second();
+
+    let expected = BatterySecond {
+        charge_percent: Some(50.0),
+        power_watts: Some(-18.0),
+    };
+    assert_eq!(second.battery, Some(expected));
+}
+
+#[test]
 fn gpu_activity_is_the_share_of_the_second_the_gpu_spent_in_its_states() {
     // Goal: the GPU chart draws how busy the GPU was over the second. Method: two states that
     // were active for 200 ms and 300 ms of a second.
@@ -300,7 +358,7 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 }
 
 mod when_the_readings_do_not_match {
-    use super::{Machine, ScanState};
+    use super::{BatteryReading, Machine, READ_INTERVAL_NS, ScanState};
 
     #[test]
     fn a_cpu_counter_that_went_back_leaves_the_cpu_percent_unknown() {
@@ -427,6 +485,34 @@ mod when_the_readings_do_not_match {
         let second = machine.first_second();
 
         assert_eq!(second.fan_mean_rpm, Some(2_000.0));
+    }
+
+    #[test]
+    fn a_fan_reading_that_is_no_speed_leaves_that_fan_without_one() {
+        // Goal: a fan whose reading is no speed shows none, and the other fan its own. Method:
+        // fan 0 read NaN and fan 1 1,500 rpm.
+        let machine = Machine::at(1).fans(&[f32::NAN, 1_500.0]);
+
+        let second = machine.first_second();
+
+        assert_eq!(second.fan_rpm, [None, Some(1_500.0)]);
+    }
+
+    #[test]
+    fn a_battery_reading_older_than_its_read_interval_shows_no_battery() {
+        // Goal: the figure never shows a battery reading the collector has since replaced, as
+        // the worker's summary of the second does not. Method: a reading one nanosecond older
+        // than the interval the collector reads the battery at.
+        let reading = BatteryReading {
+            charge_current: Some(40),
+            charge_maximum: Some(80),
+            ..BatteryReading::default()
+        };
+        let machine = Machine::at(100).battery_read_before(reading, READ_INTERVAL_NS + 1);
+
+        let second = machine.first_second();
+
+        assert_eq!(second.battery, None);
     }
 
     #[test]
@@ -594,6 +680,17 @@ impl Machine {
 
     fn thermal_pressure(mut self, level: u8) -> Self {
         self.tick.thermal_pressure = Some(level);
+        self
+    }
+
+    /// The battery reading `reading`, taken `age_ns` of the continuous clock before the tick.
+    fn battery_read_before(mut self, reading: BatteryReading, age_ns: u64) -> Self {
+        let source_continuous_ns = self.tick.continuous_ns.unwrap() - age_ns;
+
+        self.tick.battery = Some(BatteryReading {
+            source_continuous_ns,
+            ..reading
+        });
         self
     }
 

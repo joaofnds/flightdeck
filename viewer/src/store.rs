@@ -15,7 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub use buffers::{Buffers, Mailbox, Span};
-pub use second::{MachineSecond, MemorySecond, Reading, Traffic, readings};
+pub use second::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};
 
 use collector::ring::RunIdentity;
 use ring::Ring;
