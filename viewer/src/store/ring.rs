@@ -51,8 +51,8 @@ impl Ring {
     }
 
     /// Hands `push` the run and the second of each tick the ring published since the last
-    /// read, oldest first, until the ring has no more or `push` refuses one, which the next read hands it
-    /// again.
+    /// read, oldest first, until the ring has no more or `push` refuses one, which the next read
+    /// hands it again.
     pub(super) fn read(
         &mut self,
         mut push: impl FnMut(&RunIdentity, &MachineSecond) -> bool,
