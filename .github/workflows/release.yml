@@ -1,0 +1,197 @@
+name: release
+
+# A tag <version> releases the commit it names, where <version> is the one desktop/Info.plist
+# gives the app.
+on:
+  push:
+    tags:
+      - '[0-9]*'
+
+# A second run for the same tag waits, rather than cancelling one that is halfway through
+# uploading.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # The collector reads macOS kernel interfaces and frameworks, so it builds only on macOS, and
+    # only for Apple chips, the only Macs it is checked on.
+    runs-on: macos-26
+    # The limit of the desktop job of check.yml, which builds these same release binaries cold.
+    timeout-minutes: 120
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.0
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      archive: ${{ steps.archive.outputs.archive }}
+      sha256: ${{ steps.archive.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The archive, the release and the cask take the version from the tag, and the app shows
+      # the one Info.plist gives, so a tag that names another version is refused before the build.
+      # Apple's version is three integers, so it also keeps anything else out of the cask's Ruby.
+      - id: version
+        name: Refuse a tag that names another version than Info.plist
+        run: |
+          version="$(plutil -extract CFBundleShortVersionString raw desktop/Info.plist)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Info.plist's version $version is not three integers."
+            exit 1
+          fi
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME names another version than Info.plist's $version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      # No cache is restored. The caches main saves hold builds of crates the release never
+      # ships, such as test support, and a release links only what it compiled itself.
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+        with:
+          version: 2026.10.3
+          install_args: just
+          cache_save: false
+      - run: just bundle
+      # ditto keeps the bundle's permissions and signatures, and Homebrew unpacks a zip.
+      - id: archive
+        name: Archive the bundle and check the archived copy
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          archive="Flightdeck_${VERSION}_aarch64.zip"
+          ditto -c -k --keepParent desktop/target/Flightdeck.app "$archive"
+          directory="$(mktemp -d)"
+          ditto -x -k "$archive" "$directory"
+          "$directory/Flightdeck.app/Contents/MacOS/flightdeck" --bundle --check
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "$archive" | cut -c 1-64)" >> "$GITHUB_OUTPUT"
+      # The artifact wraps the archive in a zip of its own, which download-artifact extracts, so
+      # the publish job receives the archive itself. With archive: false, download-artifact would
+      # extract the archive, since it extracts whatever is a zip.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: ${{ steps.archive.outputs.archive }}
+          if-no-files-found: error
+
+  # Publishing is a job of its own, so the build, which runs every dependency's build script,
+  # never holds a token that can write the repository.
+  publish:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+      # Given an asset, gh keeps the release a draft until the asset is uploaded, deletes the draft
+      # when the upload fails, and refuses a tag that already has a release.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" "$ARCHIVE" --repo "$GITHUB_REPOSITORY"
+          --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+
+  update-tap:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Releases of two tags write the tap one after the other, so neither replaces a cask with a
+    # sha the other has just made stale.
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    steps:
+      # The contents API commits each cask as the token's owner, so the job sets no git identity
+      # and keeps the token out of a clone's configuration.
+      - name: Write the casks to joaofnds/homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+          ARCHIVE: ${{ needs.build.outputs.archive }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          # The two casks differ only in their token, so one function writes both. A versioned
+          # cask whose contents drift from the unversioned one would install something other
+          # than what the same tag serves as latest. Homebrew names only major macOS versions,
+          # so the cask admits 14.0 to 14.3, below Info.plist's LSMinimumSystemVersion of 14.4.
+          write_cask() {
+            cat > "$1" << CASK
+          # Generated by joaofnds/flightdeck release workflow. DO NOT EDIT.
+          cask "$2" do
+            version "${VERSION}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/joaofnds/flightdeck/releases/download/${VERSION}/${ARCHIVE}"
+            name "Flightdeck"
+            desc "System monitor that records every second of the machine"
+            homepage "https://github.com/joaofnds/flightdeck"
+
+            depends_on arch: :arm64
+            depends_on macos: :sonoma
+
+            app "Flightdeck.app"
+
+            postflight_steps do
+              run "/usr/bin/xattr", args: ["-cr", "{{appdir}}/Flightdeck.app"]
+            end
+
+            zap trash: [
+              "~/Library/Application Support/Flightdeck",
+              "~/Library/Preferences/dev.flightdeck.desktop.plist",
+            ]
+          end
+          CASK
+          }
+
+          listing="$(gh api repos/joaofnds/homebrew-tap/contents/Casks)"
+          # Prints the sha of the blob a cask holds in the tap, or nothing for a cask not there.
+          tap_sha() {
+            jq --raw-output --arg name "$1" '.[] | select(.name == $name) | .sha' <<< "$listing"
+          }
+
+          # Updating a file through the contents API takes the sha of the blob it replaces.
+          put_cask() {
+            sha="$(tap_sha "$1")"
+            arguments=(-f "message=Update flightdeck to ${VERSION} in $1"
+              -f "content=$(base64 -w 0 < "$1")")
+            if [ -n "$sha" ]; then
+              arguments+=(-f "sha=$sha")
+            fi
+            gh api --method PUT "repos/joaofnds/homebrew-tap/contents/Casks/$1" \
+              "${arguments[@]}" --silent
+          }
+
+          # brew resolves flightdeck@0.2.0 to Casks/flightdeck@0.2.0.rb, so the token inside the
+          # file carries the version too, or the name it installs by would not match the name it
+          # declares.
+          write_cask "flightdeck@${VERSION}.rb" "flightdeck@${VERSION}"
+          put_cask "flightdeck@${VERSION}.rb"
+
+          # A tag pushed after a newer one, such as a fix to an older version, keeps its pinned
+          # cask and leaves flightdeck.rb on the newer version, so brew upgrade never goes back.
+          if [ -n "$(tap_sha flightdeck.rb)" ]; then
+            latest="$(gh api repos/joaofnds/homebrew-tap/contents/Casks/flightdeck.rb \
+              --jq .content | base64 --decode | sed -n 's/^  version "\(.*\)"$/\1/p')"
+            if [ -z "$latest" ]; then
+              echo "::error::Casks/flightdeck.rb names no version."
+              exit 1
+            fi
+            newest="$(printf '%s\n%s\n' "$latest" "$VERSION" | sort --version-sort | tail -n 1)"
+            if [ "$newest" != "$VERSION" ]; then
+              echo "::notice::flightdeck.rb stays on $latest, newer than $VERSION."
+              exit 0
+            fi
+          fi
+          write_cask flightdeck.rb flightdeck
+          put_cask flightdeck.rb

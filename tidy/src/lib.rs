@@ -480,21 +480,49 @@ fn function_text(indentation: &str, line_count: usize) -> String {
 }
 
 #[test]
-fn mise_pins_the_toolchain_ci_checks_with() {
+fn mise_pins_the_toolchain_every_workflow_builds_with() {
     // Goal: a contributor who runs cargo through mise gets the compiler, clippy and rustfmt
-    // that CI checks with, so a change that passes there passes here.
-    // Method: read the Rust version from mise.toml and every toolchain the CI workflow pins.
+    // that CI checks with and the release builds with, so a change that passes there passes
+    // here and ships as it was checked.
+    // Method: read the Rust version from mise.toml and the toolchains each workflow git tracks
+    // pins, and require the check and the release each to pin one.
     let root = repository_root();
     let mise = read_text(&root.join("mise.toml"));
-    let workflow = read_text(&root.join(".github/workflows/check.yml"));
-
     let version = mise_rust_version(&mise);
-    let pins = workflow_toolchains(&workflow);
 
-    assert!(!pins.is_empty());
-    for pin in pins {
-        assert_eq!(pin, version);
+    let mut pinned = Vec::new();
+    for path in repository_paths(&root) {
+        if path.starts_with(".github/workflows/") {
+            match fs::read_to_string(root.join(&path)) {
+                Ok(workflow) => {
+                    let pins = workflow_toolchains(&workflow);
+                    for pin in &pins {
+                        assert_eq!(*pin, version, "{path}");
+                    }
+                    if !pins.is_empty() {
+                        pinned.push(path);
+                    }
+                }
+                // A file deleted in the working tree stays in the index until the deletion is
+                // staged.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => panic!("cannot read {path}: {error}"),
+            }
+        }
     }
+
+    assert!(
+        pinned
+            .iter()
+            .any(|path| path == ".github/workflows/check.yml"),
+        "{pinned:?}"
+    );
+    assert!(
+        pinned
+            .iter()
+            .any(|path| path == ".github/workflows/release.yml"),
+        "{pinned:?}"
+    );
 }
 
 #[test]

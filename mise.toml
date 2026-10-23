@@ -1,6 +1,6 @@
 [tools]
 just = "1.59.0"
-# The toolchain CI pins in .github/workflows/check.yml, which the tidy check holds equal.
+# The toolchain the workflows under .github/workflows pin, which the tidy check holds equal.
 rust = { version = "1.98.0", profile = "minimal", components = "rustfmt,clippy,llvm-tools" }
 "aqua:taiki-e/cargo-llvm-cov" = "0.9.1"
 "cargo:cargo-mutants" = "27.1.0"

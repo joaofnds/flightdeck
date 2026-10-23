@@ -97,6 +97,28 @@ source controls, bounded queries, development checks and performance tools.
 checks from interactive macOS observations. Historical framework measurements and
 the current toolkit decision remain in [the evaluation](desktop/EVALUATION.md).
 
+## Release
+
+Pushing a tag `<version>`, such as `0.2.0`, releases the commit it names through
+`.github/workflows/release.yml`. The version is `CFBundleShortVersionString` in
+`desktop/Info.plist`, three integers, so set it there in a commit of its own before tagging,
+since the workflow refuses a tag that names another version. It builds the bundle as
+`just bundle` does, from no cache, attaches it to the release as
+`Flightdeck_<version>_aarch64.zip`, and writes the `flightdeck@<version>` and `flightdeck`
+casks to [joaofnds/homebrew-tap](https://github.com/joaofnds/homebrew-tap):
+
+```sh
+brew install --cask joaofnds/tap/flightdeck
+```
+
+`flightdeck` stays on the newest version the tap has seen, so a tag for an older version
+writes only its pinned cask. Writing the casks takes a `HOMEBREW_TAP_TOKEN` secret that can
+write that repository's contents. `gh run rerun <run-id> --failed` repeats only the jobs of a
+run that failed, which is safe since gh deletes the draft of a publish that failed and writing
+a cask replaces the one there. The bundle has no Developer ID signature and is
+not notarized, so the cask clears the quarantine macOS sets on a download. Clear it on a copy
+downloaded by hand with `xattr -cr Flightdeck.app`. The release builds only for Apple chips.
+
 ## Recording inspection tools
 
 `ring_reader` prints each tick it reads, the events, and what it missed, until it has read
