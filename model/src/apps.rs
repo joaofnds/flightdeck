@@ -2,11 +2,13 @@
 use crate::programs::{App, Programs};
 
 /// One tick of a collector run: when the collector took it, its processes, and the processes
-/// that exited since the tick before.
+/// that started, ran another program or exited since the tick before.
 pub struct Tick<'columns> {
     pub stamp: Stamp,
     pub processes: Processes<'columns>,
     pub exits: Exits<'columns>,
+    pub starts: Starts<'columns>,
+    pub execs: Execs<'columns>,
 }
 
 /// Where and when a tick was taken.
@@ -41,9 +43,33 @@ pub struct Processes<'columns> {
 /// The processes that exited since the tick before, each with its usage as its exit read it
 /// last, as columns of one length in ascending order of pid and then of unique id.
 pub struct Exits<'columns> {
+    /// The exit's number among the events of its run, which grows with each event.
+    pub number: &'columns [u64],
     pub pid: &'columns [i32],
     pub creation: &'columns [Option<Creation>],
     pub usage: Usages<'columns>,
+}
+
+/// The processes that started since the tick before, each with the program the collector read
+/// when it noticed the start, as columns of one length in ascending order of pid, then of
+/// unique id, then of number.
+pub struct Starts<'columns> {
+    /// The start's number among the events of its run, which grows with each event.
+    pub number: &'columns [u64],
+    pub pid: &'columns [i32],
+    pub creation: &'columns [Option<Creation>],
+    pub program: &'columns [Result<u32, ProgramUnavailable>],
+}
+
+/// The processes that ran another program since the tick before, each with the program the
+/// collector read when it noticed the change, as columns of one length in ascending order of
+/// pid and then of number.
+pub struct Execs<'columns> {
+    /// The exec's number among the events of its run, which grows with each event.
+    pub number: &'columns [u64],
+    pub pid: &'columns [i32],
+    pub creation: &'columns [Option<Creation>],
+    pub program: &'columns [Result<u32, ProgramUnavailable>],
 }
 
 /// What processes had used and held when the collector read their usage, as columns of one
@@ -146,6 +172,7 @@ impl Processes<'_> {
 impl Exits<'_> {
     fn count(&self) -> usize {
         let count = self.pid.len();
+        assert_eq!(self.number.len(), count);
         assert_eq!(self.creation.len(), count);
         assert_eq!(self.usage.count(), count);
         for row in 1..count {
@@ -173,6 +200,96 @@ impl Exits<'_> {
         }
         false
     }
+}
+
+impl Starts<'_> {
+    fn count(&self) -> usize {
+        let count = self.pid.len();
+        assert_eq!(self.number.len(), count);
+        assert_eq!(self.creation.len(), count);
+        assert_eq!(self.program.len(), count);
+        for row in 1..count {
+            assert!(self.key(row - 1) <= self.key(row));
+            if self.key(row - 1) == self.key(row) {
+                assert!(self.number[row - 1] < self.number[row]);
+            }
+        }
+        count
+    }
+
+    fn key(&self, row: usize) -> Key {
+        key(self.pid[row], self.creation[row])
+    }
+
+    /// The row of the first start of the process `pid` of `unique_id`, if the tick holds one.
+    fn first(&self, pid: i32, unique_id: u64) -> Option<usize> {
+        let rows = rows_of(self.pid, pid);
+        let row = rows.start
+            + self.creation[rows.clone()]
+                .partition_point(|creation| key(pid, *creation) < (pid, Some(unique_id)));
+        if row < rows.end {
+            if self.key(row) == (pid, Some(unique_id)) {
+                return Some(row);
+            }
+        }
+        None
+    }
+
+    /// Whether the start after `row` is of the same process, which leaves which start was its
+    /// own unknown.
+    fn repeats(&self, row: usize) -> bool {
+        if row + 1 < self.pid.len() {
+            self.key(row + 1) == self.key(row)
+        } else {
+            false
+        }
+    }
+}
+
+impl Execs<'_> {
+    fn count(&self) -> usize {
+        let count = self.pid.len();
+        assert_eq!(self.number.len(), count);
+        assert_eq!(self.creation.len(), count);
+        assert_eq!(self.program.len(), count);
+        for row in 1..count {
+            assert!(self.pid[row - 1] <= self.pid[row]);
+            if self.pid[row - 1] == self.pid[row] {
+                assert!(self.number[row - 1] < self.number[row]);
+            }
+        }
+        count
+    }
+
+    /// The row of the last exec of `pid` before the event `number`, if the tick holds one.
+    fn before(&self, pid: i32, number: u64) -> Option<usize> {
+        let rows = rows_of(self.pid, pid);
+        let end = rows.start + self.number[rows.clone()].partition_point(|exec| *exec < number);
+        if rows.start < end {
+            Some(end - 1)
+        } else {
+            None
+        }
+    }
+
+    /// The number of the first exec of `pid` after the event `number`, if the tick holds one.
+    fn after(&self, pid: i32, number: u64) -> Option<u64> {
+        let rows = rows_of(self.pid, pid);
+        let row = rows.start + self.number[rows.clone()].partition_point(|exec| *exec <= number);
+        if row < rows.end {
+            Some(self.number[row])
+        } else {
+            None
+        }
+    }
+}
+
+/// The rows of `pid` in a column of pids in ascending order.
+fn rows_of(pids: &[i32], pid: i32) -> std::ops::Range<usize> {
+    let start = pids.partition_point(|row| *row < pid);
+    let end = pids.partition_point(|row| *row <= pid);
+    assert!(start <= end);
+    start..end
 }
 
 impl Usages<'_> {
@@ -465,33 +582,34 @@ impl Apps {
         let exits = selected.exits.count();
         assert!(count + exits <= self.processes.capacity());
         assert!(previous.processes.count() <= self.processes.capacity());
+        selected.starts.count();
+        selected.execs.count();
+        previous.starts.count();
+        previous.execs.count();
         self.clear();
 
         let compatible = derive_compatible(&previous.stamp, &selected.stamp);
-        let predecessor = if compatible {
-            Some(&previous.processes)
-        } else {
-            None
-        };
+        let predecessor = if compatible { Some(previous) } else { None };
+        let processes = predecessor.map(|previous| &previous.processes);
         let mut row = 0;
         let mut exit = 0;
         for _ in 0..count + exits {
             match derive_next(&selected.processes, row, &selected.exits, exit) {
                 Next::Live => {
                     let live = selected.processes.observation(row);
-                    self.derive_observation(programs, predecessor, &live);
+                    self.derive_observation(programs, processes, &live);
                     row += 1;
                 }
                 Next::Exit => {
-                    if let Some(ended) = derive_exit(predecessor, &selected.exits, exit, None) {
-                        self.derive_observation(programs, predecessor, &ended);
+                    if let Some(ended) = derive_exit(predecessor, selected, exit, None) {
+                        self.derive_observation(programs, processes, &ended);
                     }
                     exit += 1;
                 }
                 Next::Both => {
                     let live = selected.processes.observation(row);
-                    let ended = derive_exit(predecessor, &selected.exits, exit, Some(&live));
-                    self.derive_observation(programs, predecessor, ended.as_ref().unwrap_or(&live));
+                    let ended = derive_exit(predecessor, selected, exit, Some(&live));
+                    self.derive_observation(programs, processes, ended.as_ref().unwrap_or(&live));
                     row += 1;
                     exit += 1;
                 }
@@ -624,15 +742,16 @@ fn derive_next(processes: &Processes, row: usize, exits: &Exits, exit: usize) ->
 /// exit of its process, nor where no reading names its program. `live` is the process's live
 /// row, whose usage stands where the exit disagrees with it.
 fn derive_exit(
-    previous: Option<&Processes>,
-    exits: &Exits,
+    previous: Option<&Tick>,
+    selected: &Tick,
     exit: usize,
     live: Option<&Observation>,
 ) -> Option<Observation> {
+    let exits = &selected.exits;
     if exits.ambiguous(exit) {
         return None;
     }
-    let program = derive_exit_program(previous, exits.pid[exit], exits.creation[exit])?;
+    let program = derive_exit_program(previous, selected, exit)?;
 
     let mut observation = Observation {
         pid: exits.pid[exit],
@@ -657,20 +776,111 @@ fn derive_exit(
     Some(observation)
 }
 
-/// The program the process of `pid` and `creation` ran when it exited, as the previous tick
-/// names it, or why it is unknown.
-fn derive_exit_program(
-    previous: Option<&Processes>,
+/// The process an exit ended, as the events that name its program read it.
+#[derive(Clone, Copy)]
+struct Ended {
+    number: u64,
     pid: i32,
-    creation: Option<Creation>,
+    creation: Creation,
+}
+
+/// The program the process of `exit` ran when it exited, or why it is unknown, if a reading
+/// names it. The selected tick's exec of the process names it first, then the previous tick's
+/// row of it, then the selected tick's start of it, and last the previous tick's exec or start
+/// of it, which counts only where the previous tick holds no row of it. `previous` is the tick
+/// before where the two span one interval.
+fn derive_exit_program(
+    previous: Option<&Tick>,
+    selected: &Tick,
+    exit: usize,
 ) -> Option<Result<u32, ProgramUnavailable>> {
-    let previous = previous?;
-    let before = previous.find(pid, creation)?;
-    if previous.creation[before] == creation {
-        Some(previous.program[before])
-    } else {
-        Some(Err(ProgramUnavailable::Changed))
+    let ended = Ended {
+        number: selected.exits.number[exit],
+        pid: selected.exits.pid[exit],
+        creation: selected.exits.creation[exit]?,
+    };
+    let before = previous.and_then(|previous| {
+        let row = previous.processes.find(ended.pid, Some(ended.creation))?;
+        Some((
+            previous.processes.creation[row],
+            previous.processes.program[row],
+        ))
+    });
+    let mut noticed = None;
+    if before.is_none() {
+        if let Some(previous) = previous {
+            noticed = derive_exit_exec(previous, ended, false)
+                .or_else(|| derive_exit_start(previous, ended, false));
+        }
     }
+
+    let named_before = before.is_some() || noticed.is_some();
+    if let Some(program) = derive_exit_exec(selected, ended, named_before) {
+        return Some(program);
+    }
+    if let Some((creation, program)) = before {
+        if creation == Some(ended.creation) {
+            return Some(program);
+        }
+        return Some(Err(ProgramUnavailable::Changed));
+    }
+    derive_exit_start(selected, ended, noticed.is_some()).or(noticed)
+}
+
+/// The program of the last exec of the ended process in `tick` before its exit, if `tick` holds
+/// one. Where that exec is of another creation of its pid, the process's start names it, and
+/// where none does, a reading before it, `named_before`, makes its program changed.
+fn derive_exit_exec(
+    tick: &Tick,
+    ended: Ended,
+    named_before: bool,
+) -> Option<Result<u32, ProgramUnavailable>> {
+    let row = tick.execs.before(ended.pid, ended.number)?;
+    if tick.execs.creation[row] == Some(ended.creation) {
+        return Some(tick.execs.program[row]);
+    }
+    if let Some(program) = derive_exit_start(tick, ended, named_before) {
+        return Some(program);
+    }
+    if named_before {
+        Some(Err(ProgramUnavailable::Changed))
+    } else {
+        None
+    }
+}
+
+/// The program of the ended process's start in `tick`, if `tick` holds one before its exit.
+/// Where a second start of it, an exec between its start and its exit, or another pid version
+/// at its start leaves its program unknown, a reading before it, `named_before`, makes its
+/// program changed.
+fn derive_exit_start(
+    tick: &Tick,
+    ended: Ended,
+    named_before: bool,
+) -> Option<Result<u32, ProgramUnavailable>> {
+    let row = tick.starts.first(ended.pid, ended.creation.unique_id)?;
+    let number = tick.starts.number[row];
+    if number >= ended.number {
+        return None;
+    }
+
+    let changed = if named_before {
+        Some(Err(ProgramUnavailable::Changed))
+    } else {
+        None
+    };
+    if tick.starts.repeats(row) {
+        return changed;
+    }
+    if let Some(exec) = tick.execs.after(ended.pid, number) {
+        if exec < ended.number {
+            return changed;
+        }
+    }
+    if tick.starts.creation[row] != Some(ended.creation) {
+        return changed;
+    }
+    Some(tick.starts.program[row])
 }
 
 /// Whether an exit's usage is the final usage of the process whose live row read `live`: of

@@ -1,6 +1,6 @@
 use super::{
-    Amount, Apps, Creation, Deltas, Exits, Measurement, ProcessState, ProcessTotals, Processes,
-    ProgramUnavailable, Stamp, Subtotal, Tick, Totals, Unavailable, Usages,
+    Amount, Apps, Creation, Deltas, Execs, Exits, Measurement, ProcessState, ProcessTotals,
+    Processes, ProgramUnavailable, Stamp, Starts, Subtotal, Tick, Totals, Unavailable, Usages,
 };
 use crate::programs::{Capacity, Program, Programs};
 
@@ -1234,6 +1234,472 @@ fn orders_the_exits_among_the_live_processes() {
     );
 }
 
+#[test]
+fn names_an_exit_by_the_exec_the_previous_tick_noticed() {
+    // Goal: a process the previous tick noticed only as it ran another program, and which
+    // exited before a tick read it live, belongs to that program, with no counter of its own,
+    // since no reading before its exit measured it.
+    // Method: derive a previous tick holding only the exec of pid 7 and a selected tick holding
+    // only its exit, with 300 bytes resident.
+    let (previous, selected) = noticed_before();
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes.len(), 1);
+    assert_eq!(derived.processes[0].program, Ok(0));
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Baseline)
+    );
+    assert_eq!(derived.processes[0].resident_bytes_last, Some(300));
+    assert_eq!(derived.totals[0].members, 1);
+    assert_eq!(derived.totals[0].live_members, 0);
+    assert_eq!(derived.totals[0].resident_bytes, Subtotal::default());
+}
+
+#[test]
+fn names_an_exit_by_the_start_the_previous_tick_noticed() {
+    // Goal: a process the previous tick noticed only as it started, and which exited before a
+    // tick read it live, belongs to the program its start read.
+    // Method: derive a previous tick holding only the start of pid 7 and a selected tick
+    // holding only its exit.
+    let (mut previous, selected) = noticed_before();
+    previous = previous.with_execs(&[]).with_starts(&[Event::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(0));
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Baseline)
+    );
+    assert_eq!(derived.totals[0].members, 1);
+}
+
+#[test]
+fn names_an_exit_by_the_start_of_its_own_tick() {
+    // Goal: a process that started and exited between two ticks belongs to the program its
+    // start read.
+    // Method: derive a previous tick without the process and a selected tick holding its start
+    // and then its exit.
+    let previous = Columns::of(1, &[]);
+    let selected = Columns::of(2, &[])
+        .with_starts(&[Event::default()])
+        .with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(0));
+    assert_eq!(derived.processes[0].state, ProcessState::ExitedVerified);
+    assert_eq!(derived.totals[0].members, 1);
+}
+
+#[test]
+fn prefers_the_exec_of_its_own_tick_over_the_previous_event() {
+    // Goal: a program the process ran later names its exit in place of the one an earlier
+    // event read.
+    // Method: derive a previous tick holding the exec of pid 7 to Safari and a selected tick
+    // holding its exec to git and then its exit.
+    let (previous, selected) = noticed_before();
+    let selected = selected.with_execs(&[Event {
+        number: 8,
+        program: Ok(1),
+        ..Event::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(1));
+    assert_eq!(derived.totals.len(), 1);
+}
+
+#[test]
+fn prefers_the_start_of_its_own_tick_over_the_previous_event() {
+    // Goal: a start the selected tick noticed names the exit in place of an earlier event.
+    // Method: derive a previous tick holding the exec of pid 7 to Safari and a selected tick
+    // holding its start reading git and then its exit.
+    let (previous, selected) = noticed_before();
+    let selected = selected.with_starts(&[Event {
+        number: 8,
+        program: Ok(1),
+        ..Event::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(1));
+}
+
+#[test]
+fn prefers_the_exec_of_its_own_tick_over_the_previous_row() {
+    // Goal: a program the process ran after the previous tick read it names its exit.
+    // Method: derive a previous tick reading pid 7 live in Safari and a selected tick holding
+    // its exec to git and then its exit.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(2, &[])
+        .with_execs(&[Event {
+            number: 8,
+            program: Ok(1),
+            ..Event::default()
+        }])
+        .with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(1));
+}
+
+#[test]
+fn keeps_the_previous_row_ahead_of_the_previous_events() {
+    // Goal: the previous tick's row of a process names its exit before that tick's events do.
+    // Method: derive a previous tick reading pid 7 live with its program refused and holding
+    // its exec to Safari, and a selected tick holding its exit.
+    let (previous, selected) = noticed_before();
+    let previous = Columns {
+        execs: previous.execs,
+        ..Columns::of(
+            1,
+            &[Process {
+                program: Err(ProgramUnavailable::Refused),
+                ..Process::default()
+            }],
+        )
+    };
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].program,
+        Err(ProgramUnavailable::Refused)
+    );
+    assert_eq!(derived.ungrouped_members, 1);
+}
+
+#[test]
+fn leaves_an_exit_whose_start_read_another_pid_version_out_of_every_app() {
+    // Goal: a start of the process at another pid version than its exit leaves its program at
+    // the exit unknown, though an earlier event named it.
+    // Method: derive a previous tick holding the exec of pid 7 to Safari and a selected tick
+    // holding its start at pid version 3 and then its exit at pid version 1.
+    let (previous, selected) = noticed_before();
+    let selected = selected.with_starts(&[Event {
+        number: 8,
+        creation: Some(Creation {
+            pid_version: 3,
+            ..CREATION
+        }),
+        program: Err(ProgramUnavailable::Refused),
+        ..Event::default()
+    }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].program,
+        Err(ProgramUnavailable::Changed)
+    );
+    assert_eq!(derived.totals, []);
+    assert_eq!(derived.ungrouped_members, 1);
+}
+
+#[test]
+fn ignores_the_starts_after_an_exit() {
+    // Goal: an event after the exit does not change the program the process ran at it.
+    // Method: derive a previous tick holding the exec of pid 7 to Safari and a selected tick
+    // holding its exit and then two starts of it.
+    let (previous, selected) = noticed_before();
+    let selected = selected.with_starts(&[12, 13].map(|number| Event {
+        number,
+        program: Err(ProgramUnavailable::Refused),
+        ..Event::default()
+    }));
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(0));
+}
+
+#[test]
+fn leaves_an_exit_between_two_starts_of_its_process_out_of_every_app() {
+    // Goal: two starts of one process, one before its exit and one after it, leave its
+    // program at the exit unknown.
+    // Method: derive a previous tick holding the exec of pid 7 to Safari and a selected tick
+    // holding a start of it, its exit, and a second start of it.
+    let (previous, selected) = noticed_before();
+    let selected = selected.with_starts(&[8, 12].map(|number| Event {
+        number,
+        program: Err(ProgramUnavailable::Refused),
+        ..Event::default()
+    }));
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].program,
+        Err(ProgramUnavailable::Changed)
+    );
+    assert_eq!(derived.ungrouped_members, 1);
+}
+
+#[test]
+fn names_an_exit_by_the_last_exec_before_it() {
+    // Goal: the program a process ran last before it exited names its exit.
+    // Method: derive a previous tick without the process and a selected tick holding its execs
+    // to Safari and to git, its exit, and then an exec it could not have run.
+    let previous = Columns::of(1, &[]);
+    let selected = Columns::of(2, &[])
+        .with_execs(&[
+            Event {
+                number: 6,
+                ..Event::default()
+            },
+            Event {
+                number: 8,
+                program: Ok(1),
+                ..Event::default()
+            },
+            Event {
+                number: 12,
+                program: Err(ProgramUnavailable::Refused),
+                ..Event::default()
+            },
+        ])
+        .with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(1));
+}
+
+#[test]
+fn leaves_the_program_changed_after_an_exec_of_another_creation_than_the_previous_row() {
+    // Goal: an exec of the pid between the previous tick's row and the exit, of another
+    // creation, leaves the program the row read unknown at the exit.
+    // Method: derive a previous tick reading pid 7 live in Safari and a selected tick holding
+    // an exec of pid 7 without its creation and then the exit.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(2, &[])
+        .with_execs(&[Event {
+            number: 8,
+            creation: None,
+            ..Event::default()
+        }])
+        .with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].program,
+        Err(ProgramUnavailable::Changed)
+    );
+}
+
+#[test]
+fn names_an_exit_by_its_start_after_an_exec_of_another_creation() {
+    // Goal: where the last exec of the pid before the exit is of another creation, the exited
+    // process's start names its program, ahead of an earlier event.
+    // Method: derive a previous tick holding the exec of pid 7 to Safari and a selected tick
+    // holding an exec of another unique id of pid 7, a start of the exited process reading git,
+    // and its exit.
+    let (previous, selected) = noticed_before();
+    let selected = selected
+        .with_execs(&[Event {
+            number: 6,
+            creation: Some(Creation {
+                unique_id: 600,
+                ..CREATION
+            }),
+            ..Event::default()
+        }])
+        .with_starts(&[Event {
+            number: 8,
+            program: Ok(1),
+            ..Event::default()
+        }]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(1));
+}
+
+#[test]
+fn ignores_the_starts_of_other_processes_of_the_pid() {
+    // Goal: a start of an earlier or a later process of the pid does not name the exit of
+    // another one.
+    // Method: derive a previous tick holding the exec of pid 7 to Safari and a selected tick
+    // holding starts of pid 7 of a lower and of a higher unique id and then the exit.
+    let (previous, selected) = noticed_before();
+    let selected = selected.with_starts(&[600, 800].map(|unique_id| Event {
+        number: 8,
+        creation: Some(Creation {
+            unique_id,
+            ..CREATION
+        }),
+        program: Ok(1),
+        ..Event::default()
+    }));
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].program, Ok(0));
+}
+
+#[test]
+fn leaves_out_an_exit_whose_start_an_exec_followed() {
+    // Goal: an exec between a process's start and its exit leaves the program its start read
+    // unknown at the exit.
+    // Method: derive a previous tick without the process and a selected tick holding its
+    // start, an exec of the pid without its creation, the exit, and a later exec.
+    let previous = Columns::of(1, &[]);
+    let unassociated = Event {
+        creation: None,
+        ..Event::default()
+    };
+    let selected = Columns::of(2, &[])
+        .with_starts(&[Event::default()])
+        .with_execs(&[7, 12].map(|number| Event {
+            number,
+            ..unassociated
+        }))
+        .with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes, []);
+}
+
+/// Declares a test that an exec the selected tick read without its program names the exit's
+/// program unknown, for the reason the exec gives.
+macro_rules! unread_exec_tests {
+    ($($name:ident, $creation:expr, $reason:expr;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                // Goal: an exec after an earlier event names the process's program, even where
+                // the collector could not read it, so the earlier program does not stand.
+                // Method: derive a previous tick holding the exec of pid 7 to Safari and a
+                // selected tick holding an exec of pid 7 without its program, then the exit.
+                let (previous, selected) = noticed_before();
+                let selected = selected.with_execs(&[Event {
+                    number: 8,
+                    creation: $creation,
+                    program: Err(ProgramUnavailable::Refused),
+                    ..Event::default()
+                }]);
+
+                let derived = derive(&previous, &selected);
+
+                assert_eq!(derived.processes[0].program, Err($reason));
+                assert_eq!(derived.processes[0].resident_bytes_last, Some(300));
+                assert_eq!(derived.totals, []);
+                assert_eq!(derived.ungrouped_members, 1);
+            }
+        )*
+    };
+}
+
+unread_exec_tests! {
+    names_the_reason_an_exec_before_the_exit_was_not_read,
+        Some(CREATION), ProgramUnavailable::Refused;
+    leaves_the_program_changed_after_an_exec_of_another_creation,
+        None, ProgramUnavailable::Changed;
+}
+
+#[test]
+fn leaves_out_an_exit_after_an_exec_of_another_creation() {
+    // Goal: an exec of another creation of the pid names no program for an exit no reading
+    // before it named.
+    // Method: derive a previous tick without the process and a selected tick holding an exec
+    // of pid 7 without its creation and then the exit.
+    let previous = Columns::of(1, &[]);
+    let selected = Columns::of(2, &[])
+        .with_execs(&[Event {
+            number: 8,
+            creation: None,
+            ..Event::default()
+        }])
+        .with_exits(&[Exit::default()]);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes, []);
+}
+
+/// Declares a test that an event of the previous tick names no exited process.
+macro_rules! unnamed_exit_tests {
+    ($($name:ident, $change:expr;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                // Goal: an event of the previous tick names no exited process where the ticks
+                // do not span one interval, where it is of another process, or where it leaves
+                // the process's program unknown.
+                // Method: derive a previous tick holding only the exec of pid 7 and a selected
+                // tick holding only its exit, with one change to either.
+                let (mut previous, mut selected) = noticed_before();
+                let change: fn(&mut Columns, &mut Columns) = $change;
+                change(&mut previous, &mut selected);
+
+                let derived = derive(&previous, &selected);
+
+                assert_eq!(derived.processes, []);
+                assert_eq!(derived.totals, []);
+            }
+        )*
+    };
+}
+
+unnamed_exit_tests! {
+    names_no_exit_by_an_event_of_another_recording,
+        |previous, _| previous.stamp.recording = [9, 9];
+    names_no_exit_by_an_event_of_another_boot, |previous, _| previous.stamp.boot = [9, 9];
+    names_no_exit_by_an_event_of_another_run, |previous, _| previous.stamp.run = [9, 9];
+    names_no_exit_by_an_event_across_a_missed_tick,
+        |_, selected| selected.stamp.publication = 3;
+    names_no_exit_by_an_event_without_a_continuous_clock,
+        |previous, _| previous.stamp.continuous_ns = None;
+    names_no_exit_by_an_event_after_the_continuous_clock_went_back,
+        |previous, _| previous.stamp.continuous_ns = Some(3_000_000_000);
+    names_no_exit_by_an_exec_of_a_reused_pid, |previous, _| {
+        previous.execs.creation[0] = Some(Creation {
+            unique_id: 701,
+            ..CREATION
+        });
+    };
+    names_no_exit_by_an_exec_of_another_pid_version, |previous, _| {
+        previous.execs.creation[0] = Some(Creation {
+            pid_version: 3,
+            ..CREATION
+        });
+    };
+    names_no_exit_by_one_of_two_starts, |previous, _| {
+        previous.execs = EventColumns::default();
+        previous.starts = EventColumns::of(&[4, 5].map(|number| Event {
+            number,
+            ..Event::default()
+        }));
+    };
+    names_no_exit_by_a_start_before_an_exec, |previous, _| {
+        previous.execs = EventColumns::of(&[Event {
+            number: 6,
+            creation: None,
+            ..Event::default()
+        }]);
+        previous.starts = EventColumns::of(&[Event::default()]);
+    };
+}
+
+/// A previous tick holding only the exec of pid 7 to Safari, and a selected tick holding only
+/// its exit, with 300 bytes resident.
+fn noticed_before() -> (Columns, Columns) {
+    let previous = Columns::of(1, &[]).with_execs(&[Event::default()]);
+    let selected = Columns::of(2, &[]).with_exits(&[Exit {
+        resident_bytes: 300,
+        ..Exit::default()
+    }]);
+    (previous, selected)
+}
+
 struct Derived {
     processes: Vec<ProcessTotals>,
     totals: Vec<Totals>,
@@ -1241,10 +1707,12 @@ struct Derived {
     live_ungrouped_members: u32,
 }
 
-/// Derives the Apps of `selected` after `previous`, whose processes run Safari as entry 0.
+/// Derives the Apps of `selected` after `previous`, whose processes run Safari as entry 0 and
+/// git as entry 1.
 fn derive(previous: &Columns, selected: &Columns) -> Derived {
     let mut programs = Programs::new(CAPACITY);
     assert_eq!(programs.add(SAFARI), 0);
+    assert_eq!(programs.add(GIT), 1);
     let mut apps = Apps::new(PROCESSES_MAX, &programs);
 
     apps.derive(&programs, &previous.tick(), &selected.tick());
@@ -1336,6 +1804,7 @@ impl Default for Process {
 /// One exit of a tick, as a test writes it: the process's final usage.
 #[derive(Clone, Copy)]
 struct Exit {
+    number: u64,
     pid: i32,
     creation: Option<Creation>,
     usage: Measurement,
@@ -1354,6 +1823,7 @@ struct Exit {
 impl Default for Exit {
     fn default() -> Self {
         Self {
+            number: 10,
             pid: 7,
             creation: Some(CREATION),
             usage: Measurement::Measured,
@@ -1367,6 +1837,27 @@ impl Default for Exit {
             pageins: 0,
             resident_bytes: 0,
             footprint_bytes: 0,
+        }
+    }
+}
+
+/// One start or exec of a tick, as a test writes it: the program the collector read when it
+/// noticed the event.
+#[derive(Clone, Copy)]
+struct Event {
+    number: u64,
+    pid: i32,
+    creation: Option<Creation>,
+    program: Result<u32, ProgramUnavailable>,
+}
+
+impl Default for Event {
+    fn default() -> Self {
+        Self {
+            number: 5,
+            pid: 7,
+            creation: Some(CREATION),
+            program: Ok(0),
         }
     }
 }
@@ -1489,11 +1980,14 @@ struct Columns {
     gpu_ns: Vec<Option<u64>>,
     threads: Vec<Option<u64>>,
     exits: ExitColumns,
+    starts: EventColumns,
+    execs: EventColumns,
 }
 
 /// The columns of a tick's exits.
 #[derive(Default)]
 struct ExitColumns {
+    number: Vec<u64>,
     pid: Vec<i32>,
     creation: Vec<Option<Creation>>,
     usage: UsageColumns,
@@ -1517,16 +2011,31 @@ impl Columns {
             gpu_ns: rows.iter().map(|row| row.gpu_ns).collect(),
             threads: rows.iter().map(|row| row.threads).collect(),
             exits: ExitColumns::default(),
+            starts: EventColumns::default(),
+            execs: EventColumns::default(),
         }
     }
 
     /// The tick with `exits`, which a test writes in the order the rule reads them.
     fn with_exits(mut self, exits: &[Exit]) -> Self {
         self.exits = ExitColumns {
+            number: exits.iter().map(|exit| exit.number).collect(),
             pid: exits.iter().map(|exit| exit.pid).collect(),
             creation: exits.iter().map(|exit| exit.creation).collect(),
             usage: UsageColumns::of(exits.iter().map(Exit::usage)),
         };
+        self
+    }
+
+    /// The tick with `starts`, which a test writes in the order the rule reads them.
+    fn with_starts(mut self, starts: &[Event]) -> Self {
+        self.starts = EventColumns::of(starts);
+        self
+    }
+
+    /// The tick with `execs`, which a test writes in the order the rule reads them.
+    fn with_execs(mut self, execs: &[Event]) -> Self {
+        self.execs = EventColumns::of(execs);
         self
     }
 
@@ -1542,10 +2051,43 @@ impl Columns {
                 threads: &self.threads,
             },
             exits: Exits {
+                number: &self.exits.number,
                 pid: &self.exits.pid,
                 creation: &self.exits.creation,
                 usage: self.exits.usage.usages(),
             },
+            starts: Starts {
+                number: &self.starts.number,
+                pid: &self.starts.pid,
+                creation: &self.starts.creation,
+                program: &self.starts.program,
+            },
+            execs: Execs {
+                number: &self.execs.number,
+                pid: &self.execs.pid,
+                creation: &self.execs.creation,
+                program: &self.execs.program,
+            },
+        }
+    }
+}
+
+/// The columns of a tick's starts or of its execs.
+#[derive(Default)]
+struct EventColumns {
+    number: Vec<u64>,
+    pid: Vec<i32>,
+    creation: Vec<Option<Creation>>,
+    program: Vec<Result<u32, ProgramUnavailable>>,
+}
+
+impl EventColumns {
+    fn of(events: &[Event]) -> Self {
+        Self {
+            number: events.iter().map(|event| event.number).collect(),
+            pid: events.iter().map(|event| event.pid).collect(),
+            creation: events.iter().map(|event| event.creation).collect(),
+            program: events.iter().map(|event| event.program).collect(),
         }
     }
 }
