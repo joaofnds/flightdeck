@@ -27,9 +27,9 @@ use polars::prelude::{
 };
 
 use super::apps::{ROW_APP, ROW_HEADER, ROW_PROCESS, VERSION};
+use super::processes::read_processes;
 use super::{
-    AppMinute, AppParts, MachineMinute, Refused, SealedMinute, read_apps, read_machine,
-    read_processes,
+    AppMinute, AppParts, MachineMinute, Refused, SealedMinute, derive_apps, read_apps, read_machine,
 };
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
@@ -373,6 +373,87 @@ fn a_minute_sealed_without_gpu_time_gives_the_frames_its_replay_gives() {
     assert_eq!(frames, replayed_frames(&fixture));
 }
 
+#[test]
+fn a_minute_derives_the_apps_its_app_parts_keep() {
+    // Goal: the store gives a minute without App parts the Apps the seal would have kept of it,
+    // by the App rule over the minute's processes and events.
+    // Method: seal three observations of several Apps with their App parts, derive the
+    // minute's Apps from its processes and events, and compare them with the Apps its parts
+    // keep.
+    let fixture = sealed_apps_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let mut kept = AppMinute::default();
+    read_apps(&minute, &mut kept).unwrap();
+    let mut derived = AppMinute::default();
+
+    derive_apps(&minute, &mut None, &mut derived).unwrap();
+
+    assert_eq!(derived, kept);
+}
+
+#[test]
+fn a_minute_takes_its_first_rates_from_the_minute_before_it() {
+    // Goal: the first observation of a minute without App parts takes its rates from the last
+    // observation of the minute before it in its run, as the seal derives them.
+    // Method: seal two adjacent minutes of a run with their App parts, derive the first
+    // minute's Apps and then the second's from what the first left, and compare the second's
+    // with the Apps its parts keep.
+    let fixture = sealed_adjacent_apps_minutes();
+    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let mut kept = AppMinute::default();
+    read_apps(&second, &mut kept).unwrap();
+    let mut before = None;
+    derive_apps(&first, &mut before, &mut AppMinute::default()).unwrap();
+    let mut derived = AppMinute::default();
+
+    derive_apps(&second, &mut before, &mut derived).unwrap();
+
+    assert!(kept.samples[0].previous.is_some());
+    assert_eq!(derived, kept);
+}
+
+#[test]
+fn a_minute_derived_without_the_one_before_it_gives_its_first_sample_no_rates() {
+    // Goal: a minute whose Apps are derived alone gives its first observation no rates, since
+    // the observation they would come from is not at hand.
+    // Method: seal two adjacent minutes of a run, and derive the second minute's Apps alone.
+    let fixture = sealed_adjacent_apps_minutes();
+    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let mut derived = AppMinute::default();
+
+    derive_apps(&second, &mut None, &mut derived).unwrap();
+
+    assert_eq!(derived.samples[0].previous, None);
+}
+
+#[test]
+fn a_refused_minute_leaves_no_observation_to_take_rates_from() {
+    // Goal: a minute whose Apps are refused leaves the next minute no observation of it to take
+    // rates from, and no Apps.
+    // Method: derive one minute's Apps, then those of a minute whose processes name no tick.
+    let fixture = sealed_adjacent_apps_minutes();
+    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let mut before = None;
+    derive_apps(&second, &mut before, &mut AppMinute::default()).unwrap();
+    damage_table(&fixture, "processes", |frame| {
+        with_column(frame, (col("publication") + lit(100)).alias("publication"))
+    });
+    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let mut derived = AppMinute::default();
+
+    let refused = derive_apps(&first, &mut before, &mut derived);
+
+    assert!(matches!(
+        refused,
+        Err(Refused::Decode(persistence::Error::Bound(
+            "process of no tick"
+        )))
+    ));
+    assert!(before.is_none());
+    assert_eq!(derived, AppMinute::default());
+}
+
 macro_rules! refuses_damaged_processes {
     ($($name:ident, $table:literal, $reason:literal, $damage:expr;)*) => {$(
         #[test]
@@ -586,7 +667,7 @@ fn gpu_processes(step: u64, program: ProgramReference) -> ([Process; 2], [Identi
 /// The frames the decoder reads of `minute`, in publication order.
 fn decoded_frames(minute: &SealedMinute) -> Result<Vec<Frame>, Refused> {
     let mut frames = Vec::new();
-    read_processes(minute, |frame| {
+    read_processes(minute, |_, frame| {
         frames.push(*frame);
         Ok(())
     })?;
@@ -658,6 +739,23 @@ fn sealed_apps_minute() -> Fixture {
         fixture.publish_with_system_rows(second);
     }
     fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture
+}
+
+/// A fixture whose ring held the last two observations of run minute 0 and the first two of
+/// minute 1, each minute sealed with its App parts.
+fn sealed_adjacent_apps_minutes() -> Fixture {
+    let mut fixture = Fixture::new();
+    let derive = crate::SealedApps::default();
+    fixture.start_at_run_tick(58);
+    for second in 1058..=1059 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_minute_derived(0, &derive);
+    for second in 1060..=1061 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_minute_derived(1, &derive);
     fixture
 }
 

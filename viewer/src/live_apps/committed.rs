@@ -216,16 +216,16 @@ impl Frame {
         committed_many_chunks(&batch, &sizes, connection, operation, &mut consume)
     }
 
-    /// The frame of each of `endpoints`, from the rows of `rows`, which has the columns
-    /// `committed_many`'s query selects, read in `order`. `order` holds the rows of each
-    /// endpoint's publication together, in endpoint order, each publication's members by pid
-    /// and its events by number, as that query sorts them.
+    /// Hands `consume` each of `endpoints` with its frame, from the rows of `rows`, which has
+    /// the columns `committed_many`'s query selects, read in `order`. `order` holds the rows of
+    /// each endpoint's publication together, in endpoint order, each publication's members by
+    /// pid and its events by number, as that query sorts them.
     pub(crate) fn placed_many(
         endpoints: &[Endpoint],
         rows: &DataFrame,
         order: &[usize],
         operation: &Operation,
-        mut consume: impl FnMut(Box<Self>) -> Result<()>,
+        mut consume: impl FnMut(&Endpoint, Box<Self>) -> Result<()>,
     ) -> Result<()> {
         assert_eq!(rows.width(), BATCH_COLUMNS);
         assert!(order.len() <= rows.height());
@@ -252,7 +252,7 @@ impl Frame {
             committed_many_members(&mut cursor, &mut frame, endpoint, size, operation)?;
             committed_finish(&frame, size)?;
             operation.check()?;
-            consume(frame)?;
+            consume(endpoint, frame)?;
         }
         assert!(cursor.rows.next().is_none());
 

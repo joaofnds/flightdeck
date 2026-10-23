@@ -1,7 +1,7 @@
-//! Each observation's frame of a sealed minute, the processes and events the App rule takes, for
-//! a minute whose App parts the store does not read. The rows pass the identity admission rule
-//! the SQL replay of a minute applies, and the replay's own assembly builds the frames, so the
-//! two give the same frames.
+//! The Apps of a sealed minute whose App parts the store does not read, by the App rule over each
+//! observation's frame of the minute's processes and events. The rows pass the identity
+//! admission rule the SQL replay of a minute applies, and the replay's own assembly builds the
+//! frames, so the two give the same frames.
 
 use std::sync::Arc;
 
@@ -15,9 +15,11 @@ use polars::prelude::{
     DataFrame, DataType, Expr, Null, SortMultipleOptions, UInt32Type, UInt64Type, col, lit,
 };
 
+use super::apps::{AppMinute, ROWS_MAX};
 use super::{Refused, SealedMinute, SealedTable, placement};
 use crate::apps::Stamp;
 use crate::cancellation::Cancellation;
+use crate::live_app_response::Sample;
 use crate::live_apps::Frame;
 use crate::live_apps::committed::{ENDPOINTS_MAX, Endpoint};
 
@@ -84,10 +86,70 @@ const TICK_COLUMNS: [&str; 9] = [
 ];
 const TICKLESS: &str = "process of no tick";
 
-/// Hands `consume` the frame of each of `minute`'s observations, in publication order.
-pub fn read_processes(
+/// The last observation of a minute and its frame, which the first sample of the minute after it
+/// may take its rates from.
+pub struct Before {
+    endpoint: Endpoint,
+    frame: Box<Frame>,
+}
+
+/// Every App of each of `minute`'s observations, which `into`, empty, takes, by the App rule over
+/// the minute's processes and events, as the seal derives a minute's App parts. Each sample takes
+/// its rates from the observation before it where the rule allows, the first from `before`, the
+/// last observation of the minute read before this one, which `before` then holds of this one. A
+/// refused minute leaves both empty, since neither holds a whole minute.
+pub fn derive_apps(
     minute: &SealedMinute,
-    consume: impl FnMut(Box<Frame>) -> persistence::Result<()>,
+    before: &mut Option<Before>,
+    into: &mut AppMinute,
+) -> Result<(), Refused> {
+    assert!(into.samples.is_empty());
+    assert!(into.apps.is_empty());
+
+    let derived = derive_apps_samples(minute, before, into);
+    if derived.is_err() {
+        *before = None;
+        into.clear();
+    }
+    derived
+}
+
+fn derive_apps_samples(
+    minute: &SealedMinute,
+    before: &mut Option<Before>,
+    into: &mut AppMinute,
+) -> Result<(), Refused> {
+    let mut sample = None;
+    read_processes(minute, |endpoint, frame| {
+        let mut previous = None;
+        if let Some(before) = before.as_ref() {
+            if frame.takes_rates_from(&before.endpoint) {
+                previous = Some(&*before.frame);
+            }
+        }
+        Sample::capture(&frame, previous, &mut sample)?;
+        let captured = sample
+            .as_deref()
+            .ok_or(persistence::Error::Bound("derived App sample"))?;
+        into.push_sample(captured);
+        // A minute's Apps fit the rows its App parts would keep of them.
+        if into.samples.len() + into.apps.len() > collector::usize_from_u32(ROWS_MAX) {
+            return Err(persistence::Error::Bound("derived App rows"));
+        }
+
+        *before = Some(Before {
+            endpoint: *endpoint,
+            frame,
+        });
+        Ok(())
+    })
+}
+
+/// Hands `consume` the endpoint and the frame of each of `minute`'s observations, in publication
+/// order.
+pub(crate) fn read_processes(
+    minute: &SealedMinute,
+    consume: impl FnMut(&Endpoint, Box<Frame>) -> persistence::Result<()>,
 ) -> Result<(), Refused> {
     let endpoints = read_processes_endpoints(minute)?;
 

@@ -19,7 +19,7 @@ pub use machine::{
     CoreStateRow, CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
     read_machine,
 };
-pub use processes::read_processes;
+pub use processes::{Before, derive_apps};
 
 /// A sealed minute whose marker and files `open` verified.
 pub struct SealedMinute {
