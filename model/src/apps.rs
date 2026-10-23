@@ -28,23 +28,29 @@ pub struct Processes<'columns> {
     /// The process's program, as its entry in the run's dictionary, or why it was not read. Two
     /// entries of one index hold two programs, as the ring's dictionary holds each program once.
     pub program: &'columns [Result<u32, ProgramUnavailable>],
-    /// Whether the process's usage, the columns below, was read.
-    pub usage: &'columns [Measurement],
+    pub usage: Usages<'columns>,
+    /// The GPU time of the process's GPU clients, none where it has no GPU client or the read
+    /// failed, which the recording does not tell apart.
+    pub gpu_ns: &'columns [Option<u64>],
+    /// The process's threads, if they were read.
+    pub threads: &'columns [Option<u64>],
+}
+
+/// What processes had used and held when the collector read their usage, as columns of one
+/// length.
+pub struct Usages<'columns> {
+    /// Whether the usage, the columns below, was read.
+    pub measurement: &'columns [Measurement],
     pub awake_ns_at_start: &'columns [u64],
     pub user_ns: &'columns [u64],
     pub system_ns: &'columns [u64],
     pub energy_nj: &'columns [u64],
-    /// The GPU time of the process's GPU clients, none where it has no GPU client or the read
-    /// failed, which the recording does not tell apart.
-    pub gpu_ns: &'columns [Option<u64>],
     pub disk_read_bytes: &'columns [u64],
     pub disk_written_bytes: &'columns [u64],
     pub idle_wakeups: &'columns [u64],
     pub pageins: &'columns [u64],
     pub resident_bytes: &'columns [u64],
     pub footprint_bytes: &'columns [u64],
-    /// The process's threads, if they were read.
-    pub threads: &'columns [Option<u64>],
 }
 
 /// A process's creation as the kernel numbers it.
@@ -87,18 +93,8 @@ impl Processes<'_> {
         let count = self.pid.len();
         assert_eq!(self.creation.len(), count);
         assert_eq!(self.program.len(), count);
-        assert_eq!(self.usage.len(), count);
-        assert_eq!(self.awake_ns_at_start.len(), count);
-        assert_eq!(self.user_ns.len(), count);
-        assert_eq!(self.system_ns.len(), count);
-        assert_eq!(self.energy_nj.len(), count);
+        assert_eq!(self.usage.count(), count);
         assert_eq!(self.gpu_ns.len(), count);
-        assert_eq!(self.disk_read_bytes.len(), count);
-        assert_eq!(self.disk_written_bytes.len(), count);
-        assert_eq!(self.idle_wakeups.len(), count);
-        assert_eq!(self.pageins.len(), count);
-        assert_eq!(self.resident_bytes.len(), count);
-        assert_eq!(self.footprint_bytes.len(), count);
         assert_eq!(self.threads.len(), count);
         for pair in self.pid.windows(2) {
             assert!(pair[0] < pair[1]);
@@ -116,6 +112,23 @@ impl Processes<'_> {
         } else {
             None
         }
+    }
+}
+
+impl Usages<'_> {
+    fn count(&self) -> usize {
+        let count = self.measurement.len();
+        assert_eq!(self.awake_ns_at_start.len(), count);
+        assert_eq!(self.user_ns.len(), count);
+        assert_eq!(self.system_ns.len(), count);
+        assert_eq!(self.energy_nj.len(), count);
+        assert_eq!(self.disk_read_bytes.len(), count);
+        assert_eq!(self.disk_written_bytes.len(), count);
+        assert_eq!(self.idle_wakeups.len(), count);
+        assert_eq!(self.pageins.len(), count);
+        assert_eq!(self.resident_bytes.len(), count);
+        assert_eq!(self.footprint_bytes.len(), count);
+        count
     }
 }
 
@@ -257,12 +270,12 @@ impl Totals {
 
     /// Adds what the live member of `selected`'s `row` held at the tick.
     fn add_gauges(&mut self, selected: &Processes, row: usize) {
-        let unmeasured = unmeasured(selected.usage[row]);
+        let unmeasured = unmeasured(selected.usage.measurement[row]);
         self.live_members += 1;
         self.resident_bytes
-            .add(gauge(unmeasured, selected.resident_bytes[row]));
+            .add(gauge(unmeasured, selected.usage.resident_bytes[row]));
         self.footprint_bytes
-            .add(gauge(unmeasured, selected.footprint_bytes[row]));
+            .add(gauge(unmeasured, selected.usage.footprint_bytes[row]));
         self.threads.add(match selected.threads[row] {
             Some(threads) => Amount::Known(threads),
             None => Amount::Unavailable(Unavailable::Unknown),
@@ -396,15 +409,15 @@ fn derive_process(
     selected: &Processes,
     row: usize,
 ) -> ProcessTotals {
-    let unmeasured = unmeasured(selected.usage[row]);
+    let unmeasured = unmeasured(selected.usage.measurement[row]);
     let mut process = ProcessTotals {
         pid: selected.pid[row],
         creation: selected.creation[row],
         program: selected.program[row],
         deltas: Deltas::unavailable(Unavailable::Baseline),
         app_attribution: None,
-        resident_bytes_last: last(unmeasured, selected.resident_bytes[row]),
-        footprint_bytes_last: last(unmeasured, selected.footprint_bytes[row]),
+        resident_bytes_last: last(unmeasured, selected.usage.resident_bytes[row]),
+        footprint_bytes_last: last(unmeasured, selected.usage.footprint_bytes[row]),
         threads: selected.threads[row],
     };
     if !compatible {
@@ -447,37 +460,43 @@ fn derive_same_program(
 
 /// How much the process's counters grew between its observations at `before` and `row`.
 fn derive_deltas(previous: &Processes, before: usize, selected: &Processes, row: usize) -> Deltas {
-    if let Some(reason) = unmeasured(previous.usage[before]) {
+    if let Some(reason) = unmeasured(previous.usage.measurement[before]) {
         return Deltas::unavailable(reason);
     }
-    if previous.awake_ns_at_start[before] != selected.awake_ns_at_start[row] {
+    if previous.usage.awake_ns_at_start[before] != selected.usage.awake_ns_at_start[row] {
         return Deltas::unavailable(Unavailable::Creation);
     }
 
     let disk_read_bytes = change(
-        previous.disk_read_bytes[before],
-        selected.disk_read_bytes[row],
+        previous.usage.disk_read_bytes[before],
+        selected.usage.disk_read_bytes[row],
     );
     let disk_written_bytes = change(
-        previous.disk_written_bytes[before],
-        selected.disk_written_bytes[row],
+        previous.usage.disk_written_bytes[before],
+        selected.usage.disk_written_bytes[row],
     );
     Deltas {
         cpu_ns: derive_cpu_ns(previous, before, selected, row),
-        energy_nj: change(previous.energy_nj[before], selected.energy_nj[row]),
+        energy_nj: change(
+            previous.usage.energy_nj[before],
+            selected.usage.energy_nj[row],
+        ),
         gpu_ns: derive_gpu_ns(previous.gpu_ns[before], selected.gpu_ns[row]),
         disk_read_bytes,
         disk_written_bytes,
         disk_io_bytes: derive_disk_io_bytes(disk_read_bytes, disk_written_bytes),
-        idle_wakeups: change(previous.idle_wakeups[before], selected.idle_wakeups[row]),
-        pageins: change(previous.pageins[before], selected.pageins[row]),
+        idle_wakeups: change(
+            previous.usage.idle_wakeups[before],
+            selected.usage.idle_wakeups[row],
+        ),
+        pageins: change(previous.usage.pageins[before], selected.usage.pageins[row]),
     }
 }
 
 /// The CPU time the process spent between its observations at `before` and `row`.
 fn derive_cpu_ns(previous: &Processes, before: usize, selected: &Processes, row: usize) -> Amount {
-    let user_ns = selected.user_ns[row].checked_sub(previous.user_ns[before]);
-    let system_ns = selected.system_ns[row].checked_sub(previous.system_ns[before]);
+    let user_ns = selected.usage.user_ns[row].checked_sub(previous.usage.user_ns[before]);
+    let system_ns = selected.usage.system_ns[row].checked_sub(previous.usage.system_ns[before]);
     let (Some(user_ns), Some(system_ns)) = (user_ns, system_ns) else {
         return Amount::Unavailable(Unavailable::CounterReset);
     };

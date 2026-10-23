@@ -1,6 +1,6 @@
 use super::{
     Amount, Apps, Creation, Deltas, Measurement, ProcessTotals, Processes, ProgramUnavailable,
-    Stamp, Subtotal, Tick, Totals, Unavailable,
+    Stamp, Subtotal, Tick, Totals, Unavailable, Usages,
 };
 use crate::programs::{Capacity, Program, Programs};
 
@@ -1097,18 +1097,20 @@ impl Columns {
                 pid: &self.pid,
                 creation: &self.creation,
                 program: &self.program,
-                usage: &self.usage,
-                awake_ns_at_start: &self.awake_ns_at_start,
-                user_ns: &self.user_ns,
-                system_ns: &self.system_ns,
-                energy_nj: &self.energy_nj,
+                usage: Usages {
+                    measurement: &self.usage,
+                    awake_ns_at_start: &self.awake_ns_at_start,
+                    user_ns: &self.user_ns,
+                    system_ns: &self.system_ns,
+                    energy_nj: &self.energy_nj,
+                    disk_read_bytes: &self.disk_read_bytes,
+                    disk_written_bytes: &self.disk_written_bytes,
+                    idle_wakeups: &self.idle_wakeups,
+                    pageins: &self.pageins,
+                    resident_bytes: &self.resident_bytes,
+                    footprint_bytes: &self.footprint_bytes,
+                },
                 gpu_ns: &self.gpu_ns,
-                disk_read_bytes: &self.disk_read_bytes,
-                disk_written_bytes: &self.disk_written_bytes,
-                idle_wakeups: &self.idle_wakeups,
-                pageins: &self.pageins,
-                resident_bytes: &self.resident_bytes,
-                footprint_bytes: &self.footprint_bytes,
                 threads: &self.threads,
             },
         }
