@@ -15,6 +15,7 @@ mod live_fan_history;
 mod metrics;
 pub mod recording;
 mod session;
+pub mod store;
 
 pub use cancellation::Cancellation;
 pub use live::LiveSession;
