@@ -18,7 +18,7 @@ pub(crate) mod summary;
 #[path = "live_system_context.rs"]
 mod system_context;
 #[path = "live_utilization.rs"]
-mod utilization;
+pub(crate) mod utilization;
 pub(crate) use summary::matching_summary;
 
 impl LiveDashboard {
@@ -396,7 +396,12 @@ pub fn text(value: &Value) -> String {
 }
 
 pub(crate) fn pressure(value: &Value) -> &'static str {
-    match value.as_u64() {
+    pressure_level_text(value.as_u64())
+}
+
+/// macOS's name for the memory pressure `level`, or "Unavailable" where the collector read none.
+pub(crate) fn pressure_level_text(level: Option<u64>) -> &'static str {
+    match level {
         Some(0) => "Normal",
         Some(1) => "Warning",
         Some(2) => "Critical",

@@ -22,6 +22,7 @@ use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
 };
 use crate::live_views::summary;
+use crate::live_views::utilization::UtilizationReadings;
 
 #[test]
 fn a_view_newer_than_the_readings_draws_the_overviews_machine_charts() {
@@ -76,6 +77,20 @@ fn a_view_newer_than_the_readings_fills_the_overviews_readouts() {
 
     let expected = summary::cards("overview", &summary_selection(&reading_at(10_005, 0)));
     assert_eq!(texts(&dashboard.summary_cards()), texts(&expected));
+}
+
+#[test]
+fn a_view_newer_than_the_readings_fills_the_utilization_panel() {
+    // Goal: Overview's utilization panel shows the newest second the store holds, as its
+    // readouts do, so it keeps following the Mac while the worker reads nothing. Method:
+    // readings that end at 10,000, then a View that ends at 10,005, whose panel reads as the
+    // worker's summary of 10,005 reads it.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+
+    dashboard.take_view(newer_view());
+
+    let expected = UtilizationReadings::of_summary(&trend_point(&reading_at(10_005, 0)));
+    assert_eq!(dashboard.overview_utilization(), expected);
 }
 
 #[test]

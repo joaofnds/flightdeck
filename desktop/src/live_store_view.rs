@@ -24,6 +24,7 @@ use crate::live_resident_history::ResidentHistory;
 use crate::live_source_mode::SourceMode;
 use crate::live_thermal_pressure::thermal_pressure_level_text;
 use crate::live_views::summary;
+use crate::live_views::utilization::{Shares, UtilizationReadings, utilizations};
 
 #[cfg(test)]
 #[path = "live_store_view_tests.rs"]
@@ -343,6 +344,11 @@ impl LiveDashboard {
         Some(store_view_hardware_of(self.store_view_shown()?))
     }
 
+    /// The utilization panel's readings of the second the View the page draws shows.
+    pub(crate) fn store_view_utilization(&self) -> Option<UtilizationReadings> {
+        Some(store_view_utilization_of(self.store_view_shown()?))
+    }
+
     /// The second the View the page draws shows: the one it held for the shown hover, or its
     /// newest while no hover is shown. None in a gap, and where the page draws from the
     /// worker's readings.
@@ -471,9 +477,38 @@ fn store_view_hardware_of(second: &MachineSecond) -> Readings {
     }
 }
 
+/// The utilization panel's readings of `second`, as the panel reads the worker's summary of it.
+fn store_view_utilization_of(second: &MachineSecond) -> UtilizationReadings {
+    let memory = second.memory.as_ref();
+    let shares = Shares {
+        levels: performance_levels_of(second),
+        level_percent: second.cpu_level_percent,
+        gpu_percent: second.gpu_active_percent,
+        memory_used_bytes: memory.and_then(|memory| {
+            let app = memory.app_bytes?;
+            summary::memory_in_use_bytes_of(app, memory.wired_bytes, memory.compressed_bytes)
+        }),
+        memory_total_bytes: memory.map(|memory| memory.total_bytes),
+        swap_used_bytes: memory.map(|memory| memory.swap_used_bytes),
+        swap_total_bytes: memory.map(|memory| memory.swap_total_bytes),
+    };
+    let pressure = memory.map(|memory| u64::from(held_projection::pressure_level(memory.pressure)));
+
+    UtilizationReadings {
+        utilizations: utilizations(&shares),
+        pressure: crate::live_views::pressure_level_text(pressure),
+        thermal: thermal_pressure_level_text(second.thermal_pressure.map(u64::from)),
+    }
+}
+
 /// The CPU's performance levels as the newest second of `view` names them.
 fn draw_store_view_panels_levels(view: &View) -> Option<[PerformanceLevel; 2]> {
-    let [fastest, slower] = view.seconds.last()?.performance_levels.as_ref()?;
+    performance_levels_of(view.seconds.last()?)
+}
+
+/// The CPU's performance levels as `second` names them.
+fn performance_levels_of(second: &MachineSecond) -> Option<[PerformanceLevel; 2]> {
+    let [fastest, slower] = second.performance_levels.as_ref()?;
     let level = |level: &collector::system::PerformanceLevel| {
         PerformanceLevel::named(level.name.as_str(), level.logical_cpus)
     };

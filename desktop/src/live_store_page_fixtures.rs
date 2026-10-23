@@ -60,6 +60,8 @@ pub fn figure_second(wall_second: u64) -> MachineSecond {
             wired_bytes: 2 * GIBIBYTE,
             compressed_bytes: 2 * GIBIBYTE,
             pressure: Pressure::Normal,
+            swap_used_bytes: 0,
+            swap_total_bytes: 0,
         }),
         battery: Some(BatterySecond {
             charge_percent: Some(75.0),

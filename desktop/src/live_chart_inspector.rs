@@ -96,7 +96,7 @@ impl LiveDashboard {
         let second = self
             .reading_target()
             .map(|target| target.second)
-            .or_else(|| self.snapshot.as_ref()?.selection["second"].as_u64());
+            .or_else(|| self.shown_second());
         let selected = second.map_or_else(|| "Unavailable".into(), |second| clock(second, true));
         div()
             .id("chart-data-dialog")

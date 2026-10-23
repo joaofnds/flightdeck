@@ -81,8 +81,25 @@ fn app_memory_is_anonymous_memory_that_macos_may_not_purge() {
         wired_bytes: 200,
         compressed_bytes: 100,
         pressure: Pressure::Warning,
+        swap_used_bytes: 0,
+        swap_total_bytes: 0,
     };
     assert_eq!(second.memory, Some(expected));
+}
+
+#[test]
+fn a_second_holds_the_swap_macos_reported() {
+    // Goal: the Overview's utilization of swap reads the swap in use and the swap macOS set
+    // aside, as the worker's summary does. Method: 300 of 1,024 bytes of swap in use.
+    let machine = Machine::at(1).swap(300, 1_024);
+
+    let second = machine.first_second();
+
+    let memory = second.memory.unwrap();
+    assert_eq!(
+        (memory.swap_used_bytes, memory.swap_total_bytes),
+        (300, 1_024)
+    );
 }
 
 #[test]
@@ -698,6 +715,12 @@ impl Machine {
         for row in &mut self.interfaces {
             row.interface.name = interface_name(name);
         }
+        self
+    }
+
+    fn swap(mut self, used_bytes: u64, total_bytes: u64) -> Self {
+        self.memory.memory.swap_used_bytes = used_bytes;
+        self.memory.memory.swap_total_bytes = total_bytes;
         self
     }
 

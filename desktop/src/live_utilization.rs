@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::charts::{GREEN, GRID, MUTED, ORANGE, RED, TEXT, YELLOW};
 use crate::data::Panel;
 use crate::live_dashboard::LiveDashboard;
+use crate::live_inventory::PerformanceLevel;
 use crate::live_presentation::overview_context_card;
 
 const HELP: &str = "The share of each resource in use at the selected second. A core \
@@ -28,6 +29,50 @@ pub(crate) struct Utilization {
     pub percent: Option<f64>,
 }
 
+/// What the utilization panel shows of one second.
+#[derive(Debug, PartialEq)]
+pub(crate) struct UtilizationReadings {
+    pub utilizations: Vec<Utilization>,
+    /// macOS's memory pressure, as the panel names it.
+    pub pressure: &'static str,
+    /// macOS's thermal pressure, as the panel names it.
+    pub thermal: &'static str,
+}
+
+/// What one second holds of each resource `utilizations` reads.
+pub(crate) struct Shares {
+    pub levels: Option<[PerformanceLevel; 2]>,
+    /// Each performance level's busy share, level 0, the fastest, first.
+    pub level_percent: [Option<f64>; 2],
+    pub gpu_percent: Option<f64>,
+    pub memory_used_bytes: Option<u64>,
+    pub memory_total_bytes: Option<u64>,
+    pub swap_used_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
+}
+
+impl UtilizationReadings {
+    /// The panel's readings of the worker's `summary` of a second.
+    pub(crate) fn of_summary(summary: &Value) -> Self {
+        let level_percent = |index: usize| summary["cpu_level_percent"][index].as_f64();
+        let shares = Shares {
+            levels: crate::live_inventory::performance_levels(summary),
+            level_percent: [level_percent(0), level_percent(1)],
+            gpu_percent: summary["gpu_active_percent"].as_f64(),
+            memory_used_bytes: super::summary::memory_in_use_bytes(summary),
+            memory_total_bytes: summary["memory_total_bytes"].as_u64(),
+            swap_used_bytes: summary["swap_used_bytes"].as_u64(),
+            swap_total_bytes: summary["swap_total_bytes"].as_u64(),
+        };
+
+        Self {
+            utilizations: utilizations(&shares),
+            pressure: super::pressure(&summary["pressure"]),
+            thermal: crate::live_thermal_pressure::thermal_pressure_text(summary),
+        }
+    }
+}
+
 impl LiveDashboard {
     /// The prototype's analysis row: the utilization panel, then the chart that sets load,
     /// power and heat side by side, stacked where the window is narrow.
@@ -36,11 +81,8 @@ impl LiveDashboard {
         panel: Option<&Rc<Panel>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let selection = self
-            .reading_snapshot()
-            .map_or(&Value::Null, |snapshot| &snapshot.selection);
         let panel_utilization = utilization_panel(
-            super::matching_summary(selection),
+            &self.overview_utilization(),
             self.absent_reading("Unavailable"),
         );
         let chart = panel.map(|panel| self.live_chart(panel, cx).into_any_element());
@@ -66,37 +108,42 @@ impl LiveDashboard {
             .child(div().flex().flex_1().min_w_0().children(chart))
             .into_any_element()
     }
+
+    /// What the utilization panel shows: the second the store's View shows where the page draws
+    /// from it, and the worker's reading of the second it shows otherwise.
+    pub(crate) fn overview_utilization(&self) -> UtilizationReadings {
+        if let Some(readings) = self.store_view_utilization() {
+            return readings;
+        }
+
+        let selection = self
+            .reading_snapshot()
+            .map_or(&Value::Null, |snapshot| &snapshot.selection);
+        UtilizationReadings::of_summary(super::matching_summary(selection))
+    }
 }
 
 /// The share in use of each resource the prototype lists, slower core level first.
-pub(crate) fn utilizations(summary: &Value) -> Vec<Utilization> {
-    let levels = crate::live_inventory::performance_levels(summary);
+pub(crate) fn utilizations(shares: &Shares) -> Vec<Utilization> {
+    let levels = shares.levels.as_ref();
     let level = |index: usize, fallback: &'static str| Utilization {
-        name: levels
-            .as_ref()
-            .map_or(fallback.into(), |levels| levels[index].cores.clone()),
-        percent: levels
-            .as_ref()
-            .and_then(|_| summary["cpu_level_percent"][index].as_f64()),
+        name: levels.map_or(fallback.into(), |levels| levels[index].cores.clone()),
+        percent: levels.and_then(|_| shares.level_percent[index]),
     };
-    let memory = super::summary::memory_in_use_bytes(summary);
     vec![
         level(1, "Core level 1"),
         level(0, "Core level 0"),
         Utilization {
             name: "GPU".into(),
-            percent: summary["gpu_active_percent"].as_f64(),
+            percent: shares.gpu_percent,
         },
         Utilization {
             name: "Memory".into(),
-            percent: utilizations_share(memory, summary["memory_total_bytes"].as_u64()),
+            percent: utilizations_share(shares.memory_used_bytes, shares.memory_total_bytes),
         },
         Utilization {
             name: "Swap".into(),
-            percent: utilizations_share(
-                summary["swap_used_bytes"].as_u64(),
-                summary["swap_total_bytes"].as_u64(),
-            ),
+            percent: utilizations_share(shares.swap_used_bytes, shares.swap_total_bytes),
         },
     ]
 }
@@ -111,8 +158,8 @@ fn utilizations_share(part: Option<u64>, whole: Option<u64>) -> Option<f64> {
     Some(part?.to_f64()? / whole.to_f64()? * 100.0)
 }
 
-/// The panel of `summary`'s utilizations, each missing one reading `absent`.
-fn utilization_panel(summary: &Value, absent: &'static str) -> gpui::Div {
+/// The panel of `readings`, each missing one reading `absent`.
+fn utilization_panel(readings: &UtilizationReadings, absent: &'static str) -> gpui::Div {
     overview_context_card("utilization")
         .child(crate::live_chart_view::timeline::timeline_heading_text(
             "Utilization by resource",
@@ -120,9 +167,10 @@ fn utilization_panel(summary: &Value, absent: &'static str) -> gpui::Div {
             "ⓘ",
         ))
         .children(
-            utilizations(summary)
-                .into_iter()
-                .map(|utilization| utilization_row(&utilization, absent)),
+            readings
+                .utilizations
+                .iter()
+                .map(|utilization| utilization_row(utilization, absent)),
         )
         .child(
             div()
@@ -133,14 +181,8 @@ fn utilization_panel(summary: &Value, absent: &'static str) -> gpui::Div {
                 .pt(px(12.0))
                 .border_t_1()
                 .border_color(rgb(GRID))
-                .child(utilization_status(
-                    "Memory pressure",
-                    super::pressure(&summary["pressure"]),
-                ))
-                .child(utilization_status(
-                    "Thermal state",
-                    crate::live_thermal_pressure::thermal_pressure_text(summary),
-                )),
+                .child(utilization_status("Memory pressure", readings.pressure))
+                .child(utilization_status("Thermal state", readings.thermal)),
         )
         .child(
             div()
@@ -277,7 +319,7 @@ mod tests {
             "swap_used_bytes": 4_u64, "swap_total_bytes": 8_u64,
         });
 
-        let utilizations = utilizations(&summary);
+        let utilizations = UtilizationReadings::of_summary(&summary).utilizations;
 
         assert_eq!(utilizations.len(), 5);
         assert_eq!(utilizations[2].percent, Some(12.5));
@@ -297,7 +339,7 @@ mod tests {
             "swap_used_bytes": 0_u64, "swap_total_bytes": 0_u64,
         });
 
-        let utilizations = utilizations(&summary);
+        let utilizations = UtilizationReadings::of_summary(&summary).utilizations;
 
         assert_eq!(utilizations[2].percent, None);
         assert_eq!(utilizations[3].percent, None);

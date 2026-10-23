@@ -336,9 +336,7 @@ impl LiveDashboard {
     }
 
     fn time_menu_range(&self) -> impl IntoElement {
-        let second = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64());
+        let second = self.shown_second();
         let view = self.view_window();
         let entry = |label: &'static str, value: String| {
             div()

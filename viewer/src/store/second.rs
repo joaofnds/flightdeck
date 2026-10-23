@@ -68,6 +68,8 @@ pub struct MemorySecond {
     pub wired_bytes: u64,
     pub compressed_bytes: u64,
     pub pressure: Pressure,
+    pub swap_used_bytes: u64,
+    pub swap_total_bytes: u64,
 }
 
 /// External traffic over a second, in bytes per second.
@@ -159,6 +161,8 @@ impl MemorySecond {
             wired_bytes: memory.wired_bytes,
             compressed_bytes: memory.compressed_bytes,
             pressure: memory.pressure,
+            swap_used_bytes: memory.swap_used_bytes,
+            swap_total_bytes: memory.swap_total_bytes,
         }
     }
 }

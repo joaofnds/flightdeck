@@ -127,8 +127,7 @@ impl LiveDashboard {
         let state = self.chart_reading(panel, index);
         let absent = self.absent_reading("Unavailable");
         let time = self
-            .reading_snapshot()
-            .and_then(|snapshot| snapshot.selection["second"].as_u64())
+            .shown_second()
             .map_or_else(|| absent.into(), |second| clock(second, true));
         let states = panel
             .states

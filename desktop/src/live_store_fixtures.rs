@@ -41,6 +41,8 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
             wired_bytes: wall_second * 524_288,
             compressed_bytes: wall_second * 262_144,
             pressure,
+            swap_used_bytes: wall_second * 65_536,
+            swap_total_bytes: 4_294_967_296,
         }),
         network: Some(Traffic {
             received_bps: f64::from(u32::try_from(wall_second).unwrap()) * 1_000.0,
@@ -112,6 +114,8 @@ pub fn trend_point(second: &MachineSecond) -> Value {
         "memory_wired_bytes": memory.map(|memory| memory.wired_bytes),
         "memory_compressed_bytes": memory.map(|memory| memory.compressed_bytes),
         "memory_total_bytes": memory.map(|memory| memory.total_bytes),
+        "swap_used_bytes": memory.map(|memory| memory.swap_used_bytes),
+        "swap_total_bytes": memory.map(|memory| memory.swap_total_bytes),
         "pressure": pressure,
         "network_rx_bps": second.network.map(|traffic| traffic.received_bps),
         "network_tx_bps": second.network.map(|traffic| traffic.sent_bps),
