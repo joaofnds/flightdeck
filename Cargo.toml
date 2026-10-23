@@ -1,5 +1,5 @@
 [workspace]
-members = ["collector", "persistence", "persister", "tidy", "viewer"]
+members = ["collector", "model", "persistence", "persister", "tidy", "viewer"]
 resolver = "3"
 
 [workspace.dependencies.polars]
