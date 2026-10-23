@@ -244,9 +244,7 @@ impl Frame {
             placed += size.count;
             sizes.push(size);
         }
-        if placed < order.len() {
-            return Err(Error::Bound("committed App batch unwanted publication"));
-        }
+        assert_eq!(placed, order.len());
 
         for (endpoint, size) in endpoints.iter().zip(&sizes) {
             operation.check()?;

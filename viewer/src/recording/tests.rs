@@ -331,6 +331,20 @@ fn a_minute_sealed_before_process_identity_gives_the_frames_its_replay_gives() {
 }
 
 #[test]
+fn a_minute_sealed_before_process_identity_keeps_the_usage_its_events_held() {
+    // Goal: an event of a minute sealed before processes carried their identity keeps the
+    // usage availability it held, as its replay gives it.
+    // Method: seal exits of measured, refused and gone usage from a ring without identity, and
+    // compare the decoded frames with the replay's over the same files.
+    let fixture = sealed_events_minute_of(Fixture::new_mode(false, 2, None));
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let frames = decoded_frames(&minute).unwrap();
+
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames, replayed_frames(&fixture));
+}
+
+#[test]
 fn a_minute_of_gpu_time_gives_the_frames_its_replay_gives() {
     // Goal: a minute whose processes carry their GPU time gives frames that hold it, as its
     // replay gives them.
@@ -400,7 +414,11 @@ refuses_damaged_processes! {
 /// A fixture whose ring held three observations whose events start, exec and exit processes,
 /// sealed as minute 0.
 fn sealed_events_minute() -> Fixture {
-    let mut fixture = Fixture::new();
+    sealed_events_minute_of(Fixture::new())
+}
+
+/// `fixture` with the observations `sealed_events_minute` seals, sealed as minute 0.
+fn sealed_events_minute_of(mut fixture: Fixture) -> Fixture {
     let last = Usage {
         awake_ns_at_start: 1,
         user_ns: 2,
