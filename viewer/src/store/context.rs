@@ -5,31 +5,22 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use super::attribution::{COHORT_MAX, METRICS, ranked_metric};
 use super::buffers::Span;
 use super::{AppsSecond, MachineSecond};
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::app_attribution_history::means::{Comparison, Mean, compare};
 use crate::apps::AppKey;
-use crate::live_app_response::{Metric, Rankable, RankedApp};
+use crate::live_app_response::{Rankable, RankedApp};
 use crate::session::CHARTED_SECONDS;
 
 /// The Apps the context holds at most, as the worker's App histories hold them, past which it
 /// chooses no Apps.
 const APPS_MAX: usize = 24_000;
 
-/// The Apps a chart draws on lines of their own, as the worker's App histories choose them.
-const COHORT_MAX: usize = 8;
-
 /// The seconds a context that held too many Apps takes in before it adds its seconds up again,
 /// which bounds what adding them up costs while the seconds hold that many.
 const REBUILD_SECONDS: u32 = 60;
-
-/// The resources Overview draws an App chart of, in the order an entry holds their means.
-const METRICS: [AppAttributionMetric; 3] = [
-    AppAttributionMetric::Cpu,
-    AppAttributionMetric::Power,
-    AppAttributionMetric::Disk,
-];
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -384,16 +375,6 @@ fn measured(
     let amount = row.measure(ranked_metric(metric)).measured()?;
 
     Some((u128::from(amount), u128::from(elapsed_ns)))
-}
-
-/// The resource `metric` charts, as a ranking names it.
-fn ranked_metric(metric: AppAttributionMetric) -> Metric {
-    match metric {
-        AppAttributionMetric::Cpu => Metric::Cpu,
-        AppAttributionMetric::Power => Metric::Power,
-        AppAttributionMetric::Disk => Metric::Disk,
-        AppAttributionMetric::Gpu => Metric::Gpu,
-    }
 }
 
 fn key_of(name: &RankedApp) -> AppKey<'_> {

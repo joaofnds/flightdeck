@@ -70,9 +70,99 @@ mod keep {
     }
 }
 
+mod attribution {
+    use std::sync::Arc;
+
+    use super::{SampleRow, kept_second_of, sample_naming};
+    use crate::AppAttributionMetric;
+    use crate::live_app_response::Measure;
+    use crate::store::{AttributionReading, OtherReading};
+
+    /// What the Apps of a second whose readings found every process used, where it holds none.
+    const NOTHING: Measure = Measure {
+        known: 0,
+        measured_members: 0,
+        unavailable_members: 0,
+        overflowed: false,
+    };
+
+    #[test]
+    fn shows_the_other_apps_using_nothing_where_a_chart_draws_every_app() {
+        // Goal: a chart that draws every App of a second whose readings found every process
+        // shows the other Apps using nothing there, as the worker shows them. Method: keep a
+        // minute whose one observation, measured over a second, names only A, and read the CPU
+        // chart that draws A.
+        let second = kept_second_of(&[b"/A.app"], &measured());
+        let cohort = [Arc::clone(&second.apps[0].name)];
+
+        let shown = second.attribution(AppAttributionMetric::Cpu, &cohort);
+
+        assert_eq!(
+            shown.other,
+            Some(OtherReading {
+                app_count: 0,
+                reading: AttributionReading {
+                    rate: Some(0.0),
+                    measure: Some(NOTHING),
+                    membership_complete: true,
+                },
+            })
+        );
+    }
+
+    mod when_the_readings_missed_a_process {
+        use std::sync::Arc;
+
+        use super::{AttributionReading, OtherReading, SampleRow, kept_second_of, measured};
+        use crate::AppAttributionMetric;
+
+        #[test]
+        fn shows_the_other_apps_unknown_where_a_chart_draws_every_app() {
+            // Goal: a chart that draws every App of a second whose readings placed a process in
+            // no App shows the other Apps unknown, since that process may belong to an App the
+            // second missed, as the worker shows them. Method: as where the readings found every
+            // process, with one process the App rule placed in no App.
+            let sample = SampleRow {
+                ungrouped_members: 1,
+                ..measured()
+            };
+            let second = kept_second_of(&[b"/A.app"], &sample);
+            let cohort = [Arc::clone(&second.apps[0].name)];
+
+            let shown = second.attribution(AppAttributionMetric::Cpu, &cohort);
+
+            assert_eq!(
+                shown.other,
+                Some(OtherReading {
+                    app_count: 0,
+                    reading: AttributionReading {
+                        rate: None,
+                        measure: None,
+                        membership_complete: true,
+                    },
+                })
+            );
+        }
+    }
+
+    /// The sample of an observation of A measured over a second.
+    fn measured() -> SampleRow {
+        SampleRow {
+            elapsed_ns: Some(1_000_000_000),
+            ..sample_naming(&[b"/A.app"])
+        }
+    }
+}
+
 /// The second `AppsSecond::keep` makes of a minute whose one observation names the bundles
-/// `keys`, in that order.
+/// `keys`, in that order, and measured no interval.
 fn kept_second(keys: &[&[u8]]) -> AppsSecond {
+    kept_second_of(keys, &sample_naming(keys))
+}
+
+/// The second `AppsSecond::keep` makes of a minute whose one observation, `sample`, names the
+/// bundles `keys`, in that order.
+fn kept_second_of(keys: &[&[u8]], sample: &SampleRow) -> AppsSecond {
     let mut minute = AppMinute::default();
     for key in keys {
         let key_offset = minute.keys.len();
@@ -95,8 +185,26 @@ fn kept_second(keys: &[&[u8]]) -> AppsSecond {
             gpu_ns: MEASURED,
         });
     }
+    let mut second = AppsSecond::with_room();
+
+    second.keep(
+        &Kept {
+            run: &RUN,
+            sample,
+            rows: &minute.apps,
+            minute: &minute,
+        },
+        None,
+    );
+    second
+}
+
+/// The sample of an observation that names the bundles `keys`, found every process, and
+/// measured no interval.
+fn sample_naming(keys: &[&[u8]]) -> SampleRow {
     let count = u64::try_from(keys.len()).unwrap();
-    let sample = SampleRow {
+
+    SampleRow {
         publication: 1,
         run_tick: 1,
         wall_ns: Some(1_001_000_000_000),
@@ -111,17 +219,5 @@ fn kept_second(keys: &[&[u8]]) -> AppsSecond {
         usage_gone: 0,
         app_count: count,
         process_count: count,
-    };
-    let mut second = AppsSecond::with_room();
-
-    second.keep(
-        &Kept {
-            run: &RUN,
-            sample: &sample,
-            rows: &minute.apps,
-            minute: &minute,
-        },
-        None,
-    );
-    second
+    }
 }

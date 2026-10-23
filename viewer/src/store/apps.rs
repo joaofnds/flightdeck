@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use collector::ring::RunIdentity;
 
+use super::attribution::Totals;
 use crate::apps::Stamp;
 use crate::live_app_history::CompactMeasure;
 use crate::live_app_response::{
@@ -38,6 +39,9 @@ pub struct AppsSecond {
     pub usage_gone: u32,
     /// Every App of the tick, once each, in key order.
     pub apps: Vec<AppRow>,
+    /// Every App of `apps` added up, as `Totals::of` adds them, so a chart finds what the Apps
+    /// it does not draw on lines of their own used without adding them up.
+    pub totals: Totals,
 }
 
 /// Why a second holds no Apps.
@@ -175,6 +179,7 @@ impl AppsSecond {
         self.ungrouped_members = sample.ungrouped_members;
         self.usage_refused = sample.usage_refused;
         self.usage_gone = sample.usage_gone;
+        self.totals = Totals::of(&self.apps);
     }
 
     /// Holds no Apps, for `missing`.
@@ -187,6 +192,7 @@ impl AppsSecond {
         self.usage_refused = 0;
         self.usage_gone = 0;
         self.apps.clear();
+        self.totals = Totals::default();
     }
 
     /// Holds each App of `sample`. An App that `previous` holds keeps the name it holds there, so
@@ -220,6 +226,7 @@ impl AppsSecond {
         self.ungrouped_members = sample.ungrouped_members;
         self.usage_refused = sample.usage_refused;
         self.usage_gone = sample.usage_gone;
+        self.totals = Totals::of(&self.apps);
     }
 
     /// The Apps that used the most of each resource at this second, ranked by the rule that
@@ -295,6 +302,7 @@ impl Default for AppsSecond {
             usage_refused: 0,
             usage_gone: 0,
             apps: Vec::new(),
+            totals: Totals::default(),
         }
     }
 }

@@ -570,11 +570,12 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     use std::sync::Arc;
 
     use collector::processes::Usage;
+    use serde_json::Value;
 
-    use super::super::Cohorts;
-    use super::{Store, view_where};
+    use super::super::{Attribution, AttributionReading, COHORT_MAX, Cohorts, OtherReading, View};
+    use super::{Fixture, Store, view_where};
     use crate::live::app_process_groups_history_tests::named;
-    use crate::live_app_response::RankedApp;
+    use crate::live_app_response::{Measure, RankedApp};
     use crate::{AppAttributionMetric, LiveSession};
 
     const APPS: [&[u8]; 10] = [
@@ -597,6 +598,14 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         disk: Vec<String>,
     }
 
+    /// What each App chart shows at each second it draws, oldest first.
+    #[derive(Debug, PartialEq)]
+    struct Shown {
+        cpu: Vec<Attribution>,
+        power: Vec<Attribution>,
+        disk: Vec<Attribution>,
+    }
+
     #[test]
     fn the_store_chooses_the_apps_the_worker_chooses_for_each_chart() {
         // Goal: Overview's App charts drawn from the store draw on lines of their own the Apps
@@ -605,19 +614,8 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         // seconds, the first using the most CPU only in its second second and two of them
         // reading the same bytes, followed second by second by the worker and by a store, and
         // the Apps each chooses for each chart compared.
-        let mut fixture = named::dense_with_system();
-        named::publish(&mut fixture, 1, &rows(1));
-        let mut session = LiveSession::open(&fixture.root).unwrap();
-        let store = Store::start(&fixture.root).unwrap();
-        let mut view = view_where(&store, |view| view.seconds.len() == 1);
+        let (_fixture, session, view) = followed(rows, 5);
 
-        for publication in 2..=5 {
-            named::publish(&mut fixture, publication, &rows(publication));
-            session.poll().unwrap();
-            let count = usize::try_from(publication).unwrap();
-            view = view_where(&store, |view| view.seconds.len() == count);
-        }
-        session.select(1_005, 0).unwrap();
         let worker = chosen_by_worker(&session);
 
         assert_eq!(
@@ -629,6 +627,19 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             }
         );
         assert_eq!(chosen_by_store(&view.cohorts), worker);
+    }
+
+    #[test]
+    fn each_second_shows_the_readings_the_worker_shows_on_each_chart() {
+        // Goal: each second of Overview's App charts drawn from the store shows what the
+        // worker's App histories show there, each chosen App's rate and measure and the other
+        // Apps added up. Method: the ten Apps over five seconds, followed by the worker and by
+        // a store, and each second of each chart compared.
+        let (_fixture, session, view) = followed(rows, 5);
+
+        let shown = shown_by_store(&view);
+
+        assert_eq!(shown, shown_by_worker(&session));
     }
 
     #[test]
@@ -656,6 +667,24 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
 
         assert_eq!(worker, ["/B.app", "/A.app"]);
         assert_eq!(chosen_by_store_of(&view.cohorts.cpu), worker);
+    }
+
+    mod when_a_chart_draws_every_app {
+        use super::{burst_rows, followed, shown_by_store, shown_by_worker};
+
+        #[test]
+        fn the_other_apps_show_what_the_worker_shows() {
+            // Goal: a chart that draws every App of a second on a line of its own shows the
+            // other Apps as the worker shows them, unknown at a second the ring holds, since
+            // the live App rule never finds such a second's members complete. Method: A and B
+            // over three seconds, which every chart draws, followed by the worker and by a
+            // store, and each second compared.
+            let (_fixture, session, view) = followed(burst_rows, 3);
+
+            let shown = shown_by_store(&view);
+
+            assert_eq!(shown, shown_by_worker(&session));
+        }
     }
 
     mod when_the_clock_is_set_back {
@@ -690,6 +719,30 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             let view = view_where(&store, |view| held_through(view, 880));
             assert_eq!(chosen_by_store_of(&view.cohorts.cpu), ["/B.app", "/A.app"]);
         }
+    }
+
+    /// A recording of the Apps `rows_at` names at each publication from the first to `last`,
+    /// followed second by second by a worker that selects the newest and by a store, with the
+    /// store's View of them.
+    fn followed(
+        rows_at: fn(u64) -> Vec<named::Named<'static>>,
+        last: u64,
+    ) -> (Fixture, LiveSession, Arc<View>) {
+        let mut fixture = named::dense_with_system();
+        named::publish(&mut fixture, 1, &rows_at(1));
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let store = Store::start(&fixture.root).unwrap();
+        let mut view = view_where(&store, |view| view.seconds.len() == 1);
+
+        for publication in 2..=last {
+            named::publish(&mut fixture, publication, &rows_at(publication));
+            session.poll().unwrap();
+            let count = usize::try_from(publication).unwrap();
+            view = view_where(&store, |view| view.seconds.len() == count);
+        }
+        session.select(1_000 + last, 0).unwrap();
+
+        (fixture, session, view)
     }
 
     /// A and B at `publication`, A having used five seconds of CPU at the second second and
@@ -791,6 +844,85 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             .iter()
             .map(|app| String::from_utf8(app.bytes.clone()).unwrap())
             .collect()
+    }
+
+    fn shown_by_store(view: &View) -> Shown {
+        Shown {
+            cpu: shown_by_store_of(view, AppAttributionMetric::Cpu),
+            power: shown_by_store_of(view, AppAttributionMetric::Power),
+            disk: shown_by_store_of(view, AppAttributionMetric::Disk),
+        }
+    }
+
+    fn shown_by_store_of(view: &View, metric: AppAttributionMetric) -> Vec<Attribution> {
+        let cohort = view.cohorts.of(metric).unwrap();
+        let drawn = &view.apps[view.apps.len() - view.cohorts.seconds..];
+
+        drawn
+            .iter()
+            .map(|second| second.attribution(metric, cohort))
+            .collect()
+    }
+
+    fn shown_by_worker(session: &LiveSession) -> Shown {
+        Shown {
+            cpu: shown_by_worker_of(session, AppAttributionMetric::Cpu),
+            power: shown_by_worker_of(session, AppAttributionMetric::Power),
+            disk: shown_by_worker_of(session, AppAttributionMetric::Disk),
+        }
+    }
+
+    fn shown_by_worker_of(session: &LiveSession, metric: AppAttributionMetric) -> Vec<Attribution> {
+        let response = session.app_attribution_history(metric).unwrap();
+        response["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| attribution_of(point, metric))
+            .collect()
+    }
+
+    /// What the worker's `point` shows on the chart of `metric`.
+    fn attribution_of(point: &Value, metric: AppAttributionMetric) -> Attribution {
+        let mut attribution = Attribution {
+            apps: [None; COHORT_MAX],
+            other: None,
+        };
+        let apps = point["apps"].as_array().unwrap();
+        for (reading, app) in attribution.apps.iter_mut().zip(apps) {
+            *reading = reading_of(app, metric);
+        }
+        attribution.other = reading_of(&point["other"], metric).map(|reading| OtherReading {
+            app_count: u32::try_from(point["other"]["app_count"].as_u64().unwrap()).unwrap(),
+            reading,
+        });
+
+        attribution
+    }
+
+    /// The reading the worker's `value` shows on the chart of `metric`, `None` where it is null.
+    fn reading_of(value: &Value, metric: AppAttributionMetric) -> Option<AttributionReading> {
+        if value.is_null() {
+            return None;
+        }
+
+        let measure = &value[metric.amount()];
+        Some(AttributionReading {
+            rate: value[metric.rate_name()].as_f64(),
+            measure: (!measure.is_null()).then(|| measure_of(measure)),
+            membership_complete: value["membership_complete"].as_bool().unwrap(),
+        })
+    }
+
+    fn measure_of(value: &Value) -> Measure {
+        let count = |name: &str| u32::try_from(value[name].as_u64().unwrap()).unwrap();
+
+        Measure {
+            known: value["known"].as_str().unwrap().parse().unwrap(),
+            measured_members: count("measured_members"),
+            unavailable_members: count("unavailable_members"),
+            overflowed: value["overflowed"].as_bool().unwrap(),
+        }
     }
 }
 

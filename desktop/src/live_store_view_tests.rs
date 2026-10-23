@@ -7,7 +7,7 @@ use collector::machine::Pressure;
 use serde_json::json;
 use viewer::apps::Stamp;
 use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedApp};
-use viewer::store::{AppRow, AppsSecond, BatterySecond, MachineSecond, MemorySecond, View};
+use viewer::store::{AppRow, AppsSecond, BatterySecond, MachineSecond, MemorySecond, Totals, View};
 
 use super::super::LiveDashboard;
 use crate::data::Panel;
@@ -593,6 +593,7 @@ pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
         bytes: app.key.bytes.clone(),
         display_name: app.display_name.clone(),
     });
+    let apps = vec![AppRow::new(&app, ranked)];
 
     AppsSecond {
         missing: None,
@@ -613,7 +614,8 @@ pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
         ungrouped_members: 0,
         usage_refused: 0,
         usage_gone: 0,
-        apps: vec![AppRow::new(&app, ranked)],
+        totals: Totals::of(&apps),
+        apps,
     }
 }
 
