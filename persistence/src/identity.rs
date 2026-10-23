@@ -1,5 +1,9 @@
+use std::ops::Range;
+
 use crate::engine::{Cells, Engine};
-use polars::prelude::{BinaryType, BooleanType, DataFrame, Int32Type, UInt8Type, UInt64Type};
+use polars::prelude::{
+    BinaryType, BooleanType, DataFrame, DataType, Expr, Int32Type, UInt8Type, UInt64Type, col, lit,
+};
 
 use crate::schema::{
     IDENTITY_FIELDS, IDENTITY_ROWS_MAX, IDENTITY_VERSION, Table, availability,
@@ -56,28 +60,71 @@ pub(crate) fn normalize(connection: &Engine, table: Table, source: &str) -> Resu
 }
 
 fn normalize_validate(connection: &Engine, table: Table, source: &str) -> Result<()> {
-    let maximum = IDENTITY_ROWS_MAX + 1;
-    let payload = normalize_validate_payload(table);
-    let availability = match table {
-        Table::Events => "availability",
-        _ => "usage_availability",
-    };
-
-    let frame = connection.query(&format!(
-        "SELECT identity_version, identity_availability, process_unique_id, pid_version, \
-        executable_name, app_path, usage_availability, {payload}, \
-        CAST({availability} AS UTINYINT) AS source_usage_availability, \
-        (publication IS NOT NULL AND pid IS NOT NULL) AS observation_present \
-        FROM {source} LIMIT {maximum}"
-    ))?;
+    let limit =
+        u32::try_from(IDENTITY_ROWS_MAX + 1).map_err(|_| Error::Bound("process identity rows"))?;
+    let plan = connection
+        .plan(&format!("SELECT * FROM {source}"))?
+        .select(validation_columns(table))
+        .limit(limit);
+    let frame = connection.collect(plan)?;
     if u64::try_from(frame.height()).map_err(|_| Error::Bound("process identity rows"))?
         > IDENTITY_ROWS_MAX
     {
         return Err(Error::Bound("process identity rows"));
     }
 
-    let columns = ValidationColumns::new(&frame)?;
-    for row in 0..frame.height() {
+    validate(table, &frame, 0..frame.height())
+}
+
+/// The columns `validate` reads of a process or event table that holds the identity fields,
+/// each by the name `validate` reads it under.
+#[must_use]
+pub fn validation_columns(table: Table) -> Vec<Expr> {
+    assert!(matches!(table, Table::Processes | Table::Events));
+
+    let payload: Vec<_> = table
+        .columns()
+        .skip_while(|field| *field != "awake_ns_at_start")
+        .collect();
+    assert!(!payload.is_empty());
+    let present = payload
+        .iter()
+        .fold(lit(true), |all, field| all.and(col(*field).is_not_null()));
+    let absent = payload
+        .iter()
+        .fold(lit(true), |all, field| all.and(col(*field).is_null()));
+    let availability = match table {
+        Table::Events => "availability",
+        _ => "usage_availability",
+    };
+
+    vec![
+        col("identity_version"),
+        col("identity_availability"),
+        col("process_unique_id"),
+        col("pid_version"),
+        col("executable_name"),
+        col("app_path"),
+        col("usage_availability"),
+        present.alias("usage_present"),
+        absent.alias("usage_absent"),
+        col(availability)
+            .cast(DataType::UInt8)
+            .alias("source_usage_availability"),
+        col("publication")
+            .is_not_null()
+            .and(col("pid").is_not_null())
+            .alias("observation_present"),
+    ]
+}
+
+/// Refuses the rows `rows` of `frame`, rows of `table` with the columns `validation_columns`
+/// names, unless each holds an identity and a usage as format 1 writes them.
+pub fn validate(table: Table, frame: &DataFrame, rows: Range<usize>) -> Result<()> {
+    assert!(rows.end <= frame.height());
+
+    let columns = ValidationColumns::new(frame)?;
+    for row in rows {
         if columns.observation_present.optional(row)? != Some(true) {
             return Err(Error::Bound("process identity observation"));
         }
@@ -149,29 +196,6 @@ impl<'frame> ValidationColumns<'frame> {
             observation_present: Cells::named(frame, "observation_present")?,
         })
     }
-}
-
-fn normalize_validate_payload(table: Table) -> String {
-    assert!(matches!(table, Table::Processes | Table::Events));
-
-    let fields: Vec<_> = table
-        .columns()
-        .skip_while(|field| *field != "awake_ns_at_start")
-        .collect();
-    assert!(!fields.is_empty());
-
-    let known = fields
-        .iter()
-        .map(|field| format!("{field} IS NOT NULL"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let absent = fields
-        .iter()
-        .map(|field| format!("{field} IS NULL"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-
-    format!("({known}) AS usage_present, ({absent}) AS usage_absent")
 }
 
 fn normalize_validate_usage(

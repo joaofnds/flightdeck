@@ -3,7 +3,7 @@ mod battery;
 pub mod disks;
 mod encoder;
 pub mod engine;
-mod identity;
+pub mod identity;
 mod identity_encoder;
 pub mod layout;
 mod metadata;
