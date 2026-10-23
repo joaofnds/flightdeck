@@ -1062,7 +1062,6 @@ impl SealedRecording {
                 .derive(&persistence::worker::Derivation {
                     window,
                     pending: pending.path(),
-                    predecessor: None,
                 })
                 .unwrap(),
         );

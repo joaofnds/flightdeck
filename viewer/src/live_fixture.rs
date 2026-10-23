@@ -346,22 +346,17 @@ impl Fixture {
         let window = self.seal_read(&mut reader, minute, observations);
         drop(reader);
         let store = persistence::Store::open(&self.root).unwrap();
-        let latest = store.progress(&window.identity.run).unwrap();
         let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
             panic!("fixture already committed");
         };
         let mut tables = persistence::Encoder
             .encode(&window, pending.path())
             .unwrap();
-        let predecessor = latest
-            .filter(|latest| latest.publication_end == window.publication_range().start)
-            .map(|latest| store.data_path(&latest));
         tables.extend(
             derive
                 .derive(&persistence::worker::Derivation {
                     window: &window,
                     pending: pending.path(),
-                    predecessor: predecessor.as_deref(),
                 })
                 .unwrap(),
         );

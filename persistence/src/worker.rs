@@ -34,9 +34,6 @@ pub struct Derivation<'seal> {
     pub window: &'seal Window,
     /// The directory of the tables the persister wrote for the window.
     pub pending: &'seal Path,
-    /// The data directory of the run's sealed window holding the observation just before the
-    /// window's first, when there is one.
-    pub predecessor: Option<&'seal Path>,
 }
 
 /// What writes a window's tables: the persister's own and those derived from them.
@@ -238,8 +235,6 @@ struct RunState {
     losses: Losses,
     source: SourceState,
     loaded: bool,
-    /// The run's sealed window that ends last.
-    latest: Option<Manifest>,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,10 +298,8 @@ fn persist_one(
         return Ok(Progress::Unavailable);
     };
     if !state.loaded {
-        state.latest = store.progress(&registered.identity)?;
-        state.next_publication = state
-            .latest
-            .as_ref()
+        state.next_publication = store
+            .progress(&registered.identity)?
             .map_or(reader.publication_first(), |manifest| {
                 manifest.publication_end
             });
@@ -317,15 +310,14 @@ fn persist_one(
     }
     match persist_one_stage(reader, store, registered, closed, state)? {
         Staged::Window(window) => {
-            let sealed = seal(store, writers, &window, state)?;
+            let committed = seal(store, writers, &window, state)?;
             let publication_end = window.publication_range().end;
             // The worker runs its next pass at once after a seal, so a seal must move on.
             assert!(state.next_publication < publication_end);
             state.next_publication = publication_end;
-            if sealed.committed {
+            if committed {
                 state.losses = Losses::default();
             }
-            state.latest = Some(sealed.manifest);
             Ok(Progress::Sealed)
         }
         Staged::Waiting => Ok(Progress::Waiting),
@@ -375,7 +367,6 @@ fn persist_one_stage(
                 if let Some(manifest) = store.existing(&identity)? {
                     reader.seek_publication(manifest.publication_end)?;
                     state.next_publication = manifest.publication_end;
-                    state.latest = Some(manifest);
                     continue;
                 }
                 if !window_ready(&mut reader, &mut tick, &identity, closed)? {
@@ -575,37 +566,21 @@ fn read_events(
     Err(crate::Error::Bound("event scan"))
 }
 
-/// A window the store holds sealed, and whether this seal committed it.
-struct Sealed {
-    manifest: Manifest,
-    committed: bool,
-}
-
-fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState) -> Result<Sealed> {
+/// Seals a window, and returns whether this seal committed it rather than finding it sealed.
+fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState) -> Result<bool> {
     let started = std::time::Instant::now();
     let pending = match store.begin(&window.identity)? {
-        Begin::Committed(manifest) => {
-            return Ok(Sealed {
-                manifest,
-                committed: false,
-            });
-        }
+        Begin::Committed(_) => return Ok(false),
         Begin::Pending(pending) => pending,
     };
 
     let mut tables = writers.encoder.encode(window, pending.path())?;
     let publications = window.publication_range();
-    let predecessor = state
-        .latest
-        .as_ref()
-        .filter(|latest| latest.publication_end == publications.start)
-        .map(|latest| store.data_path(latest));
     tables.extend(seal_derived(
         writers.derive,
         &Derivation {
             window,
             pending: pending.path(),
-            predecessor: predecessor.as_deref(),
         },
     )?);
 
@@ -637,10 +612,7 @@ fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState)
         committed.tables.len()
     );
 
-    Ok(Sealed {
-        manifest: committed,
-        committed: true,
-    })
+    Ok(true)
 }
 
 /// The tables derived for a window, or none when deriving fails, since a reader can derive
@@ -842,7 +814,7 @@ mod tests {
         let mut state = RunState::default();
         let writers = Writers {
             encoder: Encoder,
-            derive: &PredecessorSpy::default(),
+            derive: &Underived,
         };
 
         let result = persist_one(&store, &writers, &registered, true, &mut state);
@@ -872,17 +844,12 @@ mod tests {
         .unwrap();
         let mut pauses = Vec::new();
 
-        let outcome = run_paced(
-            &root.0,
-            WORKING_BYTES_MAX,
-            &PredecessorSpy::default(),
-            &mut |pause| {
-                pauses.push(pause);
-                assert_eq!(1, pauses.len(), "the worker paused after the ring finished");
-                publish_readable_identity(&mut writer);
-                writer.finish();
-            },
-        );
+        let outcome = run_paced(&root.0, WORKING_BYTES_MAX, &Underived, &mut |pause| {
+            pauses.push(pause);
+            assert_eq!(1, pauses.len(), "the worker paused after the ring finished");
+            publish_readable_identity(&mut writer);
+            writer.finish();
+        });
 
         collector::ring::unlink_generation(writer.name()).unwrap();
         assert!(matches!(outcome.unwrap(), Outcome::Complete));
@@ -1074,7 +1041,7 @@ mod tests {
         let store = Store::open(&root.0).unwrap();
         let writers = Writers {
             encoder: Encoder,
-            derive: &PredecessorSpy::default(),
+            derive: &Underived,
         };
         let first = window(store.recording(), 0);
         let unknown = RunState {
@@ -1084,13 +1051,9 @@ mod tests {
             },
             ..RunState::default()
         };
-        assert!(
-            seal(&store, &writers, &first, &RunState::default())
-                .unwrap()
-                .committed
-        );
+        assert!(seal(&store, &writers, &first, &RunState::default()).unwrap());
 
-        let acknowledged = seal(&store, &writers, &first, &unknown).unwrap().committed;
+        let acknowledged = seal(&store, &writers, &first, &unknown).unwrap();
 
         assert!(!acknowledged);
         assert!(
@@ -1102,7 +1065,7 @@ mod tests {
                 .unknown
         );
         let next = window(store.recording(), 1);
-        assert!(seal(&store, &writers, &next, &unknown).unwrap().committed);
+        assert!(seal(&store, &writers, &next, &unknown).unwrap());
         assert!(
             store
                 .existing(&next.identity)
@@ -1181,7 +1144,6 @@ mod tests {
                 },
                 source: SourceState::Unavailable,
                 loaded: true,
-                latest: None,
             },
         ];
 
@@ -1196,17 +1158,11 @@ mod tests {
         assert_eq!(states[1].identity, None);
     }
 
-    /// Derives no table, and keeps the predecessor each window was derived from.
-    #[derive(Default)]
-    struct PredecessorSpy {
-        predecessors: std::cell::RefCell<Vec<Option<std::path::PathBuf>>>,
-    }
+    /// Derives no table.
+    struct Underived;
 
-    impl Derive for PredecessorSpy {
-        fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
-            self.predecessors
-                .borrow_mut()
-                .push(derivation.predecessor.map(Path::to_path_buf));
+    impl Derive for Underived {
+        fn derive(&self, _derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
             Ok(Vec::new())
         }
     }
@@ -1263,143 +1219,12 @@ mod tests {
         };
         let window = window(store.recording(), 0);
 
-        let sealed = seal(&store, &writers, &window, &RunState::default()).unwrap();
+        let committed = seal(&store, &writers, &window, &RunState::default()).unwrap();
 
-        assert!(sealed.committed);
+        assert!(committed);
         let reopened = store.existing(&window.identity).unwrap().unwrap();
         assert_eq!(reopened.tables.len(), crate::schema::TABLES.len());
         let path = store.data_path(&reopened).join("app_ranks.parquet");
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn derives_a_window_from_the_sealed_window_holding_the_observation_before_it() {
-        // Goal: a derivation reads the observation before its window only from where it lies.
-        // Method: seal adjacent windows, then one after a lost publication, keeping the latest.
-        let root = Directory::new();
-        let store = Store::open(&root.0).unwrap();
-        let spy = PredecessorSpy::default();
-        let writers = Writers {
-            encoder: Encoder,
-            derive: &spy,
-        };
-        let mut state = RunState::default();
-        let mut paths = Vec::new();
-
-        for (number, publication) in [(0, 1), (1, 2), (2, 4)] {
-            let window = window_at(store.recording(), number, publication);
-            let sealed = seal(&store, &writers, &window, &state).unwrap();
-            paths.push(store.data_path(&sealed.manifest));
-            state.latest = Some(sealed.manifest);
-        }
-
-        assert_eq!(
-            *spy.predecessors.borrow(),
-            [None, Some(paths[0].clone()), None]
-        );
-    }
-
-    #[test]
-    fn derives_each_window_from_the_one_before_it_across_a_restart() {
-        // Goal: the worker finds the window before the next one whether it sealed it or found
-        // it sealed after a restart, when the ring no longer holds that window's minute.
-        // Method: drain a one-slot ring minute by minute, restarting the worker before the third.
-        let root = Directory::new();
-        let store = Store::open(&root.0).unwrap();
-        let mut registered = registered(store.recording());
-        let mut writer = minutes_ring(&root, &mut registered);
-        let spy = PredecessorSpy::default();
-        let writers = Writers {
-            encoder: Encoder,
-            derive: &spy,
-        };
-        let mut state = RunState::default();
-        let mut restarted = RunState::default();
-
-        minutes_ring_publish(&mut writer, 0);
-        persist_one(&store, &writers, &registered, true, &mut state).unwrap();
-        minutes_ring_publish(&mut writer, 1);
-        persist_one(&store, &writers, &registered, true, &mut state).unwrap();
-        minutes_ring_publish(&mut writer, 2);
-        persist_one(&store, &writers, &registered, true, &mut restarted).unwrap();
-
-        collector::ring::unlink_generation(writer.name()).unwrap();
-        let path = |number| {
-            let identity = WindowIdentity {
-                run: registered.identity,
-                window: number,
-            };
-            store.data_path(&store.existing(&identity).unwrap().unwrap())
-        };
-        assert_eq!(
-            *spy.predecessors.borrow(),
-            [None, Some(path(0)), Some(path(1))]
-        );
-    }
-
-    /// A ring holding only the tick published last.
-    fn minutes_ring(root: &Directory, registered: &mut RegisteredRun) -> collector::ring::Writer {
-        let place = collector::ring::Place {
-            lock_path: root.0.join("ring.lock"),
-            name_prefix: format!("/fdminutes{}", std::process::id()),
-        };
-        let shape = Shape {
-            slot_count: 1,
-            cpu_capacity: 1,
-            interface_capacity: 1,
-            core_capacity: 1,
-            state_capacity: 1,
-            fan_capacity: 1,
-            process_capacity: 1,
-            coalition_capacity: 1,
-            event_capacity: 1,
-        };
-        let writer = collector::ring::Writer::create_with_identity(
-            &place,
-            shape,
-            collector::ring::DictionaryCapacity {
-                entries: 1,
-                arena_bytes: 32,
-            },
-            &registered.identity,
-            1,
-        )
-        .unwrap();
-        registered.ring_name = writer.name().to_owned();
-
-        writer
-    }
-
-    fn minutes_ring_publish(writer: &mut collector::ring::Writer, minute: u64) {
-        let memory = collector::machine::Memory::default();
-        let readings = collector::ring::Readings {
-            run_tick: minute + 1,
-            cpus: &[],
-            memory: &memory,
-            interfaces: &[],
-            ioreport: None,
-            smc: None,
-            processes: &[],
-            processes_refused: 0,
-            processes_gone: 0,
-            coalitions: &[],
-            events: &[],
-            dropped: collector::ring::Dropped::default(),
-        };
-
-        writer
-            .publish_with_identity(
-                &readings,
-                Some(&collector::ring::ObservationTimes {
-                    wall_ns: 1_000_000_000_000 + minute * WINDOW_NS,
-                    continuous_ns: 1 + minute * WINDOW_NS,
-                    awake_ns: 1 + minute * WINDOW_NS,
-                }),
-                &collector::ring::IdentityPublication {
-                    processes: &[],
-                    events: &[],
-                },
-            )
-            .unwrap();
     }
 }

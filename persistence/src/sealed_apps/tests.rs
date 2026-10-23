@@ -169,11 +169,7 @@ fn read(state: &mut State, window: &Window) -> crate::Result<()> {
 }
 
 fn derivation<'seal>(window: &'seal Window, pending: &'seal Path) -> Derivation<'seal> {
-    Derivation {
-        window,
-        pending,
-        predecessor: None,
-    }
+    Derivation { window, pending }
 }
 
 /// A pending directory of its own, removed with it.

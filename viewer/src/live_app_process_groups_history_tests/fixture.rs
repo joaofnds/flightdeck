@@ -405,7 +405,6 @@ fn seal_window(
             .derive(&persistence::worker::Derivation {
                 window,
                 pending: pending.path(),
-                predecessor: None,
             })
             .unwrap(),
     );
