@@ -92,6 +92,9 @@ pub enum Failure {
     Commits(io::ErrorKind),
     /// A sealed minute did not show it committed or did not decode, so its seconds are missing.
     Refused,
+    /// A thread to decode sealed minutes could not start, so the seconds of its minutes are
+    /// missing.
+    Loader(io::ErrorKind),
 }
 
 /// The store thread, and the main thread's way to its Views. Dropping the store stops its

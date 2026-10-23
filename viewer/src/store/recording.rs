@@ -3,7 +3,9 @@
 
 use std::io;
 use std::mem;
+use std::panic;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
@@ -37,14 +39,88 @@ pub(super) fn load(
     if let Err(failure) = find(root, &mut found) {
         return Some(failure);
     }
+    found.reverse();
 
     let mut left_out = None;
+    for batch in load_batches(root, &found) {
+        for (run, second) in &batch.seconds {
+            take(run, second);
+        }
+        if let Some(failure) = batch.left_out {
+            left_out = Some(failure);
+        }
+    }
+
+    left_out
+}
+
+/// The threads that decode the loaded hour's sealed minutes at once.
+const LOADERS_MAX: usize = 6;
+
+/// The ticks a sealed minute holds where none was missed.
+const TICKS_PER_MINUTE: usize = 60;
+
+/// The seconds one loader decoded from its batch of minutes, oldest first, and why it holds
+/// fewer than they sealed, where it does.
+struct Batch {
+    seconds: Vec<(RunIdentity, MachineSecond)>,
+    left_out: Option<Failure>,
+}
+
+/// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
+/// batch on a loader of its own. Returns the batches in the order of `found`.
+fn load_batches(root: &Path, found: &[Found]) -> Vec<Batch> {
+    let minutes_per_batch = found.len().div_ceil(LOADERS_MAX).max(1);
+    thread::scope(|scope| {
+        let mut loaders = Vec::with_capacity(LOADERS_MAX);
+        for (index, minutes) in found.chunks(minutes_per_batch).enumerate() {
+            let before = (index * minutes_per_batch)
+                .checked_sub(1)
+                .and_then(|before| found.get(before));
+            let loader = thread::Builder::new()
+                .name(String::from("flightdeck-loader"))
+                .spawn_scoped(scope, move || load_batch(root, before, minutes));
+            loaders.push(loader);
+        }
+
+        let mut batches = Vec::with_capacity(loaders.len());
+        for loader in loaders {
+            let batch = match loader {
+                Ok(handle) => match handle.join() {
+                    Ok(batch) => batch,
+                    Err(panic) => panic::resume_unwind(panic),
+                },
+                Err(error) => Batch {
+                    seconds: Vec::new(),
+                    left_out: Some(Failure::Loader(error.kind())),
+                },
+            };
+            batches.push(batch);
+        }
+        batches
+    })
+}
+
+/// Decodes `minutes`, oldest first. The first minute's first second takes its rates from the
+/// last tick of the minute `before` it, which the loader before this one decodes too.
+fn load_batch(root: &Path, before: Option<&Found>, minutes: &[Found]) -> Batch {
+    let mut batch = Batch {
+        seconds: Vec::with_capacity(minutes.len() * TICKS_PER_MINUTE),
+        left_out: None,
+    };
     let mut current = MachineMinute::default();
     let mut previous = MachineMinute::default();
     let mut previous_run = None;
-    for minute in found.iter().rev() {
+    if let Some(before) = before {
+        // The loader that decodes the minute before reports it where it does not decode.
+        if decode(root, &before.marker, &mut previous).is_ok() {
+            previous_run = Some(before.run);
+        }
+    }
+
+    for minute in minutes {
         if decode(root, &minute.marker, &mut current).is_err() {
-            left_out = Some(Failure::Refused);
+            batch.left_out = Some(Failure::Refused);
             previous_run = None;
             continue;
         }
@@ -55,27 +131,27 @@ pub(super) fn load(
         } else {
             None
         };
-        load_minute(&current, before, &minute.run, &mut take);
+        load_minute(&current, before, &minute.run, &mut batch.seconds);
 
         mem::swap(&mut current, &mut previous);
         previous_run = Some(minute.run);
     }
 
-    left_out
+    batch
 }
 
-/// Hands `take` the second of each tick of `minute` of run `run`, its rates over the interval
-/// since the reading before it, `before` for the minute's first.
+/// Pushes the run and the second of each tick of `minute` of run `run` onto `seconds`, its
+/// rates over the interval since the reading before it, `before` for the minute's first.
 fn load_minute(
     minute: &MachineMinute,
     before: Option<Reading<'_>>,
     run: &RunIdentity,
-    take: &mut impl FnMut(&RunIdentity, &MachineSecond),
+    seconds: &mut Vec<(RunIdentity, MachineSecond)>,
 ) {
     let mut previous = before;
     for reading in readings(minute) {
         if let Some(second) = MachineSecond::of(&reading, previous.as_ref()) {
-            take(run, &second);
+            seconds.push((*run, second));
         }
         previous = Some(reading);
     }
