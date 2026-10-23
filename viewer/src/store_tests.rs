@@ -229,3 +229,135 @@ fn wall_seconds_of(seconds: &[Arc<super::MachineSecond>]) -> Vec<u64> {
         .map(|second| second.wall_ns / 1_000_000_000)
         .collect()
 }
+
+mod when_the_recording_holds_sealed_minutes {
+    use super::{Failure, Fixture, Store, View, held_through, view_where, wall_seconds_of};
+    use crate::store::MachineSecond;
+
+    #[test]
+    fn the_store_holds_the_sealed_seconds_the_ring_no_longer_holds() {
+        // Goal: a window that opens draws the hour before the ring's newest ticks. Method: seal
+        // a minute of three ticks, publish the next minute's ticks until the ring holds none of
+        // the sealed ones, and start a store.
+        let mut fixture = Fixture::new();
+        for second in 100..103 {
+            fixture.publish_with_system_rows(second);
+        }
+        fixture.seal_minute(0);
+        fixture.skip_run_ticks(57);
+        for second in 160..168 {
+            fixture.publish_with_system_rows(second);
+        }
+
+        let store = Store::start(&fixture.root).unwrap();
+
+        let view = view_where(&store, |view| held_through(view, 167));
+        let mut expected = vec![100, 101, 102];
+        expected.extend(160..168);
+        assert_eq!(wall_seconds_of(&view.seconds), expected);
+    }
+
+    #[test]
+    fn a_store_built_from_the_recording_holds_what_one_built_from_the_ring_holds() {
+        // Goal: the ring and the recording hand the store the same seconds, the rates of a
+        // sealed minute's first second included. Method: follow two minutes' ticks with a store
+        // over the ring, seal both, publish until the ring holds neither, start a second store,
+        // and compare the seconds the two hold.
+        let mut fixture = Fixture::new();
+        fixture.skip_run_ticks(57);
+        let from_ring = Store::start(&fixture.root).unwrap();
+        for second in 157..162 {
+            fixture.publish_with_system_rows(second);
+            view_where(&from_ring, |view| held_through(view, second));
+        }
+        fixture.seal_minute(0);
+        fixture.seal_minute(1);
+        fixture.skip_run_ticks(58);
+        for second in 240..248 {
+            fixture.publish_with_system_rows(second);
+        }
+
+        let from_recording = Store::start(&fixture.root).unwrap();
+
+        let expected = view_where(&from_ring, |view| held_through(view, 247));
+        let view = view_where(&from_recording, |view| held_through(view, 247));
+        assert_eq!(seconds_of(&view), seconds_of(&expected));
+        assert_eq!(view.seconds[3].cpu_percent, Some(50.0));
+    }
+
+    #[test]
+    fn a_minute_older_than_the_loaded_hour_is_left_out() {
+        // Goal: the store reads the hour a chart reaches back and nothing before it. Method: seal
+        // a minute, seal another more than the hour and its lead-in later, publish until the
+        // ring holds neither, and start a store.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(100);
+        fixture.seal_minute(0);
+        fixture.skip_run_ticks(59);
+        fixture.publish_with_system_rows(3_800);
+        fixture.seal_minute(1);
+        fixture.skip_run_ticks(59);
+        for second in 3_900..3_908 {
+            fixture.publish_with_system_rows(second);
+        }
+
+        let store = Store::start(&fixture.root).unwrap();
+
+        let view = view_where(&store, |view| held_through(view, 3_907));
+        let mut expected = vec![3_800];
+        expected.extend(3_900..3_908);
+        assert_eq!(wall_seconds_of(&view.seconds), expected);
+    }
+
+    #[test]
+    fn a_minute_that_does_not_verify_leaves_a_gap_the_view_reports() {
+        // Goal: a sealed minute whose files changed is held as missing, never as readings.
+        // Method: seal two minutes, empty one file of the first, publish until the ring holds
+        // neither, and start a store.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(100);
+        fixture.seal_minute(0);
+        fixture.skip_run_ticks(59);
+        fixture.publish_with_system_rows(160);
+        fixture.seal_minute(1);
+        fixture.skip_run_ticks(59);
+        for second in 220..228 {
+            fixture.publish_with_system_rows(second);
+        }
+        empty_ticks_file(&fixture, 0);
+
+        let store = Store::start(&fixture.root).unwrap();
+
+        let view = view_where(&store, |view| held_through(view, 227));
+        let mut expected = vec![160];
+        expected.extend(220..228);
+        assert_eq!(wall_seconds_of(&view.seconds), expected);
+        assert_eq!(view.left_out, Some(Failure::Refused));
+    }
+
+    fn seconds_of(view: &View) -> Vec<MachineSecond> {
+        view.seconds.iter().map(|second| **second).collect()
+    }
+
+    /// Empties the ticks table of the fixture's sealed minute `minute`.
+    fn empty_ticks_file(fixture: &Fixture, minute: u64) {
+        let store = persistence::Store::open(&fixture.root).unwrap();
+        let marker = store.marker_path(&persistence::WindowIdentity {
+            run: fixture.writer.identity().unwrap(),
+            window: minute,
+        });
+        let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
+        let ticks = fixture
+            .root
+            .join(&manifest.data_directory)
+            .join("ticks.parquet");
+        std::fs::write(ticks, []).unwrap();
+    }
+}
+
+/// Whether the newest second `view` holds is at whole wall second `wall_second`.
+fn held_through(view: &View, wall_second: u64) -> bool {
+    view.seconds
+        .last()
+        .is_some_and(|second| second.wall_ns / 1_000_000_000 == wall_second)
+}

@@ -3,6 +3,7 @@
 //! that never changes while it holds it.
 
 mod buffers;
+mod recording;
 mod ring;
 mod second;
 
@@ -66,6 +67,8 @@ pub struct View {
     pub earlier: Vec<Arc<MachineSecond>>,
     /// Why the store could not read the recording at its last step.
     pub failure: Option<Failure>,
+    /// Why the store holds less of the loaded hour than the recording sealed when it started.
+    pub left_out: Option<Failure>,
 }
 
 /// Why the store could not read the recording.
@@ -85,6 +88,10 @@ pub enum Failure {
     Ring(io::ErrorKind),
     /// The ring's shape asks for buffers the store does not size.
     TickShape,
+    /// The recording's sealed minutes could not be listed.
+    Commits(io::ErrorKind),
+    /// A sealed minute did not show it committed or did not decode, so its seconds are missing.
+    Refused,
 }
 
 /// The store thread, and the main thread's way to its Views. Dropping the store stops its
@@ -114,6 +121,11 @@ impl Store {
         let thread = thread::Builder::new()
             .name(String::from("flightdeck-store"))
             .spawn(move || {
+                held.left_out = recording::load(&root, |run, second| {
+                    let taken = held.take(run, second);
+                    // No View is out before the store's first step, so every buffer is free.
+                    assert!(taken);
+                });
                 // A ring's mapping stays on the thread that maps it.
                 let mut ring = Ring::new(root);
                 run(&mut held, &mut ring, &thread_shared);
@@ -157,6 +169,7 @@ struct Held {
     views: Buffers<View>,
     version: u64,
     failure: Option<Failure>,
+    left_out: Option<Failure>,
     /// Whether the store holds what no View it handed over shows.
     unpublished: bool,
 }
@@ -175,6 +188,7 @@ impl Held {
             seconds: Vec::with_capacity(SECONDS_MAX),
             earlier: Vec::with_capacity(EARLIER_MAX),
             failure: None,
+            left_out: None,
         });
 
         Self {
@@ -184,6 +198,7 @@ impl Held {
             views,
             version: 0,
             failure: None,
+            left_out: None,
             unpublished: true,
         }
     }
@@ -238,6 +253,7 @@ impl Held {
         let span = &self.span;
         let earlier = &self.earlier;
         let failure = self.failure;
+        let left_out = self.left_out;
         let written = self.views.write(|view| {
             assert!(view.seconds.is_empty());
             assert!(view.earlier.is_empty());
@@ -247,6 +263,7 @@ impl Held {
             view.seconds.extend(span.held().map(Arc::clone));
             view.earlier.extend(earlier.held().map(Arc::clone));
             view.failure = failure;
+            view.left_out = left_out;
 
             assert_eq!((view.seconds.capacity(), view.earlier.capacity()), capacity);
         });
