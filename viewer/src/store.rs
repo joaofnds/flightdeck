@@ -52,6 +52,9 @@ const VIEWS_MAX: usize = 4;
 /// waits for its thread.
 const WAIT: Duration = Duration::from_millis(100);
 
+// The store looks for a collector started again at least once a second.
+const _: () = assert!(WAIT.saturating_mul(ring::FOLLOW_STEPS).as_millis() <= 1_000);
+
 /// The steps of the store thread, which it never reaches, since it steps until the app quits.
 const STEPS_MAX: u64 = u64::MAX;
 

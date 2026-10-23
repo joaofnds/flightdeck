@@ -16,6 +16,10 @@ use crate::recording::MachineMinute;
 /// The ticks one read takes in, well above the ticks a ring publishes between two steps.
 const TICKS_PER_READ_MAX: usize = 256;
 
+/// The steps between two looks at the runs registry for a newer run than the one the store
+/// follows, so a step between two of the ring's ticks reads no file.
+pub(super) const FOLLOW_STEPS: u32 = 10;
+
 /// The largest ring the store maps.
 const MAPPED_BYTES_MAX: usize = 1 << 30;
 
@@ -26,6 +30,9 @@ pub(super) struct Ring {
     source: Option<Source>,
     /// A second read from the ring that the store could not take yet.
     pending: Option<MachineSecond>,
+    /// The steps since the store last looked at the runs registry, and what it found there.
+    unlooked_steps: u32,
+    followed: Result<(), Failure>,
 }
 
 /// The ring of one run, and the room to take its ticks in.
@@ -47,6 +54,8 @@ impl Ring {
             registry: [0; _],
             source: None,
             pending: None,
+            unlooked_steps: FOLLOW_STEPS,
+            followed: Ok(()),
         }
     }
 
@@ -86,8 +95,22 @@ impl Ring {
     }
 
     /// Follows the newest run the recording registers, from the oldest tick its ring holds,
-    /// once that ring can be read. Until then the store follows the run it followed before.
+    /// once that ring can be read. Until then the store follows the run it followed before. It
+    /// looks at the registry once in `FOLLOW_STEPS` steps and otherwise answers what it found
+    /// there, so the steps between two of the ring's ticks read no file.
     pub(super) fn follow(&mut self) -> Result<(), Failure> {
+        if self.unlooked_steps < FOLLOW_STEPS {
+            self.unlooked_steps += 1;
+            return self.followed;
+        }
+
+        self.unlooked_steps = 1;
+        self.followed = self.follow_newest();
+        self.followed
+    }
+
+    /// Looks at the registry and follows its newest run, as `follow` describes.
+    fn follow_newest(&mut self) -> Result<(), Failure> {
         let recording =
             read_identity(&self.root).map_err(|error| Failure::Recording(error.kind()))?;
         let registry = Registry::read_into(&self.runs, &mut self.registry)

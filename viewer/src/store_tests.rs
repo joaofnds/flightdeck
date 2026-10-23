@@ -84,6 +84,7 @@ fn each_view_has_a_higher_version_than_the_one_before() {
 }
 
 mod when_the_collector_starts_again {
+    use super::super::ring::{FOLLOW_STEPS, Ring};
     use super::{Fixture, Store, view_where, wall_seconds_of};
 
     #[test]
@@ -101,6 +102,34 @@ mod when_the_collector_starts_again {
 
         let view = view_where(&store, |view| view.seconds.len() == 2);
         assert_eq!(wall_seconds_of(&view.seconds), [100, 101]);
+    }
+
+    #[test]
+    fn the_store_looks_for_the_new_run_once_in_ten_steps() {
+        // Goal: a step reads the runs registry only once in ten, so the steps between the ring's
+        // ticks read no file, and a new run is still followed within a second of steps. Method:
+        // follow a run through the ring adapter, register a second run with a tick, and count
+        // the steps until the adapter hands that tick over.
+        let mut first = Fixture::new();
+        first.publish_with_system_rows(100);
+        let mut ring = Ring::new(first.root.clone());
+        ring.follow().unwrap();
+        ring.read(|_, _| true).unwrap();
+        let mut second = Fixture::new_mode(false, 2, Some(&first));
+        second.publish_with_system_rows(101);
+
+        let steps = (1..=FOLLOW_STEPS + 1).find(|_| {
+            ring.follow().unwrap();
+            let mut taken = false;
+            ring.read(|_, _| {
+                taken = true;
+                true
+            })
+            .unwrap();
+            taken
+        });
+
+        assert_eq!(steps, Some(FOLLOW_STEPS));
     }
 }
 
