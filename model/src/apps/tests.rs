@@ -1,6 +1,6 @@
 use super::{
-    Amount, Apps, Creation, Measurement, ProcessTotals, Processes, Stamp, Subtotal, Tick, Totals,
-    Unavailable,
+    Amount, Apps, Creation, Deltas, Measurement, ProcessTotals, Processes, Stamp, Subtotal, Tick,
+    Totals, Unavailable,
 };
 use crate::programs::{Capacity, Program, Programs};
 
@@ -52,14 +52,10 @@ fn attributes_the_cpu_a_process_spent_between_two_ticks_to_its_app() {
     apps.derive(&programs, &previous.tick(), &selected.tick());
 
     assert_eq!(entry, 0);
-    assert_eq!(
-        apps.totals(),
-        [Totals {
-            app: programs.app(entry),
-            members: 1,
-            cpu_ns: measured(5_000_000, 1),
-        }]
-    );
+    assert_eq!(apps.totals().len(), 1);
+    assert_eq!(apps.totals()[0].app, programs.app(entry));
+    assert_eq!(apps.totals()[0].members, 1);
+    assert_eq!(apps.totals()[0].cpu_ns, measured(5_000_000, 1));
 }
 
 #[test]
@@ -104,14 +100,10 @@ fn groups_the_processes_of_one_bundle_into_one_app() {
 
     apps.derive(&programs, &previous.tick(), &selected.tick());
 
-    assert_eq!(
-        apps.totals(),
-        [Totals {
-            app: programs.app(main),
-            members: 2,
-            cpu_ns: measured(7_000_000, 2),
-        }]
-    );
+    assert_eq!(apps.totals().len(), 1);
+    assert_eq!(apps.totals()[0].app, programs.app(main));
+    assert_eq!(apps.totals()[0].members, 2);
+    assert_eq!(apps.totals()[0].cpu_ns, measured(7_000_000, 2));
 }
 
 #[test]
@@ -130,13 +122,8 @@ fn gives_each_process_the_cpu_it_spent() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(
-        derived.processes,
-        [ProcessTotals {
-            cpu_ns: Amount::Known(5_000_000),
-            app_attribution: None,
-        }]
-    );
+    assert_eq!(derived.processes[0].deltas.cpu_ns, Amount::Known(5_000_000));
+    assert_eq!(derived.processes[0].app_attribution, None);
 }
 
 /// Declares a test that a change to the selected tick's stamp leaves CPU time unknown, since
@@ -155,7 +142,7 @@ macro_rules! interval_tests {
 
                 let derived = derive(&previous, &selected);
 
-                assert_eq!(derived.processes, [unavailable(Unavailable::Interval)]);
+                assert_eq!(derived.processes[0].deltas, unavailable(Unavailable::Interval));
                 assert_eq!(derived.totals[0].cpu_ns, absent(1));
             }
         )*
@@ -181,7 +168,10 @@ fn leaves_cpu_unknown_without_a_continuous_clock_at_the_previous_tick() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::Interval)]);
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Interval)
+    );
 }
 
 #[test]
@@ -199,7 +189,10 @@ fn leaves_cpu_unknown_for_a_process_the_previous_tick_lacks() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::Baseline)]);
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Baseline)
+    );
 }
 
 #[test]
@@ -220,7 +213,10 @@ fn leaves_cpu_unknown_for_a_new_process_of_a_reused_pid() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::Baseline)]);
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Baseline)
+    );
 }
 
 #[test]
@@ -238,7 +234,10 @@ fn leaves_cpu_unknown_for_a_process_without_its_creation() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::Baseline)]);
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Baseline)
+    );
 }
 
 #[test]
@@ -263,7 +262,10 @@ fn leaves_cpu_unknown_when_a_counter_went_back() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::CounterReset)]);
+    assert_eq!(
+        derived.processes[0].deltas.cpu_ns,
+        Amount::Unavailable(Unavailable::CounterReset)
+    );
 }
 
 #[test]
@@ -283,7 +285,10 @@ fn leaves_cpu_unknown_when_the_spent_time_overflows() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::Overflow)]);
+    assert_eq!(
+        derived.processes[0].deltas.cpu_ns,
+        Amount::Unavailable(Unavailable::Overflow)
+    );
 }
 
 #[test]
@@ -345,7 +350,10 @@ fn leaves_cpu_unknown_when_the_process_restarted_its_clock() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::Creation)]);
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Creation)
+    );
 }
 
 /// Declares a test that a process whose usage could not be read at one tick has no CPU time,
@@ -368,7 +376,7 @@ macro_rules! measurement_tests {
 
                 let derived = derive(&previous, &selected);
 
-                assert_eq!(derived.processes, [unavailable($reason)]);
+                assert_eq!(derived.processes[0].deltas, unavailable($reason));
             }
         )*
     };
@@ -401,7 +409,10 @@ fn gives_the_interval_reason_before_a_refused_read() {
 
     let derived = derive(&previous, &selected);
 
-    assert_eq!(derived.processes, [unavailable(Unavailable::Interval)]);
+    assert_eq!(
+        derived.processes[0].deltas,
+        unavailable(Unavailable::Interval)
+    );
 }
 
 #[test]
@@ -431,21 +442,11 @@ fn keeps_the_cpu_of_a_process_that_ran_another_program_out_of_its_apps() {
 
     apps.derive(&programs, &previous.tick(), &selected.tick());
 
-    assert_eq!(
-        apps.processes(),
-        [ProcessTotals {
-            cpu_ns: Amount::Known(3_000_000),
-            app_attribution: Some(Unavailable::Exec),
-        }]
-    );
-    assert_eq!(
-        apps.totals(),
-        [Totals {
-            app: programs.app(safari),
-            members: 1,
-            cpu_ns: absent(1),
-        }]
-    );
+    assert_eq!(apps.processes()[0].deltas.cpu_ns, Amount::Known(3_000_000));
+    assert_eq!(apps.processes()[0].app_attribution, Some(Unavailable::Exec));
+    assert_eq!(apps.totals().len(), 1);
+    assert_eq!(apps.totals()[0].app, programs.app(safari));
+    assert_eq!(apps.totals()[0].cpu_ns, absent(1));
 }
 
 #[test]
@@ -467,12 +468,10 @@ fn keeps_the_cpu_of_a_process_whose_pid_version_changed_out_of_its_apps() {
 
     let derived = derive(&previous, &selected);
 
+    assert_eq!(derived.processes[0].deltas.cpu_ns, Amount::Known(3_000_000));
     assert_eq!(
-        derived.processes,
-        [ProcessTotals {
-            cpu_ns: Amount::Known(3_000_000),
-            app_attribution: Some(Unavailable::Exec),
-        }]
+        derived.processes[0].app_attribution,
+        Some(Unavailable::Exec)
     );
 }
 
@@ -520,15 +519,394 @@ fn leaves_a_process_without_its_program_out_of_every_app() {
 
     let derived = derive(&previous, &selected);
 
+    assert_eq!(derived.processes[0].deltas.cpu_ns, Amount::Known(3_000_000));
     assert_eq!(
-        derived.processes,
-        [ProcessTotals {
-            cpu_ns: Amount::Known(3_000_000),
-            app_attribution: Some(Unavailable::Program),
-        }]
+        derived.processes[0].app_attribution,
+        Some(Unavailable::Program)
     );
     assert_eq!(derived.totals, []);
     assert_eq!(derived.ungrouped_members, 1);
+}
+
+#[test]
+fn gives_each_process_the_change_of_each_counter() {
+    // Goal: each counter of a process gives the change it made between the two ticks.
+    // Method: derive two ticks of one process every counter of which grows by its own amount.
+    let previous = Columns::of(
+        1,
+        &[Process {
+            energy_nj: 100,
+            gpu_ns: Some(1_000),
+            disk_read_bytes: 4_096,
+            disk_written_bytes: 512,
+            idle_wakeups: 3,
+            pageins: 9,
+            ..Process::default()
+        }],
+    );
+    let selected = Columns::of(
+        2,
+        &[Process {
+            user_ns: 2_000_000,
+            energy_nj: 350,
+            gpu_ns: Some(1_600),
+            disk_read_bytes: 8_192,
+            disk_written_bytes: 1_536,
+            idle_wakeups: 10,
+            pageins: 11,
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].deltas,
+        Deltas {
+            cpu_ns: Amount::Known(2_000_000),
+            energy_nj: Amount::Known(250),
+            gpu_ns: Amount::Known(600),
+            disk_read_bytes: Amount::Known(4_096),
+            disk_written_bytes: Amount::Known(1_024),
+            disk_io_bytes: Amount::Known(5_120),
+            idle_wakeups: Amount::Known(7),
+            pageins: Amount::Known(2),
+        }
+    );
+}
+
+/// Declares a test that one counter that went back leaves only that counter's change
+/// unknown.
+macro_rules! counter_reset_tests {
+    ($($name:ident, $field:ident, $delta:ident;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                // Goal: a counter that went back leaves its own change unknown and no other.
+                // Method: derive two ticks of one process one counter of which falls.
+                let previous = Columns::of(1, &[Process {
+                    $field: 5,
+                    ..Process::default()
+                }]);
+                let selected = Columns::of(2, &[Process {
+                    $field: 4,
+                    ..Process::default()
+                }]);
+
+                let derived = derive(&previous, &selected);
+
+                let deltas = derived.processes[0].deltas;
+                assert_eq!(deltas.$delta, Amount::Unavailable(Unavailable::CounterReset));
+                assert_eq!(deltas.cpu_ns, Amount::Known(0));
+            }
+        )*
+    };
+}
+
+counter_reset_tests! {
+    leaves_energy_unknown_when_its_counter_went_back, energy_nj, energy_nj;
+    leaves_disk_reads_unknown_when_their_counter_went_back, disk_read_bytes, disk_read_bytes;
+    leaves_disk_writes_unknown_when_their_counter_went_back,
+        disk_written_bytes, disk_written_bytes;
+    leaves_idle_wakeups_unknown_when_their_counter_went_back, idle_wakeups, idle_wakeups;
+    leaves_pageins_unknown_when_their_counter_went_back, pageins, pageins;
+}
+
+#[test]
+fn leaves_gpu_unknown_when_its_counter_went_back() {
+    // Goal: a GPU time that went back gives no GPU time.
+    // Method: derive two ticks of one process whose GPU time falls.
+    let previous = Columns::of(
+        1,
+        &[Process {
+            gpu_ns: Some(5),
+            ..Process::default()
+        }],
+    );
+    let selected = Columns::of(
+        2,
+        &[Process {
+            gpu_ns: Some(4),
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].deltas.gpu_ns,
+        Amount::Unavailable(Unavailable::CounterReset)
+    );
+}
+
+/// Declares a test that a GPU time missing at either tick leaves the GPU time unknown, since
+/// a missing GPU time may be a failed read rather than no GPU use.
+macro_rules! gpu_unknown_tests {
+    ($($name:ident, $previous:expr, $selected:expr;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                // Goal: GPU time is unknown where either tick lacks one.
+                // Method: derive two ticks of one process one of which has no GPU time.
+                let previous = Columns::of(1, &[Process {
+                    gpu_ns: $previous,
+                    ..Process::default()
+                }]);
+                let selected = Columns::of(2, &[Process {
+                    gpu_ns: $selected,
+                    ..Process::default()
+                }]);
+
+                let derived = derive(&previous, &selected);
+
+                assert_eq!(
+                    derived.processes[0].deltas.gpu_ns,
+                    Amount::Unavailable(Unavailable::Unknown)
+                );
+            }
+        )*
+    };
+}
+
+gpu_unknown_tests! {
+    leaves_gpu_unknown_without_a_previous_gpu_time, None, Some(5);
+    leaves_gpu_unknown_without_a_selected_gpu_time, Some(5), None;
+}
+
+#[test]
+fn gives_disk_traffic_the_reason_its_reads_are_unknown() {
+    // Goal: disk traffic is unknown, for the reads' reason, when the reads are.
+    // Method: derive two ticks of one process whose disk read counter falls.
+    let previous = Columns::of(
+        1,
+        &[Process {
+            disk_read_bytes: 5,
+            ..Process::default()
+        }],
+    );
+    let selected = Columns::of(
+        2,
+        &[Process {
+            disk_written_bytes: 7,
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].deltas.disk_io_bytes,
+        Amount::Unavailable(Unavailable::CounterReset)
+    );
+}
+
+#[test]
+fn leaves_disk_traffic_unknown_when_its_sum_overflows() {
+    // Goal: disk traffic a u64 cannot hold is unknown, not wrapped.
+    // Method: derive two ticks of one process whose reads and writes each grow by more than
+    // half of a u64.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            disk_read_bytes: u64::MAX / 2 + 1,
+            disk_written_bytes: u64::MAX / 2 + 1,
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.processes[0].deltas.disk_io_bytes,
+        Amount::Unavailable(Unavailable::Overflow)
+    );
+}
+
+#[test]
+fn sums_each_counter_of_an_apps_members() {
+    // Goal: an App's subtotal of each counter sums its members' changes.
+    // Method: derive two ticks of two processes of one App, each counter of which grows.
+    let previous = Columns::of(
+        1,
+        &[
+            Process::default(),
+            Process {
+                pid: 8,
+                ..Process::default()
+            },
+        ],
+    );
+    let grown = Process {
+        energy_nj: 10,
+        gpu_ns: Some(20),
+        disk_read_bytes: 30,
+        disk_written_bytes: 40,
+        idle_wakeups: 50,
+        pageins: 60,
+        ..Process::default()
+    };
+    let selected = Columns::of(2, &[grown, Process { pid: 8, ..grown }]);
+
+    let derived = derive(&previous, &selected);
+
+    let totals = &derived.totals[0];
+    assert_eq!(totals.energy_nj, measured(20, 2));
+    assert_eq!(totals.gpu_ns, measured(40, 2));
+    assert_eq!(totals.disk_read_bytes, measured(60, 2));
+    assert_eq!(totals.disk_written_bytes, measured(80, 2));
+    assert_eq!(totals.disk_io_bytes, measured(140, 2));
+    assert_eq!(totals.idle_wakeups, measured(100, 2));
+    assert_eq!(totals.pageins, measured(120, 2));
+}
+
+#[test]
+fn gives_no_app_any_counter_of_a_process_that_ran_another_program() {
+    // Goal: an App takes none of the counters of a member that ran another program.
+    // Method: derive two ticks of one process whose pid version grows, each counter of which
+    // grows.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            creation: Some(Creation {
+                unique_id: 700,
+                pid_version: 2,
+            }),
+            energy_nj: 10,
+            gpu_ns: Some(20),
+            disk_read_bytes: 30,
+            disk_written_bytes: 40,
+            idle_wakeups: 50,
+            pageins: 60,
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    let totals = &derived.totals[0];
+    assert_eq!(totals.energy_nj, absent(1));
+    assert_eq!(totals.gpu_ns, absent(1));
+    assert_eq!(totals.disk_read_bytes, absent(1));
+    assert_eq!(totals.disk_written_bytes, absent(1));
+    assert_eq!(totals.disk_io_bytes, absent(1));
+    assert_eq!(totals.idle_wakeups, absent(1));
+    assert_eq!(totals.pageins, absent(1));
+}
+
+#[test]
+fn sums_the_memory_and_threads_of_an_apps_live_members() {
+    // Goal: an App's memory and threads are the sums of its live members' at the tick.
+    // Method: derive a tick of two processes of one App with their own memory and threads.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[
+            Process {
+                resident_bytes: 100,
+                footprint_bytes: 70,
+                threads: Some(4),
+                ..Process::default()
+            },
+            Process {
+                pid: 8,
+                resident_bytes: 50,
+                footprint_bytes: 30,
+                threads: Some(2),
+                ..Process::default()
+            },
+        ],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    let totals = &derived.totals[0];
+    assert_eq!(totals.live_members, 2);
+    assert_eq!(totals.resident_bytes, measured(150, 2));
+    assert_eq!(totals.footprint_bytes, measured(100, 2));
+    assert_eq!(totals.threads, measured(6, 2));
+}
+
+#[test]
+fn counts_a_member_whose_usage_was_not_read_out_of_its_apps_memory() {
+    // Goal: a live member whose usage was not read adds nothing to its App's memory.
+    // Method: derive a tick of one process whose read was refused.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            usage: Measurement::Refused,
+            resident_bytes: 100,
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.totals[0].resident_bytes, absent(1));
+    assert_eq!(derived.totals[0].footprint_bytes, absent(1));
+}
+
+#[test]
+fn counts_a_member_without_its_threads_out_of_its_apps_threads() {
+    // Goal: a live member whose threads were not read adds nothing to its App's threads.
+    // Method: derive a tick of one process with no thread count.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            threads: None,
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.totals[0].threads, absent(1));
+}
+
+#[test]
+fn gives_a_live_process_its_memory_and_threads_at_the_tick() {
+    // Goal: a live process carries its memory and threads at the selected tick.
+    // Method: derive a tick of one process with its own memory and threads.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            resident_bytes: 100,
+            footprint_bytes: 70,
+            threads: Some(4),
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    let process = &derived.processes[0];
+    assert_eq!(process.resident_bytes_last, Some(100));
+    assert_eq!(process.footprint_bytes_last, Some(70));
+    assert_eq!(process.threads, Some(4));
+}
+
+#[test]
+fn gives_a_live_process_whose_usage_was_not_read_no_memory() {
+    // Goal: a live process whose usage was not read carries no memory.
+    // Method: derive a tick of one process whose read was refused.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(
+        2,
+        &[Process {
+            usage: Measurement::Refused,
+            resident_bytes: 100,
+            ..Process::default()
+        }],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.processes[0].resident_bytes_last, None);
+    assert_eq!(derived.processes[0].footprint_bytes_last, None);
 }
 
 /// What a derivation of two ticks of processes of Safari gave.
@@ -571,10 +949,17 @@ fn absent(members: u32) -> Subtotal {
     }
 }
 
-fn unavailable(reason: Unavailable) -> ProcessTotals {
-    ProcessTotals {
+/// The deltas of a process none of whose counters' changes are known, for `reason`.
+fn unavailable(reason: Unavailable) -> Deltas {
+    Deltas {
         cpu_ns: Amount::Unavailable(reason),
-        app_attribution: None,
+        energy_nj: Amount::Unavailable(reason),
+        gpu_ns: Amount::Unavailable(reason),
+        disk_read_bytes: Amount::Unavailable(reason),
+        disk_written_bytes: Amount::Unavailable(reason),
+        disk_io_bytes: Amount::Unavailable(reason),
+        idle_wakeups: Amount::Unavailable(reason),
+        pageins: Amount::Unavailable(reason),
     }
 }
 
@@ -588,6 +973,15 @@ struct Process {
     awake_ns_at_start: u64,
     user_ns: u64,
     system_ns: u64,
+    energy_nj: u64,
+    gpu_ns: Option<u64>,
+    disk_read_bytes: u64,
+    disk_written_bytes: u64,
+    idle_wakeups: u64,
+    pageins: u64,
+    resident_bytes: u64,
+    footprint_bytes: u64,
+    threads: Option<u64>,
 }
 
 impl Default for Process {
@@ -603,6 +997,15 @@ impl Default for Process {
             awake_ns_at_start: 0,
             user_ns: 0,
             system_ns: 0,
+            energy_nj: 0,
+            gpu_ns: Some(0),
+            disk_read_bytes: 0,
+            disk_written_bytes: 0,
+            idle_wakeups: 0,
+            pageins: 0,
+            resident_bytes: 0,
+            footprint_bytes: 0,
+            threads: Some(1),
         }
     }
 }
@@ -617,6 +1020,15 @@ struct Columns {
     awake_ns_at_start: Vec<u64>,
     user_ns: Vec<u64>,
     system_ns: Vec<u64>,
+    energy_nj: Vec<u64>,
+    gpu_ns: Vec<Option<u64>>,
+    disk_read_bytes: Vec<u64>,
+    disk_written_bytes: Vec<u64>,
+    idle_wakeups: Vec<u64>,
+    pageins: Vec<u64>,
+    resident_bytes: Vec<u64>,
+    footprint_bytes: Vec<u64>,
+    threads: Vec<Option<u64>>,
 }
 
 impl Columns {
@@ -637,6 +1049,15 @@ impl Columns {
             awake_ns_at_start: rows.iter().map(|row| row.awake_ns_at_start).collect(),
             user_ns: rows.iter().map(|row| row.user_ns).collect(),
             system_ns: rows.iter().map(|row| row.system_ns).collect(),
+            energy_nj: rows.iter().map(|row| row.energy_nj).collect(),
+            gpu_ns: rows.iter().map(|row| row.gpu_ns).collect(),
+            disk_read_bytes: rows.iter().map(|row| row.disk_read_bytes).collect(),
+            disk_written_bytes: rows.iter().map(|row| row.disk_written_bytes).collect(),
+            idle_wakeups: rows.iter().map(|row| row.idle_wakeups).collect(),
+            pageins: rows.iter().map(|row| row.pageins).collect(),
+            resident_bytes: rows.iter().map(|row| row.resident_bytes).collect(),
+            footprint_bytes: rows.iter().map(|row| row.footprint_bytes).collect(),
+            threads: rows.iter().map(|row| row.threads).collect(),
         }
     }
 
@@ -651,6 +1072,15 @@ impl Columns {
                 awake_ns_at_start: &self.awake_ns_at_start,
                 user_ns: &self.user_ns,
                 system_ns: &self.system_ns,
+                energy_nj: &self.energy_nj,
+                gpu_ns: &self.gpu_ns,
+                disk_read_bytes: &self.disk_read_bytes,
+                disk_written_bytes: &self.disk_written_bytes,
+                idle_wakeups: &self.idle_wakeups,
+                pageins: &self.pageins,
+                resident_bytes: &self.resident_bytes,
+                footprint_bytes: &self.footprint_bytes,
+                threads: &self.threads,
             },
         }
     }
