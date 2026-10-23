@@ -361,10 +361,6 @@ impl LiveDashboard {
         hovered_at: Instant,
         cx: &mut Context<Self>,
     ) -> bool {
-        // A pinned second keeps the CPU it inspects, wherever the pointer goes.
-        if self.pinned_second().is_some() {
-            return false;
-        }
         let Some(snapshot) = self.snapshot.as_deref() else {
             return false;
         };

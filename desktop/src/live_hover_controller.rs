@@ -4,7 +4,7 @@ use gpui::{Context, SharedString};
 
 use super::timings::{HoverTiming, HoverTimings};
 use super::{Origin, Preview, Target};
-use crate::live_dashboard::{ChartHover, LiveDashboard, Picker, PinnedHover, Pinning};
+use crate::live_dashboard::{ChartHover, LiveDashboard, Picker};
 use crate::live_source::{Snapshot, Update};
 
 #[cfg(test)]
@@ -22,8 +22,7 @@ pub(crate) enum PointerPlace {
 
 impl LiveDashboard {
     /// Shows the readings of the second the pointer hovers, and times the hover from
-    /// `hovered_at`, when the app began handling what put the pointer over that second. While a
-    /// second is pinned, only the hovered chart shows the hovered reading.
+    /// `hovered_at`, when the app began handling what put the pointer over that second.
     pub(crate) fn hover_reading_target(
         &mut self,
         source: SharedString,
@@ -31,14 +30,6 @@ impl LiveDashboard {
         hovered_at: Instant,
         cx: &mut Context<Self>,
     ) {
-        if let Pinning::Pinned { hovered } = &mut self.pinning {
-            let hover = PinnedHover { source, target };
-            if hovered.as_ref() != Some(&hover) {
-                *hovered = Some(hover);
-                cx.notify();
-            }
-            return;
-        }
         if !self.set_reading_target(source, target, Origin::Pointer, cx) {
             return;
         }
@@ -121,15 +112,6 @@ impl LiveDashboard {
     }
 
     pub(crate) fn clear_reading_target(&mut self, source: &SharedString, cx: &mut Context<Self>) {
-        if let Pinning::Pinned { hovered } = &mut self.pinning {
-            if hovered
-                .as_ref()
-                .is_some_and(|hover| &hover.source == source)
-            {
-                *hovered = None;
-                cx.notify();
-            }
-        }
         if self.reading_origin() == Some(Origin::Keyboard) {
             return;
         }
@@ -144,11 +126,6 @@ impl LiveDashboard {
     /// that stale position.
     pub(crate) fn pointer_left_window(&mut self, cx: &mut Context<Self>) {
         self.pointer = PointerPlace::OutsideWindow;
-        if let Pinning::Pinned { hovered } = &mut self.pinning {
-            if hovered.take().is_some() {
-                cx.notify();
-            }
-        }
         if self.reading_origin() == Some(Origin::Pointer) {
             self.end_reading_preview(cx);
         }

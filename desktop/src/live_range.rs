@@ -4,7 +4,7 @@ use gpui::{
 
 use crate::chart_axes::TimeWindow;
 use crate::charts::{self, BLUE};
-use crate::live_dashboard::{Drag, LiveDashboard, PinnedHover};
+use crate::live_dashboard::{Drag, LiveDashboard};
 use crate::live_hover::Origin;
 use crate::time_range::Range;
 
@@ -110,7 +110,7 @@ impl LiveDashboard {
         cx.notify();
         if click(drag.pressed_at, released_at) {
             match self.drag_end_hovered(chart) {
-                Some(hovered) => self.pin_hovered(hovered, cx),
+                Some(target) => self.pin_target(target, cx),
                 None => self.pin_second(drag.from, cx),
             }
         } else {
@@ -122,13 +122,7 @@ impl LiveDashboard {
 
     /// The reading the pointer's hover of `chart` shows, which is the exact observation under
     /// it, as on the CPU history where one second holds several.
-    fn drag_end_hovered(&self, chart: &str) -> Option<PinnedHover> {
-        if let Some(hovered) = self.pinned_hover() {
-            if hovered.source.as_ref() == chart {
-                return Some(hovered.clone());
-            }
-            return None;
-        }
+    fn drag_end_hovered(&self, chart: &str) -> Option<crate::live_hover::Target> {
         let preview = self.preview.as_ref()?;
         if preview.origin != Origin::Pointer {
             return None;
@@ -137,10 +131,7 @@ impl LiveDashboard {
             return None;
         }
 
-        Some(PinnedHover {
-            source: preview.source.clone(),
-            target: preview.target.clone(),
-        })
+        Some(preview.target.clone())
     }
 
     /// The second at the pointer's horizontal place across the plot, held to the plot's edges.
@@ -151,18 +142,26 @@ impl LiveDashboard {
         self.view_window()?.second_at(fraction.clamp(0.0, 1.0))
     }
 
-    /// The band that marks the stretch being selected on `chart`.
+    /// The band that marks the stretch being selected on `chart`, or else the pinned second.
     pub(crate) fn drag_band(&self, chart: &str) -> Option<Div> {
         self.drag_band_in(chart, self.view_window()?)
     }
 
-    /// The band that marks the stretch being selected on `chart`, which draws `window`.
+    /// The band that marks the stretch being selected on `chart`, which draws `window`, or else
+    /// the pinned second, which every chart marks as the press that pinned it did.
     pub(crate) fn drag_band_in(&self, chart: &str, window: TimeWindow) -> Option<Div> {
-        let drag = self.drag.as_ref().filter(|drag| drag.chart == chart)?;
-        let (left, right) = band_edges(window, drag)?;
+        let ends = if let Some(drag) = self.drag.as_ref().filter(|drag| drag.chart == chart) {
+            (drag.from, drag.to)
+        } else {
+            let second = self.pinned_second()?;
+            (second, second)
+        };
+        let (left, right) = band_edges(window, ends)?;
+        let selector = format!("chart-band:{chart}");
 
         Some(
             div()
+                .debug_selector(move || selector)
                 .absolute()
                 .top_0()
                 .bottom_0()
@@ -186,10 +185,11 @@ fn click(pressed_at: gpui::Point<Pixels>, released_at: gpui::Point<Pixels>) -> b
     travel.y.abs() <= CLICK_TRAVEL_MAX
 }
 
-/// The band's left and right edges as fractions of the plot, covering every second it spans.
-fn band_edges(window: TimeWindow, drag: &Drag) -> Option<(f32, f32)> {
-    let first = drag.from.min(drag.to);
-    let end = drag.from.max(drag.to).checked_add(1)?;
+/// The left and right edges, as fractions of the plot, of the band covering every second
+/// between `ends`, which may come in either order.
+fn band_edges(window: TimeWindow, ends: (u64, u64)) -> Option<(f32, f32)> {
+    let first = ends.0.min(ends.1);
+    let end = ends.0.max(ends.1).checked_add(1)?;
     let span = u16::try_from(window.span).ok()?;
     let left = u16::try_from(first.checked_sub(window.first)?).ok()?;
     let right = u16::try_from(end.checked_sub(window.first)?).ok()?;
@@ -213,20 +213,8 @@ mod tests {
             first: 1000,
             span: 100,
         };
-        let forward = Drag {
-            chart: "p".into(),
-            from: 1010,
-            to: 1029,
-            pressed_at: gpui::Point::default(),
-        };
-        let backward = Drag {
-            chart: "p".into(),
-            from: 1029,
-            to: 1010,
-            pressed_at: gpui::Point::default(),
-        };
 
-        assert_eq!(band_edges(window, &forward), Some((0.1, 0.3)));
-        assert_eq!(band_edges(window, &backward), Some((0.1, 0.3)));
+        assert_eq!(band_edges(window, (1010, 1029)), Some((0.1, 0.3)));
+        assert_eq!(band_edges(window, (1029, 1010)), Some((0.1, 0.3)));
     }
 }

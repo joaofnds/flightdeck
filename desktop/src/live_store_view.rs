@@ -274,10 +274,10 @@ impl LiveDashboard {
         panels.any(|drawn| drawn.id == panel.id)
     }
 
-    /// The index of the point the page's chart `panel`, drawn from the View, shows: the point of
-    /// the hovered `target`, or the newest second's while no hover is shown.
-    pub(crate) fn store_view_index(&self, panel: &Panel, target: Option<&Target>) -> Option<usize> {
-        let Some(target) = target else {
+    /// The index of the point the page's chart `panel`, drawn from the View, shows: the hovered
+    /// second's, or the newest second's while no hover is shown.
+    pub(crate) fn store_view_index(&self, panel: &Panel) -> Option<usize> {
+        let Some(target) = self.reading_target() else {
             return panel.selected_index;
         };
 

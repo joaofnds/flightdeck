@@ -127,9 +127,10 @@ Memory quantities, CPU and App details, Storage/Battery summaries, the schematic
 and Copy. Leaving the plot
 restores the live or paused selection. A click on a plot, or Return on a second
 the arrow keys reached, pins that reading instead: every page with a time selection
-then shows it and marks it on each chart until Go to latest reading, the range's
-reset or another recording lets it go. A hover then moves only the hovered chart's
-cursor and tooltip, and the rest of the page keeps the pinned reading. Missing
+then shows it and marks it with a band on each chart. A hover still shows the hovered
+second across the page, and leaving the plot returns to the pinned one rather than the
+live selection, until Go to latest reading, the range's reset or another recording lets
+it go. Missing
 readings stay unavailable. The
 reader keeps each second's top Apps for the selected window, and the selected App's
 processes on Apps, so a hover shows them in the frame that handles the move. A

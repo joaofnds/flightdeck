@@ -74,6 +74,23 @@ fn clicking_a_history_interval_pins_the_observation_under_the_pointer(cx: &mut T
 }
 
 #[gpui::test]
+fn hovering_the_history_while_a_second_is_pinned_inspects_the_hovered_interval(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover of the CPU history inspects the interval under it while a second is
+    // pinned, as it does live. Method: click the interval drawn at 1000.9, which ends at an
+    // observation other than publication 3, hover the one drawn at 1001.3, which ends at
+    // publication 3, and read the observation it inspects.
+    let mut harness = CPUHistoryHarness::setup(cx);
+    harness.driver.click_at(1000 * NS + NS * 9 / 10);
+
+    harness.driver.hover_at(1001 * NS + NS * 3 / 10);
+
+    assert_eq!(harness.driver.inspected_publication(), Some(3));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn hovering_a_zoomed_history_inspects_the_interval_under_the_pointer(cx: &mut TestAppContext) {
     // Goal: once a range narrows the view, the pointer inspects the interval drawn under it
     // and not the one at the same fraction of the whole history.
