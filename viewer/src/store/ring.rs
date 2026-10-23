@@ -41,6 +41,8 @@ pub(super) struct Ring {
     /// The steps since the store last looked at the runs registry, and what it found there.
     unlooked_steps: u32,
     followed: Result<(), Failure>,
+    /// Whether the ring the store follows published a tick since the store last looked.
+    published: bool,
 }
 
 /// The ring of one run, and the room to take its ticks in.
@@ -74,6 +76,7 @@ impl Ring {
             pending: None,
             unlooked_steps: FOLLOW_STEPS,
             followed: Ok(()),
+            published: false,
         }
     }
 
@@ -92,6 +95,7 @@ impl Ring {
             if self.pending.is_none() {
                 match source.read_tick() {
                     Ok(Found::Publication { publication, .. }) => {
+                        self.published = true;
                         if let Some(second) = source.second(publication) {
                             self.pending = Some((second, source.apps(publication)));
                         }
@@ -124,7 +128,9 @@ impl Ring {
     /// Follows the newest run the recording registers, from the oldest tick its ring holds,
     /// once that ring can be read. Until then the store follows the run it followed before. It
     /// looks at the registry once in `FOLLOW_STEPS` steps and otherwise answers what it found
-    /// there, so the steps between two of the ring's ticks read no file.
+    /// there, so the steps between two of the ring's ticks read no file. A run starts only once
+    /// the collector of the run before it stops, so while the ring the store follows publishes,
+    /// the store skips the look unless the last one failed.
     pub(super) fn follow(&mut self) -> Result<(), Failure> {
         if self.unlooked_steps < FOLLOW_STEPS {
             self.unlooked_steps += 1;
@@ -132,6 +138,13 @@ impl Ring {
         }
 
         self.unlooked_steps = 1;
+        let published = mem::replace(&mut self.published, false);
+        if published {
+            if self.followed.is_ok() {
+                return self.followed;
+            }
+        }
+
         self.followed = self.follow_newest();
         self.followed
     }

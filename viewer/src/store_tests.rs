@@ -142,11 +142,12 @@ mod when_the_collector_starts_again {
     }
 
     #[test]
-    fn the_store_looks_for_the_new_run_once_in_ten_steps() {
-        // Goal: a step reads the runs registry only once in ten, so the steps between the ring's
-        // ticks read no file, and a new run is still followed within a second of steps. Method:
-        // follow a run through the ring adapter, register a second run with a tick, and count
-        // the steps until the adapter hands that tick over.
+    fn the_store_looks_for_the_new_run_once_its_ring_goes_quiet() {
+        // Goal: a step reads the runs registry only once in ten, and only once the ring the
+        // store follows published nothing since the last look, so a new run is followed at the
+        // second look after its collector's predecessor stopped, within two seconds of steps.
+        // Method: follow a run through the ring adapter and take its tick, register a second run
+        // with a tick, and count the steps until the adapter hands that tick over.
         let mut first = Fixture::new();
         first.publish_with_system_rows(100);
         let mut ring = Ring::new(first.root.clone());
@@ -155,7 +156,7 @@ mod when_the_collector_starts_again {
         let mut second = Fixture::new_mode(false, 2, Some(&first));
         second.publish_with_system_rows(101);
 
-        let steps = (1..=FOLLOW_STEPS + 1).find(|_| {
+        let steps = (1..=2 * FOLLOW_STEPS + 1).find(|_| {
             ring.follow().unwrap();
             let mut taken = false;
             ring.read(|_, _, _| {
@@ -166,7 +167,7 @@ mod when_the_collector_starts_again {
             taken
         });
 
-        assert_eq!(steps, Some(FOLLOW_STEPS));
+        assert_eq!(steps, Some(2 * FOLLOW_STEPS));
     }
 }
 
@@ -190,6 +191,57 @@ mod while_the_store_follows_the_newest_run {
         let looks: Vec<_> = (0..FOLLOW_STEPS).map(|_| ring.follow()).collect();
 
         assert_eq!(looks, vec![Ok(()); usize::try_from(FOLLOW_STEPS).unwrap()]);
+    }
+
+    #[test]
+    fn a_ring_that_keeps_publishing_leaves_the_registry_unread() {
+        // Goal: while the ring the store follows publishes, a look for a new run reads no file,
+        // since a run starts only once the collector before it stops, and a look costs the
+        // store about 0.1 ms. Method: follow a run, make the registry unreadable, and step
+        // through three looks with a tick published before each.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(100);
+        let mut ring = Ring::new(fixture.root.clone());
+        ring.follow().unwrap();
+        std::fs::write(fixture.root.join("runs"), "unreadable").unwrap();
+
+        let mut looks = Vec::new();
+        for second in 101..104 {
+            fixture.publish_with_system_rows(second);
+            for _ in 0..FOLLOW_STEPS {
+                ring.read(|_, _, _| true).unwrap();
+                looks.push(ring.follow());
+            }
+        }
+
+        assert_eq!(
+            looks,
+            vec![Ok(()); usize::try_from(3 * FOLLOW_STEPS).unwrap()]
+        );
+    }
+
+    #[test]
+    fn a_failed_look_is_tried_again_while_the_ring_publishes() {
+        // Goal: a look that failed is tried again at the next look even while the ring
+        // publishes, so a failure the View reports clears once the registry reads again.
+        // Method: follow a run, fail a look on an unreadable registry while the ring is quiet,
+        // restore the registry, publish a tick, and step to the next look.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(100);
+        let mut ring = Ring::new(fixture.root.clone());
+        ring.follow().unwrap();
+        ring.read(|_, _, _| true).unwrap();
+        let registry = std::fs::read(fixture.root.join("runs")).unwrap();
+        std::fs::write(fixture.root.join("runs"), "unreadable").unwrap();
+        let failed = (0..2 * FOLLOW_STEPS).map(|_| ring.follow()).last().unwrap();
+        std::fs::write(fixture.root.join("runs"), registry).unwrap();
+        fixture.publish_with_system_rows(101);
+        ring.read(|_, _, _| true).unwrap();
+
+        let looked = (0..FOLLOW_STEPS).map(|_| ring.follow()).last().unwrap();
+
+        assert!(failed.is_err());
+        assert_eq!(looked, Ok(()));
     }
 }
 
