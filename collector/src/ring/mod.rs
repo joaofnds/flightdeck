@@ -859,6 +859,23 @@ struct Opened {
 }
 
 impl Opened {
+    /// Sleeps until the writer publishes past `publications.next`, for at most `timeout`, and
+    /// returns at once where it already has.
+    fn wait(&self, timeout: Duration) -> io::Result<()> {
+        assert!(!timeout.is_zero());
+
+        let newest_word = &self.mapping.words()[HEADER_PUBLICATION_NEWEST];
+        let newest = newest_word.load(Ordering::Relaxed);
+        if self.publications.next <= newest {
+            return Ok(());
+        }
+
+        if wait(newest_word, newest, timeout)? == Waited::Unsupported {
+            std::thread::sleep(timeout.min(POLL_INTERVAL));
+        }
+        Ok(())
+    }
+
     /// The ring the lock file at `lock_path` names, with the reader's place at the oldest
     /// publication and event it holds, and no room for its ticks, which `follow` keeps.
     fn open_named(lock_path: &Path) -> io::Result<Opened> {
@@ -1148,18 +1165,7 @@ impl Reader {
     /// most `timeout`, and returns at once where it already has. A reader whose wait macOS
     /// cannot take sleeps `POLL_INTERVAL` instead, or `timeout` where that is shorter.
     pub fn wait(&self, timeout: Duration) -> io::Result<()> {
-        assert!(!timeout.is_zero());
-
-        let newest_word = &self.opened.mapping.words()[HEADER_PUBLICATION_NEWEST];
-        let newest = newest_word.load(Ordering::Relaxed);
-        if self.opened.publications.next <= newest {
-            return Ok(());
-        }
-
-        if wait(newest_word, newest, timeout)? == Waited::Unsupported {
-            std::thread::sleep(timeout.min(POLL_INTERVAL));
-        }
-        Ok(())
+        self.opened.wait(timeout)
     }
 
     /// Reads the next publication, or the range of those the writer overwrote first.

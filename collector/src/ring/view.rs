@@ -3,6 +3,7 @@
 use std::io;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use super::{
     Found, FoundEvent, HEADER_PUBLICATION_NEWEST, LockedName, Opened, RunIdentity, Shape, Tick,
@@ -54,6 +55,13 @@ impl RingReader {
         }
         self.opened.events.next = next;
         Ok(())
+    }
+
+    /// Sleeps until the writer publishes past the publications the reader has read, for at
+    /// most `timeout`, and returns at once where it already has. A reader whose wait macOS
+    /// cannot take sleeps `POLL_INTERVAL` instead, or `timeout` where that is shorter.
+    pub fn wait(&self, timeout: Duration) -> io::Result<()> {
+        self.opened.wait(timeout)
     }
 
     #[must_use]

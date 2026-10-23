@@ -1633,6 +1633,37 @@ mod tests {
     }
 
     #[test]
+    fn a_waiting_ring_reader_wakes_when_the_writer_publishes() {
+        // Goal: a reader that keeps no ticks of its own, as the viewer's store does, learns of
+        // the next tick when the writer publishes, rather than when its wait runs out.
+        // Method: a thread opens a ring reader and waits up to 20 seconds on the empty ring,
+        // while this thread publishes 100 milliseconds after the reader opened. The thread
+        // times its wait.
+        let place = TestPlace::new("ring-wake");
+        let mut writer = Writer::create(&place.place, SHAPE).unwrap();
+        let opened = Barrier::new(2);
+
+        let (waited, found) = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                // A reader maps the ring into its own thread, since a mapping is not Send.
+                let mut reader = RingReader::open(place.lock_path()).unwrap();
+                let mut tick = tick_buffer(SHAPE);
+                opened.wait();
+                let start = Instant::now();
+                reader.wait(Duration::from_secs(20)).unwrap();
+                (start.elapsed(), reader.read_into(&mut tick).unwrap())
+            });
+            opened.wait();
+            std::thread::sleep(Duration::from_millis(100));
+            publish(&mut writer, 3);
+            waiter.join().unwrap()
+        });
+
+        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
+        assert!(matches!(found, Found::Publication { publication: 1, .. }));
+    }
+
+    #[test]
     fn a_waiting_reader_returns_when_its_wait_runs_out() {
         // Goal: a reader's wait ends at its timeout when the writer publishes nothing, so a
         // reader can look for a newer ring.
