@@ -550,6 +550,8 @@ pub struct Apps {
     ungrouped_members: u32,
     /// The ungrouped members live at the tick, which an exited process does not join.
     live_ungrouped_members: u32,
+    /// The continuous time between the two ticks, where they span one interval of one run.
+    elapsed_ns: Option<u64>,
 }
 
 const SLOT_EMPTY: u32 = u32::MAX;
@@ -572,6 +574,7 @@ impl Apps {
             slots: vec![SLOT_EMPTY; programs.apps_max()],
             ungrouped_members: 0,
             live_ungrouped_members: 0,
+            elapsed_ns: None,
         }
     }
 
@@ -588,8 +591,8 @@ impl Apps {
         previous.execs.count();
         self.clear();
 
-        let compatible = derive_compatible(&previous.stamp, &selected.stamp);
-        let predecessor = if compatible { Some(previous) } else { None };
+        self.elapsed_ns = derive_elapsed(&previous.stamp, &selected.stamp);
+        let predecessor = self.elapsed_ns.map(|_| previous);
         let processes = predecessor.map(|previous| &previous.processes);
         let mut row = 0;
         let mut exit = 0;
@@ -646,6 +649,13 @@ impl Apps {
         self.live_ungrouped_members
     }
 
+    /// The continuous time between the two ticks last derived, which a rate divides by, where
+    /// they span one interval of one run.
+    #[must_use]
+    pub fn elapsed_ns(&self) -> Option<u64> {
+        self.elapsed_ns
+    }
+
     fn clear(&mut self) {
         for totals in &self.totals {
             self.slots[totals.app.index()] = SLOT_EMPTY;
@@ -654,6 +664,7 @@ impl Apps {
         self.processes.clear();
         self.ungrouped_members = 0;
         self.live_ungrouped_members = 0;
+        self.elapsed_ns = None;
     }
 
     /// Adds the process of `selected` to the tick's processes and to its App. `previous` is the
@@ -707,28 +718,28 @@ impl Apps {
     }
 }
 
-/// Whether `previous` and `selected` span one interval of one collector run, in which the
-/// continuous clock moved on.
-fn derive_compatible(previous: &Stamp, selected: &Stamp) -> bool {
+/// The continuous time from `previous` to `selected`, where they span one interval of one
+/// collector run in which the continuous clock moved on.
+fn derive_elapsed(previous: &Stamp, selected: &Stamp) -> Option<u64> {
     if previous.recording != selected.recording {
-        return false;
+        return None;
     }
     if previous.boot != selected.boot {
-        return false;
+        return None;
     }
     if previous.run != selected.run {
-        return false;
+        return None;
     }
     if previous.publication.checked_add(1) != Some(selected.publication) {
-        return false;
+        return None;
     }
-    let Some(previous) = previous.continuous_ns else {
-        return false;
-    };
-    let Some(selected) = selected.continuous_ns else {
-        return false;
-    };
-    previous < selected
+    let elapsed = selected
+        .continuous_ns?
+        .checked_sub(previous.continuous_ns?)?;
+    if elapsed == 0 {
+        return None;
+    }
+    Some(elapsed)
 }
 
 /// Which of the live process of `row` and the exit of `exit` comes first in the tick's order.

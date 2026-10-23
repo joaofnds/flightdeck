@@ -132,6 +132,20 @@ fn gives_each_process_the_cpu_it_spent() {
     assert_eq!(derived.processes[0].app_attribution, None);
 }
 
+#[test]
+fn gives_the_continuous_time_between_two_ticks_of_one_interval() {
+    // Goal: a rate divides by the continuous time between the ticks, which need not be a
+    // second.
+    // Method: derive two ticks of one interval whose continuous clocks stand 1.5 s apart.
+    let previous = Columns::of(1, &[Process::default()]);
+    let mut selected = Columns::of(2, &[Process::default()]);
+    selected.stamp.continuous_ns = Some(2_500_000_000);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(derived.elapsed_ns, Some(1_500_000_000));
+}
+
 /// Declares a test that a change to the selected tick's stamp leaves CPU time unknown, since
 /// the two ticks then do not span one interval of one collector run.
 macro_rules! interval_tests {
@@ -150,6 +164,7 @@ macro_rules! interval_tests {
 
                 assert_eq!(derived.processes[0].deltas, unavailable(Unavailable::Interval));
                 assert_eq!(derived.totals[0].cpu_ns, absent(1));
+                assert_eq!(derived.elapsed_ns, None);
             }
         )*
     };
@@ -178,6 +193,7 @@ fn leaves_cpu_unknown_without_a_continuous_clock_at_the_previous_tick() {
         derived.processes[0].deltas,
         unavailable(Unavailable::Interval)
     );
+    assert_eq!(derived.elapsed_ns, None);
 }
 
 #[test]
@@ -285,6 +301,7 @@ fn leaves_cpu_unknown_when_the_spent_time_overflows() {
         &[Process {
             user_ns: u64::MAX / 2 + 1,
             system_ns: u64::MAX / 2 + 1,
+            energy_nj: 250,
             ..Process::default()
         }],
     );
@@ -295,6 +312,7 @@ fn leaves_cpu_unknown_when_the_spent_time_overflows() {
         derived.processes[0].deltas.cpu_ns,
         Amount::Unavailable(Unavailable::Overflow)
     );
+    assert_eq!(derived.processes[0].deltas.energy_nj, Amount::Known(250));
 }
 
 #[test]
@@ -652,14 +670,15 @@ fn gives_each_process_the_change_of_each_counter() {
     );
 }
 
-/// Declares a test that one counter that went back leaves only that counter's change
-/// unknown.
+/// Declares a test that one counter that went back leaves unknown only the changes read from
+/// it.
 macro_rules! counter_reset_tests {
-    ($($name:ident, $field:ident, $delta:ident;)*) => {
+    ($($name:ident, $field:ident, $($delta:ident),+;)*) => {
         $(
             #[test]
             fn $name() {
-                // Goal: a counter that went back leaves its own change unknown and no other.
+                // Goal: a counter that went back leaves unknown the changes read from it and
+                // no other.
                 // Method: derive two ticks of one process one counter of which falls.
                 let previous = Columns::of(1, &[Process {
                     $field: 5,
@@ -672,19 +691,21 @@ macro_rules! counter_reset_tests {
 
                 let derived = derive(&previous, &selected);
 
-                let deltas = derived.processes[0].deltas;
-                assert_eq!(deltas.$delta, Amount::Unavailable(Unavailable::CounterReset));
-                assert_eq!(deltas.cpu_ns, Amount::Known(0));
+                let mut expected = unchanged();
+                $(expected.$delta = Amount::Unavailable(Unavailable::CounterReset);)+
+                assert_eq!(derived.processes[0].deltas, expected);
             }
         )*
     };
 }
 
 counter_reset_tests! {
+    leaves_only_cpu_unknown_when_its_user_time_went_back, user_ns, cpu_ns;
     leaves_energy_unknown_when_its_counter_went_back, energy_nj, energy_nj;
-    leaves_disk_reads_unknown_when_their_counter_went_back, disk_read_bytes, disk_read_bytes;
+    leaves_disk_reads_unknown_when_their_counter_went_back,
+        disk_read_bytes, disk_read_bytes, disk_io_bytes;
     leaves_disk_writes_unknown_when_their_counter_went_back,
-        disk_written_bytes, disk_written_bytes;
+        disk_written_bytes, disk_written_bytes, disk_io_bytes;
     leaves_idle_wakeups_unknown_when_their_counter_went_back, idle_wakeups, idle_wakeups;
     leaves_pageins_unknown_when_their_counter_went_back, pageins, pageins;
 }
@@ -794,9 +815,103 @@ fn leaves_disk_traffic_unknown_when_its_sum_overflows() {
 
     let derived = derive(&previous, &selected);
 
+    let deltas = derived.processes[0].deltas;
     assert_eq!(
-        derived.processes[0].deltas.disk_io_bytes,
+        deltas.disk_io_bytes,
         Amount::Unavailable(Unavailable::Overflow)
+    );
+    assert_eq!(deltas.disk_read_bytes, Amount::Known(u64::MAX / 2 + 1));
+    assert_eq!(deltas.disk_written_bytes, Amount::Known(u64::MAX / 2 + 1));
+}
+
+#[test]
+fn leaves_out_of_an_apps_disk_traffic_each_member_missing_a_direction() {
+    // Goal: an App's disk traffic sums only the members whose reads and writes are both
+    // known, so two members each missing a different direction add nothing to it.
+    // Method: derive two ticks of two processes of one App, one whose reads fall and one
+    // whose writes fall.
+    let previous = Columns::of(
+        1,
+        &[
+            Process {
+                disk_read_bytes: 5,
+                ..Process::default()
+            },
+            Process {
+                pid: 8,
+                disk_written_bytes: 5,
+                ..Process::default()
+            },
+        ],
+    );
+    let selected = Columns::of(
+        2,
+        &[
+            Process {
+                disk_written_bytes: 3,
+                ..Process::default()
+            },
+            Process {
+                pid: 8,
+                disk_read_bytes: 3,
+                ..Process::default()
+            },
+        ],
+    );
+
+    let derived = derive(&previous, &selected);
+
+    let totals = &derived.totals[0];
+    assert_eq!(totals.disk_io_bytes, absent(2));
+    assert_eq!(
+        totals.disk_read_bytes,
+        Subtotal {
+            known: 3,
+            measured_members: 1,
+            unavailable_members: 1,
+            overflowed: false,
+        }
+    );
+    assert_eq!(
+        totals.disk_written_bytes,
+        Subtotal {
+            known: 3,
+            measured_members: 1,
+            unavailable_members: 1,
+            overflowed: false,
+        }
+    );
+}
+
+#[test]
+fn marks_an_apps_memory_that_overflows_and_keeps_the_rest() {
+    // Goal: an App whose members' memory sums past a u64 reports the overflow and keeps the
+    // members it could add.
+    // Method: derive a tick of two processes of one App, holding all of a u64 and one byte.
+    let rows = [
+        Process {
+            resident_bytes: u64::MAX,
+            ..Process::default()
+        },
+        Process {
+            pid: 8,
+            resident_bytes: 1,
+            ..Process::default()
+        },
+    ];
+    let previous = Columns::of(1, &rows);
+    let selected = Columns::of(2, &rows);
+
+    let derived = derive(&previous, &selected);
+
+    assert_eq!(
+        derived.totals[0].resident_bytes,
+        Subtotal {
+            known: u64::MAX,
+            measured_members: 1,
+            unavailable_members: 1,
+            overflowed: true,
+        }
     );
 }
 
@@ -1736,6 +1851,34 @@ unnamed_exit_tests! {
     };
 }
 
+#[test]
+fn names_an_exit_by_the_exec_of_its_own_tick_after_a_missed_tick() {
+    // Goal: the selected tick's own events name an exit even when the tick before was
+    // missed, and its final memory stays with it although it spent nothing the rule knows.
+    // Method: derive a tick after a missed one, holding the exit of pid 7 with 300 bytes
+    // resident and its exec to a program macOS refused to name.
+    let previous = Columns::of(1, &[Process::default()]);
+    let selected = Columns::of(3, &[])
+        .with_exits(&[Exit {
+            resident_bytes: 300,
+            ..Exit::default()
+        }])
+        .with_execs(&[Event {
+            program: Err(ProgramUnavailable::Refused),
+            ..Event::default()
+        }]);
+
+    let derived = derive(&previous, &selected);
+
+    let process = &derived.processes[0];
+    assert_eq!(process.program, Err(ProgramUnavailable::Refused));
+    assert_eq!(process.deltas, unavailable(Unavailable::Interval));
+    assert_eq!(process.resident_bytes_last, Some(300));
+    assert_eq!(process.state, ProcessState::ExitedVerified);
+    assert_eq!(derived.ungrouped_members, 1);
+    assert_eq!(derived.live_ungrouped_members, 0);
+}
+
 /// A previous tick holding only the exec of pid 7 to Safari, and a selected tick holding only
 /// its exit, with 300 bytes resident.
 fn noticed_before() -> (Columns, Columns) {
@@ -1752,6 +1895,7 @@ struct Derived {
     totals: Vec<Totals>,
     ungrouped_members: u32,
     live_ungrouped_members: u32,
+    elapsed_ns: Option<u64>,
 }
 
 /// Derives the Apps of `selected` after `previous`, whose processes run Safari as entry 0 and
@@ -1769,6 +1913,7 @@ fn derive(previous: &Columns, selected: &Columns) -> Derived {
         totals: apps.totals().to_vec(),
         ungrouped_members: apps.ungrouped_members(),
         live_ungrouped_members: apps.live_ungrouped_members(),
+        elapsed_ns: apps.elapsed_ns(),
     }
 }
 
@@ -1778,6 +1923,20 @@ fn measured(known: u64, members: u32) -> Subtotal {
         measured_members: members,
         unavailable_members: 0,
         overflowed: false,
+    }
+}
+
+/// The changes of a process none of whose counters moved.
+fn unchanged() -> Deltas {
+    Deltas {
+        cpu_ns: Amount::Known(0),
+        energy_nj: Amount::Known(0),
+        gpu_ns: Amount::Known(0),
+        disk_read_bytes: Amount::Known(0),
+        disk_written_bytes: Amount::Known(0),
+        disk_io_bytes: Amount::Known(0),
+        idle_wakeups: Amount::Known(0),
+        pageins: Amount::Known(0),
     }
 }
 
