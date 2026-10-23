@@ -392,9 +392,9 @@ fn paint_line_runs(
     geometry: &Geometry<'_>,
     window: &mut Window,
 ) {
-    // With a clock, a missing reading leaves the windows around it with fewer readings, as a
-    // missed scrape leaves Grafana's rate, so only a change of segment ends a run. Without one,
-    // a missing reading breaks the line.
+    // With a clock, the curves of a run break at each bucket with no readings of its own, which
+    // `run_curves` finds, so only a change of segment ends a run. Without one, a missing reading
+    // breaks the line.
     let clocked = geometry.clock().is_some();
     let present = |offset: usize| clocked || values[offset].is_some();
     for_each_run(
@@ -411,8 +411,10 @@ fn paint_line_runs(
 }
 
 /// The unbroken curves through one run of readings, each as its points in time order. A chart
-/// with a clock draws a point at the end of each bucket whose window it draws, and breaks the
-/// curve where no window holds readings. A chart with no clock draws each reading.
+/// with a clock draws a point at the end of each bucket that holds readings of its own, and
+/// breaks the curve at each bucket that holds none. The bucket the join of thinned and
+/// full-detail readings cuts holds readings the chart leaves out, so the curve runs past it. A
+/// chart with no clock draws each reading.
 fn run_curves(
     values: &[Option<(f32, f32)>],
     run: std::ops::Range<usize>,
@@ -433,9 +435,8 @@ fn run_curves(
         return vec![points];
     };
 
-    let step = clock.buckets.length_seconds;
     window_means(values, run, clock)
-        .chunk_by(|left, right| right.end - left.end == step)
+        .chunk_by(|left, right| clock.buckets.joins(left.end, right.end))
         .map(|curve| {
             curve
                 .iter()
@@ -736,15 +737,37 @@ impl Buckets {
         }
         // Floors, so the index counts whole bucket lengths since the clock's zero.
         let index = second / self.length_seconds;
-        if let Some(join) = self.detail_first {
-            let start = index * self.length_seconds;
-            if start < join {
-                if join < start + self.length_seconds {
-                    return None;
-                }
-            }
+        if self.join_cuts(index * self.length_seconds) {
+            return None;
         }
         Some(index)
+    }
+
+    /// Whether the join of thinned and full-detail readings cuts the bucket from `start`, which
+    /// then holds readings of both kinds.
+    fn join_cuts(&self, start: u64) -> bool {
+        let Some(join) = self.detail_first else {
+            return false;
+        };
+        if start >= join {
+            return false;
+        }
+        join < start + self.length_seconds
+    }
+
+    /// Whether a curve runs on from its point at the bucket end `left` to its next point, at
+    /// `right`: the two buckets are neighbours, or only the bucket the join of thinned and
+    /// full-detail readings cuts lies between them, which holds readings left out, not none.
+    fn joins(&self, left: u64, right: u64) -> bool {
+        assert!(left < right);
+        let gap = right - left;
+        if gap == self.length_seconds {
+            return true;
+        }
+        if gap != 2 * self.length_seconds {
+            return false;
+        }
+        self.join_cuts(left)
     }
 }
 
@@ -789,16 +812,16 @@ impl BucketTotal {
     }
 }
 
-/// The point at the end of bucket `newest`, the mean of the readings of `recent` in its window,
-/// or `None` when the point stands before the window's oldest edge, or its window holds no
-/// readings or reaches before `whole_from`, the first bucket no slide of the window can still
+/// The point at the end of the newest bucket of `recent`, the mean of the readings in its window,
+/// or `None` when `recent` holds no bucket, the point stands before the window's oldest edge, or
+/// its window reaches before `whole_from`, the first bucket no slide of the window can still
 /// change.
 fn window_mean(
     recent: &std::collections::VecDeque<BucketTotal>,
-    newest: u64,
     whole_from: Option<u64>,
     buckets: Buckets,
 ) -> Option<WindowMean> {
+    let newest = recent.back()?.index;
     let end = (newest + 1) * buckets.length_seconds;
     if end < buckets.first_end {
         return None;
@@ -823,9 +846,7 @@ fn window_mean(
             None => panic!("a window of at most an hour holds a few readings a second"),
         };
     }
-    if count == 0 {
-        return None;
-    }
+    assert!(count > 0);
 
     let count = f32::from(count);
     Some(WindowMean {
@@ -836,9 +857,9 @@ fn window_mean(
 }
 
 /// The points of one segment's readings, `run`, in time order: one at the end of each bucket
-/// whose window holds readings, so a gap shorter than a window keeps the curve whole, as a
-/// missed scrape keeps Grafana's rate, unless readings that left the chart, or that the join
-/// of thinned and full-detail readings will still change, belong in that window.
+/// that holds readings of its own, the mean of the readings in its window, so a bucket with none
+/// breaks the curve. A point whose window holds readings that left the chart, or that the join of
+/// thinned and full-detail readings will still change, is not drawn.
 ///
 /// Readings before the first in view left a sliding window, so a run that starts there draws
 /// only windows whole inside the chart. A run that starts at a change of segment has no
@@ -871,9 +892,7 @@ fn window_means(
             // A still view gains and loses no readings, so a cut bucket only leaves its own
             // readings out. In a sliding one, the windows around it would still change.
             if sliding {
-                if let Some(open) = recent.back() {
-                    means.extend(window_mean(&recent, open.index, whole_from, buckets));
-                }
+                means.extend(window_mean(&recent, whole_from, buckets));
                 recent.clear();
                 cut = true;
             }
@@ -889,12 +908,8 @@ fn window_means(
                 open.add(top, bottom);
                 continue;
             }
-            // The buckets from the open one to this one, past which no window holds readings.
-            let last = bucket.min(open.index + buckets.per_point);
-            for newest in open.index..last {
-                means.extend(window_mean(&recent, newest, whole_from, buckets));
-            }
         }
+        means.extend(window_mean(&recent, whole_from, buckets));
         while recent
             .front()
             .is_some_and(|oldest| oldest.index + buckets.per_point <= bucket)
@@ -908,9 +923,7 @@ fn window_means(
             count: 1,
         });
     }
-    if let Some(open) = recent.back() {
-        means.extend(window_mean(&recent, open.index, whole_from, buckets));
-    }
+    means.extend(window_mean(&recent, whole_from, buckets));
     means
 }
 
@@ -1699,12 +1712,13 @@ mod live_tests {
     }
 
     #[test]
-    fn a_gap_shorter_than_a_window_keeps_the_curve_whole() {
-        // Goal: missing readings leave the windows around them with fewer readings, as a missed
-        // scrape leaves Grafana's rate, and break the curve only where a window holds none.
-        // Method: in a still window from 1000 in ten-second buckets, whose points each average
-        // twenty seconds, leave ten seconds without readings between two stretches of readings,
-        // then thirty, and count the curves each draws.
+    fn a_curve_breaks_at_a_bucket_with_no_readings_of_its_own() {
+        // Goal: a chart breaks its line at any bucket with no readings of its own, so every
+        // missed reading the buckets can show stays visible, and missing readings inside a
+        // bucket that holds others leave the line whole.
+        // Method: in a still window from 1000 in ten-second buckets, leave five seconds without
+        // readings from 1140, inside the bucket from 1140, then ten, the whole bucket, between
+        // two stretches of readings, and count the curves each draws.
         let positions = live_positions();
         let curves = |gap: usize| {
             let mut values = vec![None; 900];
@@ -1717,7 +1731,41 @@ mod live_tests {
             run_curves(&values, 0..900, &live_geometry(1000, 0, &positions)).len()
         };
 
-        assert_eq!([curves(10), curves(30)], [1, 2]);
+        assert_eq!([curves(5), curves(10)], [1, 2]);
+    }
+
+    #[test]
+    fn a_point_beside_a_missed_tick_stays_the_mean_of_its_window() {
+        // Goal: the break a missed tick leaves changes no point around it, so the first point
+        // after the gap is still the mean of the readings its whole window holds, those before
+        // the gap included.
+        // Method: in a still window from 1000 on a card wide enough for one-second buckets, whose
+        // points each average four seconds, place readings of 20 in seconds 1090 to 1099, miss
+        // 1100, and place readings of 60 in 1101 to 1109. Read the end of the curve before the
+        // gap and the start of the one after it, on a chart one pixel a second and a unit.
+        let positions = live_positions();
+        let mut geometry = live_geometry(1000, 0, &positions);
+        let window = TimeWindow {
+            first: 1000,
+            span: 900,
+        };
+        geometry.buckets = Some(Buckets::of(window, None, TICK_SECONDS, 900.0));
+        let mut values = vec![None; 900];
+        for value in &mut values[90..100] {
+            *value = Some((20.0, 0.0));
+        }
+        for value in &mut values[101..110] {
+            *value = Some((60.0, 0.0));
+        }
+
+        let curves = run_curves(&values, 0..900, &geometry);
+
+        assert_eq!(curves.len(), 2, "{curves:?}");
+        assert_places(&curves[0][9..], &[[100.0, 80.0, 100.0]]);
+        assert_places(
+            &curves[1][..2],
+            &[[102.0, 66.67, 100.0], [103.0, 53.33, 100.0]],
+        );
     }
 
     #[test]

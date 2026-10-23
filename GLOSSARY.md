@@ -85,11 +85,13 @@ process's CPU time stays in those totals after it exits. A coalition and an App 
 separate groupings, so a coalition's totals are not an App's totals.
 
 **Bucket**: a stretch of the clock, such as three seconds, at whose end a chart draws one point,
-the mean of the readings of that bucket and of the buckets just before it. A chart of readings a
-second apart takes the shortest length, of at least one second, that leaves each bucket a pixel
-of the chart, so a wider chart or a shorter span draws shorter buckets, and each point covers at
-least four seconds and a second more than its bucket. Buckets start at multiples of their length,
-so a point keeps its place as the chart scrolls. Readings further apart, such as the collector's
-ten-second reports or the older readings of a chart that reaches back more than sixteen minutes,
-which stand ten seconds apart, make buckets at least that long and points that cover at least
-four times that, so forty seconds for readings ten seconds apart.
+the mean of the readings of that bucket and of the buckets just before it. A chart breaks its
+line at any bucket with no readings of its own, and each point beside the break stays the mean
+of its buckets. A chart of readings a second apart takes the shortest length, of at least one
+second, that leaves each bucket a pixel of the chart, so a wider chart or a shorter span draws
+shorter buckets, and each point covers at least four seconds and a second more than its bucket.
+Buckets start at multiples of their length, so a point keeps its place as the chart scrolls.
+Readings further apart, such as the collector's ten-second reports or the older readings of a
+chart that reaches back more than sixteen minutes, which stand ten seconds apart, make buckets
+at least that long and points that cover at least four times that, so forty seconds for readings
+ten seconds apart.
