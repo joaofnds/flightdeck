@@ -57,9 +57,8 @@ pub struct SealedApps {
 impl Default for SealedApps {
     fn default() -> Self {
         let programs = Programs::new(PROGRAMS_CAPACITY);
-        let processes = model::u32_from_length(
-            PROCESSES_MAX + collector::tracker::EVENTS_PER_TICK_MAX,
-        );
+        let processes =
+            model::u32_from_length(PROCESSES_MAX + collector::tracker::EVENTS_PER_TICK_MAX);
         Self {
             state: RefCell::new(State {
                 ticks: WindowTicks::default(),

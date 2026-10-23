@@ -266,7 +266,10 @@ impl<'window> Push<'_, 'window> {
                 index,
                 totals: app,
             };
-            orders.push((row.order(Some(self.position(app)), self.observation), rows.len()));
+            orders.push((
+                row.order(Some(self.position(app)), self.observation),
+                rows.len(),
+            ));
             rows.push(row);
         }
         for (index, process) in (0_u32..).zip(processes) {
@@ -281,7 +284,10 @@ impl<'window> Push<'_, 'window> {
                     process,
                     entry,
                 };
-                orders.push((row.order(Some(self.position(app)), self.observation), rows.len()));
+                orders.push((
+                    row.order(Some(self.position(app)), self.observation),
+                    rows.len(),
+                ));
                 rows.push(row);
             }
         }
