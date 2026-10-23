@@ -154,9 +154,9 @@ fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     if panels.len() > limit {
         return Err("Live projection exceeds its panel bound".to_owned());
     }
-    if matches!(route, "computer" | "self") {
+    if route == "self" {
         if !snapshot.selection.is_null() {
-            return Err("Metadata route unexpectedly queried a selection".to_owned());
+            return Err("Self route unexpectedly queried a selection".to_owned());
         }
     } else {
         if snapshot.selection["selected"].is_null() {
