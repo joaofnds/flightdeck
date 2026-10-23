@@ -35,6 +35,19 @@ fn a_view_newer_than_the_readings_draws_the_overviews_machine_charts() {
 }
 
 #[test]
+fn pause_holds_the_views_newest_second() {
+    // Goal: Pause holds the second the page shows, which the View holds and the worker has not
+    // read yet. Method: readings that end at 10,000, a View that ends at 10,005, then the
+    // second Pause would hold.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    dashboard.take_view(newer_view());
+
+    let held = dashboard.pause_target();
+
+    assert_eq!(held, (Some(10_005), None));
+}
+
+#[test]
 fn the_range_ends_at_the_views_newest_second() {
     // Goal: the charts drawn from the View show its newest second, which the worker's readings
     // do not hold yet. Method: a View five seconds newer than the readings.
@@ -271,6 +284,25 @@ mod when_the_page_is_another_page {
     }
 }
 
+mod when_the_window_reads_a_saved_recording {
+    use super::*;
+
+    #[test]
+    fn the_worker_s_readings_draw_the_charts() {
+        // Goal: the store follows the live Mac, so a window that opened a saved recording draws
+        // the recording's readings and never the live View under the recording's name. Method:
+        // Overview of a recording, then a newer View.
+        let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        dashboard.native.source = crate::live_source_mode::SourceMode::Recorded;
+        let before = dashboard.panels.clone();
+
+        let changed = dashboard.take_view(newer_view());
+
+        assert!(!changed);
+        assert_same_panels(&dashboard.panels, &before);
+    }
+}
+
 mod when_the_view_is_older_than_the_readings {
     use super::*;
 
@@ -285,6 +317,26 @@ mod when_the_view_is_older_than_the_readings {
 
         assert!(!changed);
         assert_same_panels(&dashboard.panels, &before);
+    }
+}
+
+mod when_the_view_cannot_be_drawn {
+    use super::*;
+
+    #[test]
+    fn the_page_shows_the_worker_s_readings_and_no_failure() {
+        // Goal: a View the page cannot draw leaves the worker's readings whole on the page, and
+        // the page reports no failure of its own reading. Method: readings that end at 10,000,
+        // then a newer View whose newest power reading is no number.
+        let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        let mut seconds = newer_seconds();
+        seconds[2].power_watts = Some(f32::NAN);
+
+        let changed = dashboard.take_view(Arc::new(view(1, &[], &seconds)));
+
+        assert!(!changed);
+        assert!(dashboard.error.is_none());
+        assert_eq!(dashboard.shown_second(), Some(10_000));
     }
 }
 

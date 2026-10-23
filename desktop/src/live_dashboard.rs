@@ -732,26 +732,37 @@ impl LiveDashboard {
     }
 
     pub fn pause(&mut self, cx: &mut Context<Self>) {
-        if self.request.second.is_some() {
-            self.request.second = None;
-            self.request.identity = None;
-        } else {
-            if let Some(snapshot) = self.context_snapshot() {
-                let second = snapshot.selection["second"].as_u64();
-                let identity = snapshot.selection["selected"].clone();
-                self.request.second = second;
-                self.request.identity = if identity.is_null() {
-                    None
-                } else {
-                    Some(identity)
-                };
-            }
-        }
+        let (second, identity) = self.pause_target();
+        self.request.second = second;
+        self.request.identity = identity;
         self.request.offset = 0;
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
         self.select(cx);
+    }
+
+    /// The second and the reading Pause asks for: none where the page holds a second, so it
+    /// follows the newest again, and otherwise the second its reading shows.
+    pub(crate) fn pause_target(&self) -> (Option<u64>, Option<serde_json::Value>) {
+        if self.request.second.is_some() {
+            return (None, None);
+        }
+        // The page shows the View's newest second, which the worker may not have read yet.
+        if let Some(second) = self.store_view_last_second() {
+            return (Some(second), None);
+        }
+        let Some(snapshot) = self.context_snapshot() else {
+            return (None, self.request.identity.clone());
+        };
+
+        let identity = &snapshot.selection["selected"];
+        let identity = if identity.is_null() {
+            None
+        } else {
+            Some(identity.clone())
+        };
+        (snapshot.selection["second"].as_u64(), identity)
     }
 
     pub fn inspect(&mut self, second: u64, cx: &mut Context<Self>) {

@@ -16,6 +16,7 @@ use crate::data::Panel;
 use crate::hardware::Readings;
 use crate::live_inventory::PerformanceLevel;
 use crate::live_projection::held_projection;
+use crate::live_source_mode::SourceMode;
 use crate::live_thermal_pressure::thermal_pressure_level_text;
 use crate::live_views::summary;
 
@@ -50,6 +51,8 @@ pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
     panels: Vec<Rc<Panel>>,
+    /// Why the last View the page took could not be drawn, reported once.
+    failure: Option<String>,
 }
 
 impl LiveDashboard {
@@ -83,16 +86,27 @@ impl LiveDashboard {
                     self.store_panels = StorePanels {
                         version: Some(version),
                         panels,
+                        failure: None,
                     };
                 }
                 Err(error) => {
-                    self.error = Some(error);
+                    self.draw_store_view_failed(error);
                     return false;
                 }
             }
         }
         draw_store_view_splice(&mut self.panels, &self.store_panels.panels);
         true
+    }
+
+    /// Lets go of the View the page could not draw, so the page shows the worker's readings
+    /// whole and its error stays the worker's, and reports `error` once each time it changes.
+    fn draw_store_view_failed(&mut self, error: String) {
+        if self.store_panels.failure.as_ref() != Some(&error) {
+            eprintln!("Flightdeck could not draw the store's View: {error}");
+        }
+        self.store_panels.failure = Some(error);
+        self.store_view = None;
     }
 
     /// The machine charts of `view`, as the range zooms them.
@@ -110,11 +124,16 @@ impl LiveDashboard {
     }
 
     /// The View the page draws Overview's machine charts, readouts and hardware figure from: the
-    /// store's newest, while the page shows Overview's readings following the newest second, no
-    /// hover's reading is shown, and the View is no older than the worker's readings, or the
+    /// store's newest, while the page shows the live Mac's Overview following the newest second,
+    /// no hover's reading is shown, and the View is no older than the worker's readings, or the
     /// page is opening before the worker's first reading.
     fn drawn_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
+            return None;
+        }
+        // The store follows the live Mac, so a window that opened a saved recording draws only
+        // what its worker reads of it.
+        if self.native.source != SourceMode::Live {
             return None;
         }
         if self.request.second.is_some() {
