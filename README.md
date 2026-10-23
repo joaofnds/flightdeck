@@ -101,11 +101,17 @@ the current toolkit decision remain in [the evaluation](desktop/EVALUATION.md).
 
 Pushing a tag `<version>`, such as `0.2.0`, releases the commit it names through
 `.github/workflows/release.yml`. The version is `CFBundleShortVersionString` in
-`desktop/Info.plist`, three integers, so set it there in a commit of its own before tagging,
-since the workflow refuses a tag that names another version. It builds the bundle as
-`just bundle` does, from no cache, attaches it to the release as
-`Flightdeck_<version>_aarch64.zip`, and writes the `flightdeck@<version>` and `flightdeck`
-casks to [joaofnds/homebrew-tap](https://github.com/joaofnds/homebrew-tap):
+`desktop/Info.plist`, three integers, and the workflow refuses a tag that names another
+version. `just release 0.2.0` sets it, commits it and tags that commit, and pushes nothing:
+
+```sh
+just release 0.2.0
+git push origin main 0.2.0
+```
+
+The workflow builds the bundle as `just bundle` does, from no cache, attaches it to the
+release as `Flightdeck_<version>_aarch64.zip`, and writes the `flightdeck@<version>` and
+`flightdeck` casks to [joaofnds/homebrew-tap](https://github.com/joaofnds/homebrew-tap):
 
 ```sh
 brew install --cask joaofnds/tap/flightdeck
