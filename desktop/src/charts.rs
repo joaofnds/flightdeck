@@ -971,24 +971,42 @@ fn smooth(builder: &mut PathBuilder, points: &[gpui::Point<Pixels>], start: bool
     } else {
         builder.line_to(*first);
     }
-    for [to, leaving, reaching] in half_step_stretches(points) {
-        builder.cubic_bezier_to(to, leaving, reaching);
+    for stretch in smooth_stretches(points) {
+        match stretch {
+            Stretch::Straight(to) => builder.line_to(to),
+            Stretch::Bend([to, leaving, reaching]) => {
+                builder.cubic_bezier_to(to, leaving, reaching);
+            }
+        }
     }
 }
 
-/// The stretches of a curve through `points` in the order given, each as the point it reaches
-/// and its two control points, as GNOME System Monitor and Smoothie Charts draw a live curve: a
-/// stretch leaves one point level and reaches the next level, bending halfway between them. It
-/// depends on its two ends alone, so a point arriving or leaving reshapes no stretch already
-/// drawn, and it never passes above or below its ends. Drawn the other way it traces the same
-/// curve, which the bottom edge of an area relies on, since that edge runs back in time.
-fn half_step_stretches(
-    points: &[gpui::Point<Pixels>],
-) -> impl Iterator<Item = [gpui::Point<Pixels>; 3]> + '_ {
+/// One stretch of a curve, as the point it reaches and, for a bend, its two control points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stretch {
+    Straight(gpui::Point<Pixels>),
+    Bend([gpui::Point<Pixels>; 3]),
+}
+
+/// A straight stretch this narrow lies under a third of a pixel from the bend it stands for,
+/// and costs the tessellator a fifth of the bend's triangles.
+const STRAIGHT_STRETCH_WIDTH_MAX: Pixels = px(2.0);
+
+/// The stretches of a curve through `points` in the order given, as GNOME System Monitor and
+/// Smoothie Charts draw a live curve: a stretch leaves one point level and reaches the next
+/// level, bending halfway between them, or runs straight where it is too narrow for the bend to
+/// show. It depends on its two ends alone, so a point arriving or leaving reshapes no stretch
+/// already drawn, and it never passes above or below its ends. Drawn the other way it traces the
+/// same curve, which the bottom edge of an area relies on, since that edge runs back in time.
+fn smooth_stretches(points: &[gpui::Point<Pixels>]) -> impl Iterator<Item = Stretch> + '_ {
     points.windows(2).map(|pair| {
         let (source, target) = (pair[0], pair[1]);
-        let halfway = source.x + (target.x - source.x) / 2.0;
-        [target, point(halfway, source.y), point(halfway, target.y)]
+        if (target.x - source.x).abs() <= STRAIGHT_STRETCH_WIDTH_MAX {
+            Stretch::Straight(target)
+        } else {
+            let halfway = source.x + (target.x - source.x) / 2.0;
+            Stretch::Bend([target, point(halfway, source.y), point(halfway, target.y)])
+        }
     })
 }
 
@@ -1985,21 +2003,59 @@ mod live_tests {
         let mut backward = forward;
         backward.reverse();
 
-        let drawn: Vec<_> = half_step_stretches(&forward).collect();
-        let reversed: Vec<_> = half_step_stretches(&backward).collect();
+        let drawn: Vec<_> = smooth_stretches(&forward).collect();
+        let reversed: Vec<_> = smooth_stretches(&backward).collect();
 
         assert_eq!(
             drawn,
             vec![
-                [at(40.0, 20.0), at(25.0, 80.0), at(25.0, 20.0)],
-                [at(70.0, 50.0), at(55.0, 20.0), at(55.0, 50.0)],
+                Stretch::Bend([at(40.0, 20.0), at(25.0, 80.0), at(25.0, 20.0)]),
+                Stretch::Bend([at(70.0, 50.0), at(55.0, 20.0), at(55.0, 50.0)]),
             ]
         );
         assert_eq!(
             reversed,
             vec![
-                [at(40.0, 20.0), at(55.0, 50.0), at(55.0, 20.0)],
-                [at(10.0, 80.0), at(25.0, 20.0), at(25.0, 80.0)],
+                Stretch::Bend([at(40.0, 20.0), at(55.0, 50.0), at(55.0, 20.0)]),
+                Stretch::Bend([at(10.0, 80.0), at(25.0, 20.0), at(25.0, 80.0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stretch_of_curve_two_pixels_wide_or_narrower_runs_straight() {
+        // Goal: where a chart's points sit two pixels apart or closer, the halfway bend lies
+        // under a third of a pixel from a straight line, so the stretch is drawn straight, which
+        // costs the tessellator a fifth of the triangles, and a wider stretch still bends.
+        // Method: read the stretches through points one, two and two and a half pixels apart,
+        // forwards and backwards.
+        let at = |x: f32, y: f32| point(px(x), px(y));
+        let forward = [
+            at(10.0, 80.0),
+            at(11.0, 20.0),
+            at(13.0, 50.0),
+            at(15.5, 30.0),
+        ];
+        let mut backward = forward;
+        backward.reverse();
+
+        let drawn: Vec<_> = smooth_stretches(&forward).collect();
+        let reversed: Vec<_> = smooth_stretches(&backward).collect();
+
+        assert_eq!(
+            drawn,
+            vec![
+                Stretch::Straight(at(11.0, 20.0)),
+                Stretch::Straight(at(13.0, 50.0)),
+                Stretch::Bend([at(15.5, 30.0), at(14.25, 50.0), at(14.25, 30.0)]),
+            ]
+        );
+        assert_eq!(
+            reversed,
+            vec![
+                Stretch::Bend([at(13.0, 50.0), at(14.25, 30.0), at(14.25, 50.0)]),
+                Stretch::Straight(at(11.0, 20.0)),
+                Stretch::Straight(at(10.0, 80.0)),
             ]
         );
     }
