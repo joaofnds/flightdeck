@@ -3,6 +3,7 @@
 pub mod apps;
 pub mod columns;
 pub mod programs;
+pub mod ranks;
 pub mod rates;
 
 /// Widens `value`, which a `usize` holds on every 64-bit Mac.
