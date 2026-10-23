@@ -6,7 +6,7 @@ use crate::programs::{AppKey, Capacity, Program, Programs};
 
 const CAPACITY: Capacity = Capacity {
     entries: 8,
-    key_bytes: 1024,
+    program_bytes: 1024,
 };
 const PROCESSES_MAX: u32 = 8;
 const SAFARI: Program = Program {

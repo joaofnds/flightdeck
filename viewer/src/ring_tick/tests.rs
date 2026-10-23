@@ -489,7 +489,7 @@ impl Drop for Ring {
 fn programs() -> Programs {
     Programs::new(Capacity {
         entries: 4,
-        key_bytes: 4096,
+        program_bytes: 4096,
     })
 }
 

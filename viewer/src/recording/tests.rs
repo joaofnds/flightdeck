@@ -760,7 +760,7 @@ fn minute_ticks(ticks: &mut MinuteTicks, minute: &SealedMinute) -> Result<Vec<Re
 fn minute_programs() -> Programs {
     Programs::new(Capacity {
         entries: 16,
-        key_bytes: 4096,
+        program_bytes: 4096,
     })
 }
 
