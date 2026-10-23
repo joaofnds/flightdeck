@@ -27,18 +27,24 @@ jobs:
     timeout-minutes: 35
     permissions:
       actions: read
+    outputs:
+      run-id: ${{ steps.check.outputs.run-id }}
     steps:
-      - name: Wait for check to pass on the tagged commit
+      - id: check
+        name: Wait for check to pass on the tagged commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Polls every 30 seconds for 30 minutes, inside the job's limit. A missing run reads
-          # as "null null", and a run that has not ended has an empty conclusion.
+          # as "null null null", and a run that has not ended has an empty conclusion.
           for attempt in $(seq 1 60); do
-            state="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow check.yml \
+            run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow check.yml \
               --commit "$GITHUB_SHA" --event push --branch main --limit 1 \
-              --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')"
+              --json status,conclusion,databaseId \
+              --jq '.[0] | "\(.status) \(.conclusion) \(.databaseId)"')"
+            state="${run% *}"
             if [ "$state" = "completed success" ]; then
+              echo "run-id=${run##* }" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             if [ "${state%% *}" = "completed" ]; then
@@ -54,59 +60,52 @@ jobs:
           echo "::error::Check on main did not end for $GITHUB_SHA within 30 minutes."
           exit 1
 
-  build:
+  # The release ships the bundle the desktop job of check built and checked for the tagged
+  # commit, so the commit is built once. That job restores main's cache, so the bundle links
+  # crates an earlier run on main compiled, which only code that landed on main could have
+  # written. Check keeps the bundle 90 days, so a tag on an older commit finds none and fails
+  # here.
+  check-bundle:
     needs: [wait-for-check]
-    # The collector reads macOS kernel interfaces and frameworks, so it builds only on macOS, and
-    # only for Apple chips, the only Macs it is checked on.
+    # The bundle runs only on macOS, so only a Mac can check it.
     runs-on: macos-26
-    # The limit of the desktop job of check.yml, which builds these same release binaries cold.
-    timeout-minutes: 120
-    env:
-      RUSTUP_TOOLCHAIN: 1.98.0
+    timeout-minutes: 15
+    permissions:
+      actions: read
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      archive: ${{ steps.archive.outputs.archive }}
-      sha256: ${{ steps.archive.outputs.sha256 }}
+      version: ${{ steps.bundle.outputs.version }}
+      archive: ${{ steps.bundle.outputs.archive }}
+      sha256: ${{ steps.bundle.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          persist-credentials: false
+          name: bundle
+          run-id: ${{ needs.wait-for-check.outputs.run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Refuses bytes other than those check uploaded, which is also the default.
+          digest-mismatch: error
       # The archive, the release and the cask take the version from the tag, and the app shows
-      # the one Info.plist gives, so a tag that names another version is refused before the build.
-      # Apple's version is three integers, so it also keeps anything else out of the cask's Ruby.
-      - id: version
-        name: Refuse a tag that names another version than Info.plist
+      # the one its Info.plist gives, so a tag that names another version is refused. Apple's
+      # version is three integers, so it also keeps anything else out of the cask's Ruby.
+      - id: bundle
+        name: Check the bundle and name it for the release
         run: |
-          version="$(plutil -extract CFBundleShortVersionString raw desktop/Info.plist)"
+          directory="$(mktemp -d)"
+          ditto -x -k Flightdeck.zip "$directory"
+          version="$(plutil -extract CFBundleShortVersionString raw \
+            "$directory/Flightdeck.app/Contents/Info.plist")"
           if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Info.plist's version $version is not three integers."
+            echo "::error::The bundle's version $version is not three integers."
             exit 1
           fi
           if [ "$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME names another version than Info.plist's $version."
+            echo "::error::Tag $GITHUB_REF_NAME names another version than the bundle's $version."
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      # No cache is restored. The caches main saves hold builds of crates the release never
-      # ships, such as test support, and a release links only what it compiled itself.
-      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
-        with:
-          version: 2026.10.3
-          install_args: just
-          cache_save: false
-      - run: just bundle
-      # ditto keeps the bundle's permissions and signatures, and Homebrew unpacks a zip.
-      - id: archive
-        name: Archive the bundle and check the archived copy
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          archive="Flightdeck_${VERSION}_aarch64.zip"
-          ditto -c -k --keepParent desktop/target/Flightdeck.app "$archive"
-          directory="$(mktemp -d)"
-          ditto -x -k "$archive" "$directory"
           "$directory/Flightdeck.app/Contents/MacOS/flightdeck" --bundle --check
+          archive="Flightdeck_${version}_aarch64.zip"
+          mv Flightdeck.zip "$archive"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "sha256=$(shasum -a 256 "$archive" | cut -c 1-64)" >> "$GITHUB_OUTPUT"
       # The artifact wraps the archive in a zip of its own, which download-artifact extracts, so
@@ -115,13 +114,15 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
-          path: ${{ steps.archive.outputs.archive }}
+          path: ${{ steps.bundle.outputs.archive }}
           if-no-files-found: error
+          # The zip is compressed already.
+          compression-level: 0
 
-  # Publishing is a job of its own, so the build, which runs every dependency's build script,
-  # never holds a token that can write the repository.
+  # Publishing is a job of its own, so the job that runs the bundle never holds a token that can
+  # write the repository.
   publish:
-    needs: [build]
+    needs: [check-bundle]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -135,13 +136,13 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ARCHIVE: ${{ needs.build.outputs.archive }}
+          ARCHIVE: ${{ needs.check-bundle.outputs.archive }}
         run: >-
           gh release create "$GITHUB_REF_NAME" "$ARCHIVE" --repo "$GITHUB_REPOSITORY"
           --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
 
   update-tap:
-    needs: [build, publish]
+    needs: [check-bundle, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Releases of two tags write the tap one after the other, so neither replaces a cask with a
@@ -155,9 +156,9 @@ jobs:
       - name: Write the casks to joaofnds/homebrew-tap
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          VERSION: ${{ needs.build.outputs.version }}
-          ARCHIVE: ${{ needs.build.outputs.archive }}
-          SHA256: ${{ needs.build.outputs.sha256 }}
+          VERSION: ${{ needs.check-bundle.outputs.version }}
+          ARCHIVE: ${{ needs.check-bundle.outputs.archive }}
+          SHA256: ${{ needs.check-bundle.outputs.sha256 }}
         run: |
           # The two casks differ only in their token, so one function writes both. A versioned
           # cask whose contents drift from the unversioned one would install something other

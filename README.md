@@ -109,21 +109,23 @@ just release 0.2.0
 git push origin main 0.2.0
 ```
 
-The workflow builds the bundle as `just bundle` does, from no cache, attaches it to the
-release as `Flightdeck_<version>_aarch64.zip`, and writes the `flightdeck@<version>` and
-`flightdeck` casks to [joaofnds/homebrew-tap](https://github.com/joaofnds/homebrew-tap):
+The workflow waits for check to pass on the tagged commit on `main`, attaches the bundle
+that check built for it to the release as `Flightdeck_<version>_aarch64.zip`, so no commit is
+built twice, and writes the `flightdeck@<version>` and `flightdeck` casks to
+[joaofnds/homebrew-tap](https://github.com/joaofnds/homebrew-tap):
 
 ```sh
 brew install --cask joaofnds/tap/flightdeck
 ```
 
-`flightdeck` stays on the newest version the tap has seen, so a tag for an older version
-writes only its pinned cask. Writing the casks takes a `HOMEBREW_TAP_TOKEN` secret that can
-write that repository's contents. `gh run rerun <run-id> --failed` repeats only the jobs of a
-run that failed, which is safe since gh deletes the draft of a publish that failed and writing
-a cask replaces the one there. The bundle has no Developer ID signature and is
-not notarized, so the cask clears the quarantine macOS sets on a download. Clear it on a copy
-downloaded by hand with `xattr -cr Flightdeck.app`. The release builds only for Apple chips.
+Check keeps each bundle 90 days, so tag a commit within 90 days of its push. `flightdeck`
+stays on the newest version the tap has seen, so a tag for an older version writes only its
+pinned cask. Writing the casks takes a `HOMEBREW_TAP_TOKEN` secret that can write that
+repository's contents. `gh run rerun <run-id> --failed` repeats only the jobs of a run that
+failed, which is safe since gh deletes the draft of a publish that failed and writing a cask
+replaces the one there. The bundle has no Developer ID signature and is not notarized, so the
+cask clears the quarantine macOS sets on a download. Clear it on a copy downloaded by hand
+with `xattr -cr Flightdeck.app`. The bundle is built only for Apple chips.
 
 ## Recording inspection tools
 
@@ -161,8 +163,8 @@ request, under the toolchain `.github/workflows/check.yml` names. Its check job 
 runs, so a step added to either runs in CI and on your machine alike. `check-root` formats,
 lints and tests the root workspace through `fmt`, `clippy` and `test`. `check-desktop` does
 the same for the desktop workspace through the recipes named `desktop-`, then runs
-`bundle-check`, which packages the app and compares the bundle's executables with the ones
-the build made, and `seal-bench`, which prints what sealing a minute costs.
+`seal-bench`, which prints what sealing a minute costs, and last `bundle-check`, which
+packages the app and compares the bundle's executables with the ones the build made.
 
 CI adds only what its runner needs. It skips the tests in modules named `this_mac`, since
 its virtual Mac lacks the hardware they read, and runs the ignored tests that need a second

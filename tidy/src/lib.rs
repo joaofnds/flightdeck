@@ -482,10 +482,10 @@ fn function_text(indentation: &str, line_count: usize) -> String {
 #[test]
 fn mise_pins_the_toolchain_every_workflow_builds_with() {
     // Goal: a contributor who runs cargo through mise gets the compiler, clippy and rustfmt
-    // that CI checks with and the release builds with, so a change that passes there passes
-    // here and ships as it was checked.
+    // that CI checks with and builds the released bundle with, so a change that passes there
+    // passes here and ships as it was checked.
     // Method: read the Rust version from mise.toml and the toolchains each workflow git tracks
-    // pins, and require the check and the release each to pin one.
+    // pins, and require the check to pin one.
     let root = repository_root();
     let mise = read_text(&root.join("mise.toml"));
     let version = mise_rust_version(&mise);
@@ -517,12 +517,6 @@ fn mise_pins_the_toolchain_every_workflow_builds_with() {
             .any(|path| path == ".github/workflows/check.yml"),
         "{pinned:?}"
     );
-    assert!(
-        pinned
-            .iter()
-            .any(|path| path == ".github/workflows/release.yml"),
-        "{pinned:?}"
-    );
 }
 
 #[test]
@@ -536,6 +530,77 @@ fn mise_rust_version_and_workflow_toolchains_read_their_pins() {
 
     assert_eq!(mise_rust_version(mise), "1.98.0");
     assert_eq!(workflow_toolchains(workflow), ["1.98.0", "1.97.0"]);
+}
+
+#[test]
+fn release_ships_the_bundle_check_uploads_and_builds_nothing() {
+    // Goal: a rename on either side of the artifact the two workflows share fails here, at the
+    // commit that makes it, rather than at the next tag, and a release never builds again what
+    // check built.
+    // Method: read the artifact check uploads and the ones release downloads, and require
+    // release to run no cargo, rustup, mise or just.
+    let root = repository_root();
+    let check = read_text(&root.join(".github/workflows/check.yml"));
+    let release = read_text(&root.join(".github/workflows/release.yml"));
+
+    assert_eq!(artifact_names(&check, "upload-artifact"), ["bundle"]);
+    assert_eq!(
+        artifact_names(&release, "download-artifact"),
+        ["bundle", "release"]
+    );
+    for line in release.lines() {
+        let command = line
+            .trim()
+            .trim_start_matches("- ")
+            .trim_start_matches("run: ");
+        assert!(
+            !["cargo", "rustup", "mise", "jdx/mise-action"]
+                .iter()
+                .any(|tool| line.contains(tool))
+                && !command.starts_with("just "),
+            "release.yml builds: {line}"
+        );
+    }
+}
+
+#[test]
+fn artifact_names_reads_the_name_of_each_step_of_the_action() {
+    // Goal: the reader finds each step's artifact and skips a step of another action.
+    // Method: a download, an upload and a second download, each named in its own with block.
+    let workflow = concat!(
+        "      - uses: actions/download-artifact@1 # v1\n",
+        "        with:\n",
+        "          name: a\n",
+        "      - uses: actions/upload-artifact@2 # v2\n",
+        "        with:\n",
+        "          name: b\n",
+        "      - uses: actions/download-artifact@1 # v1\n",
+        "        with:\n",
+        "          path: x\n",
+        "          name: c\n",
+    );
+
+    assert_eq!(artifact_names(workflow, "download-artifact"), ["a", "c"]);
+    assert_eq!(artifact_names(workflow, "upload-artifact"), ["b"]);
+}
+
+/// Lists the artifact each step of `actions/<action>` names, in order. A step's inputs are
+/// the lines after its `uses` up to the next step.
+fn artifact_names<'a>(text: &'a str, action: &str) -> Vec<&'a str> {
+    assert!(!action.is_empty());
+    let uses = format!("uses: actions/{action}@");
+    let lines: Vec<&str> = text.lines().collect();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if line.contains(&uses) {
+            let name = lines[index + 1..]
+                .iter()
+                .take_while(|input| !input.trim_start().starts_with("- "))
+                .find_map(|input| input.trim().strip_prefix("name: "));
+            names.push(name.unwrap_or_else(|| panic!("a step of {action} names no artifact")));
+        }
+    }
+    names
 }
 
 /// Returns the version the `rust` entry of mise's `[tools]` table names.

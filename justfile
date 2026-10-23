@@ -68,8 +68,10 @@ check: check-root check-desktop
 # Check the root workspace as CI's check job does.
 check-root: fmt clippy test
 
+# The bundle-check comes last, after every other cargo run, so the bundle CI hands to a
+# release is the one whose executables it compared with the build's.
 # Check the desktop workspace and the bundle as CI's desktop job does.
-check-desktop: desktop-fmt desktop-clippy desktop-test bundle-check seal-bench
+check-desktop: desktop-fmt desktop-clippy desktop-test seal-bench bundle-check
 
 # Check the formatting of the root workspace.
 fmt:
