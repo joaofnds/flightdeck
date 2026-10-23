@@ -3322,6 +3322,7 @@ name = "viewer"
 version = "0.1.0"
 dependencies = [
  "collector",
+ "model",
  "persistence",
  "polars",
  "serde_json",

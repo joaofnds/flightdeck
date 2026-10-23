@@ -14,6 +14,7 @@ pub mod live_apps;
 mod live_fan_history;
 mod metrics;
 pub mod recording;
+pub mod ring_tick;
 mod session;
 pub mod store;
 

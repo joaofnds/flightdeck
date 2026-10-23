@@ -125,6 +125,13 @@ impl ProgramReference {
         owner: 0,
         number: 0,
     };
+
+    /// The entry's number in its run's dictionary, which counts from 1 in the order the
+    /// collector added the entries.
+    #[must_use]
+    pub fn number(&self) -> u64 {
+        self.number
+    }
 }
 
 pub const PROGRAM_PATH_BYTES_MAX: usize = 4095;

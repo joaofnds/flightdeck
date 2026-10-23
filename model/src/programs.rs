@@ -125,6 +125,12 @@ impl Programs {
         self.ranks[app.index()]
     }
 
+    /// The entries the index can hold at most, which bounds an entry's number.
+    #[must_use]
+    pub fn entries_max(&self) -> usize {
+        self.entries.len()
+    }
+
     /// The Apps the index can hold at most, which bounds an App's number.
     #[must_use]
     pub fn apps_max(&self) -> usize {
