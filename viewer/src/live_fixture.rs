@@ -400,9 +400,10 @@ impl Fixture {
         minute: Option<u64>,
         observations: &[persistence::Observation],
     ) -> persistence::Window {
-        let mut tick = persistence::tick_buffer(&SHAPE).unwrap();
+        let shape = reader.shape();
+        let mut tick = persistence::tick_buffer(&shape).unwrap();
         let mut identities = Vec::with_capacity(2);
-        let mut window = self.seal_read_window(minute);
+        let mut window = self.seal_read_window(minute, &shape);
         for _index in 0..8 {
             let found = if self.identity {
                 reader.read_identity_into(&mut tick, &mut identities)
@@ -450,14 +451,14 @@ impl Fixture {
         window
     }
 
-    fn seal_read_window(&self, minute: Option<u64>) -> persistence::Window {
+    fn seal_read_window(&self, minute: Option<u64>, shape: &Shape) -> persistence::Window {
         let window = minute.unwrap_or_default();
         persistence::Window::new(
             persistence::WindowIdentity {
                 run: self.writer.identity().unwrap(),
                 window,
             },
-            persistence::Limits::from_shape(&SHAPE).unwrap(),
+            persistence::Limits::from_shape(shape).unwrap(),
         )
     }
 }

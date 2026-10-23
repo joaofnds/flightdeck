@@ -9,8 +9,8 @@ use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::recording::{RegisteredRun, Registry};
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, IOReportReadings, IdentityPublication, ObservationTimes,
-    Place, Readings, RingReader, SmcReadings, SupplementalReadings, SystemPublication, Tick,
-    Writer,
+    Place, Readings, RingReader, RunIdentity, Shape, SmcReadings, SupplementalReadings,
+    SystemPublication, Tick, Writer,
 };
 use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading};
 use persistence::schema::{APP_PARTS, Table};
@@ -31,10 +31,13 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
     // Goal: the recording and the ring hand the store the same machine readings, so one rate
     // rule serves both.
-    // Method: publish three ticks with distinct readings, the second without IOReport and the
-    // third without the SMC, take the ring's ticks as the store would, seal them as one
-    // minute, and decode it.
+    // Method: publish three ticks with distinct readings of two of each CPU, interface, GPU
+    // state, core state and fan, the second without IOReport and the third without the SMC,
+    // take the ring's ticks as the store would, seal them as one minute, and decode it.
     let mut fixture = Fixture::new_mode(false, 2, None);
+    wide_ring(&mut fixture, |place, shape, identity| {
+        Writer::create_recording(place, shape, identity, 0)
+    });
     for step in 1..=3 {
         publish_machine(&mut fixture, step, None);
     }
@@ -51,7 +54,7 @@ fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
     let states = (expected.gpu_states.len(), expected.core_states.len());
     assert_eq!(
         (expected.ticks.len(), states, expected.fans.len()),
-        (3, (2, 2), 2)
+        (3, (4, 8), 4)
     );
     assert_eq!(decoded, expected);
 }
@@ -97,7 +100,7 @@ fn a_sealed_minute_holds_the_system_battery_and_disk_readings_the_ring_held() {
         .iter()
         .filter(|state| state.frequency_khz.is_some())
         .count();
-    assert_eq!(clocked, 2);
+    assert_eq!(clocked, 8);
     assert_eq!(decoded, expected);
 }
 
@@ -346,23 +349,42 @@ fn null(name: &str, data_type: DataType) -> Expr {
     lit(Null {}).cast(data_type).alias(name)
 }
 
-/// Moves `fixture` onto a ring of its shape and run that also carries system readings,
-/// battery readings and disks.
+/// Moves `fixture` onto a ring of its run, as `wide_ring` makes it, that also carries system
+/// readings, battery readings and disks.
 fn system_ring(fixture: &mut Fixture) {
+    wide_ring(fixture, |place, shape, identity| {
+        let capacity = DictionaryCapacity {
+            entries: 4,
+            arena_bytes: 32_768,
+        };
+        Writer::create_with_system(place, shape, capacity, identity, 0)
+    });
+}
+
+/// Moves `fixture` onto a ring of its run and shape, with room for two of each CPU, interface,
+/// core, state and fan, that `create` makes.
+fn wide_ring(
+    fixture: &mut Fixture,
+    create: fn(&Place, Shape, &RunIdentity) -> std::io::Result<Writer>,
+) {
     let identity = fixture.writer.identity().unwrap();
     let shape = RingReader::open_generation(fixture.writer.name())
         .unwrap()
         .shape();
+    let shape = Shape {
+        cpu_capacity: 2,
+        interface_capacity: 2,
+        core_capacity: 2,
+        state_capacity: 2,
+        fan_capacity: 2,
+        ..shape
+    };
     let serial = NEXT.fetch_add(1, Ordering::Relaxed);
     let place = Place {
-        lock_path: fixture.root.join("system.lock"),
-        name_prefix: format!("/fdrs{}x{serial}", std::process::id()),
+        lock_path: fixture.root.join("wide.lock"),
+        name_prefix: format!("/fdrw{}x{serial}", std::process::id()),
     };
-    let capacity = DictionaryCapacity {
-        entries: 4,
-        arena_bytes: 32_768,
-    };
-    let writer = Writer::create_with_system(&place, shape, capacity, &identity, 0).unwrap();
+    let writer = create(&place, shape, &identity).unwrap();
 
     collector::ring::unlink_generation(fixture.writer.name()).unwrap();
     fixture.writer = writer;
@@ -390,7 +412,7 @@ fn publish_supplemented(fixture: &mut Fixture, step: u64) {
         ..MachineFacts::default()
     };
     let khz = 2_000_000 + u32::try_from(step).unwrap();
-    let clock = ClockTables::from_tables(vec![vec![khz]]);
+    let clock = ClockTables::from_tables(vec![vec![khz, khz + 1_000]]);
     let system = SystemPublication {
         reading: &reading,
         machine: &machine,
@@ -529,15 +551,17 @@ fn marker(fixture: &Fixture, minute: u64) -> std::path::PathBuf {
     })
 }
 
-/// The machine readings of the `step`th tick, each counter distinct from every other tick's.
-fn machine(step: u64) -> ([CPUTicks; 1], Memory, [Interface; 1]) {
+/// The machine readings of the `step`th tick, of two CPUs and two interfaces, each counter
+/// distinct from every other.
+fn machine(step: u64) -> ([CPUTicks; 2], Memory, [Interface; 2]) {
     let small = u32::try_from(step).unwrap();
-    let cpus = [CPUTicks {
-        user: 10 * small,
-        system: 10 * small + 1,
-        nice: 10 * small + 2,
-        idle: 10 * small + 3,
-    }];
+    let cpu = |first: u32| CPUTicks {
+        user: 10 * small + first,
+        system: 10 * small + first + 1,
+        nice: 10 * small + first + 2,
+        idle: 10 * small + first + 3,
+    };
+    let cpus = [cpu(0), cpu(5)];
     let memory = Memory {
         total_bytes: 1_000 * step,
         free_bytes: 1_000 * step + 1,
@@ -560,42 +584,49 @@ fn machine(step: u64) -> ([CPUTicks; 1], Memory, [Interface; 1]) {
         pressure: [Pressure::Normal, Pressure::Warning, Pressure::Critical]
             [usize::try_from(step % 3).unwrap()],
     };
-    let mut name = [0; IFNAMSIZ];
-    name[..4].copy_from_slice(b"utun");
-    let interfaces = [Interface {
-        index: 4,
-        name: Name::from_bytes(name, 4).unwrap(),
-        received_bytes: 100 * step,
-        sent_bytes: 100 * step + 1,
-        received_packets: 100 * step + 2,
-        sent_packets: 100 * step + 3,
-        receive_errors: 100 * step + 4,
-        send_errors: 100 * step + 5,
-        receive_drops: 100 * step + 6,
-    }];
+    let interface = |index: u16, text: &[u8], first: u64| {
+        let mut name = [0; IFNAMSIZ];
+        name[..text.len()].copy_from_slice(text);
+        Interface {
+            index,
+            name: Name::from_bytes(name, text.len()).unwrap(),
+            received_bytes: 100 * step + first,
+            sent_bytes: 100 * step + first + 1,
+            received_packets: 100 * step + first + 2,
+            sent_packets: 100 * step + first + 3,
+            receive_errors: 100 * step + first + 4,
+            send_errors: 100 * step + first + 5,
+            receive_drops: 100 * step + first + 6,
+        }
+    };
+    let interfaces = [interface(4, b"utun", 0), interface(7, b"en0", 10)];
     (cpus, memory, interfaces)
 }
 
-/// The `IOReport` and SMC readings of the `step`th tick, each distinct from every other tick's.
+/// The `IOReport` and SMC readings of the `step`th tick, of two GPU states, two cores of two
+/// states and two fans, each distinct from every other.
 struct Sources {
     gpu_energy_nj: u64,
-    gpu_active_ns: [u64; 1],
-    cores: [States; 1],
+    gpu_active_ns: [u64; 2],
+    cores: [States; 2],
     power_watts: f32,
     soc_celsius: f32,
     cpu_celsius: f32,
-    fan_rpm: [f32; 1],
+    fan_rpm: [f32; 2],
 }
 
 fn sources(step: u64) -> Sources {
     let small = f32::from(u8::try_from(step).unwrap());
     Sources {
         gpu_energy_nj: 10_000 * step,
-        gpu_active_ns: [10_000 * step + 1],
-        cores: [States::with_active_ns(&[10_000 * step + 2])],
+        gpu_active_ns: [10_000 * step + 1, 10_000 * step + 2],
+        cores: [
+            States::with_active_ns(&[10_000 * step + 3, 10_000 * step + 4]),
+            States::with_active_ns(&[10_000 * step + 5, 10_000 * step + 6]),
+        ],
         power_watts: 10.0 + small,
         soc_celsius: 40.0 + small,
         cpu_celsius: 50.0 + small,
-        fan_rpm: [1_000.0 + small],
+        fan_rpm: [1_000.0 + small, 2_000.0 + small],
     }
 }
