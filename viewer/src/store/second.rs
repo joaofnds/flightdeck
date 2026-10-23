@@ -2,11 +2,15 @@
 //! takes the second in from the ring or from a sealed minute, so the main thread reads values
 //! and computes no rate.
 
+use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::interfaces::Interface;
 use collector::machine::{CPUTicks, Pressure};
+use collector::smc::FANS_MAX;
 
 use crate::metrics::number;
-use crate::recording::{CpuRow, InterfaceRow, MachineMinute, MemoryRow, TickRow};
+use crate::recording::{
+    CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
+};
 
 #[cfg(test)]
 #[path = "second_tests.rs"]
@@ -24,8 +28,17 @@ pub struct MachineSecond {
     /// only where the two readings are consecutive (doc-30).
     pub follows: bool,
     pub cpu_percent: Option<f64>,
+    /// Each performance level's busy share, level 0, the fastest, first.
+    pub cpu_level_percent: [Option<f64>; 2],
+    pub gpu_active_percent: Option<f64>,
     pub memory: Option<MemorySecond>,
     pub network: Option<Traffic>,
+    pub disk_read_bps: Option<f64>,
+    pub disk_written_bps: Option<f64>,
+    pub power_watts: Option<f32>,
+    pub soc_celsius: Option<f32>,
+    pub fan_mean_rpm: Option<f32>,
+    pub thermal_pressure: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +67,8 @@ pub struct Reading<'a> {
     /// `None` where the minute holds no memory row for the publication.
     pub memory: Option<&'a MemoryRow>,
     pub interfaces: &'a [InterfaceRow],
+    pub gpu_states: &'a [GpuStateRow],
+    pub fans: &'a [FanRow],
 }
 
 impl MachineSecond {
@@ -70,14 +85,28 @@ impl MachineSecond {
             continuous_ns: reading.tick.continuous_ns,
             follows: false,
             cpu_percent: None,
+            cpu_level_percent: [None; 2],
+            gpu_active_percent: None,
             memory: reading.memory.map(MemorySecond::of),
             network: None,
+            disk_read_bps: None,
+            disk_written_bps: None,
+            power_watts: reading.tick.power_watts,
+            soc_celsius: reading.tick.soc_celsius,
+            fan_mean_rpm: fan_mean_rpm(reading.fans),
+            thermal_pressure: reading.tick.thermal_pressure,
         };
         if let Some(previous) = previous {
             if let Some(elapsed_ns) = interval_ns(previous.tick, reading.tick) {
                 second.follows = true;
                 second.cpu_percent = cpu_percent(reading.cpus, previous.cpus);
+                second.cpu_level_percent = cpu_level_percent(reading, previous);
+                second.gpu_active_percent =
+                    gpu_active_percent(reading.gpu_states, previous.gpu_states, elapsed_ns);
                 second.network = traffic(reading.interfaces, previous.interfaces, elapsed_ns);
+                let [read, written] = disk_bytes(reading.tick, previous.tick);
+                second.disk_read_bps = read.map(|bytes| per_second(bytes, elapsed_ns));
+                second.disk_written_bps = written.map(|bytes| per_second(bytes, elapsed_ns));
             }
         }
 
@@ -169,6 +198,184 @@ fn cpu_delta(before: &CPUTicks, now: &CPUTicks) -> Option<CpuDelta> {
     })
 }
 
+/// The mean busy share of each performance level's CPUs, level 0 first, where the levels of
+/// `current` cover its CPUs. The slower level's CPUs take the lowest indices, as macOS numbers
+/// them.
+fn cpu_level_percent(current: &Reading<'_>, previous: &Reading<'_>) -> [Option<f64>; 2] {
+    let Some(levels) = current.tick.performance_levels else {
+        return [None; 2];
+    };
+    let [Ok(fast), Ok(slow)] = levels.map(|level| usize::try_from(level.logical_cpus)) else {
+        return [None; 2];
+    };
+    if fast.checked_add(slow) != Some(current.cpus.len()) {
+        return [None; 2];
+    }
+    if previous.cpus.len() != current.cpus.len() {
+        return [None; 2];
+    }
+
+    let (slow_now, fast_now) = current.cpus.split_at(slow);
+    let (slow_before, fast_before) = previous.cpus.split_at(slow);
+    [
+        mean_busy_percent(fast_now, fast_before),
+        mean_busy_percent(slow_now, slow_before),
+    ]
+}
+
+/// The mean of each CPU's busy share since `previous`, in percent. `None` where a CPU differs,
+/// a counter went back or a CPU counted no ticks.
+fn mean_busy_percent(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
+    assert_eq!(current.len(), previous.len());
+    if current.is_empty() {
+        return None;
+    }
+
+    let mut sum = 0.0;
+    let mut count = 0_u32;
+    for (now, before) in current.iter().zip(previous) {
+        if now.cpu != before.cpu {
+            return None;
+        }
+        let delta = cpu_delta(&before.ticks, &now.ticks)?;
+        let total = delta.busy.checked_add(delta.idle)?;
+        if total == 0 {
+            return None;
+        }
+
+        sum += number(delta.busy) / number(total) * 100.0;
+        count += 1;
+    }
+
+    Some(sum / f64::from(count))
+}
+
+/// The share of `elapsed_ns` the GPU spent in its states since `previous`, in percent. `None`
+/// where either tick read no states, the states differ or a counter went back.
+fn gpu_active_percent(
+    current: &[GpuStateRow],
+    previous: &[GpuStateRow],
+    elapsed_ns: u64,
+) -> Option<f64> {
+    assert!(elapsed_ns > 0);
+    if current.is_empty() {
+        return None;
+    }
+    if current.len() != previous.len() {
+        return None;
+    }
+
+    let mut active_ns = 0_u64;
+    for (index, now) in current.iter().enumerate() {
+        let before = paired(previous, index, |row| row.state == now.state)?;
+        active_ns = active_ns.checked_add(now.active_ns.checked_sub(before.active_ns)?)?;
+    }
+
+    Some(number(active_ns) * 100.0 / number(elapsed_ns))
+}
+
+/// The bytes read from and written to the disks since `previous`, summed over the disks, where
+/// both ticks scanned every disk at the tick and found the same ones. Each is `None` where a
+/// disk failed or its counter is missing or went back.
+fn disk_bytes(current: &TickRow, previous: &TickRow) -> [Option<u64>; 2] {
+    let Some(now) = disk_scan(current) else {
+        return [None; 2];
+    };
+    let Some(before) = disk_scan(previous) else {
+        return [None; 2];
+    };
+    if now.len() != before.len() {
+        return [None; 2];
+    }
+
+    let add = |total: Option<u64>, delta: Option<u64>| {
+        total
+            .zip(delta)
+            .and_then(|(total, delta)| total.checked_add(delta))
+    };
+    let mut read = Some(0_u64);
+    let mut written = Some(0_u64);
+    for disk in now {
+        let Some(old) = before.iter().find(|old| same_disk(old, disk)) else {
+            return [None; 2];
+        };
+        let [read_delta, written_delta] = disk_delta(disk, old);
+        read = add(read, read_delta);
+        written = add(written, written_delta);
+    }
+
+    [read, written]
+}
+
+/// The disks of `tick`'s scan, where the scan completed at the tick.
+fn disk_scan(tick: &TickRow) -> Option<&[DiskReading]> {
+    let snapshot: &DiskSnapshot = tick.disks.as_ref()?;
+    if Some(snapshot.source_continuous_ns) != tick.continuous_ns {
+        return None;
+    }
+    if snapshot.state != ScanState::Complete {
+        return None;
+    }
+
+    snapshot.records.get(..snapshot.count)
+}
+
+fn same_disk(one: &DiskReading, other: &DiskReading) -> bool {
+    if one.driver_id != other.driver_id {
+        return false;
+    }
+
+    one.media_id == other.media_id
+}
+
+/// The bytes `current` read and wrote since `previous`.
+fn disk_delta(current: &DiskReading, previous: &DiskReading) -> [Option<u64>; 2] {
+    if current.failed {
+        return [None; 2];
+    }
+    if previous.failed {
+        return [None; 2];
+    }
+
+    let delta = |now: Option<u64>, before: Option<u64>| {
+        now.zip(before)
+            .and_then(|(now, before)| now.checked_sub(before))
+    };
+    [
+        delta(current.read_bytes, previous.read_bytes),
+        delta(current.write_bytes, previous.write_bytes),
+    ]
+}
+
+fn per_second(count: u64, elapsed_ns: u64) -> f64 {
+    assert!(elapsed_ns > 0);
+
+    number(count) * 1e9 / number(elapsed_ns)
+}
+
+/// The mean speed of the fans `fans` measured, or `None` where it measured none. A reading that
+/// is no speed is left out, and so are fans past the most the SMC lists.
+fn fan_mean_rpm(fans: &[FanRow]) -> Option<f32> {
+    let mut sum = 0.0_f32;
+    let mut count = 0_u8;
+    for fan in fans.iter().take(usize::from(FANS_MAX)) {
+        if !fan.rpm.is_finite() {
+            continue;
+        }
+        if fan.rpm < 0.0 {
+            continue;
+        }
+
+        sum += fan.rpm;
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+
+    Some(sum / f32::from(count))
+}
+
 /// The external traffic since `previous`, over `elapsed_ns` of the continuous clock. A Mac with
 /// no interface on either side moves no traffic. `None` where the interfaces differ or a
 /// counter went back.
@@ -225,6 +432,8 @@ pub fn readings(minute: &MachineMinute) -> impl Iterator<Item = Reading<'_>> {
     let mut cpus = &minute.cpus[..];
     let mut memory = &minute.memory[..];
     let mut interfaces = &minute.interfaces[..];
+    let mut gpu_states = &minute.gpu_states[..];
+    let mut fans = &minute.fans[..];
     minute.ticks.iter().map(move |tick| {
         let publication = tick.publication;
         let (own_cpus, rest) = split_publication(cpus, publication, |row| row.publication);
@@ -234,12 +443,19 @@ pub fn readings(minute: &MachineMinute) -> impl Iterator<Item = Reading<'_>> {
         let (own_interfaces, rest) =
             split_publication(interfaces, publication, |row| row.publication);
         interfaces = rest;
+        let (own_gpu_states, rest) =
+            split_publication(gpu_states, publication, |row| row.publication);
+        gpu_states = rest;
+        let (own_fans, rest) = split_publication(fans, publication, |row| row.publication);
+        fans = rest;
 
         Reading {
             tick,
             cpus: own_cpus,
             memory: own_memory.first(),
             interfaces: own_interfaces,
+            gpu_states: own_gpu_states,
+            fans: own_fans,
         }
     })
 }
