@@ -136,8 +136,14 @@ impl Ring {
         self.followed
     }
 
-    /// Looks at the registry and follows its newest run, as `follow` describes.
+    /// Looks at the registry and follows its newest run, as `follow` describes. The store checked
+    /// the recording's identity when it began following its run, so while that run is the newest
+    /// it reads the registry alone.
     fn follow_newest(&mut self) -> Result<(), Failure> {
+        if self.follow_newest_followed()? {
+            return Ok(());
+        }
+
         let recording =
             read_identity(&self.root).map_err(|error| Failure::Recording(error.kind()))?;
         let registry = Registry::read_into(&self.runs, &mut self.registry)
@@ -179,6 +185,21 @@ impl Ring {
 
         self.source = Some(Source::open(reader, identity)?);
         Ok(())
+    }
+
+    /// Whether the registry's newest run is the run the store follows.
+    fn follow_newest_followed(&mut self) -> Result<bool, Failure> {
+        let Some(source) = &self.source else {
+            return Ok(false);
+        };
+        let registry = Registry::read_into(&self.runs, &mut self.registry)
+            .map_err(|error| Failure::Registry(error.kind()))?;
+        let Some(newest) = registry.runs().last() else {
+            return Ok(false);
+        };
+
+        let newest = newest.map_err(|error| Failure::Registry(error.kind()))?;
+        Ok(newest.identity == source.identity)
     }
 
     /// Sleeps until the ring publishes past what the store read, for at most `timeout`. Where

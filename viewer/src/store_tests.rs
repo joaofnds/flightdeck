@@ -170,6 +170,29 @@ mod when_the_collector_starts_again {
     }
 }
 
+mod while_the_store_follows_the_newest_run {
+    use super::super::ring::{FOLLOW_STEPS, Ring};
+    use super::Fixture;
+
+    #[test]
+    fn a_look_for_a_new_run_leaves_the_recording_identity_unread() {
+        // Goal: a look for a new run reads the runs registry alone while the store follows the
+        // newest, since the store checked the recording's identity when it began following, and
+        // each file opened costs the store more than reading a tick. Method: follow a run through
+        // the ring adapter, make the recording's identity unreadable, and step until the adapter
+        // looks at the registry again.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(100);
+        let mut ring = Ring::new(fixture.root.clone());
+        ring.follow().unwrap();
+        std::fs::remove_file(fixture.root.join("identity")).unwrap();
+
+        let looks: Vec<_> = (0..FOLLOW_STEPS).map(|_| ring.follow()).collect();
+
+        assert_eq!(looks, vec![Ok(()); usize::try_from(FOLLOW_STEPS).unwrap()]);
+    }
+}
+
 mod when_the_folder_holds_no_recording {
     use super::{ErrorKind, Failure, Store, view_where};
 
