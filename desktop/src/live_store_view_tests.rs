@@ -12,7 +12,7 @@ use crate::data::Panel;
 use crate::hardware::Readings;
 use crate::live_hover::{Origin, Preview, Target};
 use crate::live_projection::overview_panels;
-use crate::live_source::{Snapshot, Worker};
+use crate::live_source::{Snapshot, Update, Worker};
 use crate::live_store_fixtures::{
     levels, levels_named, reading_at, selection, store_levels_named, trend_point, view,
 };
@@ -285,6 +285,46 @@ mod when_the_view_is_older_than_the_readings {
 
         assert!(!changed);
         assert_same_panels(&dashboard.panels, &before);
+    }
+}
+
+mod when_the_page_keeps_the_room_of_its_readings {
+    use super::*;
+
+    #[test]
+    fn the_view_draws_nothing_until_the_reply() {
+        // Goal: a page asked for again keeps the room its readings took until the worker
+        // answers, and a View that arrives meanwhile draws no chart into it. Method: Overview
+        // with readings asks again, as paging a table does, then a newer View.
+        let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        dashboard.submit();
+
+        let changed = dashboard.take_view(newer_view());
+
+        assert!(!changed);
+    }
+}
+
+mod when_the_worker_fails_to_read_the_page {
+    use super::*;
+
+    #[test]
+    fn the_status_reports_the_failure() {
+        // Goal: a failed read shows as one while the store's Views keep arriving. Method: a
+        // newly opened Overview whose read fails, then a newer View.
+        let mut dashboard = opening();
+        let generation = dashboard.generation;
+        let message = String::from("unreadable");
+        let failure = Update::Failed {
+            generation,
+            message,
+        };
+        assert!(dashboard.receive(failure));
+
+        dashboard.take_view(newer_view());
+
+        let now = UNIX_EPOCH + Duration::from_secs(10_006);
+        assert_eq!(dashboard.status_at(now), "Reading unavailable");
     }
 }
 

@@ -111,8 +111,8 @@ impl LiveDashboard {
 
     /// The View the page draws Overview's machine charts, readouts and hardware figure from: the
     /// store's newest, while the page shows Overview's readings following the newest second, no
-    /// hover's reading is shown, and the View is no older than the worker's readings, where the
-    /// worker has read any.
+    /// hover's reading is shown, and the View is no older than the worker's readings, or the
+    /// page is opening before the worker's first reading.
     fn drawn_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
             return None;
@@ -127,8 +127,16 @@ impl LiveDashboard {
 
         let view = self.store_view.as_deref()?;
         let view_last = view.seconds.last()?.wall_ns / NANOSECONDS_PER_SECOND;
-        // At launch the worker's first reading comes seconds after the store's first View.
+        // At launch the worker's first reading comes seconds after the store's first View, which
+        // draws into the empty charts the page opened with. A page whose read failed, or that
+        // keeps the room of the readings it showed until the worker answers, holds no charts.
         let Some(snapshot) = &self.snapshot else {
+            if !self.is_opening() {
+                return None;
+            }
+            if !self.placeholders.is_empty() {
+                return None;
+            }
             return Some(view);
         };
         let readings_last = crate::live_projection::context_last_second(&snapshot.selection)?;
