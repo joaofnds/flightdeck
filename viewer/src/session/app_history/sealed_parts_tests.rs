@@ -8,6 +8,8 @@ use super::*;
 use crate::live::app_process_groups_history_tests::{named, usage};
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{PAGE_ROWS_MAX, Page};
+use crate::recording::apps::read_app_rows;
+use crate::recording::{AppMinute, AppParts};
 
 #[test]
 fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
@@ -32,6 +34,37 @@ fn a_window_keeps_the_parts_the_replay_of_its_minute_gives_every_app() {
     assert_eq!(replayed.len(), 3);
     assert!(keys.len() > 1);
     assert_eq!(kept, replayed_parts(&replayed, &keys));
+}
+
+#[test]
+fn a_window_keeps_every_app_of_each_observation_as_its_sample_gave_it() {
+    // Goal: a window's App rows read back with no SQL as the facts and the Apps of each sample
+    // its seal encoded, so the store holds a sealed minute's Apps as it holds a live second's.
+    // Method: encode the samples a replay of a sealed minute of three observations gives, read
+    // the table's App rows back, and compare them with the rows the samples give.
+    let mut fixture = Fixture::new();
+    let session = sealed_seconds_with_parts(&mut fixture);
+    let samples: Vec<Box<Sample>> = replayed_samples(&session, 1001)
+        .into_iter()
+        .map(Box::new)
+        .collect();
+    let pending = fixture.root.join("encoded");
+    std::fs::create_dir(&pending).unwrap();
+    let table = encode(&samples, &pending).unwrap();
+    let plan = persistence::engine::scan(&pending.join(format!("{APP_PARTS}.parquet"))).unwrap();
+    let first = samples[0].selected.stamp.publication;
+    let mut expected = AppMinute::default();
+    for sample in &samples {
+        expected.push_sample(sample);
+    }
+    let mut read = AppMinute::default();
+
+    let parts = read_app_rows(plan, table.rows, first..first + 2, &mut read).unwrap();
+
+    assert_eq!(parts, AppParts::Read);
+    assert_eq!(expected.samples.len(), 2);
+    assert!(expected.apps.len() > expected.samples.len());
+    assert_eq!(read, expected);
 }
 
 #[test]

@@ -16,35 +16,24 @@ use super::{ContextRange, Session, TICKS_PER_WINDOW_MAX, WINDOWS_MAX};
 use crate::apps::{Amount, AppKey, ProcessCreation, ProcessState, Stamp, Unavailable};
 use crate::cancellation::Operation;
 use crate::live_app_response::{
-    App, AppPart, Bytes, Header, Key, KeyKind, MEMBERS_MAX, Measure, Observation, Present, Process,
-    Sample,
+    App, AppPart, Bytes, Header, Key, KeyKind, Measure, Observation, Present, Process, Sample,
+};
+pub(super) use crate::recording::apps::VERSION;
+use crate::recording::apps::{
+    MEASURE_FIELDS, ROW_APP, ROW_HEADER, ROW_PROCESS, ROWS_MAX, ROWS_TAKEN, kept_measure,
+    kept_members, measure_column_names,
 };
 use collector::ring::{IdentityUnavailable, RunIdentity};
 use persistence::engine::{Cells, Row};
 use persistence::schema::{APP_PARTS, identity_availability};
 use persistence::{Error, Result, TableManifest};
 
-/// The version of the table's columns. A reader takes no parts from a table of another version
-/// and leaves its window to the replay, so a later build may change the columns and an older
-/// one still reads the recording.
-pub(super) const VERSION: u8 = 3;
-/// The rows a window keeps. About 1,100 processes in a few hundred Apps a second make some
-/// 85,000 rows a window, a sixth of this.
-const ROWS_MAX: u32 = 1 << 19;
-/// The rows the read takes of a window, one past what it keeps so a longer table is refused.
-const ROWS_TAKEN: u32 = ROWS_MAX + 1;
 /// What the engine may decode of a window's table, below what it admits of a file. A row
 /// decodes to at most 8 bytes a column, 16 more for each of its two columns of bytes and what
 /// parquet adds to each, and the bytes of its App's key and its executable's name, so long
 /// keys may refuse a window before its rows reach their bound.
 pub(super) const DECODED_BYTES_MAX: u64 = 384 * 1024 * 1024;
 const ROW_DECODED_BYTES: usize = COLUMNS * 8 + 2 * 24;
-
-/// A row holds the facts of an observation's sample, one of its Apps, or one of an App's
-/// processes.
-const ROW_HEADER: u8 = 0;
-const ROW_APP: u8 = 1;
-const ROW_PROCESS: u8 = 2;
 
 /// The columns before the measures and amounts, in their order: those of every row, those only
 /// a row of an observation's facts fills, those of an App and of a process row, those only an
@@ -94,12 +83,6 @@ const MEASURES: [MeasureColumn; 8] = [
     ("footprint_bytes", |app| app.footprint_bytes),
     ("gpu_ns", |app| app.gpu_ns),
 ];
-const MEASURE_FIELDS: [&str; 4] = [
-    "known",
-    "measured_members",
-    "unavailable_members",
-    "overflowed",
-];
 /// A process row's amounts, each in a column of its value and one of why it has none, after
 /// the measures.
 const AMOUNTS: [AmountColumn; 11] = [
@@ -124,6 +107,16 @@ const AMOUNT_FIRST: usize = MEASURE_FIRST + MEASURES.len() * MEASURE_FIELDS.len(
 const COLUMNS: usize = AMOUNT_FIRST + AMOUNTS.len() * 2;
 
 const _: () = {
+    // The reader of every App's rows names the measures as the table does, in its order.
+    assert!(MEASURES.len() == crate::recording::apps::MEASURES.len());
+    let mut index = 0;
+    while index < MEASURES.len() {
+        assert!(same(
+            MEASURES[index].0,
+            crate::recording::apps::MEASURES[index]
+        ));
+        index += 1;
+    }
     assert!(COLUMNS <= persistence::engine::PARQUET_COLUMNS_MAX);
     assert!(DECODED_BYTES_MAX < persistence::engine::PARQUET_EXPANDED_BYTES_MAX);
 };
@@ -558,10 +551,6 @@ fn column_names() -> Vec<String> {
     }
 
     names
-}
-
-fn measure_column_names(measure: &str) -> [String; 4] {
-    MEASURE_FIELDS.map(|field| format!("app_{measure}_{field}"))
 }
 
 fn amount_column_names(amount: &str) -> [String; 2] {
@@ -1556,15 +1545,6 @@ fn kept_app(row: &Row<'_>) -> Result<(usize, App)> {
     ))
 }
 
-/// An App's `members`, which a history bounds.
-fn kept_members(members: u32) -> Result<u32> {
-    if collector::usize_from_u32(members) > MEMBERS_MAX {
-        return Err(Error::Bound("sealed parts members"));
-    }
-
-    Ok(members)
-}
-
 /// The measure of an App of `members` members whose fields a row holds from column `first`.
 fn kept_app_measure(row: &Row<'_>, first: usize, members: u32) -> Result<Measure> {
     let measure = Measure {
@@ -1575,20 +1555,6 @@ fn kept_app_measure(row: &Row<'_>, first: usize, members: u32) -> Result<Measure
     };
 
     kept_measure(measure, members)
-}
-
-/// `measure`, of an App of `members` members.
-fn kept_measure(measure: Measure, members: u32) -> Result<Measure> {
-    // Each member adds to one count at most, and a history holds counts up to the members.
-    let counted = measure
-        .measured_members
-        .checked_add(measure.unavailable_members)
-        .ok_or(Error::Bound("sealed parts measure"))?;
-    if counted > members {
-        return Err(Error::Bound("sealed parts measure"));
-    }
-
-    Ok(measure)
 }
 
 fn kept_process(row: &Row<'_>) -> Result<Process> {

@@ -4,9 +4,11 @@ use std::ops::Range;
 use std::path::Path;
 
 use super::{ContextRange, Session};
-use crate::live_app_response::{KeyKind, Observation};
+use crate::live_app_response::Observation;
 use collector::ring::RunIdentity;
-use persistence::{Error, Result};
+use persistence::Result;
+
+pub(super) use crate::recording::apps::{kind_code, kind_of};
 
 /// A sealed window's derived table, and what its seal recorded of it.
 pub(super) struct Kept<'manifest> {
@@ -75,28 +77,6 @@ pub(super) fn observed_in(range: ContextRange, observation: &Observation) -> boo
     observation
         .wall_ns
         .is_some_and(|wall| (range.first_ns..range.end_ns).contains(&wall))
-}
-
-/// A table keeps an App's kind by these codes, so a build that changed one would misread the
-/// tables earlier builds wrote at the same version.
-const _: () = {
-    assert!(kind_code(KeyKind::Bundle) == 0);
-    assert!(kind_code(KeyKind::Executable) == 1);
-};
-
-pub(super) const fn kind_code(kind: KeyKind) -> u8 {
-    match kind {
-        KeyKind::Bundle => 0,
-        KeyKind::Executable => 1,
-    }
-}
-
-pub(super) fn kind_of(code: u8) -> Result<KeyKind> {
-    match code {
-        0 => Ok(KeyKind::Bundle),
-        1 => Ok(KeyKind::Executable),
-        _ => Err(Error::Bound("sealed App kind")),
-    }
 }
 
 #[cfg(test)]

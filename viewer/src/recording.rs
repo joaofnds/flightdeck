@@ -3,13 +3,16 @@
 //! no SQL, and computes nothing from them, so the recording and the ring hand the store the
 //! same readings.
 
+pub(crate) mod apps;
 mod machine;
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use persistence::schema::Table;
 use polars::prelude::{DataFrame, Expr, LazyFrame, SchemaRef, SortMultipleOptions, col};
 
+pub use apps::{AppMinute, AppParts, AppRow, Previous, SampleRow, read_apps};
 pub use machine::{
     CoreStateRow, CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
     read_machine,
@@ -49,10 +52,31 @@ impl SealedMinute {
         })
     }
 
-    /// Table `table`, once the marker still links the minute `open` verified. A sealed minute's
-    /// files never change, so the marker standing shows them unchanged without verifying them
-    /// again.
+    /// Table `table`, once the marker still links the minute `open` verified.
     fn table(&self, table: Table) -> Result<SealedTable, Refused> {
+        self.scan(table.name())
+    }
+
+    /// The rows the seal counted of the table `name`, `None` where the minute was sealed
+    /// without it.
+    fn rows(&self, name: &str) -> Option<u64> {
+        let table = self
+            .manifest
+            .tables
+            .iter()
+            .find(|table| table.name == name)?;
+        Some(table.rows)
+    }
+
+    /// The publications the minute's observations hold.
+    fn publications(&self) -> Range<u64> {
+        self.manifest.publication_first..self.manifest.publication_end
+    }
+
+    /// The table `name`, once the marker still links the minute `open` verified. A sealed
+    /// minute's files never change, so the marker standing shows them unchanged without
+    /// verifying them again.
+    fn scan(&self, name: &str) -> Result<SealedTable, Refused> {
         let committed =
             persistence::reread_committed(&self.root, &self.marker).map_err(Refused::Commitment)?;
         if committed != self.manifest {
@@ -65,7 +89,7 @@ impl SealedMinute {
         let path = self
             .root
             .join(&self.manifest.data_directory)
-            .join(format!("{}.parquet", table.name()));
+            .join(format!("{name}.parquet"));
         let mut plan = persistence::engine::scan(&path)?;
         let schema = plan.collect_schema().map_err(persistence::Error::from)?;
         Ok(SealedTable { plan, schema })

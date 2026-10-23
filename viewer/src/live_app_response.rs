@@ -153,7 +153,7 @@ impl KeyKind {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Measure {
     pub known: u64,
     pub measured_members: u32,

@@ -13,14 +13,15 @@ use collector::ring::{
     Writer,
 };
 use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading};
-use persistence::schema::Table;
+use persistence::schema::{APP_PARTS, Table};
 use polars::polars_utils::compression::ZstdLevel;
 use polars::prelude::{
     DataFrame, DataType, Expr, IntoLazy, Null, ParquetCompression, ParquetWriter,
-    StatisticsOptions, lit,
+    StatisticsOptions, col, lit, when,
 };
 
-use super::{MachineMinute, Refused, SealedMinute, read_machine};
+use super::apps::{ROW_APP, ROW_HEADER, ROW_PROCESS, VERSION};
+use super::{AppMinute, AppParts, MachineMinute, Refused, SealedMinute, read_apps, read_machine};
 use crate::live::identity_fixture::Fixture;
 
 /// Tells apart the rings the tests of this file make.
@@ -109,7 +110,7 @@ macro_rules! refuses_a_damaged_table {
             // Method: seal a minute of system, battery and disk readings, replace one of its
             // tables with a copy the case damages, and decode it.
             let fixture = sealed_system_minute();
-            damage_table(&fixture, $table, $damage);
+            damage_table(&fixture, $table.name(), $damage);
             let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
 
             let refused = read_machine(&minute, &mut MachineMinute::default());
@@ -146,6 +147,152 @@ refuses_a_damaged_table! {
         |frame| with_column(frame, lit("utun_longer_than_ifnamsiz").alias("name"));
 }
 
+#[test]
+fn a_sealed_minute_holds_a_row_for_every_app_its_seal_derived() {
+    // Goal: a minute sealed with App parts gives the facts of each observation and a row for
+    // every App the seal derived there, so the store holds its Apps without the App rule.
+    // Method: seal three observations of several Apps with their App parts, and read the
+    // minute's Apps.
+    let fixture = sealed_apps_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let mut apps = AppMinute::default();
+
+    let parts = read_apps(&minute, &mut apps).unwrap();
+
+    let counted: u64 = apps.samples.iter().map(|sample| sample.app_count).sum();
+    assert_eq!(parts, AppParts::Read);
+    assert_eq!(apps.samples.len(), 3);
+    assert!(apps.apps.len() > apps.samples.len());
+    assert_eq!(collector::u64_from_usize(apps.apps.len()), counted);
+}
+
+#[test]
+fn a_minute_sealed_without_app_parts_gives_no_apps() {
+    // Goal: a minute sealed without App parts says so and gives no Apps, so the store runs the
+    // App rule on it.
+    // Method: seal three observations without deriving App parts, and read the minute's Apps.
+    let mut fixture = Fixture::new();
+    for second in 1000..=1002 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_minute(0);
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let mut apps = AppMinute::default();
+
+    let parts = read_apps(&minute, &mut apps).unwrap();
+
+    assert_eq!((parts, apps), (AppParts::Missing, AppMinute::default()));
+}
+
+#[test]
+fn a_minute_whose_app_parts_are_of_another_version_gives_no_apps() {
+    // Goal: a build reads no Apps from App parts a later build wrote in columns it may not
+    // know, and leaves the minute to the App rule.
+    // Method: rewrite a sealed minute's App parts with the next version, and read its Apps.
+    let fixture = sealed_apps_minute();
+    damage_table(&fixture, APP_PARTS, |frame| {
+        with_column(
+            frame,
+            lit(VERSION + 1).cast(DataType::UInt8).alias("version"),
+        )
+    });
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let mut apps = AppMinute::default();
+
+    let parts = read_apps(&minute, &mut apps).unwrap();
+
+    assert_eq!(
+        (parts, apps),
+        (AppParts::Version(VERSION + 1), AppMinute::default())
+    );
+}
+
+macro_rules! refuses_damaged_app_parts {
+    ($($name:ident, $reason:literal, $damage:expr;)*) => {$(
+        #[test]
+        fn $name() {
+            // Goal: a minute whose App parts hold what format 1 never writes is refused with
+            // the reason, and never read as Apps.
+            // Method: seal a minute of several Apps with their App parts, replace the table
+            // with a copy the case damages, and read the minute's Apps.
+            let fixture = sealed_apps_minute();
+            damage_table(&fixture, APP_PARTS, $damage);
+            let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+            let refused = read_apps(&minute, &mut AppMinute::default());
+
+            let refusal = matches!(
+                refused,
+                Err(Refused::Decode(persistence::Error::Bound($reason)))
+            );
+            assert!(refusal, "{refused:?}");
+        }
+    )*};
+}
+
+refuses_damaged_app_parts! {
+    refuses_app_parts_that_lost_a_row_the_seal_counted, "sealed parts rows",
+        |frame| frame.head(Some(frame.height() - 1));
+    refuses_app_parts_of_two_versions, "sealed parts version",
+        |frame| with_column(frame, of_rows(ROW_HEADER, lit(VERSION + 1), "version"));
+    refuses_an_observation_that_counts_an_app_more_than_it_keeps, "sealed parts Apps",
+        |frame| with_column(frame, (col("app_count") + lit(1)).alias("app_count"));
+    refuses_apps_out_of_their_order, "sealed parts App",
+        |frame| with_column(frame, (col("app_index") + lit(1)).alias("app_index"));
+    refuses_a_measure_that_counts_more_members_than_its_app_has, "sealed parts measure",
+        |frame| {
+            let unavailable = (col("members") + lit(1)).cast(DataType::UInt32);
+            with_column(frame, unavailable.alias("app_cpu_ns_unavailable_members"))
+        };
+    refuses_an_app_of_more_members_than_a_history_holds, "sealed parts members",
+        |frame| with_column(frame, lit(u32::MAX).cast(DataType::UInt32).alias("members"));
+    refuses_an_unknown_app_kind, "sealed App kind",
+        |frame| with_column(frame, lit(7).cast(DataType::UInt8).alias("app_kind"));
+    refuses_a_row_of_an_unknown_kind, "sealed parts row kind",
+        |frame| with_column(frame, of_rows(ROW_PROCESS, lit(3), "row_kind"));
+    refuses_apps_before_the_facts_of_their_observation, "sealed parts header",
+        |frame| {
+            let later = col("publication") + lit(100);
+            with_column(frame, of_rows(ROW_HEADER, later, "publication"))
+        };
+    refuses_apps_of_an_observation_the_facts_do_not_name, "sealed parts header",
+        |frame| {
+            let last = col("row_kind")
+                .eq(lit(ROW_APP))
+                .and(col("publication").eq(col("publication").max()));
+            let later = when(last).then(col("publication") + lit(100));
+            with_column(frame, later.otherwise(col("publication")).alias("publication"))
+        };
+    refuses_two_observations_of_one_publication, "sealed parts publication",
+        |frame| {
+            let second = col("publication").eq(col("publication").min() + lit(1));
+            let first = when(second).then(col("publication").min());
+            with_column(frame, first.otherwise(col("publication")).alias("publication"))
+        };
+    refuses_an_observation_the_minute_does_not_hold, "sealed parts publication",
+        |frame| with_column(frame, (col("publication") + lit(100)).alias("publication"));
+}
+
+/// A fixture whose ring held three observations of several Apps, sealed as minute 0 with
+/// their App parts.
+fn sealed_apps_minute() -> Fixture {
+    let mut fixture = Fixture::new();
+    for second in 1000..=1002 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_minute_derived(0, &crate::SealedApps::default());
+    fixture
+}
+
+/// Column `name` holding `value` at the rows of kind `row_kind` and what it held at the
+/// others.
+fn of_rows(row_kind: u8, value: Expr, name: &str) -> Expr {
+    when(col("row_kind").eq(lit(row_kind)))
+        .then(value)
+        .otherwise(col(name))
+        .alias(name)
+}
+
 /// A fixture whose ring held the ticks `publish_supplemented` publishes, sealed as minute 0.
 fn sealed_system_minute() -> Fixture {
     let mut fixture = Fixture::new_mode(false, 2, None);
@@ -157,13 +304,13 @@ fn sealed_system_minute() -> Fixture {
     fixture
 }
 
-/// Replaces table `table` of `fixture`'s sealed minute 0 with the copy `damage` makes of it.
-fn damage_table(fixture: &Fixture, table: Table, damage: fn(DataFrame) -> DataFrame) {
+/// Replaces table `name` of `fixture`'s sealed minute 0 with the copy `damage` makes of it.
+fn damage_table(fixture: &Fixture, name: &str, damage: fn(DataFrame) -> DataFrame) {
     let manifest = persistence::read_committed(&fixture.root, &marker(fixture, 0)).unwrap();
     let path = fixture
         .root
         .join(manifest.data_directory)
-        .join(format!("{}.parquet", table.name()));
+        .join(format!("{name}.parquet"));
     let frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
     let mut damaged = damage(frame);
 
