@@ -169,8 +169,16 @@ target/release/flightdeck --reference --hardware --animate --seconds 20
 Rendering uses GPUI's Metal backend, canvas paths and a virtualized list of panel
 rows. Live queries run on a dedicated worker with capacity-one request/result
 mailboxes, cancellation generations, 512-row pages and the backend's bounded cache.
-A 250 ms main-thread timer takes completed results. During collector discovery and
-startup it also reads bounded registration/ring-header metadata for the configured
+A 250 ms main-thread timer takes completed results.
+Live Overview, while it follows the newest second, draws from the store instead. The app
+starts the store before its window opens and keeps it for its life. The store's thread writes
+the readings into buffers it allocates when it starts, and the same timer takes the store's
+newest View, which never changes while the page holds it, so a window shown again draws what
+the store holds at once. While Overview draws from the View the worker rests, and a hover over
+a second the View holds reads it there. A chosen second, a saved recording and every other
+page read through the worker. A View older than the worker's readings is not drawn, so the
+charts never show less than the worker read. During collector discovery and
+startup the timer also reads bounded registration/ring-header metadata for the configured
 root; it does no database query or tick/event copying. Automatic attachment keeps
 monitoring that producer and surfaces stopped or stalled collection through Retry,
 without taking shutdown ownership. The metadata syscalls have bounded input sizes but
@@ -209,9 +217,9 @@ and stacking them below. All four retain their captured context during exact ins
 missing intervals and individual source failures stay explicit. Per-App network and GPU
 histories are not captured. Cooling and battery context follows the inspected timestamp,
 with an explicit uncaptured thermal-state reading.
-Overview prepares CPU, process-power and Disk App histories together, sharing saved
-context work and the existing bounded History cache. Their cohorts and failures remain
-independent; Resident history uses its own source path.
+Read through the worker, Overview prepares CPU, process-power and Disk App histories
+together, sharing saved context work and the existing bounded History cache. Their cohorts
+and failures remain independent; Resident history uses its own source path.
 CPU, Memory, Energy and Storage repeat the corresponding ranking on their own pages,
 beside their captured App histories. The CPU plot uses 100% for one core; process
 power remains separate from system and GPU power. Energy's Process power summary
