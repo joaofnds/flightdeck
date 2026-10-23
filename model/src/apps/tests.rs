@@ -2,7 +2,7 @@ use super::{
     Amount, Apps, Creation, Deltas, Execs, Exits, Measurement, ProcessState, ProcessTotals,
     Processes, ProgramUnavailable, Stamp, Starts, Subtotal, Tick, Totals, Unavailable, Usages,
 };
-use crate::programs::{Capacity, Program, Programs};
+use crate::programs::{AppKey, Capacity, Program, Programs};
 
 const CAPACITY: Capacity = Capacity {
     entries: 8,
@@ -16,6 +16,10 @@ const SAFARI: Program = Program {
 const SAFARI_HELPER: Program = Program {
     executable_name: b"Safari Web Content",
     app_path: Some(b"/Applications/Safari.app"),
+};
+const BRAVE: Program = Program {
+    executable_name: b"Brave Browser",
+    app_path: Some(b"/Applications/Brave Browser.app"),
 };
 const GIT: Program = Program {
     executable_name: b"git",
@@ -412,6 +416,42 @@ fn gives_the_interval_reason_before_a_refused_read() {
     assert_eq!(
         derived.processes[0].deltas,
         unavailable(Unavailable::Interval)
+    );
+}
+
+#[test]
+fn gives_the_apps_in_key_order() {
+    // Goal: the Apps of a tick come out in the order of their keys, bundles before
+    // executables, whatever order their processes and their programs came in.
+    // Method: index git, Safari, and then Brave, which sorts before Safari, and derive a tick
+    // of one process of each in that order.
+    let mut programs = Programs::new(CAPACITY);
+    let rows: Vec<Process> = [(5, GIT), (6, SAFARI), (7, BRAVE)]
+        .into_iter()
+        .map(|(pid, program)| Process {
+            pid,
+            program: Ok(programs.add(program)),
+            ..Process::default()
+        })
+        .collect();
+    let previous = Columns::of(1, &rows);
+    let selected = Columns::of(2, &rows);
+    let mut apps = Apps::new(PROCESSES_MAX, &programs);
+
+    apps.derive(&programs, &previous.tick(), &selected.tick());
+
+    let keys: Vec<AppKey> = apps
+        .totals()
+        .iter()
+        .map(|totals| programs.key(totals.app))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            AppKey::Bundle(b"/Applications/Brave Browser.app"),
+            AppKey::Bundle(b"/Applications/Safari.app"),
+            AppKey::Executable(b"git"),
+        ]
     );
 }
 

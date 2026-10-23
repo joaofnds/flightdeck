@@ -618,6 +618,7 @@ impl Apps {
         }
         assert_eq!(row, count);
         assert_eq!(exit, exits);
+        self.order(programs);
     }
 
     /// What each process of the tick last derived spent, live or exited, in order of pid and
@@ -627,7 +628,7 @@ impl Apps {
         &self.processes
     }
 
-    /// The Apps of the tick last derived.
+    /// The Apps of the tick last derived, in key order.
     #[must_use]
     pub fn totals(&self) -> &[Totals] {
         &self.totals
@@ -682,6 +683,15 @@ impl Apps {
             if live {
                 self.live_ungrouped_members += 1;
             }
+        }
+    }
+
+    /// Puts the tick's Apps in key order, in place, since the sort allocates nothing.
+    fn order(&mut self, programs: &Programs) {
+        self.totals
+            .sort_unstable_by_key(|totals| programs.rank(totals.app));
+        for (slot, totals) in self.totals.iter().enumerate() {
+            self.slots[totals.app.index()] = crate::u32_from_length(slot);
         }
     }
 

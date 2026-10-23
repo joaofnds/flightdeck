@@ -55,6 +55,8 @@ pub struct Programs {
     arena: Vec<u8>,
     /// The Apps in key order.
     ordered: Vec<App>,
+    /// Each App's place in `ordered`.
+    ranks: Vec<u32>,
 }
 
 /// Where an App's key lies in the index's arena.
@@ -74,6 +76,7 @@ impl Programs {
             keys: Vec::with_capacity(entries_max),
             arena: Vec::with_capacity(capacity.key_bytes),
             ordered: Vec::with_capacity(entries_max),
+            ranks: Vec::with_capacity(entries_max),
         }
     }
 
@@ -110,6 +113,12 @@ impl Programs {
         }
     }
 
+    /// The place of `app` among the index's Apps in key order.
+    #[must_use]
+    pub fn rank(&self, app: App) -> u32 {
+        self.ranks[app.index()]
+    }
+
     /// The Apps the index can hold at most, which bounds an App's number.
     #[must_use]
     pub fn apps_max(&self) -> usize {
@@ -142,6 +151,13 @@ impl Programs {
             end: self.arena.len(),
         });
         self.ordered.insert(position, app);
+        self.ranks.push(0);
+        for (rank, later) in self.ordered.iter().enumerate().skip(position) {
+            self.ranks[later.index()] = crate::u32_from_length(rank);
+        }
         app
     }
 }
+
+#[cfg(test)]
+mod tests;
