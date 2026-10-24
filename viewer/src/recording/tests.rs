@@ -179,6 +179,29 @@ refuses_a_damaged_table! {
 }
 
 #[test]
+fn refuses_the_processes_of_two_ticks_of_one_publication() {
+    // Goal: a minute whose ticks name one publication twice is refused when its processes are
+    // read, as when its machine readings are, and never stops the reader.
+    // Method: seal a minute, give each of its ticks the first tick's publication, and decode
+    // its processes.
+    let fixture = sealed_system_minute();
+    damage_table(&fixture, Table::Ticks.name(), |frame| {
+        with_column(frame, col("publication").min().alias("publication"))
+    });
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+    let refused = decoded_frames(&minute);
+
+    let refusal = matches!(
+        refused,
+        Err(Refused::Decode(persistence::Error::Bound(
+            "process tick order"
+        )))
+    );
+    assert!(refusal);
+}
+
+#[test]
 fn a_sealed_minute_holds_a_row_for_every_app_its_seal_derived() {
     // Goal: a minute sealed with App parts gives the facts of each observation and a row for
     // every App the seal derived there, so the store holds its Apps without the App rule.

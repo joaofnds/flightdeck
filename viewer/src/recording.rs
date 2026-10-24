@@ -175,6 +175,22 @@ fn placement(
     Ok(order)
 }
 
+/// Refuses `rows` for `refusal` unless the `key` of each row is greater than the key of the row
+/// before it.
+fn ordered<T, K: Ord>(
+    rows: &[T],
+    refusal: &'static str,
+    key: impl Fn(&T) -> K,
+) -> Result<(), Refused> {
+    for pair in rows.windows(2) {
+        if key(&pair[0]) >= key(&pair[1]) {
+            return Err(persistence::Error::Bound(refusal).into());
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "recording/tests.rs"]
 mod tests;

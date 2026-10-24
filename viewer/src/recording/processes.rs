@@ -16,7 +16,7 @@ use polars::prelude::{
 };
 
 use super::apps::AppMinute;
-use super::{Refused, SealedMinute, SealedTable, placement};
+use super::{Refused, SealedMinute, SealedTable, ordered, placement};
 use crate::apps::Stamp;
 use crate::cancellation::Cancellation;
 use crate::live_app_response::Sample;
@@ -274,6 +274,9 @@ fn read_processes_endpoints(minute: &SealedMinute) -> Result<Vec<Endpoint>, Refu
             events_end: events_end.get(row)?,
         });
     }
+    ordered(&endpoints, "process tick order", |endpoint| {
+        endpoint.stamp.publication
+    })?;
     Ok(endpoints)
 }
 

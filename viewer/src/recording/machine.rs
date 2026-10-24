@@ -16,7 +16,7 @@ use polars::prelude::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 
-use super::{Refused, SealedMinute, placement};
+use super::{Refused, SealedMinute, ordered, placement};
 
 /// The ticks table's columns every minute holds, of those the store reads.
 const TICK_COLUMNS: [&str; 10] = [
@@ -290,22 +290,6 @@ pub fn read_machine(minute: &SealedMinute, into: &mut MachineMinute) -> Result<(
     read_gpu_states(minute, &ticks, &mut into.gpu_states)?;
     read_core_states(minute, &ticks, &mut into.core_states)?;
     read_fans(minute, &ticks, &mut into.fans)
-}
-
-/// Refuses `rows` for `refusal` unless the `key` of each row is greater than the key of the row
-/// before it.
-fn ordered<T, K: Ord>(
-    rows: &[T],
-    refusal: &'static str,
-    key: impl Fn(&T) -> K,
-) -> Result<(), Refused> {
-    for pair in rows.windows(2) {
-        if key(&pair[0]) >= key(&pair[1]) {
-            return Err(persistence::Error::Bound(refusal).into());
-        }
-    }
-
-    Ok(())
 }
 
 fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refused> {
