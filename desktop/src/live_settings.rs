@@ -108,8 +108,7 @@ impl LiveDashboard {
                     .bg(rgb(PANEL))
                     .border_1()
                     .border_color(charts::alpha(TEXT, 0.12))
-                    .child(self.settings_view_appearance_row(cx))
-                    .child(self.settings_view_appearance_default(cx)),
+                    .child(self.settings_view_appearance_row(cx)),
             )
             .child(settings_motion_status())
             .children(
@@ -133,11 +132,7 @@ impl LiveDashboard {
                     .flex_basis(px(240.0))
                     .min_w(px(0.0))
                     .max_w_full()
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Animate fans"),
-                    )
+                    .child(self.settings_view_appearance_row_label(cx))
                     .child(
                         div()
                             .debug_selector(|| "animate-fans-description".into())
@@ -152,6 +147,25 @@ impl LiveDashboard {
                     ),
             )
             .child(self.settings_animation_toggle(cx))
+    }
+
+    fn settings_view_appearance_row_label(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .min_h(px(24.0))
+            .gap(px(4.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .debug_selector(|| "animate-fans-label".into())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("Animate fans"),
+            )
+            .when(
+                self.settings.animate_fans != ANIMATE_FANS_DEFAULT,
+                |label| label.child(Self::settings_view_appearance_row_label_reset(cx)),
+            )
     }
 
     fn settings_animation_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -196,58 +210,80 @@ impl LiveDashboard {
             .child(settings_animation_toggle_switch(enabled))
     }
 
-    fn settings_view_appearance_default(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let default = animation_value(ANIMATE_FANS_DEFAULT);
-        div()
-            .px(px(12.0))
-            .py(px(4.0))
-            .min_h(px(52.0))
-            .border_t_1()
-            .border_color(rgb(LINE))
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .debug_selector(move || format!("animate-fans-default:{default}"))
-                    .text_size(px(12.0))
-                    .text_color(rgb(MUTED))
-                    .child(format!("Default: {default}")),
-            )
-            .when(self.settings.animate_fans != ANIMATE_FANS_DEFAULT, |row| {
-                row.child(Self::settings_view_appearance_default_restore(cx))
-            })
-    }
-
-    fn settings_view_appearance_default_restore(cx: &mut Context<Self>) -> impl IntoElement {
+    fn settings_view_appearance_row_label_reset(cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("restore-animate-fans")
-            .min_w_0()
-            .max_w_full()
+            .size(px(24.0))
+            .flex_shrink_0()
             .debug_selector(|| "restore-animate-fans".into())
             .role(gpui::Role::Button)
             .accessibility_id("flightdeck.settings.animate-fans.restore")
             .aria_label(format!(
-                "Restore Animate fans to default: {}",
+                "Reset Animate fans to default: {}",
                 animation_value(ANIMATE_FANS_DEFAULT)
             ))
             .focusable()
             .tab_stop(true)
             .focus(crate::charts::focus_ring)
-            .min_h(px(44.0))
-            .px(px(8.0))
             .rounded(px(5.0))
-            .text_size(px(12.0))
-            .text_color(rgb(BLUE))
             .flex()
             .items_center()
+            .justify_center()
             .cursor_pointer()
-            .hover(|style| style.bg(charts::alpha(BLUE, 0.08)))
+            .hover(|style| style.bg(charts::alpha(TEXT, 0.06)))
+            .tooltip(|_, cx| cx.new(|_| FanDefaultHelp).into())
             .on_click(cx.listener(|this, _, window, cx| this.restore_fan_animation(window, cx)))
-            .child("Restore default")
+            .child(settings_view_appearance_row_label_reset_icon())
     }
+}
+
+struct FanDefaultHelp;
+
+impl gpui::Render for FanDefaultHelp {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
+        let text = format!(
+            "Reset to default ({})",
+            animation_value(ANIMATE_FANS_DEFAULT)
+        );
+        div()
+            .child(text.clone())
+            .debug_selector(move || text.clone())
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(5.0))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(LINE))
+            .text_size(px(12.0))
+            .text_color(rgb(TEXT))
+    }
+}
+
+fn settings_view_appearance_row_label_reset_icon() -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        |bounds, (), window, _| {
+            let unit = bounds.size.width / 24.0;
+            let at = |x: f32, y: f32| {
+                gpui::point(bounds.origin.x + unit * x, bounds.origin.y + unit * y)
+            };
+
+            let mut path = gpui::PathBuilder::stroke(px(1.5));
+            path.move_to(at(9.0, 14.0));
+            path.line_to(at(4.0, 9.0));
+            path.line_to(at(9.0, 4.0));
+            path.move_to(at(4.0, 9.0));
+            path.line_to(at(14.0, 9.0));
+            path.cubic_bezier_to(at(14.0, 21.0), at(22.0, 9.0), at(22.0, 21.0));
+            path.line_to(at(12.0, 21.0));
+
+            match path.build() {
+                Ok(path) => window.paint_path(path, rgb(TEXT)),
+                Err(error) => eprintln!("Settings reset icon: {error}"),
+            }
+        },
+    )
+    .size(px(16.0))
 }
 
 fn animation_value(enabled: bool) -> &'static str {

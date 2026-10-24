@@ -4,15 +4,34 @@ use super::{InputDriver, InputHarness};
 use crate::live_source::Request;
 
 #[gpui::test]
+fn hovering_reset_explains_the_default_until_the_pointer_leaves(cx: &mut TestAppContext) {
+    // Observe delayed tooltip display and dismissal through the real hover path and test clock.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.activate_window();
+    harness.driver.click_settings_control("navigation:settings");
+    harness.driver.click_settings_control("animate-fans");
+    assert!(!harness.driver.reading_is_visible("Reset to default (Off)"));
+
+    harness
+        .driver
+        .hover_settings_control("restore-animate-fans");
+
+    assert!(harness.driver.reading_is_visible("Reset to default (Off)"));
+    harness.driver.hover_settings_control("animate-fans");
+    assert!(!harness.driver.reading_is_visible("Reset to default (Off)"));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn restoring_with_the_keyboard_returns_focus_to_the_animation_switch(cx: &mut TestAppContext) {
-    // Restore with Return, then toggle with Space without navigating to another control.
+    // Reach the preceding reset arrow, then toggle with Space after focus returns to the switch.
     let mut harness = InputHarness::setup(cx);
     harness.driver.activate_window();
     harness.driver.click_settings_control("navigation:settings");
     harness.driver.press("tab space");
     harness.driver.release_settings_key("space");
 
-    harness.driver.press("tab enter");
+    harness.driver.press("shift-tab enter");
     harness.driver.release_settings_key("enter");
 
     assert!(harness.driver.reading_is_visible("animate-fans:Off"));
@@ -79,14 +98,22 @@ fn restoring_the_fan_default_returns_off_and_removes_the_restore_action(cx: &mut
     // Change the setting through its control, then restore only that choice through the page.
     let mut harness = InputHarness::setup(cx);
     harness.driver.click_settings_control("navigation:settings");
-    assert!(
-        harness
-            .driver
-            .reading_is_visible("animate-fans-default:Off")
-    );
     assert!(!harness.driver.reading_is_visible("restore-animate-fans"));
     harness.driver.click_settings_control("animate-fans");
     let request = harness.driver.settings_resource_request();
+    let restore = harness
+        .driver
+        .context
+        .debug_bounds("restore-animate-fans")
+        .unwrap();
+    let label = harness
+        .driver
+        .context
+        .debug_bounds("animate-fans-label")
+        .unwrap();
+    assert!(restore.left() >= label.right());
+    assert!(restore.top() < label.bottom());
+    assert!(restore.bottom() > label.top());
 
     harness
         .driver
@@ -263,6 +290,16 @@ fn a_session_without_preferences_shows_that_the_animation_choice_cannot_be_saved
 }
 
 impl InputDriver {
+    fn hover_settings_control(&mut self, selector: &'static str) {
+        let bounds = self.context.debug_bounds(selector).expect(selector);
+        self.hover_position(bounds.center());
+        self.context.run_until_parked();
+        self.context
+            .executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        self.context.run_until_parked();
+    }
+
     fn release_settings_key(&mut self, key: &str) {
         self.context.simulate_event(gpui::KeyUpEvent {
             keystroke: gpui::Keystroke::parse(key).unwrap(),
