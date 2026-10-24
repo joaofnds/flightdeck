@@ -8,6 +8,18 @@ use crate::live_source_mode::SourceMode;
 use crate::time_range::Range;
 
 #[gpui::test]
+fn command_w_closes_the_window_from_its_own_key_dispatch(cx: &mut TestAppContext) {
+    // Dispatch the real shortcut inside a window update, then inspect the window registry.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.show();
+
+    harness.close_with_shortcut();
+
+    assert_eq!(0, harness.window_count());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn closing_the_last_window_keeps_the_owned_collector_running(cx: &mut TestAppContext) {
     // Goal: a closed window leaves the recording going, so no reading is missed meanwhile.
     // Method: own a real collector child, open the live window, close it, and compare the
@@ -236,6 +248,20 @@ struct BackgroundHarness {
 }
 
 impl BackgroundHarness {
+    fn close_with_shortcut(&mut self) {
+        let window = self.cx.read(|cx| cx.windows()[0]);
+        self.cx
+            .update_window(window, |_, window, _| window.activate_window())
+            .unwrap();
+        self.cx.run_until_parked();
+        self.cx
+            .update_window(window, |_, window, cx| {
+                window.dispatch_keystroke(gpui::Keystroke::parse("cmd-w").unwrap(), cx);
+            })
+            .unwrap();
+        self.cx.run_until_parked();
+    }
+
     fn setup(cx: &TestAppContext) -> Self {
         let cx = cx.clone();
         let (session, root, _pid) = super::super::lifecycle::test_child::session();

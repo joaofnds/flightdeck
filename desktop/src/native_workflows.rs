@@ -55,11 +55,15 @@ fn install_application_actions(cx: &mut gpui::App) {
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &CloseWindow, cx| {
-        if let Some(window) = cx.active_window() {
-            if let Err(error) = window.update(cx, |_, window, _| window.remove_window()) {
-                eprintln!("Close Flightdeck window: {error}");
+        let window = cx.active_window();
+        // Key dispatch borrows the window; remove it after that update has returned.
+        cx.defer(move |cx| {
+            if let Some(window) = window {
+                if let Err(error) = window.update(cx, |_, window, _| window.remove_window()) {
+                    eprintln!("Close Flightdeck window: {error}");
+                }
             }
-        }
+        });
     });
     cx.set_menus(application_menus());
 }
