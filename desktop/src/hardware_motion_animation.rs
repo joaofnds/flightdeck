@@ -1,6 +1,6 @@
 use gpui::{Bounds, Pixels, Window};
 
-use super::{HardwareState, reduce_motion};
+use super::HardwareState;
 use crate::hardware::Readings;
 use crate::hardware_animation::HardwareAnimation;
 use crate::hardware_layout::Layout;
@@ -8,7 +8,7 @@ use crate::hardware_layout::Layout;
 impl HardwareState {
     pub(crate) fn begin_frame(&self, allowed: bool) {
         let reduced = if allowed {
-            reduce_motion()
+            (self.motion_preference)()
         } else {
             self.motion_reduced.get()
         };
@@ -82,7 +82,11 @@ impl HardwareState {
     }
 
     pub(crate) fn poll_animation(&self, enabled: bool) -> bool {
-        let reduced = if enabled { reduce_motion() } else { false };
+        let reduced = if enabled {
+            (self.motion_preference)()
+        } else {
+            false
+        };
         let changed = self.motion_reduced.replace(reduced) != reduced;
         if reduced {
             self.suspend_animation();

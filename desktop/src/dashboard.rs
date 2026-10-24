@@ -58,7 +58,9 @@ impl Dashboard {
             hidden: Rc::new(Vec::new()),
             performance,
             diagnostic_selected: 29,
-            hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
+            hardware_state: Rc::new(crate::hardware_motion::HardwareState::new(
+                crate::hardware_motion::reduce_motion,
+            )),
             replay,
             replay_timer: None,
             rows: Vec::with_capacity(128),

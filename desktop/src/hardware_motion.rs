@@ -17,6 +17,7 @@ pub struct HardwareState {
     animation_ready: Cell<bool>,
     animation_failure_reported: Cell<bool>,
     motion_reduced: Cell<bool>,
+    motion_preference: fn() -> bool,
 }
 
 #[path = "hardware_motion_animation.rs"]
@@ -54,7 +55,7 @@ struct VisibilitySignature {
 }
 
 impl HardwareState {
-    pub fn new() -> Self {
+    pub fn new(motion_preference: fn() -> bool) -> Self {
         Self {
             started: Instant::now(),
             visibility: Cell::new(None),
@@ -66,6 +67,7 @@ impl HardwareState {
             animation_ready: Cell::new(false),
             animation_failure_reported: Cell::new(false),
             motion_reduced: Cell::new(false),
+            motion_preference,
         }
     }
 

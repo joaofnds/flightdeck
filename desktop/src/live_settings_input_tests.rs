@@ -127,35 +127,10 @@ fn restoring_the_fan_default_returns_off_and_removes_the_restore_action(cx: &mut
 
 #[gpui::test]
 fn unavailable_native_animation_keeps_the_figure_and_reports_its_failure(cx: &mut TestAppContext) {
-    // GPUI's test window has no native AppKit host. Exercise the real setup failure path.
-    let mut harness = InputHarness::setup_route(cx, "overview");
-    harness.driver.context.deactivate_window();
-    harness.driver.context.run_until_parked();
-    harness.driver.activate_window();
-    harness
-        .driver
-        .view
-        .update(&mut harness.driver.context, |dashboard, cx| {
-            dashboard.settings.animate_fans = true;
-            let row = dashboard
-                .rows
-                .iter()
-                .position(|row| matches!(row, crate::live_dashboard::Row::Hardware))
-                .unwrap();
-            dashboard.list.scroll_to(gpui::ListOffset {
-                item_ix: row,
-                offset_in_item: gpui::px(0.0),
-            });
-            cx.notify();
-        });
-    harness.driver.context.run_until_parked();
-    harness
-        .driver
-        .view
-        .update(&mut harness.driver.context, |dashboard, cx| {
-            dashboard.tick(cx);
-        });
-    harness.driver.context.run_until_parked();
+    // Disable Reduce Motion explicitly so the test window reaches native setup failure.
+    let mut harness = InputHarness::setup_fan_animation(cx, || false);
+
+    harness.driver.show_animated_hardware();
 
     assert!(
         harness
@@ -170,6 +145,23 @@ fn unavailable_native_animation_keeps_the_figure_and_reports_its_failure(cx: &mu
                 dashboard.hardware_state.animation_statistics().is_none()
             })
     );
+    assert!(harness.driver.hardware_is_painted());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn reduced_motion_keeps_the_figure_without_attempting_native_animation(cx: &mut TestAppContext) {
+    // The same hostless window must not report setup failure when Reduce Motion is enabled.
+    let mut harness = InputHarness::setup_fan_animation(cx, || true);
+
+    harness.driver.show_animated_hardware();
+
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("hardware-animation-error")
+    );
+    assert!(harness.driver.hardware_is_painted());
     harness.teardown();
 }
 
@@ -289,7 +281,52 @@ fn a_session_without_preferences_shows_that_the_animation_choice_cannot_be_saved
     harness.teardown();
 }
 
+impl InputHarness {
+    fn setup_fan_animation(cx: &mut TestAppContext, motion_preference: fn() -> bool) -> Self {
+        let mut harness = Self::setup_route(cx, "overview");
+        harness
+            .driver
+            .view
+            .update(&mut harness.driver.context, |dashboard, _| {
+                dashboard.hardware_state = std::rc::Rc::new(
+                    crate::hardware_motion::HardwareState::new(motion_preference),
+                );
+            });
+        harness
+    }
+}
+
 impl InputDriver {
+    fn show_animated_hardware(&mut self) {
+        self.context.deactivate_window();
+        self.context.run_until_parked();
+        self.activate_window();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.settings.animate_fans = true;
+            let row = dashboard
+                .rows
+                .iter()
+                .position(|row| matches!(row, crate::live_dashboard::Row::Hardware))
+                .unwrap();
+            dashboard.list.scroll_to(gpui::ListOffset {
+                item_ix: row,
+                offset_in_item: gpui::px(0.0),
+            });
+            cx.notify();
+        });
+        self.context.run_until_parked();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.tick(cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    fn hardware_is_painted(&self) -> bool {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.hardware_state.paint_count() > 0
+        })
+    }
+
     fn hover_settings_control(&mut self, selector: &'static str) {
         let bounds = self.context.debug_bounds(selector).expect(selector);
         self.hover_position(bounds.center());

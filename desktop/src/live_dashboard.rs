@@ -320,7 +320,9 @@ impl LiveDashboard {
             inventory: Vec::with_capacity(16),
             hidden: Vec::with_capacity(64),
             sections: crate::live_sections::Sections::default(),
-            hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
+            hardware_state: Rc::new(crate::hardware_motion::HardwareState::new(
+                crate::hardware_motion::reduce_motion,
+            )),
             settings: crate::live_settings::Settings::default(),
             started: Instant::now(),
             seconds,
