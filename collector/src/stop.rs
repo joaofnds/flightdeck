@@ -125,26 +125,54 @@ mod tests {
     }
 
     #[test]
-    fn restores_each_signals_default_action_when_dropped() {
+    fn restores_each_signals_found_action_when_dropped() {
         // Goal: a collector that finishes hands SIGINT and SIGTERM back as it found them, so a
         // later signal ends the process instead of asking a loop that has stopped.
-        // Method: read each signal's action before installing, while installed and after drop.
+        // Method: give each signal a handler of the test's own, then read each signal's action
+        // while installed and after drop. The process's own actions are not a known start,
+        // since a shell starts a background job with SIGINT ignored.
         let _handlers = HANDLERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(handler_of(SIGINT).is_none());
-        assert!(handler_of(SIGTERM).is_none());
+        let originals = [replace(SIGINT, &found()), replace(SIGTERM, &found())];
 
         let stop = Stop::install().unwrap();
         let installed = [handler_of(SIGINT), handler_of(SIGTERM)];
         drop(stop);
+        let restored = [handler_of(SIGINT), handler_of(SIGTERM)];
+        replace(SIGINT, &originals[0]);
+        replace(SIGTERM, &originals[1]);
 
         let requested: extern "C" fn(c_int) = request_stop;
         for handler in installed {
             assert!(std::ptr::fn_addr_eq(handler.unwrap(), requested));
         }
-        assert!(handler_of(SIGINT).is_none());
-        assert!(handler_of(SIGTERM).is_none());
+        let unrequested: extern "C" fn(c_int) = found_handler;
+        for handler in restored {
+            assert!(std::ptr::fn_addr_eq(handler.unwrap(), unrequested));
+        }
+    }
+
+    extern "C" fn found_handler(_signal: c_int) {}
+
+    /// The action a signal has before the collector installs its own.
+    fn found() -> Sigaction {
+        Sigaction {
+            handler: SigactionHandler {
+                sa_handler: Some(found_handler),
+            },
+            sa_mask: 0,
+            sa_flags: 0,
+        }
+    }
+
+    /// Gives `signal` the action `action`, and returns the one it had.
+    fn replace(signal: c_int, action: &Sigaction) -> Sigaction {
+        let mut previous = std::mem::MaybeUninit::<Sigaction>::uninit();
+        assert_eq!(0, unsafe {
+            sigaction(signal, &raw const *action, previous.as_mut_ptr())
+        });
+        unsafe { previous.assume_init() }
     }
 
     #[test]
