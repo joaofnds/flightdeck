@@ -102,11 +102,12 @@ the current toolkit decision remain in [the evaluation](desktop/EVALUATION.md).
 Pushing a tag `<version>`, such as `0.2.0`, releases the commit it names through
 `.github/workflows/release.yml`. The version is `CFBundleShortVersionString` in
 `desktop/Info.plist`, three integers, and the workflow refuses a tag that names another
-version. `just release 0.2.0` sets it, commits it and tags that commit, and pushes nothing:
+version. `just release` raises it by a `major`, `minor` or `patch` step from the newest tag,
+`patch` when none is named, commits it and tags that commit, and pushes nothing:
 
 ```sh
-just release 0.2.0
-git push origin main 0.2.0
+just release minor
+git push origin main 0.3.0
 ```
 
 The workflow waits for check to pass on the tagged commit on `main`, attaches the bundle

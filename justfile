@@ -40,27 +40,34 @@ bundle-check: bundle
         "$contents/Helpers/persister" | cut -c 1-64 > "$directory/tampered" && \
     ! diff -u "$directory/built" "$directory/tampered"
 
-# The tag must name what it ships, so the tree must be clean. A run that commits and stops
-# before the tag leaves Info.plist at the version, which the newer check then refuses, so tag
-# that commit by hand. sed keeps the file's layout, which plutil would rewrite.
-# Set the app's version, commit it and tag it, for a push to release: just release 0.2.0
+# The tag must name what it ships, so the tree must be clean. The next version counts from
+# Info.plist's, which must be the newest tag: a run that commits and stops before the tag
+# leaves Info.plist ahead of every tag, so tag that commit by hand rather than bump again.
+# sed keeps the file's layout, which plutil would rewrite. The level is patch by default.
+# Raise the app's version a level, commit it and tag it, for a push to release: just release minor
 [positional-arguments]
-release version:
+release level="patch":
     test -z "$(git status --porcelain)" || { echo "Commit or stash first." >&2; exit 1; }
-    expr "x$1" : 'x[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$' > /dev/null || \
-        { echo "$1 is not three integers, as 0.2.0 is." >&2; exit 1; }
-    ! git rev-parse --quiet --verify "refs/tags/$1" > /dev/null || \
-        { echo "Tag $1 exists." >&2; exit 1; }
+    case "$1" in major | minor | patch) ;; \
+        *) echo "$1 is not major, minor or patch." >&2; exit 1 ;; esac
     current="$(plutil -extract CFBundleShortVersionString raw desktop/Info.plist)" && \
-    newest="$(printf '%s\n%s\n' "$current" "$1" | sort -V | tail -n 1)" && \
-    { [ "$current" != "$1" ] && [ "$newest" = "$1" ] || \
-        { echo "Info.plist gives $current, so $1 is not newer." >&2; exit 1; }; } && \
+    newest="$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)" && \
+    { [ "$newest" = "$current" ] || \
+        { echo "Info.plist gives $current but the newest tag is $newest." >&2; exit 1; }; } && \
+    major="${current%%.*}" && rest="${current#*.}" && minor="${rest%%.*}" && \
+    patch="${rest#*.}" && \
+    case "$1" in \
+        major) next="$((major + 1)).0.0" ;; \
+        minor) next="$major.$((minor + 1)).0" ;; \
+        patch) next="$major.$minor.$((patch + 1))" ;; \
+    esac && \
     key='<key>CFBundleShortVersionString</key><string>' && \
-    sed -i '' "s|$key$current<|$key$1<|" desktop/Info.plist && \
-    [ "$(plutil -extract CFBundleShortVersionString raw desktop/Info.plist)" = "$1" ]
-    git add desktop/Info.plist
-    git commit --quiet --message "set the app's version to $1"
-    git tag "$1"
+    sed -i '' "s|$key$current<|$key$next<|" desktop/Info.plist && \
+    [ "$(plutil -extract CFBundleShortVersionString raw desktop/Info.plist)" = "$next" ] && \
+    git add desktop/Info.plist && \
+    git commit --quiet --message "set the app's version to $next" && \
+    git tag "$next" && \
+    echo "Tagged $next."
 
 # Run the CI check on this Mac, with no test skipped for lack of hardware.
 check: check-root check-desktop
