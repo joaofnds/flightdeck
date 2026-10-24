@@ -4,16 +4,16 @@ use super::{InputDriver, InputHarness, accepted_snapshot};
 use crate::live_source::Update;
 
 #[gpui::test]
-fn a_fan_frame_draws_the_page_without_drawing_a_chart_again(cx: &mut TestAppContext) {
-    // Goal: a frame of the fan animation builds no chart's plot again, since nothing a chart
-    // shows changed. Method: draw the whole Overview, notify the page as the fan clock does,
-    // and count the page's renders and the plots' renders.
+fn a_redraw_with_nothing_new_draws_no_chart_again(cx: &mut TestAppContext) {
+    // Goal: drawing the page again builds no chart's plot again when nothing a chart shows
+    // changed. Method: draw the whole Overview, notify the page with nothing changed, and count
+    // the page's renders and the plots' renders.
     let mut harness = InputHarness::setup_route(cx, "overview");
     harness.driver.show_the_whole_page();
     let drawn = harness.driver.draws();
     assert!(drawn.plots > 0);
 
-    harness.driver.draw_a_fan_frame();
+    harness.driver.redraw_the_page();
 
     assert!(harness.driver.draws().page > drawn.page);
     assert_eq!(harness.driver.draws().plots, drawn.plots);
@@ -140,8 +140,8 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    /// Notifies the page as `hardware_clock::install` does for each frame of the fans.
-    fn draw_a_fan_frame(&mut self) {
+    /// Notifies the page with nothing changed, so it draws again from what it holds.
+    fn redraw_the_page(&mut self) {
         self.view.update(&mut self.context, |_, cx| cx.notify());
         self.context.run_until_parked();
     }

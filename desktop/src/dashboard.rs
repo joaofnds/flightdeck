@@ -18,7 +18,6 @@ pub struct Dashboard {
     pub process: Option<String>,
     pub hidden: Rc<Vec<String>>,
     pub performance: Performance,
-    pub animate: bool,
     pub diagnostic_selected: usize,
     pub hardware_state: Rc<crate::hardware_motion::HardwareState>,
     pub replay: Option<crate::replay::Replay>,
@@ -45,7 +44,6 @@ impl Dashboard {
         replay: Option<crate::replay::Replay>,
     ) -> Self {
         let route = performance.options.page().to_owned();
-        let animate = performance.options.animate;
         let mut dashboard = Self {
             capture: Rc::new(capture),
             catalog: Rc::new(catalog),
@@ -59,7 +57,6 @@ impl Dashboard {
             process: None,
             hidden: Rc::new(Vec::new()),
             performance,
-            animate,
             diagnostic_selected: 29,
             hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
             replay,
@@ -306,7 +303,7 @@ impl Dashboard {
             }
             Row::Computer => self.computer().into_any_element(),
             Row::AppPicker => self.app_picker(cx).into_any_element(),
-            Row::Hardware => self.hardware(cx).into_any_element(),
+            Row::Hardware => self.hardware().into_any_element(),
         };
         div()
             .w_full()
@@ -747,7 +744,6 @@ impl Dashboard {
 
 impl Render for Dashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.hardware_state.begin_frame();
         self.performance.frame(window, cx);
         self.render_smoke(window);
         if self.performance.options.scrub {

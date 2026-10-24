@@ -8,15 +8,13 @@ use gpui::{
     IntoElement, LayoutId, PathBuilder, Pixels, Point, RenderImage, Style, TextRun, Window, div,
     fill, font, point, prelude::*, px, rgb, size,
 };
-use image::{Frame, Rgba, RgbaImage};
+use image::{Frame, RgbaImage};
 
 use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PANEL, PURPLE, RED, TEXT};
-use crate::dashboard::{Dashboard, control};
+use crate::dashboard::Dashboard;
 use crate::data::state;
 use crate::hardware_layout::{CALLOUTS, Callout, Layout};
-use crate::hardware_motion::{
-    FanFrame, HardwareState, HardwareVisibility, Vector, contains, particle, perimeter,
-};
+use crate::hardware_motion::{HardwareState, HardwareVisibility, Vector, perimeter};
 
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Readings {
@@ -29,7 +27,7 @@ pub struct Readings {
 }
 
 impl Dashboard {
-    pub fn hardware(&self, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    pub fn hardware(&self) -> impl IntoElement {
         let selected = self.inspection.selected;
         let value = |key| self.capture.value(key, selected);
         let readings = Readings {
@@ -56,29 +54,8 @@ impl Dashboard {
             .border_1()
             .border_color(rgb(GRID))
             .bg(rgb(PANEL))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .child(format!("Thermal state · {}", readings.thermal))
-                    .child(
-                        control(if self.animate {
-                            "Pause animation"
-                        } else {
-                            "Animate fans"
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.animate = !this.animate;
-                            cx.notify();
-                        })),
-                    ),
-            )
-            .child(hardware_stage(
-                readings,
-                Rc::clone(&self.hardware_state),
-                self.animate,
-            ))
+            .child(format!("Thermal state · {}", readings.thermal))
+            .child(hardware_stage(readings, Rc::clone(&self.hardware_state)))
             .child(hardware_caption())
     }
 }
@@ -93,22 +70,13 @@ pub fn hardware_caption() -> impl IntoElement {
         ))
 }
 
-pub fn hardware_stage(
-    readings: Readings,
-    state: Rc<HardwareState>,
-    animate: bool,
-) -> HardwareStage {
-    HardwareStage {
-        readings,
-        state,
-        animate,
-    }
+pub fn hardware_stage(readings: Readings, state: Rc<HardwareState>) -> HardwareStage {
+    HardwareStage { readings, state }
 }
 
 pub struct HardwareStage {
     readings: Readings,
     state: Rc<HardwareState>,
-    animate: bool,
 }
 
 impl IntoElement for HardwareStage {
@@ -173,29 +141,14 @@ impl Element for HardwareStage {
         cx: &mut App,
     ) {
         let visibility = hardware_visibility(bounds, window);
-        let visible = visibility.diagram_visible;
-        let enabled = if visibility.visible() {
-            if self.animate {
-                window.is_window_active()
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if !visible {
-            self.state.frame(self.readings.speeds, false);
-            self.state.acknowledge_visibility(&visibility);
+        self.state.acknowledge_visibility(&visibility);
+        if !visibility.diagram_visible {
             return;
         }
-        let artwork = artwork();
-        let motion = self.state.frame(self.readings.speeds, enabled);
-        self.state.acknowledge_visibility(&visibility);
+
         let layout = Layout::new(f32::from(bounds.size.width).max(1.0));
-        match artwork {
-            Ok(artwork) => {
-                paint_assembly(bounds, &layout, &self.readings, &motion, artwork, window);
-            }
+        match artwork() {
+            Ok(artwork) => paint_assembly(bounds, &layout, &self.readings, artwork, window),
             Err(error) => paint_text(error, bounds.origin, 12.0, rgb(ORANGE).into(), window, cx),
         }
         paint_callouts(bounds, &layout, &self.readings, window, cx);
@@ -226,9 +179,10 @@ fn hardware_visibility(bounds: Bounds<Pixels>, window: &Window) -> HardwareVisib
     }
 }
 
+/// The chassis, and the rotor as the left fan shows it and mirrored as the right one does.
 struct Artwork {
     chassis: Arc<RenderImage>,
-    rotors: Vec<Arc<RenderImage>>,
+    rotors: [Arc<RenderImage>; 2],
 }
 
 fn artwork() -> &'static Result<Artwork, String> {
@@ -251,14 +205,11 @@ fn artwork_load() -> Result<Artwork, String> {
         return Err("Schematic rotor dimensions changed".into());
     }
     let rotor = image::imageops::resize(&rotor, 208, 208, image::imageops::FilterType::Lanczos3);
-    let mut rotors = Vec::with_capacity(240);
-    for mirrored in [false, true] {
-        for phase in 0..120_u16 {
-            rotors.push(render_image(rotor_orientation(&rotor, phase, mirrored)));
-        }
-    }
+    let mirrored = image::imageops::flip_horizontal(&rotor);
+    let rotor_bytes = rotor.as_raw().len() + mirrored.as_raw().len();
+    let rotors = [render_image(rotor), render_image(mirrored)];
     eprintln!(
-        "schematic artwork cache: {} ms; rotor CPU bytes=41533440; orientations=240",
+        "schematic artwork cache: {} ms; rotor CPU bytes={rotor_bytes}; orientations=2",
         started.elapsed().as_millis()
     );
     Ok(Artwork {
@@ -297,65 +248,10 @@ fn render_image(mut buffer: RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(vec![Frame::new(buffer)]))
 }
 
-fn rotor_orientation(source: &RgbaImage, phase: u16, mirrored: bool) -> RgbaImage {
-    assert!(phase < 120);
-    let angle = f32::from(phase) * std::f32::consts::TAU / 120.0;
-    let (sine, cosine) = angle.sin_cos();
-    let mut target = RgbaImage::new(208, 208);
-    for y in 0..208_u16 {
-        for x in 0..208_u16 {
-            let relative_x = if mirrored {
-                103.5 - f32::from(x)
-            } else {
-                f32::from(x) - 103.5
-            };
-            let relative_y = f32::from(y) - 103.5;
-            let source_x = relative_x * cosine - relative_y * sine + 103.5;
-            let source_y = relative_x * sine + relative_y * cosine + 103.5;
-            target.put_pixel(
-                u32::from(x),
-                u32::from(y),
-                rotor_sample(source, source_x, source_y),
-            );
-        }
-    }
-    target
-}
-
-fn rotor_sample(source: &RgbaImage, x: f32, y: f32) -> Rgba<u8> {
-    if !(0.0..=207.0).contains(&x) {
-        return Rgba([0; 4]);
-    }
-    if !(0.0..=207.0).contains(&y) {
-        return Rgba([0; 4]);
-    }
-    // The checks prove finite, nonnegative coordinates within the 208-pixel buffer.
-    let column = unsafe { x.to_int_unchecked::<u32>() };
-    let row = unsafe { y.to_int_unchecked::<u32>() };
-    let horizontal = x.fract();
-    let vertical = y.fract();
-    let mut result = [0_u8; 4];
-    for (channel, target) in result.iter_mut().enumerate() {
-        let first = f32::from(source.get_pixel(column, row)[channel]) * (1.0 - horizontal)
-            + f32::from(source.get_pixel((column + 1).min(207), row)[channel]) * horizontal;
-        let second = f32::from(source.get_pixel(column, (row + 1).min(207))[channel])
-            * (1.0 - horizontal)
-            + f32::from(source.get_pixel((column + 1).min(207), (row + 1).min(207))[channel])
-                * horizontal;
-        let value = (first * (1.0 - vertical) + second * vertical)
-            .round()
-            .clamp(0.0, 255.0);
-        // Finite bilinear weights and clamping establish the u8 conversion's complete range.
-        *target = unsafe { value.to_int_unchecked::<u8>() };
-    }
-    Rgba(result)
-}
-
 fn paint_assembly(
     bounds: Bounds<Pixels>,
     layout: &Layout,
     readings: &Readings,
-    motion: &[FanFrame; 2],
     artwork: &Artwork,
     window: &mut Window,
 ) {
@@ -381,12 +277,11 @@ fn paint_assembly(
             layout.point(Vector::new(center.x - 52.0, center.y - 52.0)),
             Vector::new(104.0 * layout.scale, 104.0 * layout.scale),
         );
-        let phase = rotor_phase(motion[index].turns) + index * 120;
         if let Err(error) = window.paint_image(
             rotor,
             rotor,
             px(0.0).into(),
-            Arc::clone(&artwork.rotors[phase]),
+            Arc::clone(&artwork.rotors[index]),
             0,
             false,
         ) {
@@ -397,21 +292,11 @@ fn paint_assembly(
                 bounds,
                 layout,
                 index == 1,
-                &motion[index].distances,
                 readings.temperatures[index],
                 window,
             );
         }
     }
-}
-
-fn rotor_phase(turns: f32) -> usize {
-    let fraction = turns.fract();
-    usize::from(
-        (0..120_u16)
-            .find(|phase| fraction < f32::from(phase + 1) / 120.0)
-            .unwrap_or(119),
-    )
 }
 
 fn bounds_for(bounds: Bounds<Pixels>, origin: Vector, extent: Vector) -> Bounds<Pixels> {
@@ -428,7 +313,6 @@ fn paint_airflow(
     bounds: Bounds<Pixels>,
     layout: &Layout,
     mirrored: bool,
-    distances: &[f32; 24],
     temperature: Option<f32>,
     window: &mut Window,
 ) {
@@ -461,22 +345,6 @@ fn paint_airflow(
     match boundary.build() {
         Ok(path) => paint_airflow_wash(&path, bounds, layout, tint, window),
         Err(error) => eprintln!("Painting airflow housing: {error}"),
-    }
-    for lane in 0..24_u16 {
-        for phase in 0..4_u16 {
-            let particle = particle(lane, phase, distances[usize::from(lane)]);
-            if contains(particle.position) {
-                let center = airflow_point(particle.position, bounds, layout, mirrored);
-                let radius = particle.radius * layout.scale;
-                let rect = Bounds::new(
-                    center - point(px(radius), px(radius)),
-                    size(px(radius * 2.0), px(radius * 2.0)),
-                );
-                window.paint_quad(
-                    fill(rect, tint.opacity(particle.opacity)).corner_radii(px(radius)),
-                );
-            }
-        }
     }
 }
 
@@ -782,42 +650,5 @@ fn paint_text(
         cx,
     ) {
         eprintln!("Painting schematic error: {error}");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rotor_cache_keeps_the_artwork_and_mirrors_the_right_fan() {
-        // Compare zero-angle output pixel-for-pixel with the source and its exact reflection.
-        let source = RgbaImage::from_fn(208, 208, |x, y| {
-            Rgba([u8::try_from(x).unwrap(), u8::try_from(y).unwrap(), 100, 255])
-        });
-        assert_eq!(rotor_orientation(&source, 0, false), source);
-        assert_eq!(
-            rotor_orientation(&source, 0, true),
-            image::imageops::flip_horizontal(&source)
-        );
-        assert_eq!(rotor_sample(&source, f32::NAN, 0.0), Rgba([0; 4]));
-        assert_eq!(rotor_sample(&source, -1.0, 0.0), Rgba([0; 4]));
-        assert_eq!(rotor_phase(0.0), 0);
-        assert_eq!(rotor_phase(1.0), 0);
-        assert_eq!(rotor_phase(0.999), 119);
-    }
-
-    #[test]
-    fn quarter_turn_moves_asymmetric_pixels_and_mirrors_the_right_fan() {
-        // A negative quarter-turn maps target (120,80) to source (127,120) around (103.5,103.5).
-        // Reflecting the right fan maps target (120,80) to source (127,87) instead.
-        let source = RgbaImage::from_fn(208, 208, |x, y| {
-            Rgba([u8::try_from(x).unwrap(), u8::try_from(y).unwrap(), 100, 255])
-        });
-        let left = rotor_orientation(&source, 30, false);
-        let right = rotor_orientation(&source, 30, true);
-        assert_eq!(*left.get_pixel(120, 80), Rgba([127, 120, 100, 255]));
-        assert_eq!(*right.get_pixel(120, 80), Rgba([127, 87, 100, 255]));
-        assert_eq!(*right.get_pixel(87, 80), Rgba([127, 120, 100, 255]));
     }
 }

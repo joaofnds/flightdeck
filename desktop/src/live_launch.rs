@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui::{App, WindowOptions, px, size};
 use viewer::store::Store;
@@ -307,15 +306,10 @@ fn create_dashboard(worker: Worker, start: Start, cx: &mut App) -> gpui::Entity<
     let range = preferences::range(start.named_range, cx);
     let entity = crate::native_workflows::create_dashboard(worker, page, start.seconds, cx);
     entity.update(cx, |dashboard, cx| {
-        dashboard.animate = true;
         dashboard.reveal_hardware = start.hardware;
         dashboard.set_range(range, cx);
     });
     if let Err(error) = collection::start_timer(&entity, cx) {
-        entity.update(cx, |dashboard, _| dashboard.error = Some(error));
-    }
-    let state = Rc::clone(&entity.read(cx).hardware_state);
-    if let Err(error) = crate::hardware_clock::install(&entity, &state, cx) {
         entity.update(cx, |dashboard, _| dashboard.error = Some(error));
     }
     entity

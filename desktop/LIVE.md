@@ -356,8 +356,8 @@ and validated fan channels, with unavailable sensors labeled explicitly.
 App totals and histories stay at App scope. Executable groups use exact captured
 bytes and show measured subtotals and instance filtering for the loaded process
 page. CPU activity uses the selected observation's validated logical-CPU interval.
-The schematic uses the shared rotor artwork, callouts and illustrative airflow at
-30 Hz. Native accessibility and exact chart smoothing remain incomplete.
+The schematic draws the shared rotor artwork, callouts and illustrative airflow
+still. Native accessibility and exact chart smoothing remain incomplete.
 
 ## Historical review dispositions
 

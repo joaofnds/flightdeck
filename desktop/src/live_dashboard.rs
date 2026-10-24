@@ -117,7 +117,6 @@ pub struct LiveDashboard {
     pub updates: u32,
     pub renders: u64,
     pub(crate) plots: crate::live_plot::Plots,
-    pub animate: bool,
     pub reveal_hardware: bool,
     pub chart_hover: Option<ChartHover>,
     /// Where the pointer stands over a plot, in window coordinates, which anchors the chart
@@ -325,7 +324,6 @@ impl LiveDashboard {
             updates: 0,
             renders: 0,
             plots: crate::live_plot::Plots::new(),
-            animate: false,
             reveal_hardware: false,
             chart_hover: None,
             chart_pointer: None,
@@ -1240,7 +1238,6 @@ impl Render for LiveDashboard {
         self.install_cpu_focus(window, cx);
         let inspection_focus = self.install_inspection_focus(window, cx);
         let root_focus = self.install_root_focus(window, cx);
-        self.hardware_state.begin_frame();
         self.plots.begin_frame();
         self.renders += 1;
         if self.renders == 1 {

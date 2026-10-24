@@ -9,7 +9,6 @@ mod dashboard;
 mod data;
 mod diagnostics;
 mod hardware;
-mod hardware_clock;
 mod hardware_layout;
 mod hardware_motion;
 mod live_acceptance;
@@ -184,13 +183,8 @@ fn run_reference_window(
                 replay,
             )
         });
-        let hardware_state = std::rc::Rc::clone(&entity.read(cx).hardware_state);
         if let Err(error) = performance::start_deadline(&entity, cx) {
             eprintln!("Reference deadline failed: {error}");
-            cx.quit();
-        }
-        if let Err(error) = hardware_clock::install(&entity, &hardware_state, cx) {
-            eprintln!("Reference hardware timer failed: {error}");
             cx.quit();
         }
         if let Err(error) = replay_dashboard::start(&entity, cx) {

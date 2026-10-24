@@ -30,8 +30,7 @@ const PARAGRAPHS: [&[Run]; 4] = [
     &[text(
         "Leaders use component anchors; physical sensor coordinates and fan channel sides are \
          unverified. CPU and GPU share the cooling assembly. The separate airflow colors are a \
-         display choice, not measured exhaust temperatures. Rotor and particle speed follows \
-         each channel’s RPM.",
+         display choice, not measured exhaust temperatures.",
     )],
     &[
         link(

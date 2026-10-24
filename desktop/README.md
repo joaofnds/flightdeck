@@ -165,7 +165,7 @@ target/release/flightdeck --check
 target/release/flightdeck --reference --smoke --seconds 5
 target/release/flightdeck --reference --scrub --seconds 20
 target/release/flightdeck --reference --page cpu --minutes 60 --scrub --seconds 20
-target/release/flightdeck --reference --hardware --animate --seconds 20
+target/release/flightdeck --reference --hardware --seconds 20
 ```
 
 Rendering uses GPUI's Metal backend, canvas paths and a virtualized list of panel
@@ -245,9 +245,8 @@ missing observations remain gaps and small nonzero rates retain useful units.
 The schematic shows the selected Battery charge and signed power independently;
 missing Battery readings remain unavailable. Invalid Battery input reports its
 diagnostic while preserving valid CPU, GPU, installed-memory and fan readings.
-The schematic uses the shared chassis and rotor assets,
-anchored callouts and illustrative airflow. Its 30 Hz clock
-suspends while inactive or offscreen. The macOS text backend is enabled and checked
+The schematic draws the shared chassis and rotor assets still, with
+anchored callouts and an illustrative airflow tint. The macOS text backend is enabled and checked
 at startup; the earlier blank-text builds are unsuitable performance baselines.
 Overview defers the schematic until its first real snapshot, avoiding artwork
 initialization while the charts are still loading.
@@ -287,8 +286,7 @@ Run only one measured app at a time and keep its window exposed. A zero CPU delt
 is resolution-limited; it does not establish zero resource use.
 
 The legacy `--scrub` workload changes the selected captured sample on each requested
-animation frame. `--animate --hardware` animates the visible schematic.
-Their printed percentiles measure CPU-side view-render intervals after ten warmup
+animation frame. Its printed percentiles measure CPU-side view-render intervals after ten warmup
 renders. They are not GPU completion, display presentation, input latency, or
 proof that every frame met a deadline.
 
@@ -333,12 +331,10 @@ preparation. Requested bytes are not retained memory. Querying, decoding, encodi
 UI drawing and screen presentation are outside this measurement. Each output path
 must be new; the command refuses to overwrite an existing file.
 
-The 240 cached rotor orientations preserve the existing artwork through GPUI image
-primitives. Their CPU pixels occupy 41,533,440 bytes, plus chassis pixels and GPU
-atlas storage. Generation is timed on first schematic paint. This cost belongs
-in the application's memory and startup results.
-Live mode enables schematic animation by default, suspending its clock when
-inactive or outside the painted viewport. Its visible control can pause it.
+The rotor is held as two images, the left fan's and its mirror for the right one.
+Their CPU pixels occupy 346,112 bytes, plus chassis pixels and GPU atlas storage.
+Generation is timed on first schematic paint. This cost belongs in the
+application's memory and startup results.
 
 [First measurements and their limits](PERFORMANCE.md) include the raw process
 observations, render summaries and binary hashes.
@@ -346,8 +342,8 @@ observations, render summaries and binary hashes.
 [Current evaluation](EVALUATION.md) records the font fix, repeated measurements,
 implementation differences and remaining verification gaps.
 
-A performance verdict needs repeated matched workloads, including animation and
-interaction and the shared backend. Idle results alone can establish
+A performance verdict needs repeated matched workloads, including interaction
+and the shared backend. Idle results alone can establish
 feasibility or expose an idle cost; they cannot prove one framework universally
 faster. The existing stack research explicitly records that its Swift choice was
 a product-fit/maintenance judgment, without comparative runtime measurements.

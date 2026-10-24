@@ -20,11 +20,11 @@ impl LiveDashboard {
             .border_color(rgb(LINE))
             .bg(rgb(PANEL))
             .child(hardware_state(&thermal))
-            .child(div().mt(px(16.0)).child(hardware_stage(
-                readings,
-                Rc::clone(&self.hardware_state),
-                self.animate,
-            )))
+            .child(
+                div()
+                    .mt(px(16.0))
+                    .child(hardware_stage(readings, Rc::clone(&self.hardware_state))),
+            )
             .children(failures.into_iter().flatten().map(|error| {
                 div()
                     .debug_selector(|| "schematic-error".into())

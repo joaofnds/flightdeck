@@ -39,7 +39,6 @@ pub struct Options {
     /// The page `--page` named, which opens over the page the user left open.
     pub named_page: Option<String>,
     pub scrub: bool,
-    pub animate: bool,
     pub hardware: bool,
     /// The minutes `--minutes` named, if any.
     pub named_minutes: Option<u16>,
@@ -91,7 +90,6 @@ impl Options {
             source: Source::default(),
             named_page: None,
             scrub: false,
-            animate: false,
             hardware: false,
             named_minutes: None,
             seconds: None,
@@ -108,14 +106,6 @@ impl Options {
                 break;
             }
             position = options.parse_argument(arguments, position)?;
-        }
-        if options.animate {
-            if !options.hardware {
-                return Err("--animate requires --hardware".into());
-            }
-            if options.page() != "overview" {
-                return Err("animation is on the overview page".into());
-            }
         }
         options.validate_replay()?;
         options.validate_seconds()?;
@@ -208,7 +198,6 @@ impl Options {
                 position += 1;
             }
             "--scrub" => self.scrub = true,
-            "--animate" => self.animate = true,
             "--hardware" => self.hardware = true,
             "--replay" => {
                 self.replay = Some(
@@ -374,7 +363,6 @@ impl Performance {
             "{}",
             serde_json::json!({
                 "page": self.options.page(), "scrub": self.options.scrub,
-                "animate": self.options.animate,
                 "elapsed_seconds": self.started.elapsed().as_secs_f64(),
                 "render_count": self.frames, "measured_intervals": self.intervals.len(),
                 "render_interval_ms_p50": percentile(50), "render_interval_ms_p95": percentile(95),
@@ -393,7 +381,7 @@ fn parse_argument_help() -> ! {
     println!(
         "flightdeck [--recording PATH] [--start-collector] [--page ROUTE] [--minutes 15|60]\n\
          [--seconds 1..1800] [--live-check --seconds 5..300]\n\
-         [--reference [--scrub] [--animate]\n\
+         [--reference [--scrub]\n\
          [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\
          [--replay ACTIONS.json]] [--check]\n\
          [--control SOCKET] (automation builds: hidden window, socket commands)"
