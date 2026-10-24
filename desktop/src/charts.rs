@@ -453,7 +453,8 @@ struct Curve {
 /// The unbroken curves through one run of readings. A chart with a clock draws a point at the
 /// end of each bucket that holds readings of its own, and breaks the curve at each bucket that
 /// holds none. The bucket the join of thinned and full-detail readings cuts holds readings the
-/// chart leaves out, so the curve runs past it. A chart with no clock draws each reading.
+/// chart leaves out, so a still chart's curve runs past it. A sliding chart draws no window the
+/// join parts, so its curve breaks there. A chart with no clock draws each reading.
 fn run_curves(
     values: &[Option<(f32, f32)>],
     run: std::ops::Range<usize>,
@@ -1012,6 +1013,26 @@ impl Buckets {
         join < start + self.length_seconds
     }
 
+    /// The first bucket of the window of buckets a point averages, the point at the end of the
+    /// bucket `newest_bucket`.
+    fn window_first_bucket(&self, newest_bucket: u64) -> u64 {
+        (newest_bucket + 1).saturating_sub(self.per_point)
+    }
+
+    /// Whether the window of the point at the end of the bucket `newest_bucket` reaches across the
+    /// join of thinned and full-detail readings, holding buckets both before and from the first
+    /// bucket wholly of full-detail readings.
+    fn join_parts(&self, newest_bucket: u64) -> bool {
+        let Some(join) = self.detail_first else {
+            return false;
+        };
+        let detail_bucket_first = join.div_ceil(self.length_seconds);
+        if self.window_first_bucket(newest_bucket) >= detail_bucket_first {
+            return false;
+        }
+        detail_bucket_first <= newest_bucket
+    }
+
     /// Whether a curve runs on from its point at the bucket end `left` to its next point, at
     /// `right`: the two buckets are neighbours, or only the bucket the join of thinned and
     /// full-detail readings cuts lies between them, which holds readings left out, not none.
@@ -1086,12 +1107,13 @@ impl BucketTotal {
 }
 
 /// The point at the end of the newest bucket of `recent`, the mean of the readings in its window,
-/// or `None` when `recent` holds no bucket, the point stands before the window's oldest edge, or
-/// its window reaches before `whole_from`, the first bucket no slide of the window can still
-/// change.
+/// or `None` when `recent` holds no bucket or the point stands before the window's oldest edge. A
+/// sliding chart names `sliding_whole_from`, the first bucket no slide of the window can still
+/// change, and draws no point whose window reaches before it or that the join of thinned and
+/// full-detail readings parts. A still chart names none.
 fn window_mean(
     recent: &std::collections::VecDeque<BucketTotal>,
-    whole_from: Option<u64>,
+    sliding_whole_from: Option<u64>,
     buckets: Buckets,
 ) -> Option<WindowMean> {
     let newest = recent.back()?.index;
@@ -1099,9 +1121,12 @@ fn window_mean(
     if end < buckets.first_end {
         return None;
     }
-    let start = (newest + 1).saturating_sub(buckets.per_point);
-    if let Some(whole_from) = whole_from {
+    let start = buckets.window_first_bucket(newest);
+    if let Some(whole_from) = sliding_whole_from {
         if start < whole_from {
+            return None;
+        }
+        if buckets.join_parts(newest) {
             return None;
         }
     }
@@ -1131,8 +1156,8 @@ fn window_mean(
 
 /// The points of one segment's readings, `run`, in time order: one at the end of each bucket
 /// that holds readings of its own, the mean of the readings in its window, so a bucket with none
-/// breaks the curve. A point whose window holds readings that left the chart, or that the join of
-/// thinned and full-detail readings will still change, is not drawn.
+/// breaks the curve. A point whose window holds readings that left the chart, or reaches across
+/// the join of thinned and full-detail readings, is not drawn.
 ///
 /// Readings before the first in view left a sliding window, so a run that starts there draws
 /// only windows whole inside the chart. A run that starts at a change of segment has no
@@ -1142,12 +1167,12 @@ fn window_means(
     run: std::ops::Range<usize>,
     clock: Clock<'_>,
 ) -> Vec<WindowMean> {
-    let mut whole_from = first_whole_bucket(clock);
+    let sliding_whole_from = first_whole_bucket(clock);
     let Clock {
         buckets,
         positions,
         lower,
-        sliding,
+        ..
     } = clock;
     let capacity = match usize::try_from(buckets.per_point) {
         Ok(capacity) => capacity,
@@ -1156,33 +1181,21 @@ fn window_means(
     let mut recent: std::collections::VecDeque<BucketTotal> =
         std::collections::VecDeque::with_capacity(capacity);
     let mut means = Vec::with_capacity(run.len() / 8 + 1);
-    let mut cut = false;
     for index in run {
         let Some((top, bottom)) = values[index] else {
             continue;
         };
         let Some(bucket) = buckets.bucket_index(positions[lower + index]) else {
-            // A still view gains and loses no readings, so a cut bucket only leaves its own
-            // readings out. In a sliding one, the windows around it would still change.
-            if sliding {
-                means.extend(window_mean(&recent, whole_from, buckets));
-                recent.clear();
-                cut = true;
-            }
             continue;
         };
 
-        if cut {
-            whole_from = Some(bucket);
-            cut = false;
-        }
         if let Some(open) = recent.back_mut() {
             if open.index == bucket {
                 open.add(top, bottom);
                 continue;
             }
         }
-        means.extend(window_mean(&recent, whole_from, buckets));
+        means.extend(window_mean(&recent, sliding_whole_from, buckets));
         while recent
             .front()
             .is_some_and(|oldest| oldest.index + buckets.per_point <= bucket)
@@ -1196,7 +1209,7 @@ fn window_means(
             count: 1,
         });
     }
-    means.extend(window_mean(&recent, whole_from, buckets));
+    means.extend(window_mean(&recent, sliding_whole_from, buckets));
     means
 }
 
@@ -2556,13 +2569,9 @@ mod live_tests {
         assert_eq!(found, vec![Some(189), None, None, Some(191)]);
     }
 
-    #[test]
-    fn no_window_across_the_join_is_drawn_while_the_window_slides() {
-        // Goal: a point whose window holds readings the moving join will still thin or cut is
-        // not drawn, so the curve beside the join does not change from second to second.
-        // Method: in a following 30-minute window from 1000 in ten-second buckets with a reading
-        // each second and the join at 1905, read the points either side of the bucket the join
-        // cuts.
+    /// The curves a following 30-minute window from 1000 in ten-second buckets draws through a
+    /// reading each second, with full detail from `join`.
+    fn sliding_half_hour_curves(join: u64) -> Vec<Curve> {
         let positions = tick_positions(1800);
         let mut geometry = live_geometry(1000, 0, &positions);
         geometry.sliding = true;
@@ -2572,7 +2581,7 @@ mod live_tests {
         };
         geometry.buckets = Some(Buckets::of(
             window,
-            Some(1905),
+            Some(join),
             TICK_SECONDS,
             TEN_SECOND_CARD * 2.0,
         ));
@@ -2580,10 +2589,33 @@ mod live_tests {
             .map(|second| Some((varying_reading(second), 0.0)))
             .collect();
 
-        let curves = run_curves(&values, 0..1800, &geometry);
+        run_curves(&values, 0..1800, &geometry)
+    }
+
+    #[test]
+    fn no_window_across_the_join_is_drawn_while_the_window_slides() {
+        // Goal: a point whose window holds readings the moving join will still thin or cut is
+        // not drawn, so the curve beside the join does not change from second to second.
+        // Method: in a following 30-minute window with the join at 1905, read the points either
+        // side of the bucket the join cuts. The first window after it starts at the bucket after
+        // the cut one, so its point ends the window's four buckets later, at 1950.
+        let curves = sliding_half_hour_curves(1905);
 
         let ends = half_hour_ends(&curves);
         assert_eq!(ends, vec![(1050.0, 1900.0), (1950.0, 2790.0)]);
+    }
+
+    #[test]
+    fn no_window_across_a_join_on_a_bucket_start_is_drawn_while_the_window_slides() {
+        // Goal: a join on the first second of a bucket cuts no bucket, yet the curve breaks
+        // there as it does at a join that cuts one.
+        // Method: in a following 30-minute window with the join at 1900, a bucket's start, read
+        // the points either side of the join. The first window after it starts at the join's
+        // bucket, so its point ends the window's four buckets later, at 1940.
+        let curves = sliding_half_hour_curves(1900);
+
+        let ends = half_hour_ends(&curves);
+        assert_eq!(ends, vec![(1050.0, 1900.0), (1940.0, 2790.0)]);
     }
 
     #[test]
