@@ -63,7 +63,8 @@ impl Recording {
         let control = Arc::new(crate::Cancellation::default());
         let operation = control.operation(0).unwrap();
         let mut tables = Tables::new();
-        for (kind, _, order) in persistence::schema::TABLES {
+        for kind in persistence::schema::TABLES {
+            let order = kind.order();
             let name = kind.name();
             if TABLE_NAMES.contains(&name) {
                 connection

@@ -79,7 +79,7 @@ impl History {
                 .write(true)
                 .read(false)
                 .mode(0o600)
-                .open(payloads.join(table.0.name()))
+                .open(payloads.join(table.name()))
                 .unwrap();
             file.write_all(b"closed opaque filesystem fixture, not Parquet fidelity")
                 .unwrap();
@@ -146,7 +146,7 @@ fn history_window(store: &Store, identity: &WindowIdentity, payload: &Path, wind
         tables: crate::schema::TABLES
             .iter()
             .map(|table| TableManifest {
-                name: table.0.name(),
+                name: table.name(),
                 rows: 1,
             })
             .collect(),

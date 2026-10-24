@@ -108,16 +108,16 @@ mod tests {
         let processes = persistence::table_columns(Table::Processes, &window);
         let core_states = persistence::table_columns(Table::CoreStates, &window);
 
-        let mut expected_processes = TABLES[7].1.to_owned();
+        let mut expected_processes = TABLES[7].declaration();
         for (name, kind) in IDENTITY_FIELDS {
             expected_processes.push_str(", ");
             expected_processes.push_str(name);
             expected_processes.push(' ');
             expected_processes.push_str(kind);
         }
-        assert_eq!(ticks, TABLES[0].1);
+        assert_eq!(ticks, TABLES[0].declaration());
         assert_eq!(processes, expected_processes);
-        assert_eq!(core_states, TABLES[5].1);
+        assert_eq!(core_states, TABLES[5].declaration());
     }
 
     #[test]

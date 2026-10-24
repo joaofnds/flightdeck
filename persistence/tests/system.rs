@@ -169,7 +169,7 @@ mod tests {
         // Goal: a window sealed before the core clocks reads each state's clock as unknown.
         // Method: normalize an original core state row and read the added column.
         let tables = Tables::new();
-        tables.create("core_states", TABLES[5].1);
+        tables.create("core_states", &TABLES[5].declaration());
         tables.insert("core_states", "1 AS publication, 0 AS core, 2 AS state", 1);
 
         let normalized = table_source(&tables, Table::CoreStates, TableSource::Staged).unwrap();
@@ -185,7 +185,7 @@ mod tests {
         // Goal: a saved clock reads back as it was saved.
         // Method: stage a core state with its clock and read it.
         let tables = Tables::new();
-        tables.create("core_states", TABLES[5].1);
+        tables.create("core_states", &TABLES[5].declaration());
         tables.add_column("core_states", "frequency_khz", "UINTEGER");
         tables.insert(
             "core_states",
@@ -205,7 +205,7 @@ mod tests {
         // Goal: a clock column the writer never declares is refused rather than misread.
         // Method: expose the clock as a signed integer.
         let tables = Tables::new();
-        tables.create("core_states", TABLES[5].1);
+        tables.create("core_states", &TABLES[5].declaration());
         tables.add_column("core_states", "frequency_khz", "BIGINT");
 
         let result = table_source(&tables, Table::CoreStates, TableSource::Staged);
@@ -222,7 +222,7 @@ mod tests {
         // Goal: a window sealed before the GPU time reads each process's GPU time as unknown.
         // Method: normalize an original process row and read the added column.
         let tables = Tables::new();
-        tables.create("processes", TABLES[7].1);
+        tables.create("processes", &TABLES[7].declaration());
         tables.insert("processes", "1 AS publication, 7 AS pid", 1);
 
         let normalized = table_source(&tables, Table::Processes, TableSource::Staged).unwrap();
@@ -238,7 +238,7 @@ mod tests {
         // Goal: a GPU time column the writer never declares is refused rather than ignored.
         // Method: expose the column in capitals on a legacy process source.
         let tables = Tables::new();
-        tables.create("processes", TABLES[7].1);
+        tables.create("processes", &TABLES[7].declaration());
         tables.add_column("processes", "GPU_NS", "UBIGINT");
 
         let result = table_source(&tables, Table::Processes, TableSource::Staged);
@@ -276,7 +276,7 @@ mod tests {
             tables.add_column("ticks", name, kind);
         }
         let used =
-            TABLES[0].1.split(',').count() + BATTERY_FIELDS.len() + 1 + TEMPERATURE_FIELDS.len();
+            TABLES[0].catalog().columns.len() + BATTERY_FIELDS.len() + 1 + TEMPERATURE_FIELDS.len();
         for extra in 0..TICK_COLUMNS_MAX - used - SYSTEM_FIELDS.len() + past {
             tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
         }
@@ -291,7 +291,7 @@ mod tests {
 
     fn ticks() -> Tables {
         let tables = Tables::new();
-        tables.create("ticks", TABLES[0].1);
+        tables.create("ticks", &TABLES[0].declaration());
         tables
     }
 

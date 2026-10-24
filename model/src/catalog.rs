@@ -39,6 +39,20 @@ pub struct Table {
     pub groups: &'static [&'static [Column]],
 }
 
+impl Table {
+    /// The columns of a window that holds every group of the table.
+    #[must_use]
+    pub const fn column_count(&self) -> usize {
+        let mut count = self.columns.len();
+        let mut group = 0;
+        while group < self.groups.len() {
+            count += self.groups[group].len();
+            group += 1;
+        }
+        count
+    }
+}
+
 const fn column(name: &'static str, kind: Kind) -> Column {
     Column { name, kind }
 }
@@ -339,9 +353,9 @@ const _: () = {
 /// Whether no two of a table's columns, its groups' among them, share a name.
 const fn names_unique(table: &Table) -> bool {
     let mut first = 0;
-    while first < column_count(table) {
+    while first < table.column_count() {
         let mut second = first + 1;
-        while second < column_count(table) {
+        while second < table.column_count() {
             let (left, right) = (column_at(table, first), column_at(table, second));
             if text_equal(left.name, right.name) {
                 return false;
@@ -369,16 +383,6 @@ const fn key_declared(table: &Table) -> bool {
         key += 1;
     }
     true
-}
-
-const fn column_count(table: &Table) -> usize {
-    let mut count = table.columns.len();
-    let mut group = 0;
-    while group < table.groups.len() {
-        count += table.groups[group].len();
-        group += 1;
-    }
-    count
 }
 
 const fn column_at(table: &Table, index: usize) -> Column {

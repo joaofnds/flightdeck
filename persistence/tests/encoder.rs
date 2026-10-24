@@ -204,10 +204,12 @@ mod tests {
     }
 
     fn assert_saved_schema(directory: &Directory, schema: SavedSchema) {
-        for (table, definition, _) in TABLES {
-            let mut expected = definition
-                .split(',')
-                .map(|column| column.trim().split_once(' ').unwrap())
+        for table in TABLES {
+            let mut expected = table
+                .catalog()
+                .columns
+                .iter()
+                .map(|column| (column.name, persistence::schema::storage_name(column.kind)))
                 .collect::<Vec<_>>();
             if matches!(schema, SavedSchema::Extended) {
                 match table {

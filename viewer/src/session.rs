@@ -308,7 +308,7 @@ impl Session {
     pub fn catalog(&self) -> Value {
         json!({"path": self.root, "first_second": self.first, "last_second": self.last,
             "windows": self.windows.len(), "unknown_clock_ticks": self.unknown,
-            "tables": persistence::schema::TABLES.map(|entry| entry.0.name())})
+            "tables": persistence::schema::TABLES.map(persistence::schema::Table::name)})
     }
 
     /// Every response belongs to one explicit saved second and optional repeated observation.
@@ -698,10 +698,11 @@ impl Session {
             .selected
             .as_ref()
             .ok_or(Error::Bound("no selected observation"))?;
-        let (_, _, order) = persistence::schema::TABLES
-            .iter()
-            .find(|entry| entry.0.name() == name)
-            .ok_or(Error::Bound("table name"))?;
+        let order = persistence::schema::TABLES
+            .into_iter()
+            .find(|table| table.name() == name)
+            .ok_or(Error::Bound("table name"))?
+            .order();
         if !offset.is_multiple_of(PAGE_ROWS) {
             return Err(Error::Bound("page offset"));
         }
@@ -904,9 +905,9 @@ impl Reader<'_> {
         self.operation.check()?;
         #[cfg(test)]
         self.source_reads.increment();
-        let (table, _, _) = persistence::schema::TABLES
-            .iter()
-            .find(|entry| entry.0.name() == name)
+        let table = persistence::schema::TABLES
+            .into_iter()
+            .find(|table| table.name() == name)
             .ok_or(Error::Bound("table name"))?;
         self.validate_commitment(window)?;
         let manifest = &self.windows[window];
@@ -916,7 +917,7 @@ impl Reader<'_> {
             .join(format!("{name}.parquet"));
         persistence::query::table_source(
             self.connection,
-            *table,
+            table,
             persistence::query::TableSource::Parquet(&path),
         )
     }

@@ -32,7 +32,8 @@ mod fixture;
 fn connection() -> Engine {
     let connection = crate::data::connection();
     for index in [7, 9] {
-        let (table, columns, _) = persistence::schema::TABLES[index];
+        let table = persistence::schema::TABLES[index];
+        let columns = table.declaration();
         let gpu = matches!(table, persistence::schema::Table::Processes)
             .then_some(persistence::schema::PROCESS_GPU_FIELD);
         let extension = persistence::schema::IDENTITY_FIELDS

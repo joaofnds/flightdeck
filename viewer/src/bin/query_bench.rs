@@ -69,7 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let cpu = cpu_ns()?;
         let selection = session.select(second.saturating_sub(iteration % 30), 0)?;
         if !selection["selected"].is_null() {
-            for (table, _, _) in persistence::schema::TABLES {
+            for table in persistence::schema::TABLES {
                 let page = session.page(table.name(), 0)?;
                 if page["rows"].as_array().is_none() {
                     return Err(io::Error::other("invalid page response").into());

@@ -7,6 +7,8 @@ use polars_parquet::write::{
     row_group_iter,
 };
 
+use model::catalog;
+
 use crate::schema::{TABLES, Table};
 use crate::{Error, Result, Window};
 
@@ -43,9 +45,9 @@ impl Encoder {
         }
 
         let mut tables = Vec::with_capacity(TABLES.len());
-        for (table, _columns, order) in TABLES {
+        for table in TABLES {
             let mut frame = frame_in_file_order(table, window)?.sort(
-                order.split(", "),
+                table.catalog().key.to_vec(),
                 SortMultipleOptions {
                     descending: vec![false],
                     nulls_last: vec![true],
@@ -175,6 +177,12 @@ pub fn frame_bytes(table: Table, window: &Window) -> Result<u64> {
 pub fn frame(table: Table, window: &Window) -> Result<DataFrame> {
     bounds::frame(table, window)?;
 
+    let frame = frame_built(table, window)?;
+    frame_declared(table, window, &frame);
+    Ok(frame)
+}
+
+fn frame_built(table: Table, window: &Window) -> Result<DataFrame> {
     match table {
         Table::Ticks => ticks::frame(window),
         Table::Memory => machine::memory(window),
@@ -192,16 +200,31 @@ pub fn frame(table: Table, window: &Window) -> Result<DataFrame> {
 /// The table's frame, with the processes and events already in the order their files keep, so
 /// the sort before writing finds them sorted.
 fn frame_in_file_order(table: Table, window: &Window) -> Result<DataFrame> {
-    match table {
+    let frame = match table {
         Table::Processes => {
             bounds::frame(table, window)?;
-            crate::identity_encoder::processes_in_file_order(window)
+            crate::identity_encoder::processes_in_file_order(window)?
         }
         Table::Events => {
             bounds::frame(table, window)?;
-            crate::identity_encoder::events_in_file_order(window)
+            crate::identity_encoder::events_in_file_order(window)?
         }
-        _ => frame(table, window),
+        _ => return frame(table, window),
+    };
+    frame_declared(table, window, &frame);
+    Ok(frame)
+}
+
+/// Asserts that `frame` holds the columns the catalog declares for the table of the window, in
+/// their order and of their kinds, so a column the encoder adds, renames or moves fails here
+/// rather than in a reader of the files.
+fn frame_declared(table: Table, window: &Window, frame: &DataFrame) {
+    let declared = declared_columns(table, window);
+    assert_eq!(frame.width(), declared.len());
+    for (column, declared) in frame.columns().iter().zip(&declared) {
+        assert_eq!(column.name().as_str(), declared.name);
+        let stored = crate::query::storage_type(column.dtype());
+        assert!(stored.is_ok_and(|name| name == crate::schema::storage_name(declared.kind)));
     }
 }
 
@@ -230,51 +253,39 @@ pub(crate) fn usage_columns<'usage, Row>(
 /// Declares as SQL columns the saved schema of this table for the window's extensions.
 #[must_use]
 pub fn table_columns(table: Table, window: &Window) -> String {
-    let Some((_, columns, _)) = TABLES.iter().find(|entry| entry.0.name() == table.name()) else {
-        unreachable!("every table has a schema");
-    };
-
-    let mut columns = (*columns).to_owned();
-    if matches!(table, Table::Ticks) {
-        if window.battery_captured() {
-            table_columns_push(&mut columns, &crate::schema::BATTERY_FIELDS);
-        }
-        if window.disks_captured() {
-            columns.push_str(", physical_disks VARCHAR");
-        }
-        if window.temperatures_captured() {
-            table_columns_push(&mut columns, &crate::schema::TEMPERATURE_FIELDS);
-        }
-        if window.system_captured() {
-            table_columns_push(&mut columns, &crate::schema::SYSTEM_FIELDS);
-        }
-    }
-
-    if window.programs.is_some() {
-        if matches!(table, Table::Processes | Table::Events) {
-            table_columns_push(&mut columns, &crate::schema::IDENTITY_FIELDS);
-        }
-    }
-
-    if window.system_captured() {
-        let field = match table {
-            Table::CoreStates => Some(crate::schema::CORE_STATE_FREQUENCY_FIELD),
-            Table::Processes if window.programs.is_some() => Some(crate::schema::PROCESS_GPU_FIELD),
-            _ => None,
-        };
-        if let Some(field) = field {
-            table_columns_push(&mut columns, &[field]);
-        }
-    }
-
-    columns
+    crate::schema::declaration(&declared_columns(table, window))
 }
 
-fn table_columns_push(columns: &mut String, fields: &[(&str, &str)]) {
-    for (name, kind) in fields {
-        columns.push_str(", ");
-        columns.push_str(name);
-        columns.push(' ');
-        columns.push_str(kind);
+/// The columns the catalog declares for the table of a window: the table's own, then each of
+/// its groups the window holds.
+#[must_use]
+pub fn declared_columns(table: Table, window: &Window) -> Vec<catalog::Column> {
+    let system = window.system_captured();
+    let identities = window.programs.is_some();
+    let groups: &[(bool, &[catalog::Column])] = match table {
+        Table::Ticks => &[
+            (window.battery_captured(), &catalog::BATTERY),
+            (window.disks_captured(), &[catalog::PHYSICAL_DISKS]),
+            (window.temperatures_captured(), &catalog::TEMPERATURES),
+            (system, &catalog::SYSTEM),
+        ],
+        Table::CoreStates => &[(system, &[catalog::CORE_STATE_FREQUENCY])],
+        Table::Processes => &[
+            (identities, &catalog::IDENTITY),
+            (system && identities, &[catalog::PROCESS_GPU]),
+        ],
+        Table::Events => &[(identities, &catalog::IDENTITY)],
+        _ => &[],
+    };
+    let declared = table.catalog();
+    assert_eq!(groups.len(), declared.groups.len());
+
+    let mut columns = declared.columns.to_vec();
+    for ((held, group), declared_group) in groups.iter().zip(declared.groups) {
+        assert_eq!(group, declared_group);
+        if *held {
+            columns.extend_from_slice(group);
+        }
     }
+    columns
 }

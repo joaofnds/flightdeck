@@ -259,7 +259,7 @@ impl LiveSession {
                 json!({"path": self.root,
             "first_second": null, "last_second": null, "windows": 0,
             "unknown_clock_ticks": 0,
-            "tables": persistence::schema::TABLES.map(|entry| entry.0.name())})
+            "tables": persistence::schema::TABLES.map(persistence::schema::Table::name)})
             },
             Session::catalog,
         );
@@ -2204,7 +2204,8 @@ fn project_observation_tables(
     window: &Window,
 ) -> Result<BTreeMap<&'static str, Table>> {
     let mut tables = BTreeMap::new();
-    for (table, _, order) in persistence::schema::TABLES {
+    for table in persistence::schema::TABLES {
+        let order = table.order();
         let name = table.name();
 
         connection.register(name, persistence::frame(table, window)?)?;

@@ -61,7 +61,7 @@ mod tests {
 
     fn tables() -> Tables {
         let tables = Tables::new();
-        tables.create("ticks", TABLES[0].1);
+        tables.create("ticks", &TABLES[0].declaration());
         tables
     }
 
@@ -194,7 +194,7 @@ mod tests {
         rejects_extended_tick_tables_exceeding_the_column_bound,
         |tables| {
             for extra in
-                0..=TICK_COLUMNS_MAX - TABLES[0].1.split(',').count() - BATTERY_FIELDS.len()
+                0..=TICK_COLUMNS_MAX - TABLES[0].catalog().columns.len() - BATTERY_FIELDS.len()
             {
                 tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
             }
@@ -227,7 +227,8 @@ mod tests {
         // Method: add enough unrelated columns to an original table that the battery's no
         // longer fit.
         let tables = tables();
-        for extra in 0..=TICK_COLUMNS_MAX - TABLES[0].1.split(',').count() - BATTERY_FIELDS.len() {
+        for extra in 0..=TICK_COLUMNS_MAX - TABLES[0].catalog().columns.len() - BATTERY_FIELDS.len()
+        {
             tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
         }
 
@@ -384,7 +385,7 @@ mod tests {
         assert_eq!(Table::Ticks.columns().count(), 19);
         assert_eq!(
             persistence::table_columns(Table::Ticks, &window),
-            TABLES[0].1
+            TABLES[0].declaration()
         );
         let names: Vec<_> = tables.iter().map(|table| table.name).collect();
         assert_eq!(

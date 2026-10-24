@@ -40,9 +40,9 @@ impl<'source> Cursor<'source> {
             "event_identity" => "events",
             _ => comparison.label,
         };
-        let (table, _, _) = persistence::schema::TABLES
-            .iter()
-            .find(|entry| entry.0.name() == name)
+        let table = persistence::schema::TABLES
+            .into_iter()
+            .find(|table| table.name() == name)
             .ok_or(bound("reference table"))?;
         let columns = match comparison.label {
             "process_identity" => identity_reference::PROCESS_COLUMNS.to_owned(),
@@ -55,7 +55,7 @@ impl<'source> Cursor<'source> {
             root,
             manifests,
             reference,
-            table: *table,
+            table,
             label: comparison.label,
             columns,
             order: comparison.order,

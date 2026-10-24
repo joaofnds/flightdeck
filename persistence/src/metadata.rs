@@ -176,7 +176,7 @@ impl Manifest {
                 return Err(invalid("duplicate table"));
             }
         }
-        for (table, _columns, _order) in crate::schema::TABLES {
+        for table in crate::schema::TABLES {
             if !self.tables.iter().any(|held| held.name == table.name()) {
                 return Err(invalid("incomplete tables"));
             }
@@ -189,7 +189,7 @@ impl Manifest {
 fn table_name(name: &str) -> Option<&'static str> {
     let held = crate::schema::TABLES
         .iter()
-        .map(|table| table.0.name())
+        .map(|table| table.name())
         .find(|held| *held == name);
     held.or_else(|| {
         crate::schema::DERIVED_TABLES

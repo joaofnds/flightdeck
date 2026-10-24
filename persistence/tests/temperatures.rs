@@ -97,7 +97,7 @@ mod tests {
 
         let columns = persistence::table_columns(Table::Ticks, &window);
 
-        assert_eq!(columns, TABLES[0].1);
+        assert_eq!(columns, TABLES[0].declaration());
     }
 
     #[test]
@@ -113,7 +113,10 @@ mod tests {
 
         assert_eq!(
             columns,
-            format!("{}, cpu_celsius FLOAT, gpu_celsius FLOAT", TABLES[0].1)
+            format!(
+                "{}, cpu_celsius FLOAT, gpu_celsius FLOAT",
+                TABLES[0].declaration()
+            )
         );
     }
 
@@ -206,7 +209,7 @@ mod tests {
             tables.add_column("ticks", name, kind);
         }
         tables.add_column("ticks", "physical_disks", "VARCHAR");
-        let used = TABLES[0].1.split(',').count() + BATTERY_FIELDS.len() + 1;
+        let used = TABLES[0].catalog().columns.len() + BATTERY_FIELDS.len() + 1;
         for extra in 0..=TICK_COLUMNS_MAX - used - TEMPERATURE_FIELDS.len() {
             tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
         }
@@ -230,7 +233,7 @@ mod tests {
             tables.add_column("ticks", name, kind);
         }
         tables.add_column("ticks", "physical_disks", "VARCHAR");
-        let used = TABLES[0].1.split(',').count() + BATTERY_FIELDS.len() + 1;
+        let used = TABLES[0].catalog().columns.len() + BATTERY_FIELDS.len() + 1;
         for extra in 0..TICK_COLUMNS_MAX - used - TEMPERATURE_FIELDS.len() - SYSTEM_FIELDS.len() {
             tables.add_column("ticks", &format!("extra_{extra}"), "UBIGINT");
         }
@@ -257,7 +260,7 @@ mod tests {
 
     fn tables() -> Tables {
         let tables = Tables::new();
-        tables.create("ticks", TABLES[0].1);
+        tables.create("ticks", &TABLES[0].declaration());
         tables
     }
 

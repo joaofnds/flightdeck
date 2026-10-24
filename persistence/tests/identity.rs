@@ -10,7 +10,7 @@ mod tests {
     use super::saved;
     use persistence::engine::Row;
     use persistence::query::TableSource;
-    use persistence::schema::{TABLES, Table};
+    use persistence::schema::Table;
     use polars::prelude::{Column, DataFrame, DataType, IntoColumn, NamedFrom, Series};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -705,12 +705,8 @@ mod tests {
     }
 
     fn tables(table: Table) -> Tables {
-        let (_, columns, _) = TABLES
-            .iter()
-            .find(|entry| entry.0.name() == table.name())
-            .unwrap();
         let tables = Tables::new();
-        tables.create(table.name(), columns);
+        tables.create(table.name(), &table.declaration());
         tables
     }
 }

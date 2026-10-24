@@ -41,7 +41,7 @@ mod tests {
 
     fn tables() -> Tables {
         let tables = Tables::new();
-        tables.create("ticks", TABLES[0].1);
+        tables.create("ticks", &TABLES[0].declaration());
         tables
     }
 
@@ -276,7 +276,10 @@ mod tests {
         super::append_support::append(&tables, Table::Ticks, &window);
         let normalized = table_source(&tables, Table::Ticks, TableSource::Staged).unwrap();
 
-        assert_eq!(columns, format!("{}, physical_disks VARCHAR", TABLES[0].1));
+        assert_eq!(
+            columns,
+            format!("{}, physical_disks VARCHAR", TABLES[0].declaration())
+        );
         assert_eq!(disk_rows(&normalized)[0].1, None);
     }
 
