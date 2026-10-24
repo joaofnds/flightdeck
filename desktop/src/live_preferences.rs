@@ -263,7 +263,7 @@ impl Store {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct Preferences {
     window: Option<Frame>,
@@ -274,6 +274,18 @@ struct Preferences {
     hidden_series: Vec<String>,
     /// Motion is opt-in, including when older preferences omit this field.
     animate_fans: bool,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            window: None,
+            page: None,
+            range_minutes: None,
+            hidden_series: Vec::new(),
+            animate_fans: crate::live_settings::ANIMATE_FANS_DEFAULT,
+        }
+    }
 }
 
 impl Preferences {

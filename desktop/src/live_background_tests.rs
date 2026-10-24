@@ -8,6 +8,43 @@ use crate::live_source_mode::SourceMode;
 use crate::time_range::Range;
 
 #[gpui::test]
+fn restoring_the_fan_default_survives_reopening_and_preserves_other_preferences(
+    cx: &mut TestAppContext,
+) {
+    // Save a changed resource view, enable animation, then reset only animation through Settings.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.keep_preferences();
+    harness.show();
+    harness.adjust_window();
+    harness.close_windows();
+    harness.show();
+    let saved = harness.saved_preferences();
+    harness.toggle_animation_setting();
+    assert_eq!(true, harness.saved_preferences()["animate_fans"]);
+
+    harness.restore_animation_setting();
+    assert_eq!(saved, harness.saved_preferences());
+    harness.close_windows();
+    harness.keep_preferences();
+    harness.show();
+
+    assert!(!harness.animation_setting());
+    assert_eq!(
+        "memory",
+        harness.dashboard(|dashboard| dashboard.request.route.clone())
+    );
+    assert_eq!(
+        Range::Last(300),
+        harness.dashboard(|dashboard| dashboard.range)
+    );
+    assert_eq!(
+        vec!["cpu\tSafari".to_owned()],
+        harness.dashboard(|dashboard| dashboard.hidden.clone())
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn reopening_restores_the_animation_choice_made_in_settings(cx: &mut TestAppContext) {
     // Toggle through the page, close it, reload preferences, and read a new window's page.
     let mut harness = BackgroundHarness::setup(cx);
@@ -274,8 +311,16 @@ impl BackgroundHarness {
     }
 
     fn toggle_animation_setting(&mut self) {
+        self.click_animation_control("animate-fans");
+    }
+
+    fn restore_animation_setting(&mut self) {
+        self.click_animation_control("restore-animate-fans");
+    }
+
+    fn click_animation_control(&mut self, selector: &'static str) {
         let mut context = self.settings_window();
-        let bounds = context.debug_bounds("animate-fans").unwrap();
+        let bounds = context.debug_bounds(selector).unwrap();
         context.simulate_click(bounds.center(), gpui::Modifiers::none());
         context.run_until_parked();
     }

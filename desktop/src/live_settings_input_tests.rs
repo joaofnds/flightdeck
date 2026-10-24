@@ -4,6 +4,101 @@ use super::{InputDriver, InputHarness};
 use crate::live_source::Request;
 
 #[gpui::test]
+fn restoring_with_the_keyboard_returns_focus_to_the_animation_switch(cx: &mut TestAppContext) {
+    // Restore with Return, then toggle with Space without navigating to another control.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.activate_window();
+    harness.driver.click_settings_control("navigation:settings");
+    harness.driver.press("tab space");
+    harness.driver.release_settings_key("space");
+
+    harness.driver.press("tab enter");
+    harness.driver.release_settings_key("enter");
+
+    assert!(harness.driver.reading_is_visible("animate-fans:Off"));
+    assert!(!harness.driver.reading_is_visible("restore-animate-fans"));
+    harness.driver.press("space");
+    harness.driver.release_settings_key("space");
+    assert!(harness.driver.reading_is_visible("animate-fans:On"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn narrow_settings_keeps_the_description_above_the_switch(cx: &mut TestAppContext) {
+    // At an intermediate width, leave readable text above the switch instead of beside it.
+    let mut harness = InputHarness::setup(cx);
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(360.0), gpui::px(900.0)));
+    harness.driver.context.run_until_parked();
+    harness.driver.click_settings_control("navigation:settings");
+    let description = harness
+        .driver
+        .context
+        .debug_bounds("animate-fans-description")
+        .unwrap();
+    let toggle = harness.driver.context.debug_bounds("animate-fans").unwrap();
+
+    assert!(description.size.width >= gpui::px(120.0));
+    assert!(toggle.origin.y >= description.bottom());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn settings_controls_fit_a_narrow_window(cx: &mut TestAppContext) {
+    // Keep both controls inside the viewport when the settings row has to wrap.
+    let mut harness = InputHarness::setup(cx);
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(320.0), gpui::px(900.0)));
+    harness.driver.context.run_until_parked();
+    harness.driver.click_settings_control("navigation:settings");
+    harness.driver.click_settings_control("animate-fans");
+
+    let toggle = harness.driver.context.debug_bounds("animate-fans").unwrap();
+    let restore = harness
+        .driver
+        .context
+        .debug_bounds("restore-animate-fans")
+        .unwrap();
+
+    assert!(toggle.right() <= gpui::px(320.0));
+    assert!(restore.right() <= gpui::px(320.0));
+    assert!(restore.bottom() <= gpui::px(900.0));
+    harness
+        .driver
+        .click_settings_control("restore-animate-fans");
+    assert!(harness.driver.reading_is_visible("animate-fans:Off"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn restoring_the_fan_default_returns_off_and_removes_the_restore_action(cx: &mut TestAppContext) {
+    // Change the setting through its control, then restore only that choice through the page.
+    let mut harness = InputHarness::setup(cx);
+    harness.driver.click_settings_control("navigation:settings");
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("animate-fans-default:Off")
+    );
+    assert!(!harness.driver.reading_is_visible("restore-animate-fans"));
+    harness.driver.click_settings_control("animate-fans");
+    let request = harness.driver.settings_resource_request();
+
+    harness
+        .driver
+        .click_settings_control("restore-animate-fans");
+
+    assert!(harness.driver.reading_is_visible("animate-fans:Off"));
+    assert!(!harness.driver.reading_is_visible("restore-animate-fans"));
+    assert_eq!(harness.driver.settings_resource_request(), request);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn unavailable_native_animation_keeps_the_figure_and_reports_its_failure(cx: &mut TestAppContext) {
     // GPUI's test window has no native AppKit host. Exercise the real setup failure path.
     let mut harness = InputHarness::setup_route(cx, "overview");
