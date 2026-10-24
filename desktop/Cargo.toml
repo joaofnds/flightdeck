@@ -46,20 +46,23 @@ features = [
     "objc2-core-foundation",
 ]
 
+# GPUI comes from a fork of zed, upstream revision 56934ec0560bce8929025497411de7f5322fb6ca
+# with commits on branch flightdeck-gpui that pause an idle window's display link and keep
+# each font's sized copy. desktop/README.md says why.
 [dev-dependencies.gpui]
-git = "https://github.com/zed-industries/zed"
-rev = "56934ec0560bce8929025497411de7f5322fb6ca"
+git = "https://github.com/joaofnds/zed"
+rev = "8766c4ad567693d5c60108ff8f1287a1e046e580"
 default-features = false
 features = ["test-support"]
 
 [dependencies.gpui]
-git = "https://github.com/zed-industries/zed"
-rev = "56934ec0560bce8929025497411de7f5322fb6ca"
+git = "https://github.com/joaofnds/zed"
+rev = "8766c4ad567693d5c60108ff8f1287a1e046e580"
 default-features = false
 
 [dependencies.gpui_macos]
-git = "https://github.com/zed-industries/zed"
-rev = "56934ec0560bce8929025497411de7f5322fb6ca"
+git = "https://github.com/joaofnds/zed"
+rev = "8766c4ad567693d5c60108ff8f1287a1e046e580"
 default-features = false
 features = ["font-kit", "runtime_shaders"]
 

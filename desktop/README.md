@@ -94,8 +94,18 @@ launch that opens a recording read-only, runs for `--seconds` or listens on
 `--control` still quits with its last window. Quitting stops owned collection and
 waits for its final save. The save budget is 125 seconds, followed by a two-second
 forced-exit budget.
-Xcode and its command-line tools are required. GPUI and its macOS backend are pinned
-to upstream revision `56934ec0560bce8929025497411de7f5322fb6ca`. The direct macOS
+Xcode and its command-line tools are required. GPUI and its macOS backend come from a
+fork, https://github.com/joaofnds/zed on branch `flightdeck-gpui`, at the revision
+`Cargo.toml` pins. The branch is upstream revision
+`56934ec0560bce8929025497411de7f5322fb6ca` with commits that make two changes. The first
+pauses a window's display link once GPUI has asked for no frame for four frames, where
+upstream ticks it at every vsync while the window is visible, 120 times a second on a
+ProMotion display, though a page changes once a second. The second keeps each font's
+sized copy, where upstream makes a new one for every run of text it shapes. On an M5 Pro
+at rest, Overview at the hour range spent 14.7 to 18.4 ms of CPU a second on upstream GPUI
+and 9.0 to 12.9 with both changes. The branch is never rewritten, since the pin names a
+commit on it, so moving to a later upstream revision means carrying the changes onto a
+new branch and pinning that. The fork can go once upstream carries both. The direct macOS
 backend includes AccessKit and avoids resolving unused platform backends. It uses
 `runtime_shaders`, which compiles Metal shaders during startup instead of requiring
 Xcode's separate Metal compiler component. Startup measurements include that cost;

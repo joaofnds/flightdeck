@@ -53,10 +53,10 @@ the subsequent collection-restart gap and measurement limits are in
 [LIVE.md](LIVE.md). These checks do not establish native input latency or screen
 presentation, and they predate the separately ongoing Polars backend migration.
 
-The comparison considered [Slint 1.18.1][slint-release] and Flightdeck's
-[pinned GPUI revision](Cargo.toml),
-`56934ec0560bce8929025497411de7f5322fb6ca`. The findings below come from source and
-documentation research; no matched Slint/Flightdeck runtime comparison was run.
+The comparison considered [Slint 1.18.1][slint-release] and upstream GPUI at
+`56934ec0560bce8929025497411de7f5322fb6ca`, the revision Flightdeck pinned at the time.
+The findings below come from source and documentation research; no matched
+Slint/Flightdeck runtime comparison was run.
 
 ### Performance and resource use
 
