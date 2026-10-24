@@ -1,6 +1,7 @@
 //! Native Polars plans and typed materialization for recording queries.
 
 mod admission;
+mod admitted_file;
 mod cells;
 mod scan;
 mod sources;
@@ -22,6 +23,7 @@ use crate::{Error, Result};
 
 pub use admission::COLUMNS_MAX as PARQUET_COLUMNS_MAX;
 pub use admission::EXPANDED_BYTES_MAX as PARQUET_EXPANDED_BYTES_MAX;
+pub use admitted_file::AdmittedFile;
 pub use cells::{Cells, FromCell, Row};
 pub use scan::scan;
 pub use sources::PARQUET_SOURCES_MAX;

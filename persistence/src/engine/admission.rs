@@ -24,7 +24,7 @@ use polars_parquet_format::{
 use crate::{Error, Result};
 use protocol::BoundedProtocol;
 
-const FILE_BYTES_MAX: u64 = 512 * 1024 * 1024;
+pub(super) const FILE_BYTES_MAX: u64 = 512 * 1024 * 1024;
 const FOOTER_BYTES_MAX: u64 = 4 * 1024 * 1024;
 const PAGE_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const PAGE_HEADER_BYTES_MAX: u64 = 64 * 1024;
@@ -33,6 +33,7 @@ pub const EXPANDED_BYTES_MAX: u64 = 512 * 1024 * 1024;
 const ROWS_MAX: u64 = 8_388_608;
 /// Above the widest table, the App parts a window derives as it seals, which asserts it fits.
 pub const COLUMNS_MAX: usize = 96;
+pub(super) const COLUMN_NAME_BYTES_MAX: usize = 128;
 const ROW_GROUPS_MAX: usize = 2048;
 const PAGES_MAX: u64 = 65_536;
 
@@ -42,8 +43,6 @@ const _: () = {
     assert!(FOOTER_BYTES_MAX < FILE_BYTES_MAX);
     assert!(ROWS_MAX < 1u64 << 31);
 };
-
-type RecordingReader = BufReader<File>;
 
 struct Extent {
     start: u64,
@@ -74,21 +73,32 @@ pub(super) fn validate(path: &Path) -> Result<()> {
     }
 
     let mut reader = BufReader::with_capacity(8192, file);
-    let footer = validate_footer(&mut reader, size)?;
-    let metadata = validate_metadata(&mut reader, &footer)?;
+    validate_reader(&mut reader, size)
+}
+
+pub(super) fn validate_reader(reader: &mut (impl Read + Seek), size: u64) -> Result<()> {
+    if size > FILE_BYTES_MAX {
+        return Err(Error::Bound("parquet file bytes"));
+    }
+    if size < 12 {
+        return Err(Error::Bound("parquet file framing"));
+    }
+
+    let footer = validate_footer(reader, size)?;
+    let metadata = validate_metadata(reader, &footer)?;
     validate_schema(&metadata.schema)?;
     schema::validate_arrow(&metadata)?;
     validate_rows(&metadata)?;
     let mut totals = Totals::default();
 
     for group in &metadata.row_groups {
-        validate_group(&mut reader, group, &footer, &mut totals)?;
+        validate_group(reader, group, &footer, &mut totals)?;
     }
 
     Ok(())
 }
 
-fn validate_footer(file: &mut RecordingReader, size: u64) -> Result<Extent> {
+fn validate_footer(file: &mut (impl Read + Seek), size: u64) -> Result<Extent> {
     let mut magic = [0; 4];
     file.read_exact(&mut magic)?;
     if magic != *b"PAR1" {
@@ -122,7 +132,7 @@ fn validate_footer(file: &mut RecordingReader, size: u64) -> Result<Extent> {
     Ok(Extent { start, end })
 }
 
-fn validate_metadata(file: &mut RecordingReader, footer: &Extent) -> Result<ThriftFileMetadata> {
+fn validate_metadata(file: &mut (impl Read + Seek), footer: &Extent) -> Result<ThriftFileMetadata> {
     file.seek(SeekFrom::Start(footer.start))?;
     let length = footer.end - footer.start;
     let budget =
@@ -145,7 +155,7 @@ fn validate_schema(schema: &[SchemaElement]) -> Result<()> {
     }
 
     for field in &schema[1..] {
-        if field.name.len() > 128 {
+        if field.name.len() > COLUMN_NAME_BYTES_MAX {
             return Err(Error::Bound("parquet column name"));
         }
         if field.num_children.is_some() {
@@ -218,7 +228,7 @@ fn validate_rows(metadata: &ThriftFileMetadata) -> Result<()> {
 }
 
 fn validate_group(
-    file: &mut RecordingReader,
+    file: &mut (impl Read + Seek),
     group: &RowGroup,
     footer: &Extent,
     totals: &mut Totals,
@@ -363,7 +373,7 @@ fn validate_auxiliary_extent(
 }
 
 fn validate_pages(
-    file: &mut RecordingReader,
+    file: &mut (impl Read + Seek),
     column: &ColumnMetaData,
     extent: &Extent,
     totals: &mut Totals,

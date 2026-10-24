@@ -1,11 +1,173 @@
 use std::cell::Cell;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use polars::polars_utils::compression::ZstdLevel;
 use polars::prelude::{Column, DataFrame, ParquetCompression, ParquetWriter, StatisticsOptions};
+use polars_parquet_format::PageHeader;
+use polars_parquet_format::thrift::protocol::TCompactInputProtocol;
 
 use super::{Engine, PARQUET_SOURCES_MAX, Row};
+
+#[test]
+fn decodes_the_admitted_bytes_after_the_source_is_replaced() {
+    // Goal: decoding cannot read different bytes from those admission checked.
+    // Method: admit a real file, replace it, and read the original value from its owner.
+    let fixture = Fixture::new();
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+    let replacement = fixture.root.join("replacement.parquet");
+    write_counter(&replacement, 19);
+    std::fs::rename(&replacement, &fixture.path).unwrap();
+
+    let frame = admitted.read(&["counter"]).unwrap();
+
+    assert_eq!(Row::new(&frame, 0).unwrap().get::<u64>(0).unwrap(), 42);
+}
+
+#[test]
+fn decodes_the_admitted_bytes_after_the_same_file_is_overwritten() {
+    // Goal: retaining an open file cannot substitute for immutable captured contents.
+    // Method: overwrite the original inode after admission and read its original value.
+    let fixture = Fixture::new();
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+    std::fs::write(&fixture.path, b"overwritten in place").unwrap();
+
+    let frame = admitted.read(&["counter"]).unwrap();
+
+    assert_eq!(Row::new(&frame, 0).unwrap().get::<u64>(0).unwrap(), 42);
+}
+
+#[test]
+fn refuses_a_file_larger_than_its_compressed_byte_allowance() {
+    // Goal: an operation cannot retain a file larger than its caller reserved.
+    // Method: give admission one byte less than a real saved file needs.
+    let fixture = Fixture::new();
+    let size = std::fs::metadata(&fixture.path).unwrap().len();
+
+    let result = super::AdmittedFile::open(&fixture.path, size - 1);
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Bound("parquet file bytes"))
+    ));
+}
+
+#[test]
+fn refuses_an_invalid_footer_in_owned_bytes_before_decoding() {
+    // Goal: owning the compressed file does not bypass admission's framing checks.
+    // Method: replace a real file with a framed but oversized footer declaration.
+    let fixture = Fixture::new();
+    let mut bytes = b"PAR1".to_vec();
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    bytes.extend_from_slice(b"PAR1");
+    std::fs::write(&fixture.path, bytes).unwrap();
+
+    let result = super::AdmittedFile::open(&fixture.path, 1024 * 1024);
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Bound("parquet footer bytes"))
+    ));
+}
+
+#[test]
+fn refuses_duplicate_projection_columns() {
+    // Goal: repeated names cannot reach a native DataFrame requiring unique columns.
+    // Method: request the same stored counter twice through the admitted owner.
+    let fixture = Fixture::new();
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+
+    let result = admitted.read(&["counter", "counter"]);
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Bound("duplicate parquet projection column"))
+    ));
+}
+
+#[test]
+fn refuses_projection_names_longer_than_an_admitted_field_name() {
+    // Goal: a projection cannot copy names larger than any admitted schema permits.
+    // Method: request a name one byte beyond the stored schema's name limit.
+    let fixture = Fixture::new();
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+    let name = "x".repeat(129);
+
+    let result = admitted.read(&[&name]);
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Bound("parquet projection name bytes"))
+    ));
+}
+
+#[test]
+fn decodes_only_the_requested_columns_in_projection_order() {
+    // Goal: the byte owner preserves projected values, missing values and requested order.
+    // Method: select two columns from a real three-column file and compare the full result.
+    let fixture = Fixture::new();
+    let counter = Column::new("counter".into(), [Some(u64::MAX), None]);
+    let other = Column::new("other".into(), [Some(-7i64), Some(0)]);
+    let mut stored = DataFrame::new(
+        2,
+        vec![
+            counter.clone(),
+            other.clone(),
+            Column::new("unused".into(), [1u64, 2]),
+        ],
+    )
+    .unwrap();
+    std::fs::remove_file(&fixture.path).unwrap();
+    write_frame(&fixture.path, &mut stored);
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+
+    let actual = admitted.read(&["other", "counter"]).unwrap();
+
+    assert_eq!(actual, DataFrame::new(2, vec![other, counter]).unwrap());
+}
+
+#[test]
+fn does_not_decode_an_unrequested_damaged_column() {
+    // Goal: a projection skips unrequested page bodies rather than decoding then selecting.
+    // Method: damage only an omitted column's compressed body; select each column separately.
+    let fixture = Fixture::new();
+    let mut stored = DataFrame::new(
+        1,
+        vec![
+            Column::new("counter".into(), [42u64]),
+            Column::new("damaged".into(), [19u64]),
+        ],
+    )
+    .unwrap();
+    std::fs::remove_file(&fixture.path).unwrap();
+    write_frame(&fixture.path, &mut stored);
+    damage_column_body(&fixture.path, 1);
+
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+    let selected = admitted.read(&["counter"]).unwrap();
+    assert_eq!(Row::new(&selected, 0).unwrap().get::<u64>(0).unwrap(), 42);
+
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+    assert!(admitted.read(&["damaged"]).is_err());
+}
+
+fn damage_column_body(path: &Path, column: usize) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let metadata = polars_parquet::parquet::read::read_metadata(&mut Cursor::new(&bytes)).unwrap();
+    let extent = metadata.row_groups[0].parquet_columns()[column].byte_range();
+    let start = usize::try_from(extent.start).unwrap();
+    let end = usize::try_from(extent.end).unwrap();
+    let mut cursor = Cursor::new(&bytes[start..end]);
+    let header =
+        PageHeader::read_from_in_protocol(&mut TCompactInputProtocol::new(&mut cursor, 64 * 1024))
+            .unwrap();
+    let body = start + usize::try_from(cursor.position()).unwrap();
+    let length = usize::try_from(header.compressed_page_size).unwrap();
+    assert!(length >= 4);
+    bytes[body..body + length].fill(0);
+    std::fs::write(path, bytes).unwrap();
+}
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -43,6 +205,10 @@ impl Drop for Fixture {
 
 fn write_counter(path: &Path, value: u64) {
     let mut frame = DataFrame::new(1, vec![Column::new("counter".into(), [value])]).unwrap();
+    write_frame(path, &mut frame);
+}
+
+fn write_frame(path: &Path, frame: &mut DataFrame) {
     ParquetWriter::new(std::fs::File::create_new(path).unwrap())
         .with_compression(ParquetCompression::Zstd(Some(
             ZstdLevel::try_new(3).unwrap(),
@@ -59,7 +225,7 @@ fn write_counter(path: &Path, value: u64) {
         .set_parallel(false)
         .with_key_value_metadata(None)
         .with_context_info(None)
-        .finish(&mut frame)
+        .finish(frame)
         .unwrap();
 }
 
