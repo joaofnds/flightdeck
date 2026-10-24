@@ -6,8 +6,8 @@ use collector::processes::{Process, Task, Unreadable};
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, FoundEvent, Identity, IdentityObservation,
     IdentityPublication, IdentityUnavailable, Place, ProcessCreation, ProcessIdentity,
-    ProgramBytes, ProgramReference, Readings, RingReader, RunIdentity, Shape, UsageAvailability,
-    Writer,
+    ProgramBytes, ProgramReference, Readings, RingReader, RunIdentity, Shape, SystemSnapshot,
+    UsageAvailability, Writer,
 };
 use collector::tracker::{Event, Noticed};
 use model::apps::{Creation, Measurement, ProgramUnavailable};
@@ -189,6 +189,27 @@ fn reads_why_the_collector_read_no_program() {
     assert_eq!((read[0].usage_refused, read[0].usage_gone), (0, 1));
 }
 
+#[test]
+fn reads_a_processs_gpu_time_only_in_a_window_that_read_the_system() {
+    // Goal: the rule reads a process's GPU time where the window's processes table keeps it,
+    // which is in a window that read the system, and nowhere else.
+    // Method: publish a measured process through a real ring, give its staged tick a GPU
+    // time, and read the window before and after giving the tick a system reading.
+    let mut ring = Ring::new();
+    let tool = ring.intern(b"tool", None);
+    let measured = identity(7, UsageAvailability::Measured, tool);
+    ring.publish(0, &[process(7, 70)], &[measured], &[], &[]);
+    let mut window = ring.stage(0);
+    window.ticks[0].process_gpu_ns = vec![Some(9)];
+
+    let unread = read(&window);
+    window.ticks[0].system = Some(SystemSnapshot::default());
+    let system_read = read(&window);
+
+    assert_eq!(unread[0].gpu_ns, [None]);
+    assert_eq!(system_read[0].gpu_ns, [Some(9)]);
+}
+
 /// What a test reads of one tick and the tick before it.
 #[derive(Debug)]
 struct Read {
@@ -197,6 +218,7 @@ struct Read {
     program: Vec<Result<u32, ProgramUnavailable>>,
     measurement: Vec<Measurement>,
     user_ns: Vec<u64>,
+    gpu_ns: Vec<Option<u64>>,
     threads: Vec<Option<u64>>,
     exits: Vec<i32>,
     starts: Vec<Result<u32, ProgramUnavailable>>,
@@ -216,6 +238,7 @@ impl Read {
             program: selected.processes.program.to_vec(),
             measurement: selected.processes.usage.measurement.to_vec(),
             user_ns: selected.processes.usage.user_ns.to_vec(),
+            gpu_ns: selected.processes.gpu_ns.to_vec(),
             threads: selected.processes.threads.to_vec(),
             exits: selected.exits.pid.to_vec(),
             starts: selected.starts.program.to_vec(),
