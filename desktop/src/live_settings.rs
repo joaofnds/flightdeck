@@ -141,8 +141,8 @@ impl LiveDashboard {
                             .line_height(px(20.0))
                             .text_color(rgb(MUTED))
                             .child(
-                                "Show rotating fans and outgoing airflow on Overview. \
-                                Keeping them still uses fewer resources.",
+                                "Show rotating fans and outgoing airflow on Overview \
+                                (uses more resources)",
                             ),
                     ),
             )
