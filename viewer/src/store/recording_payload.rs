@@ -3,48 +3,117 @@ use std::mem;
 use std::path::Path;
 use std::sync::Arc;
 
+use collector::ring::RunIdentity;
+
 use super::readings;
 use super::{AppsSecond, Batch, Failure, Found, Loaded, MachineSecond, Refused, TICKS_PER_MINUTE};
 use crate::byte_budget::ByteBudget;
+use crate::cancellation::Operation;
 use crate::recording::{Before, MachineMinute, SealedMinute, read_machine};
 use crate::store::apps::TickApps;
 
-pub(super) fn load_batch(
+#[cfg(test)]
+#[path = "recording_payload_tests.rs"]
+mod tests;
+
+pub(super) fn load(
     root: &Path,
-    before: Option<&Found>,
     minutes: &[Found],
     budget: &Arc<ByteBudget>,
-) -> Batch {
-    let mut batch = Batch {
-        seconds: Vec::with_capacity(minutes.len() * TICKS_PER_MINUTE),
-        left_out: None,
-    };
-    let mut predecessor = None;
-    let mut previous = MachineMinute::default();
-    let mut previous_run = None;
-    if let Some(before) = before {
-        if let Ok(sealed) = SealedMinute::open(root, &before.marker) {
-            if read_machine(&sealed, &mut previous).is_ok() {
-                if sealed
-                    .visit_samples(&mut predecessor, |_, _| Ok(()))
-                    .is_ok()
-                {
-                    previous_run = Some(before.run);
-                }
-            }
+    operation: &Operation,
+    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<super::Outcome> {
+    let mut decoder = Decoder::default();
+    let mut left_out = None;
+    for found in minutes {
+        operation.check()?;
+        let completion = decoder.decode(root, found, budget, operation);
+        if let Some(failure) = load_consume(completion, operation, &mut take)? {
+            left_out = Some(failure);
         }
     }
+    operation.check()?;
 
-    for found in minutes {
-        let loaded = load_minute(root, found, &mut predecessor, budget);
+    Ok(super::Outcome {
+        left_out,
+        terminal: decoder.terminal(),
+    })
+}
+
+/// Owns the completion so displaced pool payloads swapped into it drop before the next decode.
+fn load_consume(
+    mut completion: Batch,
+    operation: &Operation,
+    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Option<Failure>> {
+    operation.check()?;
+    for loaded in &mut completion.seconds {
+        operation.check()?;
+        let apps = match &mut loaded.apps {
+            Ok(apps) => TickApps::Loaded(apps),
+            Err(missing) => TickApps::Missing(missing),
+        };
+        take(&loaded.run, &loaded.second, apps);
+    }
+    operation.check()?;
+
+    Ok(completion.left_out)
+}
+
+#[derive(Default)]
+struct Decoder {
+    predecessor: Option<Before>,
+    previous: MachineMinute,
+    previous_run: Option<RunIdentity>,
+}
+
+impl Decoder {
+    fn terminal(self) -> Option<super::Terminal> {
+        let run = self.previous_run?;
+        let mut machine = self.previous;
+        let publication = machine.ticks.last()?.publication;
+        machine.ticks.retain(|row| row.publication == publication);
+        machine.cpus.retain(|row| row.publication == publication);
+        machine.memory.retain(|row| row.publication == publication);
+        machine
+            .interfaces
+            .retain(|row| row.publication == publication);
+        machine
+            .gpu_states
+            .retain(|row| row.publication == publication);
+        machine
+            .core_states
+            .retain(|row| row.publication == publication);
+        machine.fans.retain(|row| row.publication == publication);
+        assert_eq!(machine.ticks.len(), 1);
+
+        Some(super::Terminal {
+            run,
+            machine,
+            process: self.predecessor,
+        })
+    }
+
+    fn decode(
+        &mut self,
+        root: &Path,
+        found: &Found,
+        budget: &Arc<ByteBudget>,
+        operation: &Operation,
+    ) -> Batch {
+        let mut batch = Batch {
+            seconds: Vec::with_capacity(TICKS_PER_MINUTE),
+            left_out: None,
+        };
+        let loaded = load_minute(root, found, &mut self.predecessor, budget, operation);
         let Ok((mut machine, mut apps)) = loaded else {
             batch.left_out = Some(Failure::Refused);
-            predecessor = None;
-            previous_run = None;
-            continue;
+            self.predecessor = None;
+            self.previous_run = None;
+            return batch;
         };
-        let mut before = if previous_run == Some(found.run) {
-            readings(&previous).last()
+        let mut before = if self.previous_run == Some(found.run) {
+            readings(&self.previous).last()
         } else {
             None
         };
@@ -70,10 +139,11 @@ pub(super) fn load_batch(
             }
             before = Some(reading);
         }
-        mem::swap(&mut machine, &mut previous);
-        previous_run = Some(found.run);
+        mem::swap(&mut machine, &mut self.previous);
+        self.previous_run = Some(found.run);
+
+        batch
     }
-    batch
 }
 
 fn load_minute(
@@ -81,12 +151,20 @@ fn load_minute(
     found: &Found,
     before: &mut Option<Before>,
     budget: &Arc<ByteBudget>,
+    operation: &Operation,
 ) -> Result<(MachineMinute, Vec<AppsSecond>), Refused> {
+    operation.check()?;
     let sealed = SealedMinute::open(root, &found.marker)?;
+    if sealed.identity() != &found.run {
+        return Err(Refused::Commitment(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "sealed minute identity differs from the registry",
+        )));
+    }
     let mut machine = MachineMinute::default();
     read_machine(&sealed, &mut machine)?;
     let mut apps = Vec::with_capacity(machine.ticks.len());
-    sealed.visit_samples(before, |endpoint, sample| {
+    sealed.visit_samples_with_operation(before, operation, |endpoint, sample| {
         let mut second = match sample {
             Ok(sample) => {
                 let mut second = AppsSecond::with_room_for(sample.apps().len());

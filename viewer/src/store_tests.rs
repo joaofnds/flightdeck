@@ -70,7 +70,7 @@ fn both_adapters_preserve_the_exact_observation_when_apps_exceed_the_bound() {
     assert_eq!(actual.apps[0].observation.unwrap().stamp.publication, 1);
 }
 
-fn expand_program_dictionary(fixture: &mut Fixture) {
+pub(super) fn expand_program_dictionary(fixture: &mut Fixture) {
     use collector::recording::{RegisteredRun, Registry};
     use collector::ring::{DictionaryCapacity, Place, RingReader, Writer};
     let reader = RingReader::open_generation(fixture.writer.name()).unwrap();
@@ -107,9 +107,15 @@ fn sealed_payload_view(fixture: &Fixture) -> Arc<View> {
     let budget = Arc::new(super::ByteBudget::new(16 * 1024 * 1024));
     let mut held = super::Held::new();
     held.enable_payload(Arc::clone(&budget));
-    held.left_out = super::recording::load(&fixture.root, Some(&budget), |run, second, apps| {
-        assert!(held.take(run, second, apps));
-    });
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    held.left_out =
+        super::recording::load_payload(&fixture.root, &budget, &operation, |run, second, apps| {
+            assert!(held.take(run, second, apps));
+        })
+        .unwrap()
+        .left_out;
     let mailbox = super::Mailbox::new();
     held.publish(&mailbox);
     mailbox.take().unwrap()
@@ -176,7 +182,12 @@ fn assert_directional_payload(view: &View) {
     );
 }
 
-fn publish_named_processes(fixture: &mut Fixture, tick: u64, names: &[&[u8]], count: i32) {
+pub(super) fn publish_named_processes(
+    fixture: &mut Fixture,
+    tick: u64,
+    names: &[&[u8]],
+    count: i32,
+) {
     use collector::ring::{
         IdentityObservation, IdentityPublication, ObservationTimes, ProcessCreation,
         ProcessIdentity, Readings, UsageAvailability,
@@ -636,7 +647,7 @@ fn publish_unavailable_processes(fixture: &mut Fixture, tick: u64) {
 }
 
 /// The first View the store hands over that `holds` accepts, failing after ten seconds.
-fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<View> {
+pub(super) fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<View> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(view) = store.take() {

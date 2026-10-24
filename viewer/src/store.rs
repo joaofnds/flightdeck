@@ -12,6 +12,10 @@ mod ring;
 mod sampled;
 mod second;
 
+#[cfg(test)]
+#[path = "store/startup_tests.rs"]
+mod startup_tests;
+
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -36,6 +40,7 @@ use context::Context;
 use ring::Ring;
 
 use crate::apps::Stamp;
+use crate::cancellation::{Cancellation, Operation};
 use crate::live::resident_history::{Interval, consecutive};
 use crate::live_app_response::Observation;
 use crate::session::EARLIER_STRIDE_SECONDS;
@@ -66,8 +71,8 @@ const EARLIER_HELD_MAX: usize = 8;
 /// it takes in place of that, and one to write.
 const VIEWS_MAX: usize = 4;
 
-/// The longest the store thread sleeps between steps, which bounds how long dropping the store
-/// waits for its thread.
+/// The longest sleep between steps. Native startup decoding can take longer to finish after
+/// cancellation, so this is not a shutdown deadline.
 const WAIT: Duration = Duration::from_millis(100);
 
 // The store looks for a collector started again at least once a second.
@@ -167,6 +172,7 @@ pub struct Store {
 struct Shared {
     mailbox: Mailbox<View>,
     stop: AtomicBool,
+    cancellation: Arc<Cancellation>,
 }
 
 impl Store {
@@ -191,26 +197,29 @@ impl Store {
         let shared = Arc::new(Shared {
             mailbox: Mailbox::new(),
             stop: AtomicBool::new(false),
+            cancellation: Arc::new(Cancellation::default()),
         });
         let mut held = Held::new();
         if let Some(budget) = budget {
             held.enable_payload(budget);
         }
         let root = root.to_owned();
+        let operation = Arc::clone(&shared.cancellation)
+            .operation(0)
+            .map_err(io::Error::other)?;
 
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name(String::from("flightdeck-store"))
             .spawn(move || {
-                let budget = held.payload_budget.clone();
-                held.left_out = recording::load(&root, budget.as_ref(), |run, second, apps| {
-                    let taken = held.take(run, second, apps);
-                    // No View is out before the store's first step, so every buffer is free.
-                    assert!(taken);
-                });
                 // A ring's mapping stays on the thread that maps it.
-                let mut ring = Ring::new(root);
-                run(&mut held, &mut ring, &thread_shared);
+                let mut ring = Ring::new(root.clone());
+                if let Err(error) = startup(&root, &mut held, &mut ring, &operation) {
+                    eprintln!("flightdeck store startup: {error}");
+                    return;
+                }
+                let operation = held.payload_budget.as_ref().map(|_| &operation);
+                run(&mut held, &mut ring, &thread_shared, operation);
             })?;
 
         Ok(Self {
@@ -230,6 +239,9 @@ impl Store {
 impl Drop for Store {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
+        if let Err(error) = self.shared.cancellation.cancel() {
+            eprintln!("flightdeck store cancellation: {error}");
+        }
         let Some(thread) = self.thread.take() else {
             unreachable!("only dropping the store takes its thread");
         };
@@ -519,15 +531,56 @@ fn stretch(second: &MachineSecond) -> u64 {
     second.wall_ns / 1_000_000_000 / EARLIER_STRIDE_SECONDS
 }
 
+/// Loads the sealed prefix before following the ring, keeping legacy startup separate.
+fn startup(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    operation: &Operation,
+) -> persistence::Result<()> {
+    let budget = held.payload_budget.clone();
+    let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
+        // No View is out during startup, so every buffer is free.
+        assert!(held.take(run, second, apps));
+    };
+
+    if let Some(budget) = &budget {
+        let outcome = recording::load_payload(root, budget, operation, take);
+
+        startup_accept(outcome, held, ring, operation)
+    } else {
+        held.left_out = recording::load(root, take);
+
+        Ok(())
+    }
+}
+
+fn startup_accept(
+    outcome: persistence::Result<recording::Outcome>,
+    held: &mut Held,
+    ring: &mut Ring,
+    operation: &Operation,
+) -> persistence::Result<()> {
+    let outcome = outcome?;
+    operation.check()?;
+    held.left_out = outcome.left_out;
+    ring.accept(outcome.terminal);
+
+    Ok(())
+}
+
 /// Steps until the store is dropped.
-fn run(held: &mut Held, ring: &mut Ring, shared: &Shared) {
+fn run(held: &mut Held, ring: &mut Ring, shared: &Shared, operation: Option<&Operation>) {
     let mut waited = Ok(());
     for _ in 0..STEPS_MAX {
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
 
-        step(held, ring, waited, &shared.mailbox);
+        if let Err(error) = step(held, ring, waited, &shared.mailbox, operation) {
+            eprintln!("flightdeck store publication: {error}");
+            return;
+        }
         waited = if held.failure.is_some() {
             // A ring that failed may fail again at once, so the thread sleeps instead.
             thread::sleep(WAIT);
@@ -542,7 +595,13 @@ fn run(held: &mut Held, ring: &mut Ring, shared: &Shared) {
 
 /// Takes in what the ring published since the last step, follows the newest run, and hands
 /// over a View where anything changed. `waited` is how the wait before the step went.
-fn step(held: &mut Held, ring: &mut Ring, waited: Result<(), Failure>, mailbox: &Mailbox<View>) {
+fn step(
+    held: &mut Held,
+    ring: &mut Ring,
+    waited: Result<(), Failure>,
+    mailbox: &Mailbox<View>,
+    operation: Option<&Operation>,
+) -> persistence::Result<()> {
     let mut failure = waited.err();
 
     let read = ring.read(|run, second, apps| held.take(run, second, apps));
@@ -559,6 +618,10 @@ fn step(held: &mut Held, ring: &mut Ring, waited: Result<(), Failure>, mailbox: 
         held.unpublished = true;
     }
     if held.unpublished {
+        if let Some(operation) = operation {
+            operation.check()?;
+        }
         held.publish(mailbox);
     }
+    Ok(())
 }

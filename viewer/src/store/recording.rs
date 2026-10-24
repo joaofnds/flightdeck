@@ -25,6 +25,43 @@ use crate::recording::{
 };
 use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 
+/// Accepted sealed observations, their incomplete-read status and their independent predecessors.
+pub(super) struct Outcome {
+    pub left_out: Option<Failure>,
+    pub terminal: Option<Terminal>,
+}
+
+/// The last raw machine tick and process frame, accepted only by the same run's ring.
+pub(super) struct Terminal {
+    pub run: RunIdentity,
+    pub machine: MachineMinute,
+    pub process: Option<crate::recording::Before>,
+}
+
+/// Decodes and consumes the opt-in payload prefix one minute at a time under caller cancellation.
+pub(super) fn load_payload(
+    root: &Path,
+    budget: &Arc<super::ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
+    operation.check()?;
+    let mut found = Vec::with_capacity(MINUTES_MAX);
+    let discovered = find(root, &mut found);
+    operation.check()?;
+    if let Err(failure) = discovered {
+        return Ok(Outcome {
+            left_out: Some(failure),
+            terminal: None,
+        });
+    }
+    found.reverse();
+    let outcome = payload::load(root, &found, budget, operation, take)?;
+    operation.check()?;
+
+    Ok(outcome)
+}
+
 /// The sealed minutes the store reads at launch at most. The hour and its lead-in span 61
 /// minutes, and each stop or recovery of a collector seals a shorter one.
 const MINUTES_MAX: usize = 128;
@@ -59,7 +96,6 @@ impl Found {
 /// hour than the recording sealed, where it does.
 pub(super) fn load(
     root: &Path,
-    budget: Option<&Arc<super::ByteBudget>>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     let mut found = Vec::with_capacity(MINUTES_MAX);
@@ -72,7 +108,7 @@ pub(super) fn load(
     found.reverse();
 
     let mut left_out = None;
-    for mut batch in load_batches(root, &found, apps_from_ns, budget) {
+    for mut batch in load_batches(root, &found, apps_from_ns) {
         for loaded in &mut batch.seconds {
             let apps = match &mut loaded.apps {
                 Ok(apps) => TickApps::Loaded(apps),
@@ -116,12 +152,7 @@ struct Loaded {
 /// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
 /// batch on a loader of its own, with the Apps of each minute whose ticks reach `apps_from_ns`.
 /// Returns the batches in the order of `found`.
-fn load_batches(
-    root: &Path,
-    found: &[Found],
-    apps_from_ns: u64,
-    budget: Option<&Arc<super::ByteBudget>>,
-) -> Vec<Batch> {
+fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
     let costs: Vec<usize> = found
         .iter()
         .map(|minute| {
@@ -142,9 +173,8 @@ fn load_batches(
             let minutes = &found[batch];
             let loader = thread::Builder::new()
                 .name(String::from("flightdeck-loader"))
-                .spawn_scoped(scope, move || match budget {
-                    Some(budget) => payload::load_batch(root, before, minutes, budget),
-                    None => load_batch(root, before, minutes, apps_from_ns),
+                .spawn_scoped(scope, move || {
+                    load_batch(root, before, minutes, apps_from_ns)
                 });
             loaders.push(loader);
         }

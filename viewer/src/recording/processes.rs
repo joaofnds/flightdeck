@@ -18,7 +18,7 @@ use polars::prelude::{
 use super::apps::AppMinute;
 use super::{Refused, SealedMinute, SealedTable, ordered, placement};
 use crate::apps::Stamp;
-use crate::cancellation::Cancellation;
+use crate::cancellation::{Cancellation, Operation};
 use crate::live_app_response::Sample;
 use crate::live_apps::Frame;
 use crate::live_apps::committed::{ENDPOINTS_MAX, Endpoint};
@@ -93,6 +93,12 @@ pub struct Before {
     frame: Box<Frame>,
 }
 
+impl Before {
+    pub(crate) fn into_parts(self) -> (Endpoint, Box<Frame>) {
+        (self.endpoint, self.frame)
+    }
+}
+
 /// Every App of each of `minute`'s observations, which `into`, empty, takes, by the App rule over
 /// the minute's processes and events, as the seal derives a minute's App parts. Each sample takes
 /// its rates from the observation before it where the rule allows, the first from `before`, the
@@ -139,10 +145,20 @@ impl SealedMinute {
     pub(crate) fn visit_samples(
         &self,
         before: &mut Option<Before>,
+        consume: impl FnMut(&Endpoint, persistence::Result<&Sample>) -> persistence::Result<()>,
+    ) -> Result<(), Refused> {
+        let operation = Arc::new(Cancellation::default()).operation(0)?;
+        self.visit_samples_with_operation(before, &operation, consume)
+    }
+
+    pub(crate) fn visit_samples_with_operation(
+        &self,
+        before: &mut Option<Before>,
+        operation: &Operation,
         mut consume: impl FnMut(&Endpoint, persistence::Result<&Sample>) -> persistence::Result<()>,
     ) -> Result<(), Refused> {
         let mut sample = None;
-        let result = read_processes(self, |endpoint, frame| {
+        let result = read_processes_with_operation(self, operation, |endpoint, frame| {
             let previous = before
                 .as_ref()
                 .filter(|before| frame.takes_rates_from(&before.endpoint))
@@ -178,19 +194,31 @@ pub(crate) struct ProcessBatch {
 
 /// Hands `consume` the endpoint and the frame of each of `minute`'s observations, in publication
 /// order.
+#[cfg(test)]
 pub(crate) fn read_processes(
     minute: &SealedMinute,
     consume: impl FnMut(&Endpoint, Box<Frame>) -> persistence::Result<()>,
 ) -> Result<(), Refused> {
-    let batch = read_processes_batch(minute)?;
     let operation = Arc::new(Cancellation::default()).operation(0)?;
+    read_processes_with_operation(minute, &operation, consume)
+}
+
+fn read_processes_with_operation(
+    minute: &SealedMinute,
+    operation: &Operation,
+    consume: impl FnMut(&Endpoint, Box<Frame>) -> persistence::Result<()>,
+) -> Result<(), Refused> {
+    operation.check()?;
+    let batch = read_processes_batch(minute)?;
+    operation.check()?;
     Frame::placed_many(
         &batch.endpoints,
         &batch.rows,
         &batch.order,
-        &operation,
+        operation,
         consume,
     )?;
+
     Ok(())
 }
 

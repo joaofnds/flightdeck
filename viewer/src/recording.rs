@@ -47,6 +47,11 @@ impl From<persistence::Error> for Refused {
 }
 
 impl SealedMinute {
+    /// The full run identity of the manifest whose commitment `open` verified.
+    pub(crate) fn identity(&self) -> &collector::ring::RunIdentity {
+        &self.manifest.identity.run
+    }
+
     /// Verifies the marker at `marker` and every file the minute it names commits.
     pub fn open(root: &Path, marker: &Path) -> Result<Self, Refused> {
         let manifest = persistence::read_committed(root, marker).map_err(Refused::Commitment)?;

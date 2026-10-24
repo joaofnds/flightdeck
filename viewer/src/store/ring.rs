@@ -21,6 +21,10 @@ use crate::live_apps::committed::Endpoint;
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::recording::MachineMinute;
 
+#[cfg(test)]
+#[path = "handoff_tests.rs"]
+mod handoff_tests;
+
 /// The ticks one read takes in, well above the ticks a ring publishes between two steps.
 const TICKS_PER_READ_MAX: usize = 256;
 
@@ -36,6 +40,7 @@ pub(super) struct Ring {
     runs: PathBuf,
     registry: RegistryBuffer,
     source: Option<Source>,
+    terminal: Option<super::recording::Terminal>,
     /// A second read from the ring that the store could not take yet, and whether the App rule
     /// derived its Apps, which the source's sample holds, or why it refused them.
     pending: Option<(MachineSecond, Result<(), String>)>,
@@ -75,11 +80,17 @@ impl Ring {
             root,
             registry: [0; _],
             source: None,
+            terminal: None,
             pending: None,
             unlooked_steps: FOLLOW_STEPS,
             followed: Ok(()),
             published: false,
         }
+    }
+
+    pub(super) fn accept(&mut self, terminal: Option<super::recording::Terminal>) {
+        assert!(self.source.is_none());
+        self.terminal = terminal;
     }
 
     /// Hands `push` the run, the second and the Apps of each tick the ring published since the
@@ -198,7 +209,11 @@ impl Ring {
             return Err(Failure::MappingSize);
         }
 
-        self.source = Some(Source::open(reader, identity)?);
+        let mut source = Source::open(reader, identity)?;
+        if let Some(terminal) = self.terminal.take() {
+            source.accept(terminal)?;
+        }
+        self.source = Some(source);
         Ok(())
     }
 
@@ -239,6 +254,26 @@ impl Ring {
 }
 
 impl Source {
+    fn accept(&mut self, terminal: super::recording::Terminal) -> Result<(), Failure> {
+        if terminal.run != self.identity {
+            return Ok(());
+        }
+        assert_eq!(terminal.machine.ticks.len(), 1);
+        let publication = terminal.machine.ticks[0].publication;
+        let next = publication.checked_add(1).ok_or(Failure::TickShape)?;
+        self.reader
+            .seek_publication(next)
+            .map_err(|error| Failure::Ring(error.kind()))?;
+        self.previous = terminal.machine;
+        if let Some(before) = terminal.process {
+            let (endpoint, frame) = before.into_parts();
+            self.previous_endpoint = Some(endpoint);
+            self.previous_frame = Some(frame);
+        }
+
+        Ok(())
+    }
+
     /// The run's ring with room for its ticks, allocated once, as the run is followed.
     fn open(reader: RingReader, identity: RunIdentity) -> Result<Self, Failure> {
         let shape = reader.shape();
