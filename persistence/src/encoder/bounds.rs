@@ -1,3 +1,5 @@
+use model::catalog::{self, Kind};
+
 use crate::owned_identity::Programs;
 use crate::schema::Table;
 use crate::window::StagedTick;
@@ -8,6 +10,15 @@ const ROW_REFERENCES_BYTES_MAX: usize = 40;
 const VALIDITY_BYTES_PER_ROW_MAX: usize = 8;
 const SORT_INDEX_BYTES_MAX: usize = 8;
 
+// Each column takes one validity bit in a row.
+const _: () = {
+    let mut index = 0;
+    while index < catalog::TABLES.len() {
+        assert!(catalog::TABLES[index].column_count() <= VALIDITY_BYTES_PER_ROW_MAX * 8);
+        index += 1;
+    }
+};
+
 pub(super) fn frame(table: Table, window: &Window) -> Result<()> {
     let bytes = frame_bytes(table, window)?;
     assert!(bytes <= FRAME_BYTES_MAX);
@@ -17,17 +28,7 @@ pub(super) fn frame(table: Table, window: &Window) -> Result<()> {
 
 /// What the frame of `table` may take of memory, refused above what a frame may take.
 pub(super) fn frame_bytes(table: Table, window: &Window) -> Result<usize> {
-    // A system column holds at most a 16-byte string view, beside the text it points to.
-    let width = match table {
-        Table::Ticks => 224 + crate::schema::SYSTEM_FIELDS.len() * 16,
-        Table::Memory => 153,
-        Table::Cpus | Table::CoreStates => 28,
-        Table::Interfaces => 82,
-        Table::GpuStates => 20,
-        Table::Fans => 16,
-        Table::Processes | Table::Events => 200,
-        Table::Coalitions => 88,
-    };
+    let width = row_bytes(table.catalog());
     let overhead = ROW_REFERENCES_BYTES_MAX + VALIDITY_BYTES_PER_ROW_MAX + SORT_INDEX_BYTES_MAX;
     let fixed = rows(table, window)
         .checked_mul(width + overhead)
@@ -48,6 +49,29 @@ pub(super) fn frame_bytes(table: Table, window: &Window) -> Result<usize> {
     }
 
     Ok(bytes)
+}
+
+/// What a row of `table` takes of memory with every one of its groups held, before the bytes
+/// its texts and blobs point to, which `frame_variable` counts.
+fn row_bytes(table: &catalog::Table) -> usize {
+    let groups = table.groups.iter().flat_map(|group| group.iter());
+    table
+        .columns
+        .iter()
+        .chain(groups)
+        .map(|column| kind_bytes(column.kind))
+        .sum()
+}
+
+/// What one value of `kind` takes in a frame. A text or a blob is a 16-byte view.
+const fn kind_bytes(kind: Kind) -> usize {
+    match kind {
+        Kind::Bool | Kind::U8 => 1,
+        Kind::U16 => 2,
+        Kind::U32 | Kind::I32 | Kind::F32 => 4,
+        Kind::U64 | Kind::I64 | Kind::F64 => 8,
+        Kind::Text | Kind::Bytes => 16,
+    }
 }
 
 pub(super) fn rows(table: Table, window: &Window) -> usize {

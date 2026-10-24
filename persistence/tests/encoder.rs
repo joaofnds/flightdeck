@@ -293,6 +293,23 @@ mod tests {
     }
 
     #[test]
+    fn admits_a_window_by_at_least_the_memory_of_each_frame() {
+        // Goal: the bound the encoder admits a window by covers what each of its frames takes,
+        // so a column added to the catalog cannot outgrow it unseen.
+        // Method: build every table's frame of a 61-tick window and of one with groups held,
+        // and compare each frame's own estimate of its memory with the bound.
+        let directory = Directory::new();
+        for window in [fixture::window(false), extended_window(&directory)] {
+            for table in TABLES {
+                let frame = persistence::frame(table, &window).unwrap();
+                let bytes = u64::try_from(frame.estimated_size(true)).unwrap();
+                let bound = persistence::frame_bytes(table, &window).unwrap();
+                assert!(bytes <= bound, "{}: {bytes} > {bound}", table.name());
+            }
+        }
+    }
+
+    #[test]
     fn refuses_to_replace_an_existing_table_file() {
         // Goal: encoding cannot overwrite a table already present in the private directory.
         // Method: reserve its first output name and verify both the error and original bytes.
