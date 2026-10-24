@@ -83,41 +83,55 @@ impl LiveDashboard {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Flightdeck"),
             )
-            .child(
+            .children((!self.settings.open).then(|| {
                 div()
                     .debug_selector(|| format!("source-sidebar:{source}"))
                     .text_size(px(11.0))
                     .text_color(rgb(MUTED))
-                    .child(source),
-            )
+                    .child(source)
+            }))
     }
 
     pub fn navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut sidebar = div()
+        let mut routes = div()
+            .id("navigation-routes")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .gap(px(3.0));
+        for (index, group) in NAVIGATION.iter().enumerate() {
+            if index > 0 {
+                routes = routes.child(div().h(px(1.0)).m(px(12.0)).bg(charts::alpha(TEXT, 0.12)));
+            }
+            for route in *group {
+                routes = routes.child(self.navigation_item(route, cx));
+            }
+        }
+        div()
             .flex()
             .flex_col()
             .w(px(SIDEBAR_WIDTH))
             .flex_shrink_0()
             .h_full()
+            .min_h_0()
             .px(px(12.0))
             .py(px(20.0))
             .gap(px(3.0))
             .border_r_1()
-            .border_color(charts::alpha(TEXT, 0.12));
-        for (index, group) in NAVIGATION.iter().enumerate() {
-            if index > 0 {
-                sidebar = sidebar.child(div().h(px(1.0)).m(px(12.0)).bg(charts::alpha(TEXT, 0.12)));
-            }
-            for route in *group {
-                sidebar = sidebar.child(self.navigation_item(route, cx));
-            }
-        }
-        sidebar
+            .border_color(charts::alpha(TEXT, 0.12))
+            .child(routes)
+            .child(self.navigation_settings(cx))
     }
 
     fn navigation_item(&self, route: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
         let title = route_title(route);
-        let selected = self.request.route == route;
+        let selected = if self.settings.open {
+            false
+        } else {
+            self.request.route == route
+        };
 
         div()
             .id(route)
@@ -141,6 +155,34 @@ impl LiveDashboard {
             .when(!selected, |item| item.hover(|style| style.bg(rgb(RAISED))))
             .on_click(cx.listener(move |this, _, _, cx| this.navigate(route, cx)))
             .child(title)
+    }
+
+    fn navigation_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("settings")
+            .debug_selector(|| "navigation:settings".into())
+            .accessibility_id("flightdeck.navigation.settings")
+            .flex_shrink_0()
+            .role(gpui::Role::Button)
+            .aria_label("Settings")
+            .aria_selected(self.settings.open)
+            .flex()
+            .items_center()
+            .min_h(px(44.0))
+            .px(px(12.0))
+            .rounded(px(5.0))
+            .cursor_pointer()
+            .focusable()
+            .tab_stop(true)
+            .focus(crate::charts::focus_ring)
+            .when(self.settings.open, |item| {
+                item.bg(charts::alpha(SELECTED, 0.15)).text_color(rgb(BLUE))
+            })
+            .when(!self.settings.open, |item| {
+                item.hover(|style| style.bg(rgb(RAISED)))
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.open_settings(cx)))
+            .child("Settings")
     }
 
     pub fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {

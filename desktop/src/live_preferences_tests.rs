@@ -26,10 +26,90 @@ fn reads_back_what_it_saved() {
     let mut preferences = Preferences::default();
     preferences.remember_view("memory", Range::Last(300), &["cpu\tSafari".into()]);
     preferences.window = Some(frame(900.0, 700.0));
+    preferences.animate_fans = true;
 
     write(&directory.file(), &preferences).unwrap();
 
     assert_eq!(preferences, load(&directory.file()).unwrap());
+}
+
+#[test]
+fn existing_preferences_leave_fan_animation_off() {
+    // Goal: existing users opt in to motion. Method: read a file without the new setting.
+    let directory = Directory::new("animation-migration");
+    std::fs::write(
+        directory.file(),
+        r#"{"page":"memory","range_minutes":5,"hidden_series":["cpu\tSafari"]}"#,
+    )
+    .unwrap();
+
+    let preferences = load(&directory.file()).unwrap();
+
+    assert!(!preferences.animate_fans);
+    assert_eq!(preferences.page.as_deref(), Some("memory"));
+    assert_eq!(preferences.range_minutes, Some(5));
+    assert_eq!(preferences.hidden_series, ["cpu\tSafari"]);
+}
+
+#[gpui::test]
+fn changing_fan_animation_saves_it_before_the_next_tick(cx: &mut TestAppContext) {
+    // Goal: closing immediately keeps the choice. Method: change it and read the file at once.
+    let directory = Directory::new("animation-immediate");
+    cx.update(|cx| install(directory.file(), cx));
+
+    cx.update(|cx| set_animate_fans(true, cx)).unwrap();
+
+    assert!(load(&directory.file()).unwrap().animate_fans);
+    assert!(cx.update(|cx| animate_fans(cx)));
+    cx.update(|cx| set_animate_fans(false, cx)).unwrap();
+    assert!(!load(&directory.file()).unwrap().animate_fans);
+}
+
+#[gpui::test]
+fn a_failed_animation_save_reports_failure_and_keeps_the_session_choice(cx: &mut TestAppContext) {
+    // Goal: a refused save is explicit. Method: block the parent directory and change the choice.
+    let directory = Directory::new("animation-failed-save");
+    let blocked = directory.path("blocked");
+    cx.update(|cx| install(blocked.join("preferences.json"), cx));
+    std::fs::write(&blocked, "").unwrap();
+
+    let result = cx.update(|cx| set_animate_fans(true, cx));
+
+    assert!(result.is_err());
+    assert!(cx.update(|cx| animate_fans(cx)));
+    std::fs::remove_file(&blocked).unwrap();
+    cx.update(|cx| set_animate_fans(true, cx)).unwrap();
+    assert!(
+        load(&blocked.join("preferences.json"))
+            .unwrap()
+            .animate_fans
+    );
+}
+
+#[gpui::test]
+fn settings_clears_a_save_warning_after_retry_without_another_toggle(cx: &mut TestAppContext) {
+    // Recover a blocked preference path, retry the ordinary save, then refresh Settings.
+    let directory = Directory::new("animation-recovery");
+    let blocked = directory.path("blocked");
+    cx.update(|cx| install(blocked.join("preferences.json"), cx));
+    std::fs::write(&blocked, "").unwrap();
+    let mut settings = crate::live_settings::Settings {
+        animate_fans: true,
+        notice: cx.update(|cx| set_animate_fans(true, cx)).err(),
+        ..crate::live_settings::Settings::default()
+    };
+    assert!(settings.notice.is_some());
+    std::fs::remove_file(&blocked).unwrap();
+
+    cx.update(|cx| cx.global_mut::<Store>().save());
+    assert!(cx.update(|cx| settings.refresh_notice(cx)));
+
+    assert!(settings.notice.is_none());
+    assert!(
+        load(&blocked.join("preferences.json"))
+            .unwrap()
+            .animate_fans
+    );
 }
 
 #[test]

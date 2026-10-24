@@ -31,6 +31,14 @@ impl LiveDashboard {
                     .text_color(rgb(ORANGE))
                     .child(error)
             }))
+            .children(self.hardware_state.animation_failure().map(|error| {
+                div()
+                    .debug_selector(|| "hardware-animation-error".into())
+                    .text_color(rgb(ORANGE))
+                    .child(format!(
+                        "Fan animation unavailable; showing still fans. {error}"
+                    ))
+            }))
     }
 
     /// The figure's readings and what kept any of them from it: the second the store's View

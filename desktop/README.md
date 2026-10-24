@@ -38,7 +38,7 @@ The Live control in a Recorded window follows new readings from that recording
 through the existing reader. It does not start a collector or acquire shutdown ownership.
 
 A build with the `automation` feature can be driven without the screen. With
-`--control SOCKET` the window opens hidden, never takes focus, and answers one command
+`--control SOCKET` the window opens hidden and answers one command
 per line on that Unix socket with one JSON line. `flightdeck-control` sends them:
 
 ```sh
@@ -51,15 +51,16 @@ target/debug/flightdeck-control --socket /tmp/flightdeck.sock \
 ```
 
 `state` reports the route, the selected and hovered seconds, the live status, the
-viewport, the scroll position and the stat cards. `rows` lists the page's rows, which
+viewport, the scroll position, Settings state and animation counters. `show` explicitly
+shows and focuses this window; `minimize` minimizes it. `rows` lists the page's rows, which
 `reveal ROW_KEY` scrolls to the top. `hovers` reports the latest 64 chart hovers, oldest
 first, each with its page, its second and `complete_ms`, the time the app measured from
 handling the pointer move to the page holding that second's complete readings. It is null
 for a hover that ended, or whose read failed, before then. `count` counts every hover since
 launch. The socket answers at the window's own pace, so its round trip cannot time a hover.
-Pointer commands take window coordinates in points. A screenshot renders the window's own
-frame offscreen, at its scale factor, so it shows exactly what the window draws and nothing
-of the desktop around it. It first waits up to five seconds for the page's readings and
+Pointer commands take window coordinates in points. A screenshot renders GPUI's frame
+offscreen at its scale factor. Native Metal fan animation is a separate surface and needs
+a visible window capture. The socket screenshot waits up to five seconds for the readings and
 reports in `settled` whether they arrived. Builds without the feature refuse `--control`.
 
 Timed interactive live windows accept `--seconds 1..1800`. Run
@@ -255,8 +256,16 @@ missing observations remain gaps and small nonzero rates retain useful units.
 The schematic shows the selected Battery charge and signed power independently;
 missing Battery readings remain unavailable. Invalid Battery input reports its
 diagnostic while preserving valid CPU, GPU, installed-memory and fan readings.
-The schematic draws the shared chassis and rotor assets still, with
-anchored callouts and an illustrative airflow tint. The macOS text backend is enabled and checked
+The schematic draws the shared chassis and rotor assets still by default, with
+anchored callouts and an illustrative airflow tint. Settings in the sidebar, the app menu,
+or Command-comma offers **Animate fans**. The choice saves immediately for normal app
+windows, including saved recordings. Timed runs and automation windows keep a session-only choice.
+An independent Metal surface animates two full-color rotors and outgoing particles,
+targeting 30 frames per second without requesting dashboard frames. Each side follows its displayed
+RPM; zero or missing RPM stops that side. Motion pauses outside Overview, when clipped out,
+under chart or time overlays, when the window is inactive or hidden, and with macOS Reduce
+Motion enabled. A renderer failure leaves the still figure and shows an error.
+The macOS text backend is enabled and checked
 at startup; the earlier blank-text builds are unsuitable performance baselines.
 Overview defers the schematic until its first real snapshot, avoiding artwork
 initialization while the charts are still loading.
@@ -286,6 +295,9 @@ comparisons, use one collector, the same recording and page, equal warmup/histor
 length and the same update cadence. Record actual window dimensions,
 display scale, hardware, binary hashes, background activity and duration. Allow a
 warmup before measuring idle. Alternate the implementation order on repeat runs.
+Record Animate fans, macOS Reduce Motion, schematic visibility and observed animation
+activity. Match these conditions unless animation is the variable being compared.
+Ordinary windows load the saved choice; timed and automation windows start with it off.
 Compare process CPU as a percentage of one core, physical footprint separately
 from RSS, and wakeup deltas. Do not apply the collector's 5% budget to the UI.
 

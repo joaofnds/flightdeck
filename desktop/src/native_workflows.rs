@@ -13,7 +13,10 @@ use crate::live_source::{Request, Snapshot, Update, Worker};
 use crate::live_source_mode::SourceMode;
 use crate::native_input::TimeInput;
 
-gpui::actions!(flightdeck_native, [Quit, CloseWindow, OpenRecording]);
+gpui::actions!(
+    flightdeck_native,
+    [Quit, CloseWindow, OpenRecording, OpenSettings]
+);
 
 pub fn create_dashboard(
     worker: Worker,
@@ -23,8 +26,9 @@ pub fn create_dashboard(
 ) -> Entity<LiveDashboard> {
     let source = worker.mode();
     let input = gpui::AppContext::new(cx, TimeInput::new);
-    let entity = gpui::AppContext::new(cx, |_| {
+    let entity = gpui::AppContext::new(cx, |cx| {
         let mut dashboard = LiveDashboard::new(worker, route, seconds);
+        dashboard.settings.animate_fans = crate::live_launch::animate_fans(cx);
         dashboard.native.source = source;
         dashboard.native.input = Some(input);
         dashboard
@@ -52,6 +56,7 @@ fn install_application_actions(cx: &mut gpui::App) {
         gpui::KeyBinding::new("cmd-q", Quit, None),
         gpui::KeyBinding::new("cmd-w", CloseWindow, None),
         gpui::KeyBinding::new("cmd-o", OpenRecording, None),
+        gpui::KeyBinding::new("cmd-,", OpenSettings, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &CloseWindow, cx| {
@@ -74,6 +79,8 @@ fn application_menus() -> Vec<gpui::Menu> {
             name: "Flightdeck".into(),
             disabled: false,
             items: vec![
+                gpui::MenuItem::action("Settings…", OpenSettings),
+                gpui::MenuItem::separator(),
                 gpui::MenuItem::action("Close Window", CloseWindow),
                 gpui::MenuItem::separator(),
                 gpui::MenuItem::action("Quit Flightdeck", Quit),
@@ -88,6 +95,12 @@ fn application_menus() -> Vec<gpui::Menu> {
 }
 
 fn install_live_actions(cx: &mut gpui::App) {
+    cx.on_action(|_: &OpenSettings, cx| {
+        let view = cx.global::<ActionTarget>().0.clone();
+        if let Err(error) = view.update(cx, LiveDashboard::open_settings) {
+            eprintln!("Open Settings action: {error}");
+        }
+    });
     cx.on_action(|_: &OpenRecording, cx| {
         let view = cx.global::<ActionTarget>().0.clone();
         if let Err(error) = view.update(cx, LiveDashboard::open_recording) {

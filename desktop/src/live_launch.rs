@@ -23,6 +23,18 @@ mod readiness;
 
 pub use collection::{collector_status, retry_collector};
 
+pub(crate) fn animate_fans(cx: &App) -> bool {
+    preferences::animate_fans(cx)
+}
+
+pub(crate) fn animation_save_notice(cx: &App) -> Option<String> {
+    preferences::animation_save_notice(cx)
+}
+
+pub(crate) fn set_animate_fans(enabled: bool, cx: &mut App) -> Result<(), String> {
+    preferences::set_animate_fans(enabled, cx)
+}
+
 pub fn probe(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let root = recording(options)?;
     let mut collector = if options.source.start_collector {
@@ -161,7 +173,7 @@ struct Opening {
 
 /// Collection outlives the window only for a launch that follows the live readings on the
 /// screen. A recording opened read-only collects nothing, a timed run quits by itself, and a
-/// window under the control socket is never on the screen.
+/// window under the control socket keeps an isolated session.
 fn reopening(root: PathBuf, options: &Options, controlled: bool) -> Option<background::Reopening> {
     if !personal(options, controlled) {
         return None;
@@ -180,7 +192,7 @@ fn reopening(root: PathBuf, options: &Options, controlled: bool) -> Option<backg
 }
 
 /// Whether the window is the user's own, on the screen until they close it. A window under
-/// the control socket is never on the screen, and a timed run quits by itself to report how
+/// the control socket is isolated from preferences, and a timed run quits to report how
 /// it ran.
 fn personal(options: &Options, controlled: bool) -> bool {
     if controlled {
@@ -222,7 +234,7 @@ fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
             px(preferences::WINDOW_SIDE_MIN),
             px(preferences::WINDOW_SIDE_MIN),
         )),
-        // A window under the control socket stays off the screen and never takes focus.
+        // A controlled window starts hidden until an explicit show command.
         show: !hidden,
         focus: !hidden,
         // The window bar draws the title row itself, with the window buttons inside it as
@@ -237,9 +249,9 @@ fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
 
     cx.open_window(window, move |window, cx| {
         let dashboard = create_dashboard(worker, start, cx);
+        crate::hardware_motion::observe_window(&dashboard, window, cx);
         background::keep_reader(&dashboard, cx);
-        // The window under the control socket stands in for a shown window and is never on the
-        // screen, so it reads its page whatever macOS reports.
+        // Controlled windows read their pages even while hidden.
         if control.is_none() {
             crate::live_dashboard::observe_visibility(&dashboard, window, cx);
         }

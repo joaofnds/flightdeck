@@ -16,6 +16,8 @@ use crate::data::state;
 use crate::hardware_layout::{CALLOUTS, Callout, Layout};
 use crate::hardware_motion::{HardwareState, HardwareVisibility, Vector, perimeter};
 
+pub(crate) const AIRFLOW_WASH_OPACITY: f32 = 0.11;
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Readings {
     pub temperatures: [Option<f32>; 3],
@@ -147,8 +149,13 @@ impl Element for HardwareStage {
         }
 
         let layout = Layout::new(f32::from(bounds.size.width).max(1.0));
+        let animated = self
+            .state
+            .paint_animation(bounds, &layout, &self.readings, window);
         match artwork() {
-            Ok(artwork) => paint_assembly(bounds, &layout, &self.readings, artwork, window),
+            Ok(artwork) => {
+                paint_assembly(bounds, &layout, &self.readings, artwork, animated, window);
+            }
             Err(error) => paint_text(error, bounds.origin, 12.0, rgb(ORANGE).into(), window, cx),
         }
         paint_callouts(bounds, &layout, &self.readings, window, cx);
@@ -253,6 +260,7 @@ fn paint_assembly(
     layout: &Layout,
     readings: &Readings,
     artwork: &Artwork,
+    animated: bool,
     window: &mut Window,
 ) {
     let stage = bounds_for(
@@ -271,21 +279,14 @@ fn paint_assembly(
         eprintln!("Painting schematic chassis: {error}");
     }
     for (index, callout) in [Callout::Fan0, Callout::Fan1].into_iter().enumerate() {
-        let center = callout.anchor();
-        let rotor = bounds_for(
-            bounds,
-            layout.point(Vector::new(center.x - 52.0, center.y - 52.0)),
-            Vector::new(104.0 * layout.scale, 104.0 * layout.scale),
-        );
-        if let Err(error) = window.paint_image(
-            rotor,
-            rotor,
-            px(0.0).into(),
-            Arc::clone(&artwork.rotors[index]),
-            0,
-            false,
-        ) {
-            eprintln!("Painting schematic rotor: {error}");
+        if !animated {
+            paint_assembly_rotor(
+                bounds,
+                layout,
+                callout,
+                Arc::clone(&artwork.rotors[index]),
+                window,
+            );
         }
         if readings.speeds[index].is_some_and(|speed| speed > 0.0) {
             paint_airflow(
@@ -296,6 +297,25 @@ fn paint_assembly(
                 window,
             );
         }
+    }
+}
+
+fn paint_assembly_rotor(
+    bounds: Bounds<Pixels>,
+    layout: &Layout,
+    callout: Callout,
+    image: Arc<RenderImage>,
+    window: &mut Window,
+) {
+    let center = callout.anchor();
+    let rotor = bounds_for(
+        bounds,
+        layout.point(Vector::new(center.x - 52.0, center.y - 52.0)),
+        Vector::new(104.0 * layout.scale, 104.0 * layout.scale),
+    );
+
+    if let Err(error) = window.paint_image(rotor, rotor, px(0.0).into(), image, 0, false) {
+        eprintln!("Painting schematic rotor: {error}");
     }
 }
 
@@ -357,8 +377,8 @@ fn paint_airflow_wash(
 ) {
     // Two clipped gradients reproduce four color stops using GPUI's two-stop primitive.
     for (first, end, stops) in [
-        (33.0, 310.42, [(0.0, 0.0), (0.08, 0.11)]),
-        (310.42, 319.0, [(0.97, 0.11), (1.0, 0.0)]),
+        (33.0, 310.42, [(0.0, 0.0), (0.08, AIRFLOW_WASH_OPACITY)]),
+        (310.42, 319.0, [(0.97, AIRFLOW_WASH_OPACITY), (1.0, 0.0)]),
     ] {
         let origin = layout.point(Vector::new(0.0, first));
         let extent = Vector::new(840.0 * layout.scale, (end - first) * layout.scale);
@@ -411,7 +431,7 @@ fn airflow_point(
     )
 }
 
-fn airflow_color(temperature: Option<f32>) -> Hsla {
+pub(crate) fn airflow_color(temperature: Option<f32>) -> Hsla {
     let Some(temperature) = temperature.filter(|value| value.is_finite()) else {
         return rgb(MUTED).into();
     };
@@ -440,12 +460,7 @@ fn paint_callouts(
     cx: &mut App,
 ) {
     for callout in CALLOUTS {
-        let tint = match callout {
-            Callout::Gpu => PURPLE,
-            Callout::Memory => GREEN,
-            Callout::Battery => ORANGE,
-            _ => BLUE,
-        };
+        let tint = callout_color(callout);
         let leader = layout.leader(callout);
         let mut path = PathBuilder::stroke(px(1.0));
         for (index, position) in leader.iter().enumerate() {
@@ -460,7 +475,7 @@ fn paint_callouts(
             }
         }
         match path.build() {
-            Ok(path) => window.paint_path(path, Hsla::from(rgb(tint)).opacity(0.65)),
+            Ok(path) => window.paint_path(path, tint.opacity(0.65)),
             Err(error) => eprintln!("Painting schematic leader: {error}"),
         }
         let anchor = bounds_for(
@@ -468,9 +483,19 @@ fn paint_callouts(
             Vector::new(leader[0].x - 2.0, leader[0].y - 2.0),
             Vector::new(4.0, 4.0),
         );
-        window.paint_quad(fill(anchor, rgb(tint)).corner_radii(px(2.0)));
+        window.paint_quad(fill(anchor, tint).corner_radii(px(2.0)));
         paint_label(bounds, layout, callout, readings, window, cx);
     }
+}
+
+pub(crate) fn callout_color(callout: Callout) -> Hsla {
+    rgb(match callout {
+        Callout::Gpu => PURPLE,
+        Callout::Memory => GREEN,
+        Callout::Battery => ORANGE,
+        _ => BLUE,
+    })
+    .into()
 }
 
 /// How far apart the prototype sets the letters of a callout's name, in em.

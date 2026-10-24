@@ -833,6 +833,47 @@ missing an entry, and on a case whose crate no member depends on.
 - Performance: The wrapper rejects oversized container declarations before the generated reader reserves their elements, without decoding compressed values. A separate parser would duplicate both the Parquet schema and compact Thrift encoding.
 - Maintenance: Keep the direct version aligned with polars-parquet. Recheck generated collection allocation and field-identifier handling on upgrades, retaining regressions for oversized metadata and malformed field deltas.
 
+## Desktop animation dependencies
+
+The separate desktop workspace uses these direct dependencies for the optional fan
+surface. They were already present transitively through GPUI; none runs in the collector.
+
+On 2026-10-24, experiment pfan09 compared a 30 Hz independent Metal surface with the
+dashboard-driven animation from f4501b4, both on GPUI 8766c4ad and common sources from
+9df54ba. On a MacBook Pro Mac17,8 (M5 Pro, 48 GB, macOS 27.0.1), two counterbalanced
+observations per condition averaged 25.94 versus 113.17 ms of application CPU per
+second. Each CPU interval lasted about 35 seconds. This supports the independent
+surface choice; it does not measure this production integration, displayed frame
+pacing or whole-machine energy. Raw results and probe sources are kept in the external
+board at `backlog/evidence/TASK-90/current-pin` and doc-68, which are not included in a
+repository clone. Animation remains an opt-in resource cost.
+
+### `metal` and `foreign-types`
+
+- Used: Metal device, texture, pipeline, command buffer and drawable ownership, plus the
+  pointer bridge to the typed QuartzCore layer. Two instanced draws share one render pass.
+- Performance: the independent-surface experiment above reduced application CPU against
+  dashboard-driven animation. That measures the rendering design, not a binding overhead
+  comparison; hand-written Objective-C calls would submit the same GPU work.
+- Maintenance: these bindings already serve GPUI's renderer. Replacing their ownership and
+  API declarations locally would duplicate platform bindings without an established gain.
+
+### `raw-window-handle`
+
+- Used: GPUI's trait implementation supplies the AppKit view that hosts the fan layer.
+- Performance: the handle is checked on ordinary paints, never obtained for each fan frame.
+  A local replacement would still need GPUI's published handle contract.
+- Maintenance: the crate provides that shared typed contract, avoiding guessed native pointers.
+
+### `objc2-quartz-core` and `objc2-core-foundation`
+
+- Used: typed layer attachment, clipping, hidden state and transactions, with CGRect/CGSize
+  types for coordinates. AppKit's existing dependency supplies the Reduce Motion preference.
+- Performance: layer geometry changes only with ordinary layout; the worker handles animation.
+  Hand-written declarations would invoke the same native methods.
+- Maintenance: generated Apple bindings keep signatures and object ownership explicit instead
+  of adding local Objective-C declarations for these APIs.
+
 ## Persistence measurements
 
 The implementation observations in this section were measured on 2026-10-15, against the

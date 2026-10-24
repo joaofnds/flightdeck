@@ -8,6 +8,23 @@ use crate::live_source_mode::SourceMode;
 use crate::time_range::Range;
 
 #[gpui::test]
+fn reopening_restores_the_animation_choice_made_in_settings(cx: &mut TestAppContext) {
+    // Toggle through the page, close it, reload preferences, and read a new window's page.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.keep_preferences();
+    harness.show();
+    assert!(!harness.animation_setting());
+
+    harness.toggle_animation_setting();
+    harness.close_windows();
+    harness.keep_preferences();
+    harness.show();
+
+    assert!(harness.animation_setting());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn command_w_closes_the_window_from_its_own_key_dispatch(cx: &mut TestAppContext) {
     // Dispatch the real shortcut inside a window update, then inspect the window registry.
     let mut harness = BackgroundHarness::setup(cx);
@@ -248,6 +265,27 @@ struct BackgroundHarness {
 }
 
 impl BackgroundHarness {
+    fn settings_window(&mut self) -> gpui::VisualTestContext {
+        let window = self.cx.read(|cx| cx.windows()[0]);
+        let mut context = gpui::VisualTestContext::from_window(window, &self.cx);
+        context.dispatch_action(crate::native_workflows::OpenSettings);
+        context.run_until_parked();
+        context
+    }
+
+    fn toggle_animation_setting(&mut self) {
+        let mut context = self.settings_window();
+        let bounds = context.debug_bounds("animate-fans").unwrap();
+        context.simulate_click(bounds.center(), gpui::Modifiers::none());
+        context.run_until_parked();
+    }
+
+    fn animation_setting(&mut self) -> bool {
+        self.settings_window()
+            .debug_bounds("animate-fans:On")
+            .is_some()
+    }
+
     fn close_with_shortcut(&mut self) {
         let window = self.cx.read(|cx| cx.windows()[0]);
         self.cx

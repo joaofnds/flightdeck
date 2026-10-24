@@ -112,6 +112,8 @@ pub struct LiveDashboard {
     pub hidden: Vec<String>,
     pub(crate) sections: crate::live_sections::Sections,
     pub hardware_state: Rc<crate::hardware_motion::HardwareState>,
+    /// Settings overlays the resource page without changing its query route.
+    pub settings: crate::live_settings::Settings,
     pub started: Instant,
     pub seconds: Option<u32>,
     pub updates: u32,
@@ -319,6 +321,7 @@ impl LiveDashboard {
             hidden: Vec::with_capacity(64),
             sections: crate::live_sections::Sections::default(),
             hardware_state: Rc::new(crate::hardware_motion::HardwareState::new()),
+            settings: crate::live_settings::Settings::default(),
             started: Instant::now(),
             seconds,
             updates: 0,
@@ -383,6 +386,15 @@ impl LiveDashboard {
     }
 
     pub fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.settings.refresh_notice(cx) {
+            cx.notify();
+        }
+        if self
+            .hardware_state
+            .poll_animation(self.settings.animate_fans)
+        {
+            cx.notify();
+        }
         self.native_tick(cx);
         match self.worker.take() {
             Ok(Some(update)) => {
@@ -420,6 +432,10 @@ impl LiveDashboard {
             self.last_status = status;
             cx.notify();
         }
+        self.tick_deadline(cx);
+    }
+
+    fn tick_deadline(&mut self, cx: &mut Context<Self>) {
         if let Some(seconds) = self.seconds {
             if self.started.elapsed() >= Duration::from_secs(u64::from(seconds)) {
                 self.seconds = None;
@@ -428,6 +444,7 @@ impl LiveDashboard {
                     serde_json::json!({"mode":"live", "route":self.request.route,
                     "elapsed_seconds":self.started.elapsed().as_secs_f64(),
                     "updates":self.updates,"renders":self.renders,
+                    "hardware_animation":self.hardware_state.animation_statistics(),
                     "plot_renders":self.plots.renders(),"plots_held":self.plots.held(),
                     "curve_builds":self.plots.curve_builds(),
                     "read_ms":self.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
@@ -760,6 +777,14 @@ impl LiveDashboard {
     }
 
     pub fn navigate(&mut self, route: &str, cx: &mut Context<Self>) {
+        if self.settings.open {
+            self.settings.open = false;
+            if self.request.route == route {
+                cx.notify();
+                return;
+            }
+        }
+
         self.switch_route(route);
         cx.notify();
     }
@@ -784,6 +809,7 @@ impl LiveDashboard {
     }
 
     pub(crate) fn switch_route(&mut self, route: &str) {
+        self.settings.open = false;
         if self.request.route != route {
             self.sections.reset();
         }
@@ -1208,53 +1234,36 @@ impl LiveDashboard {
 }
 
 impl LiveDashboard {
-    /// The window's own focus, taken at the first frame so a key pressed before any control
-    /// has focus still reaches the window's key handler.
-    fn install_root_focus(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::FocusHandle {
-        if let Some(focus) = &self.root_focus {
-            return focus.clone();
-        }
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        self.root_focus = Some(focus.clone());
-
-        focus
-    }
-}
-
-impl Render for LiveDashboard {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.rendered_source != Some(self.native.source) {
-            window.set_window_title(self.native.source.title());
-            self.rendered_source = Some(self.native.source);
-        }
-
+    fn resource_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.install_section_focus(cx);
         self.reading_viewport(window.viewport_size());
         self.install_cpu_focus(window, cx);
         let inspection_focus = self.install_inspection_focus(window, cx);
-        let root_focus = self.install_root_focus(window, cx);
-        self.plots.begin_frame();
-        self.renders += 1;
-        if self.renders == 1 {
-            window.on_next_frame(|window, _| {
-                eprintln!(
-                    "live first-frame viewport={:?} scale={}",
-                    window.viewport_size(),
-                    window.scale_factor()
-                );
-            });
-        }
-
         let body = self.inspection_body(&inspection_focus, cx);
 
         div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(self.header(cx))
+            .child(self.native_notice(cx))
+            .children(self.error_notice())
+            .child(body)
+    }
+
+    fn render_shell(
+        &self,
+        root_focus: &gpui::FocusHandle,
+        body: gpui::AnyElement,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let hardware_state = Rc::clone(&self.hardware_state);
+
+        div()
             .id("flightdeck-live")
-            .track_focus(&root_focus)
+            .track_focus(root_focus)
             .tab_stop(false)
             .role(gpui::Role::Application)
             .accessibility_id("flightdeck.live")
@@ -1282,19 +1291,75 @@ impl Render for LiveDashboard {
                     .flex_1()
                     .min_h_0()
                     .child(self.navigation(cx))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.header(cx))
-                            .child(self.native_notice(cx))
-                            .children(self.error_notice())
-                            .child(body),
-                    ),
+                    .child(body),
             )
             .children(self.chart_inspector_overlay(cx))
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |_, (), _, _| hardware_state.finish_frame(),
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(0.0)),
+            )
+            .into_any_element()
+    }
+
+    /// The window's own focus, taken at the first frame so a key pressed before any control
+    /// has focus still reaches the window's key handler.
+    fn install_root_focus(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::FocusHandle {
+        if let Some(focus) = &self.root_focus {
+            return focus.clone();
+        }
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.root_focus = Some(focus.clone());
+
+        focus
+    }
+}
+
+impl Render for LiveDashboard {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.rendered_source != Some(self.native.source) {
+            window.set_window_title(self.native.source.title());
+            self.rendered_source = Some(self.native.source);
+        }
+
+        let root_focus = self.install_root_focus(window, cx);
+        self.hardware_state.begin_frame(
+            self.settings.animate_fans
+                && !self.settings.open
+                && self.request.route == "overview"
+                && !self.native.time_menu_open
+                && self.chart_inspector.is_none()
+                && self.chart_hover.is_none(),
+        );
+        self.plots.begin_frame();
+        self.renders += 1;
+        if self.renders == 1 {
+            window.on_next_frame(|window, _| {
+                eprintln!(
+                    "live first-frame viewport={:?} scale={}",
+                    window.viewport_size(),
+                    window.scale_factor()
+                );
+            });
+        }
+
+        let body = if self.settings.open {
+            self.settings_view(cx).into_any_element()
+        } else {
+            self.resource_view(window, cx).into_any_element()
+        };
+
+        self.render_shell(&root_focus, body, cx)
     }
 }
 

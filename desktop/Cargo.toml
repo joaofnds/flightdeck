@@ -21,6 +21,13 @@ core-foundation = "=0.10.0"
 libc = "0.2"
 log = "0.4"
 image = "=0.25.10"
+metal = "0.33"
+foreign-types = "0.5"
+raw-window-handle = "0.6"
+objc2-core-foundation = "0.3.2"
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std", "CALayer", "CAMetalLayer", "CATransaction", "objc2-metal", "objc2-core-foundation",
+] }
 num-traits = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
@@ -31,6 +38,7 @@ default-features = false
 features = [
     "std",
     "NSApplication",
+    "NSAccessibility",
     "NSButton",
     "NSCell",
     "NSControl",
@@ -43,6 +51,8 @@ features = [
     "NSStatusBarButton",
     "NSStatusItem",
     "NSView",
+    "NSWorkspace",
+    "objc2-quartz-core",
     "objc2-core-foundation",
 ]
 

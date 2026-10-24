@@ -99,6 +99,45 @@ pub(super) fn range(named_range: Option<Range>, cx: &App) -> Range {
     store.current.range()
 }
 
+/// Whether the user opted in to moving fans and airflow on Overview.
+pub(super) fn animate_fans(cx: &App) -> bool {
+    cx.try_global::<Store>()
+        .is_some_and(|store| store.current.animate_fans)
+}
+
+/// Keeps the choice immediately and reports a failed save to the Settings page.
+pub(super) fn set_animate_fans(enabled: bool, cx: &mut App) -> Result<(), String> {
+    if !cx.has_global::<Store>() {
+        return Err(
+            "Preferences are unavailable. This change applies to this session only.".into(),
+        );
+    }
+
+    let store = cx.global_mut::<Store>();
+    store.current.animate_fans = enabled;
+    store.save();
+    match animation_save_notice(cx) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+pub(super) fn animation_save_notice(cx: &App) -> Option<String> {
+    let Some(store) = cx.try_global::<Store>() else {
+        return Some(
+            "Preferences are unavailable. This change applies to this session only.".into(),
+        );
+    };
+
+    if store.current.animate_fans == store.saved.animate_fans {
+        return None;
+    }
+
+    store.failed.as_ref().map(|(_, error)| {
+        format!("Could not save Animate fans. This change applies to this session only. {error}")
+    })
+}
+
 /// Where a live window opens: where the last one stood, at its size there, or centered at
 /// `default` when no window was kept. A window whose display is gone, or no longer holds its
 /// corner, opens centered at the size it was kept at.
@@ -195,7 +234,7 @@ struct Store {
     path: PathBuf,
     current: Preferences,
     saved: Preferences,
-    failed: Option<Preferences>,
+    failed: Option<(Preferences, String)>,
 }
 
 impl Global for Store {}
@@ -203,6 +242,7 @@ impl Global for Store {}
 impl Store {
     fn save(&mut self) {
         if self.current == self.saved {
+            self.failed = None;
             return;
         }
 
@@ -214,9 +254,9 @@ impl Store {
             Err(error) => {
                 // The write is tried again on each tick until it succeeds, and reported once
                 // for each change rather than on every tick.
-                if self.failed.as_ref() != Some(&self.current) {
+                if self.failed.as_ref().map(|(preferences, _)| preferences) != Some(&self.current) {
                     eprintln!("Save Flightdeck preferences: {error}");
-                    self.failed = Some(self.current.clone());
+                    self.failed = Some((self.current.clone(), error));
                 }
             }
         }
@@ -232,6 +272,8 @@ struct Preferences {
     /// The minutes of the range the menu picked last, or none for the default history.
     range_minutes: Option<u64>,
     hidden_series: Vec<String>,
+    /// Motion is opt-in, including when older preferences omit this field.
+    animate_fans: bool,
 }
 
 impl Preferences {

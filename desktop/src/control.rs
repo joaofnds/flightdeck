@@ -1,7 +1,7 @@
 //! The control socket. A test or an agent drives the running window by writing one command
-//! per line to a Unix socket and reads one JSON reply per line, so checking the app never
-//! takes over anyone's screen. It is built only with the `automation` feature, and its window
-//! opens hidden and never takes focus. Screenshots render the window's last frame offscreen.
+//! per line to a Unix socket and reads one JSON reply per line. Its window opens hidden;
+//! only an explicit show command takes focus. Built only with the automation feature.
+//! Screenshots render GPUI's frame offscreen, excluding native animation surfaces.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
@@ -252,6 +252,15 @@ fn execute(
         "state" => Ok(state(dashboard.read(cx), window)),
         "rows" => Ok(rows(dashboard.read(cx))),
         "hovers" => Ok(dashboard.read(cx).hover_timings.report()),
+        "show" => {
+            cx.activate(true);
+            window.activate_window();
+            Ok(Value::Null)
+        }
+        "minimize" => {
+            window.minimize_window();
+            Ok(Value::Null)
+        }
         "navigate" => navigate(word(words, 1)?, dashboard, cx),
         "inspect" => {
             let second = word(words, 1)?
@@ -293,6 +302,8 @@ const HELP: &[&str] = &[
     "state",
     "rows",
     "hovers",
+    "show",
+    "minimize",
     "navigate ROUTE",
     "inspect SECOND",
     "live",
@@ -528,6 +539,12 @@ fn state(dashboard: &LiveDashboard, window: &Window) -> Value {
 
     json!({
         "route": dashboard.request.route,
+        "settings_open": dashboard.settings.open,
+        "animate_fans": dashboard.settings.animate_fans,
+        "animation_error": dashboard.hardware_state.animation_failure(),
+        "hardware_animation": dashboard.hardware_state.animation_statistics(),
+        "window_visible": window.is_visible(),
+        "window_active": window.is_window_active(),
         "requested_second": dashboard.request.second,
         "selected_second": dashboard.shown_second(),
         "selected": selection["selected"],

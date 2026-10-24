@@ -1,12 +1,33 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+pub(crate) fn reduce_motion() -> bool {
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+}
 
 pub struct HardwareState {
     started: Instant,
     visibility: Cell<Option<VisibilitySignature>>,
     visibility_logs: Cell<u16>,
     paints: Cell<u64>,
+    animation: RefCell<Animation>,
+    animation_allowed: Cell<bool>,
+    animation_painted: Cell<bool>,
+    animation_ready: Cell<bool>,
+    animation_failure_reported: Cell<bool>,
+    motion_reduced: Cell<bool>,
+}
+
+#[path = "hardware_motion_animation.rs"]
+mod animation;
+
+pub(crate) use animation::observe_window;
+
+#[derive(Default)]
+struct Animation {
+    renderer: Option<crate::hardware_animation::HardwareAnimation>,
+    failure: Option<String>,
 }
 
 pub struct HardwareVisibility {
@@ -39,6 +60,12 @@ impl HardwareState {
             visibility: Cell::new(None),
             visibility_logs: Cell::new(0),
             paints: Cell::new(0),
+            animation: RefCell::new(Animation::default()),
+            animation_allowed: Cell::new(false),
+            animation_painted: Cell::new(false),
+            animation_ready: Cell::new(false),
+            animation_failure_reported: Cell::new(false),
+            motion_reduced: Cell::new(false),
         }
     }
 
@@ -107,6 +134,10 @@ impl Vector {
     pub fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
+
+    pub(crate) fn distance(self, other: Self) -> f32 {
+        (self.x - other.x).hypot(self.y - other.y)
+    }
 }
 
 pub fn perimeter() -> &'static [Vector] {
@@ -123,7 +154,7 @@ fn perimeter_make() -> Vec<Vector> {
     ]);
     perimeter_curve(
         &mut points,
-        [
+        &[
             Vector::new(292.0, 277.0),
             Vector::new(251.0, 319.0),
             Vector::new(194.0, 319.0),
@@ -131,7 +162,7 @@ fn perimeter_make() -> Vec<Vector> {
     );
     perimeter_curve(
         &mut points,
-        [
+        &[
             Vector::new(141.0, 319.0),
             Vector::new(102.0, 281.0),
             Vector::new(102.0, 227.0),
@@ -140,7 +171,7 @@ fn perimeter_make() -> Vec<Vector> {
     points.push(Vector::new(102.0, 174.0));
     perimeter_curve(
         &mut points,
-        [
+        &[
             Vector::new(102.0, 157.0),
             Vector::new(110.0, 150.0),
             Vector::new(123.0, 140.0),
@@ -151,18 +182,18 @@ fn perimeter_make() -> Vec<Vector> {
     points
 }
 
-fn perimeter_curve(points: &mut Vec<Vector>, curve: [Vector; 3]) {
+fn perimeter_curve(points: &mut Vec<Vector>, curve: &[Vector; 3]) {
     assert!(points.len() <= 69);
     let start = points[points.len() - 1];
     for step in 1..=32_u16 {
         points.push(bezier(
-            [start, curve[0], curve[1], curve[2]],
+            &[start, curve[0], curve[1], curve[2]],
             f32::from(step) / 32.0,
         ));
     }
 }
 
-fn bezier(points: [Vector; 4], progress: f32) -> Vector {
+pub(crate) fn bezier(points: &[Vector; 4], progress: f32) -> Vector {
     let inverse = 1.0 - progress;
     let weights = [
         inverse.powi(3),
