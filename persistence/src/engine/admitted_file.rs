@@ -40,8 +40,8 @@ impl AdmittedFile {
         Ok(Self { bytes })
     }
 
-    /// Decodes only the named columns from the bytes admission checked, with no path reopen.
-    pub fn read(self, columns: &[&str]) -> Result<DataFrame> {
+    /// Decodes named columns while retaining the admitted bytes for subsequent projections.
+    pub fn read(&self, columns: &[&str]) -> Result<DataFrame> {
         if columns.len() > admission::COLUMNS_MAX {
             return Err(Error::Bound("parquet projection columns"));
         }
@@ -55,7 +55,7 @@ impl AdmittedFile {
         }
 
         let columns = columns.iter().map(|name| (*name).to_owned()).collect();
-        Ok(ParquetReader::new(Cursor::new(self.bytes))
+        Ok(ParquetReader::new(Cursor::new(self.bytes.as_slice()))
             .set_rechunk(false)
             .with_slice(None)
             .with_columns(Some(columns))

@@ -39,6 +39,27 @@ fn decodes_the_admitted_bytes_after_the_same_file_is_overwritten() {
 }
 
 #[test]
+fn decodes_separate_projections_from_one_admitted_file_after_removal() {
+    // Goal: a minute can reuse its admitted input across independent table projections.
+    // Method: remove a two-column file, read both projections, then release their input.
+    let fixture = Fixture::new();
+    let counter = Column::new("counter".into(), [Some(u64::MAX), None]);
+    let other = Column::new("other".into(), [Some(-7i64), Some(0)]);
+    let mut stored = DataFrame::new(2, vec![counter.clone(), other.clone()]).unwrap();
+    std::fs::remove_file(&fixture.path).unwrap();
+    write_frame(&fixture.path, &mut stored);
+    let admitted = super::AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+    std::fs::remove_file(&fixture.path).unwrap();
+
+    let first = admitted.read(&["counter"]).unwrap();
+    let second = admitted.read(&["other"]).unwrap();
+    drop(admitted);
+
+    assert_eq!(first, DataFrame::new(2, vec![counter]).unwrap());
+    assert_eq!(second, DataFrame::new(2, vec![other]).unwrap());
+}
+
+#[test]
 fn refuses_a_file_larger_than_its_compressed_byte_allowance() {
     // Goal: an operation cannot retain a file larger than its caller reserved.
     // Method: give admission one byte less than a real saved file needs.
