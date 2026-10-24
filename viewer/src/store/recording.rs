@@ -270,7 +270,7 @@ fn load_minute_apps(
         )));
     };
 
-    let mut second = AppsSecond::with_room();
+    let mut second = AppsSecond::with_room_for(rows.len());
     let kept = Kept {
         run: minute.run,
         sample,

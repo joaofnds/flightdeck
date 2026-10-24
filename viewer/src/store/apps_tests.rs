@@ -1,6 +1,6 @@
 use collector::ring::{Identity, RunIdentity};
 
-use super::{AppsSecond, Kept, Missing};
+use super::{AppsSecond, Kept, Missing, TickApps};
 use crate::live_app_response::{KeyKind, Measure};
 use crate::recording::{AppMinute, AppRow, SampleRow};
 
@@ -67,6 +67,39 @@ mod keep {
             .iter()
             .map(|row| String::from_utf8(row.name.bytes.clone()).unwrap())
             .collect()
+    }
+}
+
+mod take {
+    use super::{AppsSecond, TickApps, kept_second, loaded_second};
+
+    #[test]
+    fn keeps_the_buffer_the_store_made_for_the_second() {
+        // Goal: a second a loader read moves into the buffer the store made for the second when
+        // it started, so the store's buffers stay the ones it allocated then, and keep resident
+        // only the pages its Apps were written to. Method: take a loaded second with room for
+        // its one App into a buffer with room for every App, and compare the buffer's address
+        // before and after.
+        let mut held = AppsSecond::with_room();
+        let room = held.apps.as_ptr();
+        let mut loaded = loaded_second(&[b"/A.app"]);
+
+        held.take(TickApps::Loaded(&mut loaded), None);
+
+        assert_eq!(held.apps.as_ptr(), room);
+    }
+
+    #[test]
+    fn holds_what_the_loader_read_of_the_second() {
+        // Goal: a second a loader read holds, once the store takes it in, the Apps and the
+        // sample the loader read of it. Method: take a loaded second naming A and B into a
+        // buffer with room for every App, and compare it with the second the loader made.
+        let mut held = AppsSecond::with_room();
+        let mut loaded = loaded_second(&[b"/A.app", b"/B.app"]);
+
+        held.take(TickApps::Loaded(&mut loaded), None);
+
+        assert_eq!(held, kept_second(&[b"/A.app", b"/B.app"]));
     }
 }
 
@@ -160,9 +193,22 @@ fn kept_second(keys: &[&[u8]]) -> AppsSecond {
     kept_second_of(keys, &sample_naming(keys))
 }
 
+/// The second a loader makes of a minute whose one observation names the bundles `keys`, in
+/// that order, and measured no interval, with room for those Apps alone.
+fn loaded_second(keys: &[&[u8]]) -> AppsSecond {
+    let second = AppsSecond::with_room_for(keys.len());
+    kept_second_in(second, keys, &sample_naming(keys))
+}
+
 /// The second `AppsSecond::keep` makes of a minute whose one observation, `sample`, names the
 /// bundles `keys`, in that order.
 fn kept_second_of(keys: &[&[u8]], sample: &SampleRow) -> AppsSecond {
+    kept_second_in(AppsSecond::with_room(), keys, sample)
+}
+
+/// The second `AppsSecond::keep` makes in `second` of a minute whose one observation,
+/// `sample`, names the bundles `keys`, in that order.
+fn kept_second_in(mut second: AppsSecond, keys: &[&[u8]], sample: &SampleRow) -> AppsSecond {
     let mut minute = AppMinute::default();
     for key in keys {
         let key_offset = minute.keys.len();
@@ -185,7 +231,6 @@ fn kept_second_of(keys: &[&[u8]], sample: &SampleRow) -> AppsSecond {
             gpu_ns: MEASURED,
         });
     }
-    let mut second = AppsSecond::with_room();
 
     second.keep(
         &Kept {

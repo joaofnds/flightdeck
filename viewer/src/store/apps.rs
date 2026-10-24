@@ -113,6 +113,15 @@ impl AppsSecond {
         }
     }
 
+    /// A second with room for `count` Apps, and never more than `APPS_PER_SECOND_MAX`, holding
+    /// none, as a loader holds what it read of a tick until the store takes it in.
+    pub(super) fn with_room_for(count: usize) -> Self {
+        Self {
+            apps: Vec::with_capacity(count.min(APPS_PER_SECOND_MAX)),
+            ..Self::default()
+        }
+    }
+
     /// Holds what the store found of a tick's Apps, `apps`. An App the second `previous` holds
     /// keeps the name it holds there.
     pub(super) fn take(&mut self, apps: TickApps<'_>, previous: Option<&Self>) {
@@ -121,7 +130,13 @@ impl AppsSecond {
             TickApps::Derived(sample) => self.fill(sample, previous),
             TickApps::Refused(error) => self.clear(Missing::Refused(error.to_owned())),
             TickApps::Loaded(loaded) => {
+                // The second keeps the buffer the store made for it at start, so only the pages
+                // its Apps fill are written and the room past them stays out of resident memory.
+                let mut room = mem::take(&mut self.apps);
                 mem::swap(self, loaded);
+                room.clear();
+                room.append(&mut self.apps);
+                self.apps = room;
                 assert!(self.apps.capacity() >= APPS_PER_SECOND_MAX);
                 self.take_names(previous);
             }
