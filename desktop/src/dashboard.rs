@@ -68,7 +68,7 @@ impl Dashboard {
             list: ListState::new(0, ListAlignment::Top, px(100.0)),
             help: None,
         };
-        if dashboard.performance.options.range_minutes == 60 {
+        if dashboard.performance.options.named_minutes == Some(60) {
             dashboard.inspection.lower = 0;
         }
         dashboard.rebuild_rows();
@@ -648,7 +648,6 @@ impl Dashboard {
             rebuild |= self.inspection.lower != lower;
             self.inspection.lower = lower;
             self.inspection.selected = 120;
-            self.performance.options.range_minutes = minutes;
         }
         if let Some(app) = &action.app {
             rebuild |= self.app != *app;

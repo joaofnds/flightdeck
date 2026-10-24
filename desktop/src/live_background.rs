@@ -116,6 +116,7 @@ fn reopen(cx: &mut App) -> Result<(), String> {
     let reopening = &background.reopening;
     let start = super::Start {
         named_page: None,
+        named_range: None,
         seconds: None,
         hardware: reopening.hardware,
     };

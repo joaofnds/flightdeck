@@ -184,6 +184,27 @@ fn a_launch_opens_the_window_as_the_last_run_left_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_launch_that_names_a_range_opens_the_window_at_it(cx: &mut TestAppContext) {
+    // Goal: a range named with --minutes opens the window at it, though the user left another.
+    // Method: pick the last five minutes and close the window, read the file again as a launch
+    // does, launch naming the hour, and read the window's range.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.keep_preferences();
+    harness.show();
+    harness.adjust_window();
+    harness.close_windows();
+    harness.keep_preferences();
+
+    harness.launch(Some(Range::Last(3600)));
+
+    assert_eq!(
+        Range::Last(3600),
+        harness.dashboard(|dashboard| dashboard.range)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn closing_the_window_saves_what_the_user_set_in_it(cx: &mut TestAppContext) {
     // Goal: the file keeps its field names, since a renamed field loses what an older build
     // saved.
@@ -231,6 +252,24 @@ impl BackgroundHarness {
 
     fn show(&mut self) {
         self.cx.update(show);
+        self.cx.run_until_parked();
+    }
+
+    /// Opens a live window as a launch that named `named_range` with --minutes does.
+    fn launch(&mut self, named_range: Option<Range>) {
+        let opening = super::super::Opening {
+            worker: Worker::start(self.root.clone()).unwrap(),
+            start: super::super::Start {
+                named_page: None,
+                named_range,
+                seconds: None,
+                hardware: false,
+            },
+            control: None,
+        };
+        self.cx
+            .update(|cx| super::super::open_window(opening, cx))
+            .unwrap();
         self.cx.run_until_parked();
     }
 

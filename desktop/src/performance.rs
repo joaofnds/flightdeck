@@ -41,7 +41,8 @@ pub struct Options {
     pub scrub: bool,
     pub animate: bool,
     pub hardware: bool,
-    pub range_minutes: u16,
+    /// The minutes `--minutes` named, if any.
+    pub named_minutes: Option<u16>,
     pub seconds: Option<u32>,
     pub replay: Option<std::path::PathBuf>,
     /// The control socket an automation build listens on, with its window hidden.
@@ -92,7 +93,7 @@ impl Options {
             scrub: false,
             animate: false,
             hardware: false,
-            range_minutes: 15,
+            named_minutes: None,
             seconds: None,
             replay: None,
             control: None,
@@ -237,7 +238,7 @@ impl Options {
                 if ![15, 60].contains(&minutes) {
                     return Err("minutes must be 15 or 60".into());
                 }
-                self.range_minutes = minutes;
+                self.named_minutes = Some(minutes);
                 position += 1;
             }
             "--seconds" => {
@@ -390,7 +391,7 @@ impl Performance {
 /// Prints the flags and ends the process, as `--help` asks.
 fn parse_argument_help() -> ! {
     println!(
-        "flightdeck [--recording PATH] [--start-collector] [--page ROUTE]\n\
+        "flightdeck [--recording PATH] [--start-collector] [--page ROUTE] [--minutes 15|60]\n\
          [--seconds 1..1800] [--live-check --seconds 5..300]\n\
          [--reference [--scrub] [--animate]\n\
          [--hardware] [--smoke] [--minutes 15|60] [--seconds 1..300]\n\

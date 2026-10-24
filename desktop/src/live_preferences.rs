@@ -85,6 +85,20 @@ pub(super) fn page(named_page: Option<String>, cx: &App) -> String {
     page.clone()
 }
 
+/// The range a live window opens at: the one the launch named, else the one the user left it
+/// at, else the default history.
+pub(super) fn range(named_range: Option<Range>, cx: &App) -> Range {
+    if let Some(range) = named_range {
+        return range;
+    }
+
+    let Some(store) = cx.try_global::<Store>() else {
+        return Range::History;
+    };
+
+    store.current.range()
+}
+
 /// Where a live window opens: where the last one stood, at its size there, or centered at
 /// `default` when no window was kept. A window whose display is gone, or no longer holds its
 /// corner, opens centered at the size it was kept at.
@@ -135,19 +149,17 @@ fn placement_on_display(frame: &Frame, display: Bounds<Pixels>) -> Option<Bounds
     }
 }
 
-/// Shows the range and hidden series last kept in the live window that just opened, and
-/// keeps its frame from now on.
+/// Shows the series last hidden in the live window that just opened, and keeps its frame from
+/// now on.
 pub(super) fn follow(dashboard: &Entity<LiveDashboard>, window: &mut Window, cx: &mut App) {
     let Some(store) = cx.try_global::<Store>() else {
         return;
     };
 
-    let range = store.current.range();
     let hidden = store.current.hidden_series.clone();
     assert!(hidden.len() <= HIDDEN_SERIES_MAX);
     dashboard.update(cx, |dashboard, cx| {
         dashboard.hidden = hidden;
-        dashboard.set_range(range, cx);
         cx.observe_window_bounds(window, |_, window, cx| {
             // A frame no window could keep, such as one macOS reports mid-transition, leaves
             // the last one kept.

@@ -288,6 +288,56 @@ fn opens_on_the_default_page_when_none_was_kept(cx: &mut TestAppContext) {
     assert_eq!(DEFAULT_PAGE, keeps_nothing);
 }
 
+#[gpui::test]
+fn opens_at_the_range_the_user_left(cx: &mut TestAppContext) {
+    // Goal: a launch that names no range opens the window at the range last shown.
+    // Method: keep a range, then ask for the range of a launch that named none.
+    let mut preferences = Preferences::default();
+    preferences.remember_view("memory", Range::Last(300), &[]);
+
+    let opened = cx.update(|cx| {
+        cx.set_global(store(PathBuf::from("/nonexistent"), preferences));
+        range(None, cx)
+    });
+
+    assert_eq!(Range::Last(300), opened);
+}
+
+#[gpui::test]
+fn opens_at_the_range_the_launch_named(cx: &mut TestAppContext) {
+    // Goal: a range named at launch opens over the range last shown.
+    // Method: keep a range, then ask for the range of a launch that named another.
+    let mut preferences = Preferences::default();
+    preferences.remember_view("memory", Range::Last(300), &[]);
+
+    let opened = cx.update(|cx| {
+        cx.set_global(store(PathBuf::from("/nonexistent"), preferences));
+        range(Some(Range::Last(3600)), cx)
+    });
+
+    assert_eq!(Range::Last(3600), opened);
+}
+
+#[gpui::test]
+fn opens_a_window_that_keeps_no_preferences_at_the_range_named(cx: &mut TestAppContext) {
+    // Goal: a timed run, which keeps no preferences, opens at the range its launch named.
+    // Method: with no preferences kept, ask for the range with the hour named.
+    let opened = cx.update(|cx| range(Some(Range::Last(3600)), cx));
+
+    assert_eq!(Range::Last(3600), opened);
+}
+
+#[gpui::test]
+fn opens_a_window_that_keeps_no_preferences_and_names_no_range_at_the_history(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a timed run that names no range opens at the default history.
+    // Method: with no preferences kept, ask for the range with none named.
+    let opened = cx.update(|cx| range(None, cx));
+
+    assert_eq!(Range::History, opened);
+}
+
 #[test]
 fn drops_a_page_this_build_does_not_have() {
     // Goal: a page removed or renamed since the file was saved opens the window on its usual

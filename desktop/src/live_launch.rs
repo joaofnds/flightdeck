@@ -7,6 +7,7 @@ use viewer::store::Store;
 use crate::live_dashboard::{LiveDashboard, ROUTES};
 use crate::live_source::Worker;
 use crate::performance::Options;
+use crate::time_range::Range;
 
 #[path = "live_app_nap.rs"]
 mod app_nap;
@@ -131,6 +132,8 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
 struct Start {
     /// The page `--page` named, which opens over the page the user left open.
     named_page: Option<String>,
+    /// The range `--minutes` named, which opens over the range the user left.
+    named_range: Option<Range>,
     seconds: Option<u32>,
     hardware: bool,
 }
@@ -142,6 +145,9 @@ mod tests;
 fn start(options: &Options) -> Start {
     Start {
         named_page: options.named_page.clone(),
+        named_range: options
+            .named_minutes
+            .map(|minutes| Range::minutes(u64::from(minutes))),
         seconds: options.seconds,
         hardware: options.hardware,
     }
@@ -298,10 +304,12 @@ fn install_control(
 
 fn create_dashboard(worker: Worker, start: Start, cx: &mut App) -> gpui::Entity<LiveDashboard> {
     let page = preferences::page(start.named_page, cx);
+    let range = preferences::range(start.named_range, cx);
     let entity = crate::native_workflows::create_dashboard(worker, page, start.seconds, cx);
-    entity.update(cx, |dashboard, _| {
+    entity.update(cx, |dashboard, cx| {
         dashboard.animate = true;
         dashboard.reveal_hardware = start.hardware;
+        dashboard.set_range(range, cx);
     });
     if let Err(error) = collection::start_timer(&entity, cx) {
         entity.update(cx, |dashboard, _| dashboard.error = Some(error));
