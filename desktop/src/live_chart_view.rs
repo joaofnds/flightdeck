@@ -480,12 +480,17 @@ impl LiveDashboard {
         }
     }
 
-    /// The target of a hover of `second`: the tick the store's View holds of it where the page
-    /// draws from the View, and otherwise the worker's.
+    /// The target of a hover of `second`: where the page draws from the store's View, the second
+    /// whose point its charts draw there, named by the tick the View holds of it, and otherwise
+    /// the worker's.
     fn hover_target(&self, snapshot: &Snapshot, second: u64) -> crate::live_hover::Target {
-        match self.store_view_target(second) {
+        let Some(shown) = self.store_view_point_second(second) else {
+            return crate::live_hover::Target::regular(snapshot, second);
+        };
+
+        match self.store_view_target(shown) {
             Some(target) => target,
-            None => crate::live_hover::Target::regular(snapshot, second),
+            None => crate::live_hover::Target::regular(snapshot, shown),
         }
     }
 

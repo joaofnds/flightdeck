@@ -55,6 +55,36 @@ pub fn overview_seconds(view: &View) -> Result<Vec<u64>, String> {
         .collect())
 }
 
+/// The wall second of the point the Overview's machine charts of `view` draw for `second`:
+/// `second` itself among the seconds they draw in full detail, and the one point of its stretch
+/// before them, since every second of an older stretch shows the reading that stands for it.
+/// None where the charts draw no point for `second`, as in a gap.
+pub fn overview_point_second(view: &View, second: u64) -> Result<Option<u64>, String> {
+    let Some(newest) = view.seconds.last() else {
+        return Ok(None);
+    };
+
+    let domain = overview_panels_domain(newest)?;
+    let points = overview_panels_points(view, &domain);
+    Ok(points
+        .iter()
+        .map(|point| point.wall_ns / NANOSECONDS_PER_SECOND)
+        .rfind(|point| overview_point_second_stands_for(&domain, *point, second)))
+}
+
+/// Whether the point the charts of `domain` draw at `point` stands for `second`.
+fn overview_point_second_stands_for(domain: &Domain, point: u64, second: u64) -> bool {
+    if second >= domain.recent_first {
+        return point == second;
+    }
+    if point >= domain.recent_first {
+        return false;
+    }
+
+    // Both divisions floor, as the stretches of the store and of the older tail do.
+    point / domain.stride == second / domain.stride
+}
+
 /// The span the Overview's machine charts draw, ending at `newest`. The page always asks for the
 /// older tail, so the charts span the loaded hour.
 fn overview_panels_domain(newest: &MachineSecond) -> Result<Domain, String> {

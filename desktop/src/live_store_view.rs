@@ -387,6 +387,20 @@ impl LiveDashboard {
         }
     }
 
+    /// The second whose point the charts of the store's View draw for a hover of `second`, or
+    /// none where they draw no point for it or the page draws from the worker's readings.
+    pub(crate) fn store_view_point_second(&self, second: u64) -> Option<u64> {
+        let view = self.followed_store_view()?;
+
+        match crate::live_projection::overview_point_second(view, second) {
+            Ok(shown) => shown,
+            Err(error) => {
+                eprintln!("Hover of the store's View: {error}");
+                None
+            }
+        }
+    }
+
     /// The hover of `second` on the page drawn from the store's View, naming the tick the View
     /// holds of it, so the charts by App find that tick as they find any they draw. None where
     /// the View holds no Apps of `second`, as in a gap or the older tail, and where the page

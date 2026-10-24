@@ -159,6 +159,51 @@ fn hovering_the_older_tail_reads_its_top_apps(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn hovering_a_stretch_of_the_hour_reads_the_chart_at_the_second_standing_for_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: at the hour range a hover over a second the View holds, older than the 16 minutes
+    // the charts draw in full detail, reads the CPU chart at the second that stands for its
+    // stretch, the one point the chart draws there, as it reads that second when it is the
+    // newest. Method: the View holds 9,030 to 9,039, older than 9,046 where the charts' full
+    // detail starts, and the pointer rests on 9,035 of the hour.
+    let mut seconds: Vec<MachineSecond> =
+        (9_030..9_040).map(|second| reading_at(second, 0)).collect();
+    seconds.extend(held_seconds());
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_held_view(&seconds);
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.hover_held_second(9_035);
+
+    let standing = [reading_at(9_020, 0), reading_at(9_030, 0)];
+    assert_eq!(
+        harness.driver.chart_accessibility_reading("live-cpu"),
+        reading_following("live-cpu", &standing)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_the_older_tail_shows_the_reading_standing_for_its_stretch(cx: &mut TestAppContext) {
+    // Goal: at the hour range a hover over a second of the older tail shows the readouts of the
+    // reading that stands for its stretch, since the store keeps one second in every ten there.
+    // Method: only the View's older tail holds 8,000, as when the worker rests while the page
+    // follows the View, and the pointer rests on 8,005 of the hour.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_held_view_over_unread_tail(&[reading_at(8_000, 0)], &held_seconds());
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.hover_held_second(8_005);
+
+    let expected = summary::cards("overview", &summary_selection(&reading_at(8_000, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_newer_view_leaves_the_hovered_charts_where_they_were(cx: &mut TestAppContext) {
     // Goal: a View the store hands over while the pointer rests on a chart drawn from the View
     // leaves the range where it was, so the hovered second stays under the pointer, as the
@@ -346,9 +391,30 @@ impl InputDriver {
     /// Shows Overview as `show_held_view` does, with `older` the older tail of both the View and
     /// the worker's readings.
     fn show_held_view_after(&mut self, older: &[MachineSecond], seconds: &[MachineSecond]) {
+        self.show_held_view_reading_older(older, older, seconds);
+    }
+
+    /// Shows Overview as `show_held_view` does, with `older` the older tail of the View, of which
+    /// the worker's readings hold nothing.
+    fn show_held_view_over_unread_tail(
+        &mut self,
+        older: &[MachineSecond],
+        seconds: &[MachineSecond],
+    ) {
+        self.show_held_view_reading_older(&[], older, seconds);
+    }
+
+    /// Shows Overview as `show_held_view` does, with `older` the older tail of the View and
+    /// `read_older` that of the worker's readings.
+    fn show_held_view_reading_older(
+        &mut self,
+        read_older: &[MachineSecond],
+        older: &[MachineSecond],
+        seconds: &[MachineSecond],
+    ) {
         let read = [reading_at(9_999, 0), reading_at(10_000, 0)];
         let mut snapshot = readings(&read);
-        snapshot.selection["earlier_trends"] = older.iter().map(trend_point).collect();
+        snapshot.selection["earlier_trends"] = read_older.iter().map(trend_point).collect();
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);

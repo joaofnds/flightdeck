@@ -1,5 +1,5 @@
 use super::super::{empty_panels, panels};
-use super::overview_panels;
+use super::{overview_panels, overview_point_second};
 use crate::live_store_fixtures::{levels, reading_at, selection, view};
 
 #[test]
@@ -106,5 +106,87 @@ mod when_the_store_holds_no_second {
         let drawn = overview_panels(&view, None);
 
         assert_eq!(drawn.unwrap(), empty_panels("overview").unwrap());
+    }
+}
+
+/// The point a hover of a second stands on, in a View whose newest second is 10,005, so its
+/// charts draw the seconds from 9,046 on in full detail.
+mod point_second {
+    use super::*;
+
+    #[test]
+    fn a_second_of_full_detail_stands_on_its_own_point() {
+        // Goal: a second the charts draw in full detail stands on its own point. Method: the
+        // View holds 9,500 among its full-detail seconds.
+        let view = view(1, &[], &held(&[9_030, 9_046, 9_500, 10_005]));
+
+        let shown = overview_point_second(&view, 9_500);
+
+        assert_eq!(shown, Ok(Some(9_500)));
+    }
+
+    #[test]
+    fn the_first_second_of_full_detail_stands_on_its_own_point() {
+        // Goal: the first second the charts draw in full detail is not read as part of the older
+        // stretch before it. Method: the View holds 9,046, where full detail starts.
+        let view = view(1, &[], &held(&[9_041, 9_046, 10_005]));
+
+        let shown = overview_point_second(&view, 9_046);
+
+        assert_eq!(shown, Ok(Some(9_046)));
+    }
+
+    #[test]
+    fn a_second_missing_from_full_detail_stands_on_no_point() {
+        // Goal: a missed tick in full detail stays a gap rather than borrowing a neighbour's
+        // reading. Method: the View holds 9,500 and 9,502 but not 9,501.
+        let view = view(1, &[], &held(&[9_500, 9_502, 10_005]));
+
+        let shown = overview_point_second(&view, 9_501);
+
+        assert_eq!(shown, Ok(None));
+    }
+
+    #[test]
+    fn a_live_second_older_than_full_detail_stands_on_the_point_of_its_stretch() {
+        // Goal: a second the View holds, older than full detail, stands on the one point the
+        // charts draw for its stretch. Method: the View holds 9,031 and 9,033 of the stretch
+        // from 9,030, and the hover is on 9,038.
+        let view = view(1, &[], &held(&[9_031, 9_033, 10_005]));
+
+        let shown = overview_point_second(&view, 9_038);
+
+        assert_eq!(shown, Ok(Some(9_031)));
+    }
+
+    #[test]
+    fn a_second_of_the_older_tail_stands_on_the_point_of_its_stretch() {
+        // Goal: a second of the older tail, which keeps one second in every ten, stands on the
+        // second kept of its stretch. Method: the older tail holds 8,000, and the hover is on
+        // 8,007.
+        let view = view(1, &held(&[8_000]), &held(&[10_005]));
+
+        let shown = overview_point_second(&view, 8_007);
+
+        assert_eq!(shown, Ok(Some(8_000)));
+    }
+
+    #[test]
+    fn a_second_before_full_detail_in_its_first_stretch_stands_on_no_point() {
+        // Goal: the seconds before full detail in the stretch where it starts, which the charts
+        // draw no point for, stand on no later point. Method: the View holds 9,043 and 9,046 of
+        // the stretch from 9,040, and the hover is on 9,043.
+        let view = view(1, &[], &held(&[9_043, 9_046, 10_005]));
+
+        let shown = overview_point_second(&view, 9_043);
+
+        assert_eq!(shown, Ok(None));
+    }
+
+    fn held(seconds: &[u64]) -> Vec<viewer::store::MachineSecond> {
+        seconds
+            .iter()
+            .map(|second| reading_at(*second, 0))
+            .collect()
     }
 }
