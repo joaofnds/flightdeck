@@ -192,13 +192,13 @@ fn damage_column_body(path: &Path, column: usize) {
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
-struct Fixture {
+pub(super) struct Fixture {
     root: PathBuf,
-    path: PathBuf,
+    pub(super) path: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "flightdeck-query-source-{}-{serial}",
@@ -229,7 +229,7 @@ fn write_counter(path: &Path, value: u64) {
     write_frame(path, &mut frame);
 }
 
-fn write_frame(path: &Path, frame: &mut DataFrame) {
+pub(super) fn write_frame(path: &Path, frame: &mut DataFrame) {
     ParquetWriter::new(std::fs::File::create_new(path).unwrap())
         .with_compression(ParquetCompression::Zstd(Some(
             ZstdLevel::try_new(3).unwrap(),

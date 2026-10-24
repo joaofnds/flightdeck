@@ -8,11 +8,12 @@ use polars_parquet_format::thrift::{Error, ProtocolError, ProtocolErrorKind, Res
 
 const CONTAINER_ITEMS_MAX: u32 = 16_384;
 const STRUCT_DEPTH_MAX: usize = 16;
-const VECTOR_BYTES_MAX: usize = 8 * 1024 * 1024;
+pub(super) const VECTOR_BYTES_MAX: usize = 8 * 1024 * 1024;
 const CONTEXT_DEPTH_MAX: usize = 48;
 
 const _: () = {
     assert!(STRUCT_DEPTH_MAX < CONTEXT_DEPTH_MAX);
+    assert!(STRUCT_DEPTH_MAX == 16);
 };
 
 pub(super) struct BoundedProtocol<R: Read> {
@@ -332,4 +333,44 @@ fn limit() -> Error {
         kind: ProtocolErrorKind::SizeLimit,
         message: "recording Parquet metadata limit".to_owned(),
     })
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use std::io::Cursor;
+
+    use super::{BoundedProtocol, ProtocolErrorKind, TInputProtocol, TType};
+    use crate::allocation_tests;
+    use crate::resources::ByteBudget;
+
+    #[test]
+    fn refuses_depth_seventeen_before_growing_the_native_struct_stack() {
+        // Goal: the pinned native stack cannot request more than its 16-element capacity.
+        // Method: nest compact struct fields to depth 17 and observe the stack's layouts.
+        let budget = ByteBudget::new(0);
+        let mut protocol = BoundedProtocol::new(Cursor::new([0x1c; 16]), 1024);
+
+        let (result, observation) = allocation_tests::observe(&budget, || {
+            protocol.read_struct_begin().unwrap();
+            for _depth in 1..16 {
+                assert_eq!(
+                    protocol.read_field_begin().unwrap().field_type,
+                    TType::Struct
+                );
+                protocol.read_struct_begin().unwrap();
+            }
+            protocol.read_field_begin().unwrap();
+            protocol.read_struct_begin()
+        });
+
+        assert!(matches!(result, Err(super::Error::Protocol(error))
+            if error.kind == ProtocolErrorKind::SizeLimit));
+        let stack: Vec<_> = observation.layouts[..observation.allocations]
+            .iter()
+            .filter(|layout| layout.1 == 2)
+            .copied()
+            .collect();
+        assert_eq!(stack, [(8, 2), (16, 2), (32, 2)]);
+        assert_eq!(observation.reallocations, 2);
+    }
 }

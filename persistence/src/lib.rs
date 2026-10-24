@@ -1,4 +1,6 @@
 //! Bounded, separate-process persistence of the collector's published measurements.
+#[cfg(test)]
+mod allocation_tests;
 pub mod app_tables;
 mod battery;
 pub mod disks;

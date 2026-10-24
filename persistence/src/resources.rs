@@ -1,5 +1,7 @@
-//! Whole-process native allocation observation, since the query engine sets no memory quota.
+//! Shared byte reservations and whole-process native allocation observation.
+mod byte_budget;
 mod native;
+pub use byte_budget::{ByteBudget, ByteReservation};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

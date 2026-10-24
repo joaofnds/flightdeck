@@ -42,6 +42,8 @@ const _: () = {
     assert!(PAGE_BYTES_MAX <= EXPANDED_BYTES_MAX);
     assert!(FOOTER_BYTES_MAX < FILE_BYTES_MAX);
     assert!(ROWS_MAX < 1u64 << 31);
+    assert!(size_of::<polars_parquet_format::thrift::Error>() <= 40);
+    assert!(size_of::<std::collections::TryReserveError>() <= 40);
 };
 
 struct Extent {
@@ -60,6 +62,33 @@ struct Totals {
 struct PageMeasurements {
     values: u64,
     expanded_bytes: u64,
+}
+
+/// Requested layouts for the captured Cursor, not allocator overhead, stack or decoding.
+/// Sources: parquet-format's `thrift/protocol/compact.rs`, Rust's `alloc/raw_vec` and
+/// `io::default_read_to_end`, and Base64's `engine/mod.rs`. The certificate tests pin
+/// Rust 1.98.0/aarch64-apple-darwin, Polars 22a147d, parquet-format 0.1.0 and Base64 0.22.1.
+/// Recheck these source assumptions when changing the supported build or parser path.
+pub(super) fn cursor_scratch_bytes() -> Result<usize> {
+    let footer =
+        usize::try_from(FOOTER_BYTES_MAX).map_err(|_| Error::Bound("parquet footer bytes"))?;
+    let header =
+        usize::try_from(PAGE_HEADER_BYTES_MAX).map_err(|_| Error::Bound("parquet page header"))?;
+    let metadata = protocol::VECTOR_BYTES_MAX + 8 * footer;
+    // Fresh native byte vectors request max(8, n) <= 8n; typed lists reserve exactly.
+    // Take(n) and read_to_end's EOF probe prevent later growth, including on short input.
+    // The cumulative ledgers cover replaced fields; footer metadata survives every phase.
+    // Base64 is sequential, at most 3*ceil(F/4); only one page header is live at once.
+    let arrow = metadata + 3 * footer.div_ceil(4);
+    // The native i16 stack overlaps 16+32 bytes during growth. Messages have L<=88;
+    // old/new formatting layouts total <=3L, plus a 19-byte original varint message.
+    // Custom requests 40 bytes; max(StringError=24, Thrift=40, TryReserveError=16)=40.
+    // These pinned layouts are checked by the cursor certificate tests on CI's test route.
+    let error_bytes = 3 * 88 + 19 + 40 + 40;
+    let rejection = metadata + 8 * header + 48 + error_bytes;
+    assert!(rejection <= arrow);
+
+    Ok(arrow)
 }
 
 pub(super) fn validate(path: &Path) -> Result<()> {
