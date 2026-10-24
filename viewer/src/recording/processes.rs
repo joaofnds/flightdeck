@@ -119,18 +119,8 @@ fn derive_apps_samples(
     before: &mut Option<Before>,
     into: &mut AppMinute,
 ) -> Result<(), Refused> {
-    let mut sample = None;
-    read_processes(minute, |endpoint, frame| {
-        let mut previous = None;
-        if let Some(before) = before.as_ref() {
-            if frame.takes_rates_from(&before.endpoint) {
-                previous = Some(&*before.frame);
-            }
-        }
-        Sample::capture(&frame, previous, &mut sample)?;
-        let captured = sample
-            .as_deref()
-            .ok_or(persistence::Error::Bound("derived App sample"))?;
+    minute.visit_samples(before, |_, captured| {
+        let captured = captured?;
         into.push_sample(captured);
         // A minute's Apps fit the rows its App parts would keep of them.
         if into.samples.len() + into.apps.len()
@@ -139,12 +129,43 @@ fn derive_apps_samples(
             return Err(persistence::Error::Bound("derived App rows"));
         }
 
-        *before = Some(Before {
-            endpoint: *endpoint,
-            frame,
-        });
         Ok(())
     })
+}
+
+impl SealedMinute {
+    /// Visits each observation's typed sample or refusal, including unattributed processes.
+    /// A refused sample clears the predecessor but does not suppress later observations.
+    pub(crate) fn visit_samples(
+        &self,
+        before: &mut Option<Before>,
+        mut consume: impl FnMut(&Endpoint, persistence::Result<&Sample>) -> persistence::Result<()>,
+    ) -> Result<(), Refused> {
+        let mut sample = None;
+        let result = read_processes(self, |endpoint, frame| {
+            let previous = before
+                .as_ref()
+                .filter(|before| frame.takes_rates_from(&before.endpoint))
+                .map(|before| &*before.frame);
+            if let Err(error) = Sample::capture(&frame, previous, &mut sample) {
+                *before = None;
+                return consume(endpoint, Err(error));
+            }
+            let captured = sample
+                .as_deref()
+                .ok_or(persistence::Error::Bound("derived App sample"))?;
+            consume(endpoint, Ok(captured))?;
+            *before = Some(Before {
+                endpoint: *endpoint,
+                frame,
+            });
+            Ok(())
+        });
+        if result.is_err() {
+            *before = None;
+        }
+        result
+    }
 }
 
 /// A minute's processes and events as rows of the columns the assembly reads, with each

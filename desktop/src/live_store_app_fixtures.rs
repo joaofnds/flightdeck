@@ -104,6 +104,7 @@ pub fn apps_at(second: &MachineSecond, apps: &[(&str, u64)]) -> AppsSecond {
         .collect();
 
     AppsSecond {
+        processes: Err(viewer::store::Missing::Unread),
         missing: None,
         observation: Some(apps_at_observation(second)),
         consecutive: true,

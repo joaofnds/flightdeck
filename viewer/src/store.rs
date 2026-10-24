@@ -6,8 +6,10 @@ mod apps;
 mod attribution;
 mod buffers;
 mod context;
+mod payload;
 mod recording;
 mod ring;
+mod sampled;
 mod second;
 
 use std::io;
@@ -17,12 +19,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+pub use crate::byte_budget::{ByteBudget, ByteReservation};
 pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Missing};
 pub use attribution::{
     Attribution, AttributionReading, COHORT_MAX, OtherReading, Resident, ResidentOther, Totals,
 };
 pub use buffers::{Buffers, Mailbox, Span};
 pub use context::Cohorts;
+pub use payload::{AppDetails, Payload, ProcessName, ProcessRow};
+pub use sampled::{SampledRank, SampledRanking, SampledRanks, SampledSecond};
 pub use second::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};
 
 use apps::TickApps;
@@ -83,6 +88,8 @@ pub struct View {
     pub apps: Vec<Arc<AppsSecond>>,
     /// The older seconds of the loaded hour, before `seconds`, oldest first.
     pub earlier: Vec<Arc<MachineSecond>>,
+    /// Older hover payloads, populated only by the opt-in complete payload store.
+    pub sampled: Vec<Arc<SampledSecond>>,
     /// The Apps each of Overview's App charts draws on a line of its own, chosen over the newest
     /// seconds of `seconds` those charts draw.
     pub cohorts: Cohorts,
@@ -90,6 +97,38 @@ pub struct View {
     pub failure: Option<Failure>,
     /// Why the store holds less of the loaded hour than the recording sealed when it started.
     pub left_out: Option<Failure>,
+}
+
+impl View {
+    /// Exact identities at this wall second, ordered by wall time, run and publication.
+    #[must_use]
+    pub fn alternatives(&self, second: u64) -> Vec<Observation> {
+        let mut observations: Vec<_> = self
+            .apps
+            .iter()
+            .filter_map(|apps| apps.observation)
+            .filter(|observation| {
+                observation.wall_ns.map(|wall| wall / 1_000_000_000) == Some(second)
+            })
+            .collect();
+        observations.sort_by_key(|observation| {
+            (
+                observation.wall_ns,
+                observation.stamp.run,
+                observation.stamp.publication,
+            )
+        });
+        observations
+    }
+
+    /// Finds the publication only when its recording, identity and every stored clock agree.
+    #[must_use]
+    pub fn observation(&self, observation: &Observation) -> Option<&AppsSecond> {
+        self.apps
+            .iter()
+            .find(|apps| apps.observation.as_ref() == Some(observation))
+            .map(AsRef::as_ref)
+    }
 }
 
 /// Why the store could not read the recording.
@@ -134,18 +173,37 @@ impl Store {
     /// Starts the store thread over the recording at `root`, with every buffer it holds
     /// seconds and Views in allocated before the thread starts.
     pub fn start(root: &Path) -> io::Result<Self> {
+        Self::start_inner(root, None)
+    }
+
+    /// Starts the expanded payload experiment with an explicit retained-byte budget.
+    /// Production pages keep using `start` until the full footprint preflight passes.
+    pub fn start_with_payload(root: &Path, bytes_max: usize) -> io::Result<Self> {
+        Self::start_with_budget(root, Arc::new(ByteBudget::new(bytes_max)))
+    }
+
+    /// Shares reservations with the caller's loader inputs, decoded work and retained results.
+    pub fn start_with_budget(root: &Path, budget: Arc<ByteBudget>) -> io::Result<Self> {
+        Self::start_inner(root, Some(budget))
+    }
+
+    fn start_inner(root: &Path, budget: Option<Arc<ByteBudget>>) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             mailbox: Mailbox::new(),
             stop: AtomicBool::new(false),
         });
         let mut held = Held::new();
+        if let Some(budget) = budget {
+            held.enable_payload(budget);
+        }
         let root = root.to_owned();
 
         let thread_shared = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name(String::from("flightdeck-store"))
             .spawn(move || {
-                held.left_out = recording::load(&root, |run, second, apps| {
+                let budget = held.payload_budget.clone();
+                held.left_out = recording::load(&root, budget.as_ref(), |run, second, apps| {
                     let taken = held.take(run, second, apps);
                     // No View is out before the store's first step, so every buffer is free.
                     assert!(taken);
@@ -186,6 +244,8 @@ impl Drop for Store {
 
 /// What the store thread holds between steps.
 struct Held {
+    payload_budget: Option<Arc<ByteBudget>>,
+    sampled: Option<Span<SampledSecond>>,
     span: Span<MachineSecond>,
     /// Each App's totals at each second of `span`, in the same order.
     apps: Span<AppsSecond>,
@@ -218,12 +278,15 @@ impl Held {
             seconds: Vec::with_capacity(SECONDS_MAX),
             apps: Vec::with_capacity(SECONDS_MAX),
             earlier: Vec::with_capacity(EARLIER_MAX),
+            sampled: Vec::new(),
             cohorts: Cohorts::with_room(),
             failure: None,
             left_out: None,
         });
 
         Self {
+            payload_budget: None,
+            sampled: None,
             span: Span::new(SECONDS_MAX, seconds),
             apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
@@ -235,6 +298,17 @@ impl Held {
             left_out: None,
             unpublished: true,
         }
+    }
+
+    fn enable_payload(&mut self, budget: Arc<ByteBudget>) {
+        assert!(self.span.is_empty());
+        self.payload_budget = Some(budget);
+        self.sampled = Some(Span::new(
+            EARLIER_MAX,
+            Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, SampledSecond::empty),
+        ));
+        self.views
+            .release(|view| view.sampled = Vec::with_capacity(EARLIER_MAX));
     }
 
     /// Takes `second` of run `run` in after the newest, with what the store found of its Apps,
@@ -263,14 +337,47 @@ impl Held {
             if !self.earlier.has_room() {
                 return false;
             }
+            if self
+                .sampled
+                .as_ref()
+                .is_some_and(|sampled| !sampled.has_room())
+            {
+                return false;
+            }
         }
 
         let segment = segment(self.newest.as_ref(), run, second);
         self.context.leave(&self.apps);
         if let Some(kept) = kept {
+            if let Some(sampled) = &mut self.sampled {
+                let apps = self.apps.leaving().unwrap_or_else(|| unreachable!());
+                let budget = self
+                    .payload_budget
+                    .as_ref()
+                    .unwrap_or_else(|| unreachable!());
+                let pushed = sampled.push(|buffer| buffer.take(&kept, apps, budget));
+                assert!(pushed);
+            }
             let pushed = self.earlier.push(|buffer| *buffer = kept);
             assert!(pushed);
         }
+        self.take_current(run, second, apps, segment);
+        self.newest = Some(Newest {
+            run: *run,
+            publication: second.publication,
+            segment,
+        });
+        self.unpublished = true;
+        true
+    }
+
+    fn take_current(
+        &mut self,
+        run: &RunIdentity,
+        second: &MachineSecond,
+        apps: TickApps<'_>,
+        segment: u64,
+    ) {
         let pushed = self.span.push(|buffer| {
             *buffer = *second;
             buffer.segment = segment;
@@ -278,8 +385,9 @@ impl Held {
         assert!(pushed);
         let previous = self.apps.newest_held().map(Arc::clone);
         let tick = take_observation(run, second);
+        let budget = self.payload_budget.as_ref();
         let pushed = self.apps.push(|buffer| {
-            buffer.take(apps, previous.as_deref());
+            buffer.take(apps, previous.as_deref(), budget);
             if buffer.observation.is_none() {
                 buffer.observation = Some(tick);
             }
@@ -290,14 +398,6 @@ impl Held {
             assert_eq!(observation.stamp.publication, second.publication);
         }
         self.context.follow(&self.span, &self.apps);
-
-        self.newest = Some(Newest {
-            run: *run,
-            publication: second.publication,
-            segment,
-        });
-        self.unpublished = true;
-        true
     }
 
     /// Hands the main thread a View of what the store holds, or leaves it to the next step
@@ -307,12 +407,14 @@ impl Held {
             view.seconds.clear();
             view.apps.clear();
             view.earlier.clear();
+            view.sampled.clear();
             view.cohorts.clear();
         });
         let version = self.version + 1;
         let span = &self.span;
         let apps = &self.apps;
         let earlier = &self.earlier;
+        let sampled = &self.sampled;
         let context = &mut self.context;
         let failure = self.failure;
         let left_out = self.left_out;
@@ -320,16 +422,22 @@ impl Held {
             assert!(view.seconds.is_empty());
             assert!(view.apps.is_empty());
             assert!(view.earlier.is_empty());
+            assert!(view.sampled.is_empty());
             let capacity = (
                 view.seconds.capacity(),
                 view.apps.capacity(),
                 view.earlier.capacity(),
+                view.sampled.capacity(),
             );
 
             view.version = version;
             view.seconds.extend(span.held().map(Arc::clone));
             view.apps.extend(apps.held().map(Arc::clone));
             view.earlier.extend(earlier.held().map(Arc::clone));
+            if let Some(sampled) = sampled {
+                view.sampled.extend(sampled.held().map(Arc::clone));
+                assert_eq!(view.sampled.len(), view.earlier.len());
+            }
             context.choose(&mut view.cohorts);
             view.failure = failure;
             view.left_out = left_out;
@@ -340,6 +448,7 @@ impl Held {
                 view.seconds.capacity(),
                 view.apps.capacity(),
                 view.earlier.capacity(),
+                view.sampled.capacity(),
             );
             assert_eq!(held, capacity);
         });

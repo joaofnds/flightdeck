@@ -73,6 +73,7 @@ pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) 
             .map(|_| Arc::new(AppsSecond::default()))
             .collect(),
         earlier: earlier.iter().copied().map(Arc::new).collect(),
+        sampled: Vec::new(),
         cohorts: Cohorts::default(),
         failure: None,
         left_out: None,

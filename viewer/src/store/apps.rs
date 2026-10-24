@@ -28,6 +28,8 @@ pub const APPS_PER_SECOND_MAX: usize = 2_048;
 /// Each App's totals at one second, and what the App rule found of the second as a whole.
 #[derive(Debug, PartialEq)]
 pub struct AppsSecond {
+    /// Complete process rows and additional App measures, or an explicit unavailable reason.
+    pub processes: Result<super::Payload, Missing>,
     /// Why the second holds no Apps, or `None` where it holds every App of its tick.
     pub missing: Option<Missing>,
     /// The tick the second shows, which the store names for every second it takes in, holding
@@ -62,6 +64,8 @@ pub enum Missing {
     Refused(String),
     /// The tick has more Apps than a second holds.
     TooMany,
+    /// The complete payload does not fit the caller's retained-byte budget.
+    Budget,
 }
 
 /// What the store found of a tick's Apps as it takes the tick's second in.
@@ -124,10 +128,25 @@ impl AppsSecond {
 
     /// Holds what the store found of a tick's Apps, `apps`. An App the second `previous` holds
     /// keeps the name it holds there.
-    pub(super) fn take(&mut self, apps: TickApps<'_>, previous: Option<&Self>) {
+    pub(super) fn take(
+        &mut self,
+        apps: TickApps<'_>,
+        previous: Option<&Self>,
+        budget: Option<&Arc<super::ByteBudget>>,
+    ) {
         match apps {
             TickApps::Missing(missing) => self.clear(missing.clone()),
-            TickApps::Derived(sample) => self.fill(sample, previous),
+            TickApps::Derived(sample) => {
+                self.processes = Err(Missing::Unread);
+                self.fill(sample, previous);
+                self.observation = Some(sample.selected);
+                if self.missing.is_none() {
+                    self.processes = match budget {
+                        Some(budget) => super::Payload::capture(sample, previous, budget),
+                        None => Err(Missing::Unread),
+                    };
+                }
+            }
             TickApps::Refused(error) => self.clear(Missing::Refused(error.to_owned())),
             TickApps::Loaded(loaded) => {
                 // The second keeps the buffer the store made for it at start, so only the pages
@@ -208,6 +227,7 @@ impl AppsSecond {
 
     /// Holds no Apps, for `missing`.
     fn clear(&mut self, missing: Missing) {
+        self.processes = Err(missing.clone());
         self.missing = Some(missing);
         self.observation = None;
         self.elapsed_ns = None;
@@ -320,6 +340,7 @@ impl Default for AppsSecond {
     /// any.
     fn default() -> Self {
         Self {
+            processes: Err(Missing::Unread),
             missing: Some(Missing::Unread),
             observation: None,
             consecutive: false,
@@ -344,6 +365,7 @@ impl fmt::Display for Missing {
                 formatter,
                 "this second holds more than {APPS_PER_SECOND_MAX} Apps"
             ),
+            Missing::Budget => formatter.write_str("the complete payload exceeds its byte budget"),
         }
     }
 }

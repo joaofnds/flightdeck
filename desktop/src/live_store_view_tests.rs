@@ -773,6 +773,7 @@ pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
     let apps = vec![AppRow::new(&app, ranked)];
 
     AppsSecond {
+        processes: Err(viewer::store::Missing::Unread),
         missing: None,
         observation: Some(Observation {
             recording: [1, 2],

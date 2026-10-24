@@ -6,6 +6,635 @@ use std::time::{Duration, Instant};
 use super::{Failure, Store, View};
 use crate::live::identity_fixture::Fixture;
 
+#[test]
+fn a_sealed_sample_refusal_preserves_machine_observations_and_resets_rates() {
+    // Goal: one refused process sample cannot erase its machine reading or adjacent samples.
+    // Method: read a sealed normal/refused/normal minute directly, without the ring adapter.
+    let mut fixture = Fixture::new_mode(true, 2_000, None);
+    publish_named_processes(&mut fixture, 0, &[b"small"], 1);
+    publish_named_processes(&mut fixture, 1, &[&vec![b'x'; 1_000]], 2_000);
+    publish_named_processes(&mut fixture, 2, &[b"small"], 1);
+    let ring = Store::start_with_payload(&fixture.root, 16 * 1024 * 1024).unwrap();
+    let expected = view_where(&ring, |view| view.seconds.len() == 3);
+    let refused =
+        super::Missing::Refused(persistence::Error::Bound("live App sample bytes").to_string());
+    assert_eq!(expected.apps[1].missing, Some(refused.clone()));
+    drop(ring);
+    crate::live::app_process_groups_history_tests::named::seal_selected(&fixture, &[1, 2, 3]);
+
+    let actual = sealed_payload_view(&fixture);
+
+    assert_eq!(actual.seconds, expected.seconds);
+    assert_eq!(actual.apps, expected.apps);
+    assert_eq!(actual.left_out, None);
+    assert_eq!(actual.apps[1].processes.as_ref().unwrap_err(), &refused);
+    assert_eq!(actual.apps[2].processes.as_ref().unwrap().previous, None);
+    assert_eq!(actual.apps[2].elapsed_ns, None);
+    assert_eq!(actual.apps[1].observation.unwrap().stamp.publication, 2);
+}
+
+#[test]
+fn both_adapters_preserve_the_exact_observation_when_apps_exceed_the_bound() {
+    // Goal: an App-count refusal belongs to its original publication, including before ingestion.
+    // Method: construct the refused second from the ring sample, then compare sealed-only output.
+    let mut fixture = Fixture::new_mode(true, 2_049, None);
+    expand_program_dictionary(&mut fixture);
+    let names: Vec<_> = (0..2_049).map(|index| format!("process-{index}")).collect();
+    let names: Vec<_> = names.iter().map(String::as_bytes).collect();
+    publish_named_processes(&mut fixture, 0, &names, 2_049);
+    let mut ring = super::ring::Ring::new(fixture.root.clone());
+    ring.follow().unwrap();
+    ring.read(|_, _, apps| {
+        let super::apps::TickApps::Derived(sample) = apps else {
+            panic!("the App count fits Sample's bound");
+        };
+        let mut second = super::AppsSecond::with_room();
+        second.take(super::apps::TickApps::Derived(sample), None, None);
+        assert_eq!(second.missing, Some(super::Missing::TooMany));
+        assert_eq!(second.observation, Some(sample.selected));
+        true
+    })
+    .unwrap();
+    let store = Store::start_with_payload(&fixture.root, 16 * 1024 * 1024).unwrap();
+    let expected = view_where(&store, |view| view.seconds.len() == 1);
+    crate::live::app_process_groups_history_tests::named::seal_selected(&fixture, &[1]);
+
+    let actual = sealed_payload_view(&fixture);
+
+    assert_eq!(actual.seconds, expected.seconds);
+    assert_eq!(actual.apps, expected.apps);
+    assert_eq!(
+        actual.apps[0].processes.as_ref().unwrap_err(),
+        &super::Missing::TooMany
+    );
+    assert_eq!(actual.apps[0].observation.unwrap().stamp.publication, 1);
+}
+
+fn expand_program_dictionary(fixture: &mut Fixture) {
+    use collector::recording::{RegisteredRun, Registry};
+    use collector::ring::{DictionaryCapacity, Place, RingReader, Writer};
+    let reader = RingReader::open_generation(fixture.writer.name()).unwrap();
+    let identity = fixture.writer.identity().unwrap();
+    let writer = Writer::create_with_identity(
+        &Place {
+            lock_path: fixture.root.join("many-names.lock"),
+            name_prefix: format!("/fdmany{}", std::process::id()),
+        },
+        reader.shape(),
+        DictionaryCapacity {
+            entries: 2_050,
+            arena_bytes: 128 * 1024,
+        },
+        &identity,
+        0,
+    )
+    .unwrap();
+    Registry {
+        runs: vec![RegisteredRun {
+            identity,
+            ring_name: writer.name().to_owned(),
+            collector_pid: 0,
+        }],
+        evictions: 0,
+    }
+    .write(&fixture.root)
+    .unwrap();
+    collector::ring::unlink_generation(fixture.writer.name()).unwrap();
+    fixture.writer = writer;
+}
+
+fn sealed_payload_view(fixture: &Fixture) -> Arc<View> {
+    let budget = Arc::new(super::ByteBudget::new(16 * 1024 * 1024));
+    let mut held = super::Held::new();
+    held.enable_payload(Arc::clone(&budget));
+    held.left_out = super::recording::load(&fixture.root, Some(&budget), |run, second, apps| {
+        assert!(held.take(run, second, apps));
+    });
+    let mailbox = super::Mailbox::new();
+    held.publish(&mailbox);
+    mailbox.take().unwrap()
+}
+
+#[test]
+fn both_adapters_keep_distinct_nonzero_read_and_write_intervals() {
+    // Goal: neither payload copier substitutes reads for writes or cumulative counters for deltas.
+    // Method: publish unequal increments above 2^53 and assert each process and App value directly.
+    let mut fixture = Fixture::new();
+    let mut usage = collector::processes::Usage {
+        awake_ns_at_start: 0,
+        user_ns: 0,
+        system_ns: 0,
+        energy_nj: 0,
+        instructions: 0,
+        super_instructions: 0,
+        cycles: 0,
+        idle_wakeups: 0,
+        interrupt_wakeups: 0,
+        pageins: 0,
+        resident_bytes: 11,
+        footprint_bytes: 12,
+        disk_read_bytes: 9_007_199_254_740_993,
+        disk_written_bytes: 9_007_199_254_741_993,
+    };
+    fixture.publish_with_usage(100, &usage);
+    usage.disk_read_bytes += 17;
+    usage.disk_written_bytes += 43;
+    fixture.publish_with_usage(100, &usage);
+    let store = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let ring = view_where(&store, |view| view.seconds.len() == 2);
+    fixture.seal();
+
+    let sealed = sealed_payload_view(&fixture);
+
+    assert_directional_payload(&ring);
+    assert_directional_payload(&sealed);
+}
+
+fn assert_directional_payload(view: &View) {
+    let payload = view.apps[1].processes.as_ref().unwrap();
+    let process = payload.iter().find(|process| process.pid == 7).unwrap();
+    assert_eq!(process.disk_read_bytes, crate::apps::Amount::Known(17));
+    assert_eq!(process.disk_written_bytes, crate::apps::Amount::Known(43));
+    let app = &payload.apps()[usize::try_from(process.app_index.unwrap()).unwrap()];
+    assert_eq!(
+        app.disk_read_bytes,
+        crate::live_app_response::Measure {
+            known: 17,
+            measured_members: 1,
+            unavailable_members: 0,
+            overflowed: false,
+        }
+    );
+    assert_eq!(
+        app.disk_written_bytes,
+        crate::live_app_response::Measure {
+            known: 43,
+            measured_members: 1,
+            unavailable_members: 0,
+            overflowed: false,
+        }
+    );
+}
+
+fn publish_named_processes(fixture: &mut Fixture, tick: u64, names: &[&[u8]], count: i32) {
+    use collector::ring::{
+        IdentityObservation, IdentityPublication, ObservationTimes, ProcessCreation,
+        ProcessIdentity, Readings, UsageAvailability,
+    };
+    let programs = publish_named_processes_programs(fixture, names);
+    let processes: Vec<_> = (1..=count)
+        .map(|pid| IdentityObservation {
+            pid,
+            usage: UsageAvailability::Refused,
+            identity: ProcessIdentity::Measured {
+                creation: ProcessCreation {
+                    unique_id: u64::try_from(pid).unwrap(),
+                    pid_version: 1,
+                },
+                program: programs[usize::try_from(pid - 1).unwrap() % programs.len()],
+            },
+        })
+        .collect();
+    let memory = collector::machine::Memory::default();
+    fixture
+        .writer
+        .publish_with_identity(
+            &Readings {
+                run_tick: tick,
+                cpus: &[],
+                memory: &memory,
+                interfaces: &[],
+                ioreport: None,
+                smc: None,
+                processes: &[],
+                processes_refused: u32::try_from(count).unwrap(),
+                processes_gone: 0,
+                coalitions: &[],
+                events: &[],
+                dropped: collector::ring::Dropped::default(),
+            },
+            Some(&ObservationTimes {
+                wall_ns: 100_000_000_000,
+                continuous_ns: tick * 1_000_000_000,
+                awake_ns: tick * 1_000_000_000,
+            }),
+            &IdentityPublication {
+                processes: &processes,
+                events: &[],
+            },
+        )
+        .unwrap();
+}
+
+fn publish_named_processes_programs(
+    fixture: &mut Fixture,
+    names: &[&[u8]],
+) -> Vec<collector::ring::ProgramReference> {
+    names
+        .iter()
+        .map(|name| {
+            let mut program = None;
+            fixture
+                .writer
+                .intern_program(
+                    &collector::ring::ProgramBytes {
+                        executable_name: name,
+                        app_path: None,
+                    },
+                    &mut program,
+                )
+                .unwrap();
+            program.unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn a_view_identifies_the_second_publication_and_its_unattributed_process() {
+    // Goal: wall seconds do not identify publications or exclude unattributed processes.
+    // Method: publish two legacy ticks in one second and select the exact second sibling.
+    let mut fixture = Fixture::new_mode(false, 2, None);
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(100);
+
+    let store = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let view = view_where(&store, |view| view.seconds.len() == 2);
+    let alternatives = view.alternatives(100);
+    assert_eq!(alternatives.len(), 2);
+    assert_eq!(alternatives[1].stamp.publication, 2);
+    let selected = view.observation(&alternatives[1]).unwrap();
+    let processes = selected.processes.as_ref().unwrap();
+    assert_eq!(processes.len(), 1);
+    assert_eq!(processes[0].pid, 7);
+    assert_eq!(processes[0].app_index, None);
+    assert_eq!(selected.observation, Some(alternatives[1]));
+}
+
+#[test]
+fn sealed_payloads_match_ring_payloads_including_refused_processes() {
+    // Goal: sealing preserves every typed process and App measure, including refusal.
+    // Method: retain a ring View and compare its two same-second ticks with the sealed adapter.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(100);
+    let ring = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let expected = view_where(&ring, |view| view.seconds.len() == 2);
+    fixture.seal();
+
+    let actual = sealed_payload_view(&fixture);
+
+    assert_eq!(actual.apps, expected.apps);
+    let processes = actual.apps[1].processes.as_ref().unwrap();
+    assert_eq!(processes.len(), 2);
+    assert_eq!(processes[0].pid, 1);
+    assert_eq!(
+        processes[0].cpu_ns,
+        crate::apps::Amount::Unavailable(crate::apps::Unavailable::Refused)
+    );
+}
+
+#[test]
+fn an_older_sample_keeps_its_identity_and_ranked_apps_without_a_recording() {
+    // Goal: a thirty-minute-back hover uses resident machine readings and rankings together.
+    // Method: advance a store directly, then inspect its sampled payload with no source reader.
+    let mut held = super::Held::new();
+    held.enable_payload(Arc::new(super::ByteBudget::new(1024 * 1024)));
+    for second in 100..=1_900 {
+        let reading = second_at(second);
+        let mut apps = ranked_second(&reading);
+        assert!(held.take(&RUN, &reading, super::apps::TickApps::Loaded(&mut apps)));
+    }
+
+    let view = published(&mut held);
+    let sample = view
+        .sampled
+        .iter()
+        .find(|sample| sample.machine.wall_ns == 100_000_000_000)
+        .unwrap();
+
+    assert_eq!(
+        sample.observation,
+        super::take_observation(&RUN, &second_at(100))
+    );
+    assert_eq!(
+        sample.machine.publication,
+        sample.observation.stamp.publication
+    );
+    assert_eq!(
+        sample.ranks().unwrap(),
+        super::SampledRanks::from(&ranked_second(&second_at(100)).ranks().unwrap())
+    );
+    let ranks = sample.ranks().unwrap();
+    let entries: Vec<_> = ranks.metrics[3].entries().collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].app.bytes, b"process");
+    assert_eq!(entries[0].amount, 100);
+    assert_eq!(entries[0].rate, Some(100.0));
+    assert_eq!(entries[0].measured_members, 1);
+    assert_eq!(entries[0].unavailable_members, 0);
+}
+
+fn ranked_second(second: &super::MachineSecond) -> super::AppsSecond {
+    let mut apps = super::AppsSecond::with_room();
+    apps.observation = Some(super::take_observation(&RUN, second));
+    apps.missing = None;
+    apps.elapsed_ns = Some(1_000_000_000);
+    let measure = crate::live_app_response::Measure {
+        known: second.publication,
+        measured_members: 1,
+        unavailable_members: 0,
+        overflowed: false,
+    };
+    let app = crate::live_app_response::App {
+        key: crate::live_app_response::Key::new(
+            crate::live_app_response::KeyKind::Executable,
+            b"process".to_vec(),
+        )
+        .unwrap(),
+        display_name: String::from("process"),
+        members: 1,
+        live_members: 1,
+        membership_complete: true,
+        cpu_ns: measure,
+        energy_nj: measure,
+        gpu_ns: measure,
+        disk_read_bytes: measure,
+        disk_written_bytes: measure,
+        disk_io_bytes: measure,
+        resident_bytes: measure,
+        footprint_bytes: measure,
+    };
+    let name = Arc::new(
+        crate::live_app_response::RankedApp::new(
+            crate::live_app_response::KeyKind::Executable,
+            b"process".to_vec(),
+        )
+        .unwrap(),
+    );
+    apps.apps.push(super::AppRow::new(&app, name));
+    apps
+}
+
+#[test]
+fn a_missed_tick_resets_process_rates_in_both_adapters() {
+    // Goal: a skipped collector tick breaks process rates even with adjacent publications.
+    // Method: skip one tick, then compare ring and recorded payloads at that observation.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.skip_run_ticks(1);
+    fixture.publish_with_system_rows(102);
+    let ring = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let expected = view_where(&ring, |view| view.seconds.len() == 2);
+    fixture.seal();
+
+    let actual = sealed_payload_view(&fixture);
+
+    assert_eq!(expected.apps[1].elapsed_ns, None);
+    assert_eq!(actual.apps, expected.apps);
+}
+
+#[test]
+fn an_exhausted_budget_reports_an_unavailable_complete_process_list() {
+    // Goal: an over-budget observation never presents a truncated list as complete.
+    // Method: give a two-process observation no retained bytes and inspect its failure.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let budget = Arc::new(super::ByteBudget::new(0));
+
+    let store = Store::start_with_budget(&fixture.root, Arc::clone(&budget)).unwrap();
+    let view = view_where(&store, |view| view.seconds.len() == 1);
+
+    assert_eq!(view.apps[0].processes, Err(super::Missing::Budget));
+    assert_eq!(budget.used(), 0);
+    assert_eq!(view.apps[0].usage_refused, 1);
+}
+
+#[test]
+fn a_view_retains_its_payload_and_byte_reservations_after_the_store_stops() {
+    // Goal: releasing the producer cannot recycle or uncharge a retained reader's payload.
+    // Method: stop the store with a View held, inspect its processes, then release the View.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
+    let store = Store::start_with_budget(&fixture.root, Arc::clone(&budget)).unwrap();
+    let view = view_where(&store, |view| view.seconds.len() == 2);
+
+    drop(store);
+
+    let first = view.apps[0].processes.as_ref().unwrap();
+    let second = view.apps[1].processes.as_ref().unwrap();
+    assert_eq!(budget.used(), first.bytes() + second.bytes());
+    assert!(std::ptr::eq(
+        first[0].executable_name().unwrap(),
+        second[0].executable_name().unwrap()
+    ));
+    assert_eq!(second[1].pid, 7);
+    drop(view);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn an_exact_selection_rejects_a_sibling_with_different_clocks() {
+    // Goal: publication identity cannot silently accept inconsistent recorded clocks.
+    // Method: change only the selected sibling's awake clock before looking it up.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let store = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let view = view_where(&store, |view| view.seconds.len() == 1);
+    let mut selected = view.alternatives(100)[0];
+    selected.stamp.awake_ns = Some(99);
+
+    assert!(view.observation(&selected).is_none());
+}
+
+#[test]
+fn sealed_legacy_processes_remain_queryable_without_app_attribution() {
+    // Goal: the process decoder retains rows that App parts cannot represent.
+    // Method: seal two legacy ticks and compare their complete payloads with the ring.
+    let mut fixture = Fixture::new_mode(false, 2, None);
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(100);
+    let ring = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let expected = view_where(&ring, |view| view.seconds.len() == 2);
+    fixture.seal();
+
+    let actual = sealed_payload_view(&fixture);
+
+    assert_eq!(actual.apps, expected.apps);
+    assert_eq!(
+        actual.apps[1].processes.as_ref().unwrap()[0].app_index,
+        None
+    );
+}
+
+#[test]
+fn a_sealed_minute_keeps_process_rates_from_its_predecessor_minute() {
+    // Goal: a loader boundary does not discard the preceding tick's process baseline.
+    // Method: seal adjacent ticks in different minutes and compare with their ring payloads.
+    let mut fixture = Fixture::new();
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(159);
+    fixture.publish_with_system_rows(160);
+    let ring = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let expected = view_where(&ring, |view| view.seconds.len() == 2);
+    fixture.seal_minute(0);
+    fixture.seal_minute(1);
+
+    let actual = sealed_payload_view(&fixture);
+
+    assert_eq!(actual.apps, expected.apps);
+    assert_eq!(actual.apps[1].elapsed_ns, Some(1_000_000_000));
+    assert_eq!(
+        actual.apps[1].processes.as_ref().unwrap().previous,
+        actual.apps[0]
+            .observation
+            .map(|observation| observation.stamp)
+    );
+}
+
+#[test]
+fn a_sampled_refusal_reserves_its_owned_reason() {
+    // Goal: unavailable rankings cannot allocate an uncharged error message.
+    // Method: sample a refused observation whose reason is larger than its row storage.
+    let reading = second_at(100);
+    let mut apps = ranked_second(&reading);
+    apps.apps.clear();
+    apps.missing = Some(super::Missing::Refused("x".repeat(16_384)));
+    let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
+    let mut sample = super::SampledSecond::empty();
+
+    sample.take(&reading, &apps, &budget);
+
+    assert_eq!(sample.ranks().unwrap_err(), apps.missing.as_ref().unwrap());
+    assert!(budget.used() >= size_of::<super::SampledSecond>() + 16_384);
+}
+
+#[test]
+fn a_retained_older_sample_stays_immutable_after_its_tail_expires() {
+    // Goal: recycling the sampled tail never changes a sample held by an older reader.
+    // Method: retain just its first sample, advance past the tail, and inspect both Views.
+    let mut held = super::Held::new();
+    held.enable_payload(Arc::new(super::ByteBudget::new(4 * 1024 * 1024)));
+    for second in 100..=1_900 {
+        let reading = second_at(second);
+        let mut apps = ranked_second(&reading);
+        assert!(held.take(&RUN, &reading, super::apps::TickApps::Loaded(&mut apps)));
+    }
+    let view = published(&mut held);
+    let sample = Arc::clone(&view.sampled[0]);
+    drop(view);
+
+    for second in 1_901..=4_000 {
+        let reading = second_at(second);
+        let mut apps = ranked_second(&reading);
+        assert!(held.take(&RUN, &reading, super::apps::TickApps::Loaded(&mut apps)));
+        drop(published(&mut held));
+    }
+    let view = published(&mut held);
+
+    assert!(
+        view.sampled
+            .iter()
+            .all(|sample| sample.machine.publication > 100)
+    );
+    assert_eq!(sample.machine.publication, 100);
+    assert_eq!(
+        sample.ranks().unwrap(),
+        super::SampledRanks::from(&ranked_second(&second_at(100)).ranks().unwrap())
+    );
+}
+
+#[test]
+fn both_adapters_keep_gone_and_refused_processes_without_app_identity() {
+    // Goal: identity-only process rows survive when neither process can join an App.
+    // Method: publish unavailable rows, seal them, and compare typed payloads and reasons.
+    let mut fixture = Fixture::new();
+    publish_unavailable_processes(&mut fixture, 0);
+    publish_unavailable_processes(&mut fixture, 1);
+    let ring = Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let expected = view_where(&ring, |view| view.seconds.len() == 2);
+    fixture.seal();
+
+    let actual = sealed_payload_view(&fixture);
+
+    assert_eq!(actual.apps, expected.apps);
+    let rows = actual.apps[1].processes.as_ref().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].app_index, None);
+    assert_eq!(rows[1].app_index, None);
+    assert_eq!(
+        rows[0].cpu_ns,
+        crate::apps::Amount::Unavailable(crate::apps::Unavailable::Gone)
+    );
+    assert_eq!(
+        rows[1].cpu_ns,
+        crate::apps::Amount::Unavailable(crate::apps::Unavailable::Refused)
+    );
+}
+
+fn publish_unavailable_processes(fixture: &mut Fixture, tick: u64) {
+    use collector::ring::{
+        IdentityObservation, IdentityPublication, IdentityUnavailable, ObservationTimes,
+        ProcessCreation, ProcessIdentity, Readings, UsageAvailability,
+    };
+    let processes = [
+        IdentityObservation {
+            pid: 1,
+            usage: UsageAvailability::Gone,
+            identity: ProcessIdentity::Unavailable {
+                creation: Some(ProcessCreation {
+                    unique_id: 1,
+                    pid_version: 1,
+                }),
+                reason: IdentityUnavailable::Gone,
+            },
+        },
+        IdentityObservation {
+            pid: 7,
+            usage: UsageAvailability::Refused,
+            identity: ProcessIdentity::Unavailable {
+                creation: Some(ProcessCreation {
+                    unique_id: 7,
+                    pid_version: 7,
+                }),
+                reason: IdentityUnavailable::Refused,
+            },
+        },
+    ];
+    let memory = collector::machine::Memory::default();
+    let readings = Readings {
+        run_tick: tick,
+        cpus: &[],
+        memory: &memory,
+        interfaces: &[],
+        ioreport: None,
+        smc: None,
+        processes: &[],
+        processes_refused: 1,
+        processes_gone: 1,
+        coalitions: &[],
+        events: &[],
+        dropped: collector::ring::Dropped::default(),
+    };
+    let times = ObservationTimes {
+        wall_ns: 100_000_000_000,
+        continuous_ns: tick * 1_000_000_000,
+        awake_ns: tick * 1_000_000_000,
+    };
+    fixture
+        .writer
+        .publish_with_identity(
+            &readings,
+            Some(&times),
+            &IdentityPublication {
+                processes: &processes,
+                events: &[],
+            },
+        )
+        .unwrap();
+}
+
 /// The first View the store hands over that `holds` accepts, failing after ten seconds.
 fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<View> {
     let deadline = Instant::now() + Duration::from_secs(10);

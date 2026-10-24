@@ -7,7 +7,11 @@ use std::mem;
 use std::ops::Range;
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
+
+#[path = "recording_payload.rs"]
+mod payload;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
@@ -55,6 +59,7 @@ impl Found {
 /// hour than the recording sealed, where it does.
 pub(super) fn load(
     root: &Path,
+    budget: Option<&Arc<super::ByteBudget>>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     let mut found = Vec::with_capacity(MINUTES_MAX);
@@ -67,7 +72,7 @@ pub(super) fn load(
     found.reverse();
 
     let mut left_out = None;
-    for mut batch in load_batches(root, &found, apps_from_ns) {
+    for mut batch in load_batches(root, &found, apps_from_ns, budget) {
         for loaded in &mut batch.seconds {
             let apps = match &mut loaded.apps {
                 Ok(apps) => TickApps::Loaded(apps),
@@ -111,7 +116,12 @@ struct Loaded {
 /// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
 /// batch on a loader of its own, with the Apps of each minute whose ticks reach `apps_from_ns`.
 /// Returns the batches in the order of `found`.
-fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
+fn load_batches(
+    root: &Path,
+    found: &[Found],
+    apps_from_ns: u64,
+    budget: Option<&Arc<super::ByteBudget>>,
+) -> Vec<Batch> {
     let costs: Vec<usize> = found
         .iter()
         .map(|minute| {
@@ -132,8 +142,9 @@ fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
             let minutes = &found[batch];
             let loader = thread::Builder::new()
                 .name(String::from("flightdeck-loader"))
-                .spawn_scoped(scope, move || {
-                    load_batch(root, before, minutes, apps_from_ns)
+                .spawn_scoped(scope, move || match budget {
+                    Some(budget) => payload::load_batch(root, before, minutes, budget),
+                    None => load_batch(root, before, minutes, apps_from_ns),
                 });
             loaders.push(loader);
         }

@@ -1,6 +1,7 @@
 //! Viewer-only recording interpretation. No collector calls this allocating adapter.
 pub mod app_process_groups_history;
 pub mod apps;
+pub mod byte_budget;
 mod byte_display;
 mod cancellation;
 mod cpu_detail;

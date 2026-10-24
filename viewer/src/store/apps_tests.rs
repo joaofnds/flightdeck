@@ -84,7 +84,7 @@ mod take {
         let room = held.apps.as_ptr();
         let mut loaded = loaded_second(&[b"/A.app"]);
 
-        held.take(TickApps::Loaded(&mut loaded), None);
+        held.take(TickApps::Loaded(&mut loaded), None, None);
 
         assert_eq!(held.apps.as_ptr(), room);
     }
@@ -97,7 +97,7 @@ mod take {
         let mut held = AppsSecond::with_room();
         let mut loaded = loaded_second(&[b"/A.app", b"/B.app"]);
 
-        held.take(TickApps::Loaded(&mut loaded), None);
+        held.take(TickApps::Loaded(&mut loaded), None, None);
 
         assert_eq!(held, kept_second(&[b"/A.app", b"/B.app"]));
     }

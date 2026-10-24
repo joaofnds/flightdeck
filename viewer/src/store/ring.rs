@@ -17,6 +17,7 @@ use persistence::{Error, NumberedEvent};
 use super::apps::TickApps;
 use super::{Failure, MachineSecond, readings};
 use crate::live_app_response::Sample;
+use crate::live_apps::committed::Endpoint;
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::recording::MachineMinute;
 
@@ -62,6 +63,7 @@ struct Source {
     /// The App rule's frame of the tick read last and of the one before it the rule took.
     frame: Option<Box<Frame>>,
     previous_frame: Option<Box<Frame>>,
+    previous_endpoint: Option<Endpoint>,
     /// The App rule's sample of the tick read last.
     sample: Option<Box<Sample>>,
 }
@@ -255,6 +257,7 @@ impl Source {
             previous: minute_of(&shape)?,
             frame: None,
             previous_frame: None,
+            previous_endpoint: None,
             sample: None,
         })
     }
@@ -276,9 +279,22 @@ impl Source {
     fn apps(&mut self, publication: u64) -> Result<(), String> {
         if let Err(error) = self.apps_capture(publication) {
             self.sample = None;
+            self.previous_frame = None;
+            self.previous_endpoint = None;
             return Err(error.to_string());
         }
 
+        let frame = self.frame.as_deref().unwrap_or_else(|| unreachable!());
+        self.previous_endpoint = Some(Endpoint {
+            identity: self.identity,
+            stamp: *frame.stamp(),
+            run_tick: frame.run_tick(),
+            wall_ns: frame.wall_ns(),
+            usage_refused: frame.usage_refused,
+            usage_gone: frame.usage_gone,
+            events_first: self.tick.events.start,
+            events_end: self.tick.events.end,
+        });
         mem::swap(&mut self.frame, &mut self.previous_frame);
         Ok(())
     }
@@ -322,7 +338,12 @@ impl Source {
             },
         )?;
 
-        Sample::capture(frame, self.previous_frame.as_deref(), &mut self.sample)
+        let previous = self.previous_frame.as_deref().filter(|_| {
+            self.previous_endpoint
+                .as_ref()
+                .is_some_and(|previous| frame.takes_rates_from(previous))
+        });
+        Sample::capture(frame, previous, &mut self.sample)
     }
 
     /// Reads the events of the tick just read into `events`, with their identities where the
