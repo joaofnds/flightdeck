@@ -260,7 +260,7 @@ The schematic draws the shared chassis and rotor assets still by default, with
 anchored callouts and an illustrative airflow tint. Settings in the sidebar, the app menu,
 or Command-comma offers **Animate fans**. The choice saves immediately for normal app
 windows, including saved recordings. Timed runs and automation windows keep a session-only choice.
-Changed settings show a reset arrow beside their name. Hover it to see the default;
+Changed settings show a reset arrow beside their name. Its tooltip says **Reset to default**;
 click it to reset and save that setting, leaving other preferences alone. Animate fans defaults to Off.
 An independent Metal surface animates two full-color rotors and outgoing particles,
 targeting 30 frames per second without requesting dashboard frames. Each side follows its displayed

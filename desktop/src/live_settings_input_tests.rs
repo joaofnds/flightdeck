@@ -4,21 +4,21 @@ use super::{InputDriver, InputHarness};
 use crate::live_source::Request;
 
 #[gpui::test]
-fn hovering_reset_explains_the_default_until_the_pointer_leaves(cx: &mut TestAppContext) {
+fn hovering_reset_explains_the_action_until_the_pointer_leaves(cx: &mut TestAppContext) {
     // Observe delayed tooltip display and dismissal through the real hover path and test clock.
     let mut harness = InputHarness::setup(cx);
     harness.driver.activate_window();
     harness.driver.click_settings_control("navigation:settings");
     harness.driver.click_settings_control("animate-fans");
-    assert!(!harness.driver.reading_is_visible("Reset to default (Off)"));
+    assert!(!harness.driver.reading_is_visible("Reset to default"));
 
     harness
         .driver
         .hover_settings_control("restore-animate-fans");
 
-    assert!(harness.driver.reading_is_visible("Reset to default (Off)"));
+    assert!(harness.driver.reading_is_visible("Reset to default"));
     harness.driver.hover_settings_control("animate-fans");
-    assert!(!harness.driver.reading_is_visible("Reset to default (Off)"));
+    assert!(!harness.driver.reading_is_visible("Reset to default"));
     harness.teardown();
 }
 

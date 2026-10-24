@@ -241,13 +241,10 @@ struct FanDefaultHelp;
 
 impl gpui::Render for FanDefaultHelp {
     fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
-        let text = format!(
-            "Reset to default ({})",
-            animation_value(ANIMATE_FANS_DEFAULT)
-        );
+        let text = "Reset to default";
         div()
-            .child(text.clone())
-            .debug_selector(move || text.clone())
+            .child(text)
+            .debug_selector(move || text.into())
             .px(px(8.0))
             .py(px(4.0))
             .rounded(px(5.0))
