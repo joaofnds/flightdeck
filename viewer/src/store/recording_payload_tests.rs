@@ -16,7 +16,7 @@ fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
     fixture.publish_with_system_rows(100);
     fixture.seal();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
     let ticks = fixture
         .root
@@ -169,7 +169,7 @@ fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitme
     fixture.publish_with_system_rows(100);
     fixture.seal();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
     let ticks = fixture
         .root
@@ -217,7 +217,7 @@ fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
     fixture.publish_with_system_rows(100);
     fixture.seal();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let budget = Arc::new(ByteBudget::new(1024));
     let charge = budget.reserve(1024).unwrap();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -261,7 +261,7 @@ fn a_sealed_boot_mismatch_cannot_seed_machine_rates_under_the_registry_identity(
     fixture.publish_with_system_rows(100);
     fixture.seal_minute(0);
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     change_committed_boot(&fixture.root, &found[0].marker);
     for second in 101..109 {
         fixture.publish_with_system_rows(second);
@@ -337,7 +337,7 @@ fn frame_assembly_observes_the_callers_cancel_between_samples() {
     fixture.publish_with_system_rows(101);
     fixture.seal();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let sealed = crate::recording::SealedMinute::open(&fixture.root, &found[0].marker).unwrap();
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
@@ -407,7 +407,7 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     found.reverse();
     let mut decoder = Decoder::default();
     let first = decoder.decode(
@@ -459,7 +459,7 @@ fn terminal_projection_keeps_only_the_last_raw_tick_and_all_its_tables() {
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let mut decoder = Decoder::default();
     drop(decoder.decode(
         &fixture.root,
@@ -520,7 +520,7 @@ fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
     // Method: replace events after real admission, before the loader constructs its scan.
     let fixture = events_loader_fixture();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     assert_eq!(found.len(), 1);
     let source = crate::recording::SealedSource {
         root: &fixture.root,
@@ -850,7 +850,7 @@ fn events_capture_budget_denial_remains_typed_without_legacy_retry() {
     use std::os::unix::fs::MetadataExt;
     let fixture = events_loader_fixture();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
     let events = fixture
         .root
@@ -900,7 +900,7 @@ fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
     // Method: cancel inside the forwarding factory after constructing the real owner.
     let fixture = events_loader_fixture();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
@@ -938,7 +938,7 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = events_loader_fixture();
     let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found).unwrap();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
     let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
     let events = fixture
         .root

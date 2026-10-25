@@ -52,6 +52,7 @@ pub(super) fn install(reopening: Reopening, cx: &mut App) {
     .detach();
     cx.on_window_closed(|cx, _window_id| {
         if cx.windows().is_empty() {
+            crate::live_dashboard::set_store_active(false, cx);
             cx.set_activation_policy(ActivationPolicy::Accessory);
         }
     })
@@ -97,6 +98,7 @@ pub(super) fn keep_reader(dashboard: &Entity<LiveDashboard>, cx: &mut App) {
 
 /// Brings the live window forward, and opens it again when the user closed it.
 pub fn show(cx: &mut App) {
+    crate::live_dashboard::set_store_active(true, cx);
     cx.set_activation_policy(ActivationPolicy::Regular);
     if let Some(window) = cx.windows().first() {
         if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {

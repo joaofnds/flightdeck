@@ -34,14 +34,20 @@ const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 /// The charts by App of a rate Overview draws from the store's View.
 const APP_METRICS: [Metric; 3] = [Metric::Cpu, Metric::Power, Metric::Disk];
 
-/// The store the app starts before its window opens and keeps for its life, so a window shown
-/// or opened again draws what the store holds at once.
+/// The live buffers kept across window hides; ingestion parks until the window shows again.
 struct LiveStore(Store);
 
 impl Global for LiveStore {}
 
 pub fn install_store(store: Store, cx: &mut App) {
     cx.set_global(LiveStore(store));
+}
+
+/// Parks ingestion while hidden, or reconciles the recording when the window shows again.
+pub(crate) fn set_store_active(active: bool, cx: &App) {
+    if let Some(store) = cx.try_global::<LiveStore>() {
+        store.0.set_active(active);
+    }
 }
 
 /// The View the store handed over since the last take, or none where the app runs no store, as

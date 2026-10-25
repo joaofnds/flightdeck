@@ -939,3 +939,50 @@ fn assert_same_panels(panels: &[Rc<Panel>], expected: &[Rc<Panel>]) {
         assert!(Rc::ptr_eq(panel, expected));
     }
 }
+
+#[gpui::test]
+fn hidden_window_pauses_the_store_and_showing_it_resumes_ingestion(cx: &mut gpui::TestAppContext) {
+    // Goal: native visibility controls store work as well as the legacy page reader.
+    // Method: hide and show a real window over a registered source and observe store parking.
+    use gpui::{AppContext, WindowOptions, WindowVisibility};
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let worker = Worker::start(recording.root.clone()).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let window = cx.update(|cx| {
+        cx.open_window(WindowOptions::default(), |window, cx| {
+            let dashboard = cx.new(|_| LiveDashboard::new(worker, "overview".into(), None));
+            crate::live_dashboard::observe_visibility(&dashboard, window, cx);
+            dashboard
+        })
+        .unwrap()
+    });
+
+    cx.simulate_window_visibility_change(window.into(), WindowVisibility::Hidden);
+    wait_for_store_activity(cx, true);
+    recording.publish();
+    cx.simulate_window_visibility_change(window.into(), WindowVisibility::Visible);
+    wait_for_store_activity(cx, false);
+
+    assert!(!cx.update(|cx| cx.global::<super::LiveStore>().0.is_paused()));
+    cx.update_window(window.into(), |_, window, _| window.remove_window())
+        .unwrap();
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+fn wait_for_store_activity(cx: &mut gpui::TestAppContext, paused: bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    for _ in 0..2_000 {
+        cx.run_until_parked();
+        if cx.update(|cx| cx.global::<super::LiveStore>().0.is_paused()) == paused {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "store activity did not change"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("store activity did not change");
+}

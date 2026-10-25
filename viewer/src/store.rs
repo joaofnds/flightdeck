@@ -16,6 +16,9 @@ mod second;
 #[path = "store/startup_tests.rs"]
 mod startup_tests;
 
+#[cfg(test)]
+mod activity_tests;
+
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -172,6 +175,9 @@ pub struct Store {
 struct Shared {
     mailbox: Mailbox<View>,
     stop: AtomicBool,
+    active: AtomicBool,
+    catch_up: AtomicBool,
+    paused: AtomicBool,
     cancellation: Arc<Cancellation>,
 }
 
@@ -197,6 +203,9 @@ impl Store {
         let shared = Arc::new(Shared {
             mailbox: Mailbox::new(),
             stop: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+            catch_up: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
         });
         let mut held = Held::new();
@@ -219,13 +228,30 @@ impl Store {
                     return;
                 }
                 let operation = held.payload_budget.as_ref().map(|_| &operation);
-                run(&mut held, &mut ring, &thread_shared, operation);
+                run(&root, &mut held, &mut ring, &thread_shared, operation);
             })?;
 
         Ok(Self {
             shared,
             thread: Some(thread),
         })
+    }
+
+    /// Pauses between bounded reads while hidden, or wakes the thread to reconcile on show.
+    pub fn set_active(&self, active: bool) {
+        self.shared.active.store(active, Ordering::Release);
+        if !active {
+            self.shared.catch_up.store(true, Ordering::Release);
+        }
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
+    }
+
+    /// Whether the store has finished its in-flight read and parked without polling.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.shared.paused.load(Ordering::Acquire)
     }
 
     /// The View the store handed over since the last take, or `None` when it handed over none
@@ -246,6 +272,7 @@ impl Drop for Store {
             unreachable!("only dropping the store takes its thread");
         };
 
+        thread.thread().unpark();
         if let Err(panic) = thread.join() {
             if !thread::panicking() {
                 std::panic::resume_unwind(panic);
@@ -576,13 +603,40 @@ fn startup_accept(
 }
 
 /// Steps until the store is dropped.
-fn run(held: &mut Held, ring: &mut Ring, shared: &Shared, operation: Option<&Operation>) {
+fn run(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+    operation: Option<&Operation>,
+) {
     let mut waited = Ok(());
     for _ in 0..STEPS_MAX {
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
-
+        if !shared.active.load(Ordering::Acquire) {
+            shared.paused.store(true, Ordering::Release);
+            thread::park();
+            shared.paused.store(false, Ordering::Release);
+            continue;
+        }
+        if shared.catch_up.swap(false, Ordering::AcqRel) {
+            match refresh(root, held, ring, shared, operation) {
+                Ok(true) => {
+                    waited = Ok(());
+                }
+                Ok(false) => {
+                    shared.catch_up.store(true, Ordering::Release);
+                    thread::park_timeout(WAIT);
+                    continue;
+                }
+                Err(error) => {
+                    eprintln!("flightdeck store catch-up: {error}");
+                    return;
+                }
+            }
+        }
         if let Err(error) = step(held, ring, waited, &shared.mailbox, operation) {
             eprintln!("flightdeck store publication: {error}");
             return;
@@ -595,8 +649,51 @@ fn run(held: &mut Held, ring: &mut Ring, shared: &Shared, operation: Option<&Ope
             ring.wait(WAIT)
         };
     }
-
     unreachable!("the store thread steps until the store is dropped");
+}
+
+/// Replays the sealed prefix into existing owners before reopening the current ring.
+fn refresh(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+    operation: Option<&Operation>,
+) -> persistence::Result<bool> {
+    let budget = held.payload_budget.clone();
+    let since = held.newest.as_ref().map(|newest| newest.run);
+    let mut accepted = true;
+    let mut next_ring = Ring::new(root.to_owned());
+    let mut take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
+        if !shared.active.load(Ordering::Acquire) {
+            accepted = false;
+        }
+        if accepted {
+            accepted = held.take(run, second, apps);
+            if held.unpublished {
+                held.publish(&shared.mailbox);
+            }
+        }
+    };
+    let left_out = if let Some(budget) = &budget {
+        let operation = operation.unwrap_or_else(|| unreachable!("payload reads are cancellable"));
+        let outcome =
+            recording::load_payload_since(root, budget, operation, since.as_ref(), &mut take)?;
+        if accepted {
+            next_ring.accept(outcome.terminal);
+        }
+        outcome.left_out
+    } else {
+        recording::load_since(root, since.as_ref(), take)
+    };
+    if held.left_out != left_out {
+        held.left_out = left_out;
+        held.unpublished = true;
+    }
+    if accepted {
+        *ring = next_ring;
+    }
+    Ok(accepted)
 }
 
 /// Takes in what the ring published since the last step, follows the newest run, and hands

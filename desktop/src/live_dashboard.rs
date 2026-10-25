@@ -39,6 +39,7 @@ pub(crate) fn observe_visibility(
     cx: &mut gpui::App,
 ) {
     dashboard.update(cx, |dashboard, cx| {
+        store_view::set_store_active(window.is_visible(), cx);
         // macOS reports only changes, so a window it hides from the start would read its page
         // until it first showed and hid again.
         if !window.is_visible() {
@@ -46,6 +47,7 @@ pub(crate) fn observe_visibility(
         }
 
         cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
+            store_view::set_store_active(visibility.is_visible(), cx);
             dashboard.presence = dashboard.presence.reported(visibility.is_visible());
             cx.notify();
         })
@@ -1220,6 +1222,7 @@ impl LiveDashboard {
 mod store_view;
 
 pub use store_view::install_store;
+pub(crate) use store_view::set_store_active;
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]

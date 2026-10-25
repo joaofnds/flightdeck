@@ -61,9 +61,37 @@ pub(super) fn load_payload_using(
     capture: &crate::recording::InputCapture<'_>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
+    load_payload_since_using(root, budget, operation, capture, None, take)
+}
+
+pub(super) fn load_payload_since(
+    root: &Path,
+    budget: &Arc<super::ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    since: Option<&RunIdentity>,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
+    load_payload_since_using(
+        root,
+        budget,
+        operation,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
+        since,
+        take,
+    )
+}
+
+fn load_payload_since_using(
+    root: &Path,
+    budget: &Arc<super::ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    capture: &crate::recording::InputCapture<'_>,
+    since: Option<&RunIdentity>,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
     operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
-    let discovered = find(root, &mut found);
+    let discovered = find(root, &mut found, since);
     operation.check()?;
     if let Err(failure) = discovered {
         return Ok(Outcome {
@@ -112,10 +140,18 @@ impl Found {
 /// hour than the recording sealed, where it does.
 pub(super) fn load(
     root: &Path,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> Option<Failure> {
+    load_since(root, None, take)
+}
+
+pub(super) fn load_since(
+    root: &Path,
+    since: Option<&RunIdentity>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     let mut found = Vec::with_capacity(MINUTES_MAX);
-    if let Err(failure) = find(root, &mut found) {
+    if let Err(failure) = find(root, &mut found, since) {
         return Some(failure);
     }
     let apps_from_ns = found
@@ -412,7 +448,7 @@ fn decode_refusal(refused: &Refused) -> String {
 
 /// Finds the sealed minutes of the loaded hour into `found`, newest first, from the newest run
 /// the recording registers back.
-fn find(root: &Path, found: &mut Vec<Found>) -> Result<(), Failure> {
+fn find(root: &Path, found: &mut Vec<Found>, since: Option<&RunIdentity>) -> Result<(), Failure> {
     let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
     let mut buffer: RegistryBuffer = [0; _];
     let registry = Registry::read_into(&root.join("runs"), &mut buffer)
@@ -423,8 +459,18 @@ fn find(root: &Path, found: &mut Vec<Found>) -> Result<(), Failure> {
         runs.push(run.identity);
     }
 
+    let first = if let Some(since) = since {
+        if since.recording != recording {
+            return Err(Failure::ForeignRecording);
+        }
+        runs.iter()
+            .position(|run| run == since)
+            .ok_or(Failure::ChangedIdentity)?
+    } else {
+        0
+    };
     let mut oldest_ns = None;
-    for run in runs.iter().rev() {
+    for run in runs[first..].iter().rev() {
         let finding = FindRun {
             root,
             recording,
