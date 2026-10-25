@@ -13,6 +13,11 @@ git = "https://github.com/pola-rs/polars"
 rev = "22a147de3d2bb2e44b97338a2510816c7105c9f2"
 default-features = false
 
+[workspace.dependencies.polars-buffer]
+git = "https://github.com/pola-rs/polars"
+rev = "22a147de3d2bb2e44b97338a2510816c7105c9f2"
+default-features = false
+
 [patch.crates-io.hashbrown]
 git = "https://github.com/pola-rs/hashbrown"
 rev = "d76a6f81abd8f388676aff15068236a8d21c7e1a"

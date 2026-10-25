@@ -3232,6 +3232,7 @@ dependencies = [
  "model",
  "polars",
  "polars-arrow-format",
+ "polars-buffer",
  "polars-parquet",
  "polars-parquet-format",
 ]

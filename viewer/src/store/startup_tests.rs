@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{AppsSecond, ByteBudget};
 use crate::live::identity_fixture::Fixture;
@@ -220,15 +221,19 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
     assert!(charges.iter().min().unwrap() * 2 > payload_maximum);
     let budget = Arc::new(ByteBudget::new(maximum));
     let mut results = Vec::with_capacity(3);
-    let mut captures = 0;
-    let mut capture = |file, budget: &Arc<ByteBudget>| {
-        assert_eq!(
-            budget.used(),
-            0,
-            "only consumed completions may precede the next capture"
-        );
-        captures += 1;
-        persistence::engine::AdmittedTable::from_file_budgeted(file, budget)
+    let captures = AtomicUsize::new(0);
+    let capture = |file, budget: &Arc<ByteBudget>| {
+        let entry = budget.used();
+        let input = persistence::engine::AdmittedTable::from_file_budgeted(file, budget)?;
+        if input.contains_column("wall_ns") {
+            assert_eq!(
+                entry, 0,
+                "only consumed completions may precede the next minute"
+            );
+            captures.fetch_add(1, Ordering::Relaxed);
+        }
+
+        Ok(input)
     };
 
     let operation = Arc::new(crate::cancellation::Cancellation::default())
@@ -238,7 +243,7 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
         &fixture.root,
         &budget,
         &operation,
-        &mut capture,
+        &capture,
         |_, second, apps| {
             let super::apps::TickApps::Loaded(loaded) = apps else {
                 panic!("valid fixture machine and App rows must decode");
@@ -257,7 +262,7 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
 
     assert_eq!(outcome.unwrap().left_out, None);
     assert_eq!(results, [(1, Ok(2)), (2, Ok(2)), (3, Ok(2))]);
-    assert_eq!(captures, 3);
+    assert_eq!(captures.load(Ordering::Relaxed), 3);
     assert_eq!(budget.used(), 0);
 }
 
@@ -275,13 +280,27 @@ fn fixture_input_peak(fixture: &Fixture) -> usize {
             continue;
         }
         let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
-        let path = fixture
-            .root
-            .join(manifest.data_directory)
-            .join("ticks.parquet");
+        let directory = fixture.root.join(manifest.data_directory);
+        let path = directory.join("ticks.parquet");
         let file = std::fs::File::open(path).unwrap();
         let input = persistence::engine::AdmittedTable::from_file_budgeted(file, &budget).unwrap();
         peak = peak.max(43 * 1024 * 1024 + budget.used());
+        for name in [
+            "cpus",
+            "memory",
+            "interfaces",
+            "gpu_states",
+            "core_states",
+            "fans",
+            "processes",
+            "events",
+        ] {
+            let file = std::fs::File::open(directory.join(format!("{name}.parquet"))).unwrap();
+            let table =
+                persistence::engine::AdmittedTable::from_file_budgeted(file, &budget).unwrap();
+            peak = peak.max(43 * 1024 * 1024 + budget.used());
+            drop(table);
+        }
         drop(input);
     }
     assert_eq!(budget.used(), 0);
@@ -331,15 +350,19 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
         charges[0] + charges[1],
         charges[0] + charges[2],
     ];
-    let mut captures = 0;
-    let mut capture = |file, budget: &Arc<ByteBudget>| {
-        assert_eq!(
-            budget.used(),
-            expected[captures],
-            "only reader/pool owners may precede capture"
-        );
-        captures += 1;
-        persistence::engine::AdmittedTable::from_file_budgeted(file, budget)
+    let captures = AtomicUsize::new(0);
+    let capture = |file, budget: &Arc<ByteBudget>| {
+        let entry = budget.used();
+        let input = persistence::engine::AdmittedTable::from_file_budgeted(file, budget)?;
+        if input.contains_column("wall_ns") {
+            let index = captures.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(
+                entry, expected[index],
+                "only reader/pool owners may precede capture"
+            );
+        }
+
+        Ok(input)
     };
 
     let operation = Arc::new(crate::cancellation::Cancellation::default())
@@ -349,7 +372,7 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
         &fixture.root,
         &budget,
         &operation,
-        &mut capture,
+        &capture,
         |_, second, apps| {
             assert!(span.push(|buffer| buffer.take(apps, None, Some(&budget))));
             let newest = span.newest_held().unwrap();
@@ -361,7 +384,7 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
 
     assert_eq!(outcome.unwrap().left_out, None);
     assert_eq!(publications, [1, 2, 3, 4]);
-    assert_eq!(captures, 4);
+    assert_eq!(captures.load(Ordering::Relaxed), 4);
     let reader = reader.unwrap();
     assert_eq!(reader.observation.unwrap().stamp.publication, 1);
     assert_eq!(reader.processes.as_ref().unwrap().len(), 2);

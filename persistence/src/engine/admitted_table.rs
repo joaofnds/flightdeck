@@ -12,6 +12,11 @@ pub struct AdmittedTable {
     names: ColumnNames,
 }
 
+/// Admission-derived names whose backing cannot escape its reservation.
+pub struct AdmittedColumns {
+    names: ColumnNames,
+}
+
 struct ColumnNames {
     values: Vec<ColumnName>,
     reservation: ByteReservation,
@@ -30,7 +35,19 @@ const _: () = {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod buffer_tests;
+
 impl AdmittedTable {
+    /// Moves compressed storage into a shared native source without copying it.
+    /// Native bridge wrappers, plans and decoding need separate accounting.
+    pub fn into_scan(self) -> Result<(polars::prelude::LazyFrame, AdmittedColumns)> {
+        let Self { input, names } = self;
+        let plan = super::scan::scan_sources(super::scan::buffer_sources(input))?;
+
+        Ok((plan, AdmittedColumns { names }))
+    }
+
     /// Reserves before seeking or capturing. Native reads/results need separate accounting.
     pub fn from_file_budgeted(
         file: File,
@@ -61,14 +78,7 @@ impl AdmittedTable {
 
     #[must_use]
     pub fn contains_column(&self, name: &str) -> bool {
-        assert_eq!(
-            self.names.reservation.bytes(),
-            self.names.values.capacity() * size_of::<ColumnName>()
-        );
-        self.names
-            .values
-            .iter()
-            .any(|column| column.bytes[..usize::from(column.length)] == *name.as_bytes())
+        self.names.contains(name)
     }
 
     /// Applies a prefix before native decoding; zero offset cannot overflow its slice extent.
@@ -106,6 +116,17 @@ impl AdmittedTable {
 }
 
 impl ColumnNames {
+    fn contains(&self, name: &str) -> bool {
+        assert_eq!(
+            self.reservation.bytes(),
+            self.values.capacity() * size_of::<ColumnName>()
+        );
+
+        self.values
+            .iter()
+            .any(|column| column.bytes[..usize::from(column.length)] == *name.as_bytes())
+    }
+
     fn capture(
         schema: &[polars_parquet_format::SchemaElement],
         budget: &Arc<ByteBudget>,
@@ -143,5 +164,12 @@ impl ColumnNames {
         assert_eq!(names.len(), names.capacity());
 
         Ok(names)
+    }
+}
+
+impl AdmittedColumns {
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.names.contains(name)
     }
 }

@@ -5,7 +5,9 @@ use persistence::engine::{AdmissionRefusal, AdmittedTable};
 use persistence::resources::ByteBudget;
 use polars::prelude::DataFrame;
 
-use super::{Refused, SealedMinute, SealedSource, SealedTable, holds_columns};
+use super::{
+    Refused, ScopedSealedMinute as SealedMinute, SealedSource, SealedTable, holds_columns,
+};
 use crate::cancellation::Operation;
 
 pub(super) struct TicksInput {
@@ -18,7 +20,23 @@ pub(super) struct TicksTable<'minute> {
     admitted: Option<&'minute TicksInput>,
 }
 
-impl SealedMinute {
+impl<'input> SealedMinute<'input> {
+    pub(crate) fn open_with_inputs_using(
+        source: &SealedSource<'_>,
+        budget: &'input Arc<ByteBudget>,
+        operation: &'input Operation,
+        capture: &'input super::InputCapture<'input>,
+    ) -> Result<Self, Refused> {
+        let mut minute = Self::open_with_ticks_using(source, budget, operation, capture)?;
+        minute.inputs = Some(super::TableInputs {
+            budget,
+            operation,
+            capture,
+        });
+
+        Ok(minute)
+    }
+
     #[cfg(test)]
     pub(super) fn open_with_ticks(
         source: &SealedSource<'_>,

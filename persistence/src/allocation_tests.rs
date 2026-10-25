@@ -24,6 +24,9 @@ pub(crate) struct Observation {
     pub deallocation_charge_min: usize,
     pub allocation_charge_min: usize,
     pub layouts: [(usize, usize); EVENTS_MAX],
+    pub free_addresses: [usize; EVENTS_MAX],
+    pub free_bytes: [usize; EVENTS_MAX],
+    pub free_charges: [usize; EVENTS_MAX],
     pub reallocations: usize,
     overflowed: bool,
 }
@@ -37,6 +40,9 @@ impl Observation {
         deallocation_charge_min: usize::MAX,
         allocation_charge_min: usize::MAX,
         layouts: [(0, 0); EVENTS_MAX],
+        free_addresses: [0; EVENTS_MAX],
+        free_bytes: [0; EVENTS_MAX],
+        free_charges: [0; EVENTS_MAX],
         reallocations: 0,
         overflowed: false,
     };
@@ -66,7 +72,7 @@ impl Drop for Guard {
     }
 }
 
-fn record(bytes: usize, alignment: usize, allocated: bool) {
+fn record(bytes: usize, alignment: usize, allocated: bool, allocation: *mut u8) {
     BUDGET.with(|watched| {
         let pointer = watched.get();
         if pointer.is_null() {
@@ -89,6 +95,10 @@ fn record(bytes: usize, alignment: usize, allocated: bool) {
                 trace.allocated_bytes += bytes;
                 trace.allocation_charge_min = trace.allocation_charge_min.min(used);
             } else {
+                let index = trace.deallocations;
+                trace.free_addresses[index] = allocation.addr();
+                trace.free_bytes[index] = bytes;
+                trace.free_charges[index] = used;
                 trace.deallocations += 1;
                 trace.deallocated_bytes += bytes;
                 trace.deallocation_charge_min = trace.deallocation_charge_min.min(used);
@@ -99,17 +109,17 @@ fn record(bytes: usize, alignment: usize, allocated: bool) {
 
 unsafe impl GlobalAlloc for Observer {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record(layout.size(), layout.align(), true);
+        record(layout.size(), layout.align(), true, std::ptr::null_mut());
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record(layout.size(), layout.align(), true);
+        record(layout.size(), layout.align(), true, std::ptr::null_mut());
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        record(layout.size(), layout.align(), false);
+        record(layout.size(), layout.align(), false, pointer);
         unsafe { System.dealloc(pointer, layout) };
     }
 
@@ -119,10 +129,10 @@ unsafe impl GlobalAlloc for Observer {
                 TRACE.with(|trace| trace.borrow_mut().reallocations += 1);
             }
         });
-        record(bytes, layout.align(), true);
+        record(bytes, layout.align(), true, std::ptr::null_mut());
         let replacement = unsafe { System.realloc(pointer, layout, bytes) };
         if !replacement.is_null() {
-            record(layout.size(), layout.align(), false);
+            record(layout.size(), layout.align(), false, pointer);
         }
         replacement
     }

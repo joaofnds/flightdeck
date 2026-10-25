@@ -25,13 +25,31 @@ pub use machine::{
 pub use minute_ticks::{MinuteTick, MinuteTicks};
 pub use processes::{Before, derive_apps};
 
-/// A sealed minute whose marker and files `open` verified.
-pub struct SealedMinute {
+/// An owned sealed minute whose marker and files `open` verified.
+pub type SealedMinute = ScopedSealedMinute<'static>;
+
+/// A sealed minute that may borrow an opt-in input factory for one synchronous load.
+pub struct ScopedSealedMinute<'input> {
     root: PathBuf,
     marker: PathBuf,
     manifest: persistence::Manifest,
     ticks: Option<TicksInput>,
+    inputs: Option<TableInputs<'input>>,
 }
+
+struct TableInputs<'input> {
+    budget: &'input std::sync::Arc<persistence::resources::ByteBudget>,
+    operation: &'input crate::cancellation::Operation,
+    capture: &'input InputCapture<'input>,
+}
+
+pub(crate) type InputCapture<'input> = dyn Fn(
+        std::fs::File,
+        &std::sync::Arc<persistence::resources::ByteBudget>,
+    ) -> Result<persistence::engine::AdmittedTable, persistence::engine::AdmissionRefusal>
+    + Send
+    + Sync
+    + 'input;
 
 pub(crate) struct SealedSource<'path> {
     pub(crate) root: &'path Path,
@@ -56,7 +74,7 @@ impl From<persistence::Error> for Refused {
     }
 }
 
-impl SealedMinute {
+impl ScopedSealedMinute<'_> {
     pub(crate) fn revalidate_full(&self) -> Result<(), Refused> {
         let current =
             persistence::read_committed(&self.root, &self.marker).map_err(Refused::Commitment)?;
@@ -81,6 +99,7 @@ impl SealedMinute {
             marker: marker.to_owned(),
             manifest,
             ticks: None,
+            inputs: None,
         })
     }
 
@@ -122,33 +141,87 @@ impl SealedMinute {
             .root
             .join(&self.manifest.data_directory)
             .join(format!("{name}.parquet"));
+        if let Some(inputs) = &self.inputs {
+            inputs.operation.check()?;
+
+            let file = collector::recording::private::open_private_file(&path, false)
+                .map_err(Refused::Commitment)?;
+
+            inputs.operation.check()?;
+            let input = (inputs.capture)(file, inputs.budget).map_err(Refused::Input)?;
+            inputs.operation.check()?;
+            let (plan, columns) = input.into_scan()?;
+
+            return Ok(SealedTable {
+                plan,
+                columns: SealedColumns::Admitted(columns),
+                operation: Some(inputs.operation.begin(inputs.operation.epoch())?),
+            });
+        }
+
         let mut plan = persistence::engine::scan(&path)?;
         let schema = plan.collect_schema().map_err(persistence::Error::from)?;
-        Ok(SealedTable { plan, schema })
+        Ok(SealedTable {
+            plan,
+            columns: SealedColumns::Legacy(schema),
+            operation: None,
+        })
     }
 }
 
 /// One table of a sealed minute, through admission, and the columns its file holds.
 struct SealedTable {
     plan: LazyFrame,
-    schema: SchemaRef,
+    columns: SealedColumns,
+    operation: Option<crate::cancellation::Operation>,
+}
+
+enum SealedColumns {
+    Legacy(SchemaRef),
+    Admitted(persistence::engine::AdmittedColumns),
 }
 
 impl SealedTable {
     /// Whether the table holds the optional columns `group`, which a minute holds whole or
     /// not at all.
     fn holds(&self, group: &[&str]) -> Result<bool, Refused> {
-        holds_columns(group, |name| self.schema.contains(name))
+        if let Some(operation) = &self.operation {
+            operation.check()?;
+        }
+
+        match &self.columns {
+            SealedColumns::Legacy(schema) => holds_columns(group, |name| schema.contains(name)),
+            SealedColumns::Admitted(columns) => holds_columns(group, |name| columns.contains(name)),
+        }
     }
 
     /// The `columns`, rows in the order the file holds them.
-    fn collect(self, columns: &[&str]) -> Result<DataFrame, Refused> {
+    fn collect(mut self, columns: &[&str]) -> Result<DataFrame, Refused> {
         let columns: Vec<Expr> = columns.iter().map(|name| col(*name)).collect();
-        self.plan
-            .select(columns)
-            .collect()
-            .map_err(|error| Refused::Decode(persistence::Error::from(error)))
+        self.plan = self.plan.select(columns);
+
+        self.collect_plan()
     }
+
+    fn collect_plan(self) -> Result<DataFrame, Refused> {
+        Ok(collect_plan(self.plan, self.operation.as_ref())?)
+    }
+}
+
+fn collect_plan(
+    plan: LazyFrame,
+    operation: Option<&crate::cancellation::Operation>,
+) -> persistence::Result<DataFrame> {
+    if let Some(operation) = operation {
+        operation.check()?;
+    }
+
+    let result = plan.collect().map_err(persistence::Error::from);
+    if let Some(operation) = operation {
+        operation.check()?;
+    }
+
+    result
 }
 
 fn holds_columns(group: &[&str], mut contains: impl FnMut(&str) -> bool) -> Result<bool, Refused> {
@@ -226,3 +299,6 @@ mod tests;
 #[cfg(test)]
 #[path = "recording/ticks_input_tests.rs"]
 mod ticks_input_tests;
+
+#[cfg(test)]
+mod table_input_tests;

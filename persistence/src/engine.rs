@@ -25,7 +25,7 @@ use crate::{Error, Result};
 pub use admission::COLUMNS_MAX as PARQUET_COLUMNS_MAX;
 pub use admission::EXPANDED_BYTES_MAX as PARQUET_EXPANDED_BYTES_MAX;
 pub use admitted_file::{AdmissionRefusal, AdmittedFile};
-pub use admitted_table::AdmittedTable;
+pub use admitted_table::{AdmittedColumns, AdmittedTable};
 pub use cells::{Cells, FromCell, Row};
 pub use scan::scan;
 pub use sources::PARQUET_SOURCES_MAX;

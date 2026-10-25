@@ -49,7 +49,7 @@ pub(super) fn load_payload(
         root,
         budget,
         operation,
-        &mut persistence::engine::AdmittedTable::from_file_budgeted,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
         take,
     )
 }
@@ -58,13 +58,7 @@ pub(super) fn load_payload_using(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
-    capture: &mut impl FnMut(
-        std::fs::File,
-        &Arc<super::ByteBudget>,
-    ) -> Result<
-        persistence::engine::AdmittedTable,
-        persistence::engine::AdmissionRefusal,
-    >,
+    capture: &crate::recording::InputCapture<'_>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     operation.check()?;

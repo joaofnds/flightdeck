@@ -16,7 +16,7 @@ use polars::prelude::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 
-use super::{Refused, SealedMinute, ordered, placement};
+use super::{Refused, ScopedSealedMinute as SealedMinute, ordered, placement};
 
 /// The ticks table's columns every minute holds, of those the store reads.
 const TICK_COLUMNS: [&str; 10] = [

@@ -9,9 +9,16 @@ base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 collector = { path = "../collector" }
 model = { path = "../model" }
 polars = { workspace = true }
+polars-buffer = { workspace = true }
 polars-arrow-format = { version = "=0.2.1", default-features = false, features = ["ipc"] }
 polars-parquet = { workspace = true }
 polars-parquet-format = { version = "=0.1.0", default-features = false }
 
 [lints]
 workspace = true
+
+# A separate test process gives the allocation trace one subject thread and no libtest worker.
+[[test]]
+name = "admitted_buffer_observation"
+path = "tests/admitted_buffer_observation.rs"
+harness = false

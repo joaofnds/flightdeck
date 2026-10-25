@@ -4,14 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use collector::ring::RunIdentity;
-use persistence::engine::{AdmissionRefusal, AdmittedTable};
-use std::fs::File;
 
 use super::readings;
 use super::{AppsSecond, Batch, Failure, Found, Loaded, MachineSecond, Refused, TICKS_PER_MINUTE};
 use crate::byte_budget::ByteBudget;
 use crate::cancellation::Operation;
-use crate::recording::{Before, MachineMinute, SealedMinute, SealedSource, read_machine};
+use crate::recording::{Before, MachineMinute, ScopedSealedMinute, SealedSource, read_machine};
 use crate::store::apps::TickApps;
 
 #[cfg(test)]
@@ -23,7 +21,7 @@ pub(super) fn load(
     minutes: &[Found],
     budget: &Arc<ByteBudget>,
     operation: &Operation,
-    capture: &mut impl FnMut(File, &Arc<ByteBudget>) -> Result<AdmittedTable, AdmissionRefusal>,
+    capture: &crate::recording::InputCapture<'_>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<super::Outcome> {
     let mut decoder = Decoder::default();
@@ -103,7 +101,7 @@ impl Decoder {
         found: &Found,
         budget: &Arc<ByteBudget>,
         operation: &Operation,
-        capture: &mut impl FnMut(File, &Arc<ByteBudget>) -> Result<AdmittedTable, AdmissionRefusal>,
+        capture: &crate::recording::InputCapture<'_>,
     ) -> Batch {
         let mut batch = Batch {
             seconds: Vec::with_capacity(TICKS_PER_MINUTE),
@@ -163,7 +161,7 @@ fn load_minute(
     before: &mut Option<Before>,
     budget: &Arc<ByteBudget>,
     operation: &Operation,
-    capture: &mut impl FnMut(File, &Arc<ByteBudget>) -> Result<AdmittedTable, AdmissionRefusal>,
+    capture: &crate::recording::InputCapture<'_>,
 ) -> Result<(MachineMinute, Vec<AppsSecond>), Refused> {
     let mut apps = Vec::with_capacity(crate::live_apps::committed::ENDPOINTS_MAX);
     let machine = load_minute_visit(
@@ -210,14 +208,14 @@ fn load_minute_visit(
     before: &mut Option<Before>,
     budget: &Arc<ByteBudget>,
     operation: &Operation,
-    capture: &mut impl FnMut(File, &Arc<ByteBudget>) -> Result<AdmittedTable, AdmissionRefusal>,
+    capture: &crate::recording::InputCapture<'_>,
     consume: impl FnMut(
         &crate::live_apps::committed::Endpoint,
         persistence::Result<&crate::live_app_response::Sample>,
     ) -> persistence::Result<()>,
 ) -> Result<MachineMinute, Refused> {
     operation.check()?;
-    let sealed = SealedMinute::open_with_ticks_using(
+    let sealed = ScopedSealedMinute::open_with_inputs_using(
         &SealedSource {
             root,
             marker: &found.marker,

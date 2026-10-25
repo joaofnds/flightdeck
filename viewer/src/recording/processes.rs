@@ -16,7 +16,7 @@ use polars::prelude::{
 };
 
 use super::apps::AppMinute;
-use super::{Refused, SealedMinute, SealedTable, ordered, placement};
+use super::{Refused, ScopedSealedMinute as SealedMinute, SealedTable, ordered, placement};
 use crate::apps::Stamp;
 use crate::cancellation::{Cancellation, Operation};
 use crate::live_app_response::Sample;
@@ -139,7 +139,7 @@ fn derive_apps_samples(
     })
 }
 
-impl SealedMinute {
+impl SealedMinute<'_> {
     /// Visits each observation's typed sample or refusal, including unattributed processes.
     /// A refused sample clears the predecessor but does not suppress later observations.
     pub(crate) fn visit_samples(
@@ -333,7 +333,7 @@ pub(super) fn read_processes_endpoints(minute: &SealedMinute) -> Result<Vec<Endp
 /// that holds the identity fields pass the identity admission rule, and a table sealed before
 /// them holds processes of unsupported identity, as the SQL replay reads it.
 fn read_processes_rows(
-    table: SealedTable,
+    mut table: SealedTable,
     kind: Table,
     origin: [Expr; 6],
 ) -> Result<DataFrame, Refused> {
@@ -350,12 +350,8 @@ fn read_processes_rows(
 
     let limit = u32::try_from(IDENTITY_ROWS_MAX + 1)
         .map_err(|_| persistence::Error::Bound("process identity rows"))?;
-    let frame = table
-        .plan
-        .limit(limit)
-        .select(columns)
-        .collect()
-        .map_err(persistence::Error::from)?;
+    table.plan = table.plan.limit(limit).select(columns);
+    let frame = table.collect_plan()?;
     if collector::u64_from_usize(frame.height()) > IDENTITY_ROWS_MAX {
         return Err(persistence::Error::Bound("process identity rows").into());
     }

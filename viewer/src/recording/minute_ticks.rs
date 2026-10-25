@@ -13,7 +13,7 @@ use polars::prelude::{
 };
 
 use super::processes::read_processes_batch;
-use super::{Refused, SealedMinute};
+use super::{Refused, ScopedSealedMinute as SealedMinute};
 use crate::live_apps::committed::{ENDPOINTS_MAX, Endpoint};
 
 /// A tick of a sealed minute beside the tick before it, as the App rule reads them, with the

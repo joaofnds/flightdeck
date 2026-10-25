@@ -1,5 +1,6 @@
 use persistence::engine::AdmittedTable;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::{Decoder, load_consume};
 use crate::cancellation::Cancellation;
@@ -28,7 +29,7 @@ fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut before = None;
-    let mut captures = 0;
+    let captures = AtomicU64::new(0);
 
     let (machine, apps) = super::load_minute(
         &fixture.root,
@@ -36,17 +37,19 @@ fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
         &mut before,
         &budget,
         &operation,
-        &mut |file, budget| {
+        &|file, budget| {
             let input = AdmittedTable::from_file_budgeted(file, budget)?;
-            captures += 1;
-            std::fs::rename(&replacement, &ticks).unwrap();
+            if input.contains_column("wall_ns") {
+                captures.fetch_add(1, Ordering::Relaxed);
+                std::fs::rename(&replacement, &ticks).unwrap();
+            }
             Ok(input)
         },
     )
     .unwrap();
 
     assert_loader_clocks(&machine, &apps, &fixture.writer.identity().unwrap());
-    assert_eq!(captures, 1);
+    assert_eq!(captures.load(Ordering::Relaxed), 1);
     assert!(before.is_some());
     drop(apps);
     assert_eq!(budget.used(), 0);
@@ -183,7 +186,7 @@ fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitme
         &mut before,
         &budget,
         &operation,
-        &mut AdmittedTable::from_file_budgeted,
+        &AdmittedTable::from_file_budgeted,
         |endpoint, sample| {
             assert!(sample.is_ok());
             consumed.push(endpoint.stamp.publication);
@@ -226,7 +229,7 @@ fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
         &mut before,
         &budget,
         &operation,
-        &mut AdmittedTable::from_file_budgeted,
+        &AdmittedTable::from_file_budgeted,
     );
     let mut decoder = Decoder::default();
     let batch = decoder.decode(
@@ -234,7 +237,7 @@ fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
         &found[0],
         &budget,
         &operation,
-        &mut AdmittedTable::from_file_budgeted,
+        &AdmittedTable::from_file_budgeted,
     );
 
     assert!(matches!(
@@ -412,7 +415,7 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
         &found[0],
         &budget,
         &operation,
-        &mut AdmittedTable::from_file_budgeted,
+        &AdmittedTable::from_file_budgeted,
     );
     let mut retained = AppsSecond::with_room();
     load_consume(first, &operation, |_, _, apps| {
@@ -426,7 +429,7 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
         &found[1],
         &budget,
         &operation,
-        &mut AdmittedTable::from_file_budgeted,
+        &AdmittedTable::from_file_budgeted,
     );
     assert!(budget.used() > charge);
     let mut accepted = 0;
@@ -463,7 +466,7 @@ fn terminal_projection_keeps_only_the_last_raw_tick_and_all_its_tables() {
         &found[0],
         &budget,
         &operation,
-        &mut AdmittedTable::from_file_budgeted,
+        &AdmittedTable::from_file_budgeted,
     ));
     decoder.previous.ticks[1].wall_ns = None;
     for publication in 1..=2 {
@@ -509,5 +512,469 @@ fn terminal_projection_keeps_only_the_last_raw_tick_and_all_its_tables() {
     assert_eq!(terminal.machine.core_states[0].publication, 2);
     assert_eq!(terminal.machine.fans.len(), 1);
     assert_eq!(terminal.machine.fans[0].publication, 2);
+    assert_eq!(budget.used(), 0);
+}
+#[test]
+fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
+    // Goal: a complete load consumes the admitted events, including their original order.
+    // Method: replace events after real admission, before the loader constructs its scan.
+    let fixture = events_loader_fixture();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found).unwrap();
+    assert_eq!(found.len(), 1);
+    let source = crate::recording::SealedSource {
+        root: &fixture.root,
+        marker: &found[0].marker,
+    };
+    let manifest = persistence::read_committed(source.root, source.marker).unwrap();
+    events_loader_make_ungrouped(&source);
+    let replacement = events_loader_prepare_replacement(&source);
+    let events = source
+        .root
+        .join(&manifest.data_directory)
+        .join("events.parquet");
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let expected = events_loader_legacy(&source, &budget, &operation);
+    let expected_captures = events_loader_consumed_inodes(&source);
+    let mut before = None;
+    let events_captures = AtomicU64::new(0);
+    let captures = Mutex::new(Vec::new());
+
+    let (machine, apps) = super::load_minute(
+        source.root,
+        &found[0],
+        &mut before,
+        &budget,
+        &operation,
+        &|file, budget| {
+            use std::os::unix::fs::MetadataExt;
+            let inode = file.metadata().unwrap().ino();
+            let input = AdmittedTable::from_file_budgeted(file, budget)?;
+            captures.lock().unwrap().push(inode);
+            if input.contains_column("event") {
+                events_captures.fetch_add(1, Ordering::Relaxed);
+                std::fs::rename(&replacement, &events).unwrap();
+            }
+
+            Ok(input)
+        },
+    )
+    .unwrap();
+
+    events_loader_assert_original(&machine, &apps, &fixture.writer.identity().unwrap());
+    assert_eq!(machine, expected.0);
+    assert_eq!(apps, expected.1);
+    assert_eq!(events_captures.load(Ordering::Relaxed), 1);
+    let mut captures = captures.into_inner().unwrap();
+    captures.sort_unstable();
+    assert_eq!(captures, expected_captures);
+    assert!(before.is_some());
+    assert_eq!(
+        persistence::read_committed(source.root, source.marker).unwrap(),
+        manifest
+    );
+}
+
+fn events_loader_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(
+        100,
+        &[
+            collector::tracker::Event::Start {
+                pid: 9,
+                coalition: Some(3),
+            },
+            collector::tracker::Event::Exec { pid: 8 },
+        ],
+    );
+    fixture.publish_with_events(100, &[events_loader_exit()]);
+    fixture.seal();
+
+    fixture
+}
+
+fn events_loader_consumed_inodes(source: &crate::recording::SealedSource<'_>) -> Vec<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let manifest = persistence::read_committed(source.root, source.marker).unwrap();
+    let directory = source.root.join(manifest.data_directory);
+    let mut inodes: Vec<_> = [
+        "ticks",
+        "cpus",
+        "memory",
+        "interfaces",
+        "gpu_states",
+        "core_states",
+        "fans",
+        "processes",
+        "events",
+    ]
+    .iter()
+    .map(|name| {
+        std::fs::metadata(directory.join(format!("{name}.parquet")))
+            .unwrap()
+            .ino()
+    })
+    .collect();
+    inodes.sort_unstable();
+
+    inodes
+}
+
+fn events_loader_exit() -> collector::tracker::Event {
+    collector::tracker::Event::Exit {
+        pid: 9,
+        last: Ok(collector::processes::Usage {
+            awake_ns_at_start: 1,
+            user_ns: 2,
+            system_ns: 3,
+            energy_nj: 4,
+            instructions: 5,
+            super_instructions: 6,
+            cycles: 7,
+            idle_wakeups: 8,
+            interrupt_wakeups: 9,
+            pageins: 10,
+            resident_bytes: 11,
+            footprint_bytes: 12,
+            disk_read_bytes: 13,
+            disk_written_bytes: 14,
+        }),
+        noticed: collector::tracker::Noticed::OnExit,
+    }
+}
+
+fn events_loader_make_ungrouped(source: &crate::recording::SealedSource<'_>) {
+    use polars::prelude::{DataType, Null, col, lit, when};
+    let manifest = persistence::read_committed(source.root, source.marker).unwrap();
+    let path = source
+        .root
+        .join(manifest.data_directory)
+        .join("processes.parquet");
+    let mut frame = persistence::engine::scan(&path)
+        .unwrap()
+        .with_columns([
+            when(col("pid").eq(lit(1_i32)))
+                .then(lit(persistence::schema::identity_availability::UNSUPPORTED))
+                .otherwise(col("identity_availability"))
+                .alias("identity_availability"),
+            when(col("pid").eq(lit(1_i32)))
+                .then(lit(Null {}).cast(DataType::Binary))
+                .otherwise(col("executable_name"))
+                .alias("executable_name"),
+            when(col("pid").eq(lit(1_i32)))
+                .then(lit(Null {}).cast(DataType::Binary))
+                .otherwise(col("app_path"))
+                .alias("app_path"),
+        ])
+        .collect()
+        .unwrap();
+    let replacement = source.root.join("ungrouped-processes.parquet");
+    events_loader_write(&replacement, &mut frame);
+    std::fs::rename(replacement, path).unwrap();
+}
+
+fn events_loader_prepare_replacement(
+    source: &crate::recording::SealedSource<'_>,
+) -> std::path::PathBuf {
+    use polars::prelude::{IntoLazy, UInt64Type, col, lit};
+    let manifest = persistence::read_committed(source.root, source.marker).unwrap();
+    let path = source
+        .root
+        .join(manifest.data_directory)
+        .join("events.parquet");
+    let original = persistence::engine::scan(&path).unwrap().collect().unwrap();
+    let numbers = persistence::engine::Cells::<UInt64Type>::named(&original, "event").unwrap();
+    let numbers: Vec<_> = (0..original.height())
+        .map(|row| numbers.get(row).unwrap())
+        .collect();
+    assert_eq!(numbers, [2, 3, 1]);
+    let mut changed = original
+        .lazy()
+        .with_columns([(col("pid") + lit(10_i32)).alias("pid")])
+        .collect()
+        .unwrap();
+    let replacement = source.root.join("changed-events.parquet");
+    events_loader_write(&replacement, &mut changed);
+
+    replacement
+}
+
+fn events_loader_write(path: &std::path::Path, frame: &mut polars::prelude::DataFrame) {
+    use polars::polars_utils::compression::ZstdLevel;
+    use polars::prelude::{ParquetCompression, ParquetWriter, StatisticsOptions};
+
+    let file = collector::recording::private::open_private_file(path, true).unwrap();
+
+    ParquetWriter::new(file)
+        .with_compression(ParquetCompression::Zstd(Some(
+            ZstdLevel::try_new(3).unwrap(),
+        )))
+        .with_statistics(StatisticsOptions {
+            min_value: true,
+            max_value: true,
+            distinct_count: false,
+            null_count: true,
+            binary_statistics_truncate_length: None,
+        })
+        .with_row_group_size(Some(16_384))
+        .with_data_page_size(None)
+        .set_parallel(false)
+        .with_key_value_metadata(None)
+        .with_context_info(None)
+        .finish(frame)
+        .unwrap();
+}
+
+fn events_loader_legacy(
+    source: &crate::recording::SealedSource<'_>,
+    budget: &Arc<ByteBudget>,
+    operation: &crate::cancellation::Operation,
+) -> (crate::recording::MachineMinute, Vec<AppsSecond>) {
+    let sealed = crate::recording::SealedMinute::open(source.root, source.marker).unwrap();
+    let mut machine = crate::recording::MachineMinute::default();
+    crate::recording::read_machine(&sealed, &mut machine).unwrap();
+    let mut before = None;
+    let mut apps = Vec::new();
+    sealed
+        .visit_samples_with_operation(&mut before, operation, |_, sample| {
+            let sample = sample.unwrap();
+            let mut second = AppsSecond::with_room_for(sample.apps().len());
+            second.take(
+                crate::store::apps::TickApps::Derived(sample),
+                apps.last(),
+                Some(budget),
+            );
+            apps.push(second);
+
+            Ok(())
+        })
+        .unwrap();
+    sealed.revalidate_full().unwrap();
+
+    (machine, apps)
+}
+
+fn events_loader_assert_observations(
+    machine: &crate::recording::MachineMinute,
+    apps: &[AppsSecond],
+    identity: &collector::ring::RunIdentity,
+) {
+    use crate::apps::Stamp;
+    use crate::live_app_response::Observation;
+    assert_eq!(apps.len(), 2);
+    let observations: Vec<_> = apps
+        .iter()
+        .map(|second| second.observation.unwrap())
+        .collect();
+    let expected: Vec<_> = (0..2_u64)
+        .map(|run_tick| Observation {
+            recording: identity.recording.0,
+            stamp: Stamp {
+                boot: identity.boot.0,
+                run: identity.run.0,
+                publication: run_tick + 1,
+                continuous_ns: Some(run_tick * 1_000_000_000),
+                awake_ns: Some(run_tick * 1_000_000_000),
+            },
+            run_tick,
+            wall_ns: Some(100_000_000_000),
+        })
+        .collect();
+    assert_eq!(observations, expected);
+    let clocks: Vec<_> = machine
+        .ticks
+        .iter()
+        .map(|tick| {
+            (
+                tick.publication,
+                tick.run_tick,
+                tick.wall_ns,
+                tick.continuous_ns,
+                tick.awake_ns,
+            )
+        })
+        .collect();
+    assert_eq!(
+        clocks,
+        [
+            (1, 0, Some(100_000_000_000), Some(0), Some(0)),
+            (
+                2,
+                1,
+                Some(100_000_000_000),
+                Some(1_000_000_000),
+                Some(1_000_000_000)
+            ),
+        ]
+    );
+}
+
+fn events_loader_assert_original(
+    machine: &crate::recording::MachineMinute,
+    apps: &[AppsSecond],
+    identity: &collector::ring::RunIdentity,
+) {
+    use crate::apps::ProcessState;
+    events_loader_assert_observations(machine, apps, identity);
+    let first = apps[0].processes.as_ref().unwrap();
+    let second = apps[1].processes.as_ref().unwrap();
+    assert_eq!(first.iter().map(|row| row.pid).collect::<Vec<_>>(), [1, 7]);
+    assert_eq!(
+        second.iter().map(|row| row.pid).collect::<Vec<_>>(),
+        [1, 7, 9]
+    );
+    assert_eq!(apps[0].ungrouped_members, 1);
+    assert_eq!(apps[1].ungrouped_members, 1);
+    assert_eq!(first[0].app_index, None);
+    assert_eq!(second[0].app_index, None);
+    assert_eq!(
+        second[0].program_unavailable,
+        Some(collector::ring::IdentityUnavailable::Unsupported)
+    );
+    assert_eq!(
+        second[2].creation,
+        Some(collector::ring::ProcessCreation {
+            unique_id: 900,
+            pid_version: -90,
+        })
+    );
+    assert_eq!(second[2].state, ProcessState::ExitedVerified);
+    assert_eq!(second[2].executable_name().unwrap().bytes, b"departed\xfd");
+}
+
+#[test]
+fn events_capture_budget_denial_remains_typed_without_legacy_retry() {
+    // Goal: a later table cannot bypass admission when the shared input budget is full.
+    // Method: exhaust remaining capacity just before the actual events constructor.
+    use std::os::unix::fs::MetadataExt;
+    let fixture = events_loader_fixture();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let events = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("events.parquet");
+    let inode = std::fs::metadata(events).unwrap().ino();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let held = Mutex::new(None);
+    let attempts = AtomicU64::new(0);
+    let mut before = None;
+
+    let result = super::load_minute(
+        &fixture.root,
+        &found[0],
+        &mut before,
+        &budget,
+        &operation,
+        &|file, budget| {
+            if file.metadata().unwrap().ino() == inode {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                *held.lock().unwrap() =
+                    Some(budget.reserve(budget.maximum() - budget.used()).unwrap());
+            }
+
+            AdmittedTable::from_file_budgeted(file, budget)
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Input(
+            persistence::engine::AdmissionRefusal::Budget
+        ))
+    ));
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    assert!(before.is_none());
+    let held = held.into_inner().unwrap().unwrap();
+    assert_eq!(budget.used(), held.bytes());
+    drop(held);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
+    // Goal: cancelled events admission cannot seed typed results or a predecessor.
+    // Method: cancel inside the forwarding factory after constructing the real owner.
+    let fixture = events_loader_fixture();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let cancellation = Arc::new(Cancellation::default());
+    let operation = Arc::clone(&cancellation).operation(0).unwrap();
+    let mut before = None;
+    let captures = AtomicU64::new(0);
+
+    let result = super::load_minute(
+        &fixture.root,
+        &found[0],
+        &mut before,
+        &budget,
+        &operation,
+        &|file, budget| {
+            let input = AdmittedTable::from_file_budgeted(file, budget)?;
+            if input.contains_column("event") {
+                captures.fetch_add(1, Ordering::Relaxed);
+                cancellation.cancel().unwrap();
+            }
+
+            Ok(input)
+        },
+    );
+
+    assert!(matches!(result, Err(crate::recording::Refused::Decode(
+        persistence::Error::Io(error))) if error.kind() == std::io::ErrorKind::Interrupted));
+    assert_eq!(captures.load(Ordering::Relaxed), 1);
+    assert!(before.is_none());
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn final_validation_rejects_consumed_events_made_nonprivate() {
+    // Goal: immutable captured events cannot excuse a later violation of file privacy.
+    // Method: make events nonprivate in the final real loader consumer with its marker intact.
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = events_loader_fixture();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let events = fixture
+        .root
+        .join(&manifest.data_directory)
+        .join("events.parquet");
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut before = None;
+    let mut consumed = Vec::new();
+
+    let result = super::load_minute_visit(
+        &fixture.root,
+        &found[0],
+        &mut before,
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+        |endpoint, sample| {
+            assert!(sample.is_ok());
+            consumed.push(endpoint.stamp.publication);
+            if endpoint.stamp.publication == 2 {
+                std::fs::set_permissions(&events, std::fs::Permissions::from_mode(0o644))?;
+            }
+
+            Ok(())
+        },
+    );
+
+    assert_eq!(consumed, [1, 2]);
+    assert_eq!(
+        persistence::reread_committed(&fixture.root, &found[0].marker).unwrap(),
+        manifest
+    );
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Commitment(_))
+    ));
     assert_eq!(budget.used(), 0);
 }

@@ -65,6 +65,7 @@ fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
     let mut decoded = MachineMinute::default();
 
     read_machine(&minute, &mut decoded).unwrap();
+    let admitted = read_admitted_machine(&fixture);
 
     let states = (expected.gpu_states.len(), expected.core_states.len());
     assert_eq!(
@@ -72,6 +73,7 @@ fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
         (3, (4, 8), 4)
     );
     assert_eq!(decoded, expected);
+    assert_eq!(admitted, expected);
 }
 
 #[test]
@@ -96,6 +98,7 @@ fn a_sealed_minute_holds_the_system_battery_and_disk_readings_the_ring_held() {
     let mut decoded = MachineMinute::default();
 
     read_machine(&minute, &mut decoded).unwrap();
+    let admitted = read_admitted_machine(&fixture);
 
     let held: Vec<_> = expected
         .ticks
@@ -116,7 +119,89 @@ fn a_sealed_minute_holds_the_system_battery_and_disk_readings_the_ring_held() {
         .filter(|state| state.frequency_khz.is_some())
         .count();
     assert_eq!(clocked, 8);
+    assert_eq!(
+        admitted
+            .core_states
+            .iter()
+            .filter(|row| row.frequency_khz.is_some())
+            .count(),
+        8
+    );
     assert_eq!(decoded, expected);
+    assert_eq!(admitted, expected);
+}
+
+#[test]
+fn admitted_machine_keeps_present_and_null_core_frequencies() {
+    // Goal: populated optional machine data matches the ring through admitted input.
+    // Method: mix clocked cores, missing IOReport, and cores without a captured clock.
+    let mut fixture = Fixture::new_mode(false, 2, None);
+    system_ring(&mut fixture);
+    publish_supplemented(&mut fixture, 1);
+    let absent = SupplementalReadings {
+        battery: None,
+        disks: None,
+        system: None,
+    };
+    publish_machine(&mut fixture, 2, Some(&absent));
+    publish_machine(&mut fixture, 3, Some(&absent));
+    let mut expected = MachineMinute::default();
+    for (publication, tick) in ring_ticks(&fixture) {
+        expected.push_tick(publication, &tick);
+    }
+    fixture.seal_minute(0);
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let mut legacy = MachineMinute::default();
+
+    read_machine(&minute, &mut legacy).unwrap();
+    let admitted = read_admitted_machine(&fixture);
+
+    assert_eq!(legacy, expected);
+    assert_eq!(admitted, expected);
+    assert_eq!(admitted.gpu_states.len(), 4);
+    assert_eq!(admitted.fans.len(), 4);
+    assert_eq!(admitted.core_states.len(), 8);
+    assert_eq!(
+        admitted
+            .core_states
+            .iter()
+            .filter(|row| row.frequency_khz.is_some())
+            .count(),
+        4
+    );
+    assert_eq!(
+        admitted
+            .core_states
+            .iter()
+            .filter(|row| row.frequency_khz.is_none())
+            .count(),
+        4
+    );
+}
+
+fn read_admitted_machine(fixture: &Fixture) -> MachineMinute {
+    let marker = marker(fixture, 0);
+    let source = super::SealedSource {
+        root: &fixture.root,
+        marker: &marker,
+    };
+    let budget = Arc::new(crate::store::ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let minute = super::ScopedSealedMinute::open_with_inputs_using(
+        &source,
+        &budget,
+        &operation,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
+    )
+    .unwrap();
+    let mut output = MachineMinute::default();
+
+    read_machine(&minute, &mut output).unwrap();
+    minute.revalidate_full().unwrap();
+    drop(minute);
+    assert_eq!(budget.used(), 0);
+
+    output
 }
 
 macro_rules! refuses_a_damaged_table {

@@ -9,7 +9,7 @@ use polars::prelude::{
     UInt64Type, col, len, lit,
 };
 
-use super::{Refused, SealedMinute, placement};
+use super::{Refused, ScopedSealedMinute as SealedMinute, placement};
 use crate::apps::AppKey;
 use crate::live_app_response::{App, KeyKind, MEMBERS_MAX, Measure, Sample};
 use persistence::app_tables::{
@@ -203,27 +203,39 @@ pub fn read_apps(
     };
 
     let table = minute.scan(APP_PARTS)?;
-    Ok(read_app_rows(
+    Ok(read_app_rows_with_operation(
         table.plan,
         rows,
         minute.publications(),
         into,
+        table.operation.as_ref(),
     )?)
 }
 
 /// Every App row of the App parts table `plan` of a minute whose seal counted `rows` rows of the
 /// observations of `publications`, which `into`, empty, takes, or none where the table is of
 /// another version.
+#[cfg(test)]
 pub(crate) fn read_app_rows(
     plan: LazyFrame,
     rows: u64,
     publications: Range<u64>,
     into: &mut AppMinute,
 ) -> Result<AppParts> {
+    read_app_rows_with_operation(plan, rows, publications, into, None)
+}
+
+fn read_app_rows_with_operation(
+    plan: LazyFrame,
+    rows: u64,
+    publications: Range<u64>,
+    into: &mut AppMinute,
+    operation: Option<&crate::cancellation::Operation>,
+) -> Result<AppParts> {
     assert!(into.samples.is_empty());
     assert!(into.apps.is_empty());
     assert!(into.keys.is_empty());
-    let version = read_app_rows_version(plan.clone(), rows)?;
+    let version = read_app_rows_version(plan.clone(), rows, operation)?;
     if version != PARTS_VERSION {
         return Ok(AppParts::Version(version));
     }
@@ -233,11 +245,11 @@ pub(crate) fn read_app_rows(
     for measure in MEASURES {
         columns.extend(measure_column_names(measure).map(col));
     }
-    let mut frame = plan
+    let plan = plan
         .filter(col("row_kind").neq(lit(ROW_PROCESS)))
         .select(columns)
-        .limit(ROWS_TAKEN)
-        .collect()?;
+        .limit(ROWS_TAKEN);
+    let mut frame = super::collect_plan(plan, operation)?;
     // A cell of a column in one chunk is read without finding its chunk first, which halves the
     // reading of the rows.
     frame.rechunk_mut();
@@ -248,14 +260,17 @@ pub(crate) fn read_app_rows(
 
 /// The version of every row of the App parts table `plan`, which must hold the `rows` rows its
 /// seal counted.
-fn read_app_rows_version(plan: LazyFrame, rows: u64) -> Result<u8> {
-    let summary = plan
-        .select([
-            col("version").min().alias("first"),
-            col("version").max().alias("last"),
-            len().cast(DataType::UInt64).alias("rows"),
-        ])
-        .collect()?;
+fn read_app_rows_version(
+    plan: LazyFrame,
+    rows: u64,
+    operation: Option<&crate::cancellation::Operation>,
+) -> Result<u8> {
+    let plan = plan.select([
+        col("version").min().alias("first"),
+        col("version").max().alias("last"),
+        len().cast(DataType::UInt64).alias("rows"),
+    ]);
+    let summary = super::collect_plan(plan, operation)?;
     let counted = Cells::<UInt64Type>::named(&summary, "rows")?.get(0)?;
     if counted != rows {
         return Err(Error::Bound("sealed parts rows"));
@@ -585,4 +600,64 @@ pub(crate) fn kept_measure(measure: Measure, members: u32) -> Result<Measure> {
     }
 
     Ok(measure)
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn cancellation_in_version_collection_starts_no_payload_collection() {
+        // Goal: cancellation between App-parts consumers cannot start a second native call.
+        // Method: cancel from the first native query over a real admitted App-parts plan.
+        let fixture = super::super::table_input_tests::parts_fixture();
+        let marker = persistence::layout::WindowKey {
+            run: fixture.writer.identity().unwrap().run,
+            window: 0,
+        }
+        .marker(&fixture.root);
+        let source = super::super::SealedSource {
+            root: &fixture.root,
+            marker: &marker,
+        };
+        let budget = Arc::new(crate::store::ByteBudget::new(64 * 1024 * 1024));
+        let cancellation = Arc::new(crate::cancellation::Cancellation::default());
+        let operation = Arc::clone(&cancellation).operation(0).unwrap();
+        let minute = SealedMinute::open_with_inputs_using(
+            &source,
+            &budget,
+            &operation,
+            &persistence::engine::AdmittedTable::from_file_budgeted,
+        )
+        .unwrap();
+        let table = minute.scan(APP_PARTS).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let plan = table.plan.map(
+            move |frame| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                cancellation.cancel().unwrap();
+                Ok(frame)
+            },
+            polars::prelude::AllowedOptimizations::empty(),
+            None,
+            Some("cancel_after_version"),
+        );
+        let mut output = AppMinute::default();
+
+        let result = read_app_rows_with_operation(
+            plan,
+            minute.rows(APP_PARTS).unwrap(),
+            minute.publications(),
+            &mut output,
+            table.operation.as_ref(),
+        );
+
+        assert!(matches!(result, Err(Error::Io(error))
+            if error.kind() == std::io::ErrorKind::Interrupted));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(output, AppMinute::default());
+    }
 }
