@@ -54,6 +54,29 @@ fn pause_holds_the_views_newest_second() {
 }
 
 #[test]
+fn pause_keeps_the_displayed_publication_among_same_second_siblings() {
+    // Goal: Pause holds the displayed publication, not another reading in the same wall second.
+    // Method: show distinct sibling readings and inspect the exact target sent by Pause.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    let first = reading_at(10_005, 0);
+    let shown = MachineSecond {
+        publication: 10_006,
+        wall_ns: first.wall_ns + 500_000_000,
+        cpu_percent: Some(91.0),
+        ..first
+    };
+    let mut view = view(1, &[], &[first, shown]);
+    view.apps[0] = Arc::new(apps_of(&first, "Browser", 100_000_000));
+    view.apps[1] = Arc::new(apps_of(&shown, "Browser", 900_000_000));
+    dashboard.take_view(Arc::new(view));
+
+    let held = dashboard.pause_target();
+
+    assert_eq!(held.0, Some(10_005));
+    assert_eq!(held.1.as_ref().unwrap()["publication"], 10_006);
+}
+
+#[test]
 fn the_range_ends_at_the_views_newest_second() {
     // Goal: the charts drawn from the View show its newest second, which the worker's readings
     // do not hold yet. Method: a View five seconds newer than the readings.

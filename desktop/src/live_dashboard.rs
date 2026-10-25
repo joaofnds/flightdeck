@@ -864,7 +864,10 @@ impl LiveDashboard {
         }
         // The page shows the View's newest second, which the worker may not have read yet.
         if let Some(second) = self.store_view_last_second() {
-            return (Some(second), None);
+            let identity = self
+                .store_view_target(second)
+                .and_then(|target| target.identity);
+            return (Some(second), identity);
         }
         let Some(snapshot) = self.context_snapshot() else {
             return (None, self.request.identity.clone());
