@@ -721,7 +721,9 @@ fn reader_snapshot(
         early,
         kept_tail_only,
     } = reader_snapshot_plan(reader, &command.request.route);
-    let session = reader_snapshot_session(&mut reader.session, root, command, shared)?;
+    let first_snapshot = reader.last_generation != command.generation;
+    let session =
+        reader_snapshot_session(&mut reader.session, root, command, shared, first_snapshot)?;
     let catalog = session.catalog();
     if published {
         if reader.last_catalog.as_ref() == Some(&catalog) {
@@ -812,13 +814,14 @@ fn reader_snapshot_histories(session: &LiveSession, snapshot: &Snapshot) -> Hist
     }
 }
 
-/// The reader's session, opened on the first read, begun for the command's epoch, and polled
-/// for new readings unless a page other than `self` asks for a chosen second.
+/// The reader's session, opened on the first read and begun for the command's epoch. A live
+/// selection first catches up the ring, then keeps that endpoint while deferred work finishes.
 fn reader_snapshot_session<'session>(
     slot: &'session mut Option<LiveSession>,
     root: &std::path::Path,
     command: &Command,
     shared: &Shared,
+    first_snapshot: bool,
 ) -> Result<&'session mut LiveSession, String> {
     let session = match slot {
         Some(session) => session,
@@ -832,7 +835,13 @@ fn reader_snapshot_session<'session>(
         .map_err(|error| error.to_string())?;
     let poll = match command.request.route.as_str() {
         "self" => true,
-        _ => command.request.second.is_none(),
+        _ => match command.mode {
+            SourceMode::Live => match command.request.second {
+                None => true,
+                Some(_) => first_snapshot && command.context == Context::Select,
+            },
+            SourceMode::Recorded => command.request.second.is_none(),
+        },
     };
     if poll {
         session.poll().map_err(|error| error.to_string())?;
@@ -939,7 +948,9 @@ fn reader_computer(
     shared: &Shared,
     published: bool,
 ) -> Result<Option<Box<Snapshot>>, String> {
-    let session = reader_snapshot_session(&mut reader.session, root, command, shared)?;
+    let first_snapshot = reader.last_generation != command.generation;
+    let session =
+        reader_snapshot_session(&mut reader.session, root, command, shared, first_snapshot)?;
     let catalog = session.catalog();
     if published {
         if reader.last_catalog.as_ref() == Some(&catalog) {

@@ -476,6 +476,53 @@ fn a_reader_handed_over_idle_leaves_its_session_where_it_is() {
 }
 
 #[test]
+fn a_resting_reader_selects_a_second_published_since_its_last_read() {
+    // Goal: Pause can select a reading already shown by the store while the page reader rests.
+    // Method: rest a real ring reader, publish another second, then request it through its handle.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let mut reader = SnapshotReader::new();
+    reader.command.mode = crate::live_source_mode::SourceMode::Live;
+    reader.read_at(&recording.root).unwrap().unwrap();
+    let mut kept = reader.hand_over_idle();
+    assert_eq!(reader.receive(), (super::Received::Continued, false));
+    recording.publish();
+    let mut request = SealedRecording::request();
+    request.second = Some(recording.last_second());
+
+    kept.request(request).unwrap();
+    assert!(reader.receive().1);
+    let selected = reader.read_at(&recording.root).unwrap().unwrap();
+
+    assert_eq!(selected.selection["second"], recording.last_second());
+    assert_eq!(selected.selection["selected"]["publication"], 2);
+    assert_eq!(
+        selected.selection["selected"]["wall_ns"],
+        1_001_000_000_000_u64
+    );
+    assert!(!selected.selection["summary"].is_null());
+}
+
+#[test]
+fn a_chosen_reading_keeps_its_context_while_deferred_work_finishes() {
+    // Goal: finishing a held request keeps the endpoint captured by its first snapshot.
+    // Method: publish a newer ring tick between Overview's initial snapshot and ranking step.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let mut reader = SnapshotReader::new();
+    reader.command.mode = crate::live_source_mode::SourceMode::Live;
+    reader.command.request.second = Some(recording.last_second());
+    let first = reader.read_at(&recording.root).unwrap().unwrap();
+    assert_eq!(first.selection["context_last_second"], 1000);
+
+    recording.publish();
+    let completed = reader.read_at(&recording.root).unwrap().unwrap();
+
+    assert_eq!(completed.selection["selected"], first.selection["selected"]);
+    assert_eq!(completed.selection["context_last_second"], 1000);
+}
+
+#[test]
 fn a_resting_reader_without_a_session_opens_one() {
     // Goal: a window closed before its reader opened the recording still opens again at once.
     // Method: step a reader that never read a page as the worker steps a resting one.
