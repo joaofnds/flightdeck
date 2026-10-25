@@ -1830,3 +1830,27 @@ fn held_through(view: &View, wall_second: u64) -> bool {
         .last()
         .is_some_and(|second| second.wall_ns / 1_000_000_000 == wall_second)
 }
+
+#[test]
+fn releasing_a_retained_view_allows_ingestion_after_the_spare_slots_fill() {
+    // Goal: backpressure ends when the reader releases its View, without another publication.
+    // Method: pin a full span, exhaust every spare slot, release the reader and retry the tick.
+    let mut held = super::Held::new();
+    let full = u64::try_from(super::SECONDS_MAX).unwrap();
+    for second in 1..=full {
+        assert!(held.take(&RUN, &second_at(second), UNREAD));
+    }
+    let reader = published(&mut held);
+    let last = full + u64::try_from(super::SECONDS_HELD_MAX).unwrap();
+    for second in full + 1..=last {
+        assert!(held.take(&RUN, &second_at(second), UNREAD));
+    }
+    let next = second_at(last + 1);
+    assert!(!held.take(&RUN, &next, UNREAD));
+
+    drop(reader);
+    let accepted = held.take(&RUN, &next, UNREAD);
+
+    assert!(accepted);
+    assert_eq!(held.span.newest().unwrap().publication, last + 1);
+}

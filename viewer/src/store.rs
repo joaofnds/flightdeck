@@ -337,6 +337,8 @@ impl Held {
             }
         }
 
+        self.release_views();
+
         let leaving = self.span.leaving().copied();
         let kept = leaving.filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
         if !self.span.has_room() {
@@ -412,9 +414,7 @@ impl Held {
         self.context.follow(&self.span, &self.apps);
     }
 
-    /// Hands the main thread a View of what the store holds, or leaves it to the next step
-    /// where the main thread holds every View.
-    fn publish(&mut self, mailbox: &Mailbox<View>) {
+    fn release_views(&mut self) {
         self.views.release(|view| {
             view.seconds.clear();
             view.apps.clear();
@@ -422,6 +422,12 @@ impl Held {
             view.sampled.clear();
             view.cohorts.clear();
         });
+    }
+
+    /// Hands the main thread a View of what the store holds, or leaves it to the next step
+    /// where the main thread holds every View.
+    fn publish(&mut self, mailbox: &Mailbox<View>) {
+        self.release_views();
         let version = self.version + 1;
         let span = &self.span;
         let apps = &self.apps;
