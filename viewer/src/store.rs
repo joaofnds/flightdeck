@@ -301,6 +301,7 @@ struct Held {
     unpublished: bool,
 }
 
+#[derive(Clone, Copy)]
 struct Newest {
     run: RunIdentity,
     publication: u64,
@@ -661,7 +662,7 @@ fn refresh(
     operation: Option<&Operation>,
 ) -> persistence::Result<bool> {
     let budget = held.payload_budget.clone();
-    let since = held.newest.as_ref().map(|newest| newest.run);
+    let since = held.newest;
     let mut accepted = true;
     let mut next_ring = Ring::new(root.to_owned());
     let mut take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {

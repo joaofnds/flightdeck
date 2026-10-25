@@ -978,3 +978,80 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
     ));
     assert_eq!(budget.used(), 0);
 }
+
+#[test]
+fn catch_up_keeps_only_unseen_minutes_and_their_predecessor_for_decoding() {
+    // Goal: a show does not decode the already retained hour again.
+    // Method: seal three real minutes and select new work after the second minute's endpoint.
+    let fixture = catch_up_fixture();
+    let newest = crate::store::Newest {
+        run: fixture.writer.identity().unwrap(),
+        publication: 3,
+        segment: 0,
+    };
+    let mut found = Vec::new();
+
+    super::super::find(&fixture.root, &mut found, Some(&newest)).unwrap();
+
+    let endpoints: Vec<_> = found.iter().map(|minute| minute.publication_end).collect();
+    assert_eq!(endpoints, [5, 4]);
+}
+
+#[test]
+fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
+    // Goal: removing old decode work cannot erase the first new observation's predecessor.
+    // Method: load after publication 3 and check publication 4's real machine and process rates.
+    let fixture = catch_up_fixture();
+    let newest = crate::store::Newest {
+        run: fixture.writer.identity().unwrap(),
+        publication: 3,
+        segment: 0,
+    };
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut selected = None;
+
+    super::super::load_payload_since(
+        &fixture.root,
+        &budget,
+        &operation,
+        Some(&newest),
+        |_, second, apps| {
+            if second.publication == 4 {
+                let crate::store::apps::TickApps::Loaded(apps) = apps else {
+                    panic!("the fixture supplies complete process payloads");
+                };
+                selected = Some((*second, std::mem::replace(apps, AppsSecond::with_room())));
+            }
+        },
+    )
+    .unwrap();
+
+    let (machine, apps) = selected.unwrap();
+    assert!(machine.follows);
+    assert_eq!(machine.cpu_percent, Some(50.0));
+    assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
+    assert_eq!(
+        apps.processes
+            .as_ref()
+            .unwrap()
+            .previous
+            .unwrap()
+            .publication,
+        3
+    );
+}
+
+fn catch_up_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(160);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(219);
+    fixture.seal_minute(1);
+    fixture.publish_with_system_rows(220);
+    fixture.seal_minute(2);
+    fixture
+}

@@ -68,7 +68,7 @@ pub(super) fn load_payload_since(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
-    since: Option<&RunIdentity>,
+    since: Option<&super::Newest>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     load_payload_since_using(
@@ -86,7 +86,7 @@ fn load_payload_since_using(
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
     capture: &crate::recording::InputCapture<'_>,
-    since: Option<&RunIdentity>,
+    since: Option<&super::Newest>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     operation.check()?;
@@ -124,6 +124,7 @@ struct Found {
     run: RunIdentity,
     marker: PathBuf,
     wall_ns_max: u64,
+    publication_end: u64,
 }
 
 impl Found {
@@ -147,7 +148,7 @@ pub(super) fn load(
 
 pub(super) fn load_since(
     root: &Path,
-    since: Option<&RunIdentity>,
+    since: Option<&super::Newest>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     let mut found = Vec::with_capacity(MINUTES_MAX);
@@ -448,7 +449,7 @@ fn decode_refusal(refused: &Refused) -> String {
 
 /// Finds the sealed minutes of the loaded hour into `found`, newest first, from the newest run
 /// the recording registers back.
-fn find(root: &Path, found: &mut Vec<Found>, since: Option<&RunIdentity>) -> Result<(), Failure> {
+fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> Result<(), Failure> {
     let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
     let mut buffer: RegistryBuffer = [0; _];
     let registry = Registry::read_into(&root.join("runs"), &mut buffer)
@@ -460,11 +461,11 @@ fn find(root: &Path, found: &mut Vec<Found>, since: Option<&RunIdentity>) -> Res
     }
 
     let first = if let Some(since) = since {
-        if since.recording != recording {
+        if since.run.recording != recording {
             return Err(Failure::ForeignRecording);
         }
         runs.iter()
-            .position(|run| run == since)
+            .position(|run| *run == since.run)
             .ok_or(Failure::ChangedIdentity)?
     } else {
         0
@@ -480,11 +481,28 @@ fn find(root: &Path, found: &mut Vec<Found>, since: Option<&RunIdentity>) -> Res
             .find(&mut oldest_ns, found)
             .map_err(|error| Failure::Commits(error.kind()))?;
         if !more {
-            return Ok(());
+            break;
         }
+    }
+    if let Some(since) = since {
+        find_unread(found, since);
     }
 
     Ok(())
+}
+
+/// Keeps new minutes and one already-held minute to seed their predecessor-dependent rates.
+fn find_unread(found: &mut Vec<Found>, since: &super::Newest) {
+    assert!(found.len() <= MINUTES_MAX);
+    let predecessor = found.iter().position(|minute| {
+        if minute.run != since.run {
+            return false;
+        }
+        minute.publication_end.saturating_sub(1) <= since.publication
+    });
+    if let Some(predecessor) = predecessor {
+        found.truncate(predecessor + 1);
+    }
 }
 
 /// The search for the sealed minutes of one run of the recording.
@@ -540,6 +558,7 @@ impl FindRun<'_> {
                     run: *self.run,
                     marker,
                     wall_ns_max: wall_ns.max,
+                    publication_end: manifest.publication_end,
                 });
             }
         }
