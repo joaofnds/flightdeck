@@ -298,7 +298,7 @@ fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refu
     let system = SYSTEM_FIELDS.map(|(name, _)| name);
     let battery = BATTERY_FIELDS.map(|(name, _)| name);
     let disks = [persistence::disks::FIELD];
-    let table = minute.table(Table::Ticks)?;
+    let table = minute.ticks()?;
     let temperatures_held = table.holds(&temperatures)?;
     let system_held = table.holds(&system)?;
     let battery_held = table.holds(&battery)?;
@@ -318,7 +318,7 @@ fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refu
     if disks_held {
         columns.extend(disks);
     }
-    let frame = table.collect(&columns)?;
+    let frame = table.collect(&columns, None)?;
 
     read_ticks_rows(&frame, into)?;
     ordered(into, "tick order", |tick| tick.publication)?;

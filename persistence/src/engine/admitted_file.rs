@@ -14,9 +14,9 @@ mod tests;
 
 /// Immutable compressed bytes shared by admission and projected decoding.
 pub struct AdmittedFile {
-    bytes: Vec<u8>,
+    pub(super) bytes: Vec<u8>,
     // Fields drop in declaration order, so captured storage dies before its charge.
-    reservation: Option<ByteReservation>,
+    pub(super) reservation: Option<ByteReservation>,
 }
 
 /// Inline failure data; the budgeted path destroys rich errors before releasing scratch.
@@ -56,6 +56,14 @@ impl AdmittedFile {
     /// Decodes named columns while retaining the admitted bytes for subsequent projections.
     /// Native decoding and projection allocations are not charged by `open_budgeted`.
     pub fn read(&self, columns: &[&str]) -> Result<DataFrame> {
+        self.read_prefix(columns, None)
+    }
+
+    pub(super) fn read_prefix(
+        &self,
+        columns: &[&str],
+        row_limit: Option<u32>,
+    ) -> Result<DataFrame> {
         if let Some(reservation) = &self.reservation {
             assert_eq!(reservation.bytes(), self.bytes.capacity());
         }
@@ -71,10 +79,15 @@ impl AdmittedFile {
             }
         }
 
+        let slice = row_limit
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| Error::Bound("parquet prefix rows"))?
+            .map(|length| (0, length));
         let columns = columns.iter().map(|name| (*name).to_owned()).collect();
         Ok(ParquetReader::new(Cursor::new(self.bytes.as_slice()))
             .set_rechunk(false)
-            .with_slice(None)
+            .with_slice(slice)
             .with_columns(Some(columns))
             .with_projection(None)
             .read_parallel(ParallelStrategy::None)
@@ -88,6 +101,13 @@ impl AdmittedFile {
 
 fn open_file(path: &Path, compressed_bytes_max: u64) -> Result<(File, u64)> {
     let file = File::open(path)?;
+
+    let size = file_size(&file, compressed_bytes_max)?;
+
+    Ok((file, size))
+}
+
+pub(super) fn file_size(file: &File, compressed_bytes_max: u64) -> Result<u64> {
     let size = file.metadata()?.len();
     if size > compressed_bytes_max.min(admission::FILE_BYTES_MAX) {
         return Err(Error::Bound("parquet file bytes"));
@@ -96,10 +116,17 @@ fn open_file(path: &Path, compressed_bytes_max: u64) -> Result<(File, u64)> {
         return Err(Error::Bound("parquet file framing"));
     }
 
-    Ok((file, size))
+    Ok(size)
 }
 
 fn capture(file: &mut impl Read, size: u64) -> Result<Vec<u8>> {
+    let bytes = capture_bytes(file, size)?;
+    admission::validate_reader(&mut Cursor::new(&bytes), size)?;
+
+    Ok(bytes)
+}
+
+pub(super) fn capture_bytes(file: &mut impl Read, size: u64) -> Result<Vec<u8>> {
     let length = usize::try_from(size).map_err(|_| Error::Bound("parquet file bytes"))?;
     let mut bytes = Vec::new();
     bytes
@@ -111,7 +138,6 @@ fn capture(file: &mut impl Read, size: u64) -> Result<Vec<u8>> {
         return Err(Error::Bound("changed parquet file size"));
     }
 
-    admission::validate_reader(&mut Cursor::new(&bytes), size)?;
     Ok(bytes)
 }
 
@@ -139,7 +165,7 @@ fn capture_budgeted(
     result
 }
 
-fn refuse(error: Error) -> AdmissionRefusal {
+pub(super) fn refuse(error: Error) -> AdmissionRefusal {
     match error {
         Error::Bound(context) => AdmissionRefusal::Bound(context),
         Error::Io(error) => AdmissionRefusal::Io {

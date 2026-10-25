@@ -106,6 +106,14 @@ pub(super) fn validate(path: &Path) -> Result<()> {
 }
 
 pub(super) fn validate_reader(reader: &mut (impl Read + Seek), size: u64) -> Result<()> {
+    drop(validate_reader_metadata(reader, size)?);
+    Ok(())
+}
+
+pub(super) fn validate_reader_metadata(
+    reader: &mut (impl Read + Seek),
+    size: u64,
+) -> Result<ThriftFileMetadata> {
     if size > FILE_BYTES_MAX {
         return Err(Error::Bound("parquet file bytes"));
     }
@@ -124,7 +132,7 @@ pub(super) fn validate_reader(reader: &mut (impl Read + Seek), size: u64) -> Res
         validate_group(reader, group, &footer, &mut totals)?;
     }
 
-    Ok(())
+    Ok(metadata)
 }
 
 fn validate_footer(file: &mut (impl Read + Seek), size: u64) -> Result<Extent> {

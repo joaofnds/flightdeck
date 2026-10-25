@@ -7,6 +7,8 @@ pub(crate) mod apps;
 mod machine;
 mod minute_ticks;
 mod processes;
+mod ticks_input;
+use ticks_input::TicksInput;
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -28,6 +30,12 @@ pub struct SealedMinute {
     root: PathBuf,
     marker: PathBuf,
     manifest: persistence::Manifest,
+    ticks: Option<TicksInput>,
+}
+
+pub(crate) struct SealedSource<'path> {
+    pub(crate) root: &'path Path,
+    pub(crate) marker: &'path Path,
 }
 
 /// Why a minute was not read, so the store holds it as failed with that reason and never as
@@ -38,6 +46,8 @@ pub enum Refused {
     Commitment(std::io::Error),
     /// A table broke an admission bound or did not decode as format 1 writes it.
     Decode(persistence::Error),
+    /// An admitted input or its column storage could not be reserved or admitted.
+    Input(persistence::engine::AdmissionRefusal),
 }
 
 impl From<persistence::Error> for Refused {
@@ -47,6 +57,17 @@ impl From<persistence::Error> for Refused {
 }
 
 impl SealedMinute {
+    pub(crate) fn revalidate_full(&self) -> Result<(), Refused> {
+        let current =
+            persistence::read_committed(&self.root, &self.marker).map_err(Refused::Commitment)?;
+
+        if current != self.manifest {
+            return Err(Refused::Commitment(std::io::ErrorKind::InvalidData.into()));
+        }
+
+        Ok(())
+    }
+
     /// The full run identity of the manifest whose commitment `open` verified.
     pub(crate) fn identity(&self) -> &collector::ring::RunIdentity {
         &self.manifest.identity.run
@@ -59,6 +80,7 @@ impl SealedMinute {
             root: root.to_owned(),
             marker: marker.to_owned(),
             manifest,
+            ticks: None,
         })
     }
 
@@ -116,19 +138,7 @@ impl SealedTable {
     /// Whether the table holds the optional columns `group`, which a minute holds whole or
     /// not at all.
     fn holds(&self, group: &[&str]) -> Result<bool, Refused> {
-        let held = group
-            .iter()
-            .filter(|name| self.schema.contains(name))
-            .count();
-        if held == 0 {
-            return Ok(false);
-        }
-
-        if held < group.len() {
-            return Err(persistence::Error::Bound("incomplete column group").into());
-        }
-
-        Ok(true)
+        holds_columns(group, |name| self.schema.contains(name))
     }
 
     /// The `columns`, rows in the order the file holds them.
@@ -139,6 +149,19 @@ impl SealedTable {
             .collect()
             .map_err(|error| Refused::Decode(persistence::Error::from(error)))
     }
+}
+
+fn holds_columns(group: &[&str], mut contains: impl FnMut(&str) -> bool) -> Result<bool, Refused> {
+    let held = group.iter().filter(|name| contains(name)).count();
+    if held == 0 {
+        return Ok(false);
+    }
+
+    if held < group.len() {
+        return Err(persistence::Error::Bound("incomplete column group").into());
+    }
+
+    Ok(true)
 }
 
 /// The place in its table of each row in publication order, the rows of one publication in the
@@ -199,3 +222,7 @@ fn ordered<T, K: Ord>(
 #[cfg(test)]
 #[path = "recording/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "recording/ticks_input_tests.rs"]
+mod ticks_input_tests;

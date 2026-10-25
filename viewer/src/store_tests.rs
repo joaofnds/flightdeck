@@ -104,7 +104,7 @@ pub(super) fn expand_program_dictionary(fixture: &mut Fixture) {
 }
 
 fn sealed_payload_view(fixture: &Fixture) -> Arc<View> {
-    let budget = Arc::new(super::ByteBudget::new(16 * 1024 * 1024));
+    let budget = Arc::new(super::ByteBudget::new(64 * 1024 * 1024));
     let mut held = super::Held::new();
     held.enable_payload(Arc::clone(&budget));
     let operation = Arc::new(crate::cancellation::Cancellation::default())

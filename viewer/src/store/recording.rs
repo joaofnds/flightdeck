@@ -45,6 +45,28 @@ pub(super) fn load_payload(
     operation: &crate::cancellation::Operation,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
+    load_payload_using(
+        root,
+        budget,
+        operation,
+        &mut persistence::engine::AdmittedTable::from_file_budgeted,
+        take,
+    )
+}
+
+pub(super) fn load_payload_using(
+    root: &Path,
+    budget: &Arc<super::ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    capture: &mut impl FnMut(
+        std::fs::File,
+        &Arc<super::ByteBudget>,
+    ) -> Result<
+        persistence::engine::AdmittedTable,
+        persistence::engine::AdmissionRefusal,
+    >,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
     operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
     let discovered = find(root, &mut found);
@@ -56,7 +78,7 @@ pub(super) fn load_payload(
         });
     }
     found.reverse();
-    let outcome = payload::load(root, &found, budget, operation, take)?;
+    let outcome = payload::load(root, &found, budget, operation, capture, take)?;
     operation.check()?;
 
     Ok(outcome)
@@ -390,6 +412,7 @@ fn decode_refusal(refused: &Refused) -> String {
     match refused {
         Refused::Commitment(error) => format!("the sealed minute did not verify: {error}"),
         Refused::Decode(error) => format!("the sealed minute's Apps did not decode: {error}"),
+        Refused::Input(error) => format!("the sealed minute's input was refused: {error:?}"),
     }
 }
 

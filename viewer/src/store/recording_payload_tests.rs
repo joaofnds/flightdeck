@@ -1,9 +1,253 @@
+use persistence::engine::AdmittedTable;
 use std::sync::Arc;
 
 use super::{Decoder, load_consume};
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
 use crate::store::{AppsSecond, ByteBudget};
+
+#[test]
+fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
+    // Goal: the payload loader cannot discard admitted ticks and reopen a legacy minute.
+    // Method: replace ticks inside its real capture factory, before both loader consumers.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let ticks = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("ticks.parquet");
+    let replacement = prepare_changed_ticks(&crate::recording::SealedSource {
+        root: &fixture.root,
+        marker: &found[0].marker,
+    });
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut before = None;
+    let mut captures = 0;
+
+    let (machine, apps) = super::load_minute(
+        &fixture.root,
+        &found[0],
+        &mut before,
+        &budget,
+        &operation,
+        &mut |file, budget| {
+            let input = AdmittedTable::from_file_budgeted(file, budget)?;
+            captures += 1;
+            std::fs::rename(&replacement, &ticks).unwrap();
+            Ok(input)
+        },
+    )
+    .unwrap();
+
+    assert_loader_clocks(&machine, &apps, &fixture.writer.identity().unwrap());
+    assert_eq!(captures, 1);
+    assert!(before.is_some());
+    drop(apps);
+    assert_eq!(budget.used(), 0);
+}
+
+fn assert_loader_clocks(
+    machine: &crate::recording::MachineMinute,
+    apps: &[AppsSecond],
+    identity: &collector::ring::RunIdentity,
+) {
+    for second in apps {
+        let processes = second.processes.as_ref().unwrap();
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].pid, 1);
+        assert_eq!(processes[1].pid, 7);
+        let observation = second.observation.unwrap();
+        assert_eq!(observation.recording, identity.recording.0);
+        assert_eq!(observation.stamp.run, identity.run.0);
+        assert_eq!(observation.stamp.boot, identity.boot.0);
+    }
+
+    let machine: Vec<_> = machine
+        .ticks
+        .iter()
+        .map(|tick| {
+            (
+                tick.publication,
+                tick.run_tick,
+                tick.wall_ns,
+                tick.continuous_ns,
+                tick.awake_ns,
+            )
+        })
+        .collect();
+    let processes: Vec<_> = apps
+        .iter()
+        .map(|apps| {
+            let observation = apps.observation.unwrap();
+            (
+                observation.stamp.publication,
+                observation.run_tick,
+                observation.wall_ns,
+                observation.stamp.continuous_ns,
+                observation.stamp.awake_ns,
+            )
+        })
+        .collect();
+    let expected = [
+        (1, 0, Some(100_000_000_000), Some(0), Some(0)),
+        (
+            2,
+            1,
+            Some(100_000_000_000),
+            Some(1_000_000_000),
+            Some(1_000_000_000),
+        ),
+    ];
+
+    assert_eq!(machine, expected);
+    assert_eq!(processes, expected);
+}
+
+fn prepare_changed_ticks(source: &crate::recording::SealedSource<'_>) -> std::path::PathBuf {
+    use polars::polars_utils::compression::ZstdLevel;
+    use polars::prelude::{
+        IntoLazy, ParquetCompression, ParquetWriter, StatisticsOptions, col, lit,
+    };
+    let manifest = persistence::read_committed(source.root, source.marker).unwrap();
+    let path = source
+        .root
+        .join(manifest.data_directory)
+        .join("ticks.parquet");
+    let mut frame = persistence::engine::scan(&path)
+        .unwrap()
+        .collect()
+        .unwrap()
+        .lazy()
+        .with_columns([
+            (col("wall_ns") + lit(10_000_000_000u64)).alias("wall_ns"),
+            (col("continuous_ns") + lit(10_000_000_000u64)).alias("continuous_ns"),
+            (col("awake_ns") + lit(10_000_000_000u64)).alias("awake_ns"),
+        ])
+        .collect()
+        .unwrap();
+    let replacement = source.root.join("changed-ticks.parquet");
+    let file = collector::recording::private::open_private_file(&replacement, true).unwrap();
+
+    ParquetWriter::new(file)
+        .with_compression(ParquetCompression::Zstd(Some(
+            ZstdLevel::try_new(3).unwrap(),
+        )))
+        .with_statistics(StatisticsOptions {
+            min_value: true,
+            max_value: true,
+            distinct_count: false,
+            null_count: true,
+            binary_statistics_truncate_length: None,
+        })
+        .with_row_group_size(Some(16_384))
+        .with_data_page_size(None)
+        .set_parallel(false)
+        .with_key_value_metadata(None)
+        .with_context_info(None)
+        .finish(&mut frame)
+        .unwrap();
+
+    replacement
+}
+
+#[test]
+fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitment() {
+    // Goal: acceptance must verify consumed files, not only reread the unchanged marker.
+    // Method: make ticks nonprivate in the real loader's last process-consumer callback.
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let ticks = fixture
+        .root
+        .join(&manifest.data_directory)
+        .join("ticks.parquet");
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut before = None;
+    let mut consumed = Vec::new();
+
+    let result = super::load_minute_visit(
+        &fixture.root,
+        &found[0],
+        &mut before,
+        &budget,
+        &operation,
+        &mut AdmittedTable::from_file_budgeted,
+        |endpoint, sample| {
+            assert!(sample.is_ok());
+            consumed.push(endpoint.stamp.publication);
+            if endpoint.stamp.publication == 2 {
+                std::fs::set_permissions(&ticks, std::fs::Permissions::from_mode(0o644))?;
+            }
+            Ok(())
+        },
+    );
+
+    assert_eq!(consumed, [1, 2]);
+    assert_eq!(
+        persistence::reread_committed(&fixture.root, &found[0].marker).unwrap(),
+        manifest
+    );
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Commitment(_))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
+    // Goal: the actual opt-in loader cannot convert an input refusal into complete coverage.
+    // Method: exhaust one shared budget before decoding a real sealed minute.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found).unwrap();
+    let budget = Arc::new(ByteBudget::new(1024));
+    let charge = budget.reserve(1024).unwrap();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut before = None;
+
+    let result = super::load_minute(
+        &fixture.root,
+        &found[0],
+        &mut before,
+        &budget,
+        &operation,
+        &mut AdmittedTable::from_file_budgeted,
+    );
+    let mut decoder = Decoder::default();
+    let batch = decoder.decode(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &mut AdmittedTable::from_file_budgeted,
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Input(
+            persistence::engine::AdmissionRefusal::Budget
+        ))
+    ));
+    assert_eq!(batch.left_out, Some(crate::store::Failure::Refused));
+    assert!(batch.seconds.is_empty());
+    assert!(decoder.predecessor.is_none());
+    assert_eq!(budget.used(), charge.bytes());
+}
 
 #[test]
 fn a_sealed_boot_mismatch_cannot_seed_machine_rates_under_the_registry_identity() {
@@ -19,7 +263,7 @@ fn a_sealed_boot_mismatch_cannot_seed_machine_rates_under_the_registry_identity(
     for second in 101..109 {
         fixture.publish_with_system_rows(second);
     }
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut accepted = Vec::new();
 
@@ -123,7 +367,7 @@ fn cancellation_in_one_minute_accepts_only_its_first_observation() {
     fixture.seal();
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut accepted = Vec::new();
 
     let result = crate::store::recording::load_payload(
@@ -158,12 +402,18 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
     fixture.seal_minute(1);
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found).unwrap();
     found.reverse();
     let mut decoder = Decoder::default();
-    let first = decoder.decode(&fixture.root, &found[0], &budget, &operation);
+    let first = decoder.decode(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &mut AdmittedTable::from_file_budgeted,
+    );
     let mut retained = AppsSecond::with_room();
     load_consume(first, &operation, |_, _, apps| {
         retained.take(apps, None, Some(&budget));
@@ -171,7 +421,13 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
     .unwrap();
     let reader = Arc::new(retained);
     let charge = reader.processes.as_ref().unwrap().bytes();
-    let completion = decoder.decode(&fixture.root, &found[1], &budget, &operation);
+    let completion = decoder.decode(
+        &fixture.root,
+        &found[1],
+        &budget,
+        &operation,
+        &mut AdmittedTable::from_file_budgeted,
+    );
     assert!(budget.used() > charge);
     let mut accepted = 0;
     cancellation.cancel().unwrap();
@@ -198,11 +454,17 @@ fn terminal_projection_keeps_only_the_last_raw_tick_and_all_its_tables() {
     fixture.publish_with_system_rows(101);
     fixture.seal();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found).unwrap();
     let mut decoder = Decoder::default();
-    drop(decoder.decode(&fixture.root, &found[0], &budget, &operation));
+    drop(decoder.decode(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &mut AdmittedTable::from_file_budgeted,
+    ));
     decoder.previous.ticks[1].wall_ns = None;
     for publication in 1..=2 {
         decoder

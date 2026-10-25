@@ -12,7 +12,7 @@ fn cancellation_immediately_before_publication_leaves_no_startup_view() {
     fixture.seal();
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut held = super::Held::new();
     held.enable_payload(Arc::clone(&budget));
     let outcome =
@@ -49,7 +49,7 @@ fn cancellation_before_loading_accepts_no_observations() {
     fixture.seal();
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut accepted = 0;
     cancellation.cancel().unwrap();
 
@@ -75,7 +75,7 @@ fn cancellation_during_consumption_accepts_no_later_minute() {
     }
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut accepted = Vec::new();
 
     let outcome =
@@ -99,7 +99,7 @@ fn cancellation_after_last_consumption_rejects_the_terminal_handoff() {
     fixture.seal();
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let mut held = super::Held::new();
     held.enable_payload(Arc::clone(&budget));
     let mut accepted = 0;
@@ -150,7 +150,7 @@ fn assert_cold_matches_warm(sealed_count: u64) {
     for offset in 0..sealed_count {
         fixture.publish_with_usage(100 + offset, &usage(offset));
     }
-    let warm = super::Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let warm = super::Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
     super::tests::view_where(&warm, |view| {
         view.seconds.len() == usize::try_from(sealed_count).unwrap()
     });
@@ -162,7 +162,7 @@ fn assert_cold_matches_warm(sealed_count: u64) {
         view.seconds.len() == usize::try_from(sealed_count + 8).unwrap()
     });
 
-    let cold = super::Store::start_with_payload(&fixture.root, 1024 * 1024).unwrap();
+    let cold = super::Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
     let actual = super::tests::view_where(&cold, |view| {
         view.seconds.len() == usize::try_from(sealed_count + 8).unwrap()
     });
@@ -213,18 +213,33 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
     fixture.seal_minute(1);
     fixture.seal_minute(2);
     let charges = fixture_payload_charges(&fixture);
-    let maximum = *charges.iter().max().unwrap();
+    let payload_maximum = *charges.iter().max().unwrap();
+    let maximum = payload_maximum + fixture_input_peak(&fixture);
     assert!(*charges.iter().min().unwrap() > 0);
-    assert!(charges.iter().sum::<usize>() > maximum);
-    assert!(charges.iter().min().unwrap() * 2 > maximum);
+    assert!(charges.iter().sum::<usize>() > payload_maximum);
+    assert!(charges.iter().min().unwrap() * 2 > payload_maximum);
     let budget = Arc::new(ByteBudget::new(maximum));
     let mut results = Vec::with_capacity(3);
+    let mut captures = 0;
+    let mut capture = |file, budget: &Arc<ByteBudget>| {
+        assert_eq!(
+            budget.used(),
+            0,
+            "only consumed completions may precede the next capture"
+        );
+        captures += 1;
+        persistence::engine::AdmittedTable::from_file_budgeted(file, budget)
+    };
 
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
-    let outcome =
-        super::recording::load_payload(&fixture.root, &budget, &operation, |_, second, apps| {
+    let outcome = super::recording::load_payload_using(
+        &fixture.root,
+        &budget,
+        &operation,
+        &mut capture,
+        |_, second, apps| {
             let super::apps::TickApps::Loaded(loaded) = apps else {
                 panic!("valid fixture machine and App rows must decode");
             };
@@ -237,11 +252,40 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
                 .map_err(Clone::clone);
             results.push((second.publication, count));
             drop(taken);
-        });
+        },
+    );
 
     assert_eq!(outcome.unwrap().left_out, None);
     assert_eq!(results, [(1, Ok(2)), (2, Ok(2)), (3, Ok(2))]);
+    assert_eq!(captures, 3);
     assert_eq!(budget.used(), 0);
+}
+
+fn fixture_input_peak(fixture: &Fixture) -> usize {
+    // The cursor certificate requires 43 MiB scratch alongside retained ticks and names.
+    let budget = Arc::new(ByteBudget::new(usize::MAX));
+    let mut peak = 0;
+    for window in 0..4 {
+        let marker = persistence::layout::WindowKey {
+            run: fixture.writer.identity().unwrap().run,
+            window,
+        }
+        .marker(&fixture.root);
+        if !marker.exists() {
+            continue;
+        }
+        let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
+        let path = fixture
+            .root
+            .join(manifest.data_directory)
+            .join("ticks.parquet");
+        let file = std::fs::File::open(path).unwrap();
+        let input = persistence::engine::AdmittedTable::from_file_budgeted(file, &budget).unwrap();
+        peak = peak.max(43 * 1024 * 1024 + budget.used());
+        drop(input);
+    }
+    assert_eq!(budget.used(), 0);
+    peak
 }
 
 fn fixture_payload_charges(fixture: &Fixture) -> Vec<usize> {
@@ -274,27 +318,50 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
         fixture.seal_minute(minute);
     }
     let charges = fixture_payload_charges(&fixture);
-    let maximum = charges.iter().max().unwrap() * 3;
-    assert!(charges.iter().sum::<usize>() > maximum);
+    let payload_maximum = charges.iter().max().unwrap() * 3;
+    let maximum = payload_maximum + fixture_input_peak(&fixture);
+    assert!(charges.iter().sum::<usize>() > payload_maximum);
     let budget = Arc::new(ByteBudget::new(maximum));
     let mut span = super::Span::new(1, super::Buffers::new(2, AppsSecond::with_room));
     let mut reader = None;
     let mut publications = Vec::new();
+    let expected = [
+        0,
+        charges[0],
+        charges[0] + charges[1],
+        charges[0] + charges[2],
+    ];
+    let mut captures = 0;
+    let mut capture = |file, budget: &Arc<ByteBudget>| {
+        assert_eq!(
+            budget.used(),
+            expected[captures],
+            "only reader/pool owners may precede capture"
+        );
+        captures += 1;
+        persistence::engine::AdmittedTable::from_file_budgeted(file, budget)
+    };
 
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
-    let outcome =
-        super::recording::load_payload(&fixture.root, &budget, &operation, |_, second, apps| {
+    let outcome = super::recording::load_payload_using(
+        &fixture.root,
+        &budget,
+        &operation,
+        &mut capture,
+        |_, second, apps| {
             assert!(span.push(|buffer| buffer.take(apps, None, Some(&budget))));
             let newest = span.newest_held().unwrap();
             assert_eq!(newest.processes.as_ref().unwrap().len(), 2);
             publications.push(second.publication);
             reader.get_or_insert_with(|| Arc::clone(newest));
-        });
+        },
+    );
 
     assert_eq!(outcome.unwrap().left_out, None);
     assert_eq!(publications, [1, 2, 3, 4]);
+    assert_eq!(captures, 4);
     let reader = reader.unwrap();
     assert_eq!(reader.observation.unwrap().stamp.publication, 1);
     assert_eq!(reader.processes.as_ref().unwrap().len(), 2);

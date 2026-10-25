@@ -287,12 +287,11 @@ pub(crate) fn read_processes_batch(minute: &SealedMinute) -> Result<ProcessBatch
 }
 
 /// The endpoint of each of `minute`'s ticks, in the order the table holds them.
-fn read_processes_endpoints(minute: &SealedMinute) -> Result<Vec<Endpoint>, Refused> {
+pub(super) fn read_processes_endpoints(minute: &SealedMinute) -> Result<Vec<Endpoint>, Refused> {
     let limit =
         u32::try_from(ENDPOINTS_MAX + 1).map_err(|_| persistence::Error::Bound("process ticks"))?;
-    let mut ticks = minute.table(Table::Ticks)?;
-    ticks.plan = ticks.plan.limit(limit);
-    let frame = ticks.collect(&TICK_COLUMNS)?;
+    let ticks = minute.ticks()?;
+    let frame = ticks.collect(&TICK_COLUMNS, Some(limit))?;
 
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let run_tick = Cells::<UInt64Type>::named(&frame, "run_tick")?;
