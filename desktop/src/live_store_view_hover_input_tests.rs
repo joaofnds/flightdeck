@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use gpui::{Modifiers, MouseButton, TestAppContext};
-use viewer::store::{AppsSecond, MachineSecond, View};
+use viewer::store::{AppsSecond, ByteBudget, MachineSecond, SampledSecond, View};
 
 use super::super::LiveDashboard;
 use super::{InputDriver, InputHarness, PlotExit};
@@ -138,6 +138,48 @@ fn hovering_a_second_the_view_holds_reads_nothing(cx: &mut TestAppContext) {
     harness.driver.tick_hover();
 
     assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_a_retained_older_sample_uses_its_machine_and_app_readings(cx: &mut TestAppContext) {
+    // Goal: a thirty-minute-old retained hover uses its exact machine and ranked App payload.
+    // Method: rest the worker, hover a budgeted sample missing from its readings, then tick.
+    let older = reading_at(8_200, 0);
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_sampled_tail(&older, &held_seconds(), 1_048_576);
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.hover_held_second(8_200);
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 0);
+    harness.driver.assert_top_apps(&top_apps(&older), 8_200);
+    let expected = summary::cards("overview", &summary_selection(&older));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_refused_older_sample_keeps_its_reading_and_reports_unavailable_apps(cx: &mut TestAppContext) {
+    // Goal: a refused retained ranking stays unavailable instead of starting an unbudgeted read.
+    // Method: hover a thirty-minute-old sample with a zero-byte budget and its worker rested.
+    let older = reading_at(8_200, 0);
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_sampled_tail(&older, &held_seconds(), 0);
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.hover_held_second(8_200);
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 0);
+    assert!(harness.driver.reading_is_visible(
+        "App totals unavailable: the complete payload exceeds its byte budget"
+    ));
+    let expected = summary::cards("overview", &summary_selection(&older));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
 
@@ -382,6 +424,31 @@ fn top_apps(second: &MachineSecond) -> TopApps {
 }
 
 impl InputDriver {
+    /// Shows a budgeted older sample and rests the legacy reader before inspecting it.
+    fn show_sampled_tail(
+        &mut self,
+        older: &MachineSecond,
+        seconds: &[MachineSecond],
+        bytes: usize,
+    ) {
+        self.show_held_view_over_unread_tail(&[*older], seconds);
+        let budget = Arc::new(ByteBudget::new(bytes));
+        let sample = SampledSecond::from_second(older, &held_apps(older), &budget);
+        let mut held = held_view(2, &[*older], seconds);
+        Arc::get_mut(&mut held)
+            .unwrap()
+            .sampled
+            .push(Arc::new(sample));
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_view(held));
+            if let Some(resting) = dashboard.worker.hand_over_idle().unwrap() {
+                dashboard.worker = resting;
+            }
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     /// Shows Overview drawn from the `held_view` of `seconds` over the worker's readings of
     /// 9,999 and 10,000, following the newest second.
     fn show_held_view(&mut self, seconds: &[MachineSecond]) {

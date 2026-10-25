@@ -69,6 +69,17 @@ pub struct SampledRank<'sample> {
 }
 
 impl SampledSecond {
+    /// Retains one observation's machine reading and bounded hover rankings on `budget`.
+    pub fn from_second(
+        machine: &MachineSecond,
+        apps: &AppsSecond,
+        budget: &Arc<ByteBudget>,
+    ) -> Self {
+        let mut sample = Self::empty();
+        sample.take(machine, apps, budget);
+        sample
+    }
+
     pub fn ranks(&self) -> Result<SampledRanks<'_>, &Missing> {
         self.ranks.as_ref().map(SampledRanks::from)
     }

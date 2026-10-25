@@ -19,7 +19,7 @@ use crate::live_hover::{HeldSecond, Target};
 use crate::live_inventory::PerformanceLevel;
 use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::held_projection;
-use crate::live_rankings::{Rankings, from_selected, stamp_identity};
+use crate::live_rankings::{Rankings, from_sampled, from_selected, stamp_identity};
 use crate::live_resident_history::ResidentHistory;
 use crate::live_source_mode::SourceMode;
 use crate::live_thermal_pressure::thermal_pressure_level_text;
@@ -403,15 +403,23 @@ impl LiveDashboard {
 
     /// The hover of `second` on the page drawn from the store's View, naming the tick the View
     /// holds of it, so the charts by App find that tick as they find any they draw. None where
-    /// the View holds no Apps of `second`, as in a gap or the older tail, and where the page
+    /// the View holds no identity of `second`, as in a gap, and where the page
     /// draws from the worker's readings.
     pub(crate) fn store_view_target(&self, second: u64) -> Option<Target> {
         let view = self.followed_store_view()?;
         let at_second = |held: &Arc<MachineSecond>| held.wall_ns / NANOSECONDS_PER_SECOND == second;
 
         assert_eq!(view.apps.len(), view.seconds.len());
-        let index = view.seconds.iter().rposition(at_second)?;
-        let observation = view.apps[index].observation.as_ref()?;
+        let observation = match view.seconds.iter().rposition(at_second) {
+            Some(index) => view.apps[index].observation.as_ref()?,
+            None => {
+                &view
+                    .sampled
+                    .iter()
+                    .rfind(|sample| sample.machine.wall_ns / NANOSECONDS_PER_SECOND == second)?
+                    .observation
+            }
+        };
         Some(Target {
             second,
             identity: Some(stamp_identity(&observation.stamp)),
@@ -422,22 +430,56 @@ impl LiveDashboard {
     /// or none where the page draws from the worker's readings.
     pub(crate) fn store_view_held(&self, target: &Target) -> Option<HeldSecond> {
         let view = self.followed_store_view()?;
-        let at_target =
-            |second: &&Arc<MachineSecond>| second.wall_ns / NANOSECONDS_PER_SECOND == target.second;
-
         assert_eq!(view.apps.len(), view.seconds.len());
-        if let Some(index) = view.seconds.iter().rposition(|second| at_target(&second)) {
+        let recent = view
+            .seconds
+            .iter()
+            .zip(&view.apps)
+            .rposition(|(second, apps)| {
+                store_view_matches(target, second, apps.observation.as_ref())
+            });
+        if let Some(index) = recent {
             return Some(HeldSecond {
                 second: Some(Arc::clone(&view.seconds[index])),
                 rankings: Some(store_view_ranks(&view.apps[index])),
             });
         }
-        // The store holds no Apps of the older tail's seconds.
+        let earlier = view
+            .earlier
+            .iter()
+            .enumerate()
+            .rposition(|(index, second)| {
+                let observation = view.sampled.get(index).map(|sample| &sample.observation);
+                store_view_matches(target, second, observation)
+            });
+        let rankings = earlier.and_then(|index| {
+            let sample = view.sampled.get(index)?;
+            assert_eq!(sample.machine.publication, view.earlier[index].publication);
+            assert_eq!(sample.machine.wall_ns, view.earlier[index].wall_ns);
+            Some(from_sampled(sample))
+        });
         Some(HeldSecond {
-            second: view.earlier.iter().rfind(at_target).map(Arc::clone),
-            rankings: None,
+            second: earlier.map(|index| Arc::clone(&view.earlier[index])),
+            rankings,
         })
     }
+}
+
+fn store_view_matches(
+    target: &Target,
+    second: &MachineSecond,
+    observation: Option<&viewer::live_app_response::Observation>,
+) -> bool {
+    if second.wall_ns / NANOSECONDS_PER_SECOND != target.second {
+        return false;
+    }
+    let Some(identity) = &target.identity else {
+        return true;
+    };
+    let Some(observation) = observation else {
+        return false;
+    };
+    crate::live_source::identity_validate(identity, &stamp_identity(&observation.stamp)).is_ok()
 }
 
 /// The charts by App of `view`.

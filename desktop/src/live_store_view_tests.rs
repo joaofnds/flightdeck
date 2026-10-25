@@ -77,6 +77,64 @@ fn pause_keeps_the_displayed_publication_among_same_second_siblings() {
 }
 
 #[test]
+fn a_retained_hover_does_not_substitute_a_different_publication() {
+    // Goal: a stale exact target cannot read a different publication of the same wall second.
+    // Method: retain only the newer sibling, then ask the hover adapter for the older identity.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    let old = reading_at(8_200, 0);
+    let newer = MachineSecond {
+        publication: 8_201,
+        ..old
+    };
+    let mut held = view(1, &[newer], &[reading_at(10_005, 0)]);
+    let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
+    held.sampled
+        .push(Arc::new(viewer::store::SampledSecond::from_second(
+            &newer,
+            &apps_of(&newer, "Newer", 20),
+            &budget,
+        )));
+    dashboard.take_view(Arc::new(held));
+    let target = Target {
+        second: 8_200,
+        identity: Some(crate::live_rankings::stamp_identity(
+            &apps_of(&old, "Older", 10).observation.unwrap().stamp,
+        )),
+    };
+
+    let reading = dashboard.store_view_held(&target);
+
+    assert!(reading.and_then(|held| held.second).is_none());
+}
+
+#[test]
+fn a_recent_hover_finds_the_exact_sibling_instead_of_the_last_in_its_second() {
+    // Goal: an exact recent target reads its own publication even when a newer sibling exists.
+    // Method: retain distinct siblings and request the first one's identity through the adapter.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    let old = reading_at(10_005, 0);
+    let newer = MachineSecond {
+        publication: 10_006,
+        cpu_percent: Some(91.0),
+        ..old
+    };
+    let old_apps = apps_of(&old, "Older", 10);
+    let target = Target {
+        second: 10_005,
+        identity: Some(crate::live_rankings::stamp_identity(
+            &old_apps.observation.unwrap().stamp,
+        )),
+    };
+    let mut held = view(1, &[], &[old, newer]);
+    held.apps = vec![Arc::new(old_apps), Arc::new(apps_of(&newer, "Newer", 20))];
+    dashboard.take_view(Arc::new(held));
+
+    let reading = dashboard.store_view_held(&target).unwrap();
+
+    assert_eq!(reading.second.as_deref(), Some(&old));
+}
+
+#[test]
 fn the_range_ends_at_the_views_newest_second() {
     // Goal: the charts drawn from the View show its newest second, which the worker's readings
     // do not hold yet. Method: a View five seconds newer than the readings.

@@ -83,19 +83,80 @@ pub fn from_ranks(ranks: &Ranks) -> TopApps {
         membership_complete: ranks.membership_complete,
         ungrouped_members: ranks.ungrouped_members,
         metrics: ranks.metrics.each_ref().map(|ranking| Ranking {
-            metric: match ranking.metric {
-                viewer::live_app_response::Metric::Cpu => Metric::Cpu,
-                viewer::live_app_response::Metric::Resident => Metric::Resident,
-                viewer::live_app_response::Metric::Power => Metric::Power,
-                viewer::live_app_response::Metric::Disk => Metric::Disk,
-                viewer::live_app_response::Metric::Gpu => Metric::Gpu,
-            },
+            metric: ranking.metric.into(),
             entries: ranking.entries.iter().map(from_ranks_entry).collect(),
             unavailable: ranking.unavailable,
             overflowed: ranking.overflowed,
             partial: ranking.partial,
         }),
     }
+}
+
+/// The retained sample's rankings, copied into the page's bounded presentation rows.
+pub fn from_sampled(sample: &viewer::store::SampledSecond) -> Rankings {
+    let ranks = match sample.ranks() {
+        Ok(ranks) => ranks,
+        Err(viewer::store::Missing::Refused(reason)) => {
+            return Rankings::Unavailable(crate::bounded::bounded(reason, 512));
+        }
+        Err(error) => return Rankings::Unavailable(error.to_string()),
+    };
+    if !from_sampled_fits(&ranks) {
+        return Rankings::Unavailable(
+            "retained rankings exceed the presentation byte limit".into(),
+        );
+    }
+    Rankings::Ready(Box::new(TopApps {
+        selected: stamp_identity(&ranks.selected.stamp),
+        app_count: ranks.app_count,
+        membership_complete: ranks.membership_complete,
+        ungrouped_members: ranks.ungrouped_members,
+        metrics: ranks.metrics.each_ref().map(|ranking| Ranking {
+            metric: ranking.metric.into(),
+            entries: ranking
+                .entries()
+                .map(|rank| Entry {
+                    app: from_ranks_app(rank.app),
+                    amount: rank.amount,
+                    rate: rank.rate,
+                    measured_members: rank.measured_members,
+                    unavailable_members: rank.unavailable_members,
+                })
+                .collect(),
+            unavailable: ranking.unavailable,
+            overflowed: ranking.overflowed,
+            partial: ranking.partial,
+        }),
+    }))
+}
+
+fn from_sampled_fits(ranks: &viewer::store::SampledRanks<'_>) -> bool {
+    let mut bytes = size_of::<TopApps>();
+    let row_bytes = size_of::<Entry>() + size_of::<App>() + "executable".len();
+    for ranking in ranks.metrics.iter().take(5) {
+        if ranking.entries().len() > RANKS_MAX {
+            return false;
+        }
+        for rank in ranking.entries().take(RANKS_MAX) {
+            let names = rank
+                .app
+                .bytes
+                .len()
+                .checked_mul(2)
+                .and_then(|key| key.checked_add(rank.app.display_name.len()));
+            let next = names
+                .and_then(|names| names.checked_add(row_bytes))
+                .and_then(|row| bytes.checked_add(row));
+            let Some(next) = next else {
+                return false;
+            };
+            if next > viewer::live_app_response::RESPONSE_BYTES_MAX {
+                return false;
+            }
+            bytes = next;
+        }
+    }
+    true
 }
 
 /// The identity the pages name the tick of `stamp` by, as the worker names it.
@@ -109,21 +170,37 @@ pub fn stamp_identity(stamp: &Stamp) -> Value {
 
 fn from_ranks_entry(rank: &Rank) -> Entry {
     Entry {
-        app: Arc::new(App {
-            key: AppKey {
-                kind: match rank.app.kind {
-                    KeyKind::Bundle => "bundle",
-                    KeyKind::Executable => "executable",
-                }
-                .into(),
-                bytes_hex: app_key_bytes_hex(&rank.app.bytes),
-            },
-            name: rank.app.display_name.clone(),
-        }),
+        app: from_ranks_app(&rank.app),
         amount: rank.amount,
         rate: rank.rate,
         measured_members: rank.measured_members,
         unavailable_members: rank.unavailable_members,
+    }
+}
+
+fn from_ranks_app(app: &viewer::live_app_response::RankedApp) -> Arc<App> {
+    Arc::new(App {
+        key: AppKey {
+            kind: match app.kind {
+                KeyKind::Bundle => "bundle",
+                KeyKind::Executable => "executable",
+            }
+            .into(),
+            bytes_hex: app_key_bytes_hex(&app.bytes),
+        },
+        name: app.display_name.clone(),
+    })
+}
+
+impl From<viewer::live_app_response::Metric> for Metric {
+    fn from(metric: viewer::live_app_response::Metric) -> Self {
+        match metric {
+            viewer::live_app_response::Metric::Cpu => Self::Cpu,
+            viewer::live_app_response::Metric::Resident => Self::Resident,
+            viewer::live_app_response::Metric::Power => Self::Power,
+            viewer::live_app_response::Metric::Disk => Self::Disk,
+            viewer::live_app_response::Metric::Gpu => Self::Gpu,
+        }
     }
 }
 
