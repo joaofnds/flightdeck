@@ -328,7 +328,10 @@ fn disk_bytes(current: &TickRow, previous: &TickRow) -> [Option<u64>; 2] {
     let Some(before) = disk_scan(previous) else {
         return [None; 2];
     };
-    crate::metrics::storage::byte_deltas(now, before)
+    crate::metrics::storage::byte_deltas(&crate::metrics::storage::DiskInterval {
+        current: now,
+        previous: before,
+    })
 }
 
 /// The disks of `tick`'s scan, where the scan completed at the tick.
@@ -347,7 +350,10 @@ fn disk_scan(tick: &TickRow) -> Option<&[DiskReading]> {
 fn per_second(count: u64, elapsed_ns: u64) -> f64 {
     assert!(elapsed_ns > 0);
 
-    reduction::per_second(count, elapsed_ns)
+    reduction::per_second(&reduction::Rate {
+        delta: count,
+        elapsed_ns,
+    })
 }
 
 /// The mean speed of the fans `fans` measured, or `None` where it measured none. A reading that
@@ -439,8 +445,14 @@ fn traffic(
     }
     let [received, sent] = totals.finish();
     Some(Traffic {
-        received_bps: reduction::per_second(received?, elapsed_ns),
-        sent_bps: reduction::per_second(sent?, elapsed_ns),
+        received_bps: reduction::per_second(&reduction::Rate {
+            delta: received?,
+            elapsed_ns,
+        }),
+        sent_bps: reduction::per_second(&reduction::Rate {
+            delta: sent?,
+            elapsed_ns,
+        }),
     })
 }
 

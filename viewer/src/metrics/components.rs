@@ -16,28 +16,31 @@ const _: () = assert!(2 * (COMPONENTS_MAX.div_ceil(5) + 1) * NODE_BYTES < 8 * 10
 
 type Rows<'a> = BTreeMap<[Option<Key<'a>>; 2], usize>;
 
-pub(super) fn sum(
-    current: &View<'_>,
-    previous: &View<'_>,
-    keys: &[&str],
-    columns: &[&str],
-) -> Result<Option<u64>> {
-    assert!(keys.len() <= 2);
-    assert!(columns.len() <= 4);
-    if current.len() != previous.len() {
+pub(super) struct Interval<'view, 'source> {
+    pub current: &'view View<'source>,
+    pub previous: &'view View<'source>,
+    pub keys: &'view [&'view str],
+    pub columns: &'view [&'view str],
+}
+
+pub(super) fn sum(interval: &Interval<'_, '_>) -> Result<Option<u64>> {
+    assert!(interval.keys.len() <= 2);
+    assert!(interval.columns.len() <= 4);
+    if interval.current.len() != interval.previous.len() {
         return Ok(None);
     }
-    let before = keyed(previous, keys)?;
-    let after = keyed(current, keys)?;
+
+    let before = keyed(interval.previous, interval.keys)?;
+    let after = keyed(interval.current, interval.keys)?;
     let mut total = CounterTotal::new();
     for (key, row) in after {
         let Some(old) = before.get(&key) else {
             return Ok(None);
         };
-        for column in columns {
+        for column in interval.columns {
             total.add(&CounterValue {
-                current: current.integer(row, column)?,
-                previous: previous.integer(*old, column)?,
+                current: interval.current.integer(row, column)?,
+                previous: interval.previous.integer(*old, column)?,
             })?;
             if total.finish().is_none() {
                 return Ok(None);
@@ -51,6 +54,7 @@ fn keyed<'a>(table: &'a View<'_>, keys: &[&str]) -> Result<Rows<'a>> {
     if table.len() > COMPONENTS_MAX {
         return Err(Error::Bound("metric component rows"));
     }
+
     let mut rows = BTreeMap::new();
     for row in table.rows() {
         let mut key = [None, None];

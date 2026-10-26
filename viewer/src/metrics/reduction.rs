@@ -29,6 +29,11 @@ pub(crate) struct Fraction {
     pub denominator: u64,
 }
 
+pub(crate) struct Rate {
+    pub delta: u64,
+    pub elapsed_ns: u64,
+}
+
 pub(crate) fn delta(value: &CounterValue) -> Option<u64> {
     value
         .current
@@ -137,6 +142,7 @@ impl CpuTotals {
         if self.total == 0 {
             return None;
         }
+
         let percent = super::number(self.busy) / super::number(self.total) * 100.0;
         assert!(percent.is_finite());
         assert!((0.0..=100.0).contains(&percent));
@@ -151,6 +157,7 @@ pub(crate) fn busy_sum(
     if pairs.len() == 0 {
         return Ok(None);
     }
+
     let mut sum = 0.0;
     for pair in pairs {
         let Some(percent) = pair?.and_then(CpuTotals::core_percent) else {
@@ -166,10 +173,11 @@ pub(crate) fn machine_percent(fraction: &Fraction) -> Option<f64> {
     if fraction.denominator == 0 {
         return None;
     }
+
     Some(super::number(fraction.numerator) * 100.0 / super::number(fraction.denominator))
 }
 
-pub(crate) fn per_second(delta: u64, elapsed_ns: u64) -> f64 {
-    assert!(elapsed_ns > 0);
-    super::number(delta) * 1e9 / super::number(elapsed_ns)
+pub(crate) fn per_second(rate: &Rate) -> f64 {
+    assert!(rate.elapsed_ns > 0);
+    super::number(rate.delta) * 1e9 / super::number(rate.elapsed_ns)
 }

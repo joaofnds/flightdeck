@@ -582,7 +582,12 @@ fn point_traffic(
 
 fn per_second(delta: Option<u64>, elapsed: u64) -> Option<f64> {
     assert!(elapsed > 0);
-    delta.map(|delta| reduction::per_second(delta, elapsed))
+    delta.map(|delta| {
+        reduction::per_second(&reduction::Rate {
+            delta,
+            elapsed_ns: elapsed,
+        })
+    })
 }
 
 fn only(table: &View<'_>) -> Result<usize> {
@@ -612,13 +617,18 @@ pub(crate) fn compatible(previous: &Observation, current: &Observation) -> bool 
 }
 
 fn cpu_percent(current: &View<'_>, previous: &View<'_>) -> Result<Option<f64>> {
-    let busy = components::sum(
+    let busy = components::sum(&components::Interval {
         current,
         previous,
-        &["cpu"],
-        &["user_ticks", "system_ticks", "nice_ticks"],
-    )?;
-    let idle = components::sum(current, previous, &["cpu"], &["idle_ticks"])?;
+        keys: &["cpu"],
+        columns: &["user_ticks", "system_ticks", "nice_ticks"],
+    })?;
+    let idle = components::sum(&components::Interval {
+        current,
+        previous,
+        keys: &["cpu"],
+        columns: &["idle_ticks"],
+    })?;
     match (busy, idle) {
         (Some(busy), Some(idle)) => {
             let total = busy.checked_add(idle).ok_or(Error::Bound("CPU sum"))?;
@@ -637,7 +647,12 @@ fn counter_delta(
     keys: &[&str],
     column: &str,
 ) -> Result<Option<u64>> {
-    components::sum(current, previous, keys, &[column])
+    components::sum(&components::Interval {
+        current,
+        previous,
+        keys,
+        columns: &[column],
+    })
 }
 
 pub(crate) fn number(value: u64) -> f64 {

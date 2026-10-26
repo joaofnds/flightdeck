@@ -197,23 +197,30 @@ fn point_totals(
         }
     }
 
-    let bytes = byte_deltas(
-        &current.records[..current.count],
-        &previous.records[..previous.count],
-    );
+    let bytes = byte_deltas(&DiskInterval {
+        current: &current.records[..current.count],
+        previous: &previous.records[..previous.count],
+    });
     totals[0] = bytes[0];
     totals[1] = bytes[1];
     totals
 }
 
+pub(crate) struct DiskInterval<'a> {
+    pub current: &'a [DiskReading],
+    pub previous: &'a [DiskReading],
+}
+
 /// The same complete-device totals the detailed Storage summary uses, before presentation.
-pub(crate) fn byte_deltas(current: &[DiskReading], previous: &[DiskReading]) -> [Option<u64>; 2] {
-    if current.len() != previous.len() {
+pub(crate) fn byte_deltas(interval: &DiskInterval<'_>) -> [Option<u64>; 2] {
+    if interval.current.len() != interval.previous.len() {
         return [None; 2];
     }
+
     let mut totals = [Some(0_u64); 2];
-    for record in current {
-        let Some(before) = previous
+    for record in interval.current {
+        let Some(before) = interval
+            .previous
             .iter()
             .find(|before| identity(before) == identity(record))
         else {
