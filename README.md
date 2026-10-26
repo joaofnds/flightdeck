@@ -93,6 +93,9 @@ The UI uses GPUI's Metal rendering without a browser runtime. Its separate Cargo
 workspace and lockfile keep UI dependencies apart from the recording core.
 [Desktop usage and architecture](desktop/README.md) describes the resource pages,
 source controls, bounded queries, development checks and performance tools.
+[Architecture and contributor map](docs/architecture.md) explains the processes,
+data flow, reader ownership and live or pinned window restoration, with diagrams
+and links to the implementation and behavioral tests.
 [Verification and remaining native checks](desktop/LIVE.md) distinguish automated
 checks from interactive macOS observations. Historical framework measurements and
 the current toolkit decision remain in [the evaluation](desktop/EVALUATION.md).

@@ -1,5 +1,9 @@
 # Window resume performance
 
+The [architecture guide](architecture.md) describes the process boundaries, reader
+ownership and window-state decisions. This report records their measured costs and
+the protocol for reproducing them.
+
 Live Overview resumes through one reader. When the cached period is sufficient and
 the registered ring still covers every unread publication, the Store retains its
 machine and App predecessors and consumes that bounded delta. A gap beyond ring

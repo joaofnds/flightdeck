@@ -4,6 +4,8 @@ The Rust/GPUI desktop client uses the shared `viewer::LiveSession` recording
 backend. Its visual reference is the approved web prototype v30. The captured
 reference remains available with `--reference`. The UI has its own Cargo workspace
 and lockfile; the recording backend is a local path dependency.
+The [architecture guide](../docs/architecture.md) maps the processes and reading
+paths, explains window restoration and links each responsibility to its source.
 
 ```sh
 just dev
@@ -182,15 +184,27 @@ target/release/flightdeck --reference --hardware --seconds 20
 Rendering uses GPUI's Metal backend, canvas paths and a virtualized list of panel
 rows. Live queries run on a dedicated worker with capacity-one request/result
 mailboxes, cancellation generations, 512-row pages and the backend's bounded cache.
-A 250 ms main-thread timer takes completed results.
-Live Overview, while it follows the newest second, draws from the store instead. The app
-starts the store before its window opens and keeps it for its life. The store's thread writes
-the readings into buffers it allocates when it starts, and the same timer takes the store's
-newest View, which never changes while the page holds it, so a window shown again draws what
-the store holds at once. While Overview draws from the View the worker rests, and a hover over
-a second the View holds reads it there. A chosen second, a saved recording and every other
-page read through the worker. A View older than the worker's readings is not drawn, so the
-charts never show less than the worker read. During collector discovery and
+A 250 ms main-thread timer takes completed results, with prompt polling while the window
+awaits a restoration or another reply.
+Live Overview, while it follows the newest second, draws from the Store instead. The app
+starts the Store before its window opens and keeps it for its life. Its ingestion thread
+uses bounded buffers and publishes immutable Views. Ingestion parks while the window is
+hidden, another page is selected, or the selection is pinned. Restoring live Overview keeps
+the selected range and reconciles to the newest endpoint before publishing a complete
+replacement. A covered checkpoint reuses cached history and reads the retained ring delta;
+an expired checkpoint or wider uncached range reloads the selected saved period. An overwrite
+during the delta read forces that reload before publication. Overview waits for the Store
+instead of starting a duplicate page query.
+While Overview draws from a View the worker rests, and a hover over a second the View holds
+reads it there. A chosen second, a saved recording and every other page read through the
+worker. Complete pins retain their exact observation and range on reopen without a live
+read. Incomplete pins restore that observation through a running worker; if the reader
+stopped, a retained pinned snapshot stays available without restarting its canceled
+histories. Initial bootstrap and incomplete histories otherwise retain the worker path.
+A View older than the worker's readings
+is not drawn. The [architecture guide](../docs/architecture.md#hiding-and-restoring-a-window)
+shows the restore decisions; the [performance report](../docs/window-resume-performance.md)
+records profiles, measurements and their limits. During collector discovery and
 startup the timer also reads bounded registration/ring-header metadata for the configured
 root; it does no database query or tick/event copying. Automatic attachment keeps
 monitoring that producer and surfaces stopped or stalled collection through Retry,
