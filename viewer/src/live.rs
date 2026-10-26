@@ -112,6 +112,11 @@ struct ScalarContext {
     points: Vec<Value>,
 }
 
+struct CacheRetention {
+    bytes: usize,
+    observations_min: usize,
+}
+
 type PointIndex<'a> = BTreeMap<(Option<&'a str>, Option<&'a str>, Option<u64>), usize>;
 
 struct PointMerge<'a> {
@@ -453,6 +458,11 @@ impl LiveSession {
         {
             return Err(Error::Bound("inspected observation second"));
         }
+        self.cache_admit(&CacheRetention {
+            bytes: self.cache_bytes + inspected.bytes,
+            observations_min: 1,
+        })?;
+        self.operation.check()?;
         self.cache_bytes += inspected.bytes;
         self.inspected = Some(inspected);
         self.poll_evict(0)?;
@@ -1350,7 +1360,8 @@ impl LiveSession {
         current.point["run"] = json!(identity_text(current.identity.run).to_string());
         current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
         current.point["observation"] = current.json();
-        current.bytes += point_bytes::charge(&current.point)?;
+        let scalar_bytes = point_bytes::charge(&current.point)?;
+        current.bytes += scalar_bytes;
         if current.bytes > CACHE_BYTES_MAX {
             return Err(Error::Bound("live observation bytes"));
         }
@@ -1367,8 +1378,9 @@ impl LiveSession {
         let first = second.saturating_sub(899) * NANOSECONDS_PER_SECOND;
         // The App history keeps the lead-in before the context as well, which its charts draw.
         let charted_first = second.saturating_sub(CHARTED_SECONDS - 1) * NANOSECONDS_PER_SECOND;
+        self.poll_admit(&current, first, scalar_bytes)?;
         self.operation.check()?;
-        self.poll_points(&current.point, first)?;
+        self.poll_points(&current.point, first, scalar_bytes)?;
         self.cache_bytes += current.bytes;
         self.observations.push_back(current);
         self.poll_evict(first)?;
@@ -1380,6 +1392,44 @@ impl LiveSession {
         self.app_history
             .push(app_point.unwrap_or_else(|| unreachable!()), charted_first);
 
+        Ok(())
+    }
+
+    fn poll_admit(&self, current: &LiveObservation, first: u64, scalar_bytes: usize) -> Result<()> {
+        let mut bytes = self.cache_bytes + current.bytes + scalar_bytes;
+        for (index, point) in self.points.iter().enumerate() {
+            let count = self.points.len() + 1 - index;
+            let wall = point["wall_ns"]
+                .as_u64()
+                .ok_or(Error::Bound("point clock"))?;
+            if count <= OBSERVATIONS_MAX {
+                if wall >= first {
+                    break;
+                }
+            }
+            bytes -= point_bytes::charge(point)?;
+        }
+        self.cache_admit(&CacheRetention {
+            bytes,
+            observations_min: 0,
+        })
+    }
+
+    fn cache_admit(&self, retention: &CacheRetention) -> Result<()> {
+        let mut bytes = retention.bytes;
+        let reclaimable = self
+            .observations
+            .len()
+            .saturating_sub(retention.observations_min);
+        for observation in self.observations.iter().take(reclaimable) {
+            if bytes <= CACHE_BYTES_MAX {
+                return Ok(());
+            }
+            bytes -= observation.bytes;
+        }
+        if bytes > CACHE_BYTES_MAX {
+            return Err(Error::Bound("live scalar cache"));
+        }
         Ok(())
     }
 
@@ -1428,8 +1478,8 @@ impl LiveSession {
         Err(Error::Bound("live eviction count"))
     }
 
-    fn poll_points(&mut self, point: &Value, first: u64) -> Result<()> {
-        self.cache_bytes += point_bytes::charge(point)?;
+    fn poll_points(&mut self, point: &Value, first: u64, scalar_bytes: usize) -> Result<()> {
+        self.cache_bytes += scalar_bytes;
         self.points.push_back(point.clone());
         for _attempt in 0..=OBSERVATIONS_MAX {
             let expired = match self.points.front() {
@@ -1682,6 +1732,11 @@ impl LiveSession {
                 } else {
                     if let Some(inspected) = self.select_rehydrate(selected)? {
                         response["summary"] = inspected.point.clone();
+                        self.cache_admit(&CacheRetention {
+                            bytes: self.cache_bytes + inspected.bytes,
+                            observations_min: 1,
+                        })?;
+                        self.operation.check()?;
                         self.cache_bytes += inspected.bytes;
                         self.inspected = Some(inspected);
                         self.poll_evict(0)?;
