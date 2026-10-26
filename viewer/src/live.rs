@@ -157,6 +157,17 @@ impl LiveSession {
     }
 
     pub fn open_with(root: &Path, cancellation: Arc<Cancellation>, epoch: u64) -> Result<Self> {
+        let mut session = Self::open_history_with(root, cancellation, epoch)?;
+        session.poll()?;
+        Ok(session)
+    }
+
+    /// Opens saved context without ingesting live arrivals for a pinned selection.
+    pub fn open_history_with(
+        root: &Path,
+        cancellation: Arc<Cancellation>,
+        epoch: u64,
+    ) -> Result<Self> {
         persistence::query::validate_root(root)?;
         collector::recording::private::verify_directory(root)?;
         collector::recording::read_identity(root)?;
@@ -196,7 +207,6 @@ impl LiveSession {
             session.history_failure(error)?;
         }
 
-        session.poll()?;
         Ok(session)
     }
 
@@ -287,8 +297,11 @@ impl LiveSession {
         catalog["latest_observation"] =
             json!(self.points.back().map(|point| &point["observation"]));
         catalog["latest_collector_pid"] = json!(self.latest_collector_pid());
-        catalog["collector_completed"] =
-            json!(self.sources.iter().all(|source| source.reader.completed()));
+        catalog["collector_completed"] = if self.sources.is_empty() {
+            Value::Null
+        } else {
+            json!(self.sources.iter().all(|source| source.reader.completed()))
+        };
         catalog["reader_losses"] = json!(
             self.sources
                 .iter()

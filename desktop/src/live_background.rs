@@ -24,8 +24,13 @@ struct Background {
     reopening: Reopening,
     /// The reader of the live window the user closed, which the window opened again reads
     /// through.
-    kept: Option<Worker>,
+    kept: Option<Kept>,
     quitting: bool,
+}
+
+struct Kept {
+    worker: Option<Worker>,
+    state: crate::live_dashboard::WindowState,
 }
 
 impl Global for Background {}
@@ -88,17 +93,26 @@ pub(super) fn keep_reader(dashboard: &Entity<LiveDashboard>, cx: &mut App) {
         if background.quitting {
             return;
         }
-        match dashboard.worker.hand_over() {
-            Ok(kept) => background.kept = kept,
-            Err(error) => eprintln!("Keep Flightdeck reader: {error}"),
+        if dashboard.worker.mode() != crate::live_source_mode::SourceMode::Live {
+            return;
         }
+        let worker = match dashboard.worker.hand_over() {
+            Ok(worker) => worker,
+            Err(error) => {
+                eprintln!("Keep Flightdeck reader: {error}");
+                None
+            }
+        };
+        background.kept = Some(Kept {
+            worker,
+            state: dashboard.window_state(),
+        });
     })
     .detach();
 }
 
 /// Brings the live window forward, and opens it again when the user closed it.
 pub fn show(cx: &mut App) {
-    crate::live_dashboard::set_store_active(true, cx);
     cx.set_activation_policy(ActivationPolicy::Regular);
     if let Some(window) = cx.windows().first() {
         if let Err(error) = window.update(cx, |_, window, _| window.activate_window()) {
@@ -114,7 +128,7 @@ pub fn show(cx: &mut App) {
 
 fn reopen(cx: &mut App) -> Result<(), String> {
     let background = cx.global_mut::<Background>();
-    let kept = background.kept.take().filter(Worker::running);
+    let kept = background.kept.take();
     let reopening = &background.reopening;
     let start = super::Start {
         named_page: None,
@@ -122,13 +136,26 @@ fn reopen(cx: &mut App) -> Result<(), String> {
         seconds: None,
         hardware: reopening.hardware,
     };
-    let worker = match kept {
-        Some(worker) => worker,
-        None => Worker::start(reopening.root.clone()).map_err(|error| error.to_string())?,
+    let (worker, state) = match kept {
+        Some(kept) => {
+            let mut state = kept.state;
+            let worker = if let Some(worker) = kept.worker.filter(Worker::running) {
+                worker
+            } else {
+                state.reader_stopped();
+                Worker::start_idle(reopening.root.clone()).map_err(|error| error.to_string())?
+            };
+            (worker, Some(state))
+        }
+        None => (
+            Worker::start(reopening.root.clone()).map_err(|error| error.to_string())?,
+            None,
+        ),
     };
     super::open_window(
         super::Opening {
             worker,
+            state,
             start,
             control: None,
         },

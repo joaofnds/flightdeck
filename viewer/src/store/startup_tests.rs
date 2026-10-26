@@ -28,7 +28,14 @@ fn cancellation_immediately_before_publication_leaves_no_startup_view() {
     let charge = reader.processes.as_ref().unwrap().bytes();
     cancellation.cancel().unwrap();
 
-    let result = super::step(&mut held, &mut ring, Ok(()), &mailbox, Some(&operation));
+    let result = super::step(
+        &mut held,
+        &mut ring,
+        Ok(()),
+        &mailbox,
+        Some(&operation),
+        super::Publication::Complete,
+    );
 
     assert!(mailbox.take().is_none());
     assert!(matches!(result, Err(persistence::Error::Io(error))
@@ -116,7 +123,14 @@ fn cancellation_after_last_consumption_rejects_the_terminal_handoff() {
     let mut ring = super::Ring::new(fixture.root.clone());
     let mailbox = super::Mailbox::new();
     let result = super::startup_accept(outcome, &mut held, &mut ring, &operation);
-    let published = super::step(&mut held, &mut ring, Ok(()), &mailbox, Some(&operation));
+    let published = super::step(
+        &mut held,
+        &mut ring,
+        Ok(()),
+        &mailbox,
+        Some(&operation),
+        super::Publication::Complete,
+    );
 
     assert_eq!(accepted, 1);
     assert!(matches!(result, Err(persistence::Error::Io(error))

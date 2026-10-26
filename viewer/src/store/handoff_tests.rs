@@ -307,7 +307,14 @@ fn cancellation_rejects_a_finished_report_before_installing_its_handoff() {
     cancellation.cancel().unwrap();
 
     let result = crate::store::startup_accept(Ok(outcome), &mut held, &mut ring, &operation);
-    let published = crate::store::step(&mut held, &mut ring, Ok(()), &mailbox, Some(&operation));
+    let published = crate::store::step(
+        &mut held,
+        &mut ring,
+        Ok(()),
+        &mailbox,
+        Some(&operation),
+        crate::store::Publication::Complete,
+    );
 
     assert!(result.is_err());
     assert!(published.is_err());

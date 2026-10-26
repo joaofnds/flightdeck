@@ -102,6 +102,7 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let preferences_path = preferences_path(options, control.is_some());
     let opening = Opening {
         worker,
+        state: None,
         start: start(options),
         control,
     };
@@ -167,6 +168,7 @@ fn start(options: &Options) -> Start {
 /// What a live window is made of when it opens.
 struct Opening {
     worker: Worker,
+    state: Option<crate::live_dashboard::WindowState>,
     start: Start,
     control: Option<Control>,
 }
@@ -221,6 +223,7 @@ fn preferences_path(options: &Options, controlled: bool) -> Option<PathBuf> {
 fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
     let Opening {
         worker,
+        state,
         start,
         control,
     } = opening;
@@ -248,7 +251,7 @@ fn open_window(opening: Opening, cx: &mut App) -> Result<(), String> {
     };
 
     cx.open_window(window, move |window, cx| {
-        let dashboard = create_dashboard(worker, start, cx);
+        let dashboard = create_dashboard(worker, start, state, cx);
         crate::hardware_motion::observe_window(&dashboard, window, cx);
         background::keep_reader(&dashboard, cx);
         // Controlled windows read their pages even while hidden.
@@ -313,13 +316,24 @@ fn install_control(
     }
 }
 
-fn create_dashboard(worker: Worker, start: Start, cx: &mut App) -> gpui::Entity<LiveDashboard> {
+fn create_dashboard(
+    worker: Worker,
+    start: Start,
+    state: Option<crate::live_dashboard::WindowState>,
+    cx: &mut App,
+) -> gpui::Entity<LiveDashboard> {
+    let restored = state.is_some();
     let page = preferences::page(start.named_page, cx);
     let range = preferences::range(start.named_range, cx);
-    let entity = crate::native_workflows::create_dashboard(worker, page, start.seconds, cx);
+    let entity = match state {
+        Some(state) => crate::native_workflows::restore_dashboard(worker, state, cx),
+        None => crate::native_workflows::create_dashboard(worker, page, start.seconds, cx),
+    };
     entity.update(cx, |dashboard, cx| {
         dashboard.reveal_hardware = start.hardware;
-        dashboard.set_range(range, cx);
+        if !restored {
+            dashboard.set_range(range, cx);
+        }
     });
     if let Err(error) = collection::start_timer(&entity, cx) {
         entity.update(cx, |dashboard, _| dashboard.error = Some(error));

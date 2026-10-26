@@ -88,6 +88,41 @@ fn a_window_shown_again_asks_its_reader_for_its_page(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_pinned_window_shown_again_keeps_its_reading_without_waking_its_reader(
+    cx: &mut TestAppContext,
+) {
+    // Goal: showing a completed pinned view cannot trigger live ingestion or reread its page.
+    // Method: answer an exact pin, hide and show the window, then compare request generations.
+    let mut window = VisibilityHarness::open(cx);
+    window.answer_readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    window.tick();
+    window
+        .window
+        .update(&mut window.cx, |dashboard, _, cx| {
+            let identity = dashboard.snapshot.as_ref().unwrap().selection["selected"].clone();
+            dashboard.pin_target(
+                Target {
+                    second: 10_000,
+                    identity: Some(identity),
+                },
+                cx,
+            );
+        })
+        .unwrap();
+    assert_eq!(window.reader.receive(), (Received::Continued, true));
+    window.answer_readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    window.tick();
+    window.change(WindowVisibility::Hidden);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+    let generation = window.generation();
+
+    window.change(WindowVisibility::Visible);
+
+    assert_eq!(window.generation(), generation);
+    assert!(!window.awaiting_reply());
+}
+
+#[gpui::test]
 fn a_shown_window_keeps_reading_its_page(cx: &mut TestAppContext) {
     // Goal: only a hidden window stops reading, so a shown one follows the recording.
     // Method: step the window's dashboard with no visibility change, then the reader's mailbox.

@@ -78,6 +78,14 @@ pub struct Span<T> {
 }
 
 impl<T> Span<T> {
+    pub(super) fn clear(&mut self) {
+        self.held.clear();
+    }
+
+    pub(super) fn release(&mut self, clear: impl FnMut(&mut T)) {
+        self.buffers.release(clear);
+    }
+
     /// A span of at most `capacity` readings over `buffers`, which needs more buffers than
     /// readings, since a View the main thread holds keeps readings the span let go of.
     #[must_use]

@@ -19,10 +19,13 @@ mod startup_tests;
 #[cfg(test)]
 mod activity_tests;
 
+#[cfg(test)]
+mod resume_tests;
+
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -179,6 +182,7 @@ struct Shared {
     catch_up: AtomicBool,
     catching_up: AtomicBool,
     paused: AtomicBool,
+    window_seconds: AtomicU64,
     cancellation: Arc<Cancellation>,
 }
 
@@ -208,6 +212,7 @@ impl Store {
             catch_up: AtomicBool::new(false),
             catching_up: AtomicBool::new(true),
             paused: AtomicBool::new(false),
+            window_seconds: AtomicU64::new(crate::session::LOADED_SECONDS),
             cancellation: Arc::new(Cancellation::default()),
         });
         let mut held = Held::new();
@@ -241,7 +246,10 @@ impl Store {
 
     /// Pauses between bounded reads while hidden, or wakes the thread to reconcile on show.
     pub fn set_active(&self, active: bool) {
-        self.shared.active.store(active, Ordering::Release);
+        if self.shared.active.swap(active, Ordering::AcqRel) == active {
+            return;
+        }
+
         if !active {
             self.shared.catching_up.store(true, Ordering::Release);
             self.shared.catch_up.store(true, Ordering::Release);
@@ -251,10 +259,33 @@ impl Store {
         }
     }
 
+    /// Selects the live period loaded on the next reconciliation or range change.
+    #[must_use]
+    pub fn set_window(&self, seconds: u64) -> bool {
+        assert!(seconds > 0);
+        assert!(seconds <= crate::session::LOADED_SECONDS);
+        if self.shared.window_seconds.swap(seconds, Ordering::AcqRel) == seconds {
+            return false;
+        }
+
+        self.shared.catching_up.store(true, Ordering::Release);
+        self.shared.catch_up.store(true, Ordering::Release);
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
+        true
+    }
+
     /// Whether the store has finished its in-flight read and parked without polling.
     #[must_use]
     pub fn is_paused(&self) -> bool {
         self.shared.paused.load(Ordering::Acquire)
+    }
+
+    /// Whether the window currently requests live ingestion.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.shared.active.load(Ordering::Acquire)
     }
 
     /// Whether catch-up or a published View still awaits the window's next step.
@@ -279,6 +310,13 @@ impl Store {
     /// or is handing one over now.
     #[must_use]
     pub fn take(&self) -> Option<Arc<View>> {
+        if self.shared.catch_up.load(Ordering::Acquire) {
+            return None;
+        }
+        if self.shared.catching_up.load(Ordering::Acquire) {
+            return None;
+        }
+
         self.shared.mailbox.take()
     }
 }
@@ -370,6 +408,22 @@ impl Held {
         ));
         self.views
             .release(|view| view.sampled = Vec::with_capacity(EARLIER_MAX));
+    }
+
+    fn reset(&mut self) {
+        self.release_views();
+        self.span.clear();
+        self.apps.clear();
+        self.apps
+            .release(|apps| apps.take(TickApps::Missing(&Missing::Unread), None, None));
+        self.earlier.clear();
+        if let Some(sampled) = &mut self.sampled {
+            sampled.clear();
+            sampled.release(|sample| *sample = SampledSecond::empty());
+        }
+        self.context.clear();
+        self.newest = None;
+        self.unpublished = true;
     }
 
     /// Takes `second` of run `run` in after the newest, with what the store found of its Apps,
@@ -662,7 +716,12 @@ fn run(
                 }
             }
         }
-        if let Err(error) = step(held, ring, waited, &shared.mailbox, operation) {
+        let publication = if shared.catching_up.load(Ordering::Acquire) {
+            Publication::Complete
+        } else {
+            Publication::Progress
+        };
+        if let Err(error) = step(held, ring, waited, &shared.mailbox, operation, publication) {
             eprintln!("flightdeck store publication: {error}");
             return;
         }
@@ -703,7 +762,7 @@ fn run_ready(held: &mut Held, ring: &Ring, shared: &Shared) {
     }
 }
 
-/// Replays the sealed prefix into existing owners before reopening the current ring.
+/// Replaces the cached period before publishing the current ring's endpoint.
 fn refresh(
     root: &Path,
     held: &mut Held,
@@ -711,48 +770,60 @@ fn refresh(
     shared: &Shared,
     operation: Option<&Operation>,
 ) -> persistence::Result<bool> {
+    drop(shared.mailbox.take());
+    held.unpublished = true;
     let budget = held.payload_budget.clone();
     let since = held.newest;
+    let seconds = shared.window_seconds.load(Ordering::Acquire);
     let mut accepted = true;
+    let mut reset = false;
     let mut next_ring = Ring::new(root.to_owned());
     let mut take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
         if !shared.active.load(Ordering::Acquire) {
             accepted = false;
         }
         if accepted {
-            accepted = held.take(run, second, apps);
-            if held.unpublished {
-                held.publish(&shared.mailbox);
+            if !reset {
+                held.reset();
+                reset = true;
             }
+            accepted = held.take(run, second, apps);
         }
     };
     let left_out = if let Some(budget) = &budget {
         let operation = operation.unwrap_or_else(|| unreachable!("payload reads are cancellable"));
-        let outcome =
-            recording::load_payload_since(root, budget, operation, since.as_ref(), &mut take)?;
+        let outcome = recording::load_payload_window(
+            root,
+            budget,
+            operation,
+            since.as_ref(),
+            seconds,
+            &mut take,
+        )?;
         if accepted {
             next_ring.accept(outcome.terminal);
         }
         outcome.left_out
     } else {
-        recording::load_since(root, since.as_ref(), take)
+        recording::load_window(root, since.as_ref(), seconds, take)
     };
     if held.left_out != left_out {
         held.left_out = left_out;
         held.unpublished = true;
     }
+    if budget.is_none() {
+        if reset {
+            let operation =
+                Arc::clone(&shared.cancellation).operation(shared.cancellation.epoch())?;
+            next_ring.accept(recording::terminal(root, &operation)?);
+        }
+    }
     if accepted {
-        if budget.is_some() {
+        if reset {
             *ring = next_ring;
         } else {
-            let previous_run = since.as_ref().map(|newest| newest.run);
-            let current_run = held.newest.as_ref().map(|newest| newest.run);
             if left_out.is_some() {
                 *ring = next_ring;
-            } else {
-                if previous_run != current_run {
-                    *ring = next_ring;
-                }
             }
             if let Err(failure) = ring.resume() {
                 held.failure = Some(failure);
@@ -763,6 +834,12 @@ fn refresh(
     Ok(accepted)
 }
 
+#[derive(Clone, Copy)]
+enum Publication {
+    Complete,
+    Progress,
+}
+
 /// Takes in what the ring published since the last step, follows the newest run, and hands
 /// over a View where anything changed. `waited` is how the wait before the step went.
 fn step(
@@ -771,6 +848,7 @@ fn step(
     waited: Result<(), Failure>,
     mailbox: &Mailbox<View>,
     operation: Option<&Operation>,
+    publication: Publication,
 ) -> persistence::Result<()> {
     let mut failure = waited.err();
 
@@ -783,13 +861,28 @@ fn step(
         failure = Some(followed);
     }
 
+    if let Some(operation) = operation {
+        operation.check()?;
+    }
+
     if failure != held.failure {
         held.failure = failure;
         held.unpublished = true;
     }
     if held.unpublished {
-        if let Some(operation) = operation {
-            operation.check()?;
+        let complete = match ring.caught_up() {
+            Ok(complete) => complete,
+            Err(failure) => {
+                held.failure = Some(failure);
+                true
+            }
+        };
+        if matches!(publication, Publication::Complete) {
+            if !complete {
+                if held.failure.is_none() {
+                    return Ok(());
+                }
+            }
         }
         held.publish(mailbox);
     }

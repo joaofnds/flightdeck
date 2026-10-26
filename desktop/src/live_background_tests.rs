@@ -219,6 +219,144 @@ fn showing_after_the_window_closed_opens_it_as_the_user_left_it(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn reopening_preserves_the_pinned_observation_and_selected_range(cx: &mut TestAppContext) {
+    // Goal: closing a pinned window cannot replace its timestamp or range with live defaults.
+    // Method: pin an exact observation, select a fixed range, close and reopen the window.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.show();
+    let window = harness.cx.read(|cx| cx.windows()[0]);
+    harness
+        .cx
+        .update_window(window, |view, _, cx| {
+            let dashboard = view.downcast::<LiveDashboard>().unwrap();
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.pin_target(
+                    crate::live_hover::Target {
+                        second: 100,
+                        identity: Some(serde_json::json!({
+                            "run": "00000000000000000000000000000001",
+                            "boot": "00000000000000000000000000000002",
+                            "publication": 7,
+                        })),
+                    },
+                    cx,
+                );
+                dashboard.set_range(
+                    Range::Between {
+                        first: 90,
+                        last: 110,
+                    },
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+    let request = harness.dashboard(|dashboard| dashboard.request.clone());
+    harness.close_windows();
+
+    harness.show();
+
+    assert_eq!(
+        request,
+        harness.dashboard(|dashboard| dashboard.request.clone())
+    );
+    assert_eq!(Some(100), harness.dashboard(LiveDashboard::pinned_second));
+    assert_eq!(
+        Range::Between {
+            first: 90,
+            last: 110
+        },
+        harness.dashboard(|dashboard| dashboard.range)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn reopening_a_pin_with_canceled_histories_keeps_its_reading_without_a_new_request(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a pinned reading remains available on reopen without starting any source read.
+    // Method: keep unfinished histories, stop the reader, then reopen and inspect the known pin.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.show();
+    let window = harness.cx.read(|cx| cx.windows()[0]);
+    harness
+        .cx
+        .update_window(window, |view, _, cx| {
+            let dashboard = view.downcast::<LiveDashboard>().unwrap();
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.pin_second(10_000, cx);
+                let mut snapshot = crate::live_store_page_fixtures::readings(&[
+                    crate::live_store_fixtures::reading_at(10_000, 0),
+                ]);
+                snapshot.generation = dashboard.generation;
+                snapshot.histories_pending = true;
+                dashboard.receive(crate::live_source::Update::Ready(snapshot));
+                dashboard.set_range(Range::Last(300), cx);
+            });
+        })
+        .unwrap();
+    let generation = harness.dashboard(|dashboard| dashboard.generation);
+    harness
+        .cx
+        .update_window(window, |view, _, cx| {
+            view.downcast::<LiveDashboard>()
+                .unwrap()
+                .update(cx, |dashboard, _| {
+                    dashboard.worker.stop();
+                });
+        })
+        .unwrap();
+    harness.close_windows();
+
+    harness.show();
+
+    assert_eq!(Some(10_000), harness.dashboard(LiveDashboard::shown_second));
+    assert_eq!(
+        generation,
+        harness.dashboard(|dashboard| dashboard.generation)
+    );
+    assert!(!harness.dashboard(|dashboard| dashboard.reply_pending));
+    assert!(harness.reader(Worker::running));
+    assert_eq!(
+        Range::Last(300),
+        harness.dashboard(|dashboard| dashboard.range)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn reopening_keeps_the_pin_when_its_reader_stopped_before_close(cx: &mut TestAppContext) {
+    // Goal: a failed reader cannot discard the user's timestamp and range on close.
+    // Method: pin a window, stop its reader before closing, and reopen over a new reader.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.show();
+    let window = harness.cx.read(|cx| cx.windows()[0]);
+    harness
+        .cx
+        .update_window(window, |view, _, cx| {
+            let dashboard = view.downcast::<LiveDashboard>().unwrap();
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.pin_second(100, cx);
+                dashboard.set_range(Range::Last(300), cx);
+                dashboard.worker.stop();
+            });
+        })
+        .unwrap();
+    harness.close_windows();
+
+    harness.show();
+
+    assert_eq!(Some(100), harness.dashboard(LiveDashboard::pinned_second));
+    assert_eq!(
+        Range::Last(300),
+        harness.dashboard(|dashboard| dashboard.range)
+    );
+    assert!(harness.reader(Worker::running));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_launch_opens_the_window_as_the_last_run_left_it(cx: &mut TestAppContext) {
     // Goal: the size, page, range and hidden series outlast quitting and launching again.
     // Method: resize the window, open a page, pick a range and hide a series, close the
@@ -368,6 +506,7 @@ impl BackgroundHarness {
     fn launch(&mut self, named_range: Option<Range>) {
         let opening = super::super::Opening {
             worker: Worker::start(self.root.clone()).unwrap(),
+            state: None,
             start: super::super::Start {
                 named_page: None,
                 named_range,
@@ -460,7 +599,7 @@ impl BackgroundHarness {
     fn stop_kept_reader(&mut self) {
         self.cx.update(|cx| {
             let kept = cx.global_mut::<Background>().kept.as_mut().unwrap();
-            kept.stop();
+            kept.worker.as_mut().unwrap().stop();
         });
     }
 

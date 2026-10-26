@@ -481,6 +481,52 @@ fn a_resting_reader_selects_a_second_published_since_its_last_read() {
 }
 
 #[test]
+fn restoring_a_pin_finishes_its_histories_without_ingesting_new_live_arrivals() {
+    // Goal: even a pin awaiting histories never follows the recording on restoration.
+    // Method: restore a known second after another publication and inspect the session catalog.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let mut reader = SnapshotReader::new();
+    reader.command.mode = crate::live_source_mode::SourceMode::Live;
+    let initial = reader.read_at(&recording.root).unwrap().unwrap();
+    let second = initial.selection["second"].as_u64().unwrap();
+    let mut kept = reader.hand_over();
+    assert_eq!(reader.receive(), (super::Received::Continued, false));
+    recording.publish();
+    let mut request = SealedRecording::request();
+    request.second = Some(second);
+
+    kept.restore(request).unwrap();
+    assert!(reader.receive().1);
+    let restored = reader.read_at(&recording.root).unwrap().unwrap();
+    let histories = reader.read_at(&recording.root).unwrap().unwrap();
+
+    assert_eq!(restored.selection["second"], second);
+    assert!(!histories.histories_pending);
+    assert_eq!(reader.session().catalog()["last_second"], second);
+    assert_ne!(second, recording.last_second());
+}
+
+#[test]
+fn a_fresh_replacement_reader_waits_for_a_request_without_opening_live_data() {
+    // Goal: a restored pin's fresh worker stays idle even before its first command arrives.
+    // Method: step the actual initial worker policy over a readable recording without a command.
+    let recording = SealedRecording::new();
+    let worker = super::Worker::start_idle(recording.root.clone()).unwrap();
+    let mut reader = SnapshotReader::new();
+
+    super::worker_step(
+        &recording.root,
+        &worker.shared,
+        &mut reader.reader,
+        &mut None,
+    );
+
+    assert!(!super::worker_step_follows(&worker.shared));
+    assert!(reader.reader.session.is_none());
+}
+
+#[test]
 fn a_chosen_reading_keeps_its_context_while_deferred_work_finishes() {
     // Goal: finishing a held request keeps the endpoint captured by its first snapshot.
     // Method: publish a newer ring tick between Overview's initial snapshot and ranking step.

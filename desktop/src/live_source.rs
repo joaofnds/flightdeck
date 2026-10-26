@@ -171,6 +171,7 @@ struct Command {
 enum Context {
     Select,
     Keep,
+    Restore,
 }
 
 struct Reader {
@@ -223,11 +224,15 @@ const _: () = {
 
 impl Worker {
     pub fn start(root: PathBuf) -> std::io::Result<Self> {
-        Self::start_mode(root, SourceMode::Live)
+        Self::start_mode(root, SourceMode::Live, Rest::Following)
+    }
+
+    pub(crate) fn start_idle(root: PathBuf) -> std::io::Result<Self> {
+        Self::start_mode(root, SourceMode::Live, Rest::Idle)
     }
 
     pub fn start_recorded(root: PathBuf) -> std::io::Result<Self> {
-        Self::start_mode(root, SourceMode::Recorded)
+        Self::start_mode(root, SourceMode::Recorded, Rest::Following)
     }
 
     pub fn mode(&self) -> SourceMode {
@@ -250,8 +255,8 @@ impl Worker {
         self.thread.as_ref().map(|thread| thread.thread().id())
     }
 
-    fn start_mode(root: PathBuf, mode: SourceMode) -> std::io::Result<Self> {
-        let shared = Arc::new(Shared::new());
+    fn start_mode(root: PathBuf, mode: SourceMode, rest: Rest) -> std::io::Result<Self> {
+        let shared = Arc::new(Shared::with_rest(rest));
         let control = Arc::clone(&shared);
         let thread = thread::Builder::new()
             .name("flightdeck-live".to_owned())
@@ -267,6 +272,11 @@ impl Worker {
 
     pub fn request(&mut self, request: Request) -> Result<u64, String> {
         self.submit(request, Context::Select)
+    }
+
+    pub(crate) fn restore(&mut self, request: Request) -> Result<u64, String> {
+        assert!(request.second.is_some());
+        self.submit(request, Context::Restore)
     }
 
     /// Reads the observation `request` names at its second alone, keeping the context the last
@@ -405,6 +415,10 @@ impl Worker {
 
 impl Shared {
     fn new() -> Self {
+        Self::with_rest(Rest::Following)
+    }
+
+    fn with_rest(rest_kind: Rest) -> Self {
         Self {
             mailbox: Mutex::new(Mailbox {
                 generation: 0,
@@ -412,7 +426,7 @@ impl Shared {
                 output: None,
                 rest: false,
                 resting: true,
-                rest_kind: Rest::Following,
+                rest_kind,
             }),
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
@@ -811,12 +825,18 @@ fn reader_snapshot_session<'session>(
     shared: &Shared,
     first_snapshot: bool,
 ) -> Result<&'session mut LiveSession, String> {
-    let session = match slot {
-        Some(session) => session,
-        None => slot.insert(
-            LiveSession::open_with(root, Arc::clone(&shared.cancellation), command.epoch)
+    let session = if let Some(session) = slot {
+        session
+    } else {
+        let open = if command.context == Context::Restore {
+            LiveSession::open_history_with
+        } else {
+            LiveSession::open_with
+        };
+        slot.insert(
+            open(root, Arc::clone(&shared.cancellation), command.epoch)
                 .map_err(|error| error.to_string())?,
-        ),
+        )
     };
     session
         .begin(command.epoch)
@@ -1129,7 +1149,7 @@ fn reader_payload_read(
             detail,
             &snapshot.selection["selected"],
         )?);
-        if context == Context::Select {
+        if context != Context::Keep {
             reader_cpu_history(session, request, snapshot)?;
         }
     }
@@ -1339,7 +1359,7 @@ fn reader_apps(
         if !detail.is_null() {
             identity_validate(&detail["selected"], &snapshot.selection["selected"])?;
         }
-        if context == Context::Select {
+        if context != Context::Keep {
             if histories == Histories::Read {
                 let history = session
                     .app_history(kind, &bytes)

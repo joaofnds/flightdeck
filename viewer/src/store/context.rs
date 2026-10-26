@@ -141,6 +141,15 @@ impl Gauge {
 }
 
 impl Context {
+    pub(super) fn clear(&mut self) {
+        self.entries.clear();
+        self.spare.clear();
+        self.held = 0;
+        self.last_second = None;
+        self.refused = None;
+        self.chosen.clear();
+    }
+
     /// A context with room for every App it holds, holding none.
     pub(super) fn new() -> Self {
         Self {

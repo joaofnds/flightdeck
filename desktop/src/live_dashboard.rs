@@ -39,7 +39,7 @@ pub(crate) fn observe_visibility(
     cx: &mut gpui::App,
 ) {
     dashboard.update(cx, |dashboard, cx| {
-        store_view::set_store_active(window.is_visible(), cx);
+        store_view::set_store_active(window.is_visible() && dashboard.follows_live(), cx);
         // macOS reports only changes, so a window it hides from the start would read its page
         // until it first showed and hid again.
         if !window.is_visible() {
@@ -47,7 +47,10 @@ pub(crate) fn observe_visibility(
         }
 
         cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
-            store_view::set_store_active(visibility.is_visible(), cx);
+            store_view::set_store_active(visibility.is_visible() && dashboard.follows_live(), cx);
+            if !visibility.is_visible() {
+                dashboard.store_view = None;
+            }
             dashboard.presence = dashboard.presence.reported(visibility.is_visible());
             cx.notify();
         })
@@ -167,6 +170,24 @@ pub struct LiveDashboard {
     pub(crate) drag: Option<Drag>,
     /// Whether the selected second is pinned, which the end of a hover then shows again.
     pub(crate) pinning: Pinning,
+}
+
+pub(crate) struct WindowState {
+    request: Request,
+    snapshot: Option<Box<Snapshot>>,
+    range: crate::time_range::Range,
+    pinning: Pinning,
+    hidden: Vec<String>,
+}
+
+impl WindowState {
+    pub(crate) fn reader_stopped(&mut self) {
+        if self.request.second.is_some() {
+            if let Some(snapshot) = &mut self.snapshot {
+                snapshot.histories_pending = false;
+            }
+        }
+    }
 }
 
 /// Whether macOS presents the window, and whether its reader has caught up with that, since the
@@ -304,9 +325,15 @@ pub enum Row {
 
 impl LiveDashboard {
     pub fn new(worker: Worker, route: String, seconds: Option<u32>) -> Self {
+        let mut dashboard = Self::new_idle(worker, Self::new_request(route), seconds);
+        dashboard.submit();
+        dashboard
+    }
+
+    fn new_idle(worker: Worker, request: Request, seconds: Option<u32>) -> Self {
         let mut dashboard = Self {
             worker,
-            request: Self::new_request(route),
+            request,
             snapshot: None,
             pending_snapshot: None,
             visited: std::collections::BTreeMap::new(),
@@ -368,8 +395,65 @@ impl LiveDashboard {
             dashboard.inventory = crate::live_inventory::rows(None);
         }
         dashboard.rebuild();
-        dashboard.submit();
         dashboard
+    }
+
+    pub(crate) fn window_state(&mut self) -> WindowState {
+        WindowState {
+            request: self.request.clone(),
+            snapshot: self.snapshot.take(),
+            range: self.range,
+            pinning: self.pinning,
+            hidden: self.hidden.clone(),
+        }
+    }
+
+    pub(crate) fn restore(worker: Worker, state: WindowState) -> Self {
+        let mut dashboard = Self::new_idle(worker, state.request, None);
+        dashboard.range = state.range;
+        dashboard.pinning = state.pinning;
+        dashboard.hidden = state.hidden;
+        if let Some(snapshot) = state.snapshot {
+            dashboard.generation = snapshot.generation;
+            dashboard.accept(snapshot);
+        }
+        if !dashboard.pinned_reading_complete() {
+            dashboard.request_restoration();
+        }
+
+        dashboard
+    }
+
+    fn pinned_reading_complete(&self) -> bool {
+        let Some(second) = self.request.second else {
+            return false;
+        };
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+        if snapshot.histories_pending {
+            return false;
+        }
+        if snapshot.selection["second"].as_u64() != Some(second) {
+            return false;
+        }
+        if let Some(identity) = &self.request.identity {
+            return crate::live_source::identity_validate(
+                identity,
+                &snapshot.selection["selected"],
+            )
+            .is_ok();
+        }
+
+        true
+    }
+
+    fn follows_live(&self) -> bool {
+        if self.worker.mode() != crate::live_source_mode::SourceMode::Live {
+            return false;
+        }
+
+        self.request.second.is_none()
     }
 
     fn new_request(route: String) -> Request {
@@ -494,6 +578,20 @@ impl LiveDashboard {
 
     /// Rests the reader of a window macOS hides, or asks for the page of a window it shows again.
     fn tick_presence(&mut self, cx: &mut Context<Self>) {
+        let visible = matches!(
+            self.presence,
+            Presence::Shown | Presence::Showing | Presence::Rested
+        );
+        if self.follows_live() {
+            if visible {
+                if store_view::set_store_window(self.range, cx) {
+                    self.store_view = None;
+                }
+            }
+        } else {
+            self.store_view = None;
+        }
+        store_view::set_store_active(visible && self.follows_live(), cx);
         if self.presence == Presence::Opening {
             if !self.reply_pending {
                 self.presence = Presence::Hiding;
@@ -584,8 +682,27 @@ impl LiveDashboard {
             return;
         }
 
+        if self.pinned_reading_complete() {
+            return;
+        }
+
         if self.worker.mode() == crate::live_source_mode::SourceMode::Live {
+            self.request_restoration();
+        }
+    }
+
+    fn request_restoration(&mut self) {
+        if self.request.second.is_none() {
             self.request_reading();
+            return;
+        }
+
+        match self.worker.restore(self.request.clone()) {
+            Ok(generation) => {
+                self.generation = generation;
+                self.reply_pending = true;
+            }
+            Err(error) => self.error = Some(error),
         }
     }
 

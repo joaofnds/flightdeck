@@ -47,6 +47,35 @@ fn a_paused_store_catches_up_from_sealed_readings_missing_from_the_ring() {
 }
 
 #[test]
+fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
+    // Goal: showing the window never hands it a historical endpoint during reconciliation.
+    // Method: reconcile a real sealed minute while newer readings remain in its ring.
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(160);
+    let mut held = super::Held::new();
+    let mut ring = super::Ring::new(fixture.root.clone());
+    let shared = super::Shared {
+        mailbox: super::Mailbox::new(),
+        stop: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        catch_up: AtomicBool::new(false),
+        catching_up: AtomicBool::new(true),
+        paused: AtomicBool::new(false),
+        window_seconds: super::AtomicU64::new(crate::session::LOADED_SECONDS),
+        cancellation: Arc::new(crate::cancellation::Cancellation::default()),
+    };
+
+    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, None).unwrap());
+
+    assert!(shared.mailbox.take().is_none());
+}
+
+#[test]
 fn resumed_payload_ingestion_matches_a_fresh_store_without_changing_a_retained_view() {
     // Goal: catch-up preserves complete processes and exact observations in the payload mode.
     // Method: retain an old View, seal an overwritten prefix, and compare with fresh ingestion.
@@ -139,7 +168,7 @@ fn dropping_a_paused_store_wakes_and_reaps_its_thread() {
     destructor.join().unwrap();
 }
 
-fn wait_until_paused(store: &Store) {
+pub(super) fn wait_until_paused(store: &Store) {
     let deadline = Instant::now() + Duration::from_secs(2);
     for _ in 0..2_000 {
         if store.is_paused() {
@@ -176,6 +205,7 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
         catch_up: AtomicBool::new(false),
         catching_up: AtomicBool::new(false),
         paused: AtomicBool::new(false),
+        window_seconds: super::AtomicU64::new(crate::session::LOADED_SECONDS),
         cancellation: Arc::new(crate::cancellation::Cancellation::default()),
     };
 

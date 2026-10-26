@@ -61,9 +61,17 @@ pub(super) fn load_payload_using(
     capture: &crate::recording::InputCapture<'_>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
-    load_payload_since_using(root, budget, operation, capture, None, take)
+    load_payload_window_using(
+        root,
+        budget,
+        operation,
+        capture,
+        &LoadWindow::all(None),
+        take,
+    )
 }
 
+#[cfg(test)]
 pub(super) fn load_payload_since(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
@@ -71,27 +79,49 @@ pub(super) fn load_payload_since(
     since: Option<&super::Newest>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
-    load_payload_since_using(
+    load_payload_window_using(
         root,
         budget,
         operation,
         &persistence::engine::AdmittedTable::from_file_budgeted,
-        since,
+        &LoadWindow::all(since),
         take,
     )
 }
 
-fn load_payload_since_using(
+pub(super) fn load_payload_window(
+    root: &Path,
+    budget: &Arc<super::ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    since: Option<&super::Newest>,
+    seconds: u64,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
+    load_payload_window_using(
+        root,
+        budget,
+        operation,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
+        &LoadWindow {
+            since,
+            seconds,
+            unread: false,
+        },
+        take,
+    )
+}
+
+fn load_payload_window_using(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
     capture: &crate::recording::InputCapture<'_>,
-    since: Option<&super::Newest>,
+    window: &LoadWindow<'_>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
-    let discovered = find(root, &mut found, since);
+    let discovered = find_window(root, &mut found, window);
     operation.check()?;
     if let Err(failure) = discovered {
         return Ok(Outcome {
@@ -110,13 +140,60 @@ fn load_payload_since_using(
 /// minutes, and each stop or recovery of a collector seals a shorter one.
 const MINUTES_MAX: usize = 128;
 
-/// How far before the newest sealed second the loaded hour and its lead-in reach.
-const LOADED_NS: u64 = (LOADED_SECONDS + LEAD_IN_SECONDS) * 1_000_000_000;
-
 /// How far before the newest sealed second the store reads Apps: the live span's 18 minutes.
 const APPS_NS: u64 = 1_080 * 1_000_000_000;
 
 const _: () = assert!(super::SECONDS_MAX == 1_080);
+
+struct LoadWindow<'a> {
+    since: Option<&'a super::Newest>,
+    seconds: u64,
+    unread: bool,
+}
+
+impl<'a> LoadWindow<'a> {
+    fn all(since: Option<&'a super::Newest>) -> Self {
+        Self {
+            since,
+            seconds: LOADED_SECONDS,
+            unread: true,
+        }
+    }
+}
+
+/// Reconstructs only the newest saved minute's predecessor for a freshly opened live ring.
+pub(super) fn terminal(
+    root: &Path,
+    operation: &crate::cancellation::Operation,
+) -> persistence::Result<Option<Terminal>> {
+    const BYTES_MAX: usize = 256 * 1024 * 1024;
+    let mut found = Vec::with_capacity(MINUTES_MAX);
+    find_window(
+        root,
+        &mut found,
+        &LoadWindow {
+            since: None,
+            seconds: 1,
+            unread: false,
+        },
+    )
+    .map_err(|failure| persistence::Error::Io(io::Error::other(format!("{failure:?}"))))?;
+    found.truncate(1);
+    let budget = Arc::new(super::ByteBudget::new(BYTES_MAX));
+    let outcome = payload::load(
+        root,
+        &found,
+        &budget,
+        operation,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
+        |_, _, _| {},
+    )?;
+    if let Some(failure) = outcome.left_out {
+        eprintln!("flightdeck store rate predecessor: {failure:?}");
+    }
+
+    Ok(outcome.terminal)
+}
 
 /// A sealed minute of the loaded hour, by its run, its marker and the newest wall time of its
 /// ticks.
@@ -149,10 +226,35 @@ pub(super) fn load(
 pub(super) fn load_since(
     root: &Path,
     since: Option<&super::Newest>,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> Option<Failure> {
+    load_window_inner(root, &LoadWindow::all(since), take)
+}
+
+pub(super) fn load_window(
+    root: &Path,
+    since: Option<&super::Newest>,
+    seconds: u64,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> Option<Failure> {
+    load_window_inner(
+        root,
+        &LoadWindow {
+            since,
+            seconds,
+            unread: false,
+        },
+        take,
+    )
+}
+
+fn load_window_inner(
+    root: &Path,
+    window: &LoadWindow<'_>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     let mut found = Vec::with_capacity(MINUTES_MAX);
-    if let Err(failure) = find(root, &mut found, since) {
+    if let Err(failure) = find_window(root, &mut found, window) {
         return Some(failure);
     }
     let apps_from_ns = found
@@ -449,7 +551,18 @@ fn decode_refusal(refused: &Refused) -> String {
 
 /// Finds the sealed minutes of the loaded hour into `found`, newest first, from the newest run
 /// the recording registers back.
+#[cfg(test)]
 fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> Result<(), Failure> {
+    find_window(root, found, &LoadWindow::all(since))
+}
+
+fn find_window(
+    root: &Path,
+    found: &mut Vec<Found>,
+    window: &LoadWindow<'_>,
+) -> Result<(), Failure> {
+    assert!(window.seconds > 0);
+    assert!(window.seconds <= LOADED_SECONDS);
     let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
     let mut buffer: RegistryBuffer = [0; _];
     let registry = Registry::read_into(&root.join("runs"), &mut buffer)
@@ -460,7 +573,7 @@ fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> R
         runs.push(run.identity);
     }
 
-    let first = if let Some(since) = since {
+    let mut first = if let Some(since) = window.since {
         if since.run.recording != recording {
             return Err(Failure::ForeignRecording);
         }
@@ -470,12 +583,16 @@ fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> R
     } else {
         0
     };
+    if !window.unread {
+        first = 0;
+    }
     let mut oldest_ns = None;
     for run in runs[first..].iter().rev() {
         let finding = FindRun {
             root,
             recording,
             run,
+            span_ns: (window.seconds + LEAD_IN_SECONDS) * 1_000_000_000,
         };
         let more = finding
             .find(&mut oldest_ns, found)
@@ -484,8 +601,10 @@ fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> R
             break;
         }
     }
-    if let Some(since) = since {
-        find_unread(found, since);
+    if window.unread {
+        if let Some(since) = window.since {
+            find_unread(found, since);
+        }
     }
 
     Ok(())
@@ -510,6 +629,7 @@ struct FindRun<'a> {
     root: &'a Path,
     recording: Identity,
     run: &'a RunIdentity,
+    span_ns: u64,
 }
 
 impl FindRun<'_> {
@@ -547,7 +667,7 @@ impl FindRun<'_> {
                     continue;
                 };
 
-                let oldest = *oldest_ns.get_or_insert(wall_ns.max.saturating_sub(LOADED_NS));
+                let oldest = *oldest_ns.get_or_insert(wall_ns.max.saturating_sub(self.span_ns));
                 if wall_ns.max < oldest {
                     return Ok(false);
                 }

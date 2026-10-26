@@ -971,6 +971,52 @@ fn hidden_window_pauses_the_store_and_showing_it_resumes_ingestion(cx: &mut gpui
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
 
+#[gpui::test]
+fn showing_a_pinned_window_keeps_the_store_paused_until_live_is_selected(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: restoring a pinned selection never starts live ingestion in the store.
+    // Method: show a pinned window over a paused real store, then explicitly return to live.
+    use gpui::{AppContext, WindowOptions, WindowVisibility};
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let worker = Worker::start(recording.root.clone()).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let window = cx.update(|cx| {
+        cx.open_window(WindowOptions::default(), |window, cx| {
+            let dashboard = cx.new(|cx| {
+                let mut dashboard = LiveDashboard::new(worker, "overview".into(), None);
+                dashboard.pin_second(1000, cx);
+                dashboard
+            });
+            crate::live_dashboard::observe_visibility(&dashboard, window, cx);
+            dashboard
+        })
+        .unwrap()
+    });
+    cx.simulate_window_visibility_change(window.into(), WindowVisibility::Hidden);
+    wait_for_store_activity(cx, true);
+
+    cx.simulate_window_visibility_change(window.into(), WindowVisibility::Visible);
+    window
+        .update(cx, |dashboard, _, cx| dashboard.tick(cx))
+        .unwrap();
+
+    assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_paused()));
+    assert!(!cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
+    window
+        .update(cx, |dashboard, _, cx| {
+            dashboard.reset_range(cx);
+            dashboard.tick(cx);
+        })
+        .unwrap();
+    wait_for_store_activity(cx, false);
+    cx.update_window(window.into(), |_, window, _| window.remove_window())
+        .unwrap();
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
 fn wait_for_store_activity(cx: &mut gpui::TestAppContext, paused: bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     for _ in 0..2_000 {
