@@ -1,4 +1,5 @@
 //! A real recording endpoint held still while separate builds measure the same resume.
+use std::cell::Cell;
 use std::fs::DirBuilder;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
@@ -8,6 +9,8 @@ use collector::recording::{Registry, private, random_identity, read_identity};
 
 #[path = "frozen_files.rs"]
 mod files;
+#[path = "frozen_input.rs"]
+mod input;
 #[path = "frozen_mapping.rs"]
 mod mapping;
 
@@ -23,6 +26,9 @@ pub struct FrozenRecording {
     root: PathBuf,
     files: FrozenFiles,
     rings: Vec<FrozenRing>,
+    replay: Cell<Option<u64>>,
+    boundaries: Vec<input::Boundary>,
+    observations: Vec<serde_json::Value>,
 }
 
 pub struct Directories<'a> {
@@ -53,10 +59,15 @@ impl FrozenRecording {
         }
         capture_registry_stable(directories.source, &registry)?;
         capture_registry_write(directories.target, registry, &rings)?;
+        let boundaries = input::boundaries(&rings[rings.len() - 1])?;
+        let observations = input::observations(&rings)?;
         Ok(Self {
             root: directories.target.to_path_buf(),
             files,
             rings,
+            replay: Cell::new(None),
+            boundaries,
+            observations,
         })
     }
 
@@ -68,6 +79,11 @@ impl FrozenRecording {
     /// A gap exceeding this generation's run returns an error instead of fabricating history.
     /// Consumers must be stopped or paused while checkpoint changes their visible endpoint.
     pub fn checkpoint(&self, gap_publications: u64) -> io::Result<()> {
+        if self.replay.get().is_some() {
+            return Err(io::Error::other(
+                "reset replay only between stopped consumers",
+            ));
+        }
         let ring = self.active_ring();
         let newest = ring
             .newest
@@ -85,10 +101,87 @@ impl FrozenRecording {
 
     /// Call while consumers are paused, immediately before timing their live restore.
     pub fn advance(&self) -> io::Result<()> {
+        self.replay.set(None);
         self.files.advance()?;
         let ring = self.active_ring();
-        ring.publish(ring.newest);
+        ring.restore();
         Ok(())
+    }
+
+    /// Consumers must be stopped. Subsequent steps only increase visibility.
+    pub fn replay_reset(&self, first: u64) -> io::Result<()> {
+        let ring = self.active_ring();
+        if !(ring.retained_first..=ring.newest).contains(&first) {
+            return Err(io::Error::other(
+                "replay start is outside validated retained input",
+            ));
+        }
+
+        ring.complete(false);
+        let boundary = self
+            .boundaries
+            .iter()
+            .find(|entry| entry.publication == first)
+            .ok_or_else(|| io::Error::other("missing replay boundary"))?;
+        ring.replay_publish(first - 1, boundary.events_first - 1);
+        self.files.checkpoint(first - 1)?;
+        self.replay.set(Some(first - 1));
+        Ok(())
+    }
+
+    pub fn replay_step(&self, publication: u64) -> io::Result<()> {
+        let previous = self
+            .replay
+            .get()
+            .ok_or_else(|| io::Error::other("reset replay first"))?;
+        if publication <= previous {
+            return Err(io::Error::other("replay publication must increase"));
+        }
+
+        let boundary = self
+            .boundaries
+            .iter()
+            .find(|entry| entry.publication == publication)
+            .ok_or_else(|| io::Error::other("publication outside validated retained input"))?;
+        self.active_ring()
+            .replay_publish(publication, boundary.events_end - 1);
+        self.replay.set(Some(publication));
+        Ok(())
+    }
+
+    pub fn replay_seal(&self, window: u64) -> io::Result<()> {
+        let newest = self
+            .replay
+            .get()
+            .ok_or_else(|| io::Error::other("reset replay first"))?;
+        self.files.replay_seal(window, newest)
+    }
+
+    pub fn replay_complete(&self) -> io::Result<()> {
+        if self.replay.get() != Some(self.active_ring().newest) {
+            return Err(io::Error::other(
+                "replay has not reached its final publication",
+            ));
+        }
+
+        self.active_ring().complete(true);
+        Ok(())
+    }
+
+    /// Export before resetting. Backing files are evidence, not an import format.
+    pub fn export(&self, directory: &Path) -> io::Result<()> {
+        if self.replay.get().is_some() {
+            return Err(io::Error::other(
+                "export requires the captured full endpoint",
+            ));
+        }
+
+        input::export(self, directory)
+    }
+
+    /// Input identities at the current endpoint; invoke outside measured intervals.
+    pub fn expectation(&self, path: &Path) -> io::Result<()> {
+        input::expectation(self, path)
     }
 
     pub fn publication_newest(&self) -> u64 {

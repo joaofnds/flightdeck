@@ -1,6 +1,7 @@
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
 use std::fs::File;
 use std::io;
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,6 +15,9 @@ pub(super) struct FrozenRing {
     pub(super) first: u64,
     pub(super) newest: u64,
     pub(super) slots: u64,
+    pub(super) retained_first: u64,
+    event_newest: u64,
+    completed: bool,
 }
 
 struct Mapping {
@@ -34,6 +38,8 @@ struct OwnedObject {
 const COPY_ATTEMPTS_MAX: u32 = 8;
 // This wire offset is shared by every admitted ring layout in collector::ring::layout.
 const HEADER_PUBLICATION_NEWEST: usize = 4;
+const HEADER_EVENT_NEWEST: usize = 7;
+const HEADER_COMPLETED: usize = 29;
 const MAPPING_BYTES_MAX: usize = 1024 * 1024 * 1024;
 const O_RDONLY: c_int = 0x0000;
 const O_RDWR: c_int = 0x0002;
@@ -93,6 +99,8 @@ impl FrozenRing {
             &reader,
             object.name()?,
         )?;
+        let captured = RingReader::open_generation(object.name()?)?;
+        let event_newest = mapping.words()[HEADER_EVENT_NEWEST].load(Ordering::Acquire);
         Ok(Self {
             mapping,
             object,
@@ -100,6 +108,9 @@ impl FrozenRing {
             first: reader.publication_first(),
             newest,
             slots: reader.shape().slot_count,
+            retained_first: captured.next_publication(),
+            event_newest,
+            completed: captured.completed(),
         })
     }
 
@@ -107,10 +118,39 @@ impl FrozenRing {
         self.object.name()
     }
 
+    pub(super) fn backing_bytes(&self) -> usize {
+        self.mapping.bytes
+    }
+
     pub(super) fn publish(&self, newest: u64) {
         assert!(newest < self.newest + 1);
         assert!(newest >= self.first - 1);
         self.mapping.words()[HEADER_PUBLICATION_NEWEST].store(newest, Ordering::Release);
+    }
+
+    pub(super) fn replay_publish(&self, newest: u64, event_newest: u64) {
+        self.mapping.words()[HEADER_EVENT_NEWEST].store(event_newest, Ordering::Release);
+        self.publish(newest);
+    }
+
+    pub(super) fn complete(&self, completed: bool) {
+        self.mapping.words()[HEADER_COMPLETED].store(u64::from(completed), Ordering::Release);
+    }
+
+    pub(super) fn restore(&self) {
+        self.replay_publish(self.newest, self.event_newest);
+        self.complete(self.completed);
+    }
+
+    pub(super) fn export(&self, path: &std::path::Path) -> io::Result<()> {
+        let file = collector::recording::private::open_private_file(path, true)?;
+        let mut output = io::BufWriter::with_capacity(65_536, file);
+        assert!(self.mapping.bytes <= MAPPING_BYTES_MAX);
+        for word in self.mapping.words() {
+            output.write_all(&word.load(Ordering::Acquire).to_ne_bytes())?;
+        }
+        output.flush()?;
+        output.get_ref().sync_all()
     }
 }
 

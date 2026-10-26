@@ -21,6 +21,7 @@ struct Fixture {
     target: PathBuf,
     writer: Writer,
     program: ProgramReference,
+    events: usize,
 }
 
 const SHAPE: Shape = Shape {
@@ -32,8 +33,139 @@ const SHAPE: Shape = Shape {
     fan_capacity: 1,
     process_capacity: 1,
     coalition_capacity: 1,
-    event_capacity: 1,
+    event_capacity: 120,
 };
+
+#[test]
+fn replays_only_monotone_retained_publications_and_eligible_seals() {
+    // Goal: running readers never see a future endpoint, event or seal during replay.
+    // Method: reset a captured real ring, step its retained tail, and inspect native readers.
+    let mut source = Fixture::new();
+    source.populate();
+    let frozen = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    })
+    .unwrap();
+    let registry = Registry::read(frozen.root()).unwrap();
+    let mut reader = RingReader::open_generation(&registry.runs[0].ring_name).unwrap();
+
+    frozen.replay_reset(1781).unwrap();
+    assert_eq!(reader.publication_newest().unwrap(), 1780);
+    assert!(!reader.completed());
+    assert!(!marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    frozen.replay_step(1800).unwrap();
+    assert_eq!(reader.publication_newest().unwrap(), 1800);
+    let expectation = source.root.join("step.json");
+    frozen.expectation(&expectation).unwrap();
+    let expectation: serde_json::Value =
+        serde_json::from_slice(&fs::read(expectation).unwrap()).unwrap();
+    assert_eq!(expectation["selected"]["publication"], 1800);
+    assert_eq!(expectation["observations"].as_array().unwrap().len(), 20);
+    assert!(frozen.replay_step(1799).is_err());
+    assert!(frozen.replay_seal(30).is_err());
+    frozen.replay_step(1860).unwrap();
+    assert!(!marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    frozen.replay_seal(30).unwrap();
+    assert!(marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    assert_eq!(reader.publication_newest().unwrap(), 1860);
+    assert!(frozen.replay_complete().is_err());
+    frozen.replay_step(1900).unwrap();
+    frozen.replay_complete().unwrap();
+    assert!(reader.completed());
+    reader.seek_publication(1900).unwrap();
+    assert_latest_row(reader.name(), &source.program);
+}
+
+#[test]
+fn bounds_event_visibility_and_exports_reader_resolved_identity_bytes() {
+    // Goal: replay hides future events and exports independent identities with backing hashes.
+    // Method: capture 120 retained eventful slots, step twice, then inspect native event reads.
+    let mut source = Fixture::new();
+    source.events = 1;
+    for publication in 1..=1900 {
+        source.publish(publication);
+    }
+    let frozen = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    })
+    .unwrap();
+    let export = source.root.join("export");
+    frozen.export(&export).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(export.join("input.json")).unwrap()).unwrap();
+    let registry = Registry::read(frozen.root()).unwrap();
+    frozen.replay_reset(1781).unwrap();
+    let mut reader = RingReader::open_generation(&registry.runs[0].ring_name).unwrap();
+    reader.seek_event(1781).unwrap();
+    assert_eq!(
+        reader.read_event().unwrap(),
+        collector::ring::FoundEvent::Nothing
+    );
+
+    frozen.replay_step(1782).unwrap();
+
+    let mut identity = IdentityObservation::EMPTY;
+    assert!(matches!(
+        reader.read_event_identity(&mut identity).unwrap(),
+        collector::ring::FoundEvent::Event {
+            number: 1781,
+            tick: 1780,
+            ..
+        }
+    ));
+    assert_eq!(identity.pid, 23);
+    assert_eq!(
+        identity.program().unwrap().number(),
+        source.program.number()
+    );
+    assert!(matches!(
+        reader.read_event().unwrap(),
+        collector::ring::FoundEvent::Event { number: 1782, .. }
+    ));
+    assert_eq!(
+        reader.read_event().unwrap(),
+        collector::ring::FoundEvent::Nothing
+    );
+    assert_exported_events(&manifest);
+    assert_eq!(
+        fs::metadata(export.join("0.ring")).unwrap().len(),
+        manifest["rings"][0]["backing_bytes"].as_u64().unwrap()
+    );
+    assert!(
+        manifest["rings"][0]["backing_bytes"].as_u64().unwrap()
+            >= u64::try_from(reader.mapped_size_bytes()).unwrap()
+    );
+}
+
+fn assert_exported_events(manifest: &serde_json::Value) {
+    let publications = manifest["rings"][0]["publications"].as_array().unwrap();
+    assert_eq!(publications.len(), 120);
+    assert_eq!(publications[0]["events_first"], 1781);
+    assert_eq!(
+        publications[0]["events"][0]["identity"]["resolved_bytes"]["name_sha256"],
+        "4064876fe25e33f80e717a645098fe5479b8d7119a47a0c9e4c0c696e0da8f09"
+    );
+}
+
+#[test]
+fn refuses_replay_when_retained_slots_reference_overwritten_events() {
+    // Goal: an incomplete native sequence is refused rather than replayed with missing events.
+    // Method: give each of 120 slots two events in a 120-event ring and attempt capture.
+    let mut source = Fixture::new();
+    source.events = 2;
+    for publication in 1..=1900 {
+        source.publish(publication);
+    }
+
+    let result = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    });
+
+    assert!(result.is_err());
+}
 
 #[test]
 fn captures_real_identity_rows_and_restores_covered_and_overwritten_gaps() {
@@ -125,6 +257,7 @@ impl Fixture {
         let nonce = collector::recording::random_identity().unwrap().0[0];
         let root = std::env::temp_dir().join(format!("flightdeck-frozen-{nonce:016x}"));
         private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let target = root.join("captured");
         let identity = new_run_identity(recording_identity(&root).unwrap()).unwrap();
         let mut writer = Writer::create_with_identity(
@@ -166,6 +299,7 @@ impl Fixture {
             target,
             writer,
             program: program.unwrap(),
+            events: 0,
         }
     }
 
@@ -232,6 +366,14 @@ impl Fixture {
                 program: self.program,
             },
         };
+        let events: [_; 2] = std::array::from_fn(|_| collector::tracker::Event::Start {
+            pid: 23,
+            coalition: Some(17),
+        });
+        let identities = [IdentityObservation {
+            usage: UsageAvailability::NotApplicable,
+            ..observation
+        }; 2];
         self.writer
             .publish_with_identity(
                 &Readings {
@@ -245,7 +387,7 @@ impl Fixture {
                     processes_refused: 0,
                     processes_gone: 0,
                     coalitions: &[],
-                    events: &[],
+                    events: &events[..self.events],
                     dropped: Dropped::default(),
                 },
                 Some(&ObservationTimes {
@@ -255,7 +397,7 @@ impl Fixture {
                 }),
                 &IdentityPublication {
                     processes: &[observation],
-                    events: &[],
+                    events: &identities[..self.events],
                 },
             )
             .unwrap();

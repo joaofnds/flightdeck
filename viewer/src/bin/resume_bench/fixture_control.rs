@@ -63,6 +63,26 @@ fn command(fixture: &FrozenRecording, line: &str) -> io::Result<()> {
     if let Some(gap) = line.strip_prefix("checkpoint ") {
         return fixture.checkpoint(gap.parse().map_err(io::Error::other)?);
     }
+    if let Some(first) = line.strip_prefix("replay-reset ") {
+        return fixture.replay_reset(first.parse().map_err(io::Error::other)?);
+    }
+    if let Some(publication) = line.strip_prefix("replay-step ") {
+        return fixture.replay_step(publication.parse().map_err(io::Error::other)?);
+    }
+    if let Some(window) = line.strip_prefix("replay-seal ") {
+        return fixture.replay_seal(window.parse().map_err(io::Error::other)?);
+    }
+    if line == "replay-complete" {
+        return fixture.replay_complete();
+    }
+    if let Some(directory) = line.strip_prefix("export ") {
+        return fixture.export(Path::new(directory));
+    }
+    if let Some(path) = line.strip_prefix("expectation ") {
+        return fixture.expectation(Path::new(path));
+    }
 
-    Err(io::Error::other("expected checkpoint N, advance, or quit"))
+    Err(io::Error::other(
+        "expected checkpoint, advance, replay-reset/step/seal/complete, export, quit",
+    ))
 }

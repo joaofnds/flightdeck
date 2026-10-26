@@ -14,17 +14,19 @@ pub(super) struct FrozenFiles {
     markers: Vec<FrozenMarker>,
     hidden: RefCell<Vec<usize>>,
     pub(super) windows: u64,
+    pub(super) captured: Vec<CapturedWindow>,
 }
 
 struct FrozenMarker {
     visible: PathBuf,
     hidden: PathBuf,
     publication_end: u64,
+    window: u64,
 }
 
-struct CapturedWindow {
-    manifest: Manifest,
-    marker: PathBuf,
+pub(super) struct CapturedWindow {
+    pub(super) manifest: Manifest,
+    pub(super) marker: PathBuf,
 }
 
 struct Destination<'a> {
@@ -70,6 +72,7 @@ impl FrozenFiles {
                     visible: window.marker.clone(),
                     hidden,
                     publication_end: window.manifest.publication_end,
+                    window: window.manifest.identity.window,
                 });
             }
         }
@@ -79,6 +82,7 @@ impl FrozenFiles {
             markers,
             hidden,
             windows: count,
+            captured: windows,
         })
     }
 
@@ -107,6 +111,22 @@ impl FrozenFiles {
             assert_eq!(hidden.pop(), Some(index));
         }
         assert!(hidden.is_empty());
+        Ok(())
+    }
+
+    pub(super) fn replay_seal(&self, window: u64, newest: u64) -> io::Result<()> {
+        let mut hidden = self.hidden.borrow_mut();
+        let position = hidden
+            .iter()
+            .position(|index| self.markers[*index].window == window)
+            .ok_or_else(|| io::Error::other("seal is absent or already visible"))?;
+        let marker = &self.markers[hidden[position]];
+        if marker.publication_end > newest + 1 {
+            return Err(io::Error::other("seal extends past replay endpoint"));
+        }
+
+        fs::rename(&marker.hidden, &marker.visible)?;
+        hidden.remove(position);
         Ok(())
     }
 }
