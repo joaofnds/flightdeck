@@ -512,18 +512,11 @@ impl LiveDashboard {
 
     /// Rests the reader of a window macOS hides, as a closed window's reader rests. A reader of
     /// a recording opened read-only reads nothing once its page is read, so it is left alone.
-    /// The reader of a page drawn from the store's View rests idle, since the View brings the
-    /// seconds the page shows when the window shows again.
+    /// The live reader leaves its session unchanged until the window asks for a page again.
     fn tick_hidden(&mut self) {
-        let drawn_from_view = self.followed_store_view().is_some();
         self.store_view = None;
 
-        let handed_over = if drawn_from_view {
-            self.worker.hand_over_idle()
-        } else {
-            self.worker.hand_over()
-        };
-        match handed_over {
+        match self.worker.hand_over() {
             Ok(Some(resting)) => {
                 self.worker = resting;
                 self.reply_pending = false;
@@ -559,7 +552,7 @@ impl LiveDashboard {
             return;
         }
 
-        match self.worker.hand_over_idle() {
+        match self.worker.hand_over() {
             Ok(Some(resting)) => {
                 self.worker = resting;
                 self.presence = Presence::Rested;

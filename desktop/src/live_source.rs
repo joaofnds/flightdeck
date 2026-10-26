@@ -342,21 +342,9 @@ impl Worker {
         }
     }
 
-    /// Hands the reader to a new handle, so the window opened next reads through it. The reader
-    /// drops the page it read and keeps its session following the recording until a request
-    /// arrives, and this handle refuses requests from then on.
+    /// Hands the reader to the next window without ingesting while no page reads it.
+    /// The session stays where it is until a request arrives, and this handle refuses requests.
     pub fn hand_over(&mut self) -> Result<Option<Worker>, String> {
-        self.hand_over_resting(Rest::Following)
-    }
-
-    /// Hands the reader to a new handle as `hand_over` does, for a window that draws its page
-    /// from the store's View, so the reader leaves its session where it is until a request
-    /// arrives.
-    pub fn hand_over_idle(&mut self) -> Result<Option<Worker>, String> {
-        self.hand_over_resting(Rest::Idle)
-    }
-
-    fn hand_over_resting(&mut self, rest: Rest) -> Result<Option<Worker>, String> {
         // A recording the user opened in the window is read-only, and the window opened again
         // follows the live recording.
         if self.mode != SourceMode::Live {
@@ -381,7 +369,7 @@ impl Worker {
             mailbox.request = None;
             mailbox.output = None;
             mailbox.rest = true;
-            mailbox.rest_kind = rest;
+            mailbox.rest_kind = Rest::Idle;
             self.shared.wake.notify_one();
         }
 

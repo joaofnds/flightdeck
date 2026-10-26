@@ -441,7 +441,7 @@ impl InputDriver {
             .push(Arc::new(sample));
         self.view.update(&mut self.context, |dashboard, cx| {
             assert!(dashboard.take_view(held));
-            if let Some(resting) = dashboard.worker.hand_over_idle().unwrap() {
+            if let Some(resting) = dashboard.worker.hand_over().unwrap() {
                 dashboard.worker = resting;
             }
             cx.notify();

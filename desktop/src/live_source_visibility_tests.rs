@@ -270,11 +270,9 @@ fn a_hidden_overview_drawn_from_the_store_leaves_its_reader_idle(cx: &mut TestAp
 }
 
 #[gpui::test]
-fn a_hidden_page_drawn_from_its_readings_keeps_its_reader_following(cx: &mut TestAppContext) {
-    // Goal: a hidden page the worker's readings draw rests its reader following the recording,
-    // so the page shown again reads only the ticks since the reader's last step.
-    // Method: hide a window whose page has no View to draw, let the reader take the rest, and
-    // step it as the worker steps a resting reader, over a recording it has not opened.
+fn a_hidden_page_drawn_from_its_readings_leaves_its_reader_idle(cx: &mut TestAppContext) {
+    // Goal: hiding a page stops background ingestion even when its readings use the legacy reader.
+    // Method: hide a page without a store View and step the resting reader over unopened input.
     let mut window = VisibilityHarness::open(cx);
     let recording = SealedRecording::new();
     window.change(WindowVisibility::Hidden);
@@ -282,7 +280,7 @@ fn a_hidden_page_drawn_from_its_readings_keeps_its_reader_following(cx: &mut Tes
 
     window.reader.step_resting(&recording.root);
 
-    assert!(window.reader.reader.session.is_some());
+    assert!(window.reader.reader.session.is_none());
 }
 
 #[gpui::test]
