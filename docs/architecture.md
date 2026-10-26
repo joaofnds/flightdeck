@@ -5,9 +5,9 @@ and drawing them. Closing the normal live window leaves collection running. The
 window's readers can stop doing work without stopping the recording.
 
 Start with the [glossary](../GLOSSARY.md) for domain terms and the
-[root README](../README.md) for building and running the app. This guide describes
-the implemented system. [Recording research](recording-research.md) covers the wider
-design and capabilities still to build.
+[root README](../README.md) for building and running the app.
+[Recording research](recording-research.md) covers the wider design and capabilities
+still to build.
 
 ## Processes and data flow
 
@@ -72,8 +72,8 @@ flowchart TD
     Overview -->|detail absent from View| Worker
 ```
 
-These paths serve different requests. Once Overview has complete initial histories
-and follows a Store View, its page worker rests. A hover retained in the View reads
+Once Overview has complete initial histories and follows a Store View, its page
+worker rests. A hover retained in the View reads
 there; a missing detail can request the worker. On another page, or at a pinned
 observation, the unused Store parks. Bootstrap, incomplete histories and unavailable
 Store data retain the page-worker path.
@@ -88,9 +88,8 @@ updates to animate the chart forward.
 Visibility and the selected time are independent. A live selection means “follow
 the latest reading with this range.” A pin means “keep this exact observation and
 this range.” Hiding the window preserves that choice and parks its readers.
-Closing a normal background-capable live window retains the request, chart range,
-pin, snapshot and handed-over worker for reopening within the running app. This
-does not describe persistence across quitting and restarting the application.
+Closing the normal live window retains the request, chart range, pin, snapshot and
+handed-over worker for reopening while the app keeps running in the background.
 
 | State before hiding or closing | Restore behavior |
 | --- | --- |
@@ -100,9 +99,6 @@ does not describe persistence across quitting and restarting the application.
 | Pin with incomplete histories and a running reader, or with no retained snapshot | Restore that selected observation through the page worker without ingesting new live arrivals |
 | Pin with a retained snapshot whose reader stopped | Keep the snapshot and range without a new request; canceled histories are no longer pending |
 | Another page or incomplete initial Overview | Restore through the existing page-worker path |
-
-For live Overview the Store chooses between reusing its checkpoint and reloading
-the selected period:
 
 ```mermaid
 flowchart TD
@@ -125,7 +121,7 @@ contiguous unread cursor still inside ring retention, and enough cached coverage
 for the requested range. A larger uncached range or expired checkpoint reloads the
 selected saved period. During restoration the Store withholds partial Views until
 it reaches the current endpoint, or reports a failure. Missing or refused readings
-remain explicit gaps; a complete replacement does not imply every tick exists.
+remain explicit gaps in the replacement.
 
 Coverage is checked again through consumption. If the writer overwrites an unread
 publication after checkpoint admission, the Store withholds the incomplete View,
@@ -134,8 +130,7 @@ only before reading would silently omit a reading still recoverable from disk.
 
 Overview waits for that replacement instead of submitting a duplicate full-period
 page query. The Store's pending state keeps restoration scheduled until its answer
-arrives. Preserving the prior live/pinned choice prevents reopening from turning
-inspection into a live request.
+arrives.
 
 ## Why this reduces work
 

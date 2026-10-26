@@ -90,7 +90,7 @@ Store's footprint stays between 248.1 and 248.3 MB over 100 warm restores, with 
 248.3 MB lifetime peak. Warm native lifetime peaks across the three ranges reach
 899 MB, versus 1,317 MB before. Cold hour restores do not improve peak footprint:
 the three-process maximum is 1,152 MB versus 1,100 MB, while the retained presentation
-and replacement overlap. No lower cold-memory peak is claimed.
+and replacement overlap.
 
 The files were filesystem-cache warm: measured disk-read bytes were zero. These
 numbers establish neither cold-storage performance nor a percentile latency target.
@@ -100,7 +100,7 @@ They are local observations on a busy development Mac, not timing thresholds for
 
 `sample` on the original active Store found 337 stack samples under
 `recording::terminal`, including 330 under its full payload decoder. That path rebuilt
-saved presentations merely to retain a raw predecessor. The optimized warm native
+saved presentations to retain a raw predecessor. The optimized warm native
 profile shows UI projection work with no saved-terminal reconstruction; the request
 counter independently confirms the duplicate reader is idle. Profiling runs are
 separate from the timing samples.

@@ -201,8 +201,8 @@ worker. Complete pins retain their exact observation and range on reopen without
 read. Incomplete pins restore that observation through a running worker; if the reader
 stopped, a retained pinned snapshot stays available without restarting its canceled
 histories. Initial bootstrap and incomplete histories otherwise retain the worker path.
-A View older than the worker's readings
-is not drawn. The [architecture guide](../docs/architecture.md#hiding-and-restoring-a-window)
+A View older than the worker's readings is not drawn.
+The [architecture guide](../docs/architecture.md#hiding-and-restoring-a-window)
 shows the restore decisions; the [performance report](../docs/window-resume-performance.md)
 records profiles, measurements and their limits. During collector discovery and
 startup the timer also reads bounded registration/ring-header metadata for the configured
