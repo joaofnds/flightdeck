@@ -91,12 +91,10 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let root = recording(options)?;
     let collector = collector_session(&root, options)?;
     // A recording opened read-only has no ring to follow, so the store does not hold it yet.
-    let (worker, store) = match (
-        options.source.recording.is_some(),
-        options.source.start_collector,
-    ) {
-        (true, false) => (Worker::start_recorded(root.clone())?, None),
-        _ => (Worker::start(root.clone())?, Some(Store::start(&root)?)),
+    let (worker, store) = if options.source.read_only() {
+        (Worker::start_recorded(root.clone())?, None)
+    } else {
+        (Worker::start(root.clone())?, Some(Store::start(&root)?))
     };
     let reopening = reopening(root, options, control.is_some());
     let preferences_path = preferences_path(options, control.is_some());

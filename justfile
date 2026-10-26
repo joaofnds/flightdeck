@@ -106,6 +106,7 @@ desktop-clippy:
 # Test the desktop workspace, then run the desktop app's own checks.
 desktop-test:
     cargo test --locked --manifest-path desktop/Cargo.toml
+    cargo test --locked --manifest-path desktop/Cargo.toml --features automation --bin flightdeck
     cargo run --locked --manifest-path desktop/Cargo.toml --bin flightdeck -- --check
     cargo run --locked --manifest-path desktop/Cargo.toml --bin text_backend_check -- --check
 

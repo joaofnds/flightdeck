@@ -753,6 +753,8 @@ impl SnapshotReader {
             },
             command: Self::command(),
             shared: Arc::new(Shared {
+                #[cfg(feature = "automation")]
+                requests: std::sync::atomic::AtomicU64::new(0),
                 mailbox: Mutex::new(Mailbox {
                     generation: 1,
                     request: None,

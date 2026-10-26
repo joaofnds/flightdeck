@@ -55,6 +55,8 @@ pub struct Source {
     pub recording: Option<std::path::PathBuf>,
     pub probe: ProbeMode,
     pub start_collector: bool,
+    #[cfg(feature = "automation")]
+    attach_live: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -109,6 +111,8 @@ impl Options {
         }
         options.validate_replay()?;
         options.validate_seconds()?;
+        #[cfg(feature = "automation")]
+        options.source.validate_attach()?;
         Ok(options)
     }
 
@@ -256,6 +260,34 @@ impl Options {
 }
 
 impl Source {
+    #[cfg(feature = "automation")]
+    fn validate_attach(&self) -> Result<(), &'static str> {
+        if self.attach_live {
+            if self.recording.is_none() {
+                return Err("--attach-live requires --recording");
+            }
+            if self.start_collector {
+                return Err("--attach-live cannot start a collector");
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the named recording uses only saved readings.
+    pub(crate) fn read_only(&self) -> bool {
+        if self.recording.is_none() {
+            return false;
+        }
+        if self.start_collector {
+            return false;
+        }
+        #[cfg(feature = "automation")]
+        if self.attach_live {
+            return false;
+        }
+        true
+    }
+
     fn parse_argument(
         &mut self,
         flag: &str,
@@ -267,6 +299,8 @@ impl Source {
             "--live-check" => self.select_probe(ProbeMode::Check)?,
             "--live-soak" => self.select_probe(ProbeMode::Soak)?,
             "--start-collector" => self.start_collector = true,
+            #[cfg(feature = "automation")]
+            "--attach-live" => self.attach_live = true,
             "--recording" => {
                 self.recording = Some(
                     arguments
@@ -393,6 +427,35 @@ fn parse_argument_help() -> ! {
 #[cfg(test)]
 mod tests {
     use super::{Options, ProbeMode};
+
+    #[cfg(feature = "automation")]
+    #[test]
+    fn attaching_live_requires_a_recording_and_excludes_starting_a_collector() {
+        // Goal: a profiling attachment cannot silently start a collector.
+        // Method: parse the valid attachment and both flag orders for conflicting options.
+        let valid = ["--attach-live", "--recording", "/fixture"].map(str::to_owned);
+        let attached = Options::parse_arguments(&valid).unwrap();
+        assert!(!attached.source.read_only());
+        assert!(!attached.source.start_collector);
+        let missing = ["--attach-live"].map(str::to_owned);
+        assert!(Options::parse_arguments(&missing).is_err());
+        for invalid in [
+            [
+                "--attach-live",
+                "--recording",
+                "/fixture",
+                "--start-collector",
+            ],
+            [
+                "--start-collector",
+                "--recording",
+                "/fixture",
+                "--attach-live",
+            ],
+        ] {
+            assert!(Options::parse_arguments(&invalid.map(str::to_owned)).is_err());
+        }
+    }
 
     #[test]
     fn parses_the_control_socket_and_refuses_it_without_a_path() {

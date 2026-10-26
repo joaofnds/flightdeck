@@ -36,6 +36,8 @@ mod live_range;
 mod live_range_menu;
 mod live_rankings;
 mod live_resident_history;
+#[cfg(feature = "automation")]
+mod live_resume_metrics;
 mod live_row_splice;
 mod live_sections;
 mod live_settings;

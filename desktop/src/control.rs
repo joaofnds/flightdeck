@@ -163,11 +163,37 @@ async fn respond(
     cx: &mut gpui::AsyncWindowContext,
 ) -> Option<String> {
     let words: Vec<&str> = line.split_whitespace().take(WORDS_MAX).collect();
+    if words.first() == Some(&"profile-cycle") {
+        let before = cx
+            .update(|window, cx| {
+                window.minimize_window();
+                dashboard.read(cx).resume_metrics.count()
+            })
+            .ok()?;
+        if !settle(dashboard, cx, Settled::Hidden).await? {
+            return Some(failure("ingestion did not park while hidden"));
+        }
+        cx.update(|window, cx| {
+            cx.activate(true);
+            window.activate_window();
+        })
+        .ok()?;
+        for _ in 0..READING_POLLS_MAX {
+            cx.background_executor().timer(READING_POLL).await;
+            let result = cx
+                .update(|_, cx| dashboard.read(cx).resume_metrics.after(before))
+                .ok()?;
+            if let Some(result) = result {
+                return Some(json!({"ok":true, "result":result}).to_string());
+            }
+        }
+        return Some(failure("fresh resume frame did not arrive"));
+    }
     if words.first() == Some(&"screenshot") {
         let Some(path) = words.get(1).map(|path| (*path).to_owned()) else {
             return Some(failure("screenshot needs a path"));
         };
-        let settled = settle(dashboard, cx).await?;
+        let settled = settle(dashboard, cx, Settled::Page).await?;
         // Two frames apart, so rows measured in the first frame lay out in the second.
         cx.update(draw).ok()?;
         cx.background_executor().timer(SETTLE).await;
@@ -192,21 +218,38 @@ async fn respond(
     })
 }
 
-/// Waits until the page holds its readings or its error, since a page reads its selection
-/// on a worker after each navigation or inspection. Answers whether it did, or none once the
-/// window is gone.
+enum Settled {
+    Page,
+    Hidden,
+}
+
+/// Waits for the requested page or the actual ingestion pause, or none after the window closes.
 async fn settle(
     dashboard: &Entity<LiveDashboard>,
     cx: &mut gpui::AsyncWindowContext,
+    settled: Settled,
 ) -> Option<bool> {
     for _ in 0..READING_POLLS_MAX {
         let settled = cx
-            .update(|_, cx| {
+            .update(|window, cx| {
                 let dashboard = dashboard.read(cx);
-                if dashboard.snapshot.is_some() {
-                    true
-                } else {
-                    dashboard.error.is_some()
+                match settled {
+                    Settled::Page => {
+                        if dashboard.snapshot.is_some() {
+                            return true;
+                        }
+                        dashboard.error.is_some()
+                    }
+                    Settled::Hidden => {
+                        if window.is_visible() {
+                            return false;
+                        }
+                        let store = crate::live_dashboard::store_activity(cx);
+                        if store.is_null() {
+                            return true;
+                        }
+                        store["paused"] == true
+                    }
                 }
             })
             .ok()?;
@@ -249,7 +292,15 @@ fn execute(
     cx: &mut App,
 ) -> Result<Value, String> {
     match words.first().copied().unwrap_or("") {
-        "state" => Ok(state(dashboard.read(cx), window)),
+        "state" => Ok(state(dashboard.read(cx), window, cx)),
+        "profile-resume" => {
+            let enabled = dashboard.update(cx, |dashboard, _| dashboard.resume_metrics.enable());
+            if enabled {
+                crate::live_dashboard::observe_visibility(dashboard, window, cx);
+            }
+            Ok(Value::Null)
+        }
+        "range" => execute_range(words, dashboard, cx),
         "rows" => Ok(rows(dashboard.read(cx))),
         "hovers" => Ok(dashboard.read(cx).hover_timings.report()),
         "show" => {
@@ -298,7 +349,27 @@ fn execute(
     }
 }
 
+fn execute_range(
+    words: &[&str],
+    dashboard: &Entity<LiveDashboard>,
+    cx: &mut App,
+) -> Result<Value, String> {
+    let minutes: u64 = word(words, 1)?
+        .parse()
+        .map_err(|error: std::num::ParseIntError| error.to_string())?;
+    if !(1..=60).contains(&minutes) {
+        return Err("range must be 1..60 minutes".into());
+    }
+    dashboard.update(cx, |dashboard, cx| {
+        dashboard.set_range(crate::time_range::Range::minutes(minutes), cx);
+    });
+    Ok(Value::Null)
+}
+
 const HELP: &[&str] = &[
+    "profile-cycle",
+    "profile-resume",
+    "range MINUTES",
     "state",
     "rows",
     "hovers",
@@ -525,7 +596,7 @@ fn reveal(key: &str, dashboard: &Entity<LiveDashboard>, cx: &mut App) -> Result<
     Ok(json!({"index": index}))
 }
 
-fn state(dashboard: &LiveDashboard, window: &Window) -> Value {
+fn state(dashboard: &LiveDashboard, window: &Window, cx: &App) -> Value {
     let selection = dashboard
         .reading_snapshot()
         .map_or(&Value::Null, |snapshot| &snapshot.selection);
@@ -539,6 +610,8 @@ fn state(dashboard: &LiveDashboard, window: &Window) -> Value {
 
     json!({
         "route": dashboard.request.route,
+        "resume": dashboard.resume_metrics.result(),
+        "store": crate::live_dashboard::store_activity(cx),
         "settings_open": dashboard.settings.open,
         "animate_fans": dashboard.settings.animate_fans,
         "animation_error": dashboard.hardware_state.animation_failure(),
@@ -546,6 +619,8 @@ fn state(dashboard: &LiveDashboard, window: &Window) -> Value {
         "window_visible": window.is_visible(),
         "window_active": window.is_window_active(),
         "requested_second": dashboard.request.second,
+        "reply_pending": dashboard.reply_pending,
+        "worker_requests_submitted": dashboard.worker.requests_submitted(),
         "selected_second": dashboard.shown_second(),
         "selected": selection["selected"],
         "status": dashboard.status(),

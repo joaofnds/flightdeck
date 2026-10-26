@@ -43,6 +43,14 @@ pub fn install_store(store: Store, cx: &mut App) {
     cx.set_global(LiveStore(store));
 }
 
+#[cfg(feature = "automation")]
+pub(crate) fn store_activity(cx: &App) -> Value {
+    cx.try_global::<LiveStore>().map_or(Value::Null, |store| {
+        json!({"active":store.0.is_active(), "paused":store.0.is_paused(),
+            "pending":store.0.pending()})
+    })
+}
+
 /// Parks ingestion while hidden, or reconciles the recording when the window shows again.
 pub(crate) fn set_store_active(active: bool, cx: &App) {
     if let Some(store) = cx.try_global::<LiveStore>() {

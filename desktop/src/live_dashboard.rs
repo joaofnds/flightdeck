@@ -47,6 +47,17 @@ pub(crate) fn observe_visibility(
         }
 
         cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
+            #[cfg(feature = "automation")]
+            if visibility.is_visible() {
+                let version = dashboard.resume_store_version();
+                dashboard
+                    .resume_metrics
+                    .begin(&crate::live_resume_metrics::Checkpoint {
+                        generation: dashboard.generation,
+                        store_version: version,
+                        requests: dashboard.worker.requests_submitted(),
+                    });
+            }
             store_view::set_store_active(visibility.is_visible() && dashboard.follows_live(), cx);
             if !visibility.is_visible() {
                 dashboard.store_view = None;
@@ -94,6 +105,8 @@ fn zoom_panel(panel: &mut Rc<Panel>, view: crate::chart_axes::TimeWindow, slidin
 }
 
 pub struct LiveDashboard {
+    #[cfg(feature = "automation")]
+    pub(crate) resume_metrics: crate::live_resume_metrics::ResumeMetrics,
     pub worker: Worker,
     pub request: Request,
     pub snapshot: Option<Box<Snapshot>>,
@@ -324,6 +337,11 @@ pub enum Row {
 }
 
 impl LiveDashboard {
+    #[cfg(feature = "automation")]
+    pub(crate) fn resume_store_version(&self) -> Option<u64> {
+        self.followed_store_view().map(|view| view.version)
+    }
+
     pub fn new(worker: Worker, route: String, seconds: Option<u32>) -> Self {
         let mut dashboard = Self::new_idle(worker, Self::new_request(route), seconds);
         dashboard.submit();
@@ -332,6 +350,8 @@ impl LiveDashboard {
 
     fn new_idle(worker: Worker, request: Request, seconds: Option<u32>) -> Self {
         let mut dashboard = Self {
+            #[cfg(feature = "automation")]
+            resume_metrics: crate::live_resume_metrics::ResumeMetrics::default(),
             worker,
             request,
             snapshot: None,
@@ -1358,6 +1378,8 @@ mod store_view;
 
 pub use store_view::install_store;
 pub(crate) use store_view::set_store_active;
+#[cfg(feature = "automation")]
+pub(crate) use store_view::store_activity;
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]
@@ -1473,6 +1495,8 @@ impl LiveDashboard {
 
 impl Render for LiveDashboard {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "automation")]
+        self.measure_resume_frame(window, cx);
         if self.rendered_source != Some(self.native.source) {
             window.set_window_title(self.native.source.title());
             self.rendered_source = Some(self.native.source);

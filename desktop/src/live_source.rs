@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+#[cfg(feature = "automation")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -125,6 +127,8 @@ pub enum Update {
 }
 
 struct Shared {
+    #[cfg(feature = "automation")]
+    requests: AtomicU64,
     mailbox: Mutex<Mailbox>,
     /// Wakes the worker from its pause when a request or a stop arrives.
     wake: Condvar,
@@ -223,6 +227,11 @@ const _: () = {
 };
 
 impl Worker {
+    #[cfg(feature = "automation")]
+    pub(crate) fn requests_submitted(&self) -> u64 {
+        self.shared.requests.load(Ordering::Relaxed)
+    }
+
     pub fn start(root: PathBuf) -> std::io::Result<Self> {
         Self::start_mode(root, SourceMode::Live, Rest::Following)
     }
@@ -318,6 +327,8 @@ impl Worker {
             request,
             context,
         });
+        #[cfg(feature = "automation")]
+        self.shared.requests.fetch_add(1, Ordering::Relaxed);
         self.shared.wake.notify_one();
 
         Ok(generation)
@@ -420,6 +431,8 @@ impl Shared {
 
     fn with_rest(rest_kind: Rest) -> Self {
         Self {
+            #[cfg(feature = "automation")]
+            requests: AtomicU64::new(0),
             mailbox: Mutex::new(Mailbox {
                 generation: 0,
                 request: None,
