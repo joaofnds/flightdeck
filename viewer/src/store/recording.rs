@@ -17,6 +17,10 @@ mod payload;
 #[path = "recording_buffer_tests.rs"]
 mod buffer_tests;
 
+#[cfg(test)]
+#[path = "recording_discovery_tests.rs"]
+mod discovery_tests;
+
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
 use persistence::layout::{self, Kind, WINDOWS_PER_DAY, WindowKey};
@@ -718,8 +722,8 @@ struct FindRun<'a> {
 
 impl FindRun<'_> {
     /// Finds the run's sealed minutes newer than `oldest_ns` into `found`, newest first, where
-    /// the first minute found sets `oldest_ns`. Returns false once a minute older than that or
-    /// a full `found` ends the search.
+    /// the first minute found sets `oldest_ns`. Returns false at the old boundary and fails
+    /// if another required minute exceeds `found`'s capacity.
     fn find(&self, oldest_ns: &mut Option<u64>, found: &mut Vec<Found>) -> io::Result<bool> {
         let run_path = layout::run(self.root, Kind::Commits, self.run.run);
         let days = match newest_days(&run_path) {
@@ -756,7 +760,7 @@ impl FindRun<'_> {
                     return Ok(false);
                 }
                 if found.len() == MINUTES_MAX {
-                    return Ok(false);
+                    return Err(io::Error::from(io::ErrorKind::InvalidData));
                 }
                 found.push(Found {
                     run: *self.run,
