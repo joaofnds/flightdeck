@@ -142,3 +142,41 @@ fn derives_a_populated_store_second_without_adapter_allocations() {
     assert_eq!(allocation.calls, 0);
     assert_eq!(allocation.bytes, 0);
 }
+
+#[test]
+fn copies_native_readings_exactly_and_refuses_json_past_one_mibibyte() {
+    // Goal: native capture preserves Copy JSON's exact values and inclusive 1 MiB limit.
+    // Method: copy a real Worker snapshot, then grow one value to the boundary and past it.
+    let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    fixture.publish_resources();
+    fixture.publish_resources();
+    let mut reader = SnapshotReader::new();
+    reader.command.mode = crate::live_source_mode::SourceMode::Live;
+    let mut snapshot = reader.read_at(&fixture.root).unwrap().unwrap();
+    let copy = |snapshot: &crate::live_source::Snapshot| {
+        crate::native_workflows::selected_copy(Some(snapshot), &reader.command.request, None)
+    };
+
+    let original = copy(&snapshot).unwrap();
+    let original: serde_json::Value = serde_json::from_str(&original).unwrap();
+    assert_eq!(
+        original["summary"]["memory_total_bytes"].as_u64(),
+        Some(9_007_199_254_740_993)
+    );
+    assert_eq!(original["observation"], snapshot.selection["selected"]);
+    snapshot.selection["summary"]["padding"] = json!("");
+    let overhead = copy(&snapshot).unwrap().len();
+    snapshot.selection["summary"]["padding"] = json!("x".repeat(1_048_576 - overhead));
+    let boundary = copy(&snapshot).unwrap();
+    assert_eq!(boundary.len(), 1_048_576);
+    let oversized = format!(
+        "{}x",
+        snapshot.selection["summary"]["padding"].as_str().unwrap()
+    );
+    snapshot.selection["summary"]["padding"] = json!(oversized);
+
+    assert_eq!(
+        copy(&snapshot).unwrap_err(),
+        "Selected details exceed the 1 MiB clipboard limit"
+    );
+}
