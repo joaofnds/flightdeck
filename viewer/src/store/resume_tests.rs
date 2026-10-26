@@ -14,6 +14,7 @@ fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
     let cancellation = std::sync::Arc::new(crate::cancellation::Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
+    let mut buffers = super::recording::LoadBuffers::default();
     ring.follow().unwrap();
     ring.read(|run, second, apps| held.take(run, second, apps))
         .unwrap();
@@ -26,29 +27,23 @@ fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
     fixture.publish_with_events(109, &[]);
     let shared = reconciliation_shared();
 
-    super::step(
-        &mut held,
-        &mut ring,
-        Ok(()),
-        &shared.mailbox,
-        None,
-        Publication::Complete,
-    )
-    .unwrap();
+    reconciliation_step(&mut held, &mut ring, &shared);
 
     assert!(shared.mailbox.take().is_none());
     assert!(super::run_retry(&mut held, &ring, &shared));
-    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, None).unwrap());
-    for _ in 0..2 {
-        super::step(
+    assert!(
+        super::refresh(
+            &fixture.root,
             &mut held,
             &mut ring,
-            Ok(()),
-            &shared.mailbox,
-            None,
-            Publication::Complete,
+            &shared,
+            &mut buffers,
+            None
         )
-        .unwrap();
+        .unwrap()
+    );
+    for _ in 0..2 {
+        reconciliation_step(&mut held, &mut ring, &shared);
         assert!(!super::run_retry(&mut held, &ring, &shared));
     }
     let resumed = shared.mailbox.take().unwrap();
@@ -61,6 +56,18 @@ fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
     assert_eq!(seconds, expected);
     assert_eq!(resumed.failure, None);
     assert_eq!(resumed.left_out, None);
+}
+
+fn reconciliation_step(held: &mut super::Held, ring: &mut super::Ring, shared: &super::Shared) {
+    super::step(
+        held,
+        ring,
+        Ok(()),
+        &shared.mailbox,
+        None,
+        Publication::Complete,
+    )
+    .unwrap();
 }
 
 fn reconciliation_shared() -> super::Shared {

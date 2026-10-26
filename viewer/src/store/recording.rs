@@ -13,6 +13,10 @@ use std::thread;
 #[path = "recording_payload.rs"]
 mod payload;
 
+#[cfg(test)]
+#[path = "recording_buffer_tests.rs"]
+mod buffer_tests;
+
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
 use persistence::layout::{self, Kind, WINDOWS_PER_DAY, WindowKey};
@@ -264,13 +268,14 @@ pub(super) fn load_since(
     since: Option<&super::Newest>,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
-    load_window_inner(root, &LoadWindow::all(since), take)
+    load_window_inner(root, &LoadWindow::all(since), None, take)
 }
 
 pub(super) fn load_window(
     root: &Path,
     since: Option<&super::Newest>,
     seconds: u64,
+    buffers: &mut LoadBuffers,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     load_window_inner(
@@ -280,6 +285,7 @@ pub(super) fn load_window(
             seconds,
             unread: false,
         },
+        Some(buffers),
         take,
     )
 }
@@ -287,6 +293,7 @@ pub(super) fn load_window(
 fn load_window_inner(
     root: &Path,
     window: &LoadWindow<'_>,
+    buffers: Option<&mut LoadBuffers>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     let mut found = Vec::with_capacity(MINUTES_MAX);
@@ -299,7 +306,7 @@ fn load_window_inner(
     found.reverse();
 
     let mut left_out = None;
-    for mut batch in load_batches(root, &found, apps_from_ns) {
+    for mut batch in load_batches(root, &found, apps_from_ns, buffers) {
         for loaded in &mut batch.seconds {
             let apps = match &mut loaded.apps {
                 Ok(apps) => TickApps::Loaded(apps),
@@ -317,6 +324,12 @@ fn load_window_inner(
 
 /// The threads that decode the loaded hour's sealed minutes at once.
 const LOADERS_MAX: usize = 6;
+
+/// One retained App decoder buffer per concurrent catch-up batch, owned by the store thread.
+#[derive(Default)]
+pub(super) struct LoadBuffers {
+    apps: [AppMinute; LOADERS_MAX],
+}
 
 /// What decoding a sealed minute with its Apps costs, counted in minutes decoded without them.
 /// The newest 18 minutes of a recording of about 460 Apps a second took 3.6 ms each for their
@@ -343,7 +356,12 @@ struct Loaded {
 /// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
 /// batch on a loader of its own, with the Apps of each minute whose ticks reach `apps_from_ns`.
 /// Returns the batches in the order of `found`.
-fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
+fn load_batches(
+    root: &Path,
+    found: &[Found],
+    apps_from_ns: u64,
+    buffers: Option<&mut LoadBuffers>,
+) -> Vec<Batch> {
     let costs: Vec<usize> = found
         .iter()
         .map(|minute| {
@@ -356,7 +374,13 @@ fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
         .collect();
     thread::scope(|scope| {
         let mut loaders = Vec::with_capacity(LOADERS_MAX);
+        let mut buffers = buffers.map(|buffers| buffers.apps.iter_mut());
         for batch in load_batches_split(&costs) {
+            let apps = buffers.as_mut().map(|buffers| {
+                buffers
+                    .next()
+                    .unwrap_or_else(|| unreachable!("one buffer per bounded batch"))
+            });
             let before = batch
                 .start
                 .checked_sub(1)
@@ -365,7 +389,7 @@ fn load_batches(root: &Path, found: &[Found], apps_from_ns: u64) -> Vec<Batch> {
             let loader = thread::Builder::new()
                 .name(String::from("flightdeck-loader"))
                 .spawn_scoped(scope, move || {
-                    load_batch(root, before, minutes, apps_from_ns)
+                    load_batch_using(root, before, minutes, apps_from_ns, apps)
                 });
             loaders.push(loader);
         }
@@ -412,17 +436,40 @@ pub(super) fn load_batches_split(costs: &[usize]) -> Vec<Range<usize>> {
     batches
 }
 
+/// Startup releases its decode storage with the batch; catch-up borrows the store's buffers.
+fn load_batch_using(
+    root: &Path,
+    before: Option<&Found>,
+    minutes: &[Found],
+    apps_from_ns: u64,
+    apps: Option<&mut AppMinute>,
+) -> Batch {
+    let mut fresh = AppMinute::default();
+    load_batch(
+        root,
+        before,
+        minutes,
+        apps_from_ns,
+        apps.unwrap_or(&mut fresh),
+    )
+}
+
 /// Decodes `minutes`, oldest first, with the Apps of each minute whose ticks reach
 /// `apps_from_ns`. The first minute's first second takes its rates from the last tick of the
 /// minute `before` it, which the loader before this one decodes too.
-fn load_batch(root: &Path, before: Option<&Found>, minutes: &[Found], apps_from_ns: u64) -> Batch {
+fn load_batch(
+    root: &Path,
+    before: Option<&Found>,
+    minutes: &[Found],
+    apps_from_ns: u64,
+    apps: &mut AppMinute,
+) -> Batch {
     let mut batch = Batch {
         seconds: Vec::with_capacity(minutes.len() * TICKS_PER_MINUTE),
         left_out: None,
     };
     let mut current = MachineMinute::default();
     let mut previous = MachineMinute::default();
-    let mut apps = AppMinute::default();
     let mut previous_run = None;
     if let Some(before) = before {
         // The loader that decodes the minute before reports it where it does not decode.
@@ -432,7 +479,7 @@ fn load_batch(root: &Path, before: Option<&Found>, minutes: &[Found], apps_from_
     }
 
     for minute in minutes {
-        let read_apps = minute.reads_apps(apps_from_ns).then_some(&mut apps);
+        let read_apps = minute.reads_apps(apps_from_ns).then_some(&mut *apps);
         let Ok(missing) = decode(root, &minute.marker, &mut current, read_apps) else {
             batch.left_out = Some(Failure::Refused);
             previous_run = None;
@@ -448,7 +495,7 @@ fn load_batch(root: &Path, before: Option<&Found>, minutes: &[Found], apps_from_
         let decoded = Decoded {
             run: &minute.run,
             machine: &current,
-            apps: missing.map_or(Ok(&apps), Err),
+            apps: missing.map_or(Ok(&*apps), Err),
         };
         load_minute(&decoded, before, &mut batch.seconds);
 
@@ -456,6 +503,7 @@ fn load_batch(root: &Path, before: Option<&Found>, minutes: &[Found], apps_from_
         previous_run = Some(minute.run);
     }
 
+    apps.clear();
     batch
 }
 

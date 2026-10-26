@@ -234,8 +234,16 @@ impl Store {
                     eprintln!("flightdeck store startup: {error}");
                     return;
                 }
+                let mut load_buffers = recording::LoadBuffers::default();
                 let operation = held.payload_budget.as_ref().map(|_| &operation);
-                run(&root, &mut held, &mut ring, &thread_shared, operation);
+                run(
+                    &root,
+                    &mut held,
+                    &mut ring,
+                    &thread_shared,
+                    &mut load_buffers,
+                    operation,
+                );
             })?;
 
         Ok(Self {
@@ -693,6 +701,7 @@ fn run(
     held: &mut Held,
     ring: &mut Ring,
     shared: &Shared,
+    load_buffers: &mut recording::LoadBuffers,
     operation: Option<&Operation>,
 ) {
     let mut waited = Ok(());
@@ -710,7 +719,7 @@ fn run(
             shared.catching_up.store(true, Ordering::Release);
         }
         if shared.catch_up.swap(false, Ordering::AcqRel) {
-            match refresh(root, held, ring, shared, operation) {
+            match refresh(root, held, ring, shared, load_buffers, operation) {
                 Ok(true) => {
                     waited = Ok(());
                 }
@@ -793,6 +802,7 @@ fn refresh(
     held: &mut Held,
     ring: &mut Ring,
     shared: &Shared,
+    load_buffers: &mut recording::LoadBuffers,
     operation: Option<&Operation>,
 ) -> persistence::Result<bool> {
     drop(shared.mailbox.take());
@@ -812,7 +822,7 @@ fn refresh(
         }
     }
 
-    refresh_load(root, held, ring, shared, operation)
+    refresh_load(root, held, ring, shared, load_buffers, operation)
 }
 
 fn refresh_load(
@@ -820,6 +830,7 @@ fn refresh_load(
     held: &mut Held,
     ring: &mut Ring,
     shared: &Shared,
+    load_buffers: &mut recording::LoadBuffers,
     operation: Option<&Operation>,
 ) -> persistence::Result<bool> {
     let budget = held.payload_budget.clone();
@@ -855,7 +866,7 @@ fn refresh_load(
         }
         outcome.left_out
     } else {
-        recording::load_window(root, since.as_ref(), seconds, take)
+        recording::load_window(root, since.as_ref(), seconds, load_buffers, take)
     };
     if held.left_out != left_out {
         held.left_out = left_out;

@@ -70,7 +70,18 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
         cancellation: Arc::new(crate::cancellation::Cancellation::default()),
     };
 
-    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, None).unwrap());
+    let mut buffers = super::recording::LoadBuffers::default();
+    assert!(
+        super::refresh(
+            &fixture.root,
+            &mut held,
+            &mut ring,
+            &shared,
+            &mut buffers,
+            None
+        )
+        .unwrap()
+    );
 
     assert!(shared.mailbox.take().is_none());
 }
@@ -209,7 +220,18 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
         cancellation: Arc::new(crate::cancellation::Cancellation::default()),
     };
 
-    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, None).unwrap());
+    let mut buffers = super::recording::LoadBuffers::default();
+    assert!(
+        super::refresh(
+            &fixture.root,
+            &mut held,
+            &mut ring,
+            &shared,
+            &mut buffers,
+            None
+        )
+        .unwrap()
+    );
     ring.follow().unwrap();
     let mut publications = Vec::new();
     let mut consecutive = Vec::new();
