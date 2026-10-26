@@ -1512,4 +1512,4 @@ fn live_overview_formats_only_its_requested_fan_page() {
 }
 
 #[path = "live_native_measurement_tests.rs"]
-mod native_measurements;
+pub(crate) mod native_measurements;

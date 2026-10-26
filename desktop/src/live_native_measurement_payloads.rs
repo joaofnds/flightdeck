@@ -7,11 +7,23 @@ use crate::live_source::Snapshot;
 const OBSERVATIONS_MAX: usize = 4096;
 const IDENTITY_FIELDS: [&str; 5] = ["run", "boot", "publication", "run_tick", "wall_ns"];
 
-pub(super) fn validate(
+pub(crate) fn validate(
     snapshot: &Snapshot,
     route: &str,
     expected: &Value,
 ) -> Result<Value, String> {
+    validate_input(snapshot, expected)?;
+    let payloads = report(snapshot)?;
+    if payloads != expected["payloads"][route] {
+        return Err(format!(
+            "Measured {route} payload availability differs: {payloads}"
+        ));
+    }
+
+    Ok(payloads)
+}
+
+pub(crate) fn validate_input(snapshot: &Snapshot, expected: &Value) -> Result<(), String> {
     for field in IDENTITY_FIELDS {
         if expected["selected"][field].is_null() {
             return Err(format!("Expected selected identity has no {field}"));
@@ -48,17 +60,10 @@ pub(super) fn validate(
             }
         }
     }
-    let payloads = report(snapshot)?;
-    if payloads != expected["payloads"][route] {
-        return Err(format!(
-            "Measured {route} payload availability differs: {payloads}"
-        ));
-    }
-
-    Ok(payloads)
+    Ok(())
 }
 
-pub(super) fn report(snapshot: &Snapshot) -> Result<Value, String> {
+pub(crate) fn report(snapshot: &Snapshot) -> Result<Value, String> {
     let resident = match snapshot.resident_history.as_deref() {
         Some(ResidentHistory::Ready(_)) => json!({"state": "ready"}),
         Some(ResidentHistory::Unavailable(error)) => {

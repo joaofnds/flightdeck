@@ -13,6 +13,10 @@ mod workflows;
 #[path = "live_probe_soak.rs"]
 mod soak;
 
+#[cfg(test)]
+#[path = "live_probe_matched_tests.rs"]
+pub(crate) mod matched_tests;
+
 pub fn soak(root: PathBuf, seconds: u32) -> Result<(), String> {
     soak::run(root, seconds)
 }

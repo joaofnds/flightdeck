@@ -4,8 +4,14 @@ use serde_json::{Value, json};
 
 use super::{SealedRecording, SnapshotReader};
 
+#[path = "live_native_measurement_diagnostics.rs"]
+mod diagnostics;
+#[path = "live_native_measurement_ownership.rs"]
+mod ownership;
 #[path = "live_native_measurement_payloads.rs"]
-mod payloads;
+pub(crate) mod payloads;
+#[path = "live_native_measurement_raw.rs"]
+mod raw;
 
 #[test]
 fn measures_the_ranking_step_after_histories_are_read_early() {
@@ -23,6 +29,26 @@ fn measures_the_ranking_step_after_histories_are_read_early() {
     ));
     assert!(!snapshot.histories_pending);
     assert!(snapshot.app_ranks.is_some());
+}
+
+#[test]
+fn waits_for_expected_completed_payloads_through_the_real_mailbox() {
+    // Goal: the gated mailbox caller includes deferred rankings before reporting success.
+    // Method: use the existing early-history fixture and an exact completed reader expectation.
+    let recording = SealedRecording::with_kept_parts();
+    let mut reader = SnapshotReader::new();
+    let (snapshot, _) = read_complete(&mut reader, &recording.root);
+    let expected = json!({"selected": snapshot.selection["selected"],
+        "observations": snapshot.selection["trends"],
+        "payloads": {"overview": payloads::report(&snapshot).unwrap()}});
+
+    let delivered = crate::live_probe::matched_tests::read_recorded(&recording.root, &expected);
+
+    assert!(!delivered.histories_pending);
+    assert_eq!(
+        payloads::validate(&delivered, "overview", &expected).unwrap(),
+        expected["payloads"]["overview"]
+    );
 }
 
 #[test]
@@ -61,14 +87,25 @@ fn records_unavailable_history_as_a_failed_payload() {
 #[ignore = "opt-in finite recording measurement; requires recording and expected-output env vars"]
 fn measures_complete_worker_routes_on_one_frozen_native_recording() {
     // Goal: expose actual worker costs and complete coverage separately from UI paint.
-    // Method: run each route cold on an externally completed, immutable fixture source.
+    // Method: run one selected route in this fresh process over immutable native input.
     let root = std::env::var_os("FLIGHTDECK_ITEM1_RECORDING").unwrap();
     let root = Path::new(&root);
-    let expected = std::env::var("FLIGHTDECK_ITEM1_EXPECTED_JSON").unwrap();
-    assert!(expected.len() <= 1024 * 1024);
+    let expected = match std::env::var_os("FLIGHTDECK_ITEM1_EXPECTED_FILE") {
+        Some(path) => {
+            assert!(std::fs::metadata(&path).unwrap().len() <= 32 * 1024 * 1024);
+            std::fs::read_to_string(path).unwrap()
+        }
+        None => std::env::var("FLIGHTDECK_ITEM1_EXPECTED_JSON").unwrap(),
+    };
+    assert!(expected.len() <= 32 * 1024 * 1024);
     let expected: Value = serde_json::from_str(&expected).unwrap();
-    for route in ["network", "memory", "cpu", "apps", "overview"] {
-        measure_route(root, route, &expected);
+    let route = std::env::var("FLIGHTDECK_ITEM1_ROUTE").unwrap();
+    assert!(["network", "memory", "cpu", "apps", "overview"].contains(&route.as_str()));
+    let phase = std::env::var("FLIGHTDECK_ITEM1_PHASE").unwrap();
+    match phase.as_str() {
+        "cold" | "correctness" => measure_route(root, &route, &expected),
+        "raw" => raw::run(root, &route, &expected),
+        _ => panic!("phase must be cold, correctness or raw"),
     }
 }
 
@@ -76,15 +113,9 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
     let mut reader = SnapshotReader::new();
     reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.command.request.route = route.to_owned();
-    let process = || {
-        collector::processes::read_usage(
-            collector::clock::Timebase::read().unwrap(),
-            i32::try_from(std::process::id()).unwrap(),
-        )
-        .unwrap()
-        .unwrap()
-    };
-    let before = process();
+    diagnostics::checkpoint("before_read");
+    let ownership_before = ownership::snapshot();
+    let before = process_usage();
     let thread_before = thread_cpu_ns();
     let started = std::time::Instant::now();
     let work = persistence::work::observe();
@@ -92,36 +123,98 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
         crate::allocation_tests::measure(|| read_complete(&mut reader, root));
     let wall_ns = started.elapsed().as_nanos();
     let thread_ns = thread_cpu_ns().checked_sub(thread_before).unwrap();
-    let after = process();
+    let after = process_usage();
     let counts = work.counts();
     drop(work);
     let footprint = persistence::resources::Footprint::read().unwrap();
-    let payloads = payloads::validate(&snapshot, route, expected).unwrap();
-    assert!(!snapshot.histories_pending);
-    assert!(snapshot.catalog["collector_completed"].as_bool().unwrap());
-    assert!(
-        snapshot.selection["selected"]["publication"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
-    let report = json!({"route": route, "root": root, "snapshots_to_complete": snapshots,
+    let ownership_held = ownership::snapshot();
+    diagnostics::checkpoint("holding_result");
+    let phase = std::env::var("FLIGHTDECK_ITEM1_PHASE").unwrap();
+    let payloads = validate_output(&snapshot, route, expected, &phase);
+    let report = json!({"route": route, "phase": phase, "root": root,
+        "snapshots_to_complete": snapshots,
         "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
+        "context_values": snapshot.selection["trends"], "pages": snapshot.pages,
+        "effective_threads": {"maximum": std::env::var("POLARS_MAX_THREADS").unwrap(),
+            "asynchronous": std::env::var("POLARS_ASYNC_THREAD_COUNT").unwrap()},
         "point_count": snapshot.selection["trends"].as_array().unwrap().len(),
         "payloads": payloads, "reader_complete": true,
-        "wall_ns": wall_ns, "worker_thread_cpu_ns": thread_ns,
+        "wall_ns": wall_ns, "calling_thread_cpu_ns": thread_ns,
         "process_cpu_ns": after.user_ns + after.system_ns - before.user_ns - before.system_ns,
-        "allocation_request_calls": allocation.calls,
-        "allocation_requested_bytes": allocation.bytes,
+        "calling_thread_allocation_request_calls": allocation.calls,
+        "calling_thread_allocation_requested_bytes": allocation.bytes,
+        "ownership_before_read": ownership_before, "ownership_held_result": ownership_held,
         "retained_cache_charge": snapshot.catalog["tail_cache_bytes"],
         "physical_footprint_bytes": footprint.current_bytes,
         "physical_footprint_lifetime_max_bytes": footprint.lifetime_bytes_max,
         "work": {"staged_ticks": counts.staged_ticks, "frames": counts.frames,
             "sql_plans": counts.sql_plans, "collections": counts.collections,
             "table_string_cells": counts.string_cells}});
-    let text = serde_json::to_string(&report).unwrap();
-    assert!(text.len() <= 1024 * 1024);
-    println!("{text}");
+    emit(&report);
+    drop(report);
+    drop(snapshot);
+    let after_result_drop = ownership::snapshot();
+    diagnostics::checkpoint("after_result_drop");
+    drop(reader);
+    diagnostics::checkpoint("after_reader_drop");
+    println!(
+        "{}",
+        json!({"route": route, "phase": "ownership_teardown",
+        "ownership_after_result_drop": after_result_drop,
+        "ownership_after_reader_drop": ownership::snapshot()})
+    );
+}
+
+fn validate_output(
+    snapshot: &crate::live_source::Snapshot,
+    route: &str,
+    expected: &Value,
+    phase: &str,
+) -> Value {
+    let payloads = if phase == "correctness" {
+        assert_eq!(
+            std::env::var("FLIGHTDECK_ITEM1_ORACLE_BASELINE").unwrap(),
+            "controlled-counterfactual"
+        );
+        payloads::validate_input(snapshot, expected).unwrap();
+        payloads::report(snapshot).unwrap()
+    } else {
+        payloads::validate(snapshot, route, expected).unwrap()
+    };
+    assert!(!snapshot.histories_pending);
+    if phase == "cold" {
+        assert!(snapshot.catalog["collector_completed"].as_bool().unwrap());
+    }
+    assert!(
+        snapshot.selection["selected"]["publication"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    payloads
+}
+
+fn process_usage() -> collector::processes::Usage {
+    collector::processes::read_usage(
+        collector::clock::Timebase::read().unwrap(),
+        i32::try_from(std::process::id()).unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+}
+
+fn emit(report: &Value) {
+    let text = serde_json::to_string(report).unwrap();
+    assert!(text.len() <= 32 * 1024 * 1024);
+    if let Some(path) = std::env::var_os("FLIGHTDECK_ITEM1_OUTPUT") {
+        use std::io::Write;
+        let mut file =
+            collector::recording::private::open_private_file(Path::new(&path), true).unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    } else {
+        println!("{text}");
+    }
 }
 
 fn read_complete(
