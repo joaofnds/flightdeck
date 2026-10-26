@@ -230,6 +230,8 @@ impl Raw {
                 row.push(cell);
             }
             rows.push(row);
+            #[cfg(test)]
+            operation.page_row()?;
         }
         operation.check()?;
         Ok(crate::data::Table { columns, rows })

@@ -1,4 +1,26 @@
 #[test]
+fn interrupts_a_page_after_formatting_starts_and_retries_in_a_new_epoch() {
+    // Goal: superseding a page after its first formatted row never returns a stale response.
+    // Method: interrupt at a deterministic row boundary, then retrieve exact cells in a new epoch.
+    let mut fixture = RingFixture::new_following();
+    fixture.publish_following(1);
+    let cancellation = Arc::new(Cancellation::default());
+    let mut session = LiveSession::open_with(&fixture.root, Arc::clone(&cancellation), 0).unwrap();
+    session.follow_latest().unwrap();
+    cancellation.interrupt_after_page_row();
+
+    let error = session.page("fans", 0).unwrap_err();
+
+    assert!(matches!(error, Error::Io(error) if error.kind() == std::io::ErrorKind::Interrupted));
+    assert_eq!(cancellation.epoch(), 1);
+    session.begin(cancellation.epoch()).unwrap();
+    let selection = session.follow_latest().unwrap();
+    let page = session.page("fans", 0).unwrap();
+    assert_eq!(page["observation"], selection["selected"]);
+    assert_eq!(page["rows"], json!([["1", "0", "1"], ["1", "1", "0"]]));
+}
+
+#[test]
 fn keeps_machine_decimal_presentation_and_multiplication_first_rates() {
     // Goal: native reduction preserves the legacy public decimal and rate operation order.
     // Method: submit a real decoded ring tick with non-binary f32 gauges and a 1 ns offset.
