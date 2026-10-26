@@ -16,6 +16,26 @@ use crate::store::apps::TickApps;
 #[path = "recording_payload_tests.rs"]
 mod tests;
 
+pub(super) fn terminal(
+    root: &Path,
+    found: &Found,
+    budget: &Arc<ByteBudget>,
+    operation: &Operation,
+    capture: &crate::recording::InputCapture<'_>,
+) -> Result<Option<super::Terminal>, Refused> {
+    operation.check()?;
+    let sealed = open_minute(root, found, budget, operation, capture)?;
+    let mut machine = MachineMinute::default();
+    read_machine(&sealed, &mut machine)?;
+    operation.check()?;
+    let process = sealed.terminal_processes(operation)?;
+    operation.check()?;
+    sealed.revalidate_full()?;
+    operation.check()?;
+
+    Ok(super::Terminal::from_minute(found.run, machine, process))
+}
+
 pub(super) fn load(
     root: &Path,
     minutes: &[Found],
@@ -71,28 +91,8 @@ struct Decoder {
 impl Decoder {
     fn terminal(self) -> Option<super::Terminal> {
         let run = self.previous_run?;
-        let mut machine = self.previous;
-        let publication = machine.ticks.last()?.publication;
-        machine.ticks.retain(|row| row.publication == publication);
-        machine.cpus.retain(|row| row.publication == publication);
-        machine.memory.retain(|row| row.publication == publication);
-        machine
-            .interfaces
-            .retain(|row| row.publication == publication);
-        machine
-            .gpu_states
-            .retain(|row| row.publication == publication);
-        machine
-            .core_states
-            .retain(|row| row.publication == publication);
-        machine.fans.retain(|row| row.publication == publication);
-        assert_eq!(machine.ticks.len(), 1);
 
-        Some(super::Terminal {
-            run,
-            machine,
-            process: self.predecessor,
-        })
+        super::Terminal::from_minute(run, self.previous, self.predecessor)
     }
 
     fn decode(
@@ -215,6 +215,27 @@ fn load_minute_visit(
     ) -> persistence::Result<()>,
 ) -> Result<MachineMinute, Refused> {
     operation.check()?;
+    let sealed = open_minute(root, found, budget, operation, capture)?;
+    let mut machine = MachineMinute::default();
+    read_machine(&sealed, &mut machine)?;
+    operation.check()?;
+
+    sealed.visit_samples_with_operation(before, operation, consume)?;
+    operation.check()?;
+
+    sealed.revalidate_full()?;
+    operation.check()?;
+
+    Ok(machine)
+}
+
+fn open_minute<'input>(
+    root: &Path,
+    found: &Found,
+    budget: &'input Arc<ByteBudget>,
+    operation: &'input Operation,
+    capture: &'input crate::recording::InputCapture<'input>,
+) -> Result<ScopedSealedMinute<'input>, Refused> {
     let sealed = ScopedSealedMinute::open_with_inputs_using(
         &SealedSource {
             root,
@@ -231,15 +252,5 @@ fn load_minute_visit(
         )));
     }
 
-    let mut machine = MachineMinute::default();
-    read_machine(&sealed, &mut machine)?;
-    operation.check()?;
-
-    sealed.visit_samples_with_operation(before, operation, consume)?;
-    operation.check()?;
-
-    sealed.revalidate_full()?;
-    operation.check()?;
-
-    Ok(machine)
+    Ok(sealed)
 }

@@ -8,6 +8,301 @@ use crate::live::identity_fixture::Fixture;
 use crate::store::{AppsSecond, ByteBudget};
 
 #[test]
+fn terminal_only_load_preserves_the_full_decoders_first_successor() {
+    // Goal: discarding presentations keeps exact machine and App rates across the saved tail.
+    // Method: seed independent real ring readers from the full and terminal-only decoders.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(57);
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.seal_minute(0);
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let mut decoder = Decoder::default();
+    drop(decoder.decode(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    ));
+    let full = decoder.terminal().unwrap();
+    let terminal = super::terminal(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(terminal.run, full.run);
+    assert_eq!(terminal.machine, full.machine);
+    fixture.publish_with_system_rows(102);
+
+    let expected = terminal_successor(&fixture.root, full);
+    let resumed = terminal_successor(&fixture.root, terminal);
+
+    assert!(expected.0.follows);
+    assert_eq!(expected.0.cpu_percent, Some(50.0));
+    assert_eq!(expected.1.elapsed_ns, Some(1_000_000_000));
+    assert_eq!(resumed, expected);
+    assert_eq!(budget.used(), 0);
+}
+
+fn terminal_successor(
+    root: &std::path::Path,
+    terminal: super::super::Terminal,
+) -> (crate::store::MachineSecond, AppsSecond) {
+    let mut ring = crate::store::ring::Ring::new(root.to_owned());
+    ring.accept(Some(terminal));
+    ring.follow().unwrap();
+    let mut result = Vec::new();
+    ring.read(|_, second, apps| {
+        let mut owned = AppsSecond::with_room();
+        owned.take(apps, None, None);
+        result.push((*second, owned));
+        true
+    })
+    .unwrap();
+    assert_eq!(result.len(), 1);
+
+    result.remove(0)
+}
+
+#[test]
+fn terminal_only_load_refuses_a_changed_consumed_file() {
+    // Goal: a saved predecessor gets the same final commitment check as full decoding.
+    // Method: make an admitted process table nonprivate before terminal decoding finishes.
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let processes = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("processes.parquet");
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let result = super::terminal(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &|file, budget| {
+            let input = AdmittedTable::from_file_budgeted(file, budget)?;
+            if input.contains_column("resident_bytes") {
+                std::fs::set_permissions(&processes, std::fs::Permissions::from_mode(0o644))
+                    .unwrap();
+            }
+            Ok(input)
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Commitment(_))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn terminal_only_load_honors_cancellation_after_the_last_table_capture() {
+    // Goal: cancellation cannot publish a predecessor even after its inputs were admitted.
+    // Method: advance the operation epoch while capturing the minute's event table.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let cancellation = Arc::new(Cancellation::default());
+    let operation = Arc::clone(&cancellation).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let result = super::terminal(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &|file, budget| {
+            let input = AdmittedTable::from_file_budgeted(file, budget)?;
+            if input.contains_column("event") {
+                cancellation.cancel().unwrap();
+            }
+            Ok(input)
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Decode(persistence::Error::Io(error)))
+        if error.kind() == std::io::ErrorKind::Interrupted
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn terminal_only_load_refuses_a_malformed_earlier_frame_even_with_a_valid_last_frame() {
+    // Goal: selecting the terminal frame does not skip semantic validation of earlier rows.
+    // Method: duplicate a PID only at the first of two committed process observations.
+    use polars::prelude::{col, lit, when};
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let processes = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("processes.parquet");
+    let mut damaged = persistence::engine::scan(&processes)
+        .unwrap()
+        .with_column(
+            when(col("publication").eq(lit(1_u64)))
+                .then(lit(7_i32))
+                .otherwise(col("pid"))
+                .alias("pid"),
+        )
+        .collect()
+        .unwrap();
+    let replacement = fixture.root.join("damaged-processes.parquet");
+    events_loader_write(&replacement, &mut damaged);
+    std::fs::rename(replacement, processes).unwrap();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let result = super::terminal(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    );
+
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Decode(
+            persistence::Error::Bound("duplicate committed App PID")
+        ))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn terminal_admission_preserves_presentation_refusal_and_recovery() {
+    // Goal: validation without copied presentations keeps the exact predecessor refusal chain.
+    // Method: expand committed process tables to exceed the 8 MiB bound at each observation.
+    for oversized_publication in 1..=2 {
+        let fixture = terminal_bound_recording(oversized_publication);
+        let mut found = Vec::new();
+        super::super::find(&fixture.root, &mut found, None).unwrap();
+        let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+        let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+        let mut decoder = Decoder::default();
+        let full = decoder.decode(
+            &fixture.root,
+            &found[0],
+            &budget,
+            &operation,
+            &AdmittedTable::from_file_budgeted,
+        );
+        let terminal = super::terminal(
+            &fixture.root,
+            &found[0],
+            &budget,
+            &operation,
+            &AdmittedTable::from_file_budgeted,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(terminal.process.is_some(), oversized_publication == 1);
+        assert_eq!(terminal.process.is_some(), decoder.predecessor.is_some());
+        if let Some(process) = terminal.process {
+            let (endpoint, frame) = process.into_parts();
+            let (expected, expected_frame) = decoder.predecessor.take().unwrap().into_parts();
+            assert_eq!(endpoint.stamp, expected.stamp);
+            assert_eq!(frame, expected_frame);
+        }
+        assert_eq!(
+            full.seconds
+                .last()
+                .unwrap()
+                .apps
+                .as_ref()
+                .unwrap()
+                .missing
+                .is_some(),
+            oversized_publication == 2
+        );
+    }
+}
+
+fn terminal_bound_recording(oversized_publication: u64) -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let processes = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("processes.parquet");
+    let mut damaged = terminal_bound_rows(&processes, oversized_publication);
+    let replacement = fixture.root.join("oversized-processes.parquet");
+    events_loader_write(&replacement, &mut damaged);
+    std::fs::rename(replacement, processes).unwrap();
+
+    fixture
+}
+
+fn terminal_bound_rows(
+    processes: &std::path::Path,
+    oversized_publication: u64,
+) -> polars::prelude::DataFrame {
+    use polars::prelude::{IntoLazy, col, lit, when};
+    let original = persistence::engine::scan(processes)
+        .unwrap()
+        .collect()
+        .unwrap();
+    let mut expanded = original.clone();
+    for copy in 1..210 {
+        let more = original
+            .clone()
+            .lazy()
+            .with_columns([
+                (col("pid") + lit(copy * 10)).alias("pid"),
+                (col("process_unique_id") + lit(u64::try_from(copy * 10).unwrap()))
+                    .alias("process_unique_id"),
+            ])
+            .collect()
+            .unwrap();
+        expanded.vstack_mut_owned(more).unwrap();
+    }
+
+    expanded
+        .lazy()
+        .with_column(
+            when(col("publication").eq(lit(oversized_publication)))
+                .then(lit(vec![255_u8; 4095]))
+                .otherwise(col("executable_name"))
+                .alias("executable_name"),
+        )
+        .collect()
+        .unwrap()
+}
+
+#[test]
 fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
     // Goal: the payload loader cannot discard admitted ticks and reopen a legacy minute.
     // Method: replace ticks inside its real capture factory, before both loader consumers.

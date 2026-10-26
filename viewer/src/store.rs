@@ -342,6 +342,7 @@ impl Drop for Store {
 
 /// What the store thread holds between steps.
 struct Held {
+    coverage_seconds: u64,
     payload_budget: Option<Arc<ByteBudget>>,
     sampled: Option<Span<SampledSecond>>,
     span: Span<MachineSecond>,
@@ -384,6 +385,7 @@ impl Held {
         });
 
         Self {
+            coverage_seconds: 0,
             payload_budget: None,
             sampled: None,
             span: Span::new(SECONDS_MAX, seconds),
@@ -423,6 +425,7 @@ impl Held {
         }
         self.context.clear();
         self.newest = None;
+        self.coverage_seconds = 0;
         self.unpublished = true;
     }
 
@@ -659,6 +662,9 @@ fn startup(
         startup_accept(outcome, held, ring, operation)
     } else {
         held.left_out = recording::load(root, take);
+        if held.left_out.is_none() {
+            held.coverage_seconds = crate::session::LOADED_SECONDS;
+        }
 
         Ok(())
     }
@@ -673,6 +679,9 @@ fn startup_accept(
     let outcome = outcome?;
     operation.check()?;
     held.left_out = outcome.left_out;
+    if held.left_out.is_none() {
+        held.coverage_seconds = crate::session::LOADED_SECONDS;
+    }
     ring.accept(outcome.terminal);
 
     Ok(())
@@ -725,6 +734,10 @@ fn run(
             eprintln!("flightdeck store publication: {error}");
             return;
         }
+        if run_retry(held, ring, shared) {
+            waited = Ok(());
+            continue;
+        }
         run_ready(held, ring, shared);
         waited = if held.failure.is_some() {
             // A ring that failed may fail again at once, so the thread sleeps instead.
@@ -737,7 +750,16 @@ fn run(
     unreachable!("the store thread steps until the store is dropped");
 }
 
-fn run_ready(held: &mut Held, ring: &Ring, shared: &Shared) {
+fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
+    if !ring.reload_required() {
+        return false;
+    }
+    held.coverage_seconds = 0;
+    shared.catch_up.store(true, Ordering::Release);
+    true
+}
+
+fn run_ready(held: &mut Held, ring: &mut Ring, shared: &Shared) {
     if !shared.catching_up.load(Ordering::Acquire) {
         return;
     }
@@ -760,9 +782,12 @@ fn run_ready(held: &mut Held, ring: &Ring, shared: &Shared) {
             }
         }
     }
+    if !shared.catching_up.load(Ordering::Acquire) {
+        ring.finish_resume();
+    }
 }
 
-/// Replaces the cached period before publishing the current ring's endpoint.
+/// Reuses a covered checkpoint or replaces the selected period before publishing its endpoint.
 fn refresh(
     root: &Path,
     held: &mut Held,
@@ -772,6 +797,31 @@ fn refresh(
 ) -> persistence::Result<bool> {
     drop(shared.mailbox.take());
     held.unpublished = true;
+    let seconds = shared.window_seconds.load(Ordering::Acquire);
+    if seconds <= held.coverage_seconds {
+        if let Some(checkpoint) = &held.newest {
+            match ring.covers(checkpoint) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(failure) => {
+                    held.failure = Some(failure);
+                    *ring = Ring::new(root.to_owned());
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    refresh_load(root, held, ring, shared, operation)
+}
+
+fn refresh_load(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+    operation: Option<&Operation>,
+) -> persistence::Result<bool> {
     let budget = held.payload_budget.clone();
     let since = held.newest;
     let seconds = shared.window_seconds.load(Ordering::Acquire);
@@ -819,19 +869,27 @@ fn refresh(
         }
     }
     if accepted {
-        if reset {
-            *ring = next_ring;
-        } else {
-            if left_out.is_some() {
-                *ring = next_ring;
-            }
-            if let Err(failure) = ring.resume() {
-                held.failure = Some(failure);
-                held.unpublished = true;
-            }
+        held.coverage_seconds = 0;
+        if left_out.is_none() {
+            held.coverage_seconds = seconds;
         }
+        refresh_load_finish(held, ring, next_ring, reset);
     }
     Ok(accepted)
+}
+
+fn refresh_load_finish(held: &mut Held, ring: &mut Ring, next: Ring, reset: bool) {
+    if reset {
+        *ring = next;
+    } else {
+        if held.left_out.is_some() {
+            *ring = next;
+        }
+        if let Err(failure) = ring.resume() {
+            held.failure = Some(failure);
+            held.unpublished = true;
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -863,6 +921,10 @@ fn step(
 
     if let Some(operation) = operation {
         operation.check()?;
+    }
+
+    if ring.reload_required() {
+        return Ok(());
     }
 
     if failure != held.failure {

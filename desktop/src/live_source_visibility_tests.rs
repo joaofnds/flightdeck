@@ -336,6 +336,87 @@ fn an_overview_shown_again_over_a_view_leaves_its_reader_resting(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn an_overview_shown_again_waits_for_its_installed_store_without_a_second_reader(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a restored Overview reads its range once, through the authoritative store.
+    // Method: show a completed page before its real store's replacement View and step both.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let mut window = VisibilityHarness::open(cx);
+    window.answer_readings(&[reading_at(999, 0), reading_at(1000, 0)]);
+    window.tick();
+    window
+        .cx
+        .update(|cx| crate::live_dashboard::install_store(store, cx));
+    window.change(WindowVisibility::Hidden);
+    let generation = window.generation();
+
+    window.change(WindowVisibility::Visible);
+
+    assert_eq!(window.generation(), generation);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+    for _ in 0..2_000 {
+        window.tick();
+        if window
+            .cx
+            .update(|cx| window.window.read(cx).unwrap().reader_rested())
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        window
+            .cx
+            .update(|cx| window.window.read(cx).unwrap().reader_rested())
+    );
+    assert_eq!(window.generation(), generation);
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
+#[gpui::test]
+fn reopening_a_completed_live_overview_waits_for_the_store_without_a_second_reader(
+    cx: &mut TestAppContext,
+) {
+    // Goal: closing and reopening uses the same single-reader restore as showing a hidden page.
+    // Method: transfer a completed page's actual retained state and idle reader into a new page.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let mut window = VisibilityHarness::open(cx);
+    window.answer_readings(&[reading_at(999, 0), reading_at(1000, 0)]);
+    window.tick();
+    window
+        .cx
+        .update(|cx| crate::live_dashboard::install_store(store, cx));
+    let (worker, state) = window
+        .window
+        .update(&mut window.cx, |page, _, _| {
+            let state = page.window_state();
+            (page.worker.hand_over().unwrap().unwrap(), state)
+        })
+        .unwrap();
+    let reopened = window
+        .cx
+        .update(|cx| cx.new(|cx| LiveDashboard::restore(worker, state, cx)));
+
+    assert!(!window.cx.update(|cx| reopened.read(cx).reply_pending));
+    assert!(window.cx.update(|cx| reopened.read(cx).awaiting_reply()));
+    window.report(WindowVisibility::Hidden);
+    window
+        .window
+        .update(&mut window.cx, |_, native, cx| {
+            crate::live_dashboard::observe_visibility(&reopened, native, cx);
+        })
+        .unwrap();
+    window.report(WindowVisibility::Visible);
+    assert!(window.cx.update(|cx| reopened.read(cx).awaiting_reply()));
+    assert_eq!(window.reader.receive(), (Received::Continued, false));
+}
+
+#[gpui::test]
 fn an_overview_awaiting_its_app_histories_keeps_its_reader_reading(cx: &mut TestAppContext) {
     // Goal: an Overview drawn from the store's View keeps its reader reading the App histories
     // its first readings leave pending, whose read a resting reader drops.

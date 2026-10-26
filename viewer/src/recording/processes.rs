@@ -140,6 +140,32 @@ fn derive_apps_samples(
 }
 
 impl SealedMinute<'_> {
+    /// Retains the last frame only when capture would admit its presentation. Each preceding
+    /// frame still passes the same validation, since a refusal breaks the rate predecessor.
+    pub(crate) fn terminal_processes(
+        &self,
+        operation: &Operation,
+    ) -> Result<Option<Before>, Refused> {
+        let mut before: Option<Before> = None;
+        read_processes_with_operation(self, operation, |endpoint, frame| {
+            let previous = before
+                .as_ref()
+                .filter(|before| frame.takes_rates_from(&before.endpoint))
+                .map(|before| &*before.frame);
+            if Sample::validate_capture(&frame, previous).is_err() {
+                before = None;
+            } else {
+                before = Some(Before {
+                    endpoint: *endpoint,
+                    frame,
+                });
+            }
+            Ok(())
+        })?;
+
+        Ok(before)
+    }
+
     /// Visits each observation's typed sample or refusal, including unattributed processes.
     /// A refused sample clears the predecessor but does not suppress later observations.
     pub(crate) fn visit_samples(

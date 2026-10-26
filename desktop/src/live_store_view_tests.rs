@@ -1034,6 +1034,30 @@ fn wait_for_store_activity(cx: &mut gpui::TestAppContext, paused: bool) {
 }
 
 #[gpui::test]
+fn a_live_page_other_than_overview_parks_the_unused_store(cx: &mut gpui::TestAppContext) {
+    // Goal: a page with its own reader cannot also spend CPU refreshing an unused Store View.
+    // Method: tick CPU with an installed live store, then navigate to Overview and tick again.
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let page = cx.update(|cx| cx.new(|_| opening_on("cpu")));
+
+    page.update(cx, LiveDashboard::tick);
+
+    wait_for_store_activity(cx, true);
+    assert!(!cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
+    page.update(cx, |page, cx| {
+        page.navigate("overview", cx);
+        page.tick(cx);
+    });
+    wait_for_store_activity(cx, false);
+    assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
 fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     cx: &mut gpui::TestAppContext,
 ) {

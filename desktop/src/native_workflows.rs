@@ -25,7 +25,7 @@ pub fn create_dashboard(
     cx: &mut gpui::App,
 ) -> Entity<LiveDashboard> {
     let source = worker.mode();
-    create_dashboard_with(source, cx, move || {
+    create_dashboard_with(source, cx, move |_| {
         LiveDashboard::new(worker, route, seconds)
     })
 }
@@ -36,17 +36,19 @@ pub(crate) fn restore_dashboard(
     cx: &mut gpui::App,
 ) -> Entity<LiveDashboard> {
     let source = worker.mode();
-    create_dashboard_with(source, cx, move || LiveDashboard::restore(worker, state))
+    create_dashboard_with(source, cx, move |cx| {
+        LiveDashboard::restore(worker, state, cx)
+    })
 }
 
 fn create_dashboard_with(
     source: SourceMode,
     cx: &mut gpui::App,
-    build: impl FnOnce() -> LiveDashboard,
+    build: impl FnOnce(&mut Context<LiveDashboard>) -> LiveDashboard,
 ) -> Entity<LiveDashboard> {
     let input = gpui::AppContext::new(cx, TimeInput::new);
     let entity = gpui::AppContext::new(cx, |cx| {
-        let mut dashboard = build();
+        let mut dashboard = build(cx);
         dashboard.settings.animate_fans = crate::live_launch::animate_fans(cx);
         dashboard.native.source = source;
         dashboard.native.input = Some(input);

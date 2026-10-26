@@ -49,6 +49,13 @@ pub(super) struct Ring {
     followed: Result<(), Failure>,
     /// Whether the ring the store follows published a tick since the store last looked.
     published: bool,
+    delta: Option<Delta>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Delta {
+    Covered,
+    Overrun,
 }
 
 /// The ring of one run, and the room to take its ticks in.
@@ -85,6 +92,7 @@ impl Ring {
             unlooked_steps: FOLLOW_STEPS,
             followed: Ok(()),
             published: false,
+            delta: None,
         }
     }
 
@@ -113,7 +121,13 @@ impl Ring {
                             self.pending = Some((second, source.apps(publication)));
                         }
                     }
-                    Ok(Found::Missed { .. }) => continue,
+                    Ok(Found::Missed { .. }) => {
+                        if self.delta.is_some() {
+                            self.delta = Some(Delta::Overrun);
+                            return Ok(());
+                        }
+                        continue;
+                    }
                     Ok(Found::Nothing) => return Ok(()),
                     Err(error) => return Err(Failure::Ring(error.kind())),
                 }
@@ -163,6 +177,9 @@ impl Ring {
     }
 
     pub(super) fn caught_up(&self) -> Result<bool, Failure> {
+        if self.reload_required() {
+            return Ok(false);
+        }
         if self.pending.is_some() {
             return Ok(false);
         }
@@ -180,9 +197,78 @@ impl Ring {
 
     /// Rechecks the source on show while keeping the current run's reader and rate predecessor.
     pub(super) fn resume(&mut self) -> Result<(), Failure> {
+        self.finish_resume();
         self.unlooked_steps = FOLLOW_STEPS;
         self.published = false;
         self.follow()
+    }
+
+    /// Reuses a checkpoint only when this generation still retains every unread publication.
+    pub(super) fn covers(&mut self, checkpoint: &super::Newest) -> Result<bool, Failure> {
+        let Some(source) = &self.source else {
+            return Ok(false);
+        };
+        if source.identity != checkpoint.run {
+            return Ok(false);
+        }
+        let recording =
+            read_identity(&self.root).map_err(|error| Failure::Recording(error.kind()))?;
+        if recording != checkpoint.run.recording {
+            return Err(Failure::ForeignRecording);
+        }
+        let registry = Registry::read_into(&self.runs, &mut self.registry)
+            .map_err(|error| Failure::Registry(error.kind()))?;
+        let Some(newest) = registry.runs().last() else {
+            return Ok(false);
+        };
+        let newest = newest.map_err(|error| Failure::Registry(error.kind()))?;
+        if newest.identity != source.identity {
+            return Ok(false);
+        }
+        if newest.ring_name != source.reader.name() {
+            return Ok(false);
+        }
+        if source.reader.identity() != Some(source.identity) {
+            return Err(Failure::ChangedIdentity);
+        }
+        let latest = source
+            .reader
+            .publication_newest()
+            .map_err(|error| Failure::Ring(error.kind()))?;
+        if latest < checkpoint.publication {
+            return Err(Failure::ChangedIdentity);
+        }
+        let first = latest
+            .saturating_sub(source.reader.shape().slot_count)
+            .saturating_add(1)
+            .max(source.reader.publication_first());
+        let cursor = match &self.pending {
+            Some((second, _)) => second.publication,
+            None => source.reader.next_publication(),
+        };
+        if cursor
+            != checkpoint
+                .publication
+                .checked_add(1)
+                .ok_or(Failure::TickShape)?
+        {
+            return Ok(false);
+        }
+        if cursor < first {
+            return Ok(false);
+        }
+        self.unlooked_steps = 1;
+        self.followed = Ok(());
+        self.delta = Some(Delta::Covered);
+        Ok(true)
+    }
+
+    pub(super) fn reload_required(&self) -> bool {
+        self.delta == Some(Delta::Overrun)
+    }
+
+    pub(super) fn finish_resume(&mut self) {
+        self.delta = None;
     }
 
     /// Looks at the registry and follows its newest run, as `follow` describes. The store checked

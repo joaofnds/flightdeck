@@ -75,6 +75,10 @@ pub(super) fn store_pending(cx: &App) -> bool {
         .is_some_and(|store| store.0.pending())
 }
 
+pub(super) fn store_installed(cx: &App) -> bool {
+    cx.has_global::<LiveStore>()
+}
+
 /// The View the store handed over since the last take, or none where the app runs no store, as
 /// for a recording opened read-only.
 pub(super) fn take_store_view(cx: &App) -> Option<Arc<View>> {

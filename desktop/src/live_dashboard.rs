@@ -39,11 +39,15 @@ pub(crate) fn observe_visibility(
     cx: &mut gpui::App,
 ) {
     dashboard.update(cx, |dashboard, cx| {
-        store_view::set_store_active(window.is_visible() && dashboard.follows_live(), cx);
+        store_view::set_store_active(window.is_visible() && dashboard.uses_live_store(), cx);
         // macOS reports only changes, so a window it hides from the start would read its page
         // until it first showed and hid again.
         if !window.is_visible() {
-            dashboard.presence = Presence::Opening;
+            if dashboard.presence == Presence::Showing {
+                dashboard.presence = Presence::Hidden;
+            } else {
+                dashboard.presence = Presence::Opening;
+            }
         }
 
         cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
@@ -58,7 +62,10 @@ pub(crate) fn observe_visibility(
                         requests: dashboard.worker.requests_submitted(),
                     });
             }
-            store_view::set_store_active(visibility.is_visible() && dashboard.follows_live(), cx);
+            store_view::set_store_active(
+                visibility.is_visible() && dashboard.uses_live_store(),
+                cx,
+            );
             if !visibility.is_visible() {
                 dashboard.store_view = None;
             }
@@ -428,7 +435,7 @@ impl LiveDashboard {
         }
     }
 
-    pub(crate) fn restore(worker: Worker, state: WindowState) -> Self {
+    pub(crate) fn restore(worker: Worker, state: WindowState, cx: &Context<Self>) -> Self {
         let mut dashboard = Self::new_idle(worker, state.request, None);
         dashboard.range = state.range;
         dashboard.pinning = state.pinning;
@@ -438,7 +445,11 @@ impl LiveDashboard {
             dashboard.accept(snapshot);
         }
         if !dashboard.pinned_reading_complete() {
-            dashboard.request_restoration();
+            if dashboard.can_resume_from_store(cx) {
+                dashboard.presence = Presence::Showing;
+            } else {
+                dashboard.request_restoration();
+            }
         }
 
         dashboard
@@ -468,12 +479,28 @@ impl LiveDashboard {
         true
     }
 
-    fn follows_live(&self) -> bool {
+    fn uses_live_store(&self) -> bool {
+        if self.request.route != "overview" {
+            return false;
+        }
         if self.worker.mode() != crate::live_source_mode::SourceMode::Live {
             return false;
         }
 
         self.request.second.is_none()
+    }
+
+    fn can_resume_from_store(&self, cx: &Context<Self>) -> bool {
+        if !self.uses_live_store() {
+            return false;
+        }
+        if !store_view::store_installed(cx) {
+            return false;
+        }
+
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.histories_pending)
     }
 
     fn new_request(route: String) -> Request {
@@ -602,7 +629,7 @@ impl LiveDashboard {
             self.presence,
             Presence::Shown | Presence::Showing | Presence::Rested
         );
-        if self.follows_live() {
+        if self.uses_live_store() {
             if visible {
                 if store_view::set_store_window(self.range, cx) {
                     self.store_view = None;
@@ -611,7 +638,7 @@ impl LiveDashboard {
         } else {
             self.store_view = None;
         }
-        store_view::set_store_active(visible && self.follows_live(), cx);
+        store_view::set_store_active(visible && self.uses_live_store(), cx);
         if self.presence == Presence::Opening {
             if !self.reply_pending {
                 self.presence = Presence::Hiding;
@@ -701,9 +728,19 @@ impl LiveDashboard {
         if self.presence == Presence::Rested {
             return;
         }
+        if self.reply_pending {
+            return;
+        }
 
         if self.pinned_reading_complete() {
             return;
+        }
+
+        if self.can_resume_from_store(cx) {
+            if store_view::store_pending(cx) {
+                self.presence = Presence::Showing;
+                return;
+            }
         }
 
         if self.worker.mode() == crate::live_source_mode::SourceMode::Live {

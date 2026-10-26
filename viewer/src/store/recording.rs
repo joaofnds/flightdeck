@@ -38,6 +38,36 @@ pub(super) struct Terminal {
     pub process: Option<crate::recording::Before>,
 }
 
+impl Terminal {
+    fn from_minute(
+        run: RunIdentity,
+        mut machine: MachineMinute,
+        process: Option<crate::recording::Before>,
+    ) -> Option<Self> {
+        let publication = machine.ticks.last()?.publication;
+        machine.ticks.retain(|row| row.publication == publication);
+        machine.cpus.retain(|row| row.publication == publication);
+        machine.memory.retain(|row| row.publication == publication);
+        machine
+            .interfaces
+            .retain(|row| row.publication == publication);
+        machine
+            .gpu_states
+            .retain(|row| row.publication == publication);
+        machine
+            .core_states
+            .retain(|row| row.publication == publication);
+        machine.fans.retain(|row| row.publication == publication);
+        assert_eq!(machine.ticks.len(), 1);
+
+        Some(Self {
+            run,
+            machine,
+            process,
+        })
+    }
+}
+
 /// Decodes and consumes the opt-in payload prefix one minute at a time under caller cancellation.
 pub(super) fn load_payload(
     root: &Path,
@@ -167,6 +197,7 @@ pub(super) fn terminal(
     operation: &crate::cancellation::Operation,
 ) -> persistence::Result<Option<Terminal>> {
     const BYTES_MAX: usize = 256 * 1024 * 1024;
+    operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
     find_window(
         root,
@@ -178,21 +209,26 @@ pub(super) fn terminal(
         },
     )
     .map_err(|failure| persistence::Error::Io(io::Error::other(format!("{failure:?}"))))?;
-    found.truncate(1);
+    operation.check()?;
+    let Some(found) = found.first() else {
+        return Ok(None);
+    };
     let budget = Arc::new(super::ByteBudget::new(BYTES_MAX));
-    let outcome = payload::load(
+    let terminal = payload::terminal(
         root,
-        &found,
+        found,
         &budget,
         operation,
         &persistence::engine::AdmittedTable::from_file_budgeted,
-        |_, _, _| {},
-    )?;
-    if let Some(failure) = outcome.left_out {
-        eprintln!("flightdeck store rate predecessor: {failure:?}");
+    );
+    operation.check()?;
+    match terminal {
+        Ok(terminal) => Ok(terminal),
+        Err(failure) => {
+            eprintln!("flightdeck store rate predecessor: {failure:?}");
+            Ok(None)
+        }
     }
-
-    Ok(outcome.terminal)
 }
 
 /// A sealed minute of the loaded hour, by its run, its marker and the newest wall time of its

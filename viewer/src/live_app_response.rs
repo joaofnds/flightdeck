@@ -289,6 +289,12 @@ const _: () = {
 };
 
 impl Sample {
+    /// Applies capture's aggregate and presentation admission without retaining a presentation.
+    /// A rate predecessor needs its accepted raw frame, rather than copies of the App rows.
+    pub(crate) fn validate_capture(selected: &Frame, previous: Option<&Frame>) -> Result<()> {
+        selected.with_aggregate(previous, capture::validate)
+    }
+
     /// Copies every borrowed fact before the aggregate callback returns.
     /// Refusal clears output rather than retaining an older successful observation.
     pub fn capture(

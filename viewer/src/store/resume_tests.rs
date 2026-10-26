@@ -3,6 +3,104 @@ use super::{MachineSecond, Mailbox, Publication, Store};
 use crate::live::identity_fixture::Fixture;
 
 #[test]
+fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
+    // Goal: a writer cannot turn a covered resume into a silently incomplete replacement.
+    // Method: overwrite the oldest unread slot after the real coverage check, then reconcile.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(100, &[]);
+    fixture.seal_minute(0);
+    let mut held = super::Held::new();
+    let mut ring = super::Ring::new(fixture.root.clone());
+    let cancellation = std::sync::Arc::new(crate::cancellation::Cancellation::default());
+    let operation = cancellation.operation(0).unwrap();
+    super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
+    ring.follow().unwrap();
+    ring.read(|run, second, apps| held.take(run, second, apps))
+        .unwrap();
+    fixture.skip_run_ticks(59);
+    for second in 101..109 {
+        fixture.publish_with_events(second, &[]);
+    }
+    fixture.seal_minute(1);
+    assert!(ring.covers(held.newest.as_ref().unwrap()).unwrap());
+    fixture.publish_with_events(109, &[]);
+    let shared = reconciliation_shared();
+
+    super::step(
+        &mut held,
+        &mut ring,
+        Ok(()),
+        &shared.mailbox,
+        None,
+        Publication::Complete,
+    )
+    .unwrap();
+
+    assert!(shared.mailbox.take().is_none());
+    assert!(super::run_retry(&mut held, &ring, &shared));
+    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, None).unwrap());
+    for _ in 0..2 {
+        super::step(
+            &mut held,
+            &mut ring,
+            Ok(()),
+            &shared.mailbox,
+            None,
+            Publication::Complete,
+        )
+        .unwrap();
+        assert!(!super::run_retry(&mut held, &ring, &shared));
+    }
+    let resumed = shared.mailbox.take().unwrap();
+    let seconds: Vec<_> = resumed
+        .seconds
+        .iter()
+        .map(|second| second.wall_ns)
+        .collect();
+    let expected: Vec<_> = (100..110).map(|second| second * 1_000_000_000).collect();
+    assert_eq!(seconds, expected);
+    assert_eq!(resumed.failure, None);
+    assert_eq!(resumed.left_out, None);
+}
+
+fn reconciliation_shared() -> super::Shared {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    super::Shared {
+        mailbox: Mailbox::new(),
+        stop: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        catch_up: AtomicBool::new(false),
+        catching_up: AtomicBool::new(true),
+        paused: AtomicBool::new(false),
+        window_seconds: AtomicU64::new(300),
+        cancellation: std::sync::Arc::new(crate::cancellation::Cancellation::default()),
+    }
+}
+
+#[test]
+fn a_covered_ring_resumes_without_reopening_its_already_cached_sealed_data() {
+    // Goal: a short hide needs only new ring data, even when the cached sealed files go offline.
+    // Method: pause a real warm store, move its data directory, publish one tick, then show it.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    let store = Store::start(&fixture.root).unwrap();
+    drop(view_where(&store, |_| true));
+    store.set_active(false);
+    super::activity_tests::wait_until_paused(&store);
+    std::fs::rename(fixture.root.join("data"), fixture.root.join("offline_data")).unwrap();
+    fixture.publish_with_system_rows(101);
+
+    store.set_active(true);
+    let resumed = view_where(&store, |_| true);
+
+    assert_eq!(resumed.left_out, None);
+    assert_eq!(resumed.failure, None);
+    assert_eq!(resumed.seconds.last().unwrap().wall_ns, 101_000_000_000);
+    assert_eq!(resumed.seconds.first().unwrap().wall_ns, 100_000_000_000);
+}
+
+#[test]
 fn opening_pinned_context_does_not_ingest_the_live_ring() {
     // Goal: reopening a pin with a fresh reader cannot start live ingestion.
     // Method: open saved context over a populated ring and inspect its public catalog.
