@@ -6,12 +6,15 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use persistence::resources::{Footprint, WORKING_BYTES_MAX, Watchdog};
+use persistence::resources::{Footprint, Watchdog};
 use serde_json::json;
 use viewer::store::{
     AppDetails, AppRow, AppsSecond, ByteBudget, MachineSecond, Missing, ProcessRow, SampledSecond,
     Store, View,
 };
+
+#[path = "store_payload/name_census.rs"]
+mod name_census;
 
 fn main() -> ExitCode {
     match run() {
@@ -25,6 +28,7 @@ fn main() -> ExitCode {
 
 const SECONDS_MAX: u64 = 60;
 const PAYLOAD_BYTES_MAX: usize = 1024 * 1024 * 1024;
+const FOOTPRINT_BYTES_MAX: u64 = 830_000_000;
 const STEPS_PER_SECOND: u64 = 10;
 
 struct Arguments {
@@ -48,7 +52,7 @@ struct PayloadCounts {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     persistence::engine::initialize_process()?;
     let arguments = Arguments::parse(&std::env::args().skip(1).take(8).collect::<Vec<_>>())?;
-    let watchdog = Watchdog::with_operation_limit(WORKING_BYTES_MAX, Duration::from_secs(90))?;
+    let watchdog = Watchdog::with_operation_limit(FOOTPRINT_BYTES_MAX, Duration::from_secs(90))?;
     let operation = watchdog.operation()?;
     let budget = Arc::new(ByteBudget::new(arguments.bytes));
     report_footprint("before_store", &budget)?;
@@ -66,10 +70,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let view = latest.ok_or_else(|| io::Error::other("store published no View"))?;
     report(&view, &budget)?;
+    name_census::report(&view, &budget)?;
     drop(view);
     drop(store);
     report_footprint("after_store_drop", &budget)?;
     drop(operation);
+    drop(watchdog);
+    check_footprint(&Footprint::read()?)?;
     Ok(())
 }
 
@@ -128,6 +135,10 @@ fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
             "payload_too_many": counts.too_many,
             "process_rows": counts.processes,
             "process_rows_max": counts.processes_max,
+            "app_row_capacity_bytes_by_reference": view.apps.iter()
+                .map(|apps| apps.apps.capacity() * size_of::<AppRow>()).sum::<usize>(),
+            "app_row_initialized_bytes_by_reference": view.apps.iter()
+                .map(|apps| apps.apps.len() * size_of::<AppRow>()).sum::<usize>(),
             "reserved_bytes": budget.used(),
             "reserved_bytes_max": budget.maximum(),
             "footprint_bytes": footprint.current_bytes,
@@ -179,5 +190,61 @@ impl PayloadCounts {
             }
         }
         counts
+    }
+}
+
+fn check_footprint(footprint: &Footprint) -> io::Result<()> {
+    let bytes = footprint.current_bytes.max(footprint.lifetime_bytes_max);
+    if bytes > FOOTPRINT_BYTES_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            format!("payload preflight footprint {bytes} exceeds {FOOTPRINT_BYTES_MAX}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod footprint_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_exact_footprint_ceiling() {
+        // Goal: the declared ceiling is inclusive. Method: check its exact boundary.
+        let memory = Footprint {
+            current_bytes: FOOTPRINT_BYTES_MAX,
+            lifetime_bytes_max: FOOTPRINT_BYTES_MAX,
+            resident_bytes: 0,
+        };
+
+        assert!(check_footprint(&memory).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_peak_above_the_last_watchdog_sample() {
+        // Goal: short-lived excess cannot pass at shutdown. Method: check a recovered peak.
+        let memory = Footprint {
+            current_bytes: 1,
+            lifetime_bytes_max: FOOTPRINT_BYTES_MAX + 1,
+            resident_bytes: 0,
+        };
+
+        let refused = check_footprint(&memory).unwrap_err();
+
+        assert_eq!(refused.kind(), io::ErrorKind::OutOfMemory);
+    }
+
+    #[test]
+    fn rejects_current_footprint_before_the_peak_catches_up() {
+        // Goal: a delayed peak counter cannot hide excess. Method: check current bytes alone.
+        let memory = Footprint {
+            current_bytes: FOOTPRINT_BYTES_MAX + 1,
+            lifetime_bytes_max: FOOTPRINT_BYTES_MAX,
+            resident_bytes: 0,
+        };
+
+        let refused = check_footprint(&memory).unwrap_err();
+
+        assert_eq!(refused.kind(), io::ErrorKind::OutOfMemory);
     }
 }
