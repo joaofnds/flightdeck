@@ -16,6 +16,7 @@ pub(super) struct FrozenRing {
     pub(super) newest: u64,
     pub(super) slots: u64,
     pub(super) retained_first: u64,
+    event_first: u64,
     event_newest: u64,
     completed: bool,
 }
@@ -36,8 +37,10 @@ struct OwnedObject {
 }
 
 const COPY_ATTEMPTS_MAX: u32 = 8;
-// This wire offset is shared by every admitted ring layout in collector::ring::layout.
+// These wire offsets are shared by every admitted ring layout in collector::ring::layout.
+const HEADER_PUBLICATION_FIRST: usize = 3;
 const HEADER_PUBLICATION_NEWEST: usize = 4;
+const HEADER_EVENT_FIRST: usize = 6;
 const HEADER_EVENT_NEWEST: usize = 7;
 const HEADER_COMPLETED: usize = 29;
 const MAPPING_BYTES_MAX: usize = 1024 * 1024 * 1024;
@@ -100,6 +103,7 @@ impl FrozenRing {
             object.name()?,
         )?;
         let captured = RingReader::open_generation(object.name()?)?;
+        let event_first = mapping.words()[HEADER_EVENT_FIRST].load(Ordering::Acquire);
         let event_newest = mapping.words()[HEADER_EVENT_NEWEST].load(Ordering::Acquire);
         Ok(Self {
             mapping,
@@ -109,6 +113,7 @@ impl FrozenRing {
             newest,
             slots: reader.shape().slot_count,
             retained_first: captured.next_publication(),
+            event_first,
             event_newest,
             completed: captured.completed(),
         })
@@ -133,11 +138,30 @@ impl FrozenRing {
         self.publish(newest);
     }
 
+    pub(super) fn replay_start(&self, event_first: u64) -> io::Result<()> {
+        if self.retained_first < self.first {
+            return Err(io::Error::other(
+                "retained publications precede source numbering",
+            ));
+        }
+
+        if event_first < self.event_first {
+            return Err(io::Error::other("retained events precede source numbering"));
+        }
+
+        self.mapping.words()[HEADER_PUBLICATION_FIRST]
+            .store(self.retained_first, Ordering::Release);
+        self.mapping.words()[HEADER_EVENT_FIRST].store(event_first, Ordering::Release);
+        Ok(())
+    }
+
     pub(super) fn complete(&self, completed: bool) {
         self.mapping.words()[HEADER_COMPLETED].store(u64::from(completed), Ordering::Release);
     }
 
     pub(super) fn restore(&self) {
+        self.mapping.words()[HEADER_PUBLICATION_FIRST].store(self.first, Ordering::Release);
+        self.mapping.words()[HEADER_EVENT_FIRST].store(self.event_first, Ordering::Release);
         self.replay_publish(self.newest, self.event_newest);
         self.complete(self.completed);
     }

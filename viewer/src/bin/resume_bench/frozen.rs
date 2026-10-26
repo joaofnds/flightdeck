@@ -117,12 +117,17 @@ impl FrozenRecording {
             ));
         }
 
-        ring.complete(false);
         let boundary = self
             .boundaries
             .iter()
             .find(|entry| entry.publication == first)
             .ok_or_else(|| io::Error::other("missing replay boundary"))?;
+        let retained = self
+            .boundaries
+            .first()
+            .ok_or_else(|| io::Error::other("missing retained replay boundary"))?;
+        ring.replay_start(retained.events_first)?;
+        ring.complete(false);
         ring.replay_publish(first - 1, boundary.events_first - 1);
         self.files.checkpoint(first - 1)?;
         self.replay.set(Some(first - 1));

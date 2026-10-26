@@ -37,6 +37,47 @@ const SHAPE: Shape = Shape {
 };
 
 #[test]
+fn starts_new_replay_readers_at_the_validated_retained_input() {
+    // Goal: replay metadata never advertises overwritten publications or events to new readers.
+    // Method: rewind a wrapped eventful capture and open a reader at its first visible tick.
+    let mut source = Fixture::new();
+    source.events = 1;
+    for publication in 1..=1900 {
+        source.publish(publication);
+    }
+    let frozen = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    })
+    .unwrap();
+    let before = source.root.join("before.ring");
+    frozen.active_ring().export(&before).unwrap();
+    frozen.replay_reset(1781).unwrap();
+    frozen.replay_step(1781).unwrap();
+    let registry = Registry::read(frozen.root()).unwrap();
+    let mut reader = RingReader::open_generation(&registry.runs[0].ring_name).unwrap();
+    let mut tick = persistence::tick_buffer(&SHAPE).unwrap();
+
+    assert_eq!(reader.next_publication(), 1781);
+    assert_eq!(
+        reader.read_into(&mut tick).unwrap(),
+        Found::Publication {
+            publication: 1781,
+            tick: 1780
+        }
+    );
+    assert!(matches!(
+        reader.read_event().unwrap(),
+        collector::ring::FoundEvent::Event { number: 1781, .. }
+    ));
+
+    frozen.advance().unwrap();
+    let after = source.root.join("after.ring");
+    frozen.active_ring().export(&after).unwrap();
+    assert_eq!(fs::read(before).unwrap(), fs::read(after).unwrap());
+}
+
+#[test]
 fn completes_a_finite_paced_replay_and_exposes_its_seal_only_after_eligible_steps() {
     // Goal: the parent can drive arrivals and sealing without a second replay implementation.
     // Method: replay 42 tiny fixture slots at 1 ms, checking state and bounds, never speed.
