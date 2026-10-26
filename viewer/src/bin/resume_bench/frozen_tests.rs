@@ -37,6 +37,30 @@ const SHAPE: Shape = Shape {
 };
 
 #[test]
+fn completes_a_finite_paced_replay_and_exposes_its_seal_only_after_eligible_steps() {
+    // Goal: the parent can drive arrivals and sealing without a second replay implementation.
+    // Method: replay 42 tiny fixture slots at 1 ms, checking state and bounds, never speed.
+    let mut source = Fixture::new();
+    source.populate();
+    let frozen = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    })
+    .unwrap();
+    let registry = Registry::read(frozen.root()).unwrap();
+    let reader = RingReader::open_generation(&registry.runs[0].ring_name).unwrap();
+    frozen.replay_reset(1859).unwrap();
+    assert!(frozen.replay_run(10_000).is_err());
+    assert!(!marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+
+    frozen.replay_run(1).unwrap();
+
+    assert_eq!(reader.publication_newest().unwrap(), 1900);
+    assert!(reader.completed());
+    assert!(marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+}
+
+#[test]
 fn replays_only_monotone_retained_publications_and_eligible_seals() {
     // Goal: running readers never see a future endpoint, event or seal during replay.
     // Method: reset a captured real ring, step its retained tail, and inspect native readers.

@@ -168,6 +168,40 @@ impl FrozenRecording {
         Ok(())
     }
 
+    /// A finite replay, bounded to five minutes, with seals at their captured end publication.
+    pub fn replay_run(&self, interval_ms: u64) -> io::Result<()> {
+        let previous = self
+            .replay
+            .get()
+            .ok_or_else(|| io::Error::other("reset replay first"))?;
+        if !(1..=10_000).contains(&interval_ms) {
+            return Err(io::Error::other(
+                "replay interval must be 1..10000 milliseconds",
+            ));
+        }
+
+        let count = self.active_ring().newest - previous;
+        if count * interval_ms > 300_000 {
+            return Err(io::Error::other("paced replay exceeds five minutes"));
+        }
+
+        let started = std::time::Instant::now();
+        for publication in previous + 1..=self.active_ring().newest {
+            let elapsed = std::time::Duration::from_millis((publication - previous) * interval_ms);
+            std::thread::sleep(
+                (started + elapsed).saturating_duration_since(std::time::Instant::now()),
+            );
+            self.replay_step(publication)?;
+            self.files.replay_seal_eligible(publication)?;
+            println!(
+                "{}",
+                serde_json::json!({"event": "replay_publication",
+                "publication": publication, "elapsed_ns": started.elapsed().as_nanos()})
+            );
+        }
+        self.replay_complete()
+    }
+
     /// Export before resetting. Backing files are evidence, not an import format.
     pub fn export(&self, directory: &Path) -> io::Result<()> {
         if self.replay.get().is_some() {

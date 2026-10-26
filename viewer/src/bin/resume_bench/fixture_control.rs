@@ -69,6 +69,9 @@ fn command(fixture: &FrozenRecording, line: &str) -> io::Result<()> {
     if let Some(publication) = line.strip_prefix("replay-step ") {
         return fixture.replay_step(publication.parse().map_err(io::Error::other)?);
     }
+    if let Some(interval_ms) = line.strip_prefix("replay-run ") {
+        return fixture.replay_run(interval_ms.parse().map_err(io::Error::other)?);
+    }
     if let Some(window) = line.strip_prefix("replay-seal ") {
         return fixture.replay_seal(window.parse().map_err(io::Error::other)?);
     }

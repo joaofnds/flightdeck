@@ -129,6 +129,18 @@ impl FrozenFiles {
         hidden.remove(position);
         Ok(())
     }
+
+    pub(super) fn replay_seal_eligible(&self, newest: u64) -> io::Result<()> {
+        assert!(self.markers.len() <= WINDOWS_MAX);
+        for marker in &self.markers {
+            if marker.publication_end == newest + 1 {
+                if marker.hidden.try_exists()? {
+                    self.replay_seal(marker.window, newest)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn capture_metadata(
