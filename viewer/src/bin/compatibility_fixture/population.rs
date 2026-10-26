@@ -13,7 +13,12 @@ pub const PROCESSES: u64 = 1050;
 pub const EVENTS: usize = 64;
 pub const MAPPED_BYTES_MAX: u64 = 64 * 1024 * 1024;
 
-pub fn create(root: &std::path::Path, recording: collector::ring::Identity) -> Result<Source> {
+pub fn create(
+    root: &std::path::Path,
+    recording: collector::ring::Identity,
+    output: &mut Option<Source>,
+) -> Result<()> {
+    assert!(output.is_none());
     let identity = collector::recording::new_run_identity(recording)?;
     let place = Place {
         lock_path: root.join("population.lock"),
@@ -41,7 +46,8 @@ pub fn create(root: &std::path::Path, recording: collector::ring::Identity) -> R
     if mapped_bytes > MAPPED_BYTES_MAX {
         return Err(Error::Bound("population ring bytes"));
     }
-    Ok(Source {
+
+    *output = Some(Source {
         identity,
         layout: super::SourceLayout::Legacy,
         lock: place.lock_path,
@@ -49,7 +55,8 @@ pub fn create(root: &std::path::Path, recording: collector::ring::Identity) -> R
         second_first: SECOND_FIRST,
         mapped_bytes,
         population: true,
-    })
+    });
+    Ok(())
 }
 
 fn publish(writer: &mut Writer, tick: u64) -> Result<()> {

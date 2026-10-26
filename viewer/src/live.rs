@@ -891,8 +891,9 @@ impl LiveSession {
             if !offset.is_multiple_of(PAGE_ROWS) {
                 return Err(Error::Bound("page offset"));
             }
-            let view = observation.raw.view(name)?;
-            let total = view.len();
+            let mut view = None;
+            observation.raw.view(name, &mut view)?;
+            let total = view.as_ref().ok_or(Error::Bound("live raw view"))?.len();
             drop(view);
             let table = observation.raw.page(name, offset, &self.operation)?;
             return Ok(json!({"name": name, "columns": table.columns,
@@ -1921,7 +1922,7 @@ fn project_observation(
         publication,
         &mut app_frame,
         |source, events, numbered| {
-            raw = Some(Raw::capture(
+            Raw::capture(
                 &Publication {
                     reader: &source.reader,
                     tick: &source.tick,
@@ -1933,8 +1934,8 @@ fn project_observation(
                     identities: &events.identities,
                 },
                 operation,
-            )?);
-            Ok(())
+                &mut raw,
+            )
         },
     )?;
     let raw = raw.ok_or(Error::Bound("live raw capture"))?;

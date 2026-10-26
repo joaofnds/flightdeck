@@ -96,8 +96,11 @@ impl<'a> Sources<'a> {
                 } else {
                     previous.ok_or(Error::Bound("native metric predecessor"))?
                 };
-                let view = raw.view(name)?;
-                Ok(Some(View::Native(view)))
+                let mut view = None;
+                raw.view(name, &mut view)?;
+                Ok(Some(View::Native(
+                    view.ok_or(Error::Bound("native metric view"))?,
+                )))
             }
         }
     }

@@ -59,7 +59,9 @@ impl Raw {
         source: &super::live_apps::Publication<'_>,
         events: &super::live_apps::PublicationEvents<'_>,
         operation: &Operation,
-    ) -> Result<Self> {
+        output: &mut Option<Self>,
+    ) -> Result<()> {
+        assert!(output.is_none());
         let tick = source.tick;
         capture_validate(source, events)?;
         validate_numbers(tick)?;
@@ -76,7 +78,9 @@ impl Raw {
         {
             return Err(Error::Bound("live raw candidate bytes"));
         }
-        let mut raw = Self::capture_storage(tick, events, identity_bytes)?;
+
+        Self::capture_storage(tick, events, identity_bytes, output)?;
+        let raw = output.as_mut().ok_or(Error::Bound("live raw storage"))?;
         let machine_capacity = machine_bytes(&raw.machine);
         raw.machine.push_tick(source.publication, tick);
         assert_eq!(machine_bytes(&raw.machine), machine_capacity);
@@ -93,20 +97,30 @@ impl Raw {
         if raw.bytes() > RAW_BYTES_MAX {
             return Err(Error::Bound("live raw retained bytes"));
         }
+
         // The removed eager core query also ran before acceptance. Check its bounded integer
         // aggregation now, so a refused derived page cannot first expose an invalid candidate.
-        drop(raw.view(crate::metrics::core_frequency::CORE_LEVEL_STATES)?);
+        let mut view = None;
+        raw.view(crate::metrics::core_frequency::CORE_LEVEL_STATES, &mut view)?;
+        drop(view);
         operation.check()?;
-        Ok(raw)
+        Ok(())
     }
 
     fn capture_storage(
         tick: &Tick,
         events: &super::live_apps::PublicationEvents<'_>,
         identity_bytes: usize,
-    ) -> Result<Self> {
-        Ok(Self {
-            machine: machine_storage(tick)?,
+        output: &mut Option<Self>,
+    ) -> Result<()> {
+        assert!(output.is_none());
+        let core_count = if tick.ioreport_read {
+            u32::try_from(tick.core_count()).map_err(|_| Error::Bound("core count"))?
+        } else {
+            0
+        };
+        *output = Some(Self {
+            machine: MachineMinute::default(),
             system: tick.system,
             processes: tick.processes.clone(),
             gpu_ns: tick.process_gpu_ns().to_vec(),
@@ -114,16 +128,20 @@ impl Raw {
             identities: None,
             events: Vec::with_capacity(events.events.len()),
             arena: Vec::with_capacity(identity_bytes),
-            core_count: if tick.ioreport_read {
-                u32::try_from(tick.core_count()).map_err(|_| Error::Bound("core count"))?
-            } else {
-                0
-            },
+            core_count,
             refused: tick.processes_refused,
             gone: tick.processes_gone,
             event_range: tick.events.clone(),
             dropped: tick.dropped,
-        })
+        });
+
+        machine_storage(
+            tick,
+            &mut output
+                .as_mut()
+                .ok_or(Error::Bound("live raw storage"))?
+                .machine,
+        )
     }
 
     fn capture_events(
@@ -140,11 +158,10 @@ impl Raw {
         let mut buffers = ([0; PATH_BYTES], [0; PATH_BYTES]);
         for (index, event) in events.events.iter().enumerate() {
             operation.check()?;
-            let identity = events
-                .identities
-                .get(index)
-                .map(|identity| Identity::capture(reader, identity, &mut buffers, &mut self.arena))
-                .transpose()?;
+            let mut identity = None;
+            if let Some(source) = events.identities.get(index) {
+                Identity::capture(reader, source, &mut buffers, &mut self.arena, &mut identity)?;
+            }
             self.events.push(CapturedEvent {
                 number: event.number,
                 tick: event.tick,
@@ -171,8 +188,8 @@ impl Raw {
             + machine_bytes(&self.machine)
     }
 
-    pub fn view(&self, name: &str) -> Result<View<'_>> {
-        View::native(self, name)
+    pub fn view<'a>(&'a self, name: &str, output: &mut Option<View<'a>>) -> Result<()> {
+        View::native(self, name, output)
     }
 
     pub fn page(
@@ -181,11 +198,14 @@ impl Raw {
         offset: u64,
         operation: &Operation,
     ) -> Result<crate::data::Table> {
-        let view = self.view(name)?;
+        let mut view = None;
+        self.view(name, &mut view)?;
+        let view = view.as_ref().ok_or(Error::Bound("live raw page view"))?;
         let start = usize::try_from(offset).map_err(|_| Error::Bound("page offset"))?;
         if start > view.len() {
             return Err(Error::Bound("page past end"));
         }
+
         // One ordering index, at most 1,048,576 entries (8 MiB on this target), and one
         // 512-row result bounded by 32 MiB. Neither survives this page operation.
         let order = view.order(operation)?;
@@ -273,16 +293,23 @@ fn core_state_count(tick: &Tick) -> Result<usize> {
     Ok(count)
 }
 
-fn machine_storage(tick: &Tick) -> Result<MachineMinute> {
-    Ok(MachineMinute {
-        ticks: Vec::with_capacity(1),
-        memory: Vec::with_capacity(1),
-        cpus: Vec::with_capacity(tick.cpus.len()),
-        interfaces: Vec::with_capacity(tick.interfaces.len()),
-        gpu_states: Vec::with_capacity(usize::from(tick.ioreport_read) * tick.gpu_active_ns.len()),
-        core_states: Vec::with_capacity(core_state_count(tick)?),
-        fans: Vec::with_capacity(usize::from(tick.smc_read) * tick.fan_rpm.len()),
-    })
+fn machine_storage(tick: &Tick, output: &mut MachineMinute) -> Result<()> {
+    assert_eq!(machine_bytes(output), 0);
+    let core_states = core_state_count(tick)?;
+
+    output.ticks.reserve_exact(1);
+    output.memory.reserve_exact(1);
+    output.cpus.reserve_exact(tick.cpus.len());
+    output.interfaces.reserve_exact(tick.interfaces.len());
+    output
+        .gpu_states
+        .reserve_exact(usize::from(tick.ioreport_read) * tick.gpu_active_ns.len());
+    output.core_states.reserve_exact(core_states);
+    output
+        .fans
+        .reserve_exact(usize::from(tick.smc_read) * tick.fan_rpm.len());
+
+    Ok(())
 }
 
 fn machine_bytes(machine: &MachineMinute) -> usize {

@@ -85,7 +85,9 @@ fn run() -> Result<()> {
     };
     let mut sources = Vec::with_capacity(2);
     if options.layout == Layout::Population {
-        sources.push(population::create(&options.root, store.recording())?);
+        let mut source = None;
+        population::create(&options.root, store.recording(), &mut source)?;
+        sources.push(source.ok_or(Error::Bound("population source"))?);
     }
     for (index, layout) in layouts.iter().enumerate() {
         let mut source = None;

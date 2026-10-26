@@ -18,15 +18,18 @@ impl Identity {
         source: &IdentityObservation,
         buffers: &mut ([u8; PATH_BYTES], [u8; PATH_BYTES]),
         arena: &mut Vec<u8>,
-    ) -> Result<Self> {
-        let mut identity = Self {
+        output: &mut Option<Self>,
+    ) -> Result<()> {
+        assert!(output.is_none());
+        *output = Some(Self {
             pid: source.pid,
             creation: source.creation().copied(),
             availability: availability(source.availability()),
             usage: usage(source.usage),
             name: None,
             app: None,
-        };
+        });
+        let identity = output.as_mut().ok_or(Error::Bound("live raw identity"))?;
         if let Some(reference) = source.program() {
             let (name, app) = copy(reader, reference, buffers)?;
             if arena.len() + name + app > arena.capacity() {
@@ -40,7 +43,7 @@ impl Identity {
             arena.extend_from_slice(&buffers.1[..app]);
             identity.app = (app > 0).then_some(start..arena.len());
         }
-        Ok(identity)
+        Ok(())
     }
 }
 
@@ -77,7 +80,9 @@ pub(super) fn capture(
     let mut rows = Vec::with_capacity(sources.len());
     for source in sources {
         operation.check()?;
-        rows.push(Identity::capture(reader, source, &mut buffers, arena)?);
+        let mut identity = None;
+        Identity::capture(reader, source, &mut buffers, arena, &mut identity)?;
+        rows.push(identity.ok_or(Error::Bound("live raw captured identity"))?);
     }
     Ok(rows)
 }

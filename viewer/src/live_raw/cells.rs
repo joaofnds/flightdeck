@@ -30,7 +30,8 @@ struct LevelState {
 }
 
 impl<'a> View<'a> {
-    pub fn native(raw: &'a Raw, name: &str) -> Result<Self> {
+    pub fn native(raw: &'a Raw, name: &str, output: &mut Option<Self>) -> Result<()> {
+        assert!(output.is_none());
         let derived = name == "core_level_states";
         let table = if derived {
             &catalog::CORE_STATES
@@ -40,22 +41,28 @@ impl<'a> View<'a> {
                 .find(|table| table.name == name)
                 .ok_or(Error::Bound("table name"))?
         };
-        let mut view = Self {
+
+        *output = Some(Self {
             raw,
             table,
             levels: Vec::new(),
             derived,
-        };
+        });
         if derived {
-            view.aggregate_levels()?;
+            output
+                .as_mut()
+                .ok_or(Error::Bound("live raw view"))?
+                .aggregate_levels()?;
         }
-        Ok(view)
+
+        Ok(())
     }
 
     fn aggregate_levels(&mut self) -> Result<()> {
         let Some(levels) = self.raw.machine.ticks[0].performance_levels else {
             return Ok(());
         };
+
         // At most two levels times 256 states; this bounded scratch is never retained.
         let mut states = std::collections::BTreeMap::new();
         for row in &self.raw.machine.core_states {
@@ -432,9 +439,7 @@ impl<'a> View<'a> {
     fn battery(&self, name: &str) -> Cell<'a> {
         let reading = self.raw.machine.ticks[0].battery.as_ref();
         match name {
-            "battery_version" => {
-                optional_unsigned(reading.map(|_| schema::BATTERY_VERSION))
-            }
+            "battery_version" => optional_unsigned(reading.map(|_| schema::BATTERY_VERSION)),
             "battery_source_continuous_ns" => {
                 optional_unsigned(reading.map(|reading| reading.source_continuous_ns))
             }
@@ -657,9 +662,7 @@ impl<'a> View<'a> {
 
     fn identity(&self, identity: Option<&'a super::Identity>, name: &str) -> Cell<'a> {
         match name {
-            "identity_version" => {
-                optional_unsigned(identity.map(|_| schema::IDENTITY_VERSION))
-            }
+            "identity_version" => optional_unsigned(identity.map(|_| schema::IDENTITY_VERSION)),
             "identity_availability" => unsigned(
                 identity.map_or(schema::identity_availability::UNSUPPORTED, |identity| {
                     identity.availability
