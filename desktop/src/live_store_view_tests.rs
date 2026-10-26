@@ -986,3 +986,72 @@ fn wait_for_store_activity(cx: &mut gpui::TestAppContext, paused: bool) {
     }
     panic!("store activity did not change");
 }
+
+#[gpui::test]
+fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: the real store's pending handoff reaches Overview's fast-poll decision.
+    // Method: hold ingestion paused, tick a rested page, then resume and accept the new View.
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    store.set_active(false);
+    cx.update(|cx| super::install_store(store, cx));
+    wait_for_store_activity(cx, true);
+    let stale = MachineSecond {
+        publication: 1,
+        ..reading_at(1000, 0)
+    };
+    let page = cx.update(|cx| {
+        cx.new(|_| {
+            let mut page = opening();
+            let mut snapshot = readings(&[stale]);
+            snapshot.generation = page.generation;
+            assert!(page.receive(Update::Ready(snapshot)));
+            assert!(page.take_view(Arc::new(view(1, &[], &[stale]))));
+            page.tick_rest();
+            assert!(page.reader_rested());
+            page
+        })
+    });
+
+    page.update(cx, LiveDashboard::tick);
+    assert!(cx.update(|cx| page.read(cx).awaiting_reply()));
+    recording.publish();
+    cx.update(|cx| super::set_store_active(true, cx));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    for _ in 0..2_000 {
+        page.update(cx, LiveDashboard::tick);
+        let delivered = cx.update(|cx| {
+            page.read(cx).store_view.as_ref().is_some_and(|view| {
+                view.seconds
+                    .last()
+                    .is_some_and(|second| second.publication == 2)
+            })
+        });
+        if delivered {
+            if !cx.update(|cx| page.read(cx).awaiting_reply()) {
+                break;
+            }
+        }
+
+        assert!(
+            std::time::Instant::now() < deadline,
+            "View handoff never finished"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let delivered = cx.update(|cx| {
+        page.read(cx)
+            .store_view
+            .as_ref()
+            .and_then(|view| view.seconds.last())
+            .map(|second| second.publication)
+    });
+    assert_eq!(delivered, Some(2));
+    assert!(!cx.update(|cx| page.read(cx).awaiting_reply()));
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}

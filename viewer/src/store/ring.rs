@@ -166,9 +166,11 @@ impl Ring {
         if self.pending.is_some() {
             return Ok(false);
         }
+
         let Some(source) = &self.source else {
             return Ok(true);
         };
+
         let newest = source
             .reader
             .publication_newest()

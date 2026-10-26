@@ -263,12 +263,15 @@ impl Store {
         if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
             return false;
         }
+
         if self.shared.catch_up.load(Ordering::Acquire) {
             return true;
         }
+
         if self.shared.catching_up.load(Ordering::Acquire) {
             return true;
         }
+
         self.shared.mailbox.pending()
     }
 
@@ -679,6 +682,7 @@ fn run_ready(held: &mut Held, ring: &Ring, shared: &Shared) {
     if !shared.catching_up.load(Ordering::Acquire) {
         return;
     }
+
     let caught_up = match ring.caught_up() {
         Ok(caught_up) => caught_up,
         Err(failure) => {
@@ -743,8 +747,12 @@ fn refresh(
         } else {
             let previous_run = since.as_ref().map(|newest| newest.run);
             let current_run = held.newest.as_ref().map(|newest| newest.run);
-            if previous_run != current_run {
+            if left_out.is_some() {
                 *ring = next_ring;
+            } else {
+                if previous_run != current_run {
+                    *ring = next_ring;
+                }
             }
             if let Err(failure) = ring.resume() {
                 held.failure = Some(failure);

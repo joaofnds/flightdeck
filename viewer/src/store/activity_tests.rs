@@ -225,3 +225,63 @@ fn pending_handoff_clears_only_after_catch_up_and_view_delivery() {
     assert!(!store.pending());
     assert_eq!(view.seconds.last().unwrap().publication, 2);
 }
+
+#[test]
+fn resuming_refuses_the_retained_ring_after_the_recording_identity_changes() {
+    // Goal: a source rejected by reconciliation cannot continue through its cached ring.
+    // Method: change the authoritative identity while paused, then publish on the old ring.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let store = Store::start(&fixture.root).unwrap();
+    let retained = view_where(&store, |view| view.seconds.len() == 1);
+    store.set_active(false);
+    wait_until_paused(&store);
+    let mut foreign = collector::recording::read_identity(&fixture.root).unwrap();
+    foreign.0[0] ^= 1;
+    std::fs::write(
+        fixture.root.join("identity"),
+        format!("{}\n", collector::recording::identity_text(foreign)),
+    )
+    .unwrap();
+    fixture.publish_with_system_rows(101);
+
+    store.set_active(true);
+    let refused = view_where(&store, |view| {
+        if view.seconds.len() > 1 {
+            return true;
+        }
+
+        view.failure.is_some()
+    });
+
+    assert_eq!(refused.seconds.len(), 1);
+    assert_eq!(refused.failure, Some(super::Failure::ForeignRecording));
+    assert_eq!(refused.seconds, retained.seconds);
+}
+
+#[test]
+fn a_completed_store_handoff_stays_pending_until_its_view_is_taken() {
+    // Goal: an unread View keeps the handoff pending after ingestion finishes.
+    // Method: deliver an actual produced View again once the store has no catch-up outstanding.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let store = Store::start(&fixture.root).unwrap();
+    let produced = view_where(&store, |view| view.seconds.len() == 1);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for _ in 0..2_000 {
+        if !store.pending() {
+            break;
+        }
+
+        assert!(Instant::now() < deadline, "store never finished ingestion");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!store.pending());
+
+    store.shared.mailbox.put(std::sync::Arc::clone(&produced));
+    assert!(store.pending());
+    let delivered = store.take().unwrap();
+
+    assert!(std::sync::Arc::ptr_eq(&produced, &delivered));
+    assert!(!store.pending());
+}

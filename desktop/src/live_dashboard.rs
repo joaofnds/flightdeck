@@ -449,12 +449,15 @@ impl LiveDashboard {
         if self.request.route != "overview" {
             return;
         }
+
         if self.native.source != crate::live_source_mode::SourceMode::Live {
             return;
         }
+
         if self.request.second.is_some() {
             return;
         }
+
         self.store_pending = store_view::store_pending(cx);
     }
 
