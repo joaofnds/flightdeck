@@ -348,6 +348,60 @@ mod tests {
     }
 
     #[test]
+    fn refuses_same_second_scalar_pressure_without_losing_latest_raw_rows() {
+        // Goal: same-second alternatives cannot make byte-pressure refusal destroy accepted data.
+        // Method: poll bounded real publications with a tied wall clock, preserving every identity.
+        let mut recording = Recording::new();
+        recording.publish(1000);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        for publication in 2_u64..=3000 {
+            recording.publish(1000);
+            let before = session.catalog();
+
+            match session.poll() {
+                Ok(changed) => assert!(changed),
+                Err(error) => {
+                    assert!(matches!(
+                        error,
+                        persistence::Error::Bound("live scalar cache")
+                    ));
+                    let after = session.catalog();
+                    assert_eq!(after["tail_cache_bytes"], before["tail_cache_bytes"]);
+                    assert_eq!(after["tail_ticks"], before["tail_ticks"]);
+                    assert!(after["tail_cache_bytes"].as_u64().unwrap() <= 128 * 1024 * 1024);
+                    let selected = session.follow_latest().unwrap();
+                    assert_eq!(selected["selected"]["publication"], publication - 1);
+                    let alternatives = selected["alternatives"].as_array().unwrap();
+                    assert_eq!(
+                        alternatives.len(),
+                        usize::try_from(publication - 1).unwrap()
+                    );
+                    let identities: std::collections::BTreeSet<_> = alternatives
+                        .iter()
+                        .map(|identity| identity["publication"].as_u64().unwrap())
+                        .collect();
+                    assert_eq!(identities.len(), alternatives.len());
+                    assert_eq!(
+                        session.page("memory", 0).unwrap()["rows"][0][1],
+                        (9_007_199_254_740_993 + publication - 2).to_string()
+                    );
+                    assert!(session.poll().is_err());
+                    assert_eq!(
+                        session.catalog()["tail_cache_bytes"],
+                        before["tail_cache_bytes"]
+                    );
+                    println!(
+                        "refused_publication={publication} accepted_cache_bytes={}",
+                        after["tail_cache_bytes"]
+                    );
+                    return;
+                }
+            }
+        }
+        panic!("same-second context must exercise scalar cache refusal");
+    }
+
+    #[test]
     fn preserves_every_populated_coalition_cell_before_and_after_sealing() {
         // Goal: native coalition formatting preserves independently specified exact cells.
         // Method: publish distinct native counters, assert the whole page, seal and assert again.
