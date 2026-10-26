@@ -508,4 +508,51 @@ mod tests {
         let readings = &coalitions.readings;
         assert!(readings.iter().any(|coalition| coalition.id == launchd));
     }
+
+    #[test]
+    fn reconciles_a_coalition_from_a_start_the_tracker_actually_dropped() {
+        // Goal: a tick recovers a coalition whose Start the tracker could not retain.
+        // Method: drop launchd's Start, then read a collector with an empty coalition store.
+        let timebase = Timebase::read().unwrap();
+        let mut collector = Collector::new(timebase, Duration::from_hours(1)).unwrap();
+        collector.smc = None;
+        collector.ioreport = None;
+        collector.coalitions = Coalitions::new(timebase, collector.coalition_limit);
+        collector.tracker = Tracker::new(
+            timebase,
+            Duration::from_hours(1),
+            Limits {
+                process_limit: processes::process_limit().unwrap(),
+                events_per_tick_max: 1,
+            },
+        )
+        .unwrap();
+        collector.tracker.drain_events().for_each(drop);
+        collector.counts_previous = collector.tracker.counts();
+        let own = std::process::id().cast_signed();
+        let launchd = coalitions::coalition_of(1).unwrap().unwrap();
+        collector
+            .tracker
+            .observe(&[], &mut Meter::default())
+            .unwrap();
+        collector
+            .tracker
+            .observe(&[own, 1], &mut Meter::default())
+            .unwrap();
+
+        collector.read(&mut Meter::default()).unwrap();
+
+        assert!(collector.counts_tick().dropped_starts > 0);
+        assert_eq!(1, collector.events().len());
+        assert!(matches!(collector.events()[0], Event::Start { pid, .. } if pid == own));
+        assert!(!collector.events().iter().any(|event| matches!(event,
+            Event::Start { coalition: Some(id), .. } if *id == launchd)));
+        assert!(
+            collector
+                .coalitions
+                .readings
+                .iter()
+                .any(|reading| reading.id == launchd)
+        );
+    }
 }

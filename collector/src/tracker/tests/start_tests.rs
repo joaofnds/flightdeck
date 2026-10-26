@@ -61,6 +61,170 @@ impl Harness {
 }
 
 #[test]
+fn skips_program_capture_for_a_start_that_cannot_be_retained() {
+    // Goal: a dropped Start consumes no payload work or dictionary room and still installs a watch.
+    // Method: fill a one-slot tracker, discover a held child, and count native-path acquisitions.
+    let mut tracker = tests::tracker_with_event_capacity(1);
+    let mut harness = Harness::new();
+    let mut sweep = Sweep::new(4);
+    let mut meter = Meter::default();
+    let own = std::process::id().cast_signed();
+    tracker.observe(&[], &mut meter).unwrap();
+    tracker.observe(&[own], &mut meter).unwrap();
+    let dictionary_before = harness.writer.dictionary_usage().unwrap();
+    let watches_before = tracker.watch_diagnostics().reads;
+    let mut child = tests::ExitChild(tests::spawn_held("/bin/cat", &[]));
+    let pid = child.0.id().cast_signed();
+
+    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        tracker
+            .observe_with_identity(&[pid], &mut meter, &mut sweep, &mut harness.writer)
+            .unwrap();
+    });
+    let dictionary_after = harness.writer.dictionary_usage().unwrap();
+    let counts = tracker.counts();
+    let retained: Vec<_> = tracker.drain_observations().collect();
+    tests::release(&mut child.0);
+    child.0.wait().unwrap();
+
+    eprintln!(
+        "saturated Start admitted={} dropped={} measured={} dictionary={dictionary_before:?} -> \
+         {dictionary_after:?} watch_reads={} rust_heap_calls={allocations}",
+        retained.len(),
+        counts.dropped_starts,
+        sweep.diagnostics().measured,
+        tracker.watch_diagnostics().reads - watches_before,
+    );
+    assert_eq!(1, counts.dropped_starts);
+    assert_eq!(1, retained.len());
+    assert!(matches!(retained[0].event, Event::Start { pid, .. } if pid == own));
+    assert_eq!(2, tracker.watch_diagnostics().reads - watches_before);
+    assert!(tracker.known[usize::try_from(pid).unwrap()].watch.active);
+    assert_eq!(0, allocations);
+    assert_eq!(0, sweep.diagnostics().measured);
+    assert_eq!(dictionary_before, dictionary_after);
+}
+
+#[test]
+fn captures_program_for_a_start_in_the_last_available_slot() {
+    // Goal: admission keeps the Start's identity and coalition with no extra heap allocation.
+    // Method: discover a held child in a one-slot tracker using the real capture and dictionary.
+    let mut tracker = tests::tracker_with_event_capacity(1);
+    let mut harness = Harness::new();
+    let mut sweep = Sweep::new(4);
+    let dictionary_before = harness.writer.dictionary_usage().unwrap();
+    let watches_before = tracker.watch_diagnostics().reads;
+    let mut child = tests::ExitChild(tests::spawn_held("/bin/cat", &[]));
+    let pid = child.0.id().cast_signed();
+    let coalition = coalitions::coalition_of(pid).unwrap();
+    let mut creation = Err(programs::CreationError::NotRead);
+    programs::read_creation(pid, false, &mut creation);
+
+    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        tracker
+            .observe_with_identity(
+                &[pid],
+                &mut Meter::default(),
+                &mut sweep,
+                &mut harness.writer,
+            )
+            .unwrap();
+    });
+    let dictionary_after = harness.writer.dictionary_usage().unwrap();
+    let counts = tracker.counts();
+    let retained: Vec<_> = tracker.drain_observations().collect();
+    tests::release(&mut child.0);
+    child.0.wait().unwrap();
+
+    eprintln!(
+        "unsaturated Start admitted={} dropped={} measured={} dictionary={dictionary_before:?} -> \
+         {dictionary_after:?} watch_reads={} rust_heap_calls={allocations}",
+        retained.len(),
+        counts.dropped_starts,
+        sweep.diagnostics().measured,
+        tracker.watch_diagnostics().reads - watches_before,
+    );
+    assert_eq!(0, counts.dropped_starts);
+    assert_eq!(1, retained.len());
+    assert_eq!(Event::Start { pid, coalition }, retained[0].event);
+    assert!(matches!(retained[0].identity.creation,
+        EventCreation::Program(ProcessIdentity::Measured { creation: found, .. })
+        if found == creation.unwrap()));
+    assert_eq!(1, sweep.diagnostics().measured);
+    assert_eq!(1, dictionary_after.unwrap().entries);
+    assert_eq!(0, allocations);
+}
+
+#[test]
+fn retains_exec_and_exit_after_dropping_the_start_and_draining() {
+    // Goal: rejected Start keeps a usable watch, and draining restores payload admission.
+    // Method: drop an owned Bash Start, drain, then capture its native Exec and Exit in one slot.
+    use std::io::Write;
+
+    let mut tracker = tests::tracker_with_event_capacity(1);
+    let before = tracker.counts();
+    let mut harness = Harness::new();
+    let mut sweep = Sweep::new(4);
+    let mut meter = Meter::default();
+    let own = std::process::id().cast_signed();
+    tracker.observe(&[], &mut meter).unwrap();
+    tracker.observe(&[own], &mut meter).unwrap();
+    let mut child = exec_child();
+    let pid = child.0.id().cast_signed();
+    tracker
+        .observe_with_identity(&[pid], &mut meter, &mut sweep, &mut harness.writer)
+        .unwrap();
+    assert_eq!(1, tracker.counts().dropped_starts);
+    assert_eq!(0, sweep.diagnostics().measured);
+    tracker.drain_observations().for_each(drop);
+    child
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"continue\n")
+        .unwrap();
+    let mut exec = None;
+    let mut exit = None;
+
+    let exec_allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        exec = Some(wait_for_exec(
+            &mut tracker,
+            &mut meter,
+            &mut sweep,
+            &mut harness.writer,
+            pid,
+        ));
+    });
+    tests::release(&mut child.0);
+    let exit_allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        exit = Some(tests::follow_to_exit_observation(&mut tracker, pid));
+    });
+    child.0.wait().unwrap();
+
+    assert_eq!(Event::Exec { pid }, exec.as_ref().unwrap().event);
+    let EventCreation::Program(ProcessIdentity::Measured { creation, .. }) =
+        exec.unwrap().identity.creation
+    else {
+        panic!("missing captured program after draining");
+    };
+    assert_eq!(
+        EventCreation::Exit(Ok(creation)),
+        exit.as_ref().unwrap().identity.creation
+    );
+    assert!(matches!(
+        exit.unwrap().event,
+        Event::Exit { last: Ok(_), .. }
+    ));
+    assert_eq!(1, sweep.diagnostics().measured);
+    assert_eq!(0, exec_allocations);
+    assert_eq!(0, exit_allocations);
+    assert_eq!(0, tracker.counts().since(&before).dropped_execs);
+    assert_eq!(0, tracker.counts().since(&before).dropped_exits);
+    assert_eq!(1, tracker.events.capacity());
+}
+
+#[test]
 fn preserves_the_start_and_coalition_when_its_new_program_exhausts_the_dictionary() {
     // Goal: dictionary refusal leaves the numeric Start and independently read coalition intact.
     // Method: fill a one-entry dictionary, discover a held child, and count capture allocations.

@@ -39,6 +39,23 @@ pub struct EventObservation {
     pub identity: EventIdentity,
 }
 
+impl EventObservation {
+    const EMPTY: Self = Self {
+        event: Event::Exec { pid: 0 },
+        identity: EventIdentity {
+            pid: 0,
+            creation: EventCreation::NotApplicable,
+        },
+    };
+}
+
+#[derive(Clone, Copy)]
+enum EventKind {
+    Start,
+    Exec,
+    Exit,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventIdentity {
     pub pid: i32,
@@ -188,6 +205,7 @@ pub struct Tracker {
     starts: Vec<i32>,
     exits: Vec<(i32, Noticed)>,
     events: Vec<EventObservation>,
+    event_scratch: EventObservation,
     exit_diagnostics: ExitDiagnostics,
     counts: Counts,
     /// Set for the length of every call that can fail and cleared as it succeeds, so it holds
@@ -409,6 +427,7 @@ impl Tracker {
             starts: Vec::with_capacity(capacity),
             exits: Vec::with_capacity(capacity),
             events: Vec::with_capacity(limits.events_per_tick_max),
+            event_scratch: EventObservation::EMPTY,
             exit_diagnostics: ExitDiagnostics::default(),
             counts: Counts::default(),
             failed: false,
@@ -462,6 +481,7 @@ impl Tracker {
                 let woke = follow_until_handle(
                     &self.eventlist[..count],
                     &mut self.events,
+                    &mut self.event_scratch,
                     &mut self.counts,
                     &mut self.exits,
                 )?;
@@ -713,12 +733,21 @@ impl Tracker {
         meter.measure(Source::StartReads, || {
             for pid in self.starts.drain(..) {
                 assert!(pid >= 0);
-                let mut start = EventObservation::from(Event::Start {
-                    pid,
-                    coalition: None,
-                });
-                read_start(&mut start, capture.as_deref_mut())?;
-                record(&mut self.events, &mut self.counts, start);
+                record(
+                    &mut self.events,
+                    &mut self.counts,
+                    &mut self.event_scratch,
+                    EventKind::Start,
+                    |observation| {
+                        observation.event = Event::Start {
+                            pid,
+                            coalition: None,
+                        };
+                        observation.identity.pid = pid;
+                        observation.identity.creation = EventCreation::NotApplicable;
+                        read_start(observation, capture.as_deref_mut())
+                    },
+                )?;
             }
 
             io::Result::Ok(())
@@ -740,46 +769,20 @@ impl Tracker {
                 let index = known_index(pid, self.known.len())?;
                 self.known[index].exited = true;
                 self.known[index].watch.active = false;
-                let mut acquired = ExitAcquisition::EMPTY;
-                let mut last = None;
-
-                acquire_exit(pid, &mut acquired, || {
-                    let mut exited = false;
-                    let reading = processes::read_exit_usage(self.timebase, pid, &mut exited);
-                    let witness = match &reading {
-                        Ok(Ok(_)) => Some(exited),
-                        Ok(Err(_)) | Err(_) => None,
-                    };
-                    last = Some(reading);
-                    witness
-                });
-
-                let last = match last {
-                    Some(last) => last?,
-                    None => unreachable!("acquire_exit always reads numeric data once"),
-                };
-
-                let creation = acquired.creation();
-                self.exit_diagnostics.attempted += 1;
-                if creation.is_ok() {
-                    self.exit_diagnostics.verified += 1;
-                } else {
-                    self.exit_diagnostics.unavailable += 1;
-                    self.exit_diagnostics.last_failure = Some(ExitFailure {
-                        pid,
-                        acquisition: acquired,
-                    });
-                }
-
-                let exit = EventObservation {
-                    event: Event::Exit { pid, last, noticed },
-                    identity: EventIdentity {
-                        pid,
-                        creation: EventCreation::Exit(creation),
+                record(
+                    &mut self.events,
+                    &mut self.counts,
+                    &mut self.event_scratch,
+                    EventKind::Exit,
+                    |observation| {
+                        read_exits_acquire(
+                            self.timebase,
+                            (pid, noticed),
+                            observation,
+                            &mut self.exit_diagnostics,
+                        )
                     },
-                };
-
-                record(&mut self.events, &mut self.counts, exit);
+                )?;
             }
 
             io::Result::Ok(())
@@ -948,6 +951,7 @@ fn exec_identity(watched: Option<u64>, identity: &mut ProcessIdentity) {
 fn follow_until_handle(
     eventlist: &[Kevent],
     events: &mut Vec<EventObservation>,
+    scratch: &mut EventObservation,
     counts: &mut Counts,
     exits: &mut Vec<(i32, Noticed)>,
 ) -> io::Result<Wake> {
@@ -975,7 +979,12 @@ fn follow_until_handle(
 
             let pid = pid_of(event.ident)?;
             if event.fflags & NOTE_EXEC != 0 {
-                record(events, counts, Event::Exec { pid });
+                record(events, counts, scratch, EventKind::Exec, |observation| {
+                    observation.event = Event::Exec { pid };
+                    observation.identity.pid = pid;
+                    observation.identity.creation = EventCreation::NotApplicable;
+                    Ok(())
+                })?;
             }
             if event.fflags & NOTE_EXIT != 0 {
                 push_without_growing(exits, (pid, Noticed::OnExit));
@@ -1022,27 +1031,40 @@ fn submit_watches_receipts(
     Ok(())
 }
 
-/// Keeps `event` among the tick's `events` while they have room for it, and otherwise
-/// counts it among the dropped events of its kind, so the list never grows.
+/// Acquires only observations the tick can retain. Scratch never enters the retained list
+/// until acquisition succeeds, so an error cannot expose a partial observation.
 fn record(
     events: &mut Vec<EventObservation>,
     counts: &mut Counts,
-    observation: impl Into<EventObservation>,
-) {
+    scratch: &mut EventObservation,
+    kind: EventKind,
+    acquire: impl FnOnce(&mut EventObservation) -> io::Result<()>,
+) -> io::Result<()> {
     let capacity = events.capacity();
     assert!(capacity > 0);
+    assert!(events.len() <= capacity);
 
-    let observation = observation.into();
-    record_assert_alignment(&observation);
-    if events.len() < capacity {
-        events.push(observation);
-    } else {
-        match observation.event {
-            Event::Start { .. } => counts.dropped_starts += 1,
-            Event::Exec { .. } => counts.dropped_execs += 1,
-            Event::Exit { .. } => counts.dropped_exits += 1,
+    if events.len() == capacity {
+        match kind {
+            EventKind::Start => counts.dropped_starts += 1,
+            EventKind::Exec => counts.dropped_execs += 1,
+            EventKind::Exit => counts.dropped_exits += 1,
         }
+
+        return Ok(());
     }
+
+    acquire(scratch)?;
+    record_assert_alignment(scratch);
+    assert!(matches!(
+        (kind, &scratch.event),
+        (EventKind::Start, Event::Start { .. })
+            | (EventKind::Exec, Event::Exec { .. })
+            | (EventKind::Exit, Event::Exit { .. })
+    ));
+    events.push(std::mem::replace(scratch, EventObservation::EMPTY));
+
+    Ok(())
 }
 
 fn record_assert_alignment(observation: &EventObservation) {
@@ -1096,6 +1118,49 @@ fn read_start(
             coalition: coalitions::coalition_of(pid)?,
         };
     }
+
+    Ok(())
+}
+
+fn read_exits_acquire(
+    timebase: Timebase,
+    exit: (i32, Noticed),
+    observation: &mut EventObservation,
+    diagnostics: &mut ExitDiagnostics,
+) -> io::Result<()> {
+    let (pid, noticed) = exit;
+    let mut acquired = ExitAcquisition::EMPTY;
+    let mut reading = None;
+
+    acquire_exit(pid, &mut acquired, || {
+        let mut exited = false;
+        let last = processes::read_exit_usage(timebase, pid, &mut exited);
+        let witness = match &last {
+            Ok(Ok(_)) => Some(exited),
+            Ok(Err(_)) | Err(_) => None,
+        };
+        reading = Some(last);
+        witness
+    });
+
+    let last = match reading {
+        Some(reading) => reading?,
+        None => unreachable!("acquire_exit always reads numeric data once"),
+    };
+    let creation = acquired.creation();
+    diagnostics.attempted += 1;
+    if creation.is_ok() {
+        diagnostics.verified += 1;
+    } else {
+        diagnostics.unavailable += 1;
+        diagnostics.last_failure = Some(ExitFailure {
+            pid,
+            acquisition: acquired,
+        });
+    }
+    observation.event = Event::Exit { pid, last, noticed };
+    observation.identity.pid = pid;
+    observation.identity.creation = EventCreation::Exit(creation);
 
     Ok(())
 }
@@ -1189,6 +1254,7 @@ fn follow_until_timer(ident: usize, deadline_ticks: u64) -> io::Result<Kevent> {
 
 #[cfg(test)]
 mod tests {
+    mod admission_tests;
     pub(super) mod start_tests;
     use super::*;
     use crate::clock;
@@ -1208,6 +1274,34 @@ mod tests {
 
     fn tracker(rescan_interval: Duration) -> Tracker {
         Tracker::new(Timebase::read().unwrap(), rescan_interval, limits()).unwrap()
+    }
+
+    fn tracker_with_event_capacity(events_per_tick_max: usize) -> Tracker {
+        let mut tracker = Tracker::new(
+            Timebase::read().unwrap(),
+            Duration::from_hours(1),
+            Limits {
+                events_per_tick_max,
+                ..limits()
+            },
+        )
+        .unwrap();
+
+        // Only watches installed by the test feed this queue, so unrelated process exits
+        // cannot take the tiny event store's slots or satisfy an owned-child assertion.
+        let queue = unsafe { kqueue() };
+        tracker.queue = if queue < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(queue) })
+        }
+        .unwrap();
+
+        for known in &mut tracker.known {
+            known.watch = watches::Watch::default();
+        }
+        tracker.drain_observations().for_each(drop);
+        tracker
     }
 
     /// The pids this Mac runs now, in a list with the room a tracker gives its own.
@@ -1263,6 +1357,25 @@ mod tests {
         vec![Event::Exec { pid: 1 }.into()]
     }
 
+    fn record_event(
+        events: &mut Vec<EventObservation>,
+        counts: &mut Counts,
+        event: impl Into<EventObservation>,
+    ) {
+        let observation = event.into();
+        let kind = match observation.event {
+            Event::Start { .. } => EventKind::Start,
+            Event::Exec { .. } => EventKind::Exec,
+            Event::Exit { .. } => EventKind::Exit,
+        };
+        let mut scratch = EventObservation::EMPTY;
+        record(events, counts, &mut scratch, kind, |scratch| {
+            *scratch = observation;
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn keeps_an_event_while_the_tick_has_room_for_it() {
         // Goal: an event is kept while the tick's list has room for it, and nothing is dropped.
@@ -1270,7 +1383,7 @@ mod tests {
         let mut events = Vec::with_capacity(1);
         let mut counts = Counts::default();
 
-        record(&mut events, &mut counts, Event::Exec { pid: 1 });
+        record_event(&mut events, &mut counts, Event::Exec { pid: 1 });
 
         assert_eq!(1, events.len());
         assert_eq!(Counts::default(), counts);
@@ -1289,7 +1402,7 @@ mod tests {
             pid: 2,
             coalition: None,
         };
-        record(&mut events, &mut counts, start);
+        record_event(&mut events, &mut counts, start);
 
         assert_eq!(1, events.len());
         assert_eq!(capacity, events.capacity());
@@ -1309,7 +1422,7 @@ mod tests {
         let capacity = events.capacity();
         let mut counts = Counts::default();
 
-        record(&mut events, &mut counts, Event::Exec { pid: 2 });
+        record_event(&mut events, &mut counts, Event::Exec { pid: 2 });
 
         assert_eq!(1, events.len());
         assert_eq!(capacity, events.capacity());
@@ -1343,7 +1456,7 @@ mod tests {
                 })),
             },
         };
-        record(&mut events, &mut counts, exit);
+        record_event(&mut events, &mut counts, exit);
 
         assert_eq!(1, events.len());
         assert_eq!(capacity, events.capacity());
@@ -1481,8 +1594,15 @@ mod tests {
         let mut events = Vec::with_capacity(EVENTS_PER_WAIT_MAX);
         let mut counts = Counts::default();
         let mut exits = Vec::with_capacity(EVENTS_PER_WAIT_MAX);
+        let mut scratch = EventObservation::EMPTY;
 
-        let wake = follow_until_handle(eventlist, &mut events, &mut counts, &mut exits);
+        let wake = follow_until_handle(
+            eventlist,
+            &mut events,
+            &mut scratch,
+            &mut counts,
+            &mut exits,
+        );
 
         Handled {
             wake,
