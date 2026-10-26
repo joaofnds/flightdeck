@@ -86,13 +86,43 @@ impl Identity {
 }
 
 pub(crate) fn counters(table: &Table, publication: u64, output: &mut Counters) -> Result<()> {
+    counters_view(&crate::metric_view::View::Saved(table), publication, output)
+}
+
+pub(crate) fn counters_rows(
+    rows: &[crate::recording::CpuRow],
+    output: &mut Counters,
+) -> Result<()> {
     assert!(output.is_empty());
-    if table.rows.len() > CPUS_MAX {
+    if rows.len() > CPUS_MAX {
+        return Err(Error::Bound("logical CPU count"));
+    }
+    output.reserve_exact(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if collector::u64_from_usize(index) != u64::from(row.cpu) {
+            return Err(Error::Bound("incomplete logical CPU domain"));
+        }
+        output.push(counters_values(&row.ticks));
+    }
+    Ok(())
+}
+
+pub(crate) fn counters_values(ticks: &collector::machine::CPUTicks) -> [Option<u64>; 4] {
+    [ticks.user, ticks.system, ticks.nice, ticks.idle].map(|value| Some(u64::from(value)))
+}
+
+pub(crate) fn counters_view(
+    table: &crate::metric_view::View<'_>,
+    publication: u64,
+    output: &mut Counters,
+) -> Result<()> {
+    assert!(output.is_empty());
+    if table.len() > CPUS_MAX {
         return Err(Error::Bound("logical CPU count"));
     }
 
-    let mut ordered = vec![None; table.rows.len()];
-    for row in &table.rows {
+    let mut ordered = vec![None; table.len()];
+    for row in table.rows() {
         if table.integer(row, "publication")? != Some(publication) {
             return Err(Error::Bound("CPU detail publication"));
         }
@@ -178,17 +208,14 @@ fn sum_busy_slices(interval: &CounterSlices<'_>) -> Result<Option<f64>> {
         return Ok(None);
     }
 
-    let mut sum = 0.0;
-    for (current, previous) in interval.current.iter().zip(interval.previous.iter()) {
-        let Some(percent) = derive_busy(BusyInterval { current, previous })? else {
-            return Ok(None);
-        };
-
-        sum += percent;
-    }
-    assert!(sum.is_finite());
-
-    Ok(Some(sum))
+    crate::metrics::reduction::busy_sum(interval.current.iter().zip(interval.previous).map(
+        |(current, previous)| {
+            crate::metrics::reduction::CpuTotals::between(crate::metrics::reduction::CounterPair {
+                current,
+                previous,
+            })
+        },
+    ))
 }
 
 /// The mean busy share of each performance level's CPUs, level 0 first. The slower level's
@@ -265,36 +292,13 @@ fn derive_unavailable(interval: &Interval<'_>) -> Option<&'static str> {
 }
 
 fn derive_busy(interval: BusyInterval<'_>) -> Result<Option<f64>> {
-    let mut total = 0_u64;
-    let mut busy = 0_u64;
-    for index in 0..4 {
-        let (Some(now), Some(old)) = (interval.current[index], interval.previous[index]) else {
-            return Ok(None);
-        };
-
-        let Some(delta) = now.checked_sub(old) else {
-            return Ok(None);
-        };
-
-        total = total
-            .checked_add(delta)
-            .ok_or(Error::Bound("CPU counter total"))?;
-        if index < 3 {
-            busy = busy
-                .checked_add(delta)
-                .ok_or(Error::Bound("CPU busy total"))?;
-        }
-    }
-
-    if total == 0 {
-        return Ok(None);
-    }
-
-    let percent = crate::metrics::number(busy) / crate::metrics::number(total) * 100.0;
-    assert!(percent.is_finite());
-    assert!((0.0..=100.0).contains(&percent));
-
-    Ok(Some(percent))
+    Ok(
+        crate::metrics::reduction::CpuTotals::between(crate::metrics::reduction::CounterPair {
+            current: interval.current,
+            previous: interval.previous,
+        })?
+        .and_then(crate::metrics::reduction::CpuTotals::core_percent),
+    )
 }
 
 #[cfg(test)]

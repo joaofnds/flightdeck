@@ -4,6 +4,7 @@ use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::data::Table;
+use crate::metric_view::{Sources, View};
 use crate::session::{OBSERVATIONS_MAX, Observation, Reader, partition};
 
 type ObservationKey = ([u64; 2], [u64; 2], u64);
@@ -242,38 +243,67 @@ fn key_previous(reader: &Reader<'_>, observation: &Observation) -> ObservationKe
     )
 }
 
-fn get<'a>(tables: &'a Tables, observation: &Observation, name: &'static str) -> Result<&'a Table> {
-    tables
-        .get(&(observation.window, name))
-        .and_then(|table| table.get(&observation.publication))
-        .ok_or(Error::Bound("missing required recorded table rows"))
-}
-
-/// The temperature of a die. A window that captured none holds neither column, which leaves the
-/// reading unavailable the way a sensor that gave none does.
-fn celsius(ticks: &Table, tick: &[Option<String>], name: &str) -> Result<Option<f64>> {
-    if ticks.columns.iter().any(|column| column == name) {
-        ticks.number(tick, name)
-    } else {
-        Ok(None)
-    }
-}
-
 pub(crate) fn point(
     tables: &Tables,
     current: &Observation,
     previous: Option<&Observation>,
     segment: u64,
 ) -> Result<Value> {
+    point_sources(&Sources::Saved(tables), current, previous, segment)
+}
+
+pub(crate) fn point_native(
+    raw: &crate::live_raw::Raw,
+    before: Option<&crate::live_raw::Raw>,
+    current: &Observation,
+    previous: Option<&Observation>,
+    segment: u64,
+) -> Result<Value> {
+    point_sources(
+        &Sources::Native {
+            current: raw,
+            previous: before,
+        },
+        current,
+        previous,
+        segment,
+    )
+}
+
+fn get<'a>(
+    tables: &Sources<'a>,
+    observation: &Observation,
+    name: &'static str,
+) -> Result<View<'a>> {
+    tables.get(observation, name)
+}
+
+/// The temperature of a die. A window that captured none holds neither column, which leaves the
+/// reading unavailable the way a sensor that gave none does.
+fn celsius(ticks: &View<'_>, tick: usize, name: &str) -> Result<Option<f64>> {
+    if ticks.holds(name) {
+        ticks.number(tick, name)
+    } else {
+        Ok(None)
+    }
+}
+
+fn point_sources(
+    tables: &Sources<'_>,
+    current: &Observation,
+    previous: Option<&Observation>,
+    segment: u64,
+) -> Result<Value> {
     let ticks = get(tables, current, "ticks")?;
-    let tick = only(ticks)?;
-    let fans = tables
-        .get(&(current.window, "fans"))
-        .ok_or(Error::Bound("missing required recorded fan source"))?
-        .get(&current.publication);
-    let fan_rpm = crate::live_fan_history::capture(ticks, fans, current.publication)?;
+    let tick = only(&ticks)?;
+    if !tables.holds(current, "fans") {
+        return Err(Error::Bound("missing required recorded fan source"));
+    }
+    let fans = tables.optional(current, "fans")?;
+    let fan_rpm =
+        crate::live_fan_history::capture_view(&ticks, fans.as_ref(), current.publication)?;
     let memory = get(tables, current, "memory")?;
-    let row = only(memory)?;
+    let row = only(&memory)?;
     let mut value = json!({"wall_ns": current.wall, "publication": current.publication,
         "run_tick": current.run_tick, "continuous_ns": current.continuous,
         "segment": segment, "cpu_percent": null, "cpu_percent_one_core": null,
@@ -281,19 +311,18 @@ pub(crate) fn point(
         "gpu_active_percent": null, "gpu_watts": null,
         "power_watts": ticks.number(tick, "power_watts")?,
         "soc_celsius": ticks.number(tick, "soc_celsius")?,
-        "cpu_celsius": celsius(ticks, tick, "cpu_celsius")?,
-        "gpu_celsius": celsius(ticks, tick, "gpu_celsius")?, "fan_rpm": fan_rpm,
+        "cpu_celsius": celsius(&ticks, tick, "cpu_celsius")?,
+        "gpu_celsius": celsius(&ticks, tick, "gpu_celsius")?, "fan_rpm": fan_rpm,
         "interval_unavailable": "Requires consecutive compatible counter samples"});
-    value["battery"] = battery::point(ticks, tick, current.continuous)?;
+    value["battery"] = battery::point(&ticks, tick, current.continuous)?;
     value["storage"] = storage::point(tables, current, previous)?;
     let system = system::SystemTick {
-        ticks,
+        ticks: &ticks,
         tick,
         wall_ns: current.wall,
     };
     system::point(&system, &mut value)?;
-    value["logical_cpu_count"] =
-        json!(optional(tables, current, "cpus").map(|cpus| cpus.rows.len()));
+    value["logical_cpu_count"] = json!(optional(tables, current, "cpus")?.map(|cpus| cpus.len()));
     for (name, column) in [
         ("memory_total_bytes", "total_bytes"),
         ("memory_free_bytes", "free_bytes"),
@@ -375,33 +404,37 @@ fn context_segments_observation(point: &Value) -> Result<Observation> {
 }
 
 fn point_interval(
-    tables: &Tables,
+    tables: &Sources<'_>,
     current: &Observation,
     previous: &Observation,
     value: &mut Value,
 ) -> Result<()> {
     let cpus = get(tables, current, "cpus")?;
     let old_cpus = get(tables, previous, "cpus")?;
-    value["cpu_percent"] = json!(cpu_percent(cpus, old_cpus)?);
+    value["cpu_percent"] = json!(cpu_percent(&cpus, &old_cpus)?);
     let mut current_counters = Vec::new();
     let mut previous_counters = Vec::new();
-    crate::cpu_history_sample::counters(cpus, current.publication, &mut current_counters)?;
-    crate::cpu_history_sample::counters(old_cpus, previous.publication, &mut previous_counters)?;
+    crate::cpu_history_sample::counters_view(&cpus, current.publication, &mut current_counters)?;
+    crate::cpu_history_sample::counters_view(
+        &old_cpus,
+        previous.publication,
+        &mut previous_counters,
+    )?;
     let counters = crate::cpu_history_sample::CounterInterval {
         current: &current_counters,
         previous: &previous_counters,
     };
     value["cpu_percent_one_core"] = json!(crate::cpu_history_sample::sum_busy(counters)?);
     let ticks = get(tables, current, "ticks")?;
-    if let Some(levels) = system::levels(ticks, only(ticks)?)? {
+    if let Some(levels) = system::levels(&ticks, only(&ticks)?)? {
         value["cpu_level_percent"] =
             json!(crate::cpu_history_sample::level_busy(counters, levels)?);
-        let states = optional(tables, current, core_frequency::CORE_LEVEL_STATES);
-        let old_states = optional(tables, previous, core_frequency::CORE_LEVEL_STATES);
+        let states = optional(tables, current, core_frequency::CORE_LEVEL_STATES)?;
+        let old_states = optional(tables, previous, core_frequency::CORE_LEVEL_STATES)?;
         if let (Some(states), Some(old_states)) = (states, old_states) {
             // A recording without core states reads an empty table live and none from
             // history, so the field stays null unless some level measured a clock.
-            let ghz = core_frequency::level_ghz(states, old_states)?;
+            let ghz = core_frequency::level_ghz_view(&states, &old_states)?;
             if ghz.iter().any(Option::is_some) {
                 value["cpu_level_ghz"] = json!(ghz);
             }
@@ -419,7 +452,7 @@ fn point_interval(
     let memory = get(tables, current, "memory")?;
     let old_memory = get(tables, previous, "memory")?;
     for (name, column) in MEMORY_RATES {
-        let delta = counter_delta(memory, old_memory, &[], &[column])?;
+        let delta = counter_delta(&memory, &old_memory, &[], column)?;
         value[name] = json!(per_second(delta, elapsed));
     }
     point_gpu(tables, current, previous, elapsed, value)?;
@@ -427,16 +460,16 @@ fn point_interval(
 }
 
 fn point_gpu(
-    tables: &Tables,
+    tables: &Sources<'_>,
     current: &Observation,
     previous: &Observation,
     elapsed: u64,
     value: &mut Value,
 ) -> Result<()> {
     let ticks = get(tables, current, "ticks")?;
-    let tick = only(ticks)?;
+    let tick = only(&ticks)?;
     let old_ticks = get(tables, previous, "ticks")?;
-    let old_tick = only(old_ticks)?;
+    let old_tick = only(&old_ticks)?;
     if ticks.field(tick, "ioreport_read")? != Some("true") {
         return Ok(());
     }
@@ -467,13 +500,13 @@ fn point_gpu(
         return Ok(());
     }
 
-    let current_states = optional(tables, current, "gpu_states");
-    let previous_states = optional(tables, previous, "gpu_states");
+    let current_states = optional(tables, current, "gpu_states")?;
+    let previous_states = optional(tables, previous, "gpu_states")?;
     if let (Some(current_states), Some(previous_states)) = (current_states, previous_states) {
-        if point_gpu_complete(current_states, count)? {
-            if point_gpu_complete(previous_states, count)? {
+        if point_gpu_complete(&current_states, count)? {
+            if point_gpu_complete(&previous_states, count)? {
                 let delta =
-                    counter_delta(current_states, previous_states, &["state"], &["active_ns"])?;
+                    counter_delta(&current_states, &previous_states, &["state"], "active_ns")?;
                 value["gpu_active_percent"] =
                     json!(delta.map(|active| number(active) * 100.0 / number(elapsed)));
             }
@@ -482,13 +515,13 @@ fn point_gpu(
     Ok(())
 }
 
-fn point_gpu_complete(table: &Table, count: u64) -> Result<bool> {
-    if u64::try_from(table.rows.len()).map_err(|_| Error::Bound("GPU state row count"))? != count {
+fn point_gpu_complete(table: &View<'_>, count: u64) -> Result<bool> {
+    if u64::try_from(table.len()).map_err(|_| Error::Bound("GPU state row count"))? != count {
         return Ok(false);
     }
 
     let mut states = BTreeSet::new();
-    for row in &table.rows {
+    for row in table.rows() {
         let Some(state) = table.integer(row, "state")? else {
             return Ok(false);
         };
@@ -510,28 +543,26 @@ fn point_gpu_complete(table: &Table, count: u64) -> Result<bool> {
 }
 
 fn optional<'a>(
-    tables: &'a Tables,
+    tables: &Sources<'a>,
     observation: &Observation,
     name: &'static str,
-) -> Option<&'a Table> {
-    tables
-        .get(&(observation.window, name))
-        .and_then(|rows| rows.get(&observation.publication))
+) -> Result<Option<View<'a>>> {
+    tables.optional(observation, name)
 }
 
 fn point_traffic(
-    tables: &Tables,
+    tables: &Sources<'_>,
     current: &Observation,
     previous: &Observation,
     elapsed: u64,
     value: &mut Value,
 ) -> Result<()> {
-    let interfaces = optional(tables, current, "interfaces");
-    let old_interfaces = optional(tables, previous, "interfaces");
+    let interfaces = optional(tables, current, "interfaces")?;
+    let old_interfaces = optional(tables, previous, "interfaces")?;
     if interfaces.is_none() {
         if old_interfaces.is_none() {
-            if tables.contains_key(&(current.window, "interfaces")) {
-                if tables.contains_key(&(previous.window, "interfaces")) {
+            if tables.holds(current, "interfaces") {
+                if tables.holds(previous, "interfaces") {
                     for (name, _column) in TRAFFIC_RATES {
                         value[name] = json!(0.0);
                     }
@@ -541,12 +572,8 @@ fn point_traffic(
     }
     if let (Some(interfaces), Some(old_interfaces)) = (interfaces, old_interfaces) {
         for (name, column) in TRAFFIC_RATES {
-            let delta = counter_delta(
-                interfaces,
-                old_interfaces,
-                &["interface", "name"],
-                &[column],
-            )?;
+            let delta =
+                counter_delta(&interfaces, &old_interfaces, &["interface", "name"], column)?;
             value[name] = json!(per_second(delta, elapsed));
         }
     }
@@ -555,14 +582,14 @@ fn point_traffic(
 
 fn per_second(delta: Option<u64>, elapsed: u64) -> Option<f64> {
     assert!(elapsed > 0);
-    delta.map(|delta| number(delta) * 1e9 / number(elapsed))
+    delta.map(|delta| reduction::per_second(delta, elapsed))
 }
 
-fn only(table: &Table) -> Result<&[Option<String>]> {
-    if table.rows.len() != 1 {
+fn only(table: &View<'_>) -> Result<usize> {
+    if table.len() != 1 {
         return Err(Error::Bound("required single row"));
     }
-    Ok(&table.rows[0])
+    Ok(0)
 }
 
 pub(crate) fn compatible(previous: &Observation, current: &Observation) -> bool {
@@ -584,72 +611,33 @@ pub(crate) fn compatible(previous: &Observation, current: &Observation) -> bool 
     }
 }
 
-fn cpu_percent(current: &Table, previous: &Table) -> Result<Option<f64>> {
-    let busy = counter_delta(
+fn cpu_percent(current: &View<'_>, previous: &View<'_>) -> Result<Option<f64>> {
+    let busy = components::sum(
         current,
         previous,
         &["cpu"],
         &["user_ticks", "system_ticks", "nice_ticks"],
     )?;
-    let idle = counter_delta(current, previous, &["cpu"], &["idle_ticks"])?;
+    let idle = components::sum(current, previous, &["cpu"], &["idle_ticks"])?;
     match (busy, idle) {
         (Some(busy), Some(idle)) => {
             let total = busy.checked_add(idle).ok_or(Error::Bound("CPU sum"))?;
-            if total == 0 {
-                return Ok(None);
-            }
-            Ok(Some(number(busy) * 100.0 / number(total)))
+            Ok(reduction::machine_percent(&reduction::Fraction {
+                numerator: busy,
+                denominator: total,
+            }))
         }
         _ => Ok(None),
     }
 }
 
 fn counter_delta(
-    current: &Table,
-    previous: &Table,
+    current: &View<'_>,
+    previous: &View<'_>,
     keys: &[&str],
-    columns: &[&str],
+    column: &str,
 ) -> Result<Option<u64>> {
-    if current.rows.len() != previous.rows.len() {
-        return Ok(None);
-    }
-    let keyed = |table: &Table| -> Result<BTreeMap<Vec<Option<String>>, usize>> {
-        let mut keyed = BTreeMap::new();
-        for (index, row) in table.rows.iter().enumerate() {
-            let key = keys
-                .iter()
-                .map(|name| table.field(row, name).map(|v| v.map(str::to_owned)))
-                .collect::<Result<Vec<_>>>()?;
-            if key.iter().any(Option::is_none) {
-                return Err(Error::Bound("missing component key"));
-            }
-            if keyed.insert(key, index).is_some() {
-                return Err(Error::Bound("duplicate component"));
-            }
-        }
-        Ok(keyed)
-    };
-    let before = keyed(previous)?;
-    let after = keyed(current)?;
-    let mut sum = 0_u64;
-    for (key, index) in after {
-        let Some(before_index) = before.get(&key) else {
-            return Ok(None);
-        };
-        for column in columns {
-            let Some(now) = current.integer(&current.rows[index], column)? else {
-                return Ok(None);
-            };
-            let Some(old) = previous.integer(&previous.rows[*before_index], column)? else {
-                return Ok(None);
-            };
-            let Some(delta) = now.checked_sub(old) else {
-                return Ok(None);
-            };
-            sum = sum.checked_add(delta).ok_or(Error::Bound("counter sum"))?;
-        }
-    }
-    Ok(Some(sum))
+    components::sum(current, previous, keys, &[column])
 }
 
 pub(crate) fn number(value: u64) -> f64 {
@@ -667,5 +655,8 @@ mod encoding_tests;
 
 pub(crate) mod battery;
 pub(crate) mod core_frequency;
-mod storage;
+pub(crate) mod storage;
 mod system;
+
+mod components;
+pub(crate) mod reduction;

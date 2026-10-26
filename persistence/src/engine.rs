@@ -120,6 +120,7 @@ impl Engine {
     }
 
     pub fn plan(&self, sql: &str) -> Result<LazyFrame> {
+        crate::work::record(|counts| counts.sql_plans += 1);
         Ok(self
             .context
             .lock()
@@ -143,6 +144,7 @@ impl Engine {
     }
 
     pub fn collect(&self, plan: LazyFrame) -> Result<DataFrame> {
+        crate::work::record(|counts| counts.collections += 1);
         let execution = self
             .execution
             .lock()

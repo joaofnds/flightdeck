@@ -5,15 +5,16 @@ use std::sync::Arc;
 
 use collector::recording::{Registry, identity_text};
 use collector::ring::{Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Tick};
-use persistence::engine::Engine;
-use persistence::{Error, Limits, Losses, NumberedEvent, Result, Window, WindowIdentity};
+use persistence::{Error, Losses, NumberedEvent, Result, WindowIdentity};
+#[cfg(test)]
+use persistence::{Limits, Window};
 use serde_json::{Value, json};
 
 use crate::cancellation::Operation;
-use crate::data::{self, Table};
 use crate::live_app_history::{GroupTarget, History, Selection, Target};
 use crate::live_app_response::{Detail, KeyKind, Page, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
+use crate::live_raw::Raw;
 use crate::session::{
     CHARTED_SECONDS, ContextRange, ContextSelection, DETAIL_SECONDS, EARLIER_STRIDE_SECONDS,
     KeptTail, LEAD_IN_SECONDS, LOADED_SECONDS, OBSERVATIONS_MAX, Observation, PAGE_ROWS, TailRange,
@@ -39,6 +40,9 @@ pub(crate) mod window;
 #[path = "live_process_groups.rs"]
 mod process_groups;
 
+#[path = "live_point_bytes.rs"]
+mod point_bytes;
+
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const CACHE_BYTES_MAX: usize = 128 * 1024 * 1024;
 const SOURCES_MAX: usize = 2;
@@ -46,8 +50,24 @@ const CONTEXT_BYTES_MAX: usize = 8 * 1024 * 1024;
 const PENDING_WINDOWS_MAX: usize = OBSERVATIONS_MAX;
 const WINDOW_MARKERS_PER_POLL_MAX: usize = 16;
 const HISTORY_REFRESH_POLLS_MAX: usize = 256;
+const CANDIDATE_BYTES_MAX: usize = crate::live_raw::RAW_BYTES_MAX
+    + crate::live_apps::FRAME_BYTES_MAX
+    + crate::live_app_response::SAMPLE_BYTES_MAX
+    + point_bytes::POINT_BYTES_MAX;
+// This owner executes capture and paging serially. One capture may overlap the accepted
+// cache, its event preparation, App views/aggregate and <=8 MiB of machine reduction scratch.
+const CAPTURE_TRANSIENT_BYTES_MAX: usize = CANDIDATE_BYTES_MAX
+    + collector::tracker::EVENTS_PER_TICK_MAX
+        * (size_of::<(u64, u64, collector::tracker::Event)>()
+            + size_of::<IdentityObservation>()
+            + size_of::<NumberedEvent<'static>>())
+    + crate::live_apps::TRANSIENT_VIEW_BYTES_MAX
+    + crate::live_apps::AGGREGATE_WORK_BYTES_MAX
+    + 8 * 1024 * 1024;
 const _: () = {
     assert!(OBSERVATIONS_MAX <= 4096);
+    assert!(CANDIDATE_BYTES_MAX <= CACHE_BYTES_MAX);
+    assert!(CAPTURE_TRANSIENT_BYTES_MAX <= 256 * 1024 * 1024);
     assert!(CACHE_BYTES_MAX >= 32 * 1024 * 1024);
     assert!(WINDOW_MARKERS_PER_POLL_MAX > 0);
     assert!(HISTORY_REFRESH_POLLS_MAX >= PENDING_WINDOWS_MAX.div_ceil(WINDOW_MARKERS_PER_POLL_MAX));
@@ -63,7 +83,6 @@ pub struct LiveSession {
     observations: VecDeque<LiveObservation>,
     points: VecDeque<Value>,
     app_history: History,
-    connection: Engine,
     operation: Operation,
     cancellation: Arc<Cancellation>,
     selected: Option<Value>,
@@ -135,7 +154,7 @@ struct LiveObservation {
     losses: Losses,
     app_frame: Box<Frame>,
     app_sample: Option<Box<Sample>>,
-    tables: BTreeMap<&'static str, Table>,
+    raw: Raw,
     point: Value,
     bytes: usize,
 }
@@ -172,8 +191,6 @@ impl LiveSession {
         collector::recording::private::verify_directory(root)?;
         collector::recording::read_identity(root)?;
         let operation = cancellation.clone().operation(epoch)?;
-        let connection = data::connection();
-        operation.attach(&connection)?;
         let mut session = Self {
             root: root.to_owned(),
             history: None,
@@ -181,10 +198,9 @@ impl LiveSession {
             restored: None,
             earlier: KeptTail::default(),
             sources: Vec::with_capacity(SOURCES_MAX),
-            observations: VecDeque::new(),
-            points: VecDeque::new(),
+            observations: VecDeque::with_capacity(OBSERVATIONS_MAX + 1),
+            points: VecDeque::with_capacity(OBSERVATIONS_MAX + 1),
             app_history: History::new(),
-            connection,
             operation,
             cancellation,
             selected: None,
@@ -192,7 +208,8 @@ impl LiveSession {
             context_last_second: None,
             cpu_history: None,
             inspected: None,
-            cache_bytes: 0,
+            cache_bytes: (OBSERVATIONS_MAX + 1)
+                * (size_of::<LiveObservation>() + size_of::<Value>()),
             app_ranks: Arc::default(),
             parts_app: None,
             app_parts: Arc::default(),
@@ -215,7 +232,6 @@ impl LiveSession {
             self.selected = None;
         }
         self.operation = self.operation.begin(epoch)?;
-        self.operation.attach(&self.connection)?;
         if let Some(history) = &mut self.history {
             history.begin(epoch)?;
         }
@@ -224,7 +240,6 @@ impl LiveSession {
 
     pub fn poll(&mut self) -> Result<bool> {
         let operation = self.operation.begin(self.operation.epoch())?;
-        operation.attach(&self.connection)?;
         operation.run(|| self.poll_inner())
     }
 
@@ -840,18 +855,12 @@ impl LiveSession {
             return Ok(());
         };
 
-        let cpus = observation
-            .tables
-            .get("cpus")
-            .ok_or(Error::Bound("missing CPU table"))?;
-        if cpus.rows.len() > crate::cpu_detail::CPUS_MAX {
-            return Err(Error::Bound("logical CPU count"));
-        }
-
+        let mut counters = Vec::new();
+        crate::cpu_history_sample::counters_rows(&observation.raw.machine.cpus, &mut counters)?;
         *output = Some(crate::cpu_detail::Sample {
             identity: observation.json(),
             observation: observation.observation.clone(),
-            cpus: cpus.clone(),
+            cpus: crate::cpu_detail::Source::Native(counters),
         });
 
         Ok(())
@@ -872,19 +881,12 @@ impl LiveSession {
             if !offset.is_multiple_of(PAGE_ROWS) {
                 return Err(Error::Bound("page offset"));
             }
-            let table = observation
-                .tables
-                .get(name)
-                .ok_or(Error::Bound("table name"))?;
-            let start = usize::try_from(offset).map_err(|_| Error::Bound("page offset"))?;
-            if start > table.rows.len() {
-                return Err(Error::Bound("page past end"));
-            }
-            let end = (start
-                + usize::try_from(PAGE_ROWS).map_err(|_| Error::Bound("page size"))?)
-            .min(table.rows.len());
+            let view = observation.raw.view(name)?;
+            let total = view.len();
+            drop(view);
+            let table = observation.raw.page(name, offset, &self.operation)?;
             return Ok(json!({"name": name, "columns": table.columns,
-                "rows": table.rows[start..end], "offset": offset, "total": table.rows.len(),
+                "rows": table.rows, "offset": offset, "total": total,
                 "observation": selected}));
         }
         self.history
@@ -1314,7 +1316,7 @@ impl LiveSession {
         if let Some(times) = source.tick.times {
             poll_observation_window(source, self.history.as_ref(), times.continuous_ns)?;
         }
-        project_observation(source, publication, &self.connection, &self.operation)
+        project_observation(source, publication, &self.operation)
     }
 
     fn poll_store(&mut self, mut current: LiveObservation) -> Result<()> {
@@ -1337,10 +1339,10 @@ impl LiveSession {
             return Err(Error::Bound("live observation bytes"));
         }
 
-        let tables = poll_store_tables(previous, &current);
         let segment = self.poll_segment(&current)?;
-        current.point = metrics::point(
-            &tables,
+        current.point = metrics::point_native(
+            &current.raw,
+            previous.map(|observation| &observation.raw),
             &current.observation,
             previous.map(|observation| &observation.observation),
             segment,
@@ -1348,6 +1350,10 @@ impl LiveSession {
         current.point["run"] = json!(identity_text(current.identity.run).to_string());
         current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
         current.point["observation"] = current.json();
+        current.bytes += point_bytes::charge(&current.point)?;
+        if current.bytes > CACHE_BYTES_MAX {
+            return Err(Error::Bound("live observation bytes"));
+        }
         let mut app_point = None;
         self.app_history.capture(
             current
@@ -1361,6 +1367,7 @@ impl LiveSession {
         let first = second.saturating_sub(899) * NANOSECONDS_PER_SECOND;
         // The App history keeps the lead-in before the context as well, which its charts draw.
         let charted_first = second.saturating_sub(CHARTED_SECONDS - 1) * NANOSECONDS_PER_SECOND;
+        self.operation.check()?;
         self.poll_points(&current.point, first)?;
         self.cache_bytes += current.bytes;
         self.observations.push_back(current);
@@ -1390,12 +1397,9 @@ impl LiveSession {
         self.cpu_history
             .as_mut()
             .ok_or(Error::Bound("CPU live retention"))?
-            .capture(
+            .capture_rows(
                 &identity.ok_or(Error::Bound("CPU live identity"))?,
-                current
-                    .tables
-                    .get("cpus")
-                    .ok_or(Error::Bound("missing CPU table"))?,
+                &current.raw.machine.cpus,
             )?;
 
         Ok(())
@@ -1425,6 +1429,7 @@ impl LiveSession {
     }
 
     fn poll_points(&mut self, point: &Value, first: u64) -> Result<()> {
+        self.cache_bytes += point_bytes::charge(point)?;
         self.points.push_back(point.clone());
         for _attempt in 0..=OBSERVATIONS_MAX {
             let expired = match self.points.front() {
@@ -1441,7 +1446,8 @@ impl LiveSession {
                     return Ok(());
                 }
             }
-            self.points.pop_front().ok_or(Error::Bound("point cache"))?;
+            let removed = self.points.pop_front().ok_or(Error::Bound("point cache"))?;
+            self.cache_bytes -= point_bytes::charge(&removed)?;
         }
         Err(Error::Bound("point eviction count"))
     }
@@ -1538,19 +1544,18 @@ impl LiveSession {
         let publication = selected["publication"]
             .as_u64()
             .ok_or(Error::Bound("selected publication"))?;
-        let mut current = project_observation(
-            &mut independent,
-            publication,
-            &self.connection,
-            &self.operation,
-        )?
-        .ok_or(Error::Bound("unsealed observation clock"))?;
+        let mut current = project_observation(&mut independent, publication, &self.operation)?
+            .ok_or(Error::Bound("unsealed observation clock"))?;
         self.select_rehydrate_apps(&mut current, &mut independent)?;
         if current.bytes > CACHE_BYTES_MAX {
             return Err(Error::Bound("live observation bytes"));
         }
 
         current.point = point.clone();
+        current.bytes += point_bytes::charge(&current.point)?;
+        if current.bytes > CACHE_BYTES_MAX {
+            return Err(Error::Bound("live observation bytes"));
+        }
 
         Ok(Some(current))
     }
@@ -1726,30 +1731,6 @@ impl LiveSession {
     }
 }
 
-/// The metric tables `metrics::point` reads for `current`: its own, and those of the observation
-/// before it in the same run, from which its rates come.
-fn poll_store_tables(
-    previous: Option<&LiveObservation>,
-    current: &LiveObservation,
-) -> metrics::Tables {
-    let mut tables = metrics::Tables::new();
-    for name in metrics::TABLE_NAMES {
-        let mut publications = BTreeMap::new();
-        if let Some(previous) = previous {
-            publications.insert(
-                previous.observation.publication,
-                previous.tables[name].clone(),
-            );
-        }
-        publications.insert(
-            current.observation.publication,
-            current.tables[name].clone(),
-        );
-        tables.insert((0, name), publications);
-    }
-    tables
-}
-
 /// A selection of `second` with nothing read from the saved minutes.
 fn select_unsaved(selection: ContextSelection) -> Value {
     json!({"second": selection.second(), "context_last_second": selection.context_last_second(),
@@ -1855,16 +1836,19 @@ fn rehydrate_source_try_read(source: &mut Source, selected: &Value) -> Result<bo
 fn project_observation(
     source: &mut Source,
     publication: u64,
-    connection: &Engine,
     operation: &Operation,
 ) -> Result<Option<LiveObservation>> {
     let Some(times) = source.tick.times else {
         source.losses.unknown = true;
         return Ok(None);
     };
-
     operation.check()?;
-
+    // Capture and paging run serially; one candidate overlaps the <=128 MiB accepted cache.
+    if source.reader.dictionary_capacity().is_some() {
+        if source.reader.identity() != Some(source.identity) {
+            return Err(Error::Bound("identity source run"));
+        }
+    }
     let mut app_frame = None;
     Frame::capture(
         &Publication {
@@ -1875,77 +1859,49 @@ fn project_observation(
         },
         &mut app_frame,
     )?;
-    let mut app_frame = app_frame
-        .unwrap_or_else(|| unreachable!("successful App frame capture initializes its output"));
-
-    let mut window = Window::new(
-        WindowIdentity {
-            run: source.identity,
-            window: 0,
-        },
-        Limits::from_shape(&source.reader.shape())?,
-    );
-    project_observation_stage(source, publication, &times, &mut window, &mut app_frame)?;
-
-    let tables = project_observation_tables(connection, operation, &window)?;
-    let bytes = tables.values().map(table_bytes).sum::<usize>() + app_frame.bytes();
-    let observation = Observation {
-        window: 0,
-        publication,
-        run_tick: source.tick.run_tick,
-        wall: times.wall_ns,
-        continuous: Some(times.continuous_ns),
-    };
-
-    Ok(Some(LiveObservation {
-        identity: source.identity,
-        observation,
-        losses: source.losses,
-        app_frame,
-        app_sample: None,
-        tables,
-        point: Value::Null,
-        bytes,
-    }))
-}
-
-fn project_observation_stage(
-    source: &mut Source,
-    publication: u64,
-    times: &collector::ring::ObservationTimes,
-    window: &mut Window,
-    app_frame: &mut Frame,
-) -> Result<()> {
-    let observation = persistence::Observation {
-        publication,
-        wall_ns: Some(times.wall_ns),
-        continuous_ns: Some(times.continuous_ns),
-        awake_ns: Some(times.awake_ns),
-    };
-
+    let mut app_frame = app_frame.unwrap_or_else(|| unreachable!("App capture sets its output"));
+    let mut raw = None;
     project_observation_capture_events(
         source,
         publication,
-        app_frame,
+        &mut app_frame,
         |source, events, numbered| {
-            if source.reader.dictionary_capacity().is_some() {
-                window.push_tick_with_identity(
-                    &observation,
-                    &source.tick,
-                    numbered,
-                    &persistence::IdentitySource {
-                        reader: &source.reader,
-                        processes: &source.identities,
-                        events: &events.identities,
-                    },
-                )?;
-            } else {
-                window.push_tick(&observation, &source.tick, numbered)?;
-            }
-
+            raw = Some(Raw::capture(
+                &Publication {
+                    reader: &source.reader,
+                    tick: &source.tick,
+                    identities: &source.identities,
+                    publication,
+                },
+                &PublicationEvents {
+                    events: numbered,
+                    identities: &events.identities,
+                },
+                operation,
+            )?);
             Ok(())
         },
-    )
+    )?;
+    let raw = raw.ok_or(Error::Bound("live raw capture"))?;
+    assert!(app_frame.bytes() <= crate::live_apps::FRAME_BYTES_MAX);
+    let bytes = raw.bytes() - size_of::<Raw>() + app_frame.bytes();
+    operation.check()?;
+    Ok(Some(LiveObservation {
+        identity: source.identity,
+        observation: Observation {
+            window: 0,
+            publication,
+            run_tick: source.tick.run_tick,
+            wall: times.wall_ns,
+            continuous: Some(times.continuous_ns),
+        },
+        losses: source.losses,
+        app_frame,
+        app_sample: None,
+        raw,
+        point: Value::Null,
+        bytes,
+    }))
 }
 
 fn project_observation_capture_events(
@@ -1972,7 +1928,7 @@ fn project_observation_capture_events(
         },
     };
 
-    project_observation_stage_events(source, &mut events)?;
+    project_observation_read_events(source, &mut events)?;
     let numbered: Vec<_> = events
         .events
         .iter()
@@ -1983,12 +1939,12 @@ fn project_observation_capture_events(
         })
         .collect();
 
-    project_observation_stage_capture(source, publication, frame, &numbered, &events.identities)?;
+    project_observation_capture_apps(source, publication, frame, &numbered, &events.identities)?;
 
     consume(source, &events, &numbered)
 }
 
-fn project_observation_stage_capture(
+fn project_observation_capture_apps(
     source: &Source,
     publication: u64,
     app_frame: &mut Frame,
@@ -2120,7 +2076,7 @@ fn poll_observation_window(
     Ok(())
 }
 
-fn project_observation_stage_events(
+fn project_observation_read_events(
     source: &mut Source,
     output: &mut ProjectionEvents,
 ) -> Result<()> {
@@ -2156,6 +2112,9 @@ fn project_observation_stage_events(
                 tick,
                 event,
             } => {
+                if output.events.len() == output.events.capacity() {
+                    return Err(Error::Bound("live event count"));
+                }
                 output.events.push((number, tick, event));
 
                 if source.reader.dictionary_capacity().is_some() {
@@ -2166,23 +2125,6 @@ fn project_observation_stage_events(
     }
 
     Err(Error::Bound("live event count"))
-}
-
-fn table_bytes(table: &Table) -> usize {
-    table.columns.capacity() * size_of::<String>()
-        + table.columns.iter().map(String::capacity).sum::<usize>()
-        + table.rows.capacity() * size_of::<Vec<Option<String>>>()
-        + table
-            .rows
-            .iter()
-            .map(|row| {
-                row.capacity() * size_of::<Option<String>>()
-                    + row
-                        .iter()
-                        .map(|value| value.as_ref().map_or(0, String::capacity))
-                        .sum::<usize>()
-            })
-            .sum::<usize>()
 }
 
 /// The summary of a live observation a hover inspects, which carries neither the observation
@@ -2209,48 +2151,6 @@ fn identity_order(value: &Value) -> (Option<u64>, Option<&str>, Option<&str>, Op
         value["boot"].as_str(),
         value["publication"].as_u64(),
     )
-}
-
-fn project_observation_tables(
-    connection: &Engine,
-    operation: &Operation,
-    window: &Window,
-) -> Result<BTreeMap<&'static str, Table>> {
-    let mut tables = BTreeMap::new();
-    for table in persistence::schema::TABLES {
-        let order = table.order();
-        let name = table.name();
-
-        connection.register(name, persistence::frame(table, window)?)?;
-        let source = persistence::query::table_source(
-            connection,
-            table,
-            persistence::query::TableSource::Staged,
-        )?;
-
-        tables.insert(
-            name,
-            data::query(
-                connection,
-                &format!("SELECT * FROM {source} ORDER BY {order}"),
-                data::ROWS_MAX,
-                operation,
-            )?,
-        );
-    }
-    let staged = |table| {
-        persistence::query::table_source(connection, table, persistence::query::TableSource::Staged)
-    };
-    let sources = metrics::core_frequency::CoreLevelSources {
-        core_states: &staged(persistence::schema::Table::CoreStates)?,
-        ticks: &staged(persistence::schema::Table::Ticks)?,
-    };
-    tables.insert(
-        metrics::core_frequency::CORE_LEVEL_STATES,
-        metrics::core_frequency::core_level_states(connection, &sources, operation)?,
-    );
-
-    Ok(tables)
 }
 
 /// Keeps the restored points from `first_ns` up to `end_ns`, where newly sealed history
@@ -2415,6 +2315,11 @@ mod tests {
         root: PathBuf,
         writer: Writer,
         following_fans: u16,
+    }
+
+    mod typed_tests {
+        use super::*;
+        include!("live_typed_tests.rs");
     }
 
     impl RingFixture {
@@ -4026,23 +3931,53 @@ mod tests {
     }
 
     #[test]
-    fn retries_identity_projection_after_interrupted_table_replacement() {
-        // Goal: a retry recreates tables dropped before a canceled schema replacement.
-        // Method: reproduce that intermediate database state before polling a real v4 tick.
-        let mut fixture = identity_fixture::Fixture::new();
+    fn rejects_nonfinite_power_before_replacing_the_accepted_observation() {
+        // Goal: deferred raw formatting cannot turn invalid power into an accepted absence.
+        // Method: corrupt a decoded real-ring candidate, then retry the intact publication.
+        let mut fixture = RingFixture::new_following();
+        fixture.publish_following(1);
         let mut session = LiveSession::open(&fixture.root).unwrap();
-        session.connection.unregister("processes").unwrap();
-        session.connection.unregister("events").unwrap();
-        fixture.publish(1000);
+        let accepted = session.follow_latest().unwrap();
+        fixture.publish_following(2);
+        assert!(matches!(
+            session.sources[0].read_tick().unwrap(),
+            Found::Publication { publication: 2, .. }
+        ));
+        session.sources[0].tick.power_watts = f32::NAN;
 
+        assert!(session.poll_publication(0, 2).is_err());
+        assert_eq!(session.follow_latest().unwrap(), accepted);
         assert!(session.poll().unwrap());
-        session.select(1000, 0).unwrap();
-
         assert_eq!(
-            session.page("processes", 0).unwrap()["rows"][0][26],
-            r"refused\xff"
+            session.follow_latest().unwrap()["selected"]["publication"],
+            2
         );
-        assert_eq!(session.page("events", 0).unwrap()["rows"][0][25], "700");
+    }
+
+    #[test]
+    fn rejects_event_tick_mismatch_and_accepts_an_intact_retry() {
+        // Goal: event metadata remains validated before accepting a typed publication.
+        // Method: change a decoded tick's run number while its ring event keeps the original.
+        let mut fixture = identity_fixture::Fixture::new();
+        fixture.publish(1000);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let accepted = session.follow_latest().unwrap();
+        fixture.publish(1001);
+        assert!(matches!(
+            session.sources[0].read_tick().unwrap(),
+            Found::Publication { publication: 2, .. }
+        ));
+        session.sources[0].tick.run_tick += 1;
+
+        let rejected = session.poll_publication(0, 2);
+        println!("event_tick_rejection={rejected:?}");
+        assert!(matches!(rejected, Err(Error::Bound(_))));
+        assert_eq!(session.follow_latest().unwrap(), accepted);
+        assert!(session.poll().unwrap());
+        assert_eq!(
+            session.follow_latest().unwrap()["selected"]["publication"],
+            2
+        );
     }
 
     #[test]
@@ -4083,7 +4018,7 @@ mod tests {
             "process_cpu_ns":after.user_ns+after.system_ns-before.user_ns-before.system_ns,
             "physical_footprint_bytes":footprint.current_bytes,
             "process_lifetime_footprint_max_bytes":footprint.lifetime_bytes_max,
-            "retained_table_bytes":session.cache_bytes,
+            "retained_observation_bytes":session.cache_bytes,
             "source_identity_buffer_bytes":session.sources[0].identities.capacity()
                 *size_of::<IdentityObservation>()})
         );

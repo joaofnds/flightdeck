@@ -10,6 +10,22 @@ use crate::apps::{self, Stamp, Unavailable};
 
 /// Each selected/predecessor pair stays inside the aggregate's 64 MiB raw-byte budget.
 pub const PROGRAM_FRAME_BYTES_MAX: usize = apps::PROGRAM_BYTES_MAX / 2;
+/// Native Frame's maximum retained ownership, including every event descriptor and the arena.
+pub(crate) const FRAME_BYTES_MAX: usize = size_of::<Frame>()
+    + PROGRAM_FRAME_BYTES_MAX
+    + apps::PROCESS_INTERVALS_MAX * size_of::<Member>()
+    + collector::tracker::EVENTS_PER_TICK_MAX
+        * (size_of::<Start>() + size_of::<Exec>() + size_of::<Exit>());
+const _: () = assert!(FRAME_BYTES_MAX <= 48 * 1024 * 1024);
+/// The aggregate owns no program bytes. Its result Vec is exact-reserved; both ordered
+/// trees have at most one node per five entries plus their root in CI's Rust 1.98.
+pub(crate) const AGGREGATE_WORK_BYTES_MAX: usize = size_of::<apps::Aggregate<'static>>()
+    + apps::PROCESS_INTERVALS_MAX * size_of::<apps::ProcessTotals<'static>>()
+    + (apps::PROCESS_INTERVALS_MAX.div_ceil(5) + 1)
+        * (11 * (size_of::<apps::AppKey<'static>>() + size_of::<apps::AppTotals>())
+            + 11 * size_of::<(i32, Option<u64>)>()
+            + 24 * size_of::<usize>()
+            + 64);
 /// Join-view payload bound; the shared aggregate separately bounds its result/work storage.
 pub const TRANSIENT_VIEW_BYTES_MAX: usize = apps::PROCESS_INTERVALS_MAX
     * (2 * size_of::<Option<ProgramBytes<'static>>>()

@@ -282,7 +282,7 @@ impl CommitHandoff {
         let directory = self.fixture.root.join(&manifest.data_directory);
         let path = directory.join("ticks.parquet");
         let mut ticks = {
-            let connection = Engine::new();
+            let connection = persistence::engine::Engine::new();
             let source = connection.parquet_source(&path).unwrap();
             connection
                 .query(&format!(

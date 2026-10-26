@@ -22,6 +22,7 @@ pub const EVENT_EXECUTABLE: &[u8] = b"event\xfe\t\\";
 
 pub struct Source {
     pub identity: RunIdentity,
+    pub population: bool,
     pub layout: SourceLayout,
     pub lock: PathBuf,
     pub ring: String,
@@ -120,6 +121,7 @@ pub fn create(
 
     *output = Some(Source {
         identity,
+        population: false,
         layout,
         lock: place.lock_path,
         ring,
@@ -142,7 +144,7 @@ pub const SHAPE: Shape = Shape {
     event_capacity: 2,
 };
 
-fn create_register(root: &Path, identity: &RunIdentity, ring: &str) -> Result<()> {
+pub(super) fn create_register(root: &Path, identity: &RunIdentity, ring: &str) -> Result<()> {
     let lock = private::FileLock::wait_short(&root.join("registration.lock"))?;
     let mut registry = Registry::read(root)?;
     registry.add(

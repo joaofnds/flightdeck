@@ -1011,7 +1011,7 @@ fn keeps_compact_app_trends_after_actual_raw_cache_pressure() {
     let mut fixture = Fixture::new_mode(true, 12_000, None);
     fixture.publish(1000);
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    for second in 1001..=1016 {
+    for second in 1001..=1031 {
         fixture.publish(second);
         session.poll().unwrap();
     }
@@ -1025,18 +1025,18 @@ fn keeps_compact_app_trends_after_actual_raw_cache_pressure() {
         .unwrap();
     let catalog = session.catalog();
 
-    assert!(catalog["tail_ticks"].as_u64().unwrap() < 17);
-    assert_eq!(history["points"].as_array().unwrap().len(), 17);
+    assert!(catalog["tail_ticks"].as_u64().unwrap() < 32);
+    assert_eq!(history["points"].as_array().unwrap().len(), 32);
     assert_eq!(
         history["points"][0]["observation"]["stamp"]["publication"],
         "1"
     );
     assert_eq!(
-        history["points"][16]["observation"]["stamp"]["publication"],
-        "17"
+        history["points"][31]["observation"]["stamp"]["publication"],
+        "32"
     );
-    assert_eq!(history["points"][16]["cpu_ns"]["known"], "1");
-    assert_eq!(history["points"][16]["resident_bytes"]["known"], "11");
+    assert_eq!(history["points"][31]["cpu_ns"]["known"], "1");
+    assert_eq!(history["points"][31]["resident_bytes"]["known"], "11");
     assert_eq!(history["coverage"]["retention_limited"], false);
     assert!(
         history["coverage"]["cache_bytes"].as_u64().unwrap()

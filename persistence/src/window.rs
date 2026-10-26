@@ -152,6 +152,97 @@ impl Limits {
             events: counts[7].min(collector::tracker::EVENTS_PER_TICK_MAX),
         })
     }
+
+    /// Validates one publication's native sections and event association without staging it.
+    pub fn validate_tick(
+        &self,
+        publication: u64,
+        tick: &Tick,
+        events: &[NumberedEvent<'_>],
+    ) -> Result<()> {
+        if publication == 0 {
+            return Err(Error::Bound("publication zero"));
+        }
+        if publication == u64::MAX {
+            return Err(Error::Bound("publication end"));
+        }
+        if tick.events.start > tick.events.end {
+            return Err(Error::Bound("event range"));
+        }
+        let sizes = [
+            tick.cpus.len(),
+            tick.interfaces.len(),
+            tick.core_count(),
+            tick.gpu_active_ns.len(),
+            tick.fan_rpm.len(),
+            tick.processes.len(),
+            tick.coalitions.len(),
+            events.len(),
+        ];
+        let bounds = [
+            self.cpus,
+            self.interfaces,
+            self.cores,
+            self.states,
+            self.fans,
+            self.processes,
+            self.coalitions,
+            self.events,
+        ];
+        for (size, bound) in sizes.into_iter().zip(bounds) {
+            if size > bound {
+                return Err(Error::Bound("tick section rows"));
+            }
+        }
+        for index in 0..tick.core_count() {
+            if tick.core_active_ns(index).len() > self.states {
+                return Err(Error::Bound("core states"));
+            }
+        }
+        validate_events(tick, events)?;
+        Ok(())
+    }
+
+    /// Validates one publication's complete identity/numeric association without owning bytes.
+    /// The caller verifies its run; dictionary references must belong to source.reader.
+    pub fn validate_identity(
+        &self,
+        tick: &Tick,
+        events: &[NumberedEvent<'_>],
+        source: &IdentitySource<'_>,
+    ) -> Result<()> {
+        if source.reader.source_layout_version() != 4 {
+            return Err(Error::Bound("identity source layout"));
+        }
+        if source.processes.len() > self.processes {
+            return Err(Error::Bound("identity process rows"));
+        }
+
+        if source.events.len() != events.len() {
+            return Err(Error::Bound("identity event rows"));
+        }
+
+        if !tick.process_gpu_ns().is_empty() {
+            if tick.process_gpu_ns().len() != source.processes.len() {
+                return Err(Error::Bound("process GPU time rows"));
+            }
+        }
+
+        push_tick_validate_identity_processes(tick, source.processes)?;
+
+        for (identity, event) in source.events.iter().zip(events) {
+            let numeric = EventRecord::copy(event);
+            if identity.pid != numeric.pid {
+                return Err(Error::Bound("identity event pid"));
+            }
+
+            if usage_code(identity.usage) != numeric.availability {
+                return Err(Error::Bound("identity event usage"));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Window {
@@ -238,6 +329,7 @@ impl Window {
             return Err(Error::Bound("process GPU time without identities"));
         }
 
+        crate::work::record(|counts| counts.staged_ticks += 1);
         self.push_tick_validate(observation, tick, events)?;
 
         let bytes = staging_bytes(tick, events.len());
@@ -270,6 +362,7 @@ impl Window {
             }
         }
 
+        crate::work::record(|counts| counts.staged_ticks += 1);
         self.push_tick_validate(observation, tick, events)?;
         self.push_tick_validate_identity(tick, events, source)?;
 
@@ -326,35 +419,8 @@ impl Window {
             return Err(Error::Bound("identity source run"));
         }
 
-        if source.processes.len() > self.limits.processes {
-            return Err(Error::Bound("identity process rows"));
-        }
-
-        if source.events.len() != events.len() {
-            return Err(Error::Bound("identity event rows"));
-        }
-
-        if !tick.process_gpu_ns().is_empty() {
-            if tick.process_gpu_ns().len() != source.processes.len() {
-                return Err(Error::Bound("process GPU time rows"));
-            }
-        }
-
-        self.push_tick_validate_identity_rows(source)?;
-        push_tick_validate_identity_processes(tick, source.processes)?;
-
-        for (identity, event) in source.events.iter().zip(events) {
-            let numeric = EventRecord::copy(event);
-            if identity.pid != numeric.pid {
-                return Err(Error::Bound("identity event pid"));
-            }
-
-            if usage_code(identity.usage) != numeric.availability {
-                return Err(Error::Bound("identity event usage"));
-            }
-        }
-
-        Ok(())
+        self.limits.validate_identity(tick, events, source)?;
+        self.push_tick_validate_identity_rows(source)
     }
 
     fn push_tick_validate_identity_rows(&self, source: &IdentitySource<'_>) -> Result<()> {
@@ -386,15 +452,8 @@ impl Window {
         tick: &Tick,
         events: &[NumberedEvent<'_>],
     ) -> Result<()> {
-        if observation.publication == 0 {
-            return Err(Error::Bound("publication zero"));
-        }
-        if observation.publication == u64::MAX {
-            return Err(Error::Bound("publication end"));
-        }
-        if tick.events.start > tick.events.end {
-            return Err(Error::Bound("event range"));
-        }
+        self.limits
+            .validate_tick(observation.publication, tick, events)?;
         if self.ticks.len() == WINDOW_TICKS_MAX {
             return Err(Error::Bound("window ticks"));
         }
@@ -403,37 +462,6 @@ impl Window {
                 return Err(Error::Bound("publication order"));
             }
         }
-        let sizes = [
-            tick.cpus.len(),
-            tick.interfaces.len(),
-            tick.core_count(),
-            tick.gpu_active_ns.len(),
-            tick.fan_rpm.len(),
-            tick.processes.len(),
-            tick.coalitions.len(),
-            events.len(),
-        ];
-        let bounds = [
-            self.limits.cpus,
-            self.limits.interfaces,
-            self.limits.cores,
-            self.limits.states,
-            self.limits.fans,
-            self.limits.processes,
-            self.limits.coalitions,
-            self.limits.events,
-        ];
-        for (size, bound) in sizes.into_iter().zip(bounds) {
-            if size > bound {
-                return Err(Error::Bound("tick section rows"));
-            }
-        }
-        for index in 0..tick.core_count() {
-            if tick.core_active_ns(index).len() > self.limits.states {
-                return Err(Error::Bound("core states"));
-            }
-        }
-        validate_events(tick, events)?;
         Ok(())
     }
 }

@@ -2,8 +2,8 @@ use collector::disks::{DISKS_MAX, DiskReading, DiskSnapshot, ScanState};
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use super::{Tables, compatible, get, number, only};
-use crate::data::Table;
+use super::{compatible, get, number, only};
+use crate::metric_view::{Sources, View};
 use crate::session::Observation;
 
 const RATE_FIELDS: [&str; 8] = [
@@ -18,13 +18,13 @@ const RATE_FIELDS: [&str; 8] = [
 ];
 
 pub(super) fn point(
-    tables: &Tables,
+    tables: &Sources<'_>,
     current: &Observation,
     previous: Option<&Observation>,
 ) -> Result<Value> {
     let mut snapshot = DiskSnapshot::default();
     if !point_source(
-        get(tables, current, "ticks")?,
+        &get(tables, current, "ticks")?,
         current.continuous,
         &mut snapshot,
     )? {
@@ -34,7 +34,7 @@ pub(super) fn point(
     let mut previous_snapshot = DiskSnapshot::default();
     let baseline = if let Some(previous) = previous.filter(|before| compatible(before, current)) {
         if point_source(
-            get(tables, previous, "ticks")?,
+            &get(tables, previous, "ticks")?,
             previous.continuous,
             &mut previous_snapshot,
         )? {
@@ -82,21 +82,12 @@ pub(super) fn point(
     Ok(value)
 }
 
-fn point_source(table: &Table, time: Option<u64>, snapshot: &mut DiskSnapshot) -> Result<bool> {
+fn point_source(table: &View<'_>, time: Option<u64>, snapshot: &mut DiskSnapshot) -> Result<bool> {
     *snapshot = DiskSnapshot::default();
-    if !table
-        .columns
-        .iter()
-        .any(|name| name == persistence::disks::FIELD)
-    {
+    if !table.disks(only(table)?, snapshot)? {
         return Ok(false);
     }
 
-    let Some(text) = table.field(only(table)?, persistence::disks::FIELD)? else {
-        return Ok(false);
-    };
-
-    persistence::disks::decode(text, snapshot)?;
     if Some(snapshot.source_continuous_ns) != time {
         *snapshot = DiskSnapshot::default();
         return Ok(false);
@@ -199,13 +190,42 @@ fn point_totals(
 
     let mut totals = [Some(0_u64); 8];
     for delta in &deltas[..current.count] {
-        for (total, delta) in totals.iter_mut().zip(delta) {
+        for (total, delta) in totals.iter_mut().zip(delta).skip(2) {
             *total = total
                 .zip(*delta)
                 .and_then(|(sum, delta)| sum.checked_add(delta));
         }
     }
 
+    let bytes = byte_deltas(
+        &current.records[..current.count],
+        &previous.records[..previous.count],
+    );
+    totals[0] = bytes[0];
+    totals[1] = bytes[1];
+    totals
+}
+
+/// The same complete-device totals the detailed Storage summary uses, before presentation.
+pub(crate) fn byte_deltas(current: &[DiskReading], previous: &[DiskReading]) -> [Option<u64>; 2] {
+    if current.len() != previous.len() {
+        return [None; 2];
+    }
+    let mut totals = [Some(0_u64); 2];
+    for record in current {
+        let Some(before) = previous
+            .iter()
+            .find(|before| identity(before) == identity(record))
+        else {
+            return [None; 2];
+        };
+        let deltas = point_delta(record, Some(before));
+        for (total, delta) in totals.iter_mut().zip(deltas) {
+            *total = total
+                .zip(delta)
+                .and_then(|(total, delta)| total.checked_add(delta));
+        }
+    }
     totals
 }
 

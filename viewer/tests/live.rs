@@ -919,6 +919,79 @@ mod tests {
     }
 
     #[test]
+    fn freezes_identity_pages_and_summary_before_typed_capture() {
+        // Goal: native retention preserves schemas, exact counters and captured identity bytes.
+        // Method: freeze every public live page and summary from the existing real-ring fixture.
+        let mut fixture = super::identity_fixture::Fixture::new();
+        fixture.publish_with_system_rows(1000);
+        fixture.publish_with_system_rows(1001);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let response = session.follow_latest().unwrap();
+        let mut summary = response["summary"].clone();
+        summary.as_object_mut().unwrap().remove("run");
+        summary.as_object_mut().unwrap().remove("boot");
+        let mut pages = serde_json::Map::new();
+        for name in persistence::schema::TABLES.map(persistence::schema::Table::name) {
+            let mut page = session.page(name, 0).unwrap();
+            page.as_object_mut().unwrap().remove("observation");
+            pages.insert(name.to_owned(), page);
+        }
+        let mut derived = session.page("core_level_states", 0).unwrap();
+        derived.as_object_mut().unwrap().remove("observation");
+        pages.insert("core_level_states".to_owned(), derived);
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("live/item1_expected.json")).unwrap();
+        assert_eq!(
+            serde_json::json!({"summary":summary,"pages":pages}),
+            expected
+        );
+    }
+
+    #[test]
+    fn observes_real_staging_frames_queries_and_table_cells_within_a_scope() {
+        // Goal: removed-work guards cannot pass through a disconnected or fake-zero recorder.
+        // Method: stage and seal real ticks, then select their saved summary through Session.
+        let mut recording = Recording::new();
+        recording.publish_resources(1000);
+        recording.publish_resources(1001);
+        let measured = persistence::work::observe();
+
+        recording.seal();
+        let mut session = viewer::Session::open(&recording.root).unwrap();
+        session.select(1001, 0).unwrap();
+        let work = measured.counts();
+
+        assert_eq!(work.staged_ticks, 2);
+        assert!(work.frames > 0);
+        assert!(work.sql_plans > 0);
+        assert!(work.collections > 0);
+        assert!(work.string_cells > 0);
+    }
+
+    #[test]
+    fn ingests_populated_machine_readings_without_staging_queries_or_string_cells() {
+        // Goal: normal metric ingestion does no persistence or text-table work.
+        // Method: publish two resource ticks into a real ring and inspect the selected summary.
+        let mut recording = Recording::new();
+        recording.publish_resources(1000);
+        recording.publish_resources(1001);
+        let measured = persistence::work::observe();
+
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        let response = session.follow_latest().unwrap();
+        let work = measured.counts();
+
+        assert_eq!(response["summary"]["network_rx_bps"], 1024.0);
+        assert_eq!(response["summary"]["gpu_active_percent"], 40.0);
+        assert_eq!(
+            response["summary"]["memory_total_bytes"],
+            9_007_199_254_740_993_u64
+        );
+        println!("live_ingestion_work={work:?}");
+        assert_eq!(work, persistence::work::Counts::default());
+    }
+
+    #[test]
     fn reads_unsealed_seconds_and_preserves_exact_cells() {
         // Goal: the ring's unsealed observation has the historical table contract.
         // Method: publish into an owned recording and inspect it through the public adapter.

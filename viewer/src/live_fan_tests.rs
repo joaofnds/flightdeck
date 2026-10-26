@@ -447,9 +447,11 @@ fn measures_bounded_fan_projection_and_retained_json_cost() {
     let mut point = response["summary"].clone();
     let start = std::time::Instant::now();
     for _sample in 0..10_000 {
-        point["fan_rpm"] = crate::live_fan_history::capture(
-            &source.tables["ticks"],
-            Some(&source.tables["fans"]),
+        point["fan_rpm"] = crate::live_fan_history::capture_view(
+            &crate::metric_view::View::Native(source.raw.view("ticks").unwrap()),
+            Some(&crate::metric_view::View::Native(
+                source.raw.view("fans").unwrap(),
+            )),
             source.observation.publication,
         )
         .unwrap();

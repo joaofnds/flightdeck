@@ -1465,3 +1465,51 @@ fn a_new_request_ends_the_pause_between_polls() {
     ending.recv_timeout(Duration::from_secs(10)).unwrap();
     pausing.join().unwrap();
 }
+
+#[test]
+fn live_network_ingestion_runs_the_worker_without_staging_queries_or_string_tables() {
+    // Goal: the production worker's ordinary populated live path has no eager table work.
+    // Method: step the existing worker harness over a registered native ring and read Network.
+    let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    fixture.publish_resources();
+    fixture.publish_resources();
+    let mut worker = SnapshotReader::new();
+    worker.command.mode = crate::live_source_mode::SourceMode::Live;
+    worker.command.request.route = "network".into();
+    let measured = persistence::work::observe();
+
+    let snapshot = worker.read_at(&fixture.root).unwrap().unwrap();
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert_eq!(snapshot.selection["summary"]["cpu_percent"], 50.0);
+    assert_eq!(snapshot.selection["summary"]["network_rx_bps"], 1.0);
+    assert!(!snapshot.histories_pending);
+    assert_eq!(measured.counts(), persistence::work::Counts::default());
+}
+
+#[test]
+fn live_overview_formats_only_its_requested_fan_page() {
+    // Goal: Overview's explicitly requested raw page stays distinct from metric ingestion.
+    // Method: run the production worker on a private native source with one measured fan row.
+    let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    fixture.publish_resources();
+    fixture.publish_resources();
+    let mut worker = SnapshotReader::new();
+    worker.command.mode = crate::live_source_mode::SourceMode::Live;
+    let measured = persistence::work::observe();
+
+    let snapshot = worker.read_at(&fixture.root).unwrap().unwrap();
+
+    assert_eq!(snapshot.pages.len(), 1);
+    assert_eq!(snapshot.pages["fans"]["total"], 1);
+    assert_eq!(snapshot.pages["fans"]["rows"][0][2], "1234");
+    let work = measured.counts();
+    assert_eq!(work.staged_ticks, 0);
+    assert_eq!(work.frames, 0);
+    assert_eq!(work.sql_plans, 0);
+    assert_eq!(work.collections, 0);
+    assert_eq!(work.string_cells, 3);
+}
+
+#[path = "live_native_measurement_tests.rs"]
+mod native_measurements;

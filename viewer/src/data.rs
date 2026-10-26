@@ -112,6 +112,7 @@ fn query_frame(
 }
 
 fn cell(value: AnyValue<'_>, column: &str) -> Result<Option<String>> {
+    persistence::work::record(|counts| counts.string_cells += 1);
     let text = match value {
         AnyValue::Null => return Ok(None),
         AnyValue::Boolean(value) => value.to_string(),

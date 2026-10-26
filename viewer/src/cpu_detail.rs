@@ -2,7 +2,6 @@ use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::cpu_history_sample::{self, CounterSample, Identity, Interval};
-use crate::data::Table;
 use crate::session::Observation;
 
 pub(crate) use crate::cpu_history_sample::CPUS_MAX;
@@ -15,7 +14,12 @@ const _: () = {
 pub(crate) struct Sample {
     pub identity: Value,
     pub observation: Observation,
-    pub cpus: Table,
+    pub cpus: Source,
+}
+
+pub(crate) enum Source {
+    Saved(crate::data::Table),
+    Native(cpu_history_sample::Counters),
 }
 
 pub(crate) fn project(current: &Sample, previous: Option<&Sample>) -> Result<Value> {
@@ -59,8 +63,14 @@ fn project_sample(sample: &Sample, output: &mut Option<CounterSample>) -> Result
 
     let mut identity = None;
     Identity::read(&sample.identity, &sample.observation, &mut identity)?;
-    let mut counters = Vec::new();
-    cpu_history_sample::counters(&sample.cpus, sample.observation.publication, &mut counters)?;
+    let counters = match &sample.cpus {
+        Source::Native(counters) => counters.clone(),
+        Source::Saved(table) => {
+            let mut counters = Vec::new();
+            cpu_history_sample::counters(table, sample.observation.publication, &mut counters)?;
+            counters
+        }
+    };
     *output = Some(CounterSample {
         identity: identity.ok_or(Error::Bound("CPU identity"))?,
         counters,

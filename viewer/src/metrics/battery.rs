@@ -3,9 +3,9 @@ use persistence::schema::{BATTERY_FIELDS, BATTERY_VERSION};
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use crate::data::Table;
+use crate::metric_view::View;
 
-pub(super) fn point(table: &Table, row: &[Option<String>], now: Option<u64>) -> Result<Value> {
+pub(super) fn point(table: &View<'_>, row: usize, now: Option<u64>) -> Result<Value> {
     let Some(reading) = source(table, row)? else {
         return Ok(Value::Null);
     };
@@ -41,10 +41,10 @@ pub(crate) fn power_watts(reading: &BatteryReading) -> Option<f64> {
     Some(signed * super::number(voltage) / 1_000_000.0)
 }
 
-fn source(table: &Table, row: &[Option<String>]) -> Result<Option<BatteryReading>> {
+fn source(table: &View<'_>, row: usize) -> Result<Option<BatteryReading>> {
     let count = BATTERY_FIELDS
         .iter()
-        .filter(|(name, _kind)| table.columns.iter().any(|column| column == name))
+        .filter(|(name, _kind)| table.holds(name))
         .count();
     if count == 0 {
         return Ok(None);
@@ -82,16 +82,12 @@ fn source(table: &Table, row: &[Option<String>]) -> Result<Option<BatteryReading
         charging: boolean(table, row, "battery_charging")?,
         external_power: boolean(table, row, "battery_external_power")?,
         voltage_mv: table.integer(row, "battery_voltage_mv")?,
-        current_ma: table
-            .field(row, "battery_current_ma")?
-            .map(str::parse::<i64>)
-            .transpose()
-            .map_err(|_| Error::Bound("battery signed current"))?,
+        current_ma: table.signed(row, "battery_current_ma")?,
         adapter_watts: table.integer(row, "battery_adapter_watts")?,
     }))
 }
 
-fn source_empty(table: &Table, row: &[Option<String>], skip: usize) -> Result<()> {
+fn source_empty(table: &View<'_>, row: usize, skip: usize) -> Result<()> {
     for (name, _kind) in BATTERY_FIELDS.iter().skip(skip) {
         if table.field(row, name)?.is_some() {
             return Err(Error::Bound("battery payload without source"));
@@ -101,7 +97,7 @@ fn source_empty(table: &Table, row: &[Option<String>], skip: usize) -> Result<()
     Ok(())
 }
 
-fn boolean(table: &Table, row: &[Option<String>], name: &str) -> Result<Option<bool>> {
+fn boolean(table: &View<'_>, row: usize, name: &str) -> Result<Option<bool>> {
     table
         .field(row, name)?
         .map(str::parse::<bool>)

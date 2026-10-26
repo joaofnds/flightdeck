@@ -891,3 +891,32 @@ impl Shape {
         }
     }
 }
+
+#[test]
+fn retains_cpu_activity_for_matching_noncontiguous_cpu_identities() {
+    // Goal: sharing heatmap arithmetic cannot impose its complete-domain policy on Store rates.
+    // Method: retain CPUs 0 and 7 with 30% and 50% activity, as the original Store paired them.
+    let mut before = Machine::at(1).cpus(&[(0, 0), (0, 0)]);
+    let mut after = Machine::at(2).cpus(&[(30, 70), (50, 50)]);
+    before.cpus[1].cpu = 7;
+    after.cpus[1].cpu = 7;
+
+    let second = after.second_after(&before);
+
+    assert_eq!(second.cpu_percent, Some(40.0));
+    assert_eq!(second.cpu_percent_one_core, Some(80.0));
+}
+
+#[test]
+fn pairs_aggregate_cpu_activity_by_identity_after_rows_change_order() {
+    // Goal: aggregate Store CPU activity preserves its identity-based pairing policy.
+    // Method: reverse only current rows; the position-based per-core sum remains unavailable.
+    let before = Machine::at(1).cpus(&[(0, 0), (0, 0)]);
+    let mut after = Machine::at(2).cpus(&[(30, 70), (50, 50)]);
+    after.cpus.reverse();
+
+    let second = after.second_after(&before);
+
+    assert_eq!(second.cpu_percent, Some(40.0));
+    assert_eq!(second.cpu_percent_one_core, None);
+}

@@ -97,7 +97,7 @@ fn history_assert_saved(root: &Path) {
 #[test]
 fn retains_previously_observed_cpu_history_after_real_raw_byte_eviction_before_sealing() {
     // Goal: entering CPU after other panes retains observed intervals despite raw byte eviction.
-    // Method: follow901 unsealed readings, with1024 genuine processes in the final202 ticks.
+    // Method: follow901 unsealed readings, with2048 genuine processes in the final202 ticks.
     let mut fixture = RingFixture::new_with_shape(&Shape {
         slot_count: 120,
         cpu_capacity: 18,
@@ -105,7 +105,7 @@ fn retains_previously_observed_cpu_history_after_real_raw_byte_eviction_before_s
         core_capacity: 1,
         state_capacity: 1,
         fan_capacity: 1,
-        process_capacity: 1024,
+        process_capacity: 2048,
         coalition_capacity: 1,
         event_capacity: 8,
     });
@@ -241,7 +241,7 @@ fn history_publish(fixture: &mut RingFixture, tick: u32, process_pressure: bool)
 fn history_processes(tick: u32) -> Vec<collector::processes::Process> {
     use collector::processes::{Process, Task, Usage};
     let counter = 1_000_000_000_000 + u64::from(tick);
-    (1..=1024)
+    (1..=2048)
         .map(|pid| Process {
             pid,
             usage: Usage {

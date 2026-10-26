@@ -1,4 +1,5 @@
 use super::*;
+use crate::data::Table;
 
 #[test]
 fn derives_each_logical_cpu_activity_from_its_own_counter_interval() {
@@ -29,7 +30,7 @@ fn sample(publication: u64, counters: Vec<[u64; 4]>) -> Sample {
             wall: publication * 1_000_000_000,
             continuous: Some(publication * 1_000_000_000),
         },
-        cpus: Table {
+        cpus: Source::Saved(Table {
             columns: [
                 "publication",
                 "cpu",
@@ -51,7 +52,14 @@ fn sample(publication: u64, counters: Vec<[u64; 4]>) -> Sample {
                         .collect()
                 })
                 .collect(),
-        },
+        }),
+    }
+}
+
+fn table(sample: &mut Sample) -> &mut Table {
+    match &mut sample.cpus {
+        Source::Saved(table) => table,
+        Source::Native(_) => unreachable!(),
     }
 }
 
@@ -84,7 +92,7 @@ unavailable_case!(
     gaps_when_a_publication_is_missing,
     |current: &mut Sample| {
         current.observation.publication += 1;
-        current.cpus.rows[0][0] = Some("3".to_owned());
+        table(current).rows[0][0] = Some("3".to_owned());
     }
 );
 unavailable_case!(gaps_when_a_run_tick_is_missing, |current: &mut Sample| {
@@ -114,7 +122,7 @@ fn retains_independent_unavailable_and_available_cpus() {
             [10, 0, 10, 30],
         ],
     );
-    current.cpus.rows[1][2] = None;
+    table(&mut current).rows[1][2] = None;
 
     let result = project(&current, Some(&previous)).unwrap();
 
@@ -134,7 +142,7 @@ fn matches_reordered_rows_by_logical_index() {
     // Method: reverse one of two complete counter domains.
     let previous = sample(1, vec![[0, 0, 0, 0]; 2]);
     let mut current = sample(2, vec![[25, 0, 0, 75], [75, 0, 0, 25]]);
-    current.cpus.rows.reverse();
+    table(&mut current).rows.reverse();
 
     let result = project(&current, Some(&previous)).unwrap();
 
@@ -183,28 +191,28 @@ macro_rules! invalid_domain_case {
 invalid_domain_case!(
     rejects_duplicate_cpu_indices,
     |current: &mut Sample| {
-        current.cpus.rows[1][1] = Some("0".to_owned());
+        table(current).rows[1][1] = Some("0".to_owned());
     },
     "duplicate logical CPU index"
 );
 invalid_domain_case!(
     rejects_incomplete_cpu_domains,
     |current: &mut Sample| {
-        current.cpus.rows[1][1] = Some("2".to_owned());
+        table(current).rows[1][1] = Some("2".to_owned());
     },
     "incomplete logical CPU domain"
 );
 invalid_domain_case!(
     rejects_oversized_cpu_indices,
     |current: &mut Sample| {
-        current.cpus.rows[1][1] = Some("4294967296".to_owned());
+        table(current).rows[1][1] = Some("4294967296".to_owned());
     },
     "logical CPU index"
 );
 invalid_domain_case!(
     rejects_foreign_publication_rows,
     |current: &mut Sample| {
-        current.cpus.rows[1][0] = Some("1".to_owned());
+        table(current).rows[1][0] = Some("1".to_owned());
     },
     "CPU detail publication"
 );

@@ -59,7 +59,18 @@ pub(crate) fn core_level_states_query(sources: &CoreLevelSources<'_>) -> String 
 /// from `previous` to `current`, in GHz, level 0 first. Each active state's clock is weighted
 /// by the time the level's cores spent in it. A level with no active time, or with a state
 /// whose clock is unknown, reads nothing.
-pub(super) fn level_ghz(current: &Table, previous: &Table) -> Result<[Option<f64>; 2]> {
+#[cfg(test)]
+fn level_ghz(current: &Table, previous: &Table) -> Result<[Option<f64>; 2]> {
+    level_ghz_view(
+        &crate::metric_view::View::Saved(current),
+        &crate::metric_view::View::Saved(previous),
+    )
+}
+
+pub(super) fn level_ghz_view(
+    current: &crate::metric_view::View<'_>,
+    previous: &crate::metric_view::View<'_>,
+) -> Result<[Option<f64>; 2]> {
     let mut levels = [None, None];
     for (level, ghz) in (0_u64..).zip(levels.iter_mut()) {
         let after = level_ghz_states(current, level)?;
@@ -73,9 +84,12 @@ pub(super) fn level_ghz(current: &Table, previous: &Table) -> Result<[Option<f64
 }
 
 /// The time `table` holds in each state of `level`, and its clock in kHz, by state index.
-fn level_ghz_states(table: &Table, level: u64) -> Result<BTreeMap<u64, (u64, Option<u64>)>> {
+fn level_ghz_states(
+    table: &crate::metric_view::View<'_>,
+    level: u64,
+) -> Result<BTreeMap<u64, (u64, Option<u64>)>> {
     let mut states = BTreeMap::new();
-    for row in &table.rows {
+    for row in table.rows() {
         if table.integer(row, "level")? != Some(level) {
             continue;
         }

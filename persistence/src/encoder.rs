@@ -175,6 +175,7 @@ pub fn frame_bytes(table: Table, window: &Window) -> Result<u64> {
 
 /// Materializes a single admitted window table without a SQL or row-string conversion.
 pub fn frame(table: Table, window: &Window) -> Result<DataFrame> {
+    crate::work::record(|counts| counts.frames += 1);
     bounds::frame(table, window)?;
 
     let frame = frame_built(table, window)?;

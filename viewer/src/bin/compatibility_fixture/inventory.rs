@@ -16,6 +16,7 @@ pub fn print(options: &Options, sources: &[Source]) -> Result<()> {
     };
     let layout = match options.layout {
         Layout::Legacy => "legacy",
+        Layout::Population => "population",
         Layout::Identity => "identity",
         Layout::Mixed => "mixed",
     };
@@ -24,10 +25,17 @@ pub fn print(options: &Options, sources: &[Source]) -> Result<()> {
         "format": "flightdeck-compatibility-fixture-1", "recording": options.root,
         "layout": layout, "interruption": interruption, "sources": runs,
         "normal_sealing": "external retained persister only",
-        "bounds": { "runs": 2, "publications_per_run": 2, "processes_per_publication": 3,
+        "bounds": if options.layout == Layout::Population {
+            json!({"runs": 1, "publications_per_run": super::population::PUBLICATIONS,
+                "processes_per_publication": super::population::PROCESSES,
+                "events_per_publication": super::population::EVENTS,
+                "ring_bytes": super::population::MAPPED_BYTES_MAX,
+                "inventory_bytes": 16384, "operation_seconds": 30,
+                "working_bytes": 2_147_483_648_u64})
+        } else { json!({ "runs": 2, "publications_per_run": 2, "processes_per_publication": 3,
             "events_per_publication": 1, "dictionary_entries": 2, "dictionary_arena_bytes": 256,
             "ring_bytes": 65536, "inventory_bytes": 16384, "operation_seconds": 30,
-            "working_bytes": 2_147_483_648_u64 },
+            "working_bytes": 2_147_483_648_u64 }) },
     });
     let bytes = serde_json::to_vec(&inventory).map_err(std::io::Error::other)?;
     if bytes.len() >= 16_384 {
@@ -43,6 +51,9 @@ pub fn print(options: &Options, sources: &[Source]) -> Result<()> {
 }
 
 fn print_source(source: &Source) -> Value {
+    if source.population {
+        return print_population(source);
+    }
     let captured = source.layout == SourceLayout::Identity;
     json!({
         "layout": if captured { 4 } else { 3 },
@@ -94,4 +105,21 @@ fn print_identity() -> Value {
             "app_path": null, "kinds": [1, 3], "usage_availability": [3, 0],
             "start_coalition": 17 },
     })
+}
+
+fn print_population(source: &Source) -> Value {
+    use super::population::{EVENTS, MAPPED_BYTES_MAX, PROCESSES, PUBLICATIONS};
+    json!({"layout": 3, "completed": true, "ring_name": source.ring,
+        "lock_path": source.lock,
+        "recording_id": identity_text(source.identity.recording).to_string(),
+        "run_id": identity_text(source.identity.run).to_string(),
+        "boot_id": identity_text(source.identity.boot).to_string(),
+        "publications": PUBLICATIONS, "processes_per_publication": PROCESSES,
+        "events_per_publication": EVENTS, "mapped_bytes": source.mapped_bytes,
+        "mapped_bytes_max": MAPPED_BYTES_MAX,
+        "first_second": source.second_first, "last_second": source.second_first + PUBLICATIONS - 1,
+        "expected_selected_publication": PUBLICATIONS, "expected_cpu_percent": 30.0,
+        "expected_rx_bps": 1_048_576.0, "expected_fans": [1234.1, 0.0],
+        "source_units": "native counters and gauges; unavailable legacy identity",
+        "sealed_windows": 0, "publisher_after_generation": "none"})
 }

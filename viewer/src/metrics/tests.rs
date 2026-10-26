@@ -970,3 +970,41 @@ fn retains_nullable_fan_channels_in_common_projection() {
 
     assert_eq!(fixture.point()["fan_rpm"], json!([null, 0.0]));
 }
+
+#[test]
+fn preserves_machine_rate_multiplication_before_division() {
+    // Goal: sharing exact deltas cannot change the machine's public floating-point rate.
+    // Method: one byte over 1,000,000,001 ns distinguishes the two operation orders.
+    let expected: f64 = 0.999_999_999;
+
+    assert_eq!(
+        per_second(Some(1), 1_000_000_001).unwrap().to_bits(),
+        expected.to_bits()
+    );
+}
+
+#[test]
+fn retains_decimal_component_order_before_a_later_reset() {
+    // Goal: typed pairing retains the saved reduction's overflow before a later reset.
+    // Method: keys 1, 10, 2 overflow in decimal order but reset first in numeric order.
+    let current = table(
+        &["cpu", "user_ticks"],
+        &[&["1", "18446744073709551615"], &["2", "0"], &["10", "1"]],
+    );
+    let previous = table(
+        &["cpu", "user_ticks"],
+        &[&["1", "0"], &["2", "1"], &["10", "0"]],
+    );
+
+    let result = counter_delta(
+        &View::Saved(&current),
+        &View::Saved(&previous),
+        &["cpu"],
+        "user_ticks",
+    );
+
+    assert!(matches!(result, Err(Error::Bound("counter sum"))));
+    let integer = crate::metric_view::Key::Integer(10);
+    assert!(integer < crate::metric_view::Key::Integer(2));
+    assert!(integer == crate::metric_view::Key::Text("10"));
+}

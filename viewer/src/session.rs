@@ -682,7 +682,7 @@ impl Session {
         *output = Some(crate::cpu_detail::Sample {
             identity: observation.json(&self.windows),
             observation: observation.clone(),
-            cpus,
+            cpus: crate::cpu_detail::Source::Saved(cpus),
         });
 
         Ok(())

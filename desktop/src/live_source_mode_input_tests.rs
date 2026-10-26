@@ -355,6 +355,60 @@ impl LiveRecording {
         self.publication += 1;
     }
 
+    pub(crate) fn publish_resources(&mut self) {
+        let count = u32::try_from(self.publication).unwrap();
+        let cpus = [collector::machine::CPUTicks {
+            user: count,
+            idle: count,
+            ..collector::machine::CPUTicks::default()
+        }];
+        let memory = collector::machine::Memory {
+            total_bytes: 9_007_199_254_740_993,
+            ..collector::machine::Memory::default()
+        };
+        let mut name = [0_u8; collector::interfaces::IFNAMSIZ];
+        name[..3].copy_from_slice(b"en0");
+        let interfaces = [collector::interfaces::Interface {
+            index: 7,
+            name: collector::interfaces::Name::from_bytes(name, 3).unwrap(),
+            received_bytes: self.publication,
+            sent_bytes: self.publication,
+            received_packets: self.publication,
+            sent_packets: self.publication,
+            receive_errors: 0,
+            send_errors: 0,
+            receive_drops: 0,
+        }];
+        self.writer.publish_observed(
+            &Readings {
+                run_tick: self.publication,
+                cpus: &cpus,
+                memory: &memory,
+                interfaces: &interfaces,
+                ioreport: None,
+                smc: Some(collector::ring::SmcReadings {
+                    power_watts: 0.1,
+                    soc_celsius: 40.0,
+                    cpu_celsius: None,
+                    gpu_celsius: None,
+                    fan_rpm: &[1234.0],
+                }),
+                processes: &[],
+                processes_refused: 0,
+                processes_gone: 0,
+                coalitions: &[],
+                events: &[],
+                dropped: collector::ring::Dropped::default(),
+            },
+            &ObservationTimes {
+                wall_ns: (1000 + self.publication) * 1_000_000_000,
+                continuous_ns: (self.publication + 1) * 1_000_000_000,
+                awake_ns: (self.publication + 1) * 1_000_000_000,
+            },
+        );
+        self.publication += 1;
+    }
+
     /// The wall-clock second of the newest tick published.
     pub(crate) fn last_second(&self) -> u64 {
         assert!(self.publication > 0);

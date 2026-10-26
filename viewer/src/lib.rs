@@ -13,6 +13,8 @@ mod live_app_history;
 pub mod live_app_response;
 pub mod live_apps;
 mod live_fan_history;
+mod live_raw;
+mod metric_view;
 mod metrics;
 pub mod recording;
 pub mod ring_tick;

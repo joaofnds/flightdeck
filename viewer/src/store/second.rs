@@ -3,12 +3,12 @@
 //! and computes no rate.
 
 use collector::disks::{DiskReading, DiskSnapshot, ScanState};
-use collector::interfaces::Interface;
-use collector::machine::{CPUTicks, Pressure};
+use collector::machine::Pressure;
 use collector::smc::FANS_MAX;
 use collector::system::PerformanceLevel;
 
-use crate::metrics::{battery, number};
+use crate::cpu_history_sample;
+use crate::metrics::{battery, reduction};
 use crate::recording::{
     CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
 };
@@ -188,76 +188,75 @@ impl BatterySecond {
 /// consecutive readings of one run: consecutive publications and run ticks, wall clocks rising
 /// by at most one second, and continuous clocks rising (doc-30, `metrics::compatible`).
 fn interval_ns(previous: &TickRow, current: &TickRow) -> Option<u64> {
-    if previous.publication.checked_add(1) != Some(current.publication) {
-        return None;
-    }
-
-    if previous.run_tick.checked_add(1) != Some(current.run_tick) {
-        return None;
-    }
-
-    let (Some(wall_before), Some(wall_now)) = (previous.wall_ns, current.wall_ns) else {
-        return None;
+    let observation = |tick: &TickRow| {
+        Some(crate::session::Observation {
+            window: 0,
+            publication: tick.publication,
+            run_tick: tick.run_tick,
+            wall: tick.wall_ns?,
+            continuous: tick.continuous_ns,
+        })
     };
-    if wall_before >= wall_now {
+    if !crate::metrics::compatible(&observation(previous)?, &observation(current)?) {
         return None;
     }
-
-    // Both divisions floor, so the wall clocks fall in the same or the next whole second.
-    if wall_now / 1_000_000_000 > wall_before / 1_000_000_000 + 1 {
-        return None;
-    }
-
-    let (Some(before), Some(now)) = (previous.continuous_ns, current.continuous_ns) else {
-        return None;
-    };
-    now.checked_sub(before).filter(|elapsed| *elapsed > 0)
+    current.continuous_ns?.checked_sub(previous.continuous_ns?)
 }
 
 /// The share of every CPU's ticks since `previous` that were busy, in percent. `None` where
 /// the CPUs differ or a counter went back.
 fn cpu_percent(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
+    if current.len() > cpu_history_sample::CPUS_MAX {
+        return None;
+    }
     if current.len() != previous.len() {
         return None;
     }
-
-    let mut busy = 0_u64;
-    let mut idle = 0_u64;
+    let mut totals = reduction::CpuTotals::default();
     for (index, now) in current.iter().enumerate() {
-        let before = paired(previous, index, |row| row.cpu == now.cpu)?;
-        let delta = cpu_delta(&before.ticks, &now.ticks)?;
-        busy = busy.checked_add(delta.busy)?;
-        idle = idle.checked_add(delta.idle)?;
+        let old = paired(previous, index, |old| old.cpu == now.cpu)?;
+        let Ok(Some(delta)) = cpu_delta(now, old) else {
+            return None;
+        };
+        if totals.add(&delta).is_err() {
+            return None;
+        }
     }
-
-    let total = busy.checked_add(idle)?;
-    if total == 0 {
-        return None;
-    }
-
-    Some(number(busy) * 100.0 / number(total))
+    totals.machine_percent()
 }
 
-struct CpuDelta {
-    busy: u64,
-    idle: u64,
-}
-
-fn cpu_delta(before: &CPUTicks, now: &CPUTicks) -> Option<CpuDelta> {
-    let user = now.user.checked_sub(before.user)?;
-    let system = now.system.checked_sub(before.system)?;
-    let nice = now.nice.checked_sub(before.nice)?;
-    let idle = now.idle.checked_sub(before.idle)?;
-
-    Some(CpuDelta {
-        busy: u64::from(user) + u64::from(system) + u64::from(nice),
-        idle: u64::from(idle),
+fn cpu_delta(
+    current: &CpuRow,
+    previous: &CpuRow,
+) -> persistence::Result<Option<reduction::CpuTotals>> {
+    reduction::CpuTotals::between(reduction::CounterPair {
+        current: &cpu_history_sample::counters_values(&current.ticks),
+        previous: &cpu_history_sample::counters_values(&previous.ticks),
     })
 }
 
-/// The mean busy share of each performance level's CPUs, level 0 first, where the levels of
-/// `current` cover its CPUs. The slower level's CPUs take the lowest indices, as macOS numbers
-/// them.
+fn cpu_percent_one_core(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
+    let Ok(percent) = cpu_busy_sum(current, previous) else {
+        return None;
+    };
+    percent
+}
+
+fn cpu_busy_sum(current: &[CpuRow], previous: &[CpuRow]) -> persistence::Result<Option<f64>> {
+    if current.len() > cpu_history_sample::CPUS_MAX {
+        return Ok(None);
+    }
+    if current.len() != previous.len() {
+        return Ok(None);
+    }
+    reduction::busy_sum(current.iter().zip(previous).map(|(now, old)| {
+        if now.cpu != old.cpu {
+            return Ok(None);
+        }
+        cpu_delta(now, old)
+    }))
+}
+
 fn cpu_level_percent(current: &Reading<'_>, previous: &Reading<'_>) -> [Option<f64>; 2] {
     let Some(levels) = current.tick.performance_levels else {
         return [None; 2];
@@ -271,71 +270,19 @@ fn cpu_level_percent(current: &Reading<'_>, previous: &Reading<'_>) -> [Option<f
     if previous.cpus.len() != current.cpus.len() {
         return [None; 2];
     }
-
-    let (slow_now, fast_now) = current.cpus.split_at(slow);
-    let (slow_before, fast_before) = previous.cpus.split_at(slow);
     [
-        mean_busy_percent(fast_now, fast_before),
-        mean_busy_percent(slow_now, slow_before),
+        cpu_level_mean(&current.cpus[slow..], &previous.cpus[slow..]),
+        cpu_level_mean(&current.cpus[..slow], &previous.cpus[..slow]),
     ]
 }
 
-/// Each CPU's busy share since `previous` added up, in percent, so one busy CPU is 100%, as the
-/// worker's All CPU adds it up. `None` where the CPUs differ, a counter went back or a CPU
-/// counted no ticks.
-fn cpu_percent_one_core(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
-    if current.len() != previous.len() {
+fn cpu_level_mean(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
+    let Ok(Some(sum)) = cpu_busy_sum(current, previous) else {
         return None;
-    }
-    if current.is_empty() {
-        return None;
-    }
-
-    Some(busy_shares(current, previous)?.percent_sum)
-}
-
-/// The mean of each CPU's busy share since `previous`, in percent. `None` where a CPU differs,
-/// a counter went back or a CPU counted no ticks.
-fn mean_busy_percent(current: &[CpuRow], previous: &[CpuRow]) -> Option<f64> {
-    assert_eq!(current.len(), previous.len());
-    if current.is_empty() {
-        return None;
-    }
-
-    let shares = busy_shares(current, previous)?;
-    Some(shares.percent_sum / f64::from(shares.count))
-}
-
-/// Each CPU's busy share since a previous reading, added up in percent, and the CPUs added.
-struct BusyShares {
-    percent_sum: f64,
-    count: u32,
-}
-
-/// The busy shares of `current`'s CPUs since `previous`, CPU by CPU in order. `None` where a CPU
-/// differs, a counter went back or a CPU counted no ticks.
-fn busy_shares(current: &[CpuRow], previous: &[CpuRow]) -> Option<BusyShares> {
-    assert_eq!(current.len(), previous.len());
-
-    let mut shares = BusyShares {
-        percent_sum: 0.0,
-        count: 0,
     };
-    for (now, before) in current.iter().zip(previous) {
-        if now.cpu != before.cpu {
-            return None;
-        }
-        let delta = cpu_delta(&before.ticks, &now.ticks)?;
-        let total = delta.busy.checked_add(delta.idle)?;
-        if total == 0 {
-            return None;
-        }
-
-        shares.percent_sum += number(delta.busy) / number(total) * 100.0;
-        shares.count += 1;
-    }
-
-    Some(shares)
+    let count = u32::try_from(current.len()).unwrap_or_else(|_| unreachable!("bounded CPU count"));
+    assert!(count > 0);
+    Some(sum / f64::from(count))
 }
 
 /// The share of `elapsed_ns` the GPU spent in its states since `previous`, in percent. `None`
@@ -352,14 +299,23 @@ fn gpu_active_percent(
     if current.len() != previous.len() {
         return None;
     }
-
-    let mut active_ns = 0_u64;
+    let mut totals = reduction::CounterTotals::new();
     for (index, now) in current.iter().enumerate() {
-        let before = paired(previous, index, |row| row.state == now.state)?;
-        active_ns = active_ns.checked_add(now.active_ns.checked_sub(before.active_ns)?)?;
+        let old = paired(previous, index, |old| old.state == now.state)?;
+        if totals
+            .add(reduction::CounterPair {
+                current: &[Some(now.active_ns)],
+                previous: &[Some(old.active_ns)],
+            })
+            .is_err()
+        {
+            return None;
+        }
     }
-
-    Some(number(active_ns) * 100.0 / number(elapsed_ns))
+    reduction::machine_percent(&reduction::Fraction {
+        numerator: totals.finish()[0]?,
+        denominator: elapsed_ns,
+    })
 }
 
 /// The bytes read from and written to the disks since `previous`, summed over the disks, where
@@ -372,27 +328,7 @@ fn disk_bytes(current: &TickRow, previous: &TickRow) -> [Option<u64>; 2] {
     let Some(before) = disk_scan(previous) else {
         return [None; 2];
     };
-    if now.len() != before.len() {
-        return [None; 2];
-    }
-
-    let add = |total: Option<u64>, delta: Option<u64>| {
-        total
-            .zip(delta)
-            .and_then(|(total, delta)| total.checked_add(delta))
-    };
-    let mut read = Some(0_u64);
-    let mut written = Some(0_u64);
-    for disk in now {
-        let Some(old) = before.iter().find(|old| same_disk(old, disk)) else {
-            return [None; 2];
-        };
-        let [read_delta, written_delta] = disk_delta(disk, old);
-        read = add(read, read_delta);
-        written = add(written, written_delta);
-    }
-
-    [read, written]
+    crate::metrics::storage::byte_deltas(now, before)
 }
 
 /// The disks of `tick`'s scan, where the scan completed at the tick.
@@ -408,37 +344,10 @@ fn disk_scan(tick: &TickRow) -> Option<&[DiskReading]> {
     snapshot.records.get(..snapshot.count)
 }
 
-fn same_disk(one: &DiskReading, other: &DiskReading) -> bool {
-    if one.driver_id != other.driver_id {
-        return false;
-    }
-
-    one.media_id == other.media_id
-}
-
-/// The bytes `current` read and wrote since `previous`.
-fn disk_delta(current: &DiskReading, previous: &DiskReading) -> [Option<u64>; 2] {
-    if current.failed {
-        return [None; 2];
-    }
-    if previous.failed {
-        return [None; 2];
-    }
-
-    let delta = |now: Option<u64>, before: Option<u64>| {
-        now.zip(before)
-            .and_then(|(now, before)| now.checked_sub(before))
-    };
-    [
-        delta(current.read_bytes, previous.read_bytes),
-        delta(current.write_bytes, previous.write_bytes),
-    ]
-}
-
 fn per_second(count: u64, elapsed_ns: u64) -> f64 {
     assert!(elapsed_ns > 0);
 
-    number(count) * 1e9 / number(elapsed_ns)
+    reduction::per_second(count, elapsed_ns)
 }
 
 /// The mean speed of the fans `fans` measured, or `None` where it measured none. A reading that
@@ -504,42 +413,44 @@ fn traffic(
     if current.len() != previous.len() {
         return None;
     }
-
-    let mut received = 0_u64;
-    let mut sent = 0_u64;
+    let mut totals = reduction::CounterTotals::new();
     for (index, now) in current.iter().enumerate() {
-        let before = paired(previous, index, |row| {
-            same_interface(&row.interface, &now.interface)
+        let old = paired(previous, index, |old| {
+            if old.interface.index != now.interface.index {
+                return false;
+            }
+            old.interface.name == now.interface.name
         })?;
-        let now = &now.interface;
-        let before = &before.interface;
-        received = received.checked_add(now.received_bytes.checked_sub(before.received_bytes)?)?;
-        sent = sent.checked_add(now.sent_bytes.checked_sub(before.sent_bytes)?)?;
+        if totals
+            .add(reduction::CounterPair {
+                current: &[
+                    Some(now.interface.received_bytes),
+                    Some(now.interface.sent_bytes),
+                ],
+                previous: &[
+                    Some(old.interface.received_bytes),
+                    Some(old.interface.sent_bytes),
+                ],
+            })
+            .is_err()
+        {
+            return None;
+        }
     }
-
+    let [received, sent] = totals.finish();
     Some(Traffic {
-        received_bps: number(received) * 1e9 / number(elapsed_ns),
-        sent_bps: number(sent) * 1e9 / number(elapsed_ns),
+        received_bps: reduction::per_second(received?, elapsed_ns),
+        sent_bps: reduction::per_second(sent?, elapsed_ns),
     })
 }
 
-fn same_interface(one: &Interface, other: &Interface) -> bool {
-    if one.index != other.index {
-        return false;
-    }
-
-    one.name == other.name
-}
-
-/// The row of `previous` that `matches`, looked for first at `index`, since both readings
-/// list their rows in one order unless what the collector found changed.
+/// The adapter retains each domain's original pairing policy; the reducer owns arithmetic.
 fn paired<T>(previous: &[T], index: usize, matches: impl Fn(&T) -> bool) -> Option<&T> {
     if let Some(row) = previous.get(index) {
         if matches(row) {
             return Some(row);
         }
     }
-
     previous.iter().find(|row| matches(row))
 }
 

@@ -4,6 +4,7 @@ use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::cpu_history_sample::{self, CounterSample, Identity, Interval};
+#[cfg(test)]
 use crate::data::Table;
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation};
 
@@ -100,9 +101,28 @@ impl History {
         });
     }
 
+    #[cfg(test)]
     pub fn capture(&mut self, identity: &Identity, table: &Table) -> Result<()> {
         let mut counters = Vec::new();
         cpu_history_sample::counters(table, identity.observation.publication, &mut counters)?;
+        self.capture_counters(identity, counters)
+    }
+
+    pub fn capture_rows(
+        &mut self,
+        identity: &Identity,
+        rows: &[crate::recording::CpuRow],
+    ) -> Result<()> {
+        let mut counters = Vec::new();
+        cpu_history_sample::counters_rows(rows, &mut counters)?;
+        self.capture_counters(identity, counters)
+    }
+
+    fn capture_counters(
+        &mut self,
+        identity: &Identity,
+        counters: cpu_history_sample::Counters,
+    ) -> Result<()> {
         let current = CounterSample {
             identity: identity.clone(),
             counters,

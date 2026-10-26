@@ -3,15 +3,15 @@
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use crate::data::Table;
+use crate::metric_view::View;
 
 /// The column that shows a source holds the system group, which comes whole or not at all.
 const SYSTEM_COLUMN: &str = "load_average_1";
 
 /// The system readings of a tick at its wall clock time.
 pub(super) struct SystemTick<'tick> {
-    pub ticks: &'tick Table,
-    pub tick: &'tick [Option<String>],
+    pub ticks: &'tick View<'tick>,
+    pub tick: usize,
     pub wall_ns: u64,
 }
 
@@ -58,8 +58,8 @@ pub(super) fn point(system: &SystemTick<'_>, value: &mut Value) -> Result<()> {
 /// The machine's two performance levels as `tick` recorded them, or none where the collector
 /// read no two levels.
 pub(crate) fn levels(
-    ticks: &Table,
-    tick: &[Option<String>],
+    ticks: &View<'_>,
+    tick: usize,
 ) -> Result<Option<collector::machine::PerformanceLevels>> {
     if !captured(ticks) {
         return Ok(None);
@@ -97,11 +97,11 @@ const FIELDS: [&str; 15] = [
     "performance_levels",
 ];
 
-fn captured(ticks: &Table) -> bool {
-    ticks.columns.iter().any(|column| column == SYSTEM_COLUMN)
+fn captured(ticks: &View<'_>) -> bool {
+    ticks.holds(SYSTEM_COLUMN)
 }
 
-fn machine(ticks: &Table, tick: &[Option<String>], value: &mut Value) -> Result<()> {
+fn machine(ticks: &View<'_>, tick: usize, value: &mut Value) -> Result<()> {
     for name in ["machine_model", "machine_chip", "machine_architecture"] {
         value[name] = json!(machine_text(ticks, tick, name)?);
     }
@@ -134,7 +134,7 @@ fn machine(ticks: &Table, tick: &[Option<String>], value: &mut Value) -> Result<
     Ok(())
 }
 
-fn machine_text(ticks: &Table, tick: &[Option<String>], name: &str) -> Result<Option<String>> {
+fn machine_text(ticks: &View<'_>, tick: usize, name: &str) -> Result<Option<String>> {
     Ok(ticks.field(tick, name)?.map(str::to_owned))
 }
 

@@ -3,6 +3,8 @@
 mod interrupted;
 #[path = "compatibility_fixture/inventory.rs"]
 mod inventory;
+#[path = "compatibility_fixture/population.rs"]
+mod population;
 #[path = "compatibility_fixture/source.rs"]
 mod source;
 
@@ -26,6 +28,7 @@ fn main() -> ExitCode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Layout {
+    Population,
     Legacy,
     Identity,
     Mixed,
@@ -76,10 +79,14 @@ fn run() -> Result<()> {
     let store = Store::open(&options.root)?;
     let layouts: &[SourceLayout] = match options.layout {
         Layout::Legacy => &[SourceLayout::Legacy],
+        Layout::Population => &[],
         Layout::Identity => &[SourceLayout::Identity],
         Layout::Mixed => &[SourceLayout::Legacy, SourceLayout::Identity],
     };
     let mut sources = Vec::with_capacity(2);
+    if options.layout == Layout::Population {
+        sources.push(population::create(&options.root, store.recording())?);
+    }
     for (index, layout) in layouts.iter().enumerate() {
         let mut source = None;
         source::create(
@@ -107,7 +114,7 @@ fn parse(arguments: &[String], output: &mut Option<Options>) -> Result<()> {
     assert!(output.is_none());
     if !matches!(arguments.len(), 4 | 6) {
         return Err(Error::Bound(
-            "--recording PATH --layout legacy|identity|mixed [--interrupt MODE]",
+            "--recording PATH --layout legacy|identity|mixed|population [--interrupt MODE]",
         ));
     }
 
@@ -132,6 +139,7 @@ fn parse(arguments: &[String], output: &mut Option<Options>) -> Result<()> {
         "legacy" => Layout::Legacy,
         "identity" => Layout::Identity,
         "mixed" => Layout::Mixed,
+        "population" => Layout::Population,
         _ => return Err(Error::Bound("unknown fixture layout")),
     };
     let interruption = parse_interruption(arguments, layout)?;
@@ -168,6 +176,24 @@ fn parse_interruption(arguments: &[String], layout: Layout) -> Result<Option<Int
 #[cfg(test)]
 mod tests {
     use super::{Interruption, Layout};
+
+    #[test]
+    fn accepts_the_fixed_finite_population_profile() {
+        // Goal: process-volume measurements use a bounded existing fixture entry point.
+        // Method: parse the opt-in profile without allocating or publishing a ring.
+        let arguments = [
+            "--recording",
+            "/private/tmp/finite-population",
+            "--layout",
+            "population",
+        ]
+        .map(str::to_owned);
+        let mut parsed = None;
+        super::parse(&arguments, &mut parsed).unwrap();
+        assert_eq!(parsed.unwrap().layout, Layout::Population);
+        assert_eq!(super::population::PUBLICATIONS, 120);
+        assert_eq!(super::population::PROCESSES, 1050);
+    }
 
     #[test]
     fn refuses_interruptions_for_ordinary_legacy_sources() {
