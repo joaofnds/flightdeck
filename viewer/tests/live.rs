@@ -298,6 +298,20 @@ mod tests {
             events: &[collector::tracker::Event],
             processes: &[collector::processes::Process],
         ) {
+            self.publish_rows(second, events, processes, &[]);
+        }
+
+        fn publish_coalition(&mut self, second: u64, coalition: &collector::coalitions::Coalition) {
+            self.publish_rows(second, &[], &[], std::slice::from_ref(coalition));
+        }
+
+        fn publish_rows(
+            &mut self,
+            second: u64,
+            events: &[collector::tracker::Event],
+            processes: &[collector::processes::Process],
+            coalitions: &[collector::coalitions::Coalition],
+        ) {
             let memory = Memory {
                 total_bytes: 9_007_199_254_740_993 + self.elapsed,
                 ..Memory::default()
@@ -319,7 +333,7 @@ mod tests {
                     processes,
                     processes_refused: 0,
                     processes_gone: 0,
-                    coalitions: &[],
+                    coalitions,
                     events,
                     dropped: Dropped::default(),
                 },
@@ -331,6 +345,69 @@ mod tests {
             );
             self.elapsed += 1;
         }
+    }
+
+    #[test]
+    fn preserves_every_populated_coalition_cell_before_and_after_sealing() {
+        // Goal: native coalition formatting preserves independently specified exact cells.
+        // Method: publish distinct native counters, assert the whole page, seal and assert again.
+        let mut recording = Recording::new();
+        recording.publish_coalition(
+            1000,
+            &collector::coalitions::Coalition {
+                id: 9_007_199_254_740_993,
+                tasks_started: 101,
+                tasks_exited: 17,
+                cpu_ns: 9_007_199_254_740_995,
+                interrupt_wakeups: 23,
+                idle_wakeups: 29,
+                disk_read_bytes: 9_007_199_254_740_997,
+                disk_written_bytes: 9_007_199_254_740_999,
+                gpu_ns: 9_007_199_254_741_001,
+                energy_nj: u64::MAX,
+            },
+        );
+        let columns = serde_json::json!([
+            "publication",
+            "coalition",
+            "tasks_started",
+            "tasks_exited",
+            "cpu_ns",
+            "interrupt_wakeups",
+            "idle_wakeups",
+            "disk_read_bytes",
+            "disk_written_bytes",
+            "gpu_ns",
+            "energy_nj"
+        ]);
+        let rows = serde_json::json!([[
+            "1",
+            "9007199254740993",
+            "101",
+            "17",
+            "9007199254740995",
+            "23",
+            "29",
+            "9007199254740997",
+            "9007199254740999",
+            "9007199254741001",
+            "18446744073709551615"
+        ]]);
+
+        let mut live = LiveSession::open(&recording.root).unwrap();
+        live.follow_latest().unwrap();
+        let page = live.page("coalitions", 0).unwrap();
+
+        assert_eq!(page["columns"], columns);
+        assert_eq!(page["rows"], rows);
+        assert_eq!(page["total"], 1);
+        recording.seal();
+        let mut saved = viewer::Session::open(&recording.root).unwrap();
+        saved.select(1000, 0).unwrap();
+        let sealed = saved.page("coalitions", 0).unwrap();
+        assert_eq!(sealed["columns"], columns);
+        assert_eq!(sealed["rows"], rows);
+        assert_eq!(sealed["total"], 1);
     }
 
     impl Drop for Recording {
