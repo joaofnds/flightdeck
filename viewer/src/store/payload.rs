@@ -49,19 +49,25 @@ pub struct ProcessRow {
     pub app_index: Option<u32>,
     executable_name: Option<Arc<ProcessName>>,
     pub program_unavailable: Option<IdentityUnavailable>,
-    pub cpu_ns: Amount,
-    pub energy_nj: Amount,
-    pub gpu_ns: Amount,
-    pub disk_read_bytes: Amount,
-    pub disk_written_bytes: Amount,
-    pub disk_io_bytes: Amount,
-    pub resident_bytes: Amount,
-    pub footprint_bytes: Amount,
-    pub idle_wakeups: Amount,
-    pub pageins: Amount,
-    pub threads: Amount,
+    cpu_ns: CompactAmount,
+    energy_nj: CompactAmount,
+    gpu_ns: CompactAmount,
+    disk_read_bytes: CompactAmount,
+    disk_written_bytes: CompactAmount,
+    disk_io_bytes: CompactAmount,
+    resident_bytes: CompactAmount,
+    footprint_bytes: CompactAmount,
+    idle_wakeups: CompactAmount,
+    pageins: CompactAmount,
+    threads: CompactAmount,
     pub app_attribution: Option<Unavailable>,
     pub state: ProcessState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CompactAmount {
+    known: [u8; 8],
+    unavailable: Option<Unavailable>,
 }
 
 /// Measures displayed in App detail, aligned with the observation's App rows.
@@ -136,6 +142,61 @@ impl Payload {
 }
 
 impl ProcessRow {
+    #[must_use]
+    pub fn cpu_ns(&self) -> Amount {
+        self.cpu_ns.amount()
+    }
+
+    #[must_use]
+    pub fn energy_nj(&self) -> Amount {
+        self.energy_nj.amount()
+    }
+
+    #[must_use]
+    pub fn gpu_ns(&self) -> Amount {
+        self.gpu_ns.amount()
+    }
+
+    #[must_use]
+    pub fn disk_read_bytes(&self) -> Amount {
+        self.disk_read_bytes.amount()
+    }
+
+    #[must_use]
+    pub fn disk_written_bytes(&self) -> Amount {
+        self.disk_written_bytes.amount()
+    }
+
+    #[must_use]
+    pub fn disk_io_bytes(&self) -> Amount {
+        self.disk_io_bytes.amount()
+    }
+
+    #[must_use]
+    pub fn resident_bytes(&self) -> Amount {
+        self.resident_bytes.amount()
+    }
+
+    #[must_use]
+    pub fn footprint_bytes(&self) -> Amount {
+        self.footprint_bytes.amount()
+    }
+
+    #[must_use]
+    pub fn idle_wakeups(&self) -> Amount {
+        self.idle_wakeups.amount()
+    }
+
+    #[must_use]
+    pub fn pageins(&self) -> Amount {
+        self.pageins.amount()
+    }
+
+    #[must_use]
+    pub fn threads(&self) -> Amount {
+        self.threads.amount()
+    }
+
     /// The name remains borrowed from the payload that owns its byte reservation.
     /// ```compile_fail
     /// use viewer::store::{ProcessName, ProcessRow};
@@ -169,19 +230,41 @@ impl ProcessRow {
             app_index: process.app_index,
             executable_name,
             program_unavailable: process.program_unavailable,
-            cpu_ns: process.cpu_ns,
-            energy_nj: process.energy_nj,
-            gpu_ns: process.gpu_ns,
-            disk_read_bytes: process.disk_read_bytes,
-            disk_written_bytes: process.disk_written_bytes,
-            disk_io_bytes: process.disk_io_bytes,
-            resident_bytes: process.resident_bytes,
-            footprint_bytes: process.footprint_bytes,
-            idle_wakeups: process.idle_wakeups,
-            pageins: process.pageins,
-            threads: process.threads,
+            cpu_ns: CompactAmount::capture(process.cpu_ns),
+            energy_nj: CompactAmount::capture(process.energy_nj),
+            gpu_ns: CompactAmount::capture(process.gpu_ns),
+            disk_read_bytes: CompactAmount::capture(process.disk_read_bytes),
+            disk_written_bytes: CompactAmount::capture(process.disk_written_bytes),
+            disk_io_bytes: CompactAmount::capture(process.disk_io_bytes),
+            resident_bytes: CompactAmount::capture(process.resident_bytes),
+            footprint_bytes: CompactAmount::capture(process.footprint_bytes),
+            idle_wakeups: CompactAmount::capture(process.idle_wakeups),
+            pageins: CompactAmount::capture(process.pageins),
+            threads: CompactAmount::capture(process.threads),
             app_attribution: process.app_attribution,
             state: process.state,
+        }
+    }
+}
+
+impl CompactAmount {
+    fn capture(amount: Amount) -> Self {
+        match amount {
+            Amount::Known(value) => Self {
+                known: value.to_le_bytes(),
+                unavailable: None,
+            },
+            Amount::Unavailable(reason) => Self {
+                known: [0; 8],
+                unavailable: Some(reason),
+            },
+        }
+    }
+
+    fn amount(self) -> Amount {
+        match self.unavailable {
+            Some(reason) => Amount::Unavailable(reason),
+            None => Amount::Known(u64::from_le_bytes(self.known)),
         }
     }
 }
@@ -201,6 +284,12 @@ impl PartialEq for Payload {
 }
 
 const _: () = {
-    assert!(size_of::<ProcessRow>() <= 240);
+    assert!(size_of::<ProcessRow>() <= 152);
+    assert!(size_of::<CompactAmount>() <= 9);
+    assert!(align_of::<CompactAmount>() == 1);
     assert!(size_of::<AppDetails>() <= 80);
 };
+
+#[cfg(test)]
+#[path = "payload_tests.rs"]
+mod tests;

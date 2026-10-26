@@ -159,8 +159,8 @@ fn both_adapters_keep_distinct_nonzero_read_and_write_intervals() {
 fn assert_directional_payload(view: &View) {
     let payload = view.apps[1].processes.as_ref().unwrap();
     let process = payload.iter().find(|process| process.pid == 7).unwrap();
-    assert_eq!(process.disk_read_bytes, crate::apps::Amount::Known(17));
-    assert_eq!(process.disk_written_bytes, crate::apps::Amount::Known(43));
+    assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
+    assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
     let app = &payload.apps()[usize::try_from(process.app_index.unwrap()).unwrap()];
     assert_eq!(
         app.disk_read_bytes,
@@ -299,7 +299,7 @@ fn sealed_payloads_match_ring_payloads_including_refused_processes() {
     assert_eq!(processes.len(), 2);
     assert_eq!(processes[0].pid, 1);
     assert_eq!(
-        processes[0].cpu_ns,
+        processes[0].cpu_ns(),
         crate::apps::Amount::Unavailable(crate::apps::Unavailable::Refused)
     );
 }
@@ -575,11 +575,11 @@ fn both_adapters_keep_gone_and_refused_processes_without_app_identity() {
     assert_eq!(rows[0].app_index, None);
     assert_eq!(rows[1].app_index, None);
     assert_eq!(
-        rows[0].cpu_ns,
+        rows[0].cpu_ns(),
         crate::apps::Amount::Unavailable(crate::apps::Unavailable::Gone)
     );
     assert_eq!(
-        rows[1].cpu_ns,
+        rows[1].cpu_ns(),
         crate::apps::Amount::Unavailable(crate::apps::Unavailable::Refused)
     );
 }

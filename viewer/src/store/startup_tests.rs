@@ -175,8 +175,8 @@ fn assert_cold_matches_warm(sealed_count: u64) {
     assert_eq!(actual.apps[index], expected.apps[index]);
     let payload = actual.apps[index].processes.as_ref().unwrap();
     let process = payload.iter().find(|process| process.pid == 7).unwrap();
-    assert_eq!(process.disk_read_bytes, crate::apps::Amount::Known(17));
-    assert_eq!(process.disk_written_bytes, crate::apps::Amount::Known(43));
+    assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
+    assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
     assert_eq!(payload.previous.unwrap().publication, sealed_count);
     assert_eq!(actual.apps[index].elapsed_ns, Some(1_000_000_000));
 }
