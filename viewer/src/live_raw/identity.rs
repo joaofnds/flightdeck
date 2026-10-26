@@ -32,6 +32,7 @@ impl Identity {
             if arena.len() + name + app > arena.capacity() {
                 return Err(Error::Bound("live raw changed identity bytes"));
             }
+
             let start = arena.len();
             arena.extend_from_slice(&buffers.0[..name]);
             identity.name = Some(start..arena.len());
@@ -96,9 +97,11 @@ fn copy(
     if name > PATH_BYTES {
         return Err(Error::Bound("captured path bytes"));
     }
+
     if app > PATH_BYTES {
         return Err(Error::Bound("captured path bytes"));
     }
+
     collector::ring::ProgramBytes {
         executable_name: &buffers.0[..name],
         app_path: (app > 0).then_some(&buffers.1[..app]),

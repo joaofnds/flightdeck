@@ -20,6 +20,7 @@ pub(super) fn charge(point: &Value) -> Result<usize> {
         if count == 0 {
             return Ok(bytes);
         }
+
         count -= 1;
         let value = pending[count]
             .take()

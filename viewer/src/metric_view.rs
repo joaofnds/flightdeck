@@ -160,6 +160,7 @@ impl View<'_> {
                 if name == "name" {
                     return Ok(self.field(row, name)?.map(Key::Text));
                 }
+
                 Ok(self.integer(row, name)?.map(Key::Integer))
             }
         }
@@ -204,9 +205,11 @@ impl View<'_> {
                 if !self.holds(persistence::disks::FIELD) {
                     return Ok(false);
                 }
+
                 let Some(text) = table.field(&table.rows[row], persistence::disks::FIELD)? else {
                     return Ok(false);
                 };
+
                 persistence::disks::decode(text, snapshot)?;
                 Ok(true)
             }

@@ -80,6 +80,7 @@ impl<'a> View<'a> {
         if states.len() > 512 {
             return Err(Error::Bound("core level states"));
         }
+
         self.levels = states.into_values().collect();
         Ok(())
     }
@@ -88,6 +89,7 @@ impl<'a> View<'a> {
         if self.derived {
             return self.levels.len();
         }
+
         let machine = &self.raw.machine;
         match self.table.name {
             "ticks" | "memory" => 1,
@@ -172,6 +174,7 @@ impl<'a> View<'a> {
         if self.len() > crate::data::ROWS_MAX {
             return Err(Error::Bound("live raw rows"));
         }
+
         let mut order: Vec<_> = (0..self.len()).collect();
         operation.check()?;
         match self.table.name {
@@ -237,13 +240,16 @@ impl<'a> View<'a> {
         if row >= self.len() {
             return Err(Error::Bound("live raw row"));
         }
+
         if !self.holds(name) {
             return Err(Error::Bound("missing schema column"));
         }
+
         let publication = self.raw.machine.ticks[0].publication;
         if name == "publication" {
             return Ok(Cell::Unsigned(publication));
         }
+
         if self.derived {
             let state = &self.levels[row];
             return Ok(match name {
@@ -254,6 +260,7 @@ impl<'a> View<'a> {
                 _ => unreachable!("derived columns"),
             });
         }
+
         Ok(match self.table.name {
             "ticks" => self.tick(name),
             "memory" => self.memory(name),
@@ -287,6 +294,7 @@ impl Cell<'_> {
                 if !number.is_finite() {
                     return Ok(None);
                 }
+
                 // Legacy Float32 cells used their shortest decimal before f64 parsing.
                 // Preserve that public scalar presentation without building a string table.
                 number
@@ -323,6 +331,7 @@ impl Cell<'_> {
         if text.len() > 4096 {
             return Err(Error::Bound("cell bytes"));
         }
+
         Ok(Some(text))
     }
 }
@@ -424,7 +433,7 @@ impl<'a> View<'a> {
         let reading = self.raw.machine.ticks[0].battery.as_ref();
         match name {
             "battery_version" => {
-                optional_unsigned(reading.map(|_| persistence::schema::BATTERY_VERSION))
+                optional_unsigned(reading.map(|_| schema::BATTERY_VERSION))
             }
             "battery_source_continuous_ns" => {
                 optional_unsigned(reading.map(|reading| reading.source_continuous_ns))
@@ -649,7 +658,7 @@ impl<'a> View<'a> {
     fn identity(&self, identity: Option<&'a super::Identity>, name: &str) -> Cell<'a> {
         match name {
             "identity_version" => {
-                optional_unsigned(identity.map(|_| persistence::schema::IDENTITY_VERSION))
+                optional_unsigned(identity.map(|_| schema::IDENTITY_VERSION))
             }
             "identity_availability" => unsigned(
                 identity.map_or(schema::identity_availability::UNSUPPORTED, |identity| {
