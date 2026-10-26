@@ -159,7 +159,10 @@ impl FrozenRecording {
             .replay
             .get()
             .ok_or_else(|| io::Error::other("reset replay first"))?;
-        self.files.replay_seal(window, newest)
+        self.files.replay_seal(&files::Seal {
+            window,
+            publication: newest,
+        })
     }
 
     pub fn replay_complete(&self) -> io::Result<()> {
@@ -169,6 +172,7 @@ impl FrozenRecording {
             ));
         }
 
+        self.files.replay_complete(self.active_ring().newest)?;
         self.active_ring().complete(true);
         Ok(())
     }
@@ -190,6 +194,7 @@ impl FrozenRecording {
             return Err(io::Error::other("paced replay exceeds five minutes"));
         }
 
+        self.files.replay_seal_eligible(previous)?;
         let started = std::time::Instant::now();
         for publication in previous + 1..=self.active_ring().newest {
             let elapsed = std::time::Duration::from_millis((publication - previous) * interval_ms);

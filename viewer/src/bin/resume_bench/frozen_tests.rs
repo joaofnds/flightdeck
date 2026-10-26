@@ -22,6 +22,7 @@ struct Fixture {
     writer: Writer,
     program: ProgramReference,
     events: usize,
+    wall_ns: Option<u64>,
 }
 
 const SHAPE: Shape = Shape {
@@ -35,6 +36,81 @@ const SHAPE: Shape = Shape {
     coalition_capacity: 1,
     event_capacity: 120,
 };
+
+#[test]
+fn retries_a_failed_eligible_seal_before_completing_replay() {
+    // Goal: a recoverable seal failure cannot leave a hidden commit behind a successful replay.
+    // Method: block the eligible marker's destination, observe refusal, restore it and retry.
+    let mut source = Fixture::new();
+    source.populate();
+    let frozen = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    })
+    .unwrap();
+    let destination = marker(frozen.root(), source.writer.identity().unwrap().run, 30);
+    frozen.replay_reset(1859).unwrap();
+    fs::create_dir(&destination).unwrap();
+
+    assert!(frozen.replay_run(1).is_err());
+    assert_eq!(frozen.replay.get(), Some(1860));
+    fs::remove_dir(&destination).unwrap();
+    frozen.replay_run(1).unwrap();
+
+    assert!(destination.is_file());
+    assert_eq!(frozen.replay.get(), Some(1900));
+    let registry = Registry::read(frozen.root()).unwrap();
+    assert!(
+        RingReader::open_generation(&registry.runs[0].ring_name)
+            .unwrap()
+            .completed()
+    );
+}
+
+#[test]
+fn follows_native_publication_order_after_wall_rollback_with_future_saved_points() {
+    // Goal: frozen input expectations follow native order and clip future wall-clock readings.
+    // Method: keep a later-clock sealed window, roll the live clock back, and compare the caller.
+    let mut source = Fixture::new();
+    source.populate();
+    for (publication, second) in [(1901, 1000), (1902, 900), (1903, 900)] {
+        source.wall_ns = Some(second * 1_000_000_000);
+        source.publish(publication);
+    }
+    let frozen = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    })
+    .unwrap();
+    let path = source.root.join("rollback.json");
+    frozen.expectation(&path).unwrap();
+    let expected: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+
+    assert_eq!(expected["selected"]["publication"], 1903);
+    assert_eq!(expected["selected"]["wall_ns"], 900_000_000_000_u64);
+    let mut session = viewer::LiveSession::open(frozen.root()).unwrap();
+    session.poll().unwrap();
+    let actual = session.follow_latest().unwrap();
+    for field in ["run", "boot", "publication", "run_tick", "wall_ns"] {
+        assert_eq!(actual["selected"][field], expected["selected"][field]);
+    }
+    let context: Vec<_> = actual["trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|point| {
+            serde_json::json!({"run": point["run"], "boot": point["boot"],
+            "publication": point["publication"], "run_tick": point["run_tick"],
+            "wall_ns": point["wall_ns"]})
+        })
+        .collect();
+    assert_eq!(context, *expected["observations"].as_array().unwrap());
+    assert!(
+        context
+            .iter()
+            .all(|point| point["wall_ns"].as_u64().unwrap() < 901_000_000_000)
+    );
+}
 
 #[test]
 fn starts_new_replay_readers_at_the_validated_retained_input() {
@@ -365,6 +441,7 @@ impl Fixture {
             writer,
             program: program.unwrap(),
             events: 0,
+            wall_ns: None,
         }
     }
 
@@ -443,7 +520,7 @@ impl Fixture {
             .publish_with_identity(
                 &Readings {
                     run_tick: publication - 1,
-                    cpus: &[],
+                    cpus: &[collector::machine::CPUTicks::default()],
                     memory: &Memory::default(),
                     interfaces: &[],
                     ioreport: None,
@@ -456,7 +533,7 @@ impl Fixture {
                     dropped: Dropped::default(),
                 },
                 Some(&ObservationTimes {
-                    wall_ns: publication * 1_000_000_000,
+                    wall_ns: self.wall_ns.unwrap_or(publication * 1_000_000_000),
                     continuous_ns: publication * 1_000_000_000,
                     awake_ns: publication * 1_000_000_000,
                 }),

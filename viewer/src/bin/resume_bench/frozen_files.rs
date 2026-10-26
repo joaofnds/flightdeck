@@ -24,6 +24,11 @@ struct FrozenMarker {
     window: u64,
 }
 
+pub(super) struct Seal {
+    pub(super) window: u64,
+    pub(super) publication: u64,
+}
+
 pub(super) struct CapturedWindow {
     pub(super) manifest: Manifest,
     pub(super) marker: PathBuf,
@@ -114,31 +119,53 @@ impl FrozenFiles {
         Ok(())
     }
 
-    pub(super) fn replay_seal(&self, window: u64, newest: u64) -> io::Result<()> {
+    pub(super) fn replay_seal(&self, seal: &Seal) -> io::Result<()> {
         let mut hidden = self.hidden.borrow_mut();
         let position = hidden
             .iter()
-            .position(|index| self.markers[*index].window == window)
+            .position(|index| self.markers[*index].window == seal.window)
             .ok_or_else(|| io::Error::other("seal is absent or already visible"))?;
-        let marker = &self.markers[hidden[position]];
-        if marker.publication_end > newest + 1 {
+        if self.markers[hidden[position]].publication_end > seal.publication + 1 {
             return Err(io::Error::other("seal extends past replay endpoint"));
         }
 
-        fs::rename(&marker.hidden, &marker.visible)?;
-        hidden.remove(position);
-        Ok(())
+        self.replay_reveal(&mut hidden, position)
     }
 
     pub(super) fn replay_seal_eligible(&self, newest: u64) -> io::Result<()> {
-        assert!(self.markers.len() <= WINDOWS_MAX);
-        for marker in &self.markers {
-            if marker.publication_end == newest + 1 {
-                if marker.hidden.try_exists()? {
-                    self.replay_seal(marker.window, newest)?;
-                }
+        let mut hidden = self.hidden.borrow_mut();
+        let mut position = 0;
+        for _marker in 0..self.markers.len() {
+            if position == hidden.len() {
+                return Ok(());
+            }
+
+            if self.markers[hidden[position]].publication_end <= newest + 1 {
+                self.replay_reveal(&mut hidden, position)?;
+            } else {
+                position += 1;
             }
         }
+        assert_eq!(position, hidden.len());
+        Ok(())
+    }
+
+    pub(super) fn replay_complete(&self, newest: u64) -> io::Result<()> {
+        self.replay_seal_eligible(newest)?;
+        if !self.hidden.borrow().is_empty() {
+            return Err(io::Error::other(
+                "captured seals extend past final replay input",
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn replay_reveal(&self, hidden: &mut Vec<usize>, position: usize) -> io::Result<()> {
+        assert!(position < hidden.len());
+        let marker = &self.markers[hidden[position]];
+        fs::rename(&marker.hidden, &marker.visible)?;
+        hidden.remove(position);
         Ok(())
     }
 }

@@ -16,6 +16,12 @@ pub(super) struct Boundary {
     pub(super) events_end: u64,
 }
 
+struct ManifestData<'a> {
+    rings: &'a [Value],
+    windows: &'a [Value],
+    selected: &'a Value,
+}
+
 const PUBLICATIONS_MAX: u64 = 65_536;
 const CONTEXT_INPUTS_MAX: usize = 6_000_000;
 const MANIFEST_BYTES_MAX: usize = 256 * 1024 * 1024;
@@ -46,14 +52,20 @@ pub(super) fn expectation(frozen: &FrozenRecording, path: &Path) -> io::Result<(
         frozen.active_ring().identity.run.0[1]
     );
     let mut observations = frozen.observations.clone();
-    export_windows(frozen, &mut observations)?;
-    observations.retain(|point| {
+    let visible = |point: &Value| {
         point["run"].as_str() != Some(&active)
             || point["publication"]
                 .as_u64()
                 .is_some_and(|publication| publication <= newest)
-    });
-    let (selected, observations) = context(observations)?;
+    };
+    observations.retain(visible);
+    let selected = observations
+        .last()
+        .ok_or_else(|| io::Error::other("no native endpoint is visible"))?
+        .clone();
+    export_windows(frozen, &mut observations)?;
+    observations.retain(visible);
+    let observations = context(observations, &selected)?;
     let bytes = serde_json::to_vec_pretty(&json!({"selected": selected,
         "observations": observations, "payloads": Value::Null,
         "provenance": "native input identities and currently visible committed machine ticks"}))
@@ -112,22 +124,34 @@ pub(super) fn export(frozen: &FrozenRecording, directory: &Path) -> io::Result<(
             "sha256": file_hash(&backing)?,
             "publications": publications}));
     }
+    let selected = observations
+        .last()
+        .ok_or_else(|| io::Error::other("empty native input"))?
+        .clone();
     let windows = export_windows(frozen, &mut observations)?;
-    export_manifest(frozen, directory, &rings, &windows, observations)
+    export_manifest(
+        frozen,
+        directory,
+        &ManifestData {
+            rings: &rings,
+            windows: &windows,
+            selected: &selected,
+        },
+        observations,
+    )
 }
 
 fn export_manifest(
     frozen: &FrozenRecording,
     directory: &Path,
-    rings: &[Value],
-    windows: &[Value],
+    data: &ManifestData<'_>,
     observations: Vec<Value>,
 ) -> io::Result<()> {
-    let (selected, observations) = context(observations)?;
+    let observations = context(observations, data.selected)?;
     let manifest = json!({"provenance":
         "native readers and committed machine decoder; no measured outputs",
         "identity_sha256": file_hash(&frozen.root().join("identity"))?,
-        "rings": rings, "windows": windows, "selected": selected,
+        "rings": data.rings, "windows": data.windows, "selected": data.selected,
         "observations": observations, "payloads": Value::Null,
         "payload_oracle":
             "freeze separately from route contracts or baseline correctness before timing"});
@@ -142,29 +166,33 @@ fn export_manifest(
     file.sync_all()
 }
 
-fn context(mut observations: Vec<Value>) -> io::Result<(Value, Vec<Value>)> {
-    observations.sort_by_key(|point| {
+fn context(mut observations: Vec<Value>, selected: &Value) -> io::Result<Vec<Value>> {
+    observations.sort_by(|left, right| {
         (
-            point["wall_ns"].as_u64(),
-            point["run"].as_str().map(str::to_owned),
-            point["publication"].as_u64(),
+            left["wall_ns"].as_u64(),
+            left["run"].as_str(),
+            left["boot"].as_str(),
+            left["publication"].as_u64(),
         )
+            .cmp(&(
+                right["wall_ns"].as_u64(),
+                right["run"].as_str(),
+                right["boot"].as_str(),
+                right["publication"].as_u64(),
+            ))
     });
     observations.dedup();
-    let selected = observations
-        .last()
-        .ok_or_else(|| io::Error::other("empty input"))?
-        .clone();
     let last = selected["wall_ns"]
         .as_u64()
         .ok_or_else(|| io::Error::other("input clock"))?
         / 1_000_000_000;
     observations.retain(|point| {
         point["wall_ns"].as_u64().is_some_and(|wall| {
-            wall / 1_000_000_000 >= last.saturating_sub(viewer::CHARTED_SECONDS - 1)
+            (last.saturating_sub(viewer::CHARTED_SECONDS - 1)..=last)
+                .contains(&(wall / 1_000_000_000))
         })
     });
-    Ok((selected, observations))
+    Ok(observations)
 }
 
 fn visit(
