@@ -1,5 +1,5 @@
 use model::catalog;
-use persistence::{Error, Result};
+use persistence::{Error, Result, schema};
 
 use super::{Operation, Raw};
 
@@ -207,7 +207,7 @@ impl<'a> View<'a> {
     ) {
         if let Some(identities) = &self.raw.identities {
             let identity = &identities[index];
-            let process = if identity.usage == 0 {
+            let process = if identity.usage == schema::availability::MEASURED {
                 let index = self
                     .raw
                     .processes
@@ -350,19 +350,40 @@ fn event_facts(
     use collector::processes::Unreadable;
     use collector::tracker::{Event, Noticed};
     match event {
-        Event::Start { pid, coalition } => (*pid, None, 1, *coalition, 3, None),
-        Event::Exec { pid } => (*pid, None, 2, None, 3, None),
+        Event::Start { pid, coalition } => (
+            *pid,
+            None,
+            schema::event_kind::START,
+            *coalition,
+            schema::availability::NOT_APPLICABLE,
+            None,
+        ),
+        Event::Exec { pid } => (
+            *pid,
+            None,
+            schema::event_kind::EXEC,
+            None,
+            schema::availability::NOT_APPLICABLE,
+            None,
+        ),
         Event::Exit { pid, last, noticed } => {
             let (usage, availability) = match last {
-                Ok(usage) => (Some(usage), 0),
-                Err(Unreadable::Refused) => (None, 1),
-                Err(Unreadable::Gone) => (None, 2),
+                Ok(usage) => (Some(usage), schema::availability::MEASURED),
+                Err(Unreadable::Refused) => (None, schema::availability::REFUSED),
+                Err(Unreadable::Gone) => (None, schema::availability::GONE),
             };
             let noticed = match noticed {
-                Noticed::OnExit => 0,
-                Noticed::AlreadyExited => 1,
+                Noticed::OnExit => schema::noticed::ON_EXIT,
+                Noticed::AlreadyExited => schema::noticed::ALREADY_EXITED,
             };
-            (*pid, usage, 3, None, availability, Some(noticed))
+            (
+                *pid,
+                usage,
+                schema::event_kind::EXIT,
+                None,
+                availability,
+                Some(noticed),
+            )
         }
     }
 }
@@ -525,9 +546,9 @@ impl<'a> View<'a> {
             "compressions" => unsigned(memory.compressions),
             "decompressions" => unsigned(memory.decompressions),
             "pressure" => unsigned(match memory.pressure {
-                collector::machine::Pressure::Normal => 0_u8,
-                collector::machine::Pressure::Warning => 1,
-                collector::machine::Pressure::Critical => 2,
+                collector::machine::Pressure::Normal => schema::pressure::NORMAL,
+                collector::machine::Pressure::Warning => schema::pressure::WARNING,
+                collector::machine::Pressure::Critical => schema::pressure::CRITICAL,
             }),
             _ => unreachable!("memory columns"),
         }
@@ -630,10 +651,14 @@ impl<'a> View<'a> {
             "identity_version" => {
                 optional_unsigned(identity.map(|_| persistence::schema::IDENTITY_VERSION))
             }
-            "identity_availability" => {
-                unsigned(identity.map_or(3, |identity| identity.availability))
+            "identity_availability" => unsigned(
+                identity.map_or(schema::identity_availability::UNSUPPORTED, |identity| {
+                    identity.availability
+                }),
+            ),
+            "usage_availability" => {
+                unsigned(identity.map_or(schema::availability::MEASURED, |identity| identity.usage))
             }
-            "usage_availability" => unsigned(identity.map_or(0, |identity| identity.usage)),
             "process_unique_id" => optional_unsigned(
                 identity
                     .and_then(|identity| identity.creation)

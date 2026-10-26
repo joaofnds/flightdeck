@@ -1,5 +1,5 @@
 use collector::ring::{IdentityObservation, ProgramBuffers, RingReader};
-use persistence::{Error, Result};
+use persistence::{Error, Result, schema};
 
 use super::{Operation, PATH_BYTES, ProcessCreation, RAW_BYTES_MAX};
 
@@ -111,22 +111,22 @@ fn copy(
 fn availability(value: collector::ring::IdentityAvailability) -> u8 {
     use collector::ring::IdentityAvailability;
     match value {
-        IdentityAvailability::Measured => 0,
-        IdentityAvailability::Refused => 1,
-        IdentityAvailability::Gone => 2,
-        IdentityAvailability::Unsupported => 3,
-        IdentityAvailability::Changed => 4,
-        IdentityAvailability::Invalid => 5,
-        IdentityAvailability::Exhausted => 6,
+        IdentityAvailability::Measured => schema::identity_availability::MEASURED,
+        IdentityAvailability::Refused => schema::identity_availability::REFUSED,
+        IdentityAvailability::Gone => schema::identity_availability::GONE,
+        IdentityAvailability::Unsupported => schema::identity_availability::UNSUPPORTED,
+        IdentityAvailability::Changed => schema::identity_availability::CHANGED,
+        IdentityAvailability::Invalid => schema::identity_availability::INVALID,
+        IdentityAvailability::Exhausted => schema::identity_availability::EXHAUSTED,
     }
 }
 
 fn usage(value: collector::ring::UsageAvailability) -> u8 {
     use collector::ring::UsageAvailability;
     match value {
-        UsageAvailability::Measured => 0,
-        UsageAvailability::Refused => 1,
-        UsageAvailability::Gone => 2,
-        UsageAvailability::NotApplicable => 3,
+        UsageAvailability::Measured => schema::availability::MEASURED,
+        UsageAvailability::Refused => schema::availability::REFUSED,
+        UsageAvailability::Gone => schema::availability::GONE,
+        UsageAvailability::NotApplicable => schema::availability::NOT_APPLICABLE,
     }
 }
