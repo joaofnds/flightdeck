@@ -124,11 +124,13 @@ fn export_manifest(
     observations: Vec<Value>,
 ) -> io::Result<()> {
     let (selected, observations) = context(observations)?;
-    let manifest = json!({"provenance": "native readers and committed machine decoder; no measured outputs",
+    let manifest = json!({"provenance":
+        "native readers and committed machine decoder; no measured outputs",
         "identity_sha256": file_hash(&frozen.root().join("identity"))?,
         "rings": rings, "windows": windows, "selected": selected,
         "observations": observations, "payloads": Value::Null,
-        "payload_oracle": "freeze separately from route contracts or baseline correctness before timing"});
+        "payload_oracle":
+            "freeze separately from route contracts or baseline correctness before timing"});
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
     if bytes.len() > MANIFEST_BYTES_MAX {
         return Err(io::Error::other("input manifest byte bound"));
@@ -223,7 +225,8 @@ fn validate_events(
                 event,
             } if number == expected && event_tick == tick.run_tick => {
                 events.push(json!({"number": number, "run_tick": event_tick,
-                    "metadata": format!("{event:?}"), "identity": identity_value(reader, &identity)?}));
+                    "metadata": format!("{event:?}"),
+                    "identity": identity_value(reader, &identity)?}));
             }
             _ => return Err(io::Error::other("native event overwritten or incomplete")),
         }
