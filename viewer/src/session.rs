@@ -1127,7 +1127,7 @@ fn reopen_markers<'earlier>(
     markers
 }
 
-fn discover(
+pub(crate) fn discover(
     root: &Path,
     recording: Identity,
     windows: &mut Vec<Manifest>,

@@ -13,6 +13,9 @@ use std::thread;
 #[path = "recording_payload.rs"]
 mod payload;
 
+#[path = "recording_catalog.rs"]
+mod catalog;
+
 #[cfg(test)]
 #[path = "recording_buffer_tests.rs"]
 mod buffer_tests;
@@ -159,7 +162,7 @@ fn load_payload_window_using(
 ) -> persistence::Result<Outcome> {
     operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
-    let discovered = find_window(root, &mut found, window);
+    let discovered = catalog::find(root, &mut found, window, operation);
     operation.check()?;
     if let Err(failure) = discovered {
         return Ok(Outcome {
