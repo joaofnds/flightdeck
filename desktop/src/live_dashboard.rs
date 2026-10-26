@@ -1290,6 +1290,9 @@ impl LiveDashboard {
         div()
             .id("flightdeck-live")
             .track_focus(root_focus)
+            .on_action(|_: &crate::native_workflows::CloseWindow, window, _| {
+                window.remove_window();
+            })
             .tab_stop(false)
             .role(gpui::Role::Application)
             .accessibility_id("flightdeck.live")

@@ -4,7 +4,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{JoinHandle, yield_now};
 use std::time::{Duration, Instant};
 
-use gpui::{Entity, TestAppContext, VisualTestContext, WindowOptions};
+use gpui::{AppContext, Entity, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::json;
 
 use super::{fresh_request, selected_copy};
@@ -15,6 +15,34 @@ const WAITING: &str = "Finishing recording cleanup. Open will become available w
 const DELAYED: &str = "Recording cleanup is taking longer. You can keep using \
     this recording. Close and reopen Flightdeck to open another recording.";
 const TEST_DEADLINE: Duration = Duration::from_secs(10);
+
+#[gpui::test]
+fn command_w_closes_its_window_without_platform_activation(cx: &mut TestAppContext) {
+    // Send the shortcut to its window before macOS has designated an active window.
+    let window = cx.update(|cx| {
+        cx.open_window(WindowOptions::default(), |_, cx| {
+            super::create_dashboard(
+                Worker::start(missing_recording()).unwrap(),
+                "settings".into(),
+                None,
+                cx,
+            )
+        })
+        .unwrap()
+    });
+    let dashboard = window.root(cx).unwrap();
+    cx.run_until_parked();
+    assert!(cx.read(|cx| cx.active_window().is_none()));
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.dispatch_keystroke(gpui::Keystroke::parse("cmd-w").unwrap(), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    assert!(cx.read(|cx| cx.windows().is_empty()));
+    dashboard.update(cx, |dashboard, _| dashboard.worker.stop());
+}
 
 #[gpui::test]
 fn opening_while_a_reader_retires_explains_the_wait_and_preserves_readings(
