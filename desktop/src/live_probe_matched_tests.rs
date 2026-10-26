@@ -48,6 +48,7 @@ fn follows_matched_replay_through_the_real_worker_mailbox() {
 
 fn commands(probe: &mut Probe, route: &str, expected: &Value) {
     let mut input = std::io::stdin().lock();
+    let mut context = Value::Null;
     for _command in 0..COMMANDS_MAX {
         println!("{}", json!({"event": "await_command"}));
         std::io::stdout().flush().unwrap();
@@ -78,6 +79,7 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
             _ => panic!("expected follow, pin, hover, resume, supersede, cancel or stop"),
         }
         let generation = if words[0] == "hover" {
+            payloads::validate_context(&context, &step["kept_observations"]).unwrap();
             request.load_resident_history = false;
             request.load_app_attribution_history = false;
             request.load_process_history = false;
@@ -86,12 +88,16 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
             probe.worker.request(request).unwrap()
         };
         let snapshot = wait(probe, generation, route, step);
+        if words[0] != "hover" {
+            context = snapshot.selection["trends"].clone();
+        }
         println!(
             "{}",
             json!({"event": "complete", "step": index,
             "command": words[0], "generation": generation,
             "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
             "context_values": snapshot.selection["trends"],
+            "kept_context_values": context,
             "payloads": payloads::validate(&snapshot, route, step).unwrap()})
         );
     }

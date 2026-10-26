@@ -12,6 +12,8 @@ mod ownership;
 pub(crate) mod payloads;
 #[path = "live_native_measurement_raw.rs"]
 mod raw;
+#[path = "live_native_measurement_selection.rs"]
+mod selection;
 
 #[test]
 fn measures_the_ranking_step_after_histories_are_read_early() {
@@ -113,6 +115,9 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
     let mut reader = SnapshotReader::new();
     reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.command.request.route = route.to_owned();
+    let selection = std::env::var_os("FLIGHTDECK_ITEM1_SELECTION")
+        .map_or_else(|| "follow".into(), |value| value.into_string().unwrap());
+    selection::configure(&mut reader, root, expected, &selection);
     diagnostics::checkpoint("before_read");
     let ownership_before = ownership::snapshot();
     let before = process_usage();
@@ -131,13 +136,15 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
     diagnostics::checkpoint("holding_result");
     let phase = std::env::var("FLIGHTDECK_ITEM1_PHASE").unwrap();
     let payloads = validate_output(&snapshot, route, expected, &phase);
-    let report = json!({"route": route, "phase": phase, "root": root,
+    let report = json!({"route": route, "phase": phase, "root": root, "selection_kind": selection,
         "snapshots_to_complete": snapshots,
         "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
         "context_values": snapshot.selection["trends"], "pages": snapshot.pages,
         "effective_threads": {"maximum": std::env::var("POLARS_MAX_THREADS").unwrap(),
             "asynchronous": std::env::var("POLARS_ASYNC_THREAD_COUNT").unwrap()},
-        "point_count": snapshot.selection["trends"].as_array().unwrap().len(),
+        "point_count": snapshot.selection["trends"].as_array().map(Vec::len),
+        "context_mode": expected["context_mode"],
+        "kept_observations": expected["kept_observations"],
         "payloads": payloads, "reader_complete": true,
         "wall_ns": wall_ns, "calling_thread_cpu_ns": thread_ns,
         "process_cpu_ns": after.user_ns + after.system_ns - before.user_ns - before.system_ns,

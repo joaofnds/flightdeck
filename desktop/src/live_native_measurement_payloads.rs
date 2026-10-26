@@ -34,25 +34,29 @@ pub(crate) fn validate_input(snapshot: &Snapshot, expected: &Value) -> Result<()
             ));
         }
     }
-    let observations = expected["observations"]
-        .as_array()
-        .ok_or("Missing expected observations")?;
-    if observations.len() > OBSERVATIONS_MAX {
-        return Err("Expected context exceeds the observation bound".into());
-    }
+    if expected["context_mode"] == "kept" {
+        if snapshot.selection.get("trends").is_some() {
+            return Err("Hover unexpectedly returned a new context".into());
+        }
+        if expected.get("observations") != Some(&Value::Null) {
+            return Err("Expected hover must declare absent returned context".into());
+        }
 
-    let points = snapshot.selection["trends"]
-        .as_array()
-        .ok_or("Missing measured context")?;
+        context_shape(&expected["kept_observations"])?;
+        return Ok(());
+    }
+    validate_context(&snapshot.selection["trends"], &expected["observations"])
+}
+
+pub(crate) fn validate_context(points: &Value, observations: &Value) -> Result<(), String> {
+    let observations = context_shape(observations)?;
+    let points = points.as_array().ok_or("Missing measured context")?;
     if points.len() != observations.len() {
         return Err("Measured context length differs from the frozen input".into());
     }
 
     for (point, observation) in points.iter().zip(observations) {
         for field in IDENTITY_FIELDS {
-            if observation[field].is_null() {
-                return Err(format!("Expected context identity has no {field}"));
-            }
             if point[field] != observation[field] {
                 return Err(format!(
                     "Measured context {field} differs from the frozen input"
@@ -61,6 +65,24 @@ pub(crate) fn validate_input(snapshot: &Snapshot, expected: &Value) -> Result<()
         }
     }
     Ok(())
+}
+
+fn context_shape(observations: &Value) -> Result<&[Value], String> {
+    let observations = observations
+        .as_array()
+        .ok_or("Missing expected observations")?;
+    if observations.len() > OBSERVATIONS_MAX {
+        return Err("Expected context exceeds the observation bound".into());
+    }
+
+    for observation in observations {
+        for field in IDENTITY_FIELDS {
+            if observation[field].is_null() {
+                return Err(format!("Expected context identity has no {field}"));
+            }
+        }
+    }
+    Ok(observations)
 }
 
 pub(crate) fn report(snapshot: &Snapshot) -> Result<Value, String> {
