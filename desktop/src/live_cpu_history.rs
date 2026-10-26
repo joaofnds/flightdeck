@@ -101,6 +101,11 @@ impl CPUHistory {
         self.wire.observations.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn restoration_error(&self) -> Option<&str> {
+        self.wire.restoration_error.as_deref()
+    }
+
     pub fn inspect(&self, row: usize, fraction: f64) -> Option<CPUInspection> {
         if row >= self.wire.cpus.len() {
             return None;

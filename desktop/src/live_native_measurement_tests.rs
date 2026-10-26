@@ -1,22 +1,78 @@
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
-use super::SnapshotReader;
+use super::{SealedRecording, SnapshotReader};
+
+#[path = "live_native_measurement_payloads.rs"]
+mod payloads;
 
 #[test]
-#[ignore = "opt-in finite native recording measurement; requires FLIGHTDECK_ITEM1_RECORDING"]
+fn measures_the_ranking_step_after_histories_are_read_early() {
+    // Goal: a complete measured request includes the ranks deferred after early histories.
+    // Method: drive the existing sealed-part fixture through the measurement's actual reader.
+    let recording = SealedRecording::with_kept_parts();
+    let mut reader = SnapshotReader::new();
+
+    let (snapshot, count) = read_complete(&mut reader, &recording.root);
+
+    assert_eq!(count, 2);
+    assert!(super::super::reader_published(
+        &reader.reader,
+        reader.command.generation
+    ));
+    assert!(!snapshot.histories_pending);
+    assert!(snapshot.app_ranks.is_some());
+}
+
+#[test]
+fn records_unavailable_history_as_a_failed_payload() {
+    // Goal: a finished reader cannot make a failed history look like an available payload.
+    // Method: corrupt the existing sealed fixture's App parts and report its completed request.
+    let recording = SealedRecording::with_kept_parts();
+    recording.corrupt_app_parts();
+    let mut reader = SnapshotReader::new();
+
+    let (snapshot, _) = read_complete(&mut reader, &recording.root);
+    let report = payloads::report(&snapshot).unwrap();
+
+    assert!(super::super::reader_published(
+        &reader.reader,
+        reader.command.generation
+    ));
+    assert_eq!(report["resident_history"]["state"], "unavailable");
+    assert!(
+        report["resident_history"]["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+    );
+    assert_eq!(
+        report["overview_app_histories"]["cpu"]["state"],
+        "unavailable"
+    );
+    let mut expected = json!({"selected": snapshot.selection["selected"],
+        "observations": snapshot.selection["trends"], "payloads": {"overview": report}});
+    expected["payloads"]["overview"]["resident_history"] = json!({"state": "ready"});
+    let error = payloads::validate(&snapshot, "overview", &expected).unwrap_err();
+    assert!(error.contains("payload availability differs"));
+}
+
+#[test]
+#[ignore = "opt-in finite recording measurement; requires recording and expected-output env vars"]
 fn measures_complete_worker_routes_on_one_frozen_native_recording() {
     // Goal: expose actual worker costs and complete coverage separately from UI paint.
     // Method: run each route cold on an externally completed, immutable fixture source.
     let root = std::env::var_os("FLIGHTDECK_ITEM1_RECORDING").unwrap();
     let root = Path::new(&root);
+    let expected = std::env::var("FLIGHTDECK_ITEM1_EXPECTED_JSON").unwrap();
+    assert!(expected.len() <= 1024 * 1024);
+    let expected: Value = serde_json::from_str(&expected).unwrap();
     for route in ["network", "memory", "cpu", "apps", "overview"] {
-        measure_route(root, route);
+        measure_route(root, route, &expected);
     }
 }
 
-fn measure_route(root: &Path, route: &str) {
+fn measure_route(root: &Path, route: &str, expected: &Value) {
     let mut reader = SnapshotReader::new();
     reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.command.request.route = route.to_owned();
@@ -40,6 +96,7 @@ fn measure_route(root: &Path, route: &str) {
     let counts = work.counts();
     drop(work);
     let footprint = persistence::resources::Footprint::read().unwrap();
+    let payloads = payloads::validate(&snapshot, route, expected).unwrap();
     assert!(!snapshot.histories_pending);
     assert!(snapshot.catalog["collector_completed"].as_bool().unwrap());
     assert!(
@@ -51,6 +108,7 @@ fn measure_route(root: &Path, route: &str) {
     let report = json!({"route": route, "root": root, "snapshots_to_complete": snapshots,
         "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
         "point_count": snapshot.selection["trends"].as_array().unwrap().len(),
+        "payloads": payloads, "reader_complete": true,
         "wall_ns": wall_ns, "worker_thread_cpu_ns": thread_ns,
         "process_cpu_ns": after.user_ns + after.system_ns - before.user_ns - before.system_ns,
         "allocation_request_calls": allocation.calls,
@@ -72,7 +130,8 @@ fn read_complete(
 ) -> (Box<crate::live_source::Snapshot>, u32) {
     for count in 1..=4 {
         let snapshot = reader.read_at(root).unwrap().unwrap();
-        if !snapshot.histories_pending {
+        if super::super::reader_published(&reader.reader, reader.command.generation) {
+            assert!(!snapshot.histories_pending);
             return (snapshot, count);
         }
     }
