@@ -206,6 +206,16 @@ impl<V> Mailbox<V> {
         drop(untaken);
     }
 
+    /// Whether a View is waiting, including a handoff currently holding the mailbox lock.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        match self.newest.try_lock() {
+            Ok(newest) => newest.is_some(),
+            Err(TryLockError::WouldBlock) => true,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().is_some(),
+        }
+    }
+
     /// The View the store left since the last take, or `None` when it left none or is leaving
     /// one now, so the main thread never waits on the store.
     pub fn take(&self) -> Option<Arc<V>> {

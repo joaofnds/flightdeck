@@ -177,6 +177,7 @@ struct Shared {
     stop: AtomicBool,
     active: AtomicBool,
     catch_up: AtomicBool,
+    catching_up: AtomicBool,
     paused: AtomicBool,
     cancellation: Arc<Cancellation>,
 }
@@ -205,6 +206,7 @@ impl Store {
             stop: AtomicBool::new(false),
             active: AtomicBool::new(true),
             catch_up: AtomicBool::new(false),
+            catching_up: AtomicBool::new(true),
             paused: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
         });
@@ -241,6 +243,7 @@ impl Store {
     pub fn set_active(&self, active: bool) {
         self.shared.active.store(active, Ordering::Release);
         if !active {
+            self.shared.catching_up.store(true, Ordering::Release);
             self.shared.catch_up.store(true, Ordering::Release);
         }
         if let Some(thread) = &self.thread {
@@ -252,6 +255,21 @@ impl Store {
     #[must_use]
     pub fn is_paused(&self) -> bool {
         self.shared.paused.load(Ordering::Acquire)
+    }
+
+    /// Whether catch-up or a published View still awaits the window's next step.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            return false;
+        }
+        if self.shared.catch_up.load(Ordering::Acquire) {
+            return true;
+        }
+        if self.shared.catching_up.load(Ordering::Acquire) {
+            return true;
+        }
+        self.shared.mailbox.pending()
     }
 
     /// The View the store handed over since the last take, or `None` when it handed over none
@@ -622,6 +640,9 @@ fn run(
             shared.paused.store(false, Ordering::Release);
             continue;
         }
+        if shared.catch_up.load(Ordering::Acquire) {
+            shared.catching_up.store(true, Ordering::Release);
+        }
         if shared.catch_up.swap(false, Ordering::AcqRel) {
             match refresh(root, held, ring, shared, operation) {
                 Ok(true) => {
@@ -642,6 +663,7 @@ fn run(
             eprintln!("flightdeck store publication: {error}");
             return;
         }
+        run_ready(held, ring, shared);
         waited = if held.failure.is_some() {
             // A ring that failed may fail again at once, so the thread sleeps instead.
             thread::sleep(WAIT);
@@ -651,6 +673,30 @@ fn run(
         };
     }
     unreachable!("the store thread steps until the store is dropped");
+}
+
+fn run_ready(held: &mut Held, ring: &Ring, shared: &Shared) {
+    if !shared.catching_up.load(Ordering::Acquire) {
+        return;
+    }
+    let caught_up = match ring.caught_up() {
+        Ok(caught_up) => caught_up,
+        Err(failure) => {
+            held.failure = Some(failure);
+            held.unpublished = true;
+            held.publish(&shared.mailbox);
+            true
+        }
+    };
+    if !held.unpublished {
+        if caught_up {
+            shared.catching_up.store(false, Ordering::Release);
+        } else {
+            if held.failure.is_some() {
+                shared.catching_up.store(false, Ordering::Release);
+            }
+        }
+    }
 }
 
 /// Replays the sealed prefix into existing owners before reopening the current ring.
@@ -692,7 +738,19 @@ fn refresh(
         held.unpublished = true;
     }
     if accepted {
-        *ring = next_ring;
+        if budget.is_some() {
+            *ring = next_ring;
+        } else {
+            let previous_run = since.as_ref().map(|newest| newest.run);
+            let current_run = held.newest.as_ref().map(|newest| newest.run);
+            if previous_run != current_run {
+                *ring = next_ring;
+            }
+            if let Err(failure) = ring.resume() {
+                held.failure = Some(failure);
+                held.unpublished = true;
+            }
+        }
     }
     Ok(accepted)
 }

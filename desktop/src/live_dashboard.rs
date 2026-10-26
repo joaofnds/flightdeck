@@ -106,6 +106,7 @@ pub struct LiveDashboard {
     /// The worker has not yet answered the last request, so the app polls it quickly.
     pub(crate) reply_pending: bool,
     presence: Presence,
+    store_pending: bool,
     pub error: Option<String>,
     pub rows: Vec<Row>,
     pub expanded: Option<(String, usize)>,
@@ -313,6 +314,7 @@ impl LiveDashboard {
             generation: 0,
             reply_pending: false,
             presence: Presence::Shown,
+            store_pending: false,
             store_view: None,
             store_panels: store_view::StorePanels::default(),
             error: None,
@@ -422,7 +424,9 @@ impl LiveDashboard {
         }
         self.tick_presence(cx);
         // A hover's read would wake the resting reader of a hidden window.
-        if self.presence != Presence::Hidden {
+        if self.presence == Presence::Hidden {
+            self.store_pending = false;
+        } else {
             self.preview_tick(cx);
             if let Some(view) = store_view::take_store_view(cx) {
                 if self.take_view(view) {
@@ -430,6 +434,7 @@ impl LiveDashboard {
                 }
             }
             self.tick_rest();
+            self.tick_store_pending(cx);
         }
         let status = self.status();
         if self.last_status != status {
@@ -437,6 +442,20 @@ impl LiveDashboard {
             cx.notify();
         }
         self.tick_deadline(cx);
+    }
+
+    fn tick_store_pending(&mut self, cx: &Context<Self>) {
+        self.store_pending = false;
+        if self.request.route != "overview" {
+            return;
+        }
+        if self.native.source != crate::live_source_mode::SourceMode::Live {
+            return;
+        }
+        if self.request.second.is_some() {
+            return;
+        }
+        self.store_pending = store_view::store_pending(cx);
     }
 
     fn tick_deadline(&mut self, cx: &mut Context<Self>) {
@@ -744,6 +763,9 @@ impl LiveDashboard {
         // come only once the window shows again.
         if self.presence == Presence::Hidden {
             return false;
+        }
+        if self.store_pending {
+            return true;
         }
 
         if let Some(snapshot) = &self.snapshot {
@@ -1376,6 +1398,32 @@ mod selection_tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn a_resting_page_keeps_fast_polling_until_store_catch_up_finishes() {
+        // Goal: a resumed page takes the fresh View without a quarter-second polling delay.
+        // Method: settle the legacy reply and leave only the store's catch-up outstanding.
+        let mut page = dashboard();
+        page.reply_pending = false;
+        page.presence = Presence::Rested;
+        page.snapshot.as_mut().unwrap().histories_pending = false;
+        page.store_pending = true;
+
+        assert!(page.awaiting_reply());
+    }
+
+    #[test]
+    fn a_hidden_page_never_fast_polls_its_pending_store() {
+        // Goal: pending store work cannot wake a hidden page repeatedly.
+        // Method: leave only store catch-up outstanding and inspect the hidden polling policy.
+        let mut page = dashboard();
+        page.reply_pending = false;
+        page.presence = Presence::Hidden;
+        page.snapshot.as_mut().unwrap().histories_pending = false;
+        page.store_pending = true;
+
+        assert!(!page.awaiting_reply());
+    }
 
     fn dashboard() -> LiveDashboard {
         let root = std::env::temp_dir().join(format!(

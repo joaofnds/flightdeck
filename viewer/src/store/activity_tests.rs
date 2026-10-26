@@ -150,3 +150,78 @@ fn wait_until_paused(store: &Store) {
     }
     panic!("store did not pause");
 }
+
+#[test]
+fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
+    // Goal: catch-up processes only ring publications received since the reader rested.
+    // Method: use the real ring before and after the actual resume path and inspect its output.
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    let mut fixture = Fixture::new();
+    for second in 100..103 {
+        fixture.publish_with_system_rows(second);
+    }
+    let mut held = super::Held::new();
+    let mut ring = super::Ring::new(fixture.root.clone());
+    ring.follow().unwrap();
+    ring.read(|run, second, apps| held.take(run, second, apps))
+        .unwrap();
+    for second in 103..106 {
+        fixture.publish_with_system_rows(second);
+    }
+    let shared = super::Shared {
+        mailbox: super::Mailbox::new(),
+        stop: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        catch_up: AtomicBool::new(false),
+        catching_up: AtomicBool::new(false),
+        paused: AtomicBool::new(false),
+        cancellation: Arc::new(crate::cancellation::Cancellation::default()),
+    };
+
+    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, None).unwrap());
+    ring.follow().unwrap();
+    let mut publications = Vec::new();
+    let mut consecutive = Vec::new();
+    ring.read(|_, second, _| {
+        publications.push(second.publication);
+        consecutive.push(second.follows);
+        true
+    })
+    .unwrap();
+
+    assert_eq!(publications, [4, 5, 6]);
+    assert_eq!(consecutive, [true, true, true]);
+}
+
+#[test]
+fn pending_handoff_clears_only_after_catch_up_and_view_delivery() {
+    // Goal: a shown window can poll until both ingestion and its View handoff complete.
+    // Method: park a real store, publish another tick, resume and drain its mailbox.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let store = Store::start(&fixture.root).unwrap();
+    drop(view_where(&store, |view| view.seconds.len() == 1));
+    store.set_active(false);
+    wait_until_paused(&store);
+    assert!(store.pending());
+    fixture.publish_with_system_rows(101);
+
+    store.set_active(true);
+    let view = view_where(&store, |view| view.seconds.len() == 2);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for _ in 0..2_000 {
+        if !store.pending() {
+            break;
+        }
+        drop(store.take());
+        assert!(
+            Instant::now() < deadline,
+            "store never completed its handoff"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(!store.pending());
+    assert_eq!(view.seconds.last().unwrap().publication, 2);
+}

@@ -50,6 +50,11 @@ pub(crate) fn set_store_active(active: bool, cx: &App) {
     }
 }
 
+pub(super) fn store_pending(cx: &App) -> bool {
+    cx.try_global::<LiveStore>()
+        .is_some_and(|store| store.0.pending())
+}
+
 /// The View the store handed over since the last take, or none where the app runs no store, as
 /// for a recording opened read-only.
 pub(super) fn take_store_view(cx: &App) -> Option<Arc<View>> {

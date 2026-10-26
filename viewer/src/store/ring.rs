@@ -162,6 +162,27 @@ impl Ring {
         self.followed
     }
 
+    pub(super) fn caught_up(&self) -> Result<bool, Failure> {
+        if self.pending.is_some() {
+            return Ok(false);
+        }
+        let Some(source) = &self.source else {
+            return Ok(true);
+        };
+        let newest = source
+            .reader
+            .publication_newest()
+            .map_err(|error| Failure::Ring(error.kind()))?;
+        Ok(source.reader.next_publication() > newest)
+    }
+
+    /// Rechecks the source on show while keeping the current run's reader and rate predecessor.
+    pub(super) fn resume(&mut self) -> Result<(), Failure> {
+        self.unlooked_steps = FOLLOW_STEPS;
+        self.published = false;
+        self.follow()
+    }
+
     /// Looks at the registry and follows its newest run, as `follow` describes. The store checked
     /// the recording's identity when it began following its run, so while that run is the newest
     /// it reads the registry alone.
