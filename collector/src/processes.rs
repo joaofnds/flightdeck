@@ -256,29 +256,36 @@ pub fn pid_list(process_limit: usize) -> Vec<i32> {
 
 /// Lists the pid of every process into `into`, up to the capacity it has, which it never
 /// grows. A listing that fills `into` may have been cut short, so it is an error, and so is a
-/// pid macOS gives no process.
+/// pid macOS gives no process. An error leaves `into` empty.
 pub fn list_pids(into: &mut Vec<i32>) -> io::Result<()> {
+    into.clear();
     let capacity = into.capacity();
     assert!(capacity > 0);
     let buffer_size = c_int::try_from(capacity * size_of::<i32>()).map_err(io::Error::other)?;
 
-    into.resize(capacity, 0);
-    let count = unsafe { proc_listallpids(into.as_mut_ptr().cast(), buffer_size) };
-    let listed = match usize::try_from(count) {
-        Ok(count) if count < capacity => {
-            into.truncate(count);
-            list_pids_check(into)
-        }
+    let returned =
+        unsafe { proc_listallpids(into.spare_capacity_mut().as_mut_ptr().cast(), buffer_size) };
+    let count = list_pids_count(returned, capacity)?;
+    // SAFETY: proc_listallpids initializes the prefix its count reports. The count fits the
+    // allocation, and clearing the vector exposed all capacity to that call.
+    unsafe { into.set_len(count) };
+
+    let listed = list_pids_check(into);
+    if listed.is_err() {
+        into.clear();
+    }
+    listed
+}
+
+fn list_pids_count(returned: c_int, capacity: usize) -> io::Result<usize> {
+    match usize::try_from(returned) {
+        Ok(count) if count < capacity => Ok(count),
         Ok(_) => Err(io::Error::new(
             io::ErrorKind::QuotaExceeded,
             format!("the pids listed filled the room for {capacity}"),
         )),
         Err(_) => Err(io::Error::last_os_error()),
-    };
-    if listed.is_err() {
-        into.clear();
     }
-    listed
 }
 
 /// Checks that `pids` holds a pid, as a listing holds this process's at least, and that each
@@ -581,17 +588,108 @@ mod tests {
     }
 
     #[test]
+    fn leaves_unused_pid_storage_untouched() {
+        // Goal: a native listing writes only its returned prefix, never the unused capacity.
+        // Method: initialize every slot, shorten the list, and inspect its untouched suffix.
+        const UNUSED_PID: i32 = -1;
+        let mut pids = pid_list(process_limit().unwrap());
+        let capacity = pids.capacity();
+        pids.resize(capacity, UNUSED_PID);
+        pids.truncate(1);
+        let pointer = pids.as_ptr();
+
+        list_pids(&mut pids).unwrap();
+
+        assert_eq!(capacity, pids.capacity());
+        assert_eq!(pointer, pids.as_ptr());
+        assert!(pids.contains(&own_pid().unwrap()));
+        assert!(pids.iter().all(|pid| (0..=PID_MAX).contains(pid)));
+        assert!(pids.len() < capacity);
+        // SAFETY: resize initialized every slot and the allocation has not changed. The
+        // native call writes integer PIDs, so the unused slots remain initialized i32 values.
+        assert!(
+            pids.spare_capacity_mut()
+                .iter()
+                .all(|pid| unsafe { pid.assume_init() } == UNUSED_PID)
+        );
+    }
+
+    #[test]
+    fn replaces_a_longer_listing_with_only_the_current_pids() {
+        // Goal: a shorter native listing exposes no stale elements from the previous list.
+        // Method: fill the logical list with invalid PIDs, then read the actual shorter list.
+        let mut pids = pid_list(process_limit().unwrap());
+        let capacity = pids.capacity();
+        pids.resize(capacity, -1);
+
+        list_pids(&mut pids).unwrap();
+
+        assert!(pids.len() < capacity);
+        assert!(pids.contains(&own_pid().unwrap()));
+        assert!(pids.iter().all(|pid| (0..=PID_MAX).contains(pid)));
+    }
+
+    #[test]
+    fn repeats_pid_listings_without_heap_calls() {
+        // Goal: every successful rescan reuses startup storage without Rust heap activity.
+        // Method: warm the native call, then count heap calls across 128 validated rescans.
+        let mut pids = pid_list(process_limit().unwrap());
+        let capacity = pids.capacity();
+        let pointer = pids.as_ptr();
+        let own_pid = own_pid().unwrap();
+        list_pids(&mut pids).unwrap();
+
+        let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+            for _ in 0..128 {
+                list_pids(&mut pids).unwrap();
+                assert!(pids.contains(&own_pid));
+                assert!(pids.iter().all(|pid| (0..=PID_MAX).contains(pid)));
+            }
+        });
+
+        assert_eq!(0, allocations);
+        assert_eq!(capacity, pids.capacity());
+        assert_eq!(pointer, pids.as_ptr());
+    }
+
+    #[test]
     fn reports_a_listing_that_fills_its_buffer_without_growing_it() {
         // Goal: a pid listing longer than its buffer is an error, and the buffer keeps the
-        // capacity it was given, as Tiger Style's limit on everything asks.
-        // Method: list into a buffer with room for one pid, fewer than any Mac runs.
-        let mut pids = Vec::with_capacity(1);
+        // capacity it was given without exposing old contents after failure.
+        // Method: replace a prior one-pid list in a buffer smaller than any Mac's listing.
+        let mut pids = vec![own_pid().unwrap()];
         let capacity = pids.capacity();
 
         let listed = list_pids(&mut pids);
 
         assert_eq!(io::ErrorKind::QuotaExceeded, listed.unwrap_err().kind());
         assert_eq!(capacity, pids.capacity());
+        assert!(pids.is_empty());
+    }
+
+    #[test]
+    fn accepts_a_native_pid_count_below_capacity() {
+        // Goal: the largest complete prefix fits without treating unused storage as data.
+        // Method: interpret a native count one below the buffer capacity.
+        assert_eq!(2, list_pids_count(2, 3).unwrap());
+    }
+
+    #[test]
+    fn refuses_a_native_pid_count_past_capacity() {
+        // Goal: an oversized native result cannot become the vector's readable length.
+        // Method: interpret a count beyond the allocation without exposing any storage.
+        let count = list_pids_count(3, 2);
+
+        assert_eq!(io::ErrorKind::QuotaExceeded, count.unwrap_err().kind());
+    }
+
+    #[test]
+    fn refuses_a_negative_native_pid_count() {
+        // Goal: a negative native result cannot become the vector's readable length.
+        // Method: interpret the native failure value and require an operating-system error.
+        let count = list_pids_count(-1, 2);
+
+        assert!(count.unwrap_err().raw_os_error().is_some());
     }
 
     #[test]
