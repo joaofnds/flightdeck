@@ -40,6 +40,7 @@ impl Session {
                 continue;
             };
 
+            let _observation = self.source_scope(window, Some(name));
             self.validate_commitment(window)?;
             let value = read(&Kept {
                 path: &self

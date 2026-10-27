@@ -23,6 +23,8 @@ pub(super) fn terminal(
     operation: &Operation,
     capture: &crate::recording::InputCapture<'_>,
 ) -> Result<Option<super::Terminal>, Refused> {
+    let _purpose =
+        persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
     operation.check()?;
     let sealed = open_minute(root, found, budget, operation, capture)?;
     let mut machine = MachineMinute::default();

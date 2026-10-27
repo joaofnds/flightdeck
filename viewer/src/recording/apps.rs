@@ -202,6 +202,8 @@ pub fn read_apps(
         return Ok(AppParts::Missing);
     };
 
+    let _observation =
+        persistence::work::ingestion::minute_source(&minute.manifest, Some(APP_PARTS));
     let table = minute.scan(APP_PARTS)?;
     Ok(read_app_rows_with_operation(
         table.plan,

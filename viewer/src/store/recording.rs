@@ -397,10 +397,14 @@ fn load_batches(
                 .checked_sub(1)
                 .and_then(|before| found.get(before));
             let minutes = &found[batch];
+            let observation = persistence::work::ingestion::inherit_current();
             let loader = thread::Builder::new()
                 .name(String::from("flightdeck-loader"))
                 .spawn_scoped(scope, move || {
-                    load_batch_using(root, before, minutes, apps_from_ns, apps)
+                    let observation = observation.enter();
+                    let result = load_batch_using(root, before, minutes, apps_from_ns, apps);
+                    drop(observation);
+                    result
                 });
             loaders.push(loader);
         }
@@ -483,6 +487,9 @@ fn load_batch(
     let mut previous = MachineMinute::default();
     let mut previous_run = None;
     if let Some(before) = before {
+        let _purpose = persistence::work::ingestion::purpose(
+            persistence::work::ingestion::Purpose::Predecessor,
+        );
         // The loader that decodes the minute before reports it where it does not decode.
         if decode(root, &before.marker, &mut previous, None).is_ok() {
             previous_run = Some(before.run);
@@ -532,6 +539,11 @@ fn load_minute(minute: &Decoded<'_>, before: Option<Reading<'_>>, seconds: &mut 
     let mut previous = before;
     let mut kept = KeptWalk::default();
     for reading in readings(minute.machine) {
+        persistence::work::ingestion::record_publication(
+            *minute.run,
+            reading.tick.publication,
+            persistence::work::ingestion::Kind::MachineReduction,
+        );
         if let Some(second) = MachineSecond::of(&reading, previous.as_ref()) {
             let held = seconds.last().and_then(|loaded| loaded.apps.as_ref().ok());
             let apps = load_minute_apps(minute, second.publication, &mut kept, held);

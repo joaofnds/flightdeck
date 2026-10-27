@@ -603,14 +603,73 @@ fn rejects_duplicate_pid_associations_without_installing_a_partial_frame() {
         .operation(0)
         .unwrap();
     let mut frame = None;
+    let trace = persistence::work::ingestion::Trace::new(endpoint().identity.recording);
+    let scope = trace.enter();
 
     let result = Frame::committed(&endpoint(), &connection, "app_rows", &operation, &mut frame);
+    drop(scope);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
 
     assert!(matches!(
         result,
         Err(Error::Bound("duplicate committed App PID"))
     ));
     assert!(frame.is_none());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == persistence::work::ingestion::Kind::CommittedFrameCapture)
+            .count(),
+        0
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind
+                == persistence::work::ingestion::Kind::CommittedFrameCaptureAttempt)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn records_a_completed_committed_frame_after_its_capture_attempt() {
+    // Goal: a successful committed frame contributes one attempt and one completion.
+    // Method: decode a real normalized source and observe the public capture result and trace.
+    use persistence::work::ingestion::{Kind, Trace};
+    let connection = connection();
+    measured(&connection);
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let trace = Trace::new(endpoint().identity.recording);
+    let scope = trace.enter();
+    let mut frame = None;
+
+    Frame::committed(&endpoint(), &connection, "app_rows", &operation, &mut frame).unwrap();
+    drop(scope);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+
+    assert_eq!(frame.unwrap().process_count(), 1);
+    let captures: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                Kind::CommittedFrameCaptureAttempt | Kind::CommittedFrameCapture
+            )
+        })
+        .map(|event| event.kind)
+        .collect();
+    assert_eq!(
+        captures,
+        [
+            Kind::CommittedFrameCaptureAttempt,
+            Kind::CommittedFrameCapture
+        ]
+    );
 }
 
 #[path = "event_tests.rs"]

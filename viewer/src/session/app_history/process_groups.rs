@@ -133,6 +133,7 @@ impl Session {
         let first = readings
             .first()
             .ok_or(Error::Bound("process cohort empty batch"))?;
+        let _observation = self.source_scope(first.window, None);
         self.validate_commitment(first.window)?;
         let predecessors: Vec<_> = readings
             .iter()
@@ -216,8 +217,8 @@ impl Session {
             self.validate_commitment(*window)?;
         }
 
-        for source in replay.restore.sources.values() {
-            source.refresh(&self.connection)?;
+        for ((window, _kind), source) in &replay.restore.sources {
+            source.refresh(&self.connection, &self.windows[*window])?;
         }
 
         self.operation.check()
@@ -328,6 +329,8 @@ impl Session {
 
             self.validate_commitment(window)?;
             for file in &pin.files {
+                let _observation =
+                    self.source_scope(window, file.path.file_stem().and_then(|name| name.to_str()));
                 if self.connection.parquet_source(&file.path)? != file.alias {
                     return Err(Error::Bound("changed committed App history source"));
                 }

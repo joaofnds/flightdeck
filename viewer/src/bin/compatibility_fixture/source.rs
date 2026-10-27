@@ -52,7 +52,7 @@ const USAGE: Usage = Usage {
     disk_written_bytes: 9_007_199_254_744_993,
 };
 
-const PROCESS: Process = Process {
+pub const PROCESS: Process = Process {
     pid: 41001,
     usage: USAGE,
     task: Task {
@@ -70,6 +70,17 @@ pub fn create(
     layout: SourceLayout,
     index: u64,
     output: &mut Option<Source>,
+) -> Result<()> {
+    create_custom(root, recording, layout, index, output, |_| {})
+}
+
+pub fn create_custom(
+    root: &Path,
+    recording: Identity,
+    layout: SourceLayout,
+    index: u64,
+    output: &mut Option<Source>,
+    mut customize: impl FnMut(&mut Readings<'_>),
 ) -> Result<()> {
     assert!(output.is_none());
     assert!(index < 2);
@@ -105,9 +116,26 @@ pub fn create(
 
     let second_first = SECOND_FIRST + index * 120;
     for tick in 0..2 {
-        create_publish(&mut writer, programs.as_ref(), second_first, tick)?;
+        create_publish(
+            &mut writer,
+            programs.as_ref(),
+            second_first,
+            tick,
+            &mut customize,
+        )?;
     }
     writer.finish();
+    create_output(writer, place, identity, second_first, layout, output)
+}
+
+fn create_output(
+    writer: Writer,
+    place: Place,
+    identity: RunIdentity,
+    second_first: u64,
+    layout: SourceLayout,
+    output: &mut Option<Source>,
+) -> Result<()> {
     let reader = RingReader::open(&place.lock_path)?;
     let mapped_bytes = u64::try_from(reader.mapped_size_bytes())
         .map_err(|_| Error::Bound("fixture mapping bytes"))?;
@@ -118,7 +146,6 @@ pub fn create(
     let ring = writer.name().to_owned();
     drop(reader);
     drop(writer);
-
     *output = Some(Source {
         identity,
         population: false,
@@ -128,7 +155,6 @@ pub fn create(
         second_first,
         mapped_bytes,
     });
-
     Ok(())
 }
 
@@ -197,6 +223,7 @@ fn create_publish(
     programs: Option<&Programs>,
     second_first: u64,
     tick: u64,
+    customize: &mut impl FnMut(&mut Readings<'_>),
 ) -> Result<()> {
     assert!(tick < 2);
     let memory = Memory {
@@ -233,7 +260,7 @@ fn create_publish(
         continuous_ns: CONTINUOUS_FIRST_NS + tick * 1_000_000_000,
         awake_ns: AWAKE_FIRST_NS + tick * 1_000_000_000,
     };
-    let readings = Readings {
+    let mut readings = Readings {
         run_tick: tick,
         cpus: &cpus,
         memory: &memory,
@@ -247,6 +274,7 @@ fn create_publish(
         events: &events,
         dropped: Dropped::default(),
     };
+    customize(&mut readings);
     if let Some(programs) = programs {
         create_publish_identity(writer, programs, &readings, &times)?;
     } else {

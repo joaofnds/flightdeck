@@ -249,7 +249,7 @@ pub(crate) fn checks_held_teardown(root: &std::path::Path) {
     assert!(thread.is_none());
 }
 
-fn join_observed(
+pub(crate) fn join_observed(
     slot: &mut Option<std::thread::JoinHandle<()>>,
     deadline: Instant,
 ) -> Result<(), String> {

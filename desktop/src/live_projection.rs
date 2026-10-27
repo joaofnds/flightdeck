@@ -146,7 +146,7 @@ fn wall_second_of(point: &Value) -> Option<u64> {
 /// The fields of a trend point that name its observation, which the reader accepts as the
 /// selection. The rest of the point holds the observation's readings and is far larger than
 /// the reader's bound on an identity.
-fn observation_identity(point: &Value) -> Value {
+pub(crate) fn observation_identity(point: &Value) -> Value {
     let mut identity = serde_json::Map::with_capacity(OBSERVATION_FIELDS.len());
     for field in OBSERVATION_FIELDS {
         if let Some(value) = point.get(field) {

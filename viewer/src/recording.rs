@@ -104,7 +104,7 @@ impl ScopedSealedMinute<'_> {
     }
 
     /// Table `table`, once the marker still links the minute `open` verified.
-    fn table(&self, table: Table) -> Result<SealedTable, Refused> {
+    fn table(&self, table: Table) -> Result<SealedTable<'_>, Refused> {
         self.scan(table.name())
     }
 
@@ -127,7 +127,9 @@ impl ScopedSealedMinute<'_> {
     /// The table `name`, once the marker still links the minute `open` verified. A sealed
     /// minute's files never change, so the marker standing shows them unchanged without
     /// verifying them again.
-    fn scan(&self, name: &str) -> Result<SealedTable, Refused> {
+    fn scan(&self, name: &str) -> Result<SealedTable<'_>, Refused> {
+        let table = persistence::work::ingestion::table_name(name);
+        let _observation = persistence::work::ingestion::minute_source(&self.manifest, table);
         let committed =
             persistence::reread_committed(&self.root, &self.marker).map_err(Refused::Commitment)?;
         if committed != self.manifest {
@@ -156,6 +158,8 @@ impl ScopedSealedMinute<'_> {
                 plan,
                 columns: SealedColumns::Admitted(columns),
                 operation: Some(inputs.operation.begin(inputs.operation.epoch())?),
+                manifest: &self.manifest,
+                table,
             });
         }
 
@@ -165,15 +169,19 @@ impl ScopedSealedMinute<'_> {
             plan,
             columns: SealedColumns::Legacy(schema),
             operation: None,
+            manifest: &self.manifest,
+            table,
         })
     }
 }
 
 /// One table of a sealed minute, through admission, and the columns its file holds.
-struct SealedTable {
+struct SealedTable<'minute> {
     plan: LazyFrame,
     columns: SealedColumns,
     operation: Option<crate::cancellation::Operation>,
+    manifest: &'minute persistence::Manifest,
+    table: Option<&'static str>,
 }
 
 enum SealedColumns {
@@ -181,7 +189,7 @@ enum SealedColumns {
     Admitted(persistence::engine::AdmittedColumns),
 }
 
-impl SealedTable {
+impl SealedTable<'_> {
     /// Whether the table holds the optional columns `group`, which a minute holds whole or
     /// not at all.
     fn holds(&self, group: &[&str]) -> Result<bool, Refused> {
@@ -204,6 +212,8 @@ impl SealedTable {
     }
 
     fn collect_plan(self) -> Result<DataFrame, Refused> {
+        let _observation = persistence::work::ingestion::minute_source(self.manifest, self.table);
+
         Ok(collect_plan(self.plan, self.operation.as_ref())?)
     }
 }
@@ -216,6 +226,10 @@ fn collect_plan(
         operation.check()?;
     }
 
+    persistence::work::ingestion::record_content(
+        persistence::work::ingestion::Kind::NativeCollect,
+        0,
+    );
     let result = plan.collect().map_err(persistence::Error::from);
     if let Some(operation) = operation {
         operation.check()?;
@@ -302,3 +316,6 @@ mod ticks_input_tests;
 
 #[cfg(test)]
 mod table_input_tests;
+
+#[cfg(test)]
+mod ingestion_tests;

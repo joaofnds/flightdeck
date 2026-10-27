@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::{Error, Result};
 
 pub fn scan(path: &Path) -> Result<LazyFrame> {
+    crate::work::ingestion::record_content(crate::work::ingestion::Kind::NativeScan, 0);
     super::admission::validate(path)?;
     let path = path.to_str().ok_or(Error::Bound("query path encoding"))?;
     Ok(LazyFrame::scan_parquet(PlRefPath::new(path), options())?)
@@ -31,6 +32,7 @@ pub(super) fn buffer_sources(input: super::AdmittedFile) -> ScanSources {
 }
 
 pub(super) fn scan_sources(sources: ScanSources) -> Result<LazyFrame> {
+    crate::work::ingestion::record_content(crate::work::ingestion::Kind::BufferedScan, 0);
     Ok(LazyFrame::scan_parquet_sources(sources, options())?)
 }
 

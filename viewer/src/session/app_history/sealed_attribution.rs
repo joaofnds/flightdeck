@@ -169,6 +169,7 @@ impl Session {
             return Ok(());
         }
 
+        let _observation = self.source_scope(kept.window, Some(APP_PARTS));
         self.validate_commitment(kept.window)?;
         pin(self.kept_pin(kept))?;
         let windows = [Some(self.windows[kept.window].identity), None];

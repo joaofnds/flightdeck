@@ -62,6 +62,7 @@ impl Raw {
         output: &mut Option<Self>,
     ) -> Result<()> {
         assert!(output.is_none());
+        source.record_work(persistence::work::ingestion::Kind::RawCaptureAttempt);
         let tick = source.tick;
         capture_validate(source, events)?;
         validate_numbers(tick)?;
@@ -104,6 +105,7 @@ impl Raw {
         raw.view(crate::metrics::core_frequency::CORE_LEVEL_STATES, &mut view)?;
         drop(view);
         operation.check()?;
+        source.record_work(persistence::work::ingestion::Kind::RawCapture);
         Ok(())
     }
 

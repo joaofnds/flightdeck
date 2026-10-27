@@ -237,9 +237,12 @@ impl Store {
             .map_err(io::Error::other)?;
 
         let thread_shared = Arc::clone(&shared);
+        let observation =
+            persistence::work::ingestion::inherit(persistence::work::ingestion::Producer::Store);
         let thread = thread::Builder::new()
             .name(String::from("flightdeck-store"))
             .spawn(move || {
+                let observation = observation.enter();
                 // A ring's mapping stays on the thread that maps it.
                 let mut ring = Ring::new(root.clone());
                 if let Err(error) = startup(&root, &mut held, &mut ring, &operation) {
@@ -256,6 +259,7 @@ impl Store {
                     &mut load_buffers,
                     operation,
                 );
+                drop(observation);
             })?;
 
         Ok(Self {
@@ -510,6 +514,11 @@ impl Held {
             assert!(pushed);
         }
         self.take_current(run, second, apps, segment);
+        persistence::work::ingestion::record_publication(
+            *run,
+            second.publication,
+            persistence::work::ingestion::Kind::Accepted,
+        );
         if let Some(leaving) = leaving {
             self.full_detail_evicted_through_ns = Some(
                 self.full_detail_evicted_through_ns

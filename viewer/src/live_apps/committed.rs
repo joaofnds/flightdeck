@@ -252,6 +252,11 @@ impl Frame {
             committed_many_members(&mut cursor, &mut frame, endpoint, size, operation)?;
             committed_finish(&frame, size)?;
             operation.check()?;
+            persistence::work::ingestion::record_publication(
+                endpoint.identity,
+                endpoint.stamp.publication,
+                persistence::work::ingestion::Kind::CommittedFrameCapture,
+            );
             consume(endpoint, frame)?;
         }
         assert!(cursor.rows.next().is_none());
@@ -617,6 +622,11 @@ fn committed_many_rows(
         committed_many_members(&mut rows, &mut frame, endpoint, size, operation)?;
         committed_finish(&frame, size)?;
         operation.check()?;
+        persistence::work::ingestion::record_publication(
+            endpoint.identity,
+            endpoint.stamp.publication,
+            persistence::work::ingestion::Kind::CommittedFrameCapture,
+        );
         consume(frame)?;
     }
     if rows.rows.next().is_some() {
@@ -768,6 +778,11 @@ fn committed_many_members(
 }
 
 fn committed_frame(endpoint: &Endpoint, size: &FrameSize) -> Box<Frame> {
+    persistence::work::ingestion::record_publication(
+        endpoint.identity,
+        endpoint.stamp.publication,
+        persistence::work::ingestion::Kind::CommittedFrameCaptureAttempt,
+    );
     Box::new(Frame {
         identity: endpoint.identity,
         stamp: endpoint.stamp,

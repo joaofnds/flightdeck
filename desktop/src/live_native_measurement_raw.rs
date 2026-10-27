@@ -33,7 +33,7 @@ pub(super) fn run(root: &Path, route: &str, expected: &Value) {
     );
 }
 
-fn pages(session: &viewer::LiveSession) -> Value {
+pub(crate) fn pages(session: &viewer::LiveSession) -> Value {
     let mut tables = serde_json::Map::new();
     for table in TABLES {
         let mut pages = Vec::new();

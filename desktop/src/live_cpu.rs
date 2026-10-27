@@ -9,6 +9,7 @@ use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{identity_signature, identity_validate};
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct CPUActivity {
     pub observation: Value,
     pub previous_observation: Option<Value>,
@@ -18,6 +19,7 @@ pub struct CPUActivity {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct LogicalCPU {
     pub cpu: u32,
     pub busy_percent: Option<f32>,

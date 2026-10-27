@@ -88,6 +88,11 @@ pub(crate) fn trends_point(
     previous: Option<&Observation>,
     segment: u64,
 ) -> Result<Value> {
+    persistence::work::ingestion::record_publication(
+        reader.windows[observation.window].identity.run,
+        observation.publication,
+        persistence::work::ingestion::Kind::MachineReduction,
+    );
     let mut value = point(tables, observation, previous, segment)?;
     let identity = observation.json(reader.windows);
     value["run"] = identity["run"].clone();
@@ -155,6 +160,8 @@ fn trends_predecessor(
     tables: &mut Tables,
     cell_count: &mut usize,
 ) -> Result<Option<Observation>> {
+    let _purpose =
+        persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
     let Some(publication) = observation.publication.checked_sub(1) else {
         return Ok(None);
     };

@@ -1,4 +1,56 @@
 #[test]
+fn does_not_report_a_cancelled_raw_capture_as_complete() {
+    // Goal: a cancelled candidate contributes attempted work but no completed raw capture.
+    // Method: reuse a real publication and interrupt its operation before owned capture ends.
+    use persistence::work::ingestion::{Kind, Trace};
+    let mut fixture = RingFixture::new_following();
+    fixture.publish_following(1);
+    let session = LiveSession::open(&fixture.root).unwrap();
+    let source = &session.sources[0];
+    let cancellation = Arc::new(Cancellation::default());
+    let operation = Arc::clone(&cancellation).operation(0).unwrap();
+    cancellation.cancel().unwrap();
+    let trace = Trace::new(source.identity.recording);
+    let scope = trace.enter();
+    let mut raw = None;
+
+    let result = Raw::capture(
+        &Publication {
+            reader: &source.reader,
+            tick: &source.tick,
+            identities: &source.identities,
+            publication: 1,
+        },
+        &PublicationEvents {
+            events: &[],
+            identities: &[],
+        },
+        &operation,
+        &mut raw,
+    );
+    drop(scope);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+
+    assert!(matches!(result,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == Kind::RawCapture)
+            .count(),
+        0
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == Kind::RawCaptureAttempt)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn interrupts_a_page_after_formatting_starts_and_retries_in_a_new_epoch() {
     // Goal: superseding a page after its first formatted row never returns a stale response.
     // Method: interrupt at a deterministic row boundary, then retrieve exact cells in a new epoch.

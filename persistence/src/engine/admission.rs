@@ -101,8 +101,27 @@ pub(super) fn validate(path: &Path) -> Result<()> {
         return Err(Error::Bound("parquet file framing"));
     }
 
-    let mut reader = BufReader::with_capacity(8192, file);
+    let mut reader = BufReader::with_capacity(8192, AdmissionFile(file));
     validate_reader(&mut reader, size)
+}
+
+struct AdmissionFile(File);
+
+impl Read for AdmissionFile {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let count = self.0.read(bytes)?;
+        crate::work::ingestion::record_content(
+            crate::work::ingestion::Kind::AdmissionRead,
+            collector::u64_from_usize(count),
+        );
+        Ok(count)
+    }
+}
+
+impl Seek for AdmissionFile {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.0.seek(position)
+    }
 }
 
 pub(super) fn validate_reader(reader: &mut (impl Read + Seek), size: u64) -> Result<()> {

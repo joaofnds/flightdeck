@@ -559,10 +559,16 @@ impl Session {
             let mut readers = Vec::with_capacity(CONTEXT_READERS);
             for (part, connection) in parts.into_iter().zip(&self.context_connections) {
                 let reader = self.reader_through(connection);
+                let observation = persistence::work::ingestion::inherit_current();
                 let thread = std::thread::Builder::new()
                     .name(name.to_owned())
                     .stack_size(CONTEXT_READER_STACK_BYTES)
-                    .spawn_scoped(scope, move || read(&reader, part))?;
+                    .spawn_scoped(scope, move || {
+                        let observation = observation.enter();
+                        let result = read(&reader, part);
+                        drop(observation);
+                        result
+                    })?;
                 readers.push(thread);
             }
 
@@ -640,6 +646,7 @@ impl Session {
                 continue;
             }
 
+            let _observation = self.source_scope(window, Some("ticks"));
             let source = self.source(window, "ticks")?;
             let table = data::query(
                 &self.connection,
@@ -669,6 +676,7 @@ impl Session {
     ) -> Result<()> {
         assert!(output.is_none());
 
+        let _observation = self.source_scope(observation.window, Some("cpus"));
         let source = self.source(observation.window, "cpus")?;
         let publication = observation.publication;
         let limit = crate::cpu_detail::CPUS_MAX + 1;
@@ -706,6 +714,7 @@ impl Session {
         if !offset.is_multiple_of(PAGE_ROWS) {
             return Err(Error::Bound("page offset"));
         }
+        let _observation = self.source_scope(selected.window, Some(name));
         let source = self.source(selected.window, name)?;
         let publication = selected.publication;
         let count = self.connection.query(&format!(
@@ -732,6 +741,14 @@ impl Session {
 
     pub(crate) fn source(&self, window: usize, name: &str) -> Result<String> {
         self.reader().source(window, name)
+    }
+
+    pub(crate) fn source_scope(
+        &self,
+        window: usize,
+        table: Option<&str>,
+    ) -> Option<persistence::work::ingestion::Scope> {
+        self.reader().source_scope(window, table)
     }
 
     fn validate_commitment(&self, window: usize) -> Result<()> {
@@ -901,6 +918,23 @@ pub(crate) struct Reader<'session> {
 }
 
 impl Reader<'_> {
+    fn source_scope(
+        &self,
+        window: usize,
+        table: Option<&str>,
+    ) -> Option<persistence::work::ingestion::Scope> {
+        if !persistence::work::ingestion::is_active() {
+            return None;
+        }
+
+        self.windows.get(window).map(|manifest| {
+            persistence::work::ingestion::minute_source(
+                manifest,
+                table.and_then(persistence::work::ingestion::table_name),
+            )
+        })
+    }
+
     pub(crate) fn source(&self, window: usize, name: &str) -> Result<String> {
         self.operation.check()?;
         #[cfg(test)]
@@ -915,6 +949,8 @@ impl Reader<'_> {
             .root
             .join(&manifest.data_directory)
             .join(format!("{name}.parquet"));
+        let _observation =
+            persistence::work::ingestion::minute_source(manifest, Some(table.name()));
         persistence::query::table_source(
             self.connection,
             table,
@@ -947,6 +983,7 @@ impl Reader<'_> {
     }
 
     pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
+        let _observation = self.source_scope(window, Some(name));
         #[cfg(test)]
         self.table_queries.increment();
         if name == metrics::core_frequency::CORE_LEVEL_STATES {
@@ -983,6 +1020,7 @@ impl Reader<'_> {
         range: ContextRange,
         observations: &mut Vec<Observation>,
     ) -> Result<()> {
+        let _observation = self.source_scope(window, Some("ticks"));
         let source = self.source(window, "ticks")?;
         let ContextRange { first_ns, end_ns } = range;
         let ticks = data::query(

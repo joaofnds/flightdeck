@@ -89,6 +89,7 @@ impl Session {
             return Ok(());
         }
 
+        let _observation = self.source_scope(kept.window, Some(persistence::schema::APP_PARTS));
         self.validate_commitment(kept.window)?;
         self.visit_kept_parts_residents(&kept.source, &plotted_headers, |header, apps| {
             consume(&SavedResidents::Sealed { header, apps })
@@ -118,6 +119,7 @@ impl Session {
         let first = readings
             .first()
             .ok_or(Error::Bound("resident history empty batch"))?;
+        let _observation = self.source_scope(first.window, None);
         self.validate_commitment(first.window)?;
         let endpoints: Vec<_> = readings.iter().map(Reading::endpoint).collect();
         let source = self.app_history_source(&mut replay.restore, first.window, Source::Apps)?;
@@ -155,8 +157,8 @@ impl Session {
             self.operation.check()?;
             self.validate_commitment(kept.window)?;
         }
-        for source in replay.restore.sources.values() {
-            source.refresh(&self.connection)?;
+        for ((window, _kind), source) in &replay.restore.sources {
+            source.refresh(&self.connection, &self.windows[*window])?;
         }
 
         self.operation.check()
@@ -255,6 +257,8 @@ impl Session {
             }
             self.validate_commitment(window)?;
             for file in &pin.files {
+                let _observation =
+                    self.source_scope(window, file.path.file_stem().and_then(|name| name.to_str()));
                 if self.connection.parquet_source(&file.path)? != file.alias {
                     return Err(Error::Bound("resident cache file changed"));
                 }

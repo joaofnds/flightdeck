@@ -144,12 +144,25 @@ struct ProjectionEvents {
 
 impl Source {
     fn read_tick(&mut self) -> std::io::Result<Found> {
-        if self.reader.dictionary_capacity().is_some() {
+        persistence::work::ingestion::record_publication(
+            self.identity,
+            self.reader.next_publication(),
+            persistence::work::ingestion::Kind::RingReadAttempt,
+        );
+        let found = if self.reader.dictionary_capacity().is_some() {
             self.reader
                 .read_identity_into(&mut self.tick, &mut self.identities)
         } else {
             self.reader.read_into(&mut self.tick)
+        }?;
+        if let Found::Publication { publication, .. } = found {
+            persistence::work::ingestion::record_publication(
+                self.identity,
+                publication,
+                persistence::work::ingestion::Kind::RingRead,
+            );
         }
+        Ok(found)
     }
 }
 
@@ -877,6 +890,8 @@ impl LiveSession {
     }
 
     pub fn page(&self, name: &str, offset: u64) -> Result<Value> {
+        let _purpose =
+            persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Raw);
         self.operation.check()?;
         let selected = self
             .selected
@@ -1311,6 +1326,11 @@ impl LiveSession {
         match projected {
             Ok(changed) => Ok(changed),
             Err(error) => {
+                persistence::work::ingestion::record_publication(
+                    self.sources[index].identity,
+                    publication,
+                    persistence::work::ingestion::Kind::AttemptFailed,
+                );
                 self.sources[index].reader.seek_publication(publication)?;
                 self.sources[index].losses = losses;
                 Err(error)
@@ -1351,21 +1371,7 @@ impl LiveSession {
         }
 
         let segment = self.poll_segment(&current)?;
-        current.point = metrics::point_native(
-            &current.raw,
-            previous.map(|observation| &observation.raw),
-            &current.observation,
-            previous.map(|observation| &observation.observation),
-            segment,
-        )?;
-        current.point["run"] = json!(identity_text(current.identity.run).to_string());
-        current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
-        current.point["observation"] = current.json();
-        let scalar_bytes = point_bytes::charge(&current.point)?;
-        current.bytes += scalar_bytes;
-        if current.bytes > CACHE_BYTES_MAX {
-            return Err(Error::Bound("live observation bytes"));
-        }
+        let scalar_bytes = Self::poll_store_point(&mut current, previous, segment)?;
         let mut app_point = None;
         self.app_history.capture(
             current
@@ -1392,8 +1398,48 @@ impl LiveSession {
         }
         self.app_history
             .push(app_point.unwrap_or_else(|| unreachable!()), charted_first);
+        self.poll_store_accepted();
 
         Ok(())
+    }
+
+    fn poll_store_point(
+        current: &mut LiveObservation,
+        previous: Option<&LiveObservation>,
+        segment: u64,
+    ) -> Result<usize> {
+        persistence::work::ingestion::record_publication(
+            current.identity,
+            current.observation.publication,
+            persistence::work::ingestion::Kind::MachineReduction,
+        );
+        current.point = metrics::point_native(
+            &current.raw,
+            previous.map(|observation| &observation.raw),
+            &current.observation,
+            previous.map(|observation| &observation.observation),
+            segment,
+        )?;
+        current.point["run"] = json!(identity_text(current.identity.run).to_string());
+        current.point["boot"] = json!(identity_text(current.identity.boot).to_string());
+        current.point["observation"] = current.json();
+        let scalar_bytes = point_bytes::charge(&current.point)?;
+        current.bytes += scalar_bytes;
+        if current.bytes > CACHE_BYTES_MAX {
+            return Err(Error::Bound("live observation bytes"));
+        }
+        Ok(scalar_bytes)
+    }
+
+    fn poll_store_accepted(&self) {
+        if persistence::work::ingestion::is_active() {
+            let accepted = self.observations.back().unwrap_or_else(|| unreachable!());
+            persistence::work::ingestion::record_publication(
+                accepted.identity,
+                accepted.observation.publication,
+                persistence::work::ingestion::Kind::Accepted,
+            );
+        }
     }
 
     fn poll_admit(&self, current: &LiveObservation, first: u64, scalar_bytes: usize) -> Result<()> {
@@ -1559,6 +1605,8 @@ impl LiveSession {
     }
 
     fn select_rehydrate(&self, selected: &Value) -> Result<Option<LiveObservation>> {
+        let _purpose =
+            persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Selection);
         if self.history.as_ref().is_some_and(|history| {
             history.windows.iter().any(|manifest| {
                 if !identity_matches(manifest.identity.run, selected) {
@@ -1625,6 +1673,9 @@ impl LiveSession {
         });
         let mut previous_frame = None;
         if let Some(previous) = previous {
+            let _purpose = persistence::work::ingestion::purpose(
+                persistence::work::ingestion::Purpose::Predecessor,
+            );
             if rehydrate_source_try_read(source, &previous["observation"])? {
                 let publication = previous["observation"]["publication"]
                     .as_u64()

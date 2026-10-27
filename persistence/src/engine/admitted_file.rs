@@ -85,6 +85,7 @@ impl AdmittedFile {
             .map_err(|_| Error::Bound("parquet prefix rows"))?
             .map(|length| (0, length));
         let columns = columns.iter().map(|name| (*name).to_owned()).collect();
+        crate::work::ingestion::record_content(crate::work::ingestion::Kind::ProjectionDecode, 0);
         Ok(ParquetReader::new(Cursor::new(self.bytes.as_slice()))
             .set_rechunk(false)
             .with_slice(slice)
@@ -127,6 +128,10 @@ fn capture(file: &mut impl Read, size: u64) -> Result<Vec<u8>> {
 }
 
 pub(super) fn capture_bytes(file: &mut impl Read, size: u64) -> Result<Vec<u8>> {
+    crate::work::ingestion::record_content(
+        crate::work::ingestion::Kind::ContentCaptureAttempt,
+        size,
+    );
     let length = usize::try_from(size).map_err(|_| Error::Bound("parquet file bytes"))?;
     let mut bytes = Vec::new();
     bytes
@@ -137,6 +142,8 @@ pub(super) fn capture_bytes(file: &mut impl Read, size: u64) -> Result<Vec<u8>> 
     if file.read(&mut [0])? != 0 {
         return Err(Error::Bound("changed parquet file size"));
     }
+
+    crate::work::ingestion::record_content(crate::work::ingestion::Kind::ContentCapture, size);
 
     Ok(bytes)
 }

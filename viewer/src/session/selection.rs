@@ -16,6 +16,7 @@ impl Session {
             return Ok(());
         };
 
+        let _observation = self.source_scope(window, Some("ticks"));
         let source = self.source(window, "ticks")?;
         let table = data::query(
             &self.connection,

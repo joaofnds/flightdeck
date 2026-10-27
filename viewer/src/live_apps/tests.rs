@@ -50,6 +50,34 @@ mod fixture;
 use fixture::{Change, Fixture};
 
 #[test]
+fn refuses_an_overflowing_publication_before_optional_work_accounting() {
+    // Goal: inactive instrumentation preserves the public malformed-publication refusal.
+    // Method: capture one real identity publication, then supply u64::MAX to the same reader.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    fixture.publish(0, Change::None);
+    let mut frame = None;
+    fixture.capture(&mut frame);
+
+    let result = Frame::capture(
+        &Publication {
+            reader: fixture.reader.as_ref().unwrap(),
+            tick: &fixture.tick,
+            identities: &fixture.identities,
+            publication: u64::MAX,
+        },
+        &mut frame,
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("live App publication association"))
+    ));
+    assert!(frame.is_none());
+}
+
+#[test]
 fn charges_the_maximum_captured_start_population_to_the_live_frame() {
     // Goal: owned Start identities and bytes stay charged to the existing observation cache.
     // Method: capture all 16384 Starts referencing one five-byte program in a real v4 ring.

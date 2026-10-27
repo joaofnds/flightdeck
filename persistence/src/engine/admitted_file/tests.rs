@@ -15,6 +15,62 @@ use crate::engine::source_tests::{Fixture, write_frame};
 use crate::resources::ByteBudget;
 
 #[test]
+fn does_not_report_a_grown_input_as_a_complete_content_capture() {
+    // Goal: completed byte capture includes the final size check, while retaining attempts.
+    // Method: offer more bytes than the admitted length and observe the actual capture entry.
+    use crate::work::ingestion::{Kind, Trace};
+    let trace = Trace::new(collector::ring::Identity([1, 2]));
+    let scope = trace.enter();
+    let mut reader = Cursor::new([1, 2]);
+
+    let result = super::capture_bytes(&mut reader, 1);
+    drop(scope);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Bound("changed parquet file size"))
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == Kind::ContentCapture)
+            .count(),
+        0
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == Kind::ContentCaptureAttempt)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn reports_content_capture_after_the_complete_input_passes_its_size_check() {
+    // Goal: successful full input capture remains visible beside its attempt.
+    // Method: capture a one-byte input and require both events with the exact byte count.
+    use crate::work::ingestion::{Kind, Trace};
+    let trace = Trace::new(collector::ring::Identity([1, 2]));
+    let scope = trace.enter();
+    let mut reader = Cursor::new([1]);
+
+    let bytes = super::capture_bytes(&mut reader, 1).unwrap();
+    drop(scope);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+
+    assert_eq!(bytes, [1]);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].kind, Kind::ContentCaptureAttempt);
+    assert_eq!(events[0].bytes, 1);
+    assert_eq!(events[1].kind, Kind::ContentCapture);
+    assert_eq!(events[1].bytes, 1);
+}
+
+#[test]
 fn retains_only_compressed_charge_until_the_final_input_owner_drops() {
     // Goal: independent projections share charged immutable input after its source is gone.
     // Method: retain two Arc readers, remove the path, project both columns, then drop owners.

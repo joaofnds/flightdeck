@@ -166,6 +166,7 @@ impl Session {
         window: usize,
         publication: u64,
     ) -> Result<Option<Endpoint>> {
+        let _observation = self.source_scope(window, Some("ticks"));
         let source = self.source(window, "ticks")?;
         let frame = self.connection.query(&format!(
             "SELECT run_tick, wall_ns, continuous_ns, awake_ns, processes_refused, \
@@ -216,6 +217,7 @@ impl Session {
         source: &mut Option<FrameSource>,
         output: &mut Option<Box<Frame>>,
     ) -> Result<()> {
+        let _observation = self.source_scope(window, None);
         if source.as_ref().is_none_or(|source| source.window != window) {
             let processes = self.source(window, "processes")?;
             let events = self.source(window, "events")?;

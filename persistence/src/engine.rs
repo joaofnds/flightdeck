@@ -145,6 +145,7 @@ impl Engine {
 
     pub fn collect(&self, plan: LazyFrame) -> Result<DataFrame> {
         crate::work::record(|counts| counts.collections += 1);
+        crate::work::ingestion::record_content(crate::work::ingestion::Kind::NativeCollect, 0);
         let execution = self
             .execution
             .lock()

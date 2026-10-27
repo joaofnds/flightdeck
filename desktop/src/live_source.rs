@@ -132,6 +132,8 @@ struct Shared {
     #[cfg(test)]
     measurement_taken: AtomicBool,
     #[cfg(test)]
+    measurement_raw: AtomicBool,
+    #[cfg(test)]
     measurement_gate: Mutex<Option<measurement::Gate>>,
     #[cfg(test)]
     measurement_wake: Condvar,
@@ -145,6 +147,10 @@ struct Shared {
 }
 
 struct Mailbox {
+    #[cfg(test)]
+    frozen_payloads: BTreeMap<&'static str, Value>,
+    #[cfg(test)]
+    taken_payloads: BTreeMap<&'static str, Value>,
     #[cfg(test)]
     output_complete: bool,
     generation: u64,
@@ -277,10 +283,16 @@ impl Worker {
     fn start_mode(root: PathBuf, mode: SourceMode, rest: Rest) -> std::io::Result<Self> {
         let shared = Arc::new(Shared::with_rest(rest));
         let control = Arc::clone(&shared);
+        let observation =
+            persistence::work::ingestion::inherit(persistence::work::ingestion::Producer::Worker);
         let thread = thread::Builder::new()
             .name("flightdeck-live".to_owned())
             .stack_size(4 * 1024 * 1024)
-            .spawn(move || worker_run(&root, &control))?;
+            .spawn(move || {
+                let observation = observation.enter();
+                worker_run(&root, &control);
+                drop(observation);
+            })?;
 
         Ok(Self {
             shared,
@@ -347,6 +359,10 @@ impl Worker {
     pub fn take(&mut self) -> Result<Option<Update>, String> {
         let mut mailbox = self.mailbox()?;
         let output = mailbox.output.take();
+        #[cfg(test)]
+        if output.is_some() {
+            mailbox.taken_payloads = std::mem::take(&mut mailbox.frozen_payloads);
+        }
         #[cfg(test)]
         self.shared.measurement_taken.store(
             output.is_some() && mailbox.output_complete,
@@ -451,12 +467,18 @@ impl Shared {
             #[cfg(test)]
             measurement_taken: AtomicBool::new(false),
             #[cfg(test)]
+            measurement_raw: AtomicBool::new(false),
+            #[cfg(test)]
             measurement_gate: Mutex::new(None),
             #[cfg(test)]
             measurement_wake: Condvar::new(),
             #[cfg(feature = "automation")]
             requests: AtomicU64::new(0),
             mailbox: Mutex::new(Mailbox {
+                #[cfg(test)]
+                frozen_payloads: BTreeMap::new(),
+                #[cfg(test)]
+                taken_payloads: BTreeMap::new(),
                 #[cfg(test)]
                 output_complete: false,
                 generation: 0,
@@ -671,6 +693,7 @@ fn worker_publish(shared: &Shared, generation: u64, output: Update) {
                 #[cfg(test)]
                 {
                     mailbox.output_complete = shared.measurement_staged.load(Ordering::Acquire);
+                    mailbox.frozen_payloads = measurement::take_payloads();
                 }
                 mailbox.output = Some(output);
             }
@@ -736,6 +759,8 @@ fn reader_read(
     if Instant::now() < reader.retry_after {
         return None;
     }
+    #[cfg(test)]
+    measurement::clear_payloads();
     match reader_snapshot(reader, root, command, shared) {
         Ok(Some(snapshot)) => Some(Update::Ready(snapshot)),
         Ok(None) => None,
@@ -758,18 +783,11 @@ fn reader_snapshot(
 ) -> Result<Option<Box<Snapshot>>, String> {
     let started = Instant::now();
     let published = reader_published(reader, command.generation);
-    if command.mode == SourceMode::Recorded {
-        if published {
-            return Ok(None);
-        }
+    if reader_snapshot_finished(command, published) {
+        return Ok(None);
     }
     if command.request.route == "computer" {
         return reader_computer(reader, root, command, shared, published);
-    }
-    if published {
-        if reader_snapshot_is_pinned(&command.request) {
-            return Ok(None);
-        }
     }
     let Plan {
         mut histories,
@@ -798,6 +816,8 @@ fn reader_snapshot(
         histories,
         &mut snapshot,
     )?;
+    #[cfg(test)]
+    measurement::raw_if_requested(session, shared, &snapshot.selection);
     if histories == Histories::Defer {
         snapshot.histories_pending = true;
     }
@@ -808,6 +828,19 @@ fn reader_snapshot(
     reader_snapshot_record(reader, command, &snapshot, histories);
 
     Ok(Some(snapshot))
+}
+
+fn reader_snapshot_finished(command: &Command, published: bool) -> bool {
+    if !published {
+        return false;
+    }
+    if command.mode == SourceMode::Recorded {
+        return true;
+    }
+    if command.request.route == "computer" {
+        return false;
+    }
+    reader_snapshot_is_pinned(&command.request)
 }
 
 /// What a step of the page reads, and what it leaves to a later step.
@@ -1027,6 +1060,8 @@ fn reader_computer(
 
     let selection = reader_latest(session)?;
     let snapshot = reader_snapshot_new(command.generation, catalog, selection);
+    #[cfg(test)]
+    measurement::raw_if_requested(session, shared, &snapshot.selection);
     reader_snapshot_record(reader, command, &snapshot, Histories::Read);
     Ok(Some(snapshot))
 }
@@ -1204,6 +1239,8 @@ fn reader_payload_read(
     }
     if request.route == "cpu" {
         let detail = session.cpu_detail().map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        measurement::payload("cpu_detail", &detail);
         snapshot.cpu_detail = Some(crate::live_cpu::CPUActivity::decode(
             detail,
             &snapshot.selection["selected"],
@@ -1317,7 +1354,11 @@ fn reader_app_attribution_result(
 ) -> Arc<crate::live_app_attribution_history::AppAttributionHistory> {
     use crate::live_app_attribution_history::AppAttributionHistory;
     Arc::new(match result {
-        Ok(payload) => AppAttributionHistory::prepare(metric, &payload, selection),
+        Ok(payload) => {
+            #[cfg(test)]
+            measurement::payload(metric.panel_id(), &payload);
+            AppAttributionHistory::prepare(metric, &payload, selection)
+        }
         Err(error) => {
             AppAttributionHistory::Unavailable(crate::bounded::bounded(&error.to_string(), 512))
         }
@@ -1359,6 +1400,8 @@ fn reader_overview_app_histories_result(
 fn reader_resident_history(session: &LiveSession, snapshot: &mut Snapshot) {
     let history = match session.app_resident_history() {
         Ok(payload) => {
+            #[cfg(test)]
+            measurement::payload("resident_history", &payload);
             crate::live_resident_history::ResidentHistory::prepare(&payload, &snapshot.selection)
         }
         Err(error) => crate::live_resident_history::ResidentHistory::Unavailable(
@@ -1386,6 +1429,8 @@ fn reader_cpu_history(
     let payload = session
         .cpu_history(request.cpu_offset)
         .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    measurement::payload("cpu_history", &payload);
     snapshot.cpu_history = Some(Arc::new(crate::live_cpu_history::CPUHistory::decode(
         payload,
         &snapshot.selection,

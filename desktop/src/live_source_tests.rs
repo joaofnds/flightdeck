@@ -755,11 +755,14 @@ impl SnapshotReader {
             shared: Arc::new(Shared {
                 measurement_staged: AtomicBool::new(false),
                 measurement_taken: AtomicBool::new(false),
+                measurement_raw: AtomicBool::new(false),
                 measurement_gate: Mutex::new(None),
                 measurement_wake: Condvar::new(),
                 #[cfg(feature = "automation")]
                 requests: std::sync::atomic::AtomicU64::new(0),
                 mailbox: Mutex::new(Mailbox {
+                    frozen_payloads: std::collections::BTreeMap::new(),
+                    taken_payloads: std::collections::BTreeMap::new(),
                     output_complete: false,
                     generation: 1,
                     request: None,

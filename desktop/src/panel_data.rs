@@ -7,6 +7,7 @@ fn tick_seconds() -> u64 {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct Panel {
     pub selected_index: Option<usize>,
@@ -55,6 +56,7 @@ pub struct Panel {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
 pub struct Line {
     pub name: String,

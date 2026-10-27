@@ -16,8 +16,9 @@ pub(super) struct TicksInput {
 }
 
 pub(super) struct TicksTable<'minute> {
-    legacy: Option<SealedTable>,
+    legacy: Option<SealedTable<'minute>>,
     admitted: Option<&'minute TicksInput>,
+    manifest: &'minute persistence::Manifest,
 }
 
 impl<'input> SealedMinute<'input> {
@@ -54,6 +55,8 @@ impl<'input> SealedMinute<'input> {
     ) -> Result<Self, Refused> {
         operation.check()?;
         let mut minute = Self::open(source.root, source.marker)?;
+        let _observation =
+            persistence::work::ingestion::minute_source(&minute.manifest, Some("ticks"));
         let path = source
             .root
             .join(&minute.manifest.data_directory)
@@ -87,11 +90,13 @@ impl<'input> SealedMinute<'input> {
             Ok(TicksTable {
                 legacy: None,
                 admitted: Some(ticks),
+                manifest: &self.manifest,
             })
         } else {
             Ok(TicksTable {
                 legacy: Some(self.table(persistence::schema::Table::Ticks)?),
                 admitted: None,
+                manifest: &self.manifest,
             })
         }
     }
@@ -123,6 +128,8 @@ impl TicksTable<'_> {
             }
             (None, Some(input)) => {
                 input.operation.check()?;
+                let _observation =
+                    persistence::work::ingestion::minute_source(self.manifest, Some("ticks"));
                 let result = input.table.read(columns, row_limit);
                 input.operation.check()?;
                 Ok(result?)

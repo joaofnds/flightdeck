@@ -91,10 +91,15 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     let root = recording(options)?;
     let collector = collector_session(&root, options)?;
     // A recording opened read-only has no ring to follow, so the store does not hold it yet.
-    let (worker, store) = if options.source.read_only() {
-        (Worker::start_recorded(root.clone())?, None)
+    let mode = if options.source.read_only() {
+        crate::live_source_mode::SourceMode::Recorded
     } else {
-        (Worker::start(root.clone())?, Some(Store::start(&root)?))
+        crate::live_source_mode::SourceMode::Live
+    };
+    let mut backend = None;
+    Backend::start(&root, mode, &mut backend)?;
+    let Some(Backend { worker, store }) = backend else {
+        unreachable!("successful backend construction initializes its output");
     };
     let reopening = reopening(root, options, control.is_some());
     let preferences_path = preferences_path(options, control.is_some());
@@ -138,6 +143,32 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+struct Backend {
+    worker: Worker,
+    store: Option<Store>,
+}
+
+impl Backend {
+    fn start(
+        root: &std::path::Path,
+        mode: crate::live_source_mode::SourceMode,
+        output: &mut Option<Self>,
+    ) -> std::io::Result<()> {
+        assert!(output.is_none());
+        let (worker, store) = match mode {
+            crate::live_source_mode::SourceMode::Recorded => {
+                (Worker::start_recorded(root.to_owned())?, None)
+            }
+            crate::live_source_mode::SourceMode::Live => {
+                (Worker::start(root.to_owned())?, Some(Store::start(root)?))
+            }
+        };
+
+        *output = Some(Self { worker, store });
+        Ok(())
+    }
+}
+
 /// What the window opens on.
 struct Start {
     /// The page `--page` named, which opens over the page the user left open.
@@ -151,6 +182,10 @@ struct Start {
 #[cfg(test)]
 #[path = "live_launch_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "live_launch_ingestion_tests.rs"]
+mod ingestion_tests;
 
 fn start(options: &Options) -> Start {
     Start {

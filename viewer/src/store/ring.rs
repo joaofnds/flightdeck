@@ -487,13 +487,26 @@ impl Source {
 
     /// Reads the ring's next tick, with its processes' identities where the ring holds them.
     fn read_tick(&mut self) -> std::io::Result<Found> {
-        if self.reader.dictionary_capacity().is_some() {
+        persistence::work::ingestion::record_publication(
+            self.identity,
+            self.reader.next_publication(),
+            persistence::work::ingestion::Kind::RingReadAttempt,
+        );
+        let found = if self.reader.dictionary_capacity().is_some() {
             self.reader
                 .read_identity_into(&mut self.tick, &mut self.identities)
         } else {
             self.identities.clear();
             self.reader.read_into(&mut self.tick)
+        }?;
+        if let Found::Publication { publication, .. } = found {
+            persistence::work::ingestion::record_publication(
+                self.identity,
+                publication,
+                persistence::work::ingestion::Kind::RingRead,
+            );
         }
+        Ok(found)
     }
 
     /// Runs the App rule on the tick just read, the ring's publication `publication`, with its
@@ -501,6 +514,11 @@ impl Source {
     /// why the rule refused the tick.
     fn apps(&mut self, publication: u64) -> Result<(), String> {
         if let Err(error) = self.apps_capture(publication) {
+            persistence::work::ingestion::record_publication(
+                self.identity,
+                publication,
+                persistence::work::ingestion::Kind::AttemptFailed,
+            );
             self.sample = None;
             self.previous_frame = None;
             self.previous_endpoint = None;
@@ -616,6 +634,11 @@ impl Source {
     /// The second of the tick just read, the ring's publication `publication`, with its rates
     /// over the interval since the tick read before it.
     fn second(&mut self, publication: u64) -> Option<MachineSecond> {
+        persistence::work::ingestion::record_publication(
+            self.identity,
+            publication,
+            persistence::work::ingestion::Kind::MachineReduction,
+        );
         self.current.clear();
         self.current.push_tick(publication, &self.tick);
 

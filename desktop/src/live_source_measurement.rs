@@ -1,7 +1,52 @@
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::sync::{Arc, MutexGuard};
 use std::time::Duration;
 
+use serde_json::Value;
+
 use super::{Shared, Worker};
+
+thread_local! {
+    static PAYLOADS: RefCell<BTreeMap<&'static str, Value>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+pub(super) fn clear_payloads() {
+    PAYLOADS.with(|payloads| payloads.borrow_mut().clear());
+}
+
+pub(super) fn payload(name: &'static str, payload: &serde_json::Value) {
+    if !persistence::work::ingestion::is_active() {
+        return;
+    }
+    assert!(serde_json::to_vec(payload).unwrap().len() <= 8 * 1024 * 1024);
+    PAYLOADS.with(|payloads| {
+        let mut payloads = payloads.borrow_mut();
+        assert!(payloads.len() < 8);
+        payloads.insert(name, payload.clone());
+    });
+}
+
+pub(super) fn take_payloads() -> std::collections::BTreeMap<&'static str, serde_json::Value> {
+    PAYLOADS.with(|payloads| std::mem::take(&mut *payloads.borrow_mut()))
+}
+
+pub(super) fn raw_if_requested(
+    session: &viewer::LiveSession,
+    shared: &Shared,
+    selection: &serde_json::Value,
+) {
+    if shared
+        .measurement_raw
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        if !selection["selected"].is_null() {
+            let pages = crate::live_source::tests::native_measurements::raw::pages(session);
+            payload("raw_pages", &pages);
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage {
@@ -22,6 +67,21 @@ pub(crate) struct Hold {
 }
 
 impl Worker {
+    pub(crate) fn freeze_raw_pages(&self) {
+        assert!(persistence::work::ingestion::is_active());
+        self.shared
+            .measurement_raw
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn frozen_payloads(
+        &self,
+        output: &mut std::collections::BTreeMap<&'static str, serde_json::Value>,
+    ) {
+        assert!(output.is_empty());
+        output.clone_from(&self.mailbox().unwrap().taken_payloads);
+    }
+
     pub(crate) fn hold_measurement_stage(&self, stage: Stage) -> Hold {
         let mut slot = self.shared.measurement_gate.lock().unwrap();
         assert!(slot.is_none());

@@ -260,6 +260,7 @@ impl Session {
         assert!(output.is_none());
         assert!(query.rows_max <= BATCH_PUBLICATIONS_MAX * cpu_history_sample::CPUS_MAX);
 
+        let _observation = self.source_scope(query.window, Some(query.table));
         let source = self.source(query.window, query.table)?;
         let limit = query.rows_max + 1;
         let predicate = query.predicate;

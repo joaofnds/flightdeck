@@ -127,6 +127,20 @@ pub struct Publication<'source> {
     pub publication: u64,
 }
 
+impl Publication<'_> {
+    pub(crate) fn record_work(&self, kind: persistence::work::ingestion::Kind) {
+        if !persistence::work::ingestion::is_active() {
+            return;
+        }
+
+        if let Some(identity) = self.reader.identity() {
+            persistence::work::ingestion::record_publication(identity, self.publication, kind);
+        } else {
+            persistence::work::ingestion::record_content(kind, 0);
+        }
+    }
+}
+
 const _: () = {
     assert!(PROGRAM_FRAME_BYTES_MAX * 2 == apps::PROGRAM_BYTES_MAX);
     assert!(apps::PROCESS_INTERVALS_MAX < 65_536);
@@ -136,6 +150,7 @@ impl Frame {
     /// Owns copied source bytes and numeric readings. A refusal leaves output empty.
     pub fn capture(source: &Publication<'_>, output: &mut Option<Box<Self>>) -> Result<()> {
         *output = None;
+        source.record_work(persistence::work::ingestion::Kind::FrameCaptureAttempt);
         validate(source)?;
         let identity = source
             .reader
@@ -179,6 +194,7 @@ impl Frame {
         assert_eq!(frame.members.len(), count);
         assert!(frame.arena.len() <= PROGRAM_FRAME_BYTES_MAX);
         *output = Some(frame);
+        source.record_work(persistence::work::ingestion::Kind::FrameCapture);
 
         Ok(())
     }
@@ -235,6 +251,11 @@ impl Frame {
         previous: Option<&Self>,
         consume: impl FnOnce(&apps::Aggregate<'_>) -> Result<()>,
     ) -> Result<()> {
+        persistence::work::ingestion::record_publication(
+            self.identity,
+            self.stamp.publication,
+            persistence::work::ingestion::Kind::AppDerivation,
+        );
         views::with_aggregate(self, previous, consume)
     }
 }

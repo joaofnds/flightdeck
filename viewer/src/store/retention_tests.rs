@@ -57,7 +57,8 @@ fn an_eviction_records_the_departed_time_without_moving_an_older_view() {
 
 #[test]
 fn backpressure_does_not_advance_the_eviction_boundary() {
-    // Goal: a refused publication cannot invalidate more full detail than ingestion actually evicts.
+    // Goal: a refused publication cannot invalidate more full detail than ingestion
+    // actually evicts.
     // Method: pin a full View, consume every spare buffer, then offer one further publication.
     let mut held = full_span();
     let original = publish(&mut held);

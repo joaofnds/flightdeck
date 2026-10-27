@@ -4,6 +4,8 @@ use std::cell::Cell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
+pub mod ingestion;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
     pub staged_ticks: u64,

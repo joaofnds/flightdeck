@@ -90,6 +90,7 @@ impl Session {
         let first = readings
             .first()
             .ok_or(Error::Bound("attribution empty batch"))?;
+        let _observation = self.source_scope(first.window, None);
         self.validate_commitment(first.window)?;
         let endpoints: Vec<_> = readings.iter().map(Reading::endpoint).collect();
         self.app_history_source(restore, first.window, Source::Apps)?;
@@ -171,7 +172,7 @@ impl Session {
                 .sources
                 .get(&(window, kind))
                 .ok_or(Error::Bound("attribution pin source"))?;
-            source.refresh(&self.connection)?;
+            source.refresh(&self.connection, &self.windows[window])?;
             files.extend(source.files.iter().map(|file| ResidentFile {
                 path: file.path.clone(),
                 alias: file.alias.clone(),
@@ -197,6 +198,8 @@ impl Session {
             }
             self.validate_commitment(window)?;
             for file in &pin.files {
+                let _observation =
+                    self.source_scope(window, file.path.file_stem().and_then(|name| name.to_str()));
                 if self.connection.parquet_source(&file.path)? != file.alias {
                     return Err(Error::Bound("attribution cache file changed"));
                 }
@@ -391,9 +394,9 @@ impl Session {
             self.operation.check()?;
             self.validate_commitment(*window)?;
         }
-        for source in replay.restore.sources.values() {
+        for ((window, _kind), source) in &replay.restore.sources {
             self.operation.check()?;
-            source.refresh(&self.connection)?;
+            source.refresh(&self.connection, &self.windows[*window])?;
         }
 
         self.operation.check()

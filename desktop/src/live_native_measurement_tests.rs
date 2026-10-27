@@ -11,7 +11,7 @@ mod ownership;
 #[path = "live_native_measurement_payloads.rs"]
 pub(crate) mod payloads;
 #[path = "live_native_measurement_raw.rs"]
-mod raw;
+pub(crate) mod raw;
 #[path = "live_native_measurement_selection.rs"]
 mod selection;
 

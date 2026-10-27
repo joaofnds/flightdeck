@@ -73,9 +73,24 @@ struct SourceFile {
 }
 
 impl SourceQuery {
-    fn refresh(&self, connection: &persistence::engine::Engine) -> Result<()> {
+    fn refresh(
+        &self,
+        connection: &persistence::engine::Engine,
+        manifest: &persistence::Manifest,
+    ) -> Result<()> {
         assert!(self.files.len() <= 2);
         for file in &self.files {
+            let _observation = if persistence::work::ingestion::is_active() {
+                Some(persistence::work::ingestion::minute_source(
+                    manifest,
+                    file.path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .and_then(persistence::work::ingestion::table_name),
+                ))
+            } else {
+                None
+            };
             if connection.parquet_source(&file.path)? != file.alias {
                 return Err(Error::Bound("changed committed App history source"));
             }
@@ -499,6 +514,7 @@ impl Session {
     }
 
     fn app_history_ticks_cache(&self, restore: &mut Restore, window: usize) -> Result<()> {
+        let _observation = self.source_scope(window, Some("ticks"));
         // Registering the source pins its file and checks the window is still committed.
         let source = self.app_history_source(restore, window, Source::Ticks)?;
         if self
@@ -534,6 +550,7 @@ impl Session {
         window: usize,
         kind: Source,
     ) -> Result<&'restore str> {
+        let _observation = self.source_scope(window, None);
         let key = (window, kind);
         if !restore.sources.contains_key(&key) {
             if restore.sources.len() == SOURCES_MAX {
@@ -559,7 +576,7 @@ impl Session {
             .ok_or(Error::Bound("committed App history source output"))?;
 
         // A long history can retain SQL after the engine's bounded scan cache evicts its aliases.
-        source.refresh(&self.connection)?;
+        source.refresh(&self.connection, &self.windows[window])?;
 
         Ok(&source.sql)
     }
@@ -586,6 +603,7 @@ impl Session {
 
         let mut files = Vec::with_capacity(names.len());
         for name in names {
+            let _observation = self.source_scope(window, Some(name));
             let path = self
                 .root
                 .join(&self.windows[window].data_directory)
@@ -646,6 +664,7 @@ impl Session {
         let first = readings
             .first()
             .ok_or(Error::Bound("committed App history empty batch"))?;
+        let _observation = self.source_scope(first.window, None);
         let endpoints: Vec<_> = readings.iter().map(Reading::endpoint).collect();
         let source = self.app_history_source(restore, first.window, Source::Apps)?;
         let mut index = 0;
