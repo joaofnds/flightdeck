@@ -237,9 +237,9 @@ impl FrozenRecording {
         self.active_ring().newest
     }
 
-    /// Physical slot capacity; a recently started generation may hold fewer publications.
+    /// Validated publications of the active generation, independent of replay visibility.
     pub fn retained_publications(&self) -> u64 {
-        self.active_ring().slots
+        collector::u64_from_usize(self.boundaries.len())
     }
 
     pub fn committed_windows(&self) -> u64 {

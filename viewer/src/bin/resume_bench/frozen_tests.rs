@@ -38,6 +38,25 @@ const SHAPE: Shape = Shape {
 };
 
 #[test]
+fn reports_captured_publications_instead_of_unfilled_ring_capacity() {
+    // Goal: input coverage reports count native facts rather than possible ring slots.
+    // Method: capture both an almost-empty ring and a wrapped one through the native reader.
+    for publications in [2, 1900] {
+        let mut source = Fixture::new();
+        for publication in 1..=publications {
+            source.publish(publication);
+        }
+        let frozen = FrozenRecording::capture(&super::Directories {
+            source: &source.root,
+            target: &source.target,
+        })
+        .unwrap();
+
+        assert_eq!(frozen.retained_publications(), publications.min(120));
+    }
+}
+
+#[test]
 fn retries_a_failed_eligible_seal_before_completing_replay() {
     // Goal: a recoverable seal failure cannot leave a hidden commit behind a successful replay.
     // Method: block the eligible marker's destination, observe refusal, restore it and retry.
