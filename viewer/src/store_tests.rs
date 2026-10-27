@@ -816,21 +816,28 @@ mod while_the_store_follows_the_newest_run {
     use super::Fixture;
 
     #[test]
-    fn a_look_for_a_new_run_leaves_the_recording_identity_unread() {
-        // Goal: a look for a new run reads the runs registry alone while the store follows the
-        // newest, since the store checked the recording's identity when it began following, and
-        // each file opened costs the store more than reading a tick. Method: follow a run through
-        // the ring adapter, make the recording's identity unreadable, and step until the adapter
-        // looks at the registry again.
+    fn a_look_for_a_new_run_rechecks_the_recording_identity() {
+        // Goal: a reconciliation cannot qualify a source whose recording identity disappeared.
+        // Method: follow a run, remove its root identity, and step through the lookup cadence.
         let mut fixture = Fixture::new();
         fixture.publish_with_system_rows(100);
         let mut ring = Ring::new(fixture.root.clone());
         ring.follow().unwrap();
         std::fs::remove_file(fixture.root.join("identity")).unwrap();
 
-        let looks: Vec<_> = (0..FOLLOW_STEPS).map(|_| ring.follow()).collect();
+        let cached: Vec<_> = (1..FOLLOW_STEPS).map(|_| ring.follow()).collect();
+        let looked = ring.follow();
 
-        assert_eq!(looks, vec![Ok(()); usize::try_from(FOLLOW_STEPS).unwrap()]);
+        assert_eq!(
+            cached,
+            vec![Ok(()); usize::try_from(FOLLOW_STEPS - 1).unwrap()]
+        );
+        assert_eq!(
+            looked,
+            Err(super::super::Failure::Recording(
+                std::io::ErrorKind::NotFound
+            ))
+        );
     }
 
     #[test]

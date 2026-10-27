@@ -47,6 +47,7 @@ pub(super) struct Ring {
     /// The steps since the store last looked at the runs registry, and what it found there.
     unlooked_steps: u32,
     followed: Result<(), Failure>,
+    registered: bool,
     /// Whether the ring the store follows published a tick since the store last looked.
     published: bool,
     delta: Option<Delta>,
@@ -62,6 +63,7 @@ enum Delta {
 struct Source {
     reader: RingReader,
     identity: RunIdentity,
+    complete: bool,
     tick: Tick,
     /// The identities of the processes of the tick just read, where the ring holds them.
     identities: Vec<IdentityObservation>,
@@ -91,6 +93,7 @@ impl Ring {
             pending: None,
             unlooked_steps: FOLLOW_STEPS,
             followed: Ok(()),
+            registered: false,
             published: false,
             delta: None,
         }
@@ -119,9 +122,12 @@ impl Ring {
                         self.published = true;
                         if let Some(second) = source.second(publication) {
                             self.pending = Some((second, source.apps(publication)));
+                        } else {
+                            source.complete = false;
                         }
                     }
                     Ok(Found::Missed { .. }) => {
+                        source.complete = false;
                         if self.delta.is_some() {
                             self.delta = Some(Delta::Overrun);
                             return Ok(());
@@ -129,7 +135,10 @@ impl Ring {
                         continue;
                     }
                     Ok(Found::Nothing) => return Ok(()),
-                    Err(error) => return Err(Failure::Ring(error.kind())),
+                    Err(error) => {
+                        source.complete = false;
+                        return Err(Failure::Ring(error.kind()));
+                    }
                 }
             }
 
@@ -176,7 +185,14 @@ impl Ring {
         self.followed
     }
 
-    pub(super) fn caught_up(&self) -> Result<bool, Failure> {
+    pub(super) fn caught_up(&mut self) -> Result<bool, Failure> {
+        self.caught_up_read(RingReader::publication_newest)
+    }
+
+    pub(super) fn caught_up_read(
+        &mut self,
+        read: impl FnOnce(&RingReader) -> std::io::Result<u64>,
+    ) -> Result<bool, Failure> {
         if self.reload_required() {
             return Ok(false);
         }
@@ -184,15 +200,37 @@ impl Ring {
             return Ok(false);
         }
 
-        let Some(source) = &self.source else {
+        let Some(source) = &mut self.source else {
             return Ok(true);
         };
 
-        let newest = source
-            .reader
-            .publication_newest()
-            .map_err(|error| Failure::Ring(error.kind()))?;
+        let newest = match read(&source.reader) {
+            Ok(newest) => newest,
+            Err(error) => {
+                source.complete = false;
+                return Err(Failure::Ring(error.kind()));
+            }
+        };
+
         Ok(source.reader.next_publication() > newest)
+    }
+
+    pub(super) fn complete(&self, recording: &collector::ring::Identity) -> bool {
+        if self.followed.is_err() {
+            return false;
+        }
+        if !self.registered {
+            return false;
+        }
+
+        let Some(source) = &self.source else {
+            return false;
+        };
+        if source.identity.recording != *recording {
+            return false;
+        }
+
+        source.complete
     }
 
     /// Rechecks the source on show while keeping the current run's reader and rate predecessor.
@@ -205,6 +243,7 @@ impl Ring {
 
     /// Reuses a checkpoint only when this generation still retains every unread publication.
     pub(super) fn covers(&mut self, checkpoint: &super::Newest) -> Result<bool, Failure> {
+        self.registered = false;
         let Some(source) = &self.source else {
             return Ok(false);
         };
@@ -259,6 +298,7 @@ impl Ring {
         }
         self.unlooked_steps = 1;
         self.followed = Ok(());
+        self.registered = true;
         self.delta = Some(Delta::Covered);
         Ok(true)
     }
@@ -271,16 +311,25 @@ impl Ring {
         self.delta = None;
     }
 
-    /// Looks at the registry and follows its newest run, as `follow` describes. The store checked
-    /// the recording's identity when it began following its run, so while that run is the newest
-    /// it reads the registry alone.
+    /// Rechecks the recording identity and follows the newest registered generation.
     fn follow_newest(&mut self) -> Result<(), Failure> {
+        self.registered = false;
+        let recording =
+            read_identity(&self.root).map_err(|error| Failure::Recording(error.kind()))?;
+        if let Some(source) = &self.source {
+            if source.identity.recording != recording {
+                return Err(Failure::ForeignRecording);
+            }
+        }
+
         if self.follow_newest_followed()? {
+            self.registered = true;
+            return Ok(());
+        }
+        if !self.caught_up()? {
             return Ok(());
         }
 
-        let recording =
-            read_identity(&self.root).map_err(|error| Failure::Recording(error.kind()))?;
         let registry = Registry::read_into(&self.runs, &mut self.registry)
             .map_err(|error| Failure::Registry(error.kind()))?;
         let Some(newest) = registry.runs().last() else {
@@ -289,12 +338,6 @@ impl Ring {
         let newest = newest.map_err(|error| Failure::Registry(error.kind()))?;
         if newest.identity.recording != recording {
             return Err(Failure::ForeignRecording);
-        }
-
-        if let Some(source) = &self.source {
-            if source.identity == newest.identity {
-                return Ok(());
-            }
         }
 
         let reader = match RingReader::open_generation(newest.ring_name) {
@@ -318,11 +361,20 @@ impl Ring {
             return Err(Failure::MappingSize);
         }
 
+        if let Some(source) = &mut self.source {
+            if source.identity == identity {
+                source.follow(reader)?;
+                self.registered = true;
+                return Ok(());
+            }
+        }
+
         let mut source = Source::open(reader, identity)?;
         if let Some(terminal) = self.terminal.take() {
             source.accept(terminal)?;
         }
         self.source = Some(source);
+        self.registered = true;
         Ok(())
     }
 
@@ -338,7 +390,10 @@ impl Ring {
         };
 
         let newest = newest.map_err(|error| Failure::Registry(error.kind()))?;
-        Ok(newest.identity == source.identity)
+        if newest.identity != source.identity {
+            return Ok(false);
+        }
+        Ok(newest.ring_name == source.reader.name())
     }
 
     /// Sleeps until the ring publishes past what the store read, for at most `timeout`. Where
@@ -363,6 +418,27 @@ impl Ring {
 }
 
 impl Source {
+    fn follow(&mut self, mut reader: RingReader) -> Result<(), Failure> {
+        if reader.shape() != self.reader.shape() {
+            return Err(Failure::TickShape);
+        }
+
+        let next = self.reader.next_publication();
+        if reader.publication_first() < next {
+            return Err(Failure::ChangedIdentity);
+        }
+
+        if next < reader.next_publication() {
+            self.complete = false;
+        }
+        reader
+            .seek_publication(next)
+            .map_err(|error| Failure::Ring(error.kind()))?;
+        self.reader = reader;
+
+        Ok(())
+    }
+
     fn accept(&mut self, terminal: super::recording::Terminal) -> Result<(), Failure> {
         if terminal.run != self.identity {
             return Ok(());
@@ -370,6 +446,7 @@ impl Source {
         assert_eq!(terminal.machine.ticks.len(), 1);
         let publication = terminal.machine.ticks[0].publication;
         let next = publication.checked_add(1).ok_or(Failure::TickShape)?;
+        self.complete = next >= self.reader.next_publication();
         self.reader
             .seek_publication(next)
             .map_err(|error| Failure::Ring(error.kind()))?;
@@ -389,10 +466,12 @@ impl Source {
         let tick = persistence::tick_buffer(&shape).map_err(|_| Failure::TickShape)?;
 
         let processes = count(shape.process_capacity)?;
+        let complete = reader.next_publication() == reader.publication_first();
 
         Ok(Self {
             reader,
             identity,
+            complete,
             tick,
             identities: Vec::with_capacity(processes),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),

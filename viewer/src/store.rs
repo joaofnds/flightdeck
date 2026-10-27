@@ -22,6 +22,9 @@ mod activity_tests;
 #[cfg(test)]
 mod resume_tests;
 
+#[cfg(test)]
+mod reconciliation_tests;
+
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -108,6 +111,9 @@ pub struct View {
     pub failure: Option<Failure>,
     /// Why the store holds less of the loaded hour than the recording sealed when it started.
     pub left_out: Option<Failure>,
+    /// The latest validated ring generation is caught up without an unexplained publication gap.
+    /// This does not certify sealed-history coverage, retained context or complete App payloads.
+    pub ring_complete: bool,
 }
 
 impl View {
@@ -351,6 +357,7 @@ impl Drop for Store {
 /// What the store thread holds between steps.
 struct Held {
     coverage_seconds: u64,
+    ring_complete: bool,
     payload_budget: Option<Arc<ByteBudget>>,
     sampled: Option<Span<SampledSecond>>,
     span: Span<MachineSecond>,
@@ -390,10 +397,12 @@ impl Held {
             cohorts: Cohorts::with_room(),
             failure: None,
             left_out: None,
+            ring_complete: false,
         });
 
         Self {
             coverage_seconds: 0,
+            ring_complete: false,
             payload_budget: None,
             sampled: None,
             span: Span::new(SECONDS_MAX, seconds),
@@ -434,6 +443,7 @@ impl Held {
         self.context.clear();
         self.newest = None;
         self.coverage_seconds = 0;
+        self.ring_complete = false;
         self.unpublished = true;
     }
 
@@ -550,6 +560,7 @@ impl Held {
         let context = &mut self.context;
         let failure = self.failure;
         let left_out = self.left_out;
+        let ring_complete = self.ring_complete;
         let written = self.views.write(|view| {
             assert!(view.seconds.is_empty());
             assert!(view.apps.is_empty());
@@ -573,6 +584,7 @@ impl Held {
             context.choose(&mut view.cohorts);
             view.failure = failure;
             view.left_out = left_out;
+            view.ring_complete = ring_complete;
 
             assert_eq!(view.apps.len(), view.seconds.len());
             assert!(view.cohorts.seconds <= view.seconds.len());
@@ -764,6 +776,7 @@ fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
         return false;
     }
     held.coverage_seconds = 0;
+    held.ring_complete = false;
     shared.catch_up.store(true, Ordering::Release);
     true
 }
@@ -777,6 +790,7 @@ fn run_ready(held: &mut Held, ring: &mut Ring, shared: &Shared) {
         Ok(caught_up) => caught_up,
         Err(failure) => {
             held.failure = Some(failure);
+            held.ring_complete = false;
             held.unpublished = true;
             held.publish(&shared.mailbox);
             true
@@ -942,14 +956,8 @@ fn step(
         held.failure = failure;
         held.unpublished = true;
     }
+    let complete = step_complete(held, ring);
     if held.unpublished {
-        let complete = match ring.caught_up() {
-            Ok(complete) => complete,
-            Err(failure) => {
-                held.failure = Some(failure);
-                true
-            }
-        };
         if matches!(publication, Publication::Complete) {
             if !complete {
                 if held.failure.is_none() {
@@ -960,4 +968,30 @@ fn step(
         held.publish(mailbox);
     }
     Ok(())
+}
+
+fn step_complete(held: &mut Held, ring: &mut Ring) -> bool {
+    let complete = match ring.caught_up() {
+        Ok(complete) => complete,
+        Err(failure) => {
+            held.failure = Some(failure);
+            held.unpublished = true;
+            true
+        }
+    };
+    let mut ring_complete = false;
+    if complete {
+        if held.failure.is_none() {
+            ring_complete = held
+                .newest
+                .as_ref()
+                .is_some_and(|newest| ring.complete(&newest.run.recording));
+        }
+    }
+    if held.ring_complete != ring_complete {
+        held.ring_complete = ring_complete;
+        held.unpublished = true;
+    }
+
+    complete
 }

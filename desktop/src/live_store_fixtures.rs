@@ -77,6 +77,7 @@ pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) 
         cohorts: Cohorts::default(),
         failure: None,
         left_out: None,
+        ring_complete: false,
     }
 }
 
