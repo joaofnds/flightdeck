@@ -2,11 +2,15 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(test)]
+mod tests;
+
 /// Capacity is reserved before allocation and released only with its owning reservation.
 #[derive(Debug)]
 pub struct ByteBudget {
     maximum: usize,
     used: AtomicUsize,
+    used_peak: AtomicUsize,
 }
 
 /// Move this owner with the allocation, including into a published immutable buffer.
@@ -23,6 +27,7 @@ impl ByteBudget {
         Self {
             maximum,
             used: AtomicUsize::new(0),
+            used_peak: AtomicUsize::new(0),
         }
     }
 
@@ -34,10 +39,14 @@ impl ByteBudget {
                 used.checked_add(bytes)
                     .filter(|total| *total <= self.maximum)
             }) {
-            Ok(_) => Some(ByteReservation {
-                budget: Arc::clone(self),
-                bytes,
-            }),
+            Ok(before) => {
+                self.used_peak.fetch_max(before + bytes, Ordering::Relaxed);
+
+                Some(ByteReservation {
+                    budget: Arc::clone(self),
+                    bytes,
+                })
+            }
             Err(_) => None,
         }
     }
@@ -45,6 +54,14 @@ impl ByteBudget {
     #[must_use]
     pub fn used(&self) -> usize {
         self.used.load(Ordering::Acquire)
+    }
+
+    /// Largest reserved total recorded by successful calls over this budget's lifetime.
+    /// Concurrent `used` and peak reads are independent snapshots; join callers for a final peak.
+    /// This measures reservations, excluding uncharged allocations and physical footprint.
+    #[must_use]
+    pub fn used_peak(&self) -> usize {
+        self.used_peak.load(Ordering::Relaxed)
     }
 
     #[must_use]
