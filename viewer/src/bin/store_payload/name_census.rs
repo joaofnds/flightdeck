@@ -1,4 +1,4 @@
-//! Process-name allocations reached by one published View, separate from its reservations.
+//! Process-name capacities and owner-held reservations reached by one published View.
 use std::io;
 
 use serde_json::json;
@@ -11,7 +11,7 @@ struct Names {
     raw_capacity_bytes: u64,
     display_capacity_bytes: u64,
     initialized_bytes: u64,
-    occurrence_charge_bytes: u64,
+    reserved_bytes: u64,
 }
 
 pub(super) fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
@@ -59,14 +59,16 @@ pub(super) fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
             "initialized_name_bytes":measured.initialized_bytes,
             "unique_value_slot_bytes":measured.unique * u64::try_from(size_of::<ProcessName>())
                 .map_err(io::Error::other)?,
-            "conservative_occurrence_charge_bytes":measured.occurrence_charge_bytes,
+            "unique_name_reserved_bytes":measured.reserved_bytes,
             "observer_record_requested_bytes":observer_bytes,
             "observer_record_reserved_bytes":observer.used(),
             "observer_capacity":names.capacity(), "component_only":true,
             "footprint_bytes_with_observer":footprint.current_bytes,
             "footprint_peak_bytes_with_observer":footprint.lifetime_bytes_max,
-            "scope":concat!("Names reached by this published View; excludes Arc headers, ",
-                "other roots, native allocations and physical footprint")}),
+            "scope":concat!("Names reached by this published View. Capacity totals exclude ",
+                "Arc headers; reserved bytes include the Arc/value allowance. Other roots ",
+                "and native allocations are excluded. Process footprint is reported ",
+                "separately with observer overhead.")}),
     );
     drop(names);
     drop(reservation);
@@ -97,13 +99,6 @@ fn measure(names: &mut [&ProcessName], measured: &mut Names) -> io::Result<()> {
     names.sort_unstable_by_key(|name| std::ptr::from_ref(*name).addr());
     let mut previous = None;
     for name in names.iter().copied() {
-        for bytes in [
-            2 * size_of::<usize>() + size_of::<ProcessName>(),
-            name.bytes.len(),
-            name.display.len(),
-        ] {
-            add(&mut measured.occurrence_charge_bytes, bytes)?;
-        }
         let address = std::ptr::from_ref(name).addr();
         if previous == Some(address) {
             continue;
@@ -117,6 +112,7 @@ fn measure(names: &mut [&ProcessName], measured: &mut Names) -> io::Result<()> {
         )?;
         add(&mut measured.initialized_bytes, name.bytes.len())?;
         add(&mut measured.initialized_bytes, name.display.len())?;
+        add(&mut measured.reserved_bytes, name.reserved_bytes())?;
     }
     Ok(())
 }
@@ -155,7 +151,7 @@ mod tests {
                 raw_capacity_bytes: 3,
                 display_capacity_bytes: 3,
                 initialized_bytes: 6,
-                occurrence_charge_bytes: 140,
+                reserved_bytes: name_bytes(6),
             }
         );
         assert_eq!(Arc::strong_count(&name), 2);
@@ -178,7 +174,7 @@ mod tests {
                 raw_capacity_bytes: 6,
                 display_capacity_bytes: 6,
                 initialized_bytes: 12,
-                occurrence_charge_bytes: 140,
+                reserved_bytes: 2 * name_bytes(6),
             }
         );
     }
@@ -186,10 +182,17 @@ mod tests {
     #[test]
     fn unused_name_capacity_is_still_counted() {
         // Goal: empty buffers retain storage. Method: count actual spare capacities.
-        let name = ProcessName {
-            bytes: Vec::with_capacity(64),
-            display: String::with_capacity(128),
-        };
+        let budget = Arc::new(ByteBudget::new(1024));
+        let reservation = budget
+            .reserve(2 * size_of::<usize>() + size_of::<ProcessName>() + 64 + 128)
+            .unwrap();
+        let name = ProcessName::from_reserved(
+            viewer::live_app_response::Bytes {
+                bytes: Vec::with_capacity(64),
+                display: String::with_capacity(128),
+            },
+            reservation,
+        );
 
         let mut measured = Names::default();
         measure(&mut [&name], &mut measured).unwrap();
@@ -202,15 +205,26 @@ mod tests {
                 raw_capacity_bytes: 64,
                 display_capacity_bytes: 128,
                 initialized_bytes: 0,
-                occurrence_charge_bytes: 64,
+                reserved_bytes: name_bytes(192),
             }
         );
     }
 
     fn name() -> ProcessName {
-        ProcessName {
-            bytes: b"abc".to_vec(),
-            display: "abc".to_owned(),
-        }
+        let budget = Arc::new(ByteBudget::new(1024));
+        let reservation = budget
+            .reserve(2 * size_of::<usize>() + size_of::<ProcessName>() + 6)
+            .unwrap();
+        ProcessName::from_reserved(
+            viewer::live_app_response::Bytes {
+                bytes: b"abc".to_vec(),
+                display: "abc".to_owned(),
+            },
+            reservation,
+        )
+    }
+
+    fn name_bytes(backing: usize) -> u64 {
+        u64::try_from(2 * size_of::<usize>() + size_of::<ProcessName>() + backing).unwrap()
     }
 }

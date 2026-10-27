@@ -94,7 +94,13 @@ fn detachment_retains_native_origin_and_the_original_metadata_reservation() {
     })
     .unwrap();
     let metadata = second.metadata.bytes();
-    let payload = second.processes.as_ref().unwrap().bytes();
+    let payload = second.processes.as_ref().unwrap();
+    let process_names: usize = payload
+        .iter()
+        .filter_map(crate::store::ProcessRow::executable_name)
+        .map(crate::store::ProcessName::reserved_bytes)
+        .sum();
+    let payload = payload.bytes();
     let names: usize = second
         .apps
         .iter()
@@ -110,7 +116,10 @@ fn detachment_retains_native_origin_and_the_original_metadata_reservation() {
         detached.metadata.origin,
         super::Origin::Live(persistence::Losses::default())
     );
-    assert_eq!(budget.used(), detached.bytes() + metadata + payload + names);
+    assert_eq!(
+        budget.used(),
+        detached.bytes() + metadata + payload + names + process_names
+    );
     drop(detached);
     assert_eq!(budget.used(), 0);
 }

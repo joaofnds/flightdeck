@@ -344,7 +344,19 @@ fn fixture_payload_charges(fixture: &Fixture) -> Vec<usize> {
 }
 
 pub(super) fn retained_app_charge(apps: &AppsSecond) -> usize {
-    apps.processes.as_ref().unwrap().bytes()
+    let payload = apps.processes.as_ref().unwrap();
+    let mut seen = std::collections::HashSet::new();
+    let mut names = 0;
+    for name in payload
+        .iter()
+        .filter_map(super::ProcessRow::executable_name)
+    {
+        if seen.insert(std::ptr::from_ref(name)) {
+            names += name.reserved_bytes();
+        }
+    }
+    payload.bytes()
+        + names
         + apps.metadata.bytes()
         + apps.apps.reserved_bytes()
         + apps

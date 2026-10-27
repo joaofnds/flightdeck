@@ -1,11 +1,12 @@
-//! Typed process payloads retained under one shared byte reservation, including View owners.
+//! Typed process payloads and shared names retain their own admissions, including View owners.
+use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
 use super::{AppsSecond, Missing};
 use crate::apps::{Amount, ProcessState, Stamp, Unavailable};
 use crate::byte_budget::{ByteBudget, ByteReservation};
-use crate::live_app_response::{Measure, Observation, Process, Sample};
+use crate::live_app_response::{Bytes, Measure, Observation, Process, Sample};
 use collector::ring::{IdentityUnavailable, ProcessCreation};
 
 /// A complete observation's processes and additional App measures.
@@ -27,15 +28,22 @@ pub struct Payload {
 }
 
 /// Captured executable bytes and their display spelling, shared across observations.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// Buffers cannot be detached from their reservation, even with an exclusive owner.
+/// ```compile_fail
+/// use viewer::store::ProcessName;
+/// fn escape(name: &mut ProcessName) -> Vec<u8> {
+///     std::mem::take(&mut name.bytes)
+/// }
+/// ```
 pub struct ProcessName {
-    pub bytes: Vec<u8>,
-    pub display: String,
+    name: Bytes,
+    reservation: ByteReservation,
 }
 
 /// Every process of the sample, including unavailable identity and usage.
 ///
-/// Executable storage cannot escape the payload's byte reservation.
+/// Executable ownership is shared privately; public access remains borrowed.
 /// ```compile_fail
 /// use std::sync::Arc;
 /// use viewer::store::{ProcessName, ProcessRow};
@@ -100,7 +108,8 @@ impl Payload {
             .and_then(|apps| apps.processes.as_ref().ok())
             .map(Arc::as_ref);
         for process in sample.processes() {
-            rows.push(ProcessRow::capture(process, previous));
+            let name = Self::capture_name(process, previous, budget)?;
+            rows.push(ProcessRow::capture(process, name));
         }
         let apps = sample
             .apps()
@@ -121,25 +130,37 @@ impl Payload {
         })
     }
 
-    /// A conservative charge counts shared names once for each retaining payload.
-    /// The reservation is acquired before copying any rows or name bytes.
+    /// Names own separate reservations; this admission precedes either container allocation.
     fn capture_bytes(sample: &Sample) -> usize {
-        let mut bytes = 2 * size_of::<usize>()
+        2 * size_of::<usize>()
             + size_of::<Self>()
             + sample.processes().len() * size_of::<ProcessRow>()
-            + sample.apps().len() * size_of::<AppDetails>();
-        for process in sample.processes() {
-            if let Some(name) = &process.executable_name {
-                bytes += 2 * size_of::<usize>()
-                    + size_of::<ProcessName>()
-                    + name.bytes.len()
-                    + name.display.len();
-            }
-        }
-        bytes
+            + sample.apps().len() * size_of::<AppDetails>()
     }
 
-    /// Reserved bytes, including conservative charges for shared names.
+    fn capture_name(
+        process: &Process,
+        previous: Option<&Self>,
+        budget: &Arc<ByteBudget>,
+    ) -> Result<Option<Arc<ProcessName>>, Missing> {
+        let Some(name) = &process.executable_name else {
+            return Ok(None);
+        };
+
+        if let Some(previous) = previous {
+            for row in &previous.rows {
+                if let Some(held) = &row.executable_name {
+                    if held.bytes == name.bytes {
+                        return Ok(Some(Arc::clone(held)));
+                    }
+                }
+            }
+        }
+
+        ProcessName::capture(name, budget).map(Some)
+    }
+
+    /// This payload's header and containers, excluding separately admitted shared names.
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.reservation.bytes()
@@ -227,7 +248,7 @@ impl ProcessRow {
         self.threads.amount()
     }
 
-    /// The name remains borrowed from the payload that owns its byte reservation.
+    /// The name remains borrowed from its shared reservation owner.
     /// ```compile_fail
     /// use viewer::store::{ProcessName, ProcessRow};
     /// fn escape(row: &ProcessRow) -> Option<&'static ProcessName> {
@@ -239,21 +260,7 @@ impl ProcessRow {
         self.executable_name.as_deref()
     }
 
-    fn capture(process: &Process, previous: Option<&Payload>) -> Self {
-        let executable_name = process.executable_name.as_ref().map(|name| {
-            let held = previous.and_then(|previous| {
-                previous.rows.iter().find_map(|row| {
-                    let held = row.executable_name.as_ref()?;
-                    (held.bytes == name.bytes).then(|| Arc::clone(held))
-                })
-            });
-            held.unwrap_or_else(|| {
-                Arc::new(ProcessName {
-                    bytes: name.bytes.clone(),
-                    display: name.display.clone(),
-                })
-            })
-        });
+    fn capture(process: &Process, executable_name: Option<Arc<ProcessName>>) -> Self {
         Self {
             pid: process.pid,
             creation: process.creation,
@@ -276,6 +283,69 @@ impl ProcessRow {
         }
     }
 }
+
+impl ProcessName {
+    const OWNER_BYTES: usize = 2 * size_of::<usize>() + size_of::<Self>();
+
+    /// Adopts buffers allocated under this reservation, including their spare capacity.
+    /// The caller reserves before allocating the buffers and the enclosing Arc.
+    #[must_use]
+    pub fn from_reserved(name: Bytes, mut reservation: ByteReservation) -> Self {
+        let Some(bytes) = Self::OWNER_BYTES
+            .checked_add(name.bytes.capacity())
+            .and_then(|bytes| bytes.checked_add(name.display.capacity()))
+        else {
+            panic!("process name capacity exceeds address space");
+        };
+
+        assert!(bytes <= reservation.bytes());
+        reservation.shrink_to(bytes);
+
+        Self { name, reservation }
+    }
+
+    fn capture(name: &Bytes, budget: &Arc<ByteBudget>) -> Result<Arc<Self>, Missing> {
+        let bytes = Self::OWNER_BYTES
+            .checked_add(name.bytes.len())
+            .and_then(|bytes| bytes.checked_add(name.display.len()))
+            .ok_or(Missing::Budget)?;
+        let reservation = budget.reserve(bytes).ok_or(Missing::Budget)?;
+
+        Ok(Arc::new(Self::from_reserved(name.clone(), reservation)))
+    }
+
+    /// This shared allocation's charge, counted once regardless of its retaining payloads.
+    #[must_use]
+    pub fn reserved_bytes(&self) -> usize {
+        self.reservation.bytes()
+    }
+}
+
+impl Deref for ProcessName {
+    type Target = Bytes;
+
+    fn deref(&self) -> &Self::Target {
+        &self.name
+    }
+}
+
+impl fmt::Debug for ProcessName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProcessName")
+            .field("bytes", &self.bytes)
+            .field("display", &self.display)
+            .finish()
+    }
+}
+
+impl PartialEq for ProcessName {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes && self.display == other.display
+    }
+}
+
+impl Eq for ProcessName {}
 
 impl CompactAmount {
     fn capture(amount: Amount) -> Self {
@@ -326,3 +396,7 @@ const _: () = {
 #[cfg(test)]
 #[path = "payload_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "payload_name_tests.rs"]
+mod name_tests;

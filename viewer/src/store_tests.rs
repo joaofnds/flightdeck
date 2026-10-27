@@ -506,14 +506,21 @@ fn a_view_retains_its_payload_and_byte_reservations_after_the_store_stops() {
         .iter()
         .map(|app| app.name.reserved_bytes())
         .sum();
+    let process_names: usize = first
+        .iter()
+        .filter_map(super::ProcessRow::executable_name)
+        .map(super::ProcessName::reserved_bytes)
+        .sum();
     assert_eq!(
         budget.used(),
-        first.bytes() + second.bytes() + machines + metadata + rows + names
+        first.bytes() + second.bytes() + machines + metadata + rows + names + process_names
     );
-    assert!(std::ptr::eq(
-        first[0].executable_name().unwrap(),
-        second[0].executable_name().unwrap()
-    ));
+    for (first, second) in first.iter().zip(second.iter()) {
+        assert!(std::ptr::eq(
+            first.executable_name().unwrap(),
+            second.executable_name().unwrap()
+        ));
+    }
     assert_eq!(second[1].pid, 7);
     drop(view);
     assert_eq!(budget.used(), 0);
