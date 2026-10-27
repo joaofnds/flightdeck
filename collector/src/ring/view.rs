@@ -33,6 +33,15 @@ pub struct RingReader {
     opened: Opened,
 }
 
+/// Publication timing alone; a coherent value does not validate the reading's payload.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PublicationTiming {
+    pub run_tick: u64,
+    pub times: Option<super::ObservationTimes>,
+}
+
+const _: () = assert!(size_of::<PublicationTiming>() <= 40);
+
 impl RingReader {
     /// Positions the next read without rescanning earlier publications.
     pub fn seek_publication(&mut self, next: u64) -> io::Result<()> {
@@ -177,6 +186,12 @@ impl RingReader {
     /// A capacity refusal leaves the publication cursor unchanged.
     pub fn read_into(&mut self, tick: &mut Tick) -> io::Result<Found> {
         self.opened.read_into(tick)
+    }
+
+    /// Reads only timing under the publication sequence check, without payload validation.
+    /// Only a returned publication makes the caller's fixed-size output valid.
+    pub fn read_timing_into(&mut self, timing: &mut PublicationTiming) -> io::Result<Found> {
+        self.opened.read_timing_into(timing)
     }
 
     /// Reads numeric and identity rows under the same publication sequence check.

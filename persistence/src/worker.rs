@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use collector::processes::{self, Unreadable};
 use collector::recording::{RegisteredRun, Registry};
-use collector::ring::{Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Tick};
+use collector::ring::{
+    Found, FoundEvent, IdentityObservation, PublicationTiming, RingReader, RunIdentity, Tick,
+};
 use collector::tracker::Event;
 
 use crate::resources::{WORKING_BYTES_MAX, Watchdog};
@@ -446,19 +448,18 @@ fn persist_one_open(
 }
 
 fn window_ready(
-    reader: &mut RingReader,
-    tick: &mut Tick,
+    reader: &RingReader,
+    newest: Option<&PublicationTiming>,
     identity: &WindowIdentity,
     closed: bool,
 ) -> Result<bool> {
     if closed || reader.completed() {
         return Ok(true);
     }
-    let newest = reader.publication_newest()?;
-    reader.seek_publication(newest)?;
-    match reader.read_into(tick)? {
-        Found::Publication { .. } => Ok(window_number(reader, tick)? > identity.window),
-        Found::Missed { .. } | Found::Nothing => Ok(false),
+
+    match newest {
+        Some(timing) => Ok(timing_window_number(reader, timing)? > identity.window),
+        None => Ok(false),
     }
 }
 
@@ -651,19 +652,29 @@ fn bounds(window: &Window, field: impl Fn(&Observation) -> Option<u64>) -> Optio
 }
 
 fn window_number(reader: &RingReader, tick: &Tick) -> Result<u64> {
-    match (tick.times, reader.run_start_continuous_ns()) {
+    timing_window_number(
+        reader,
+        &PublicationTiming {
+            run_tick: tick.run_tick,
+            times: tick.times,
+        },
+    )
+}
+
+fn timing_window_number(reader: &RingReader, timing: &PublicationTiming) -> Result<u64> {
+    match (timing.times, reader.run_start_continuous_ns()) {
         (Some(times), Some(start)) => times
             .continuous_ns
             .checked_sub(start)
             .map(|elapsed| elapsed / WINDOW_NS)
             .ok_or(crate::Error::Bound("continuous time order")),
-        _ => Ok(tick.run_tick / 60),
+        _ => Ok(timing.run_tick / 60),
     }
 }
 
 fn persist_one_closed(
     reader: &mut RingReader,
-    tick: &mut Tick,
+    newest: &mut Option<PublicationTiming>,
     pid: u32,
     retired: bool,
 ) -> Result<bool> {
@@ -680,7 +691,8 @@ fn persist_one_closed(
     if pid > processes::PID_MAX {
         return Err(crate::Error::Bound("collector pid"));
     }
-    let latest_awake_ns = persist_one_latest_awake_ns(reader, tick)?;
+    *newest = persist_one_latest_timing(reader)?;
+    let latest_awake_ns = newest.and_then(|timing| timing.times.map(|times| times.awake_ns));
     let timebase = collector::clock::Timebase::read()?;
     match processes::read_usage(timebase, pid)? {
         Ok(usage) => {
@@ -698,17 +710,20 @@ fn persist_one_closed(
     }
 }
 
-fn persist_one_latest_awake_ns(reader: &mut RingReader, tick: &mut Tick) -> Result<Option<u64>> {
+fn persist_one_latest_timing(reader: &mut RingReader) -> Result<Option<PublicationTiming>> {
     let newest = reader.publication_newest()?;
     if newest == 0 {
         return Ok(None);
     }
+
     let position = reader.next_publication();
     reader.seek_publication(newest)?;
-    let found = reader.read_into(tick);
+    let mut timing = PublicationTiming::default();
+    let found = reader.read_timing_into(&mut timing);
     reader.seek_publication(position)?;
+
     match found? {
-        Found::Publication { .. } => Ok(tick.times.map(|times| times.awake_ns)),
+        Found::Publication { .. } => Ok(Some(timing)),
         Found::Missed { .. } | Found::Nothing => Ok(None),
     }
 }
@@ -719,6 +734,7 @@ mod tests {
     use collector::ring::{Identity, Shape};
 
     mod staging_tests;
+    mod timing_tests;
 
     struct Directory(std::path::PathBuf);
 

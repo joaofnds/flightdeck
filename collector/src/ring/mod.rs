@@ -48,7 +48,7 @@ use object::{
 };
 pub use system::{GPU_NS_MAX, SystemPublication, SystemSnapshot};
 pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
-pub use view::{RingReader, TickBuffers};
+pub use view::{PublicationTiming, RingReader, TickBuffers};
 
 /// Explicit opt-in dictionary bounds; default writers continue using layout 3.
 #[derive(Debug, Clone, Copy)]
@@ -924,6 +924,35 @@ impl Opened {
         self.read_into_identity(tick, None)
     }
 
+    fn read_timing_into(&mut self, timing: &mut PublicationTiming) -> io::Result<Found> {
+        let words = self.mapping.words();
+        let newest = read_newest(&words[HEADER_PUBLICATION_NEWEST])?;
+        let publication = match self
+            .publications
+            .step(self.layout.publications_held(newest))
+        {
+            Step::Nothing => return Ok(Found::Nothing),
+            Step::Missed { first, end } => return Ok(Found::Missed { first, end }),
+            Step::Read(publication) => publication,
+        };
+        let slot = &words[self.layout.slot(publication)];
+        let loaded = read_finished(slot, SLOT_SEQUENCE, publication, || {
+            tick::load_timing(slot, &self.layout, timing);
+            Some(())
+        })?;
+
+        match loaded {
+            Some(()) => Ok(Found::Publication {
+                publication,
+                tick: timing.run_tick,
+            }),
+            None => Ok(Found::Missed {
+                first: publication,
+                end: publication + 1,
+            }),
+        }
+    }
+
     fn read_into_identity(
         &mut self,
         tick: &mut Tick,
@@ -1604,3 +1633,6 @@ mod disks_tests;
 
 #[cfg(test)]
 mod system_tests;
+
+#[cfg(test)]
+mod timing_tests;

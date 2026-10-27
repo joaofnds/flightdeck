@@ -427,7 +427,10 @@ fn store_tick_ioreport(slot: &[AtomicU64], layout: &Layout, ioreport: &IOReportR
 /// which a slot the writer overwrote during the load may not.
 pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) -> bool {
     assert_eq!(layout.slot_words, slot.len());
-    tick.times = load_tick_times(slot, layout);
+    let mut timing = super::PublicationTiming::default();
+    load_timing(slot, layout, &mut timing);
+    tick.times = timing.times;
+    tick.run_tick = timing.run_tick;
 
     let count = |index: usize, capacity: usize| {
         let count = slot[index].load(Ordering::Relaxed);
@@ -444,7 +447,6 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
         return false;
     };
 
-    tick.run_tick = slot[SLOT_RUN_TICK].load(Ordering::Relaxed);
     tick.processes_refused = load_half(slot, SLOT_PROCESSES_REFUSED);
     tick.processes_gone = load_half(slot, SLOT_PROCESSES_GONE);
     let events_first = slot[SLOT_EVENTS_FIRST].load(Ordering::Relaxed);
@@ -490,6 +492,16 @@ pub(super) fn load_tick(slot: &[AtomicU64], layout: &Layout, tick: &mut Tick) ->
     load_tick_processes(slot, layout, processes, tick);
     load_tick_coalitions(slot, layout, coalitions, tick);
     true
+}
+
+pub(super) fn load_timing(
+    slot: &[AtomicU64],
+    layout: &Layout,
+    timing: &mut super::PublicationTiming,
+) {
+    assert_eq!(layout.slot_words, slot.len());
+    timing.run_tick = slot[SLOT_RUN_TICK].load(Ordering::Relaxed);
+    timing.times = load_tick_times(slot, layout);
 }
 
 fn load_tick_times(slot: &[AtomicU64], layout: &Layout) -> Option<super::ObservationTimes> {

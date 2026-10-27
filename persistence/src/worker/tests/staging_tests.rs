@@ -128,8 +128,11 @@ fn waits_for_the_open_successor_after_losing_the_selected_minute() {
         run: registered.identity,
         window: 0,
     };
-    assert!(!persist_one_closed(&mut reader, &mut tick, registered.collector_pid, false).unwrap());
-    assert!(window_ready(&mut reader, &mut tick, &selected, false).unwrap());
+    let mut newest = None;
+    assert!(
+        !persist_one_closed(&mut reader, &mut newest, registered.collector_pid, false).unwrap()
+    );
+    assert!(window_ready(&reader, newest.as_ref(), &selected, false).unwrap());
     ring.publish(61);
     reader.seek_publication(1).unwrap();
     let mut state = RunState {
@@ -250,7 +253,8 @@ fn advances_a_wholly_lost_selection_without_returning_an_empty_window() {
         Found::Publication { .. }
     ));
     let selected = WindowIdentity { run, window: 0 };
-    assert!(window_ready(&mut reader, &mut tick, &selected, false).unwrap());
+    let newest = persist_one_latest_timing(&mut reader).unwrap();
+    assert!(window_ready(&reader, newest.as_ref(), &selected, false).unwrap());
     ring.publish(61);
     reader.seek_publication(1).unwrap();
     let mut state = RunState {
