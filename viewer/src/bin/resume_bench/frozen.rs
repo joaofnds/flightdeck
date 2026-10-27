@@ -128,7 +128,10 @@ impl FrozenRecording {
             .ok_or_else(|| io::Error::other("missing retained replay boundary"))?;
         ring.replay_start(retained.events_first)?;
         ring.complete(false);
-        ring.replay_publish(first - 1, boundary.events_first - 1);
+        ring.replay_publish(&mapping::ReplayPosition {
+            publication: first - 1,
+            event: boundary.events_first - 1,
+        });
         self.files.checkpoint(first - 1)?;
         self.replay.set(Some(first - 1));
         Ok(())
@@ -148,8 +151,10 @@ impl FrozenRecording {
             .iter()
             .find(|entry| entry.publication == publication)
             .ok_or_else(|| io::Error::other("publication outside validated retained input"))?;
-        self.active_ring()
-            .replay_publish(publication, boundary.events_end - 1);
+        self.active_ring().replay_publish(&mapping::ReplayPosition {
+            publication,
+            event: boundary.events_end - 1,
+        });
         self.replay.set(Some(publication));
         Ok(())
     }

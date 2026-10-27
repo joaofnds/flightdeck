@@ -22,6 +22,12 @@ struct ManifestData<'a> {
     selected: &'a Value,
 }
 
+struct ObservationData {
+    publication: u64,
+    run_tick: u64,
+    wall_ns: u64,
+}
+
 const PUBLICATIONS_MAX: u64 = 65_536;
 const CONTEXT_INPUTS_MAX: usize = 6_000_000;
 const MANIFEST_BYTES_MAX: usize = 256 * 1024 * 1024;
@@ -32,11 +38,14 @@ pub(super) fn observations(rings: &[FrozenRing]) -> io::Result<Vec<Value>> {
         visit(ring, |_reader, publication, tick, _identities| {
             observations.push(observation(
                 &ring.identity,
-                publication,
-                tick.run_tick,
-                tick.times
-                    .ok_or_else(|| io::Error::other("native input clock"))?
-                    .wall_ns,
+                &ObservationData {
+                    publication,
+                    run_tick: tick.run_tick,
+                    wall_ns: tick
+                        .times
+                        .ok_or_else(|| io::Error::other("native input clock"))?
+                        .wall_ns,
+                },
             ));
             Ok(())
         })?;
@@ -100,11 +109,14 @@ pub(super) fn export(frozen: &FrozenRecording, directory: &Path) -> io::Result<(
         visit(ring, |reader, publication, tick, identities| {
             let observation = observation(
                 &ring.identity,
-                publication,
-                tick.run_tick,
-                tick.times
-                    .ok_or_else(|| io::Error::other("native observation has no clock"))?
-                    .wall_ns,
+                &ObservationData {
+                    publication,
+                    run_tick: tick.run_tick,
+                    wall_ns: tick
+                        .times
+                        .ok_or_else(|| io::Error::other("native observation has no clock"))?
+                        .wall_ns,
+                },
             );
             observations.push(observation.clone());
             let mut events = Vec::new();
@@ -285,15 +297,10 @@ fn identity_value(reader: &RingReader, identity: &IdentityObservation) -> io::Re
     )
 }
 
-fn observation(
-    identity: &collector::ring::RunIdentity,
-    publication: u64,
-    run_tick: u64,
-    wall_ns: u64,
-) -> Value {
+fn observation(identity: &collector::ring::RunIdentity, data: &ObservationData) -> Value {
     let text = |value: collector::ring::Identity| format!("{:016x}{:016x}", value.0[0], value.0[1]);
     json!({"run": text(identity.run), "boot": text(identity.boot),
-        "publication": publication, "run_tick": run_tick, "wall_ns": wall_ns})
+        "publication": data.publication, "run_tick": data.run_tick, "wall_ns": data.wall_ns})
 }
 
 fn export_windows(
@@ -317,10 +324,13 @@ fn export_windows(
             }
             observations.push(observation(
                 &window.manifest.identity.run,
-                tick.publication,
-                tick.run_tick,
-                tick.wall_ns
-                    .ok_or_else(|| io::Error::other("sealed input clock"))?,
+                &ObservationData {
+                    publication: tick.publication,
+                    run_tick: tick.run_tick,
+                    wall_ns: tick
+                        .wall_ns
+                        .ok_or_else(|| io::Error::other("sealed input clock"))?,
+                },
             ));
         }
         let directory = frozen.root().join(&window.manifest.data_directory);

@@ -95,7 +95,11 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
             _ => panic!("expected follow, pin, hover, resume, supersede, cancel or stop"),
         }
         let generation = if words[0] == "hover" {
-            payloads::validate_context(&context, &step["kept_observations"]).unwrap();
+            payloads::validate_context(&payloads::ContextComparison {
+                points: &context,
+                observations: &step["kept_observations"],
+            })
+            .unwrap();
             request.load_resident_history = false;
             request.load_app_attribution_history = false;
             request.load_process_history = false;

@@ -11,10 +11,10 @@ pub(super) fn configure(reader: &mut SnapshotReader, root: &Path, expected: &Val
         "pin" => {}
         "hover" => {
             let (snapshot, _) = read_complete(reader, root);
-            super::payloads::validate_context(
-                &snapshot.selection["trends"],
-                &expected["kept_observations"],
-            )
+            super::payloads::validate_context(&super::payloads::ContextComparison {
+                points: &snapshot.selection["trends"],
+                observations: &expected["kept_observations"],
+            })
             .unwrap();
             reader.command.generation += 1;
             reader.command.context = crate::live_source::Context::Keep;

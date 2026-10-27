@@ -7,6 +7,11 @@ use crate::live_source::Snapshot;
 const OBSERVATIONS_MAX: usize = 4096;
 const IDENTITY_FIELDS: [&str; 5] = ["run", "boot", "publication", "run_tick", "wall_ns"];
 
+pub(crate) struct ContextComparison<'a> {
+    pub(crate) points: &'a Value,
+    pub(crate) observations: &'a Value,
+}
+
 pub(crate) fn validate(
     snapshot: &Snapshot,
     route: &str,
@@ -45,12 +50,18 @@ pub(crate) fn validate_input(snapshot: &Snapshot, expected: &Value) -> Result<()
         context_shape(&expected["kept_observations"])?;
         return Ok(());
     }
-    validate_context(&snapshot.selection["trends"], &expected["observations"])
+    validate_context(&ContextComparison {
+        points: &snapshot.selection["trends"],
+        observations: &expected["observations"],
+    })
 }
 
-pub(crate) fn validate_context(points: &Value, observations: &Value) -> Result<(), String> {
-    let observations = context_shape(observations)?;
-    let points = points.as_array().ok_or("Missing measured context")?;
+pub(crate) fn validate_context(comparison: &ContextComparison<'_>) -> Result<(), String> {
+    let observations = context_shape(comparison.observations)?;
+    let points = comparison
+        .points
+        .as_array()
+        .ok_or("Missing measured context")?;
     if points.len() != observations.len() {
         return Err("Measured context length differs from the frozen input".into());
     }

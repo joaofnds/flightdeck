@@ -172,7 +172,14 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
     let ownership_held = ownership::snapshot();
     diagnostics::checkpoint("holding_result");
     let phase = std::env::var("FLIGHTDECK_ITEM1_PHASE").unwrap();
-    let payloads = validate_output(&snapshot, route, expected, &phase);
+    let payloads = validate_output(
+        &snapshot,
+        expected,
+        &RoutePhase {
+            route,
+            phase: &phase,
+        },
+    );
     let report = json!({"route": route, "phase": phase, "root": root, "selection_kind": selection,
         "snapshots_to_complete": snapshots,
         "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
@@ -209,13 +216,17 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
     );
 }
 
+struct RoutePhase<'a> {
+    route: &'a str,
+    phase: &'a str,
+}
+
 fn validate_output(
     snapshot: &crate::live_source::Snapshot,
-    route: &str,
     expected: &Value,
-    phase: &str,
+    request: &RoutePhase<'_>,
 ) -> Value {
-    let payloads = if phase == "correctness" {
+    let payloads = if request.phase == "correctness" {
         assert_eq!(
             std::env::var("FLIGHTDECK_ITEM1_ORACLE_BASELINE").unwrap(),
             "controlled-counterfactual"
@@ -223,10 +234,10 @@ fn validate_output(
         payloads::validate_input(snapshot, expected).unwrap();
         payloads::report(snapshot).unwrap()
     } else {
-        payloads::validate(snapshot, route, expected).unwrap()
+        payloads::validate(snapshot, request.route, expected).unwrap()
     };
     assert!(!snapshot.histories_pending);
-    if phase == "cold" {
+    if request.phase == "cold" {
         assert!(snapshot.catalog["collector_completed"].as_bool().unwrap());
     }
     assert!(

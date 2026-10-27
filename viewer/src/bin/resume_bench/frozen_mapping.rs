@@ -21,6 +21,11 @@ pub(super) struct FrozenRing {
     completed: bool,
 }
 
+pub(super) struct ReplayPosition {
+    pub(super) publication: u64,
+    pub(super) event: u64,
+}
+
 struct Mapping {
     address: *mut c_void,
     bytes: usize,
@@ -133,9 +138,9 @@ impl FrozenRing {
         self.mapping.words()[HEADER_PUBLICATION_NEWEST].store(newest, Ordering::Release);
     }
 
-    pub(super) fn replay_publish(&self, newest: u64, event_newest: u64) {
-        self.mapping.words()[HEADER_EVENT_NEWEST].store(event_newest, Ordering::Release);
-        self.publish(newest);
+    pub(super) fn replay_publish(&self, position: &ReplayPosition) {
+        self.mapping.words()[HEADER_EVENT_NEWEST].store(position.event, Ordering::Release);
+        self.publish(position.publication);
     }
 
     pub(super) fn replay_start(&self, event_first: u64) -> io::Result<()> {
@@ -162,7 +167,10 @@ impl FrozenRing {
     pub(super) fn restore(&self) {
         self.mapping.words()[HEADER_PUBLICATION_FIRST].store(self.first, Ordering::Release);
         self.mapping.words()[HEADER_EVENT_FIRST].store(self.event_first, Ordering::Release);
-        self.replay_publish(self.newest, self.event_newest);
+        self.replay_publish(&ReplayPosition {
+            publication: self.newest,
+            event: self.event_newest,
+        });
         self.complete(self.completed);
     }
 
