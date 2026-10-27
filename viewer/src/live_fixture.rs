@@ -318,7 +318,6 @@ impl Fixture {
         observations: &[persistence::Observation],
         derive: &dyn persistence::worker::Derive,
     ) {
-        assert!(observations.len() <= 8);
         self.seal_window(None, observations, derive);
     }
 
@@ -336,12 +335,13 @@ impl Fixture {
         self.seal_derived(observations, &Underived);
     }
 
-    fn seal_window(
+    pub(crate) fn seal_window(
         &self,
         minute: Option<u64>,
         observations: &[persistence::Observation],
         derive: &dyn persistence::worker::Derive,
     ) {
+        assert!(observations.len() <= 8);
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
         let window = self.seal_read(&mut reader, minute, observations);
         drop(reader);

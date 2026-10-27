@@ -247,7 +247,7 @@ pub(super) fn terminal(
 struct Found {
     run: RunIdentity,
     marker: PathBuf,
-    wall_ns_max: u64,
+    wall_ns_max: Option<u64>,
     publication_end: u64,
 }
 
@@ -255,7 +255,10 @@ impl Found {
     /// Whether the store reads the minute's Apps, where it reads those of minutes whose ticks
     /// reach `apps_from_ns`.
     fn reads_apps(&self, apps_from_ns: u64) -> bool {
-        self.wall_ns_max >= apps_from_ns
+        match self.wall_ns_max {
+            Some(wall_ns) => wall_ns >= apps_from_ns,
+            None => true,
+        }
     }
 }
 
@@ -309,7 +312,8 @@ fn load_window_inner(
     }
     let apps_from_ns = found
         .first()
-        .map_or(0, |newest| newest.wall_ns_max.saturating_sub(APPS_NS));
+        .and_then(|newest| newest.wall_ns_max)
+        .map_or(0, |newest| newest.saturating_sub(APPS_NS));
     found.reverse();
 
     let mut left_out = None;
@@ -753,14 +757,15 @@ impl FindRun<'_> {
                 }
                 .marker(self.root);
                 let manifest = persistence::list_committed(self.root, &marker, self.recording)?;
-                // A minute of unknown wall time has no place on a chart.
-                let Some(wall_ns) = manifest.wall_ns else {
-                    continue;
-                };
-
-                let oldest = *oldest_ns.get_or_insert(wall_ns.max.saturating_sub(self.span_ns));
-                if wall_ns.max < oldest {
-                    return Ok(false);
+                let oldest = *oldest_ns.get_or_insert_with(|| {
+                    manifest
+                        .wall_ns
+                        .map_or(0, |wall| wall.max.saturating_sub(self.span_ns))
+                });
+                if let Some(wall_ns) = manifest.wall_ns {
+                    if wall_ns.max < oldest {
+                        return Ok(false);
+                    }
                 }
                 if found.len() == MINUTES_MAX {
                     return Err(io::Error::from(io::ErrorKind::InvalidData));
@@ -768,7 +773,7 @@ impl FindRun<'_> {
                 found.push(Found {
                     run: *self.run,
                     marker,
-                    wall_ns_max: wall_ns.max,
+                    wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
                     publication_end: manifest.publication_end,
                 });
             }

@@ -45,10 +45,8 @@ pub(super) fn find(
     }
     crate::session::discover(root, recording, &mut catalog, operation).map_err(find_failure)?;
     find_checkpoint(window, &runs, &catalog)?;
-    let Some(newest_ns) = find_newest(&catalog, &runs) else {
-        return Ok(());
-    };
-    let first_ns = newest_ns.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000);
+    let first_ns = find_newest(&catalog, &runs)
+        .map(|newest| newest.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000));
     find_range(root, &catalog, &runs, first_ns, found)?;
     found.sort_unstable_by_key(|minute| {
         let order = runs
@@ -84,14 +82,14 @@ fn find_checkpoint(
     Ok(())
 }
 
-/// The newest registered run with sealed wall times anchors the same period as the live locator.
-/// An evicted run remains discoverable even when no registered run has a sealed window.
+/// Uses the latest sealed window of the newest registered run that has one.
+/// Unknown bounds there cannot borrow an older clock. When no registered run has a sealed
+/// window, the catalog's known maximum is the fallback.
 fn find_newest(catalog: &[Manifest], runs: &[RunIdentity]) -> Option<u64> {
     for run in runs.iter().rev() {
         let latest = catalog
             .iter()
             .filter(|manifest| manifest.identity.run.run == run.run)
-            .filter(|manifest| manifest.wall_ns.is_some())
             .max_by_key(|manifest| manifest.identity.window);
         if let Some(latest) = latest {
             return latest.wall_ns.map(|wall| wall.max);
@@ -108,16 +106,16 @@ fn find_range(
     root: &Path,
     catalog: &[Manifest],
     runs: &[RunIdentity],
-    first_ns: u64,
+    first_ns: Option<u64>,
     found: &mut Vec<Found>,
 ) -> Result<(), Failure> {
     for manifest in catalog {
-        // Unknown wall times cannot place an observation on a chart.
-        let Some(wall) = manifest.wall_ns else {
-            continue;
-        };
-        if wall.max < first_ns {
-            continue;
+        if let Some(first_ns) = first_ns {
+            if let Some(wall) = manifest.wall_ns {
+                if wall.max < first_ns {
+                    continue;
+                }
+            }
         }
         if found.len() == MINUTES_MAX {
             return Err(Failure::Commits(io::ErrorKind::InvalidData));
@@ -129,7 +127,7 @@ fn find_range(
         found.push(Found {
             run,
             marker: persistence::layout::WindowKey::from(&manifest.identity).marker(root),
-            wall_ns_max: wall.max,
+            wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
             publication_end: manifest.publication_end,
         });
     }
