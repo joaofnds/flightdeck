@@ -428,6 +428,16 @@ impl Frame {
             .map_err(AggregateError::legacy)
     }
 
+    /// Validates the same borrowed input as aggregation without deriving App totals.
+    pub(crate) fn validate_input_typed(
+        &self,
+        previous: Option<&Self>,
+    ) -> std::result::Result<(), AggregateError> {
+        views::with_aggregate_input(self, previous, |interval, processes| {
+            apps::validate(interval, processes).map_err(AggregateError::Input)
+        })
+    }
+
     pub(crate) fn with_aggregate_typed(
         &self,
         previous: Option<&Self>,

@@ -114,6 +114,74 @@ fn saved_computer_labels_keep_the_legacy_text_domain_through_the_store_loader() 
 }
 
 #[test]
+fn terminal_only_load_preserves_exact_source_without_deriving_apps() {
+    // Goal: predecessor proof keeps exact terminal input without deriving App totals.
+    // Method: trace terminal loading of two populated observations in a real sealed minute.
+    use persistence::work::ingestion::{Key, Kind, Purpose, Trace};
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.seal_minute(0);
+    let identity = fixture.writer.identity().unwrap();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    assert_eq!(found.len(), 1);
+    let mut decoder = Decoder::default();
+    let batch = decoder.decode(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    );
+    assert_eq!(batch.seconds.len(), 2);
+    assert!(batch.seconds.iter().all(|second| second.apps.is_ok()));
+    let expected = decoder.terminal().unwrap();
+    let trace = Trace::new(identity.recording);
+
+    let scope = trace.enter();
+    let terminal = super::terminal(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap()
+    .unwrap();
+    drop(scope);
+
+    assert_eq!(terminal.run, identity);
+    assert_eq!(terminal.machine, expected.machine);
+    let (endpoint, frame) = terminal.process.unwrap().into_parts();
+    let (expected_endpoint, expected_frame) = expected.process.unwrap().into_parts();
+    assert_eq!(endpoint.identity, identity);
+    assert_eq!(endpoint.stamp.publication, 2);
+    assert_eq!(endpoint.run_tick, 1);
+    assert_eq!(endpoint.stamp, expected_endpoint.stamp);
+    assert_eq!(frame, expected_frame);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    let count = |kind| events.iter().filter(|event| event.kind == kind).count();
+    eprintln!(
+        "terminal-source-work AppDerivation={} CommittedFrameCapture={}",
+        count(Kind::AppDerivation),
+        count(Kind::CommittedFrameCapture)
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.purpose == Purpose::Predecessor)
+    );
+    assert!(events.iter().any(|event| matches!(event.key,
+        Key::Publication { run, publication: 2 } if run == identity)));
+    assert_eq!(count(Kind::CommittedFrameCapture), 2);
+    assert_eq!(count(Kind::AppDerivation), 0);
+}
+
+#[test]
 fn terminal_only_load_preserves_the_full_decoders_first_successor() {
     // Goal: discarding presentations keeps exact machine and App rates across the saved tail.
     // Method: seed independent real ring readers from the full and terminal-only decoders.

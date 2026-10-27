@@ -160,7 +160,7 @@ impl SealedMinute<'_> {
                         .can_use_predecessor(&before.endpoint.observation())
                 })
                 .map(|before| &*before.frame);
-            let valid_input = match Sample::validate_capture_typed(&frame, previous) {
+            let valid_input = match frame.validate_input_typed(previous) {
                 Ok(()) => true,
                 Err(error) => error.retains_input(),
             };

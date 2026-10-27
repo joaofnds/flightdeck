@@ -674,7 +674,7 @@ fn start_matches(interval: &Interval, process: &ProcessInterval) -> bool {
     usage.awake_ns_at_start <= now
 }
 
-fn validate(interval: &Interval, processes: &[ProcessInterval]) -> Result<(), Error> {
+pub(crate) fn validate(interval: &Interval, processes: &[ProcessInterval]) -> Result<(), Error> {
     if processes.len() > PROCESS_INTERVALS_MAX {
         return Err(Error::ProcessBound);
     }

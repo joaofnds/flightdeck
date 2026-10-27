@@ -9,6 +9,26 @@ pub(super) fn with_aggregate(
     previous: Option<&Frame>,
     consume: impl FnOnce(&Aggregate<'_>) -> Result<()>,
 ) -> std::result::Result<(), super::AggregateError> {
+    with_aggregate_input(selected, previous, |interval, processes| {
+        let mut aggregate = None;
+        Aggregate::initialize(&mut aggregate);
+        let aggregate = aggregate.as_mut().unwrap_or_else(|| unreachable!());
+        aggregate
+            .compute(interval, processes)
+            .map_err(super::AggregateError::Input)?;
+
+        consume(aggregate).map_err(super::AggregateError::Presentation)
+    })
+}
+
+pub(super) fn with_aggregate_input(
+    selected: &Frame,
+    previous: Option<&Frame>,
+    consume: impl FnOnce(
+        &Interval,
+        &[ProcessInterval<'_>],
+    ) -> std::result::Result<(), super::AggregateError>,
+) -> std::result::Result<(), super::AggregateError> {
     let previous = previous.unwrap_or(selected);
     let observation = selected.observation();
     let predecessor = previous.observation();
@@ -55,14 +75,7 @@ pub(super) fn with_aggregate(
         + processes.capacity() * size_of::<ProcessInterval<'_>>();
     assert!(view_bytes <= super::TRANSIENT_VIEW_BYTES_MAX);
 
-    let mut aggregate = None;
-    Aggregate::initialize(&mut aggregate);
-    let aggregate = aggregate.as_mut().unwrap_or_else(|| unreachable!());
-    aggregate
-        .compute(&interval, &processes)
-        .map_err(super::AggregateError::Input)?;
-
-    consume(aggregate).map_err(super::AggregateError::Presentation)
+    consume(&interval, &processes)
 }
 
 struct Predecessor<'frame> {

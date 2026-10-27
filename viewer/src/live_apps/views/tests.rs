@@ -529,6 +529,250 @@ fn keeps_live_unavailable_gauges_absent_across_a_run_tick_gap() {
         .unwrap();
 }
 
+macro_rules! source_admission {
+    ($name:ident, $change:expr, $expected:pat, $input_expected:pat, $retained:literal) => {
+        #[test]
+        fn $name() {
+            // Goal: source retention keeps capture's typed integrity and refusal policy.
+            // Method: change one boundary of the same owned predecessor/selected fixture.
+            let mut scenario = Scenario::new();
+            $change(&mut scenario);
+
+            let result = crate::live_app_response::Sample::validate_capture_typed(
+                &scenario.selected,
+                Some(&scenario.previous),
+            );
+
+            let input = scenario
+                .selected
+                .validate_input_typed(Some(&scenario.previous));
+
+            assert!(matches!(&result, $expected), "{result:?}");
+            assert!(matches!(&input, $input_expected), "{input:?}");
+            assert_eq!(
+                result
+                    .as_ref()
+                    .err()
+                    .is_none_or(|error| error.retains_input()),
+                $retained
+            );
+
+            assert_eq!(
+                input
+                    .as_ref()
+                    .err()
+                    .is_none_or(|error| error.retains_input()),
+                $retained
+            );
+        }
+    };
+}
+
+source_admission!(
+    accepts_valid_source_input,
+    |_: &mut Scenario| {},
+    Ok(()),
+    Ok(()),
+    true
+);
+source_admission!(
+    rejects_invalid_selected_program_input,
+    |scenario: &mut Scenario| {
+        scenario.selected.arena = b"/orker/Applications/B.app".to_vec();
+        scenario.selected.execs.push(Exec {
+            number: 0,
+            pid: 7,
+            creation: Some(creation()),
+            program: Ok(program()),
+        });
+    },
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::InvalidProgram
+    )),
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::InvalidProgram
+    )),
+    false
+);
+source_admission!(
+    rejects_invalid_predecessor_program_input,
+    |scenario: &mut Scenario| scenario.previous.arena[0] = b'/',
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::InvalidProgram
+    )),
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::InvalidProgram
+    )),
+    false
+);
+source_admission!(
+    rejects_duplicate_process_creation_input,
+    |scenario: &mut Scenario| {
+        source_members(&mut scenario.selected, 7..9, b"worker");
+        scenario.selected.members[1].pid = 7;
+        scenario.selected.members[1].creation = scenario.selected.members[0].creation;
+        scenario.selected.exits.clear();
+    },
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::DuplicateProcess
+    )),
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::DuplicateProcess
+    )),
+    false
+);
+source_admission!(
+    rejects_duplicate_unknown_creation_input,
+    |scenario: &mut Scenario| {
+        source_members(&mut scenario.selected, 7..9, b"worker");
+        scenario.selected.members[1].pid = 7;
+        scenario.selected.members[0].creation = None;
+        scenario.selected.members[1].creation = None;
+        scenario.selected.exits.clear();
+    },
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::DuplicateProcess
+    )),
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::DuplicateProcess
+    )),
+    false
+);
+source_admission!(
+    accepts_unassociated_event_input_without_stale_program_bytes,
+    |scenario: &mut Scenario| {
+        scenario.selected.execs.push(Exec {
+            number: 0,
+            pid: 7,
+            creation: None,
+            program: Err(IdentityUnavailable::Changed),
+        });
+    },
+    Ok(()),
+    Ok(()),
+    true
+);
+source_admission!(
+    accepts_source_after_a_publication_gap,
+    |scenario: &mut Scenario| {
+        scenario.previous.arena[0] = b'/';
+        scenario.selected.stamp.publication = 3;
+    },
+    Ok(()),
+    Ok(()),
+    true
+);
+source_admission!(
+    accepts_source_after_a_restart,
+    |scenario: &mut Scenario| {
+        scenario.previous.arena[0] = b'/';
+        scenario.selected.stamp.run = [90, 91];
+    },
+    Ok(()),
+    Ok(()),
+    true
+);
+source_admission!(
+    accepts_source_without_a_predecessor_clock,
+    |scenario: &mut Scenario| {
+        scenario.previous.arena[0] = b'/';
+        scenario.previous.stamp.continuous_ns = None;
+    },
+    Ok(()),
+    Ok(()),
+    true
+);
+source_admission!(
+    rejects_invalid_source_even_without_rate_eligibility,
+    |scenario: &mut Scenario| {
+        scenario.previous.arena[0] = b'/';
+        scenario.selected.run_tick = 3;
+    },
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::InvalidProgram
+    )),
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::InvalidProgram
+    )),
+    false
+);
+source_admission!(
+    retains_source_at_the_joint_process_view_bound,
+    |scenario: &mut Scenario| {
+        source_members(&mut scenario.selected, 100..24_100, b"worker");
+    },
+    Err(crate::live_apps::AggregateError::View(
+        crate::apps::Error::ProcessBound
+    )),
+    Err(crate::live_apps::AggregateError::View(
+        crate::apps::Error::ProcessBound
+    )),
+    true
+);
+source_admission!(
+    retains_source_at_the_joint_program_bound,
+    |scenario: &mut Scenario| {
+        let name = [b'x'; collector::ring::PROGRAM_PATH_BYTES_MAX];
+        source_members(&mut scenario.previous, 100..8294, &name);
+        scenario.previous.execs.clear();
+        source_members(&mut scenario.selected, 10_000..18_194, &name);
+        scenario.selected.exits = scenario
+            .previous
+            .members
+            .iter()
+            .map(|member| Exit {
+                number: 1,
+                pid: member.pid,
+                creation: member.creation,
+                usage: Ok(usage()),
+                ambiguous: false,
+            })
+            .collect();
+    },
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::ProgramBound
+    )),
+    Err(crate::live_apps::AggregateError::Input(
+        crate::apps::Error::ProgramBound
+    )),
+    true
+);
+source_admission!(
+    retains_source_when_sample_presentation_exceeds_its_byte_bound,
+    |scenario: &mut Scenario| {
+        let name = [255; collector::ring::PROGRAM_PATH_BYTES_MAX];
+        source_members(&mut scenario.selected, 100..520, &name);
+        scenario.selected.exits.clear();
+    },
+    Err(crate::live_apps::AggregateError::Presentation(
+        persistence::Error::Bound("live App sample bytes")
+    )),
+    Ok(()),
+    true
+);
+
+fn source_members(frame: &mut Frame, pids: std::ops::Range<i32>, name: &[u8]) {
+    assert!(pids.len() <= crate::apps::PROCESS_INTERVALS_MAX);
+    frame.arena = name.to_vec();
+    frame.members = pids
+        .map(|pid| crate::live_apps::Member {
+            pid,
+            creation: Some(ProcessCreation {
+                unique_id: u64::try_from(pid).unwrap(),
+                pid_version: 1,
+            }),
+            program: Ok(ProgramSpan {
+                start: 0,
+                name_end: name.len(),
+                end: name.len(),
+            }),
+            usage: Ok(usage()),
+            gpu_ns: None,
+            threads: None,
+        })
+        .collect();
+}
+
 fn creation() -> ProcessCreation {
     ProcessCreation {
         unique_id: 700,

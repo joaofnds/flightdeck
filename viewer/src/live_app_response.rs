@@ -285,6 +285,7 @@ const _: () = {
 impl Sample {
     /// Applies capture's aggregate and presentation admission without retaining a presentation.
     /// A rate predecessor needs its accepted raw frame, rather than copies of the App rows.
+    #[cfg(test)]
     pub(crate) fn validate_capture_typed(
         selected: &Frame,
         previous: Option<&Frame>,
