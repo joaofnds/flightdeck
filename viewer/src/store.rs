@@ -25,6 +25,9 @@ mod resume_tests;
 #[cfg(test)]
 mod reconciliation_tests;
 
+#[cfg(test)]
+mod retention_tests;
+
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -114,6 +117,9 @@ pub struct View {
     /// The latest validated ring generation is caught up without an unexplained publication gap.
     /// This does not certify sealed-history coverage, retained context or complete App payloads.
     pub ring_complete: bool,
+    /// Greatest wall time of a full-detail reading evicted since the last load reset.
+    /// This does not certify checked history or complete payloads; older Views may still own it.
+    pub full_detail_evicted_through_ns: Option<u64>,
 }
 
 impl View {
@@ -358,6 +364,7 @@ impl Drop for Store {
 struct Held {
     coverage_seconds: u64,
     ring_complete: bool,
+    full_detail_evicted_through_ns: Option<u64>,
     payload_budget: Option<Arc<ByteBudget>>,
     sampled: Option<Span<SampledSecond>>,
     span: Span<MachineSecond>,
@@ -398,11 +405,13 @@ impl Held {
             failure: None,
             left_out: None,
             ring_complete: false,
+            full_detail_evicted_through_ns: None,
         });
 
         Self {
             coverage_seconds: 0,
             ring_complete: false,
+            full_detail_evicted_through_ns: None,
             payload_budget: None,
             sampled: None,
             span: Span::new(SECONDS_MAX, seconds),
@@ -444,6 +453,7 @@ impl Held {
         self.newest = None;
         self.coverage_seconds = 0;
         self.ring_complete = false;
+        self.full_detail_evicted_through_ns = None;
         self.unpublished = true;
     }
 
@@ -500,6 +510,12 @@ impl Held {
             assert!(pushed);
         }
         self.take_current(run, second, apps, segment);
+        if let Some(leaving) = leaving {
+            self.full_detail_evicted_through_ns = Some(
+                self.full_detail_evicted_through_ns
+                    .map_or(leaving.wall_ns, |previous| previous.max(leaving.wall_ns)),
+            );
+        }
         self.newest = Some(Newest {
             run: *run,
             publication: second.publication,
@@ -561,6 +577,7 @@ impl Held {
         let failure = self.failure;
         let left_out = self.left_out;
         let ring_complete = self.ring_complete;
+        let full_detail_evicted_through_ns = self.full_detail_evicted_through_ns;
         let written = self.views.write(|view| {
             assert!(view.seconds.is_empty());
             assert!(view.apps.is_empty());
@@ -585,6 +602,7 @@ impl Held {
             view.failure = failure;
             view.left_out = left_out;
             view.ring_complete = ring_complete;
+            view.full_detail_evicted_through_ns = full_detail_evicted_through_ns;
 
             assert_eq!(view.apps.len(), view.seconds.len());
             assert!(view.cohorts.seconds <= view.seconds.len());

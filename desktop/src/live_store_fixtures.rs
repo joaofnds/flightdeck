@@ -78,6 +78,7 @@ pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) 
         failure: None,
         left_out: None,
         ring_complete: false,
+        full_detail_evicted_through_ns: None,
     }
 }
 
