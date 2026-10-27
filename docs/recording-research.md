@@ -119,15 +119,25 @@ gives these readings without root in memory the collector owns. Without root,
 exist (probed 2026-10-14 on macOS 27.0.1). No IOReport call the collector knows takes a
 sample into memory the caller passes.
 
-The GPU's memory and each process's GPU time come from the GPU accelerator's
-`PerformanceStatistics` dictionary and the `AppUsage` array of each of its user clients.
-`IORegistryEntryGetProperty`, which copies a property into the caller's buffer, returns
-kIOReturnBadArgument (0xe00002c2) for both, while it copies the 22 bytes of a client's
-`IOUserClientCreator` and the GPU's `gpu-core-count` (probed 2026-10-22 on macOS 27.0.1).
-So the collector copies the creator into its own buffer and reads the dictionary and the
-arrays with `IORegistryEntryCreateCFProperty`, which allocates on every read and falls
-under the same departure. The malloc-family calls these reads add to a tick are not
-counted yet.
+The GPU's memory comes from the accelerator's `PerformanceStatistics` dictionary.
+`IORegistryEntryGetProperty`, which copies a property into the caller's buffer, returned
+kIOReturnBadArgument (0xe00002c2) for that dictionary and the clients' `AppUsage` arrays
+when probed on 2026-10-22 on macOS 27.0.1. The collector reads the memory dictionary with
+`IORegistryEntryCreateCFProperty`, whose native allocations fall under the same departure.
+Their malloc-family cost has not been measured.
+
+Process GPU attribution is unavailable. The clients' `IOUserClientCreator` property is a
+PID/name diagnostic string, not a process-creation identity. A current PID lookup cannot
+prove that a retained client belongs to that process, so the collector does not read or
+join client counters. A task-bound replacement, `TASK_POWER_INFO_V2`, returned zero GPU
+time on this Mac while an existing client's counter advanced by 69,186,250 ns over about
+three seconds, with unchanged creation identity (2026-10-27, Apple M5 Pro, macOS 27.0.1).
+Apple's [ARM GPU accounting] writes coalition statistics and returns zero from
+`ml_gpu_stat`; its [client cleanup] delegates to the driver. These observations establish
+no trustworthy replacement yet. Machine GPU readings and historical decoding remain.
+
+[ARM GPU accounting]: https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/osfmk/arm64/machine_routines.c#L2762
+[client cleanup]: https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/iokit/Kernel/IOUserClient.cpp#L1979
 
 Handing a tick over costs 53 to 80 µs of CPU for writer and reader together, so at
 one tick a second the transport is under 0.01% of a core. The ring with a reader woken
@@ -210,13 +220,10 @@ bits, which wrap every 4 GB. Per-process network bytes come from the private
 NetworkStatistics framework that `nettop` uses, and without root `nettop` reported
 processes of root and four system users beside the user's own. Running `nettop` itself
 costs about 30 ms of CPU and 5 seconds a sample, so the collector has to call the
-framework directly. Per-process GPU time is readable without root: each client of the
-GPU's `AGXAccelerator` entry in the I/O Registry names its process in
-`IOUserClientCreator` and carries an `accumulatedGPUTime` in nanoseconds. Summing a pid's
-clients would give that process's GPU time, which no run here has compared with another
-source. On 2026-10-19 the user's account read 95
-such clients with `ioreg -l -w0 -r -c AGXAccelerator`. The collector does not read them
-yet, and their cost is not measured.
+framework directly. On 2026-10-19 the user's account read 95 GPU clients without root
+with `ioreg -l -w0 -r -c AGXAccelerator`. Each carried an `IOUserClientCreator` PID/name
+and `accumulatedGPUTime` in nanoseconds. Those fields expose client counters, but do not
+establish their process ownership; the attribution decision above governs collection.
 
 Summed from parts measured apart, the collector was estimated at 20 to 22 ms a second,
 2.0 to 2.2% of one core. The collector in Rust reads every row above with a cost in its

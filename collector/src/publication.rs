@@ -93,7 +93,7 @@ impl Publication {
             collector.read(meter)?;
         }
         if self.tails >= Tails::System {
-            collector.observe_gpu();
+            collector.prepare_process_gpu();
         }
         self.remember_watch_diagnostics(collector.tracker.watch_diagnostics());
 

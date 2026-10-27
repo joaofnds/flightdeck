@@ -37,44 +37,6 @@ impl Entry {
         Ok(entry)
     }
 
-    /// Calls `visit` with each child of this entry in the service plane that conforms to
-    /// class `class`, at most `limit` of them, and returns how many it visited. User clients
-    /// are children of the service they opened and are not matched as services themselves.
-    pub(crate) fn each_child_of_class(
-        &self,
-        class: &CStr,
-        limit: usize,
-        mut visit: impl FnMut(&Self) -> io::Result<()>,
-    ) -> io::Result<usize> {
-        let mut iterator = 0_u32;
-        let status = unsafe {
-            IORegistryEntryGetChildIterator(self.0, c"IOService".as_ptr(), &raw mut iterator)
-        };
-        // The collector reads children each tick and goes on after a failure, so the error
-        // carries no message, whose text would allocate.
-        if status != 0 {
-            crate::diagnostics::error(format_args!(
-                "collector: IORegistryEntryGetChildIterator returned {status:#x}"
-            ));
-            return Err(io::Error::from(io::ErrorKind::Other));
-        }
-        let iterator = Self(iterator);
-
-        let mut visited = 0;
-        while visited < limit {
-            let child = Self(unsafe { IOIteratorNext(iterator.0) });
-            if child.0 == 0 {
-                break;
-            }
-            if unsafe { IOObjectConformsTo(child.0, class.as_ptr()) } == 0 {
-                continue;
-            }
-            visit(&child)?;
-            visited += 1;
-        }
-        Ok(visited)
-    }
-
     /// The property `key`, or none where the entry has no such property.
     fn property(&self, key: &Key) -> Option<Owned> {
         let value = Owned(unsafe {
@@ -85,52 +47,6 @@ impl Entry {
             return None;
         }
         Some(value)
-    }
-
-    /// The bytes of the string or data property `name` written into `buffer`, and their
-    /// count, or none where the entry has no such property, it holds a collection, or it does
-    /// not fit `buffer`. Unlike a CoreFoundation property, it allocates nothing.
-    pub(crate) fn bytes(
-        &self,
-        name: &CStr,
-        buffer: &mut [u8; PROPERTY_BYTES_MAX],
-    ) -> Option<usize> {
-        let mut size = match u32::try_from(PROPERTY_BYTES_MAX) {
-            Ok(size) => size,
-            Err(error) => unreachable!("{error}"),
-        };
-        let status = unsafe {
-            IORegistryEntryGetProperty(self.0, name.as_ptr(), buffer.as_mut_ptr(), &raw mut size)
-        };
-        if status != 0 {
-            return None;
-        }
-
-        let count = crate::usize_from_u32(size);
-        if count > PROPERTY_BYTES_MAX {
-            return None;
-        }
-        Some(count)
-    }
-
-    /// The sum of the whole numbers that each dictionary of the array property `key` holds
-    /// under `name`, or none where the entry has no such array or the sum overflows. A
-    /// dictionary without a whole number under `name` adds nothing.
-    pub(crate) fn array_sum(&self, key: &Key, name: &Key) -> Option<u64> {
-        let array = self.property(key)?;
-        if unsafe { CFGetTypeID(array.0) } != unsafe { CFArrayGetTypeID() } {
-            return None;
-        }
-        let count = unsafe { CFArrayGetCount(array.0) };
-        let mut sum = 0_u64;
-        for index in 0..count {
-            // The array keeps each element alive, and none is ours to release.
-            let dictionary = unsafe { CFArrayGetValueAtIndex(array.0, index) };
-            if let Some(value) = dictionary_count(dictionary, name) {
-                sum = sum.checked_add(value)?;
-            }
-        }
-        Some(sum)
     }
 
     /// The bytes of the data property `key`, or none where the entry has no such property or
@@ -267,9 +183,6 @@ impl Drop for Owned {
     }
 }
 
-/// The most bytes `Entry::bytes` reads, the size of the `io_struct_inband_t` it fills.
-pub(crate) const PROPERTY_BYTES_MAX: usize = 4096;
-
 const UTF8_ENCODING: u32 = 0x0800_0100;
 const NUMBER_SINT64: isize = 4;
 
@@ -278,17 +191,7 @@ unsafe extern "C" {
     fn IOServiceNameMatching(name: *const c_char) -> *mut c_void;
     fn IOServiceMatching(name: *const c_char) -> *mut c_void;
     fn IOServiceGetMatchingService(port: u32, matching: *mut c_void) -> u32;
-    fn IORegistryEntryGetChildIterator(entry: u32, plane: *const c_char, iterator: *mut u32)
-    -> i32;
-    fn IOObjectConformsTo(object: u32, class: *const c_char) -> u32;
-    fn IOIteratorNext(iterator: u32) -> u32;
     fn IOObjectRelease(object: u32) -> i32;
-    fn IORegistryEntryGetProperty(
-        entry: u32,
-        name: *const c_char,
-        buffer: *mut u8,
-        size: *mut u32,
-    ) -> i32;
     fn IORegistryEntryCreateCFProperty(
         entry: u32,
         key: *const c_void,
@@ -312,8 +215,5 @@ unsafe extern "C" {
     fn CFDictionaryGetTypeID() -> c_ulong;
     fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
     fn CFNumberGetTypeID() -> c_ulong;
-    fn CFArrayGetTypeID() -> c_ulong;
-    fn CFArrayGetCount(array: *const c_void) -> isize;
-    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
     fn CFNumberGetValue(number: *const c_void, kind: isize, value: *mut c_void) -> u8;
 }

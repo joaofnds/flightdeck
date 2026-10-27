@@ -30,7 +30,7 @@ pub struct Collector {
     pub battery: Option<Battery>,
     pub disks: Option<Disks>,
     pub system: System,
-    /// The GPU time of each process `identities` observed, in its order.
+    /// Unavailable GPU times, aligned with each process `identities` observed.
     pub process_gpu_ns: Vec<Option<u64>>,
     pub processes: Sweep,
     pub identities: programs::sweep::Sweep,
@@ -196,30 +196,22 @@ impl Collector {
         Ok(())
     }
 
-    /// Reads the system readings and each process's GPU time, for the tick whose identities
-    /// `observe_gpu` then pairs them with.
+    /// Reads the tick's independent machine-wide system readings.
     pub fn read_system(&mut self, meter: &mut Meter) -> io::Result<()> {
         meter.measure(Source::System, || {
             self.system.read();
             Ok(())
-        })?;
-        meter.measure(Source::GpuClients, || {
-            self.system.read_gpu();
-            Ok(())
         })
     }
 
-    /// Pairs each process the identities observed with the GPU time `read_system` read.
-    pub fn observe_gpu(&mut self) {
+    /// Keeps GPU time unavailable: a driver's client PID does not identify its creation.
+    pub fn prepare_process_gpu(&mut self) {
         let capacity = self.process_gpu_ns.capacity();
-        crate::system::gpu_ns_by_pid(
-            self.identities
-                .observations()
-                .iter()
-                .map(|observation| observation.pid),
-            &self.system.gpu_times,
-            &mut self.process_gpu_ns,
-        );
+        let count = self.identities.observations().len();
+        assert!(count <= capacity);
+
+        self.process_gpu_ns.clear();
+        self.process_gpu_ns.resize(count, None);
         assert_eq!(self.process_gpu_ns.capacity(), capacity);
     }
 

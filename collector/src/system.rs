@@ -7,7 +7,6 @@ use std::ffi::{CStr, c_char, c_int};
 use std::io;
 
 use crate::clock_states::ClockTables;
-use crate::gpu_clients::{CLIENTS_MAX, GpuClientTime, GpuClients};
 use crate::gpu_memory::{GpuMemory, GpuMemoryReading};
 use crate::kernel::Sysctl;
 
@@ -109,12 +108,9 @@ pub struct System {
     boot_time: Option<Sysctl>,
     thermal_pressure: Option<ThermalPressure>,
     gpu_memory: Option<GpuMemory>,
-    gpu_clients: Option<GpuClients>,
     clock: Option<ClockTables>,
     pub machine: MachineFacts,
     pub reading: SystemReading,
-    /// Each process's GPU time the last tick read, by pid, rising.
-    pub gpu_times: Vec<GpuClientTime>,
 }
 
 impl System {
@@ -128,11 +124,9 @@ impl System {
             boot_time: open_source("kern.boottime", Sysctl::named(c"kern.boottime")),
             thermal_pressure: open_source("thermal pressure", ThermalPressure::register()),
             gpu_memory: open_source("GPU memory", GpuMemory::open()),
-            gpu_clients: open_source("GPU clients", GpuClients::new()),
             clock: open_source("clock tables", crate::clock_states::read()),
             machine: machine_facts(),
             reading: SystemReading::default(),
-            gpu_times: Vec::with_capacity(CLIENTS_MAX),
         }
     }
 
@@ -160,74 +154,12 @@ impl System {
         };
     }
 
-    /// Reads each process's GPU time. A read that fails is reported and leaves no times.
-    pub fn read_gpu(&mut self) {
-        let Some(clients) = &self.gpu_clients else {
-            self.gpu_times.clear();
-            return;
-        };
-
-        let capacity = self.gpu_times.capacity();
-        if let Err(error) = clients.read(&mut self.gpu_times) {
-            crate::diagnostics::error(format_args!(
-                "collector: GPU clients read failed: kind={:?} errno={:?}",
-                error.kind(),
-                error.raw_os_error()
-            ));
-            self.gpu_times.clear();
-        }
-        assert_eq!(self.gpu_times.capacity(), capacity);
-    }
-
     /// The power manager's clock tables, read when the source opened, or none where
     /// unreadable.
     #[must_use]
     pub fn clock(&self) -> Option<&ClockTables> {
         self.clock.as_ref()
     }
-}
-
-/// Fills `gpu_ns` with the GPU time of each pid of `pids`, rising, from `times`, rising by
-/// pid, with none for a pid that has no GPU clients or more time than the ring carries.
-pub fn gpu_ns_by_pid(
-    pids: impl Iterator<Item = i32>,
-    times: &[GpuClientTime],
-    gpu_ns: &mut Vec<Option<u64>>,
-) {
-    gpu_ns.clear();
-    let capacity = gpu_ns.capacity();
-    let mut time = 0;
-    let mut previous = None;
-    for pid in pids {
-        if let Some(previous) = previous {
-            assert!(previous < pid);
-        }
-        previous = Some(pid);
-
-        while time < times.len() {
-            if times[time].pid >= pid {
-                break;
-            }
-            time += 1;
-        }
-        let found = times.get(time).filter(|found| found.pid == pid);
-        assert!(gpu_ns.len() < capacity);
-        gpu_ns.push(found.and_then(gpu_ns_by_pid_carried));
-    }
-}
-
-/// The time of `found`, or none where it passes what the ring carries, which only a client
-/// count no driver keeps, or a sum of them, reaches.
-fn gpu_ns_by_pid_carried(found: &GpuClientTime) -> Option<u64> {
-    if found.gpu_ns > crate::ring::GPU_NS_MAX {
-        crate::diagnostics::error(format_args!(
-            "collector: GPU time of pid {} read {} ns, past what the ring carries",
-            found.pid, found.gpu_ns
-        ));
-        return None;
-    }
-
-    Some(found.gpu_ns)
 }
 
 fn open_source<T>(name: &str, opened: io::Result<T>) -> Option<T> {

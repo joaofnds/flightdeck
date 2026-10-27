@@ -63,14 +63,18 @@ impl Harness {
     }
 
     fn battery(collector: &Collector) -> Self {
-        Self::sources(collector, false)
+        Self::sources(collector, Tails::Battery)
     }
 
     fn disks(collector: &Collector) -> Self {
-        Self::sources(collector, true)
+        Self::sources(collector, Tails::Disks)
     }
 
-    fn sources(collector: &Collector, disks: bool) -> Self {
+    fn system(collector: &Collector) -> Self {
+        Self::sources(collector, Tails::System)
+    }
+
+    fn sources(collector: &Collector, tails: Tails) -> Self {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let lock_path = std::env::temp_dir().join(format!(
             "fd-battery-publication-{}-{number}.lock",
@@ -97,10 +101,11 @@ impl Harness {
             run: Identity([3, number]),
             boot: Identity([4, 5]),
         };
-        let create = if disks {
-            Writer::create_with_disks
-        } else {
-            Writer::create_with_battery
+        let create = match tails {
+            Tails::Battery => Writer::create_with_battery,
+            Tails::Disks => Writer::create_with_disks,
+            Tails::System => Writer::create_with_system,
+            Tails::None => unreachable!("source fixture needs a supplemental tail"),
         };
         let writer = create(
             &place,
@@ -450,7 +455,7 @@ fn publishes_scheduled_start_identity_from_collection() {
     collector.ioreport = None;
     collector.battery = None;
     collector.disks = None;
-    let mut harness = Harness::sources(&collector, false);
+    let mut harness = Harness::battery(&collector);
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut child = HeldChild::new();
     let pid = child.0.id().cast_signed();
@@ -565,7 +570,7 @@ fn reports_wait_capture_diagnostics_before_the_scheduled_sweep_resets_them() {
     collector.ioreport = None;
     collector.battery = None;
     collector.disks = None;
-    let mut harness = Harness::sources(&collector, false);
+    let mut harness = Harness::battery(&collector);
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut child = HeldChild::new();
     let mut meter = Meter::default();
@@ -603,7 +608,7 @@ fn reports_watch_reads_from_the_actual_scheduled_collector_path() {
     collector.ioreport = None;
     collector.battery = None;
     collector.disks = None;
-    let mut harness = Harness::sources(&collector, false);
+    let mut harness = Harness::battery(&collector);
     let mut publication = Publication::new(&harness.writer).unwrap();
 
     publication
@@ -993,4 +998,108 @@ fn publishes_each_disk_attempt_at_the_tick_start_and_clears_failed_acquisition()
             ..DiskSnapshot::default()
         })
     );
+}
+
+#[test]
+fn publishes_unavailable_process_gpu_without_losing_system_readings_or_allocating() {
+    // Goal: unsupported process attribution stays unknown alongside independent system facts.
+    // Method: poison the output buffer, collect and publish a real tick, then read the ring.
+    // The GPU memory value is injected at publication; its availability is not a host claim.
+    use collector::gpu_memory::GpuMemoryReading;
+    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = None;
+    let mut harness = Harness::system(&collector);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+    let mut tick = battery_tick(&reader.shape());
+    let mut identities = Vec::with_capacity(collector.capacities().processes);
+    let mut meter = Meter::default();
+    publication
+        .read(&mut collector, &mut meter, &mut harness.writer, None)
+        .unwrap();
+    let capacity = collector.process_gpu_ns.capacity();
+    collector.process_gpu_ns.resize(capacity, Some(7));
+    collector.process_gpu_ns.fill(Some(7));
+    let gpu_memory = GpuMemoryReading {
+        in_use_bytes: Some(4096),
+        allocated_bytes: Some(8192),
+    };
+
+    let allocations = crate::tests::allocator_calls_in(|| {
+        publication
+            .read(&mut collector, &mut meter, &mut harness.writer, None)
+            .unwrap();
+        collector.system.reading.gpu_memory = Some(gpu_memory);
+        publication
+            .publish(&mut harness.writer, &collector, 0, None)
+            .unwrap();
+        reader
+            .read_identity_into(&mut tick, &mut identities)
+            .unwrap();
+    });
+
+    assert_eq!(allocations, 0);
+    assert_eq!(collector.process_gpu_ns.capacity(), capacity);
+    assert!(!identities.is_empty());
+    assert_eq!(identities.len(), collector.identities.observations().len());
+    let identity = |observation: &IdentityObservation| {
+        (
+            observation.pid,
+            observation.usage,
+            observation.creation().copied(),
+            observation.availability(),
+        )
+    };
+    assert!(
+        identities.iter().map(identity).eq(collector
+            .identities
+            .observations()
+            .iter()
+            .map(identity))
+    );
+    assert_eq!(tick.process_gpu_ns(), vec![None; identities.len()]);
+    assert_eq!(tick.system.unwrap().reading, collector.system.reading);
+    assert_eq!(tick.system.unwrap().machine, collector.system.machine);
+    assert_eq!(tick.system.unwrap().reading.gpu_memory, Some(gpu_memory));
+    println!(
+        "published_identities={} process_gpu_all_none=true gpu_buffer_capacity={capacity} \
+         rust_allocator_calls={allocations} injected_machine_gpu_memory={gpu_memory:?}",
+        identities.len(),
+    );
+}
+
+/// Native GPU acquisition requires the Apple GPU driver, which CI's virtual Mac lacks.
+mod this_mac {
+    use super::*;
+
+    #[test]
+    fn publishes_the_gpu_memory_acquired_from_this_mac() {
+        // Goal: system acquisition remains connected to actual collector publication.
+        // Method: collect without supplying GPU memory, then decode the acquired reading.
+        let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
+        collector.smc = None;
+        collector.ioreport = None;
+        collector.battery = None;
+        collector.disks = None;
+        let mut harness = Harness::system(&collector);
+        let mut publication = Publication::new(&harness.writer).unwrap();
+        let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
+        let mut tick = battery_tick(&reader.shape());
+        let mut meter = Meter::default();
+
+        publication
+            .read(&mut collector, &mut meter, &mut harness.writer, None)
+            .unwrap();
+        publication
+            .publish(&mut harness.writer, &collector, 0, None)
+            .unwrap();
+        reader.read_into(&mut tick).unwrap();
+
+        let memory = tick.system.unwrap().reading.gpu_memory.unwrap();
+        assert!(memory.in_use_bytes.is_some());
+        println!("acquired_machine_gpu_memory={memory:?}");
+    }
 }

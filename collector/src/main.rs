@@ -1340,7 +1340,7 @@ mod tests {
     }
 
     /// Returns how many times `work` called the allocator on this thread.
-    fn allocator_calls_in(work: impl FnOnce()) -> u64 {
+    pub(crate) fn allocator_calls_in(work: impl FnOnce()) -> u64 {
         CALLS_THIS_THREAD.set(0);
         COUNTING_THIS_THREAD.set(true);
         work();

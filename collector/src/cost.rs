@@ -26,7 +26,7 @@ pub enum Source {
     Disks,
     /// The load average, open files, thermal pressure, GPU memory and boot time.
     System,
-    /// Each process's GPU time, from the GPU driver's clients.
+    /// Retained report slot for the removed, unverified per-client GPU source.
     GpuClients,
 }
 

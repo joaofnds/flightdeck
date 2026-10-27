@@ -249,44 +249,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_a_recoverable_library_read_progressing_when_stderr_is_broken() {
-        // Goal: a real recoverable library diagnostic cannot fail its caller on EPIPE.
-        // Method: exercise the bounded GPU-time rejection through an installed reporter.
-        if std::env::var_os(ROLE).is_some() {
-            diagnostics::install(Role::Collector);
-            let mut times = Vec::with_capacity(1);
-            collector::system::gpu_ns_by_pid(
-                [1].into_iter(),
-                &[collector::gpu_clients::GpuClientTime {
-                    pid: 1,
-                    gpu_ns: u64::MAX,
-                }],
-                &mut times,
-            );
-            assert_eq!(times, [None]);
-            let mut group = diagnostics::stdout_group();
-            group.write_all(b"library continued\n").unwrap();
-            group.submit();
-            diagnostics::exit(0);
-        }
-        let root = root("library");
-        let (peer, sink) = UnixStream::pair().unwrap();
-        drop(peer);
-        File::create(root.join("stderr")).unwrap();
-
-        let status = run_child_with_stderr(
-            "tests::keeps_a_recoverable_library_read_progressing_when_stderr_is_broken",
-            &root,
-            Stdio::from(OwnedFd::from(sink)),
-        );
-
-        assert!(status.success());
-        let output = fs::read_to_string(root.join("stdout")).unwrap();
-        assert!(output.contains("library continued\n"), "{output}");
-        remove_successful_fixture(&root);
-    }
-
-    #[test]
     fn delivers_loss_without_an_admitted_group_before_normal_exit() {
         // Goal: a final rejected event wakes the idle writer and reaches a healthy sink.
         // Method: submit only an oversize group, then perform the terminal bounded drain.

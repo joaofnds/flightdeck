@@ -89,12 +89,17 @@ handle that event, and it goes back to sleep until the deadline.
 
 When the deadline fires, the collector takes the tick's clocks and reads, in this order: the
 battery, which it refreshes only once every 60 seconds; the disks; the system readings, such
-as the load average, open files, thermal pressure, GPU memory, each core's clocks and each
-process's GPU time; the machine's counters; the network interfaces; IOReport's frequency
+as the load average, open files, thermal pressure, GPU memory and each core's clocks;
+the machine's counters; the network interfaces; IOReport's frequency
 states and the GPU's energy; and the SMC's temperatures and fans. Then it lists every pid,
 reads each process's usage, drains the process events of the tick, and reads the resource
 coalitions those processes belong to. Every reading of the tick carries the same tick number
 and the clocks taken at its start, so readings of one second join on equality.
+
+New process and App GPU readings are unavailable. The GPU driver's client counters name
+only a PID, which cannot establish the owning process after PID reuse. The collector
+therefore skips this acquisition. Machine GPU activity, energy and memory, and resource
+coalition readings remain available. Existing recordings retain their recorded values.
 
 It then writes the tick into the next slot of the ring and wakes any reader waiting on it.
 If the work ran past the next deadline, the next tick is the first deadline still ahead. The
