@@ -15,6 +15,9 @@ mod source;
 #[path = "live_launch_ingestion_output.rs"]
 mod output;
 
+#[path = "live_launch_ingestion_sequence.rs"]
+mod sequence;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceLayout {
     Legacy,
@@ -24,6 +27,7 @@ enum SourceLayout {
 #[derive(Clone, Copy)]
 enum Input {
     Sealed(SourceLayout),
+    RunTickGap,
     NonfinitePower,
     DuplicatePid,
 }
@@ -55,6 +59,17 @@ impl Harness {
         match input {
             Input::Sealed(layout) => {
                 source::create(&root, store.recording(), layout, 0, &mut captured).unwrap();
+            }
+            Input::RunTickGap => {
+                source::create_custom(
+                    &root,
+                    store.recording(),
+                    SourceLayout::Identity,
+                    0,
+                    &mut captured,
+                    |readings| customize(input, readings),
+                )
+                .unwrap();
             }
             Input::NonfinitePower | Input::DuplicatePid => {
                 source::create_custom(
@@ -169,6 +184,10 @@ impl Harness {
     }
 
     fn view(&self) -> std::sync::Arc<viewer::store::View> {
+        self.view_at(2)
+    }
+
+    fn view_at(&self, publication: u64) -> std::sync::Arc<viewer::store::View> {
         let store = self.backend.as_ref().unwrap().store.as_ref().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         for _step in 0..2_000 {
@@ -176,7 +195,7 @@ impl Harness {
                 if view
                     .seconds
                     .last()
-                    .is_some_and(|second| second.publication == 2)
+                    .is_some_and(|second| second.publication == publication)
                 {
                     if view.ring_complete {
                         return view;
@@ -351,6 +370,7 @@ fn customize(input: Input, readings: &mut collector::ring::Readings<'_>) {
     }
     match input {
         Input::Sealed(_) => {}
+        Input::RunTickGap => readings.run_tick = 2,
         Input::NonfinitePower => {
             readings.smc = Some(collector::ring::SmcReadings {
                 power_watts: f32::NAN,
@@ -365,6 +385,65 @@ fn customize(input: Input, readings: &mut collector::ring::Readings<'_>) {
             readings.processes = &PROCESSES;
         }
     }
+}
+
+#[test]
+fn characterizes_different_app_predecessors_after_a_missed_run_tick() {
+    // Goal: expose the existing App and process interval disagreement before canonicalization.
+    // Method: give both launch-created consumers two native publications with run ticks 0 and 2.
+    // TODO(GUI item 2, doc-102): replace this baseline with shared consecutive-run-tick admission.
+    let mut harness = None;
+    Harness::setup(Input::RunTickGap, &mut harness);
+    let mut harness = harness.unwrap();
+    let mut requested = request("apps");
+    requested.app = Some(crate::live_source::AppKey {
+        kind: "bundle".into(),
+        bytes_hex: crate::live_source::app_key_bytes_hex(source::APP),
+    });
+
+    let snapshot = harness.read_request(requested).unwrap();
+    let mut event_request = request("apps");
+    event_request.app = Some(crate::live_source::AppKey {
+        kind: "executable".into(),
+        bytes_hex: crate::live_source::app_key_bytes_hex(source::EVENT_EXECUTABLE),
+    });
+    let exited = harness.read_request(event_request).unwrap();
+    let view = harness.view();
+    harness.teardown();
+    let detail = snapshot.detail.as_ref().unwrap();
+    output::record_semantics("run-tick-gap", &harness, &snapshot, &view);
+    output::record_semantics("run-tick-gap-exit", &harness, &exited, &view);
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert_eq!(snapshot.selection["selected"]["run_tick"], 2);
+    assert_eq!(detail["previous"]["publication"], "1");
+    assert_eq!(detail["elapsed_ns"], "1000000000");
+    assert_eq!(detail["app"]["cpu_ns"]["known"], "300000000");
+    assert_eq!(detail["app"]["cpu_percent_one_core"], 30.0);
+    assert_eq!(detail["app"]["members"], 3);
+    assert_eq!(detail["app"]["membership_complete"], false);
+    assert_eq!(snapshot.apps.as_ref().unwrap()["app_count"], 2);
+    assert_eq!(snapshot.apps.as_ref().unwrap()["process_count"], 4);
+    assert_eq!(detail["processes"][0]["pid"], 41001);
+    assert_eq!(detail["processes"][0]["cpu_ns"]["known"], "300000000");
+    assert_eq!(detail["processes"][0]["cpu_percent_one_core"], 30.0);
+    let stored = view.apps.last().unwrap();
+    assert_eq!(stored.apps.len(), 1);
+    let exited_detail = exited.detail.as_ref().unwrap();
+    assert_eq!(exited_detail["processes"][0]["pid"], 42001);
+    assert_eq!(exited_detail["processes"][0]["state"], "exited_verified");
+    assert_eq!(stored.observation.unwrap().run_tick, 2);
+    assert_eq!(stored.elapsed_ns, None);
+    assert!(!stored.consecutive);
+    let name = std::sync::Arc::clone(&stored.apps[0].name);
+    assert_eq!(name.bytes, source::APP);
+    let charted = stored.attribution(viewer::AppAttributionMetric::Cpu, &[name]);
+    let reading = charted.apps[0].unwrap();
+    assert_eq!(reading.rate, None);
+    let measure = reading.measure.unwrap();
+    assert_eq!(measure.known, 0);
+    assert_eq!(measure.measured_members, 0);
+    assert_eq!(measure.unavailable_members, 3);
 }
 
 #[test]

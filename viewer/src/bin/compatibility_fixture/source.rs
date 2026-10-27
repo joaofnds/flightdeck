@@ -30,7 +30,7 @@ pub struct Source {
     pub mapped_bytes: u64,
 }
 
-struct Programs {
+pub(super) struct Programs {
     process: ProgramReference,
     event: ProgramReference,
 }
@@ -191,7 +191,7 @@ pub(super) fn create_register(root: &Path, identity: &RunIdentity, ring: &str) -
     Ok(())
 }
 
-fn create_programs(writer: &mut Writer, output: &mut Option<Programs>) -> Result<()> {
+pub(super) fn create_programs(writer: &mut Writer, output: &mut Option<Programs>) -> Result<()> {
     assert!(output.is_none());
     let mut process = None;
     writer
@@ -222,14 +222,14 @@ fn create_programs(writer: &mut Writer, output: &mut Option<Programs>) -> Result
     Ok(())
 }
 
-fn create_publish(
+pub(super) fn create_publish(
     writer: &mut Writer,
     programs: Option<&Programs>,
     second_first: u64,
     tick: u64,
     customize: &mut impl FnMut(&mut Readings<'_>),
 ) -> Result<()> {
-    assert!(tick < 2);
+    assert!(tick < 6);
     let memory = Memory {
         total_bytes: 8_589_934_592,
         free_bytes: 4_294_967_296,

@@ -265,6 +265,45 @@ pub(super) fn record_refusal(
     );
 }
 
+pub(super) fn record_semantics(
+    case: &str,
+    harness: &Harness,
+    snapshot: &Snapshot,
+    view: &viewer::store::View,
+) {
+    let report = json!({"schemaVersion": 1, "case": case,
+        "selection": snapshot.selection, "apps": snapshot.apps, "detail": snapshot.detail,
+        "store_machine": format!("{:?}", view.seconds),
+        "store_apps": format!("{:?}", view.apps),
+        "input_root": harness.root, "input_owned": harness.input.is_some(),
+        "ring": harness.input.as_ref().map(|input| &input.ring),
+        "trace_complete": true, "trace_overflowed": false,
+        "events": harness.events().iter().map(event).collect::<Vec<_>>()});
+    println!("{report}");
+    emit(case, &report);
+}
+
+pub(super) fn record_sequence(harness: &Harness, observations: &Value) {
+    let report = json!({"schemaVersion": 1, "case": "refusal-successor",
+        "input_root": harness.root, "ring": harness.input.as_ref().map(|input| &input.ring),
+        "input": {"publications": 3, "slots": 4,
+            "run_ticks": [0, 1, 2], "power_nonfinite_publication": 2},
+        "observations": observations,
+        "trace_complete": true, "trace_overflowed": false,
+        "events": harness.events().iter().map(event).collect::<Vec<_>>()});
+    println!("{report}");
+    emit("refusal-successor", &report);
+}
+
+pub(super) fn record_sequence_case(case: &str, harness: &Harness, observations: &Value) {
+    let report = json!({"schemaVersion": 1, "case": case,
+        "input_root": harness.root, "ring": harness.input.as_ref().map(|input| &input.ring),
+        "observations": observations, "trace_complete": true, "trace_overflowed": false,
+        "events": harness.events().iter().map(event).collect::<Vec<_>>()});
+    println!("{report}");
+    emit(case, &report);
+}
+
 #[test]
 fn preserves_full_integer_precision_in_structured_source_work() {
     // Goal: an ordinary JSON consumer cannot silently round trace publication or byte counts.
