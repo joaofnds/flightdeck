@@ -165,6 +165,7 @@ impl Backend {
         };
 
         *output = Some(Self { worker, store });
+
         Ok(())
     }
 }

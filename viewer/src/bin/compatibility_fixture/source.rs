@@ -124,7 +124,9 @@ pub fn create_custom(
             &mut customize,
         )?;
     }
+
     writer.finish();
+
     create_output(writer, place, identity, second_first, layout, output)
 }
 
@@ -146,6 +148,7 @@ fn create_output(
     let ring = writer.name().to_owned();
     drop(reader);
     drop(writer);
+
     *output = Some(Source {
         identity,
         population: false,
@@ -155,6 +158,7 @@ fn create_output(
         second_first,
         mapped_bytes,
     });
+
     Ok(())
 }
 

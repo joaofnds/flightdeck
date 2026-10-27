@@ -506,6 +506,7 @@ impl Source {
                 persistence::work::ingestion::Kind::RingRead,
             );
         }
+
         Ok(found)
     }
 

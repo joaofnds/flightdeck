@@ -110,10 +110,12 @@ struct AdmissionFile(File);
 impl Read for AdmissionFile {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let count = self.0.read(bytes)?;
+
         crate::work::ingestion::record_content(
             crate::work::ingestion::Kind::AdmissionRead,
             collector::u64_from_usize(count),
         );
+
         Ok(count)
     }
 }

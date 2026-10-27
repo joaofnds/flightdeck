@@ -162,6 +162,7 @@ impl Source {
                 persistence::work::ingestion::Kind::RingRead,
             );
         }
+
         Ok(found)
     }
 }
@@ -1428,6 +1429,7 @@ impl LiveSession {
         if current.bytes > CACHE_BYTES_MAX {
             return Err(Error::Bound("live observation bytes"));
         }
+
         Ok(scalar_bytes)
     }
 

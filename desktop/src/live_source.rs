@@ -834,12 +834,15 @@ fn reader_snapshot_finished(command: &Command, published: bool) -> bool {
     if !published {
         return false;
     }
+
     if command.mode == SourceMode::Recorded {
         return true;
     }
+
     if command.request.route == "computer" {
         return false;
     }
+
     reader_snapshot_is_pinned(&command.request)
 }
 

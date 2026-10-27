@@ -152,6 +152,7 @@ impl Trace {
         }
 
         output.extend_from_slice(&state.events);
+
         Ok(())
     }
 
@@ -160,6 +161,7 @@ impl Trace {
         let state = self.shared.state.lock().unwrap_or_else(|_| {
             unreachable!("a trace lock is held only while copying bounded events")
         });
+
         2 * size_of::<usize>() + size_of::<Shared>() + state.events.capacity() * size_of::<Event>()
     }
 }
@@ -170,6 +172,7 @@ pub fn inherit(producer: Producer) -> Inherited {
     if let Some(context) = &mut context {
         Arc::make_mut(context).producer = producer;
     }
+
     Inherited(context)
 }
 
@@ -208,6 +211,7 @@ fn change(update: impl FnOnce(&mut Context)) -> Scope {
     if let Some(context) = &mut context {
         update(Arc::make_mut(context));
     }
+
     enter(context)
 }
 
@@ -231,6 +235,7 @@ pub fn record(key: Key, kind: Kind) {
 pub fn record_publication(run: RunIdentity, publication: u64, kind: Kind) {
     if is_active() {
         let key = Key::Publication { run, publication };
+
         record(key, kind);
     }
 }
