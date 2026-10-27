@@ -2,10 +2,244 @@ use persistence::engine::AdmittedTable;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::{Decoder, load_consume};
+use super::{Cursor, Decoder, LoadInput, load_consume};
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
 use crate::store::{AppsSecond, ByteBudget};
+
+#[test]
+fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
+    // Goal: each step releases one minute while the completed cursor keeps the exact raw tail.
+    // Method: advance three real sealed minutes separately and compare the terminal-only reader.
+    let fixture = catch_up_fixture();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    let input = LoadInput {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+        capture: &AdmittedTable::from_file_budgeted,
+    };
+    let mut cursor = Cursor::new(&found);
+    let mut accepted = Vec::new();
+
+    cursor
+        .step(&input, |_, second, _| accepted.push(second.publication))
+        .unwrap();
+    assert_eq!(accepted, [1]);
+    assert_eq!(budget.used(), 0);
+    cursor
+        .step(&input, |_, second, _| accepted.push(second.publication))
+        .unwrap();
+    assert_eq!(accepted, [1, 2, 3]);
+    assert_eq!(budget.used(), 0);
+    cursor
+        .step(&input, |_, second, _| accepted.push(second.publication))
+        .unwrap();
+    let outcome = cursor.finish(&operation).unwrap();
+    let expected = super::terminal(
+        &fixture.root,
+        &found[2],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(accepted, [1, 2, 3, 4]);
+    assert_eq!(outcome.left_out, None);
+    assert!(outcome.checked_catalog.is_none());
+    assert_eq!(outcome.decoded_catalog.windows, 3);
+    assert_eq!(outcome.decoded_catalog.first_known_second, Some(100));
+    assert_eq!(outcome.decoded_catalog.last_known_second, Some(220));
+    assert_eq!(outcome.decoded_catalog.unknown_clock_ticks, 0);
+    let actual = outcome.terminal.unwrap();
+    assert_eq!(actual.run, expected.run);
+    assert_eq!(actual.machine, expected.machine);
+    let (actual, actual_frame) = actual.process.unwrap().into_parts();
+    let (expected, expected_frame) = expected.process.unwrap().into_parts();
+    assert_eq!(actual.identity, expected.identity);
+    assert_eq!(actual.stamp, expected.stamp);
+    assert_eq!(actual.run_tick, expected.run_tick);
+    assert_eq!(actual.wall_ns, expected.wall_ns);
+    assert_eq!(actual.usage_refused, expected.usage_refused);
+    assert_eq!(actual.usage_gone, expected.usage_gone);
+    assert_eq!(actual.events_first, expected.events_first);
+    assert_eq!(actual.events_end, expected.events_end);
+    assert_eq!(actual_frame, expected_frame);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn cursor_steps_preserve_the_first_live_successor() {
+    // Goal: pausing at minute boundaries preserves the first live machine and process rates.
+    // Method: seed real ring readers with a stepped cursor and the independent terminal reader.
+    let mut fixture = catch_up_fixture();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    let input = LoadInput {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+        capture: &AdmittedTable::from_file_budgeted,
+    };
+    let mut cursor = Cursor::new(&found);
+    let expected = super::terminal(
+        &fixture.root,
+        &found[2],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap()
+    .unwrap();
+
+    cursor.step(&input, |_, _, _| {}).unwrap();
+    cursor.step(&input, |_, _, _| {}).unwrap();
+    cursor.step(&input, |_, _, _| {}).unwrap();
+    let actual = cursor.finish(&operation).unwrap().terminal.unwrap();
+    fixture.publish_with_system_rows(221);
+    let expected = terminal_successor(&fixture.root, expected);
+    let actual = terminal_successor(&fixture.root, actual);
+
+    assert!(expected.0.follows);
+    assert_eq!(expected.0.cpu_percent, Some(50.0));
+    assert_eq!(expected.1.elapsed_ns, Some(1_000_000_000));
+    assert_eq!(actual, expected);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn cursor_refuses_a_terminal_handoff_before_all_minutes_are_consumed() {
+    // Goal: a partial cursor cannot publish a terminal or catalog as a completed load.
+    // Method: consume the oldest real sealed minute and attempt to finish with two still pending.
+    let fixture = catch_up_fixture();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    let input = LoadInput {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+        capture: &AdmittedTable::from_file_budgeted,
+    };
+    let mut cursor = Cursor::new(&found);
+    cursor.step(&input, |_, _, _| {}).unwrap();
+
+    let result = cursor.finish(&operation);
+
+    assert!(matches!(
+        result,
+        Err(persistence::Error::Bound(
+            "sealed payload cursor unfinished"
+        ))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
+    // Goal: cancelling between minutes accepts no later rows and releases only unretained owners.
+    // Method: retain one real payload, cancel before the next step, then drop each owner.
+    let fixture = catch_up_fixture();
+    let cancellation = Arc::new(Cancellation::default());
+    let operation = Arc::clone(&cancellation).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    let input = LoadInput {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+        capture: &AdmittedTable::from_file_budgeted,
+    };
+    let mut cursor = Cursor::new(&found);
+    let mut retained = AppsSecond::with_room();
+    cursor
+        .step(&input, |_, _, apps| {
+            retained.take(apps, None, Some(&budget));
+        })
+        .unwrap();
+    let reader = Arc::new(retained);
+    let charge = crate::store::startup_tests::retained_app_charge(&reader);
+    let mut accepted = 0;
+    cancellation.cancel().unwrap();
+
+    let result = cursor.step(&input, |_, _, _| accepted += 1);
+    let finished = cursor.finish(&operation);
+
+    assert_eq!(accepted, 0);
+    assert!(matches!(result, Err(persistence::Error::Io(error))
+        if error.kind() == std::io::ErrorKind::Interrupted));
+    assert!(matches!(finished, Err(persistence::Error::Io(error))
+        if error.kind() == std::io::ErrorKind::Interrupted));
+    assert_eq!(budget.used(), charge);
+    assert_eq!(reader.observation.unwrap().stamp.publication, 1);
+    assert_eq!(reader.processes.as_ref().unwrap().len(), 2);
+    drop(reader);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
+    // Goal: a refused minute leaves a gap without discarding later valid minutes or the refusal.
+    // Method: damage the middle real marker, advance each minute, and inspect the recovered tail.
+    let fixture = catch_up_fixture();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    std::fs::write(&found[1].marker, b"invalid committed minute").unwrap();
+    let input = LoadInput {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+        capture: &AdmittedTable::from_file_budgeted,
+    };
+    let mut cursor = Cursor::new(&found);
+    let mut accepted = Vec::new();
+
+    cursor
+        .step(&input, |_, second, _| {
+            accepted.push((second.publication, second.follows));
+        })
+        .unwrap();
+    cursor
+        .step(&input, |_, second, _| {
+            accepted.push((second.publication, second.follows));
+        })
+        .unwrap();
+    assert_eq!(accepted, [(1, false)]);
+    cursor
+        .step(&input, |_, second, _| {
+            accepted.push((second.publication, second.follows));
+        })
+        .unwrap();
+    let outcome = cursor.finish(&operation).unwrap();
+
+    assert_eq!(accepted, [(1, false), (4, false)]);
+    assert_eq!(outcome.left_out, Some(crate::store::Failure::Refused));
+    assert_eq!(outcome.decoded_catalog.windows, 2);
+    let terminal = outcome.terminal.unwrap();
+    assert_eq!(terminal.machine.ticks.len(), 1);
+    assert_eq!(terminal.machine.ticks[0].publication, 4);
+    assert_eq!(
+        terminal.process.unwrap().into_parts().0.stamp.publication,
+        4
+    );
+    assert_eq!(budget.used(), 0);
+}
 
 #[test]
 fn saved_origin_carries_the_admitted_manifests_actual_losses() {

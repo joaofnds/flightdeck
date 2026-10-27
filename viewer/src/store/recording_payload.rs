@@ -46,24 +46,90 @@ pub(super) fn load(
     capture: &crate::recording::InputCapture<'_>,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<super::Outcome> {
-    let mut decoder = Decoder::default();
-    let mut left_out = None;
-    for found in minutes {
-        operation.check()?;
-        let completion = decoder.decode(root, found, budget, operation, capture);
-        if let Some(failure) = load_consume(completion, operation, &mut take)? {
-            left_out = Some(failure);
+    let input = LoadInput {
+        root,
+        budget,
+        operation,
+        capture,
+    };
+    let mut cursor = Cursor::new(minutes);
+    for _ in 0..minutes.len() {
+        cursor.step(&input, &mut take)?;
+    }
+
+    cursor.finish(operation)
+}
+
+struct Cursor<'a> {
+    minutes: &'a [Found],
+    next_minute_index: usize,
+    decoder: Decoder,
+    left_out: Option<Failure>,
+}
+
+struct LoadInput<'a> {
+    root: &'a Path,
+    budget: &'a Arc<ByteBudget>,
+    operation: &'a Operation,
+    capture: &'a crate::recording::InputCapture<'a>,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(minutes: &'a [Found]) -> Self {
+        assert!(minutes.len() <= super::MINUTES_MAX);
+
+        Self {
+            minutes,
+            next_minute_index: 0,
+            decoder: Decoder::default(),
+            left_out: None,
         }
     }
-    operation.check()?;
 
-    let decoded_catalog = mem::take(&mut decoder.decoded_catalog);
-    Ok(super::Outcome {
-        left_out,
-        terminal: decoder.terminal(),
-        checked_catalog: None,
-        decoded_catalog,
-    })
+    fn step(
+        &mut self,
+        input: &LoadInput<'_>,
+        take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    ) -> persistence::Result<()> {
+        input.operation.check()?;
+        let Some(found) = self.minutes.get(self.next_minute_index) else {
+            return Err(persistence::Error::Bound("sealed payload cursor exhausted"));
+        };
+
+        let completion = self.decoder.decode(
+            input.root,
+            found,
+            input.budget,
+            input.operation,
+            input.capture,
+        );
+        if let Some(failure) = load_consume(completion, input.operation, take)? {
+            self.left_out = Some(failure);
+        }
+        self.next_minute_index += 1;
+        assert!(self.next_minute_index <= self.minutes.len());
+
+        Ok(())
+    }
+
+    fn finish(mut self, operation: &Operation) -> persistence::Result<super::Outcome> {
+        operation.check()?;
+        if self.next_minute_index < self.minutes.len() {
+            return Err(persistence::Error::Bound(
+                "sealed payload cursor unfinished",
+            ));
+        }
+
+        assert_eq!(self.next_minute_index, self.minutes.len());
+        let decoded_catalog = mem::take(&mut self.decoder.decoded_catalog);
+
+        Ok(super::Outcome {
+            left_out: self.left_out,
+            terminal: self.decoder.terminal(),
+            checked_catalog: None,
+            decoded_catalog,
+        })
+    }
 }
 
 /// Owns the completion so displaced pool payloads swapped into it drop before the next decode.
