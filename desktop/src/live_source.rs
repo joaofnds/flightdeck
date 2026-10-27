@@ -127,6 +127,14 @@ pub enum Update {
 }
 
 struct Shared {
+    #[cfg(test)]
+    measurement_staged: AtomicBool,
+    #[cfg(test)]
+    measurement_taken: AtomicBool,
+    #[cfg(test)]
+    measurement_gate: Mutex<Option<measurement::Gate>>,
+    #[cfg(test)]
+    measurement_wake: Condvar,
     #[cfg(feature = "automation")]
     requests: AtomicU64,
     mailbox: Mutex<Mailbox>,
@@ -137,6 +145,8 @@ struct Shared {
 }
 
 struct Mailbox {
+    #[cfg(test)]
+    output_complete: bool,
     generation: u64,
     request: Option<Command>,
     output: Option<Update>,
@@ -337,6 +347,11 @@ impl Worker {
     pub fn take(&mut self) -> Result<Option<Update>, String> {
         let mut mailbox = self.mailbox()?;
         let output = mailbox.output.take();
+        #[cfg(test)]
+        self.shared.measurement_taken.store(
+            output.is_some() && mailbox.output_complete,
+            Ordering::Release,
+        );
         if output.is_none() {
             if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
                 return Err("Live reader has exited".to_owned());
@@ -431,9 +446,19 @@ impl Shared {
 
     fn with_rest(rest_kind: Rest) -> Self {
         Self {
+            #[cfg(test)]
+            measurement_staged: AtomicBool::new(false),
+            #[cfg(test)]
+            measurement_taken: AtomicBool::new(false),
+            #[cfg(test)]
+            measurement_gate: Mutex::new(None),
+            #[cfg(test)]
+            measurement_wake: Condvar::new(),
             #[cfg(feature = "automation")]
             requests: AtomicU64::new(0),
             mailbox: Mutex::new(Mailbox {
+                #[cfg(test)]
+                output_complete: false,
                 generation: 0,
                 request: None,
                 output: None,
@@ -565,7 +590,18 @@ fn worker_step(
     command: &mut Option<Command>,
 ) -> Duration {
     if let Some(command) = command {
+        #[cfg(test)]
+        if reader_pending(reader, command.generation) {
+            measurement::checkpoint(shared, command.generation, measurement::Stage::Pending);
+        }
         if let Some(output) = reader_read(reader, root, command, shared) {
+            #[cfg(test)]
+            shared.measurement_staged.store(
+                reader_published(reader, command.generation),
+                Ordering::Release,
+            );
+            #[cfg(test)]
+            measurement::finished(shared, command.generation);
             worker_publish(shared, command.generation, output);
         }
         worker_pause(reader, command)
@@ -632,6 +668,10 @@ fn worker_publish(shared: &Shared, generation: u64, output: Update) {
         Ok(mut mailbox) => {
             // Publishing and accepting requests use one lock, so supersession is atomic.
             if generation == mailbox.generation {
+                #[cfg(test)]
+                {
+                    mailbox.output_complete = shared.measurement_staged.load(Ordering::Acquire);
+                }
                 mailbox.output = Some(output);
             }
         }
@@ -854,6 +894,8 @@ fn reader_snapshot_session<'session>(
     session
         .begin(command.epoch)
         .map_err(|error| error.to_string())?;
+    #[cfg(test)]
+    measurement::checkpoint(shared, command.generation, measurement::Stage::Reading);
     let poll = match command.request.route.as_str() {
         "self" => true,
         _ => match command.mode {
@@ -865,7 +907,11 @@ fn reader_snapshot_session<'session>(
         },
     };
     if poll {
-        session.poll().map_err(|error| error.to_string())?;
+        session.poll().map_err(|error| {
+            #[cfg(test)]
+            measurement::interrupted(shared, command.generation, &error);
+            error.to_string()
+        })?;
     }
 
     Ok(session)
@@ -1672,6 +1718,10 @@ fn request_validate(request: &Request) -> Result<(), String> {
 #[cfg(test)]
 #[path = "live_app_key_tests.rs"]
 pub(crate) mod app_key_tests;
+
+#[cfg(test)]
+#[path = "live_source_measurement.rs"]
+pub(crate) mod measurement;
 
 #[cfg(test)]
 #[path = "live_source_tests.rs"]

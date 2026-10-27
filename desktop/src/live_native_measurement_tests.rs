@@ -34,6 +34,43 @@ fn measures_the_ranking_step_after_histories_are_read_early() {
 }
 
 #[test]
+fn requires_a_started_read_to_observe_interruption_before_replacement() {
+    // Goal: cancellation coverage requires a real entered operation and a completed replacement.
+    // Method: hold the Worker after its epoch begins, supersede it, and observe Interrupted.
+    let recording = SealedRecording::with_kept_parts();
+    let mut reader = SnapshotReader::new();
+    let (snapshot, _) = read_complete(&mut reader, &recording.root);
+    let expected = json!({"selected": snapshot.selection["selected"],
+        "observations": snapshot.selection["trends"],
+        "payloads": {"overview": payloads::report(&snapshot).unwrap()}});
+
+    crate::live_probe::matched_tests::checks_interrupted_read(&recording.root, &expected);
+}
+
+#[test]
+fn requires_thread_exit_before_teardown_success() {
+    // Goal: a stopped request cannot substitute for observed Worker thread termination.
+    // Method: retain a real read at its checkpoint, reject teardown, then release and join it.
+    let recording = SealedRecording::with_kept_parts();
+
+    crate::live_probe::matched_tests::checks_held_teardown(&recording.root);
+}
+
+#[test]
+fn withholds_mailbox_completion_until_pending_ranks_finish() {
+    // Goal: matching early payloads cannot complete a generation with ranking work held.
+    // Method: gate the actual Worker before pending ranks and exercise the harness predicate.
+    let recording = SealedRecording::with_kept_parts();
+    let mut reader = SnapshotReader::new();
+    let (snapshot, _) = read_complete(&mut reader, &recording.root);
+    let expected = json!({"selected": snapshot.selection["selected"],
+        "observations": snapshot.selection["trends"],
+        "payloads": {"overview": payloads::report(&snapshot).unwrap()}});
+
+    crate::live_probe::matched_tests::checks_pending_completion(&recording.root, &expected);
+}
+
+#[test]
 fn waits_for_expected_completed_payloads_through_the_real_mailbox() {
     // Goal: the gated mailbox caller includes deferred rankings before reporting success.
     // Method: use the existing early-history fixture and an exact completed reader expectation.

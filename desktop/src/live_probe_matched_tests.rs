@@ -10,6 +10,13 @@ use crate::live_source::{Snapshot, Update, Worker};
 
 const COMMANDS_MAX: u32 = 1024;
 
+struct CommandReport<'a> {
+    name: &'a str,
+    route: &'a str,
+    index: usize,
+    expected: &'a Value,
+}
+
 pub(crate) fn read_recorded(root: &std::path::Path, step: &Value) -> Box<Snapshot> {
     let mut probe = Probe {
         worker: Worker::start_recorded(root.to_owned()).unwrap(),
@@ -17,7 +24,10 @@ pub(crate) fn read_recorded(root: &std::path::Path, step: &Value) -> Box<Snapsho
         snapshots: 0,
     };
     let generation = probe.worker.request(probe_request("overview")).unwrap();
-    wait(&mut probe, generation, "overview", step)
+    let snapshot = wait(&mut probe, generation, "overview", step);
+    let mut thread = probe.worker.retire();
+    join_observed(&mut thread, Instant::now() + Duration::from_secs(10)).unwrap();
+    snapshot
 }
 
 #[test]
@@ -39,9 +49,15 @@ fn follows_matched_replay_through_the_real_worker_mailbox() {
 
     commands(&mut probe, &route, &expected);
 
-    probe.worker.stop();
-    drop(probe);
-    println!("{}", json!({"event": "worker_dropped", "success": true}));
+    let mut thread = probe.worker.retire();
+    let result = join_observed(&mut thread, Instant::now() + Duration::from_secs(10));
+    println!(
+        "{}",
+        json!({"event": "worker_dropped", "success": result.is_ok(),
+        "termination": if result.is_ok() {"joined"} else {"unconfirmed"},
+        "error": result.as_ref().err()})
+    );
+    result.unwrap();
     std::thread::sleep(Duration::from_secs(5));
     println!("{}", json!({"event": "settled"}));
 }
@@ -64,13 +80,13 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
         assert!(step.is_object());
         let mut request = probe_request(route);
         match words[0] {
-            "follow" | "resume" => {}
+            "follow" | "resume" | "cancel" => {}
             "pin" | "hover" => {
                 request.second =
                     Some(step["selected"]["wall_ns"].as_u64().unwrap() / 1_000_000_000);
                 request.identity = Some(step["selected"].clone());
             }
-            "supersede" | "cancel" => {
+            "supersede" => {
                 for route in ["apps", "cpu", "overview"] {
                     let generation = probe.worker.request(probe_request(route)).unwrap();
                     assert!(generation > 0);
@@ -85,23 +101,57 @@ fn commands(probe: &mut Probe, route: &str, expected: &Value) {
             request.load_process_history = false;
             probe.worker.inspect(request).unwrap()
         } else {
-            probe.worker.request(request).unwrap()
+            if words[0] == "cancel" {
+                cancel_running(&mut probe.worker, request)
+            } else {
+                probe.worker.request(request).unwrap()
+            }
         };
         let snapshot = wait(probe, generation, route, step);
         if words[0] != "hover" {
             context = snapshot.selection["trends"].clone();
         }
-        println!(
-            "{}",
-            json!({"event": "complete", "step": index,
-            "command": words[0], "generation": generation,
-            "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
-            "context_values": snapshot.selection["trends"],
-            "kept_context_values": context,
-            "payloads": payloads::validate(&snapshot, route, step).unwrap()})
+        emit_complete(
+            &snapshot,
+            &context,
+            &CommandReport {
+                name: words[0],
+                route,
+                index,
+                expected: step,
+            },
         );
     }
     panic!("matched command count bound reached");
+}
+
+fn emit_complete(snapshot: &Snapshot, context: &Value, report: &CommandReport<'_>) {
+    println!(
+        "{}",
+        json!({"event": "complete", "step": report.index,
+        "command": report.name, "generation": snapshot.generation,
+        "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
+        "context_values": snapshot.selection["trends"], "kept_context_values": context,
+        "payloads": payloads::validate(snapshot, report.route, report.expected).unwrap()})
+    );
+}
+
+fn cancel_running(worker: &mut Worker, request: crate::live_source::Request) -> u64 {
+    let hold = worker.hold_measurement_stage(crate::live_source::measurement::Stage::Reading);
+    let predecessor = worker.request(request.clone()).unwrap();
+    assert_eq!(hold.entered(), predecessor);
+    let replacement = worker.request(request).unwrap();
+    hold.release();
+    assert!(
+        hold.observed_interruption(),
+        "predecessor did not observe interruption"
+    );
+    println!(
+        "{}",
+        json!({"event": "interrupted", "generation": predecessor,
+        "replacement_generation": replacement})
+    );
+    replacement
 }
 
 fn wait(probe: &mut Probe, generation: u64, route: &str, step: &Value) -> Box<Snapshot> {
@@ -110,14 +160,10 @@ fn wait(probe: &mut Probe, generation: u64, route: &str, step: &Value) -> Box<Sn
         assert!(Instant::now() < probe.deadline, "{last_mismatch}");
         match probe.worker.take().unwrap() {
             Some(Update::Ready(snapshot)) => {
-                if snapshot.generation < generation {
-                    continue;
-                }
                 assert_eq!(snapshot.generation, generation);
                 probe.snapshots += 1;
-                match payloads::validate(&snapshot, route, step) {
-                    Ok(_) if !snapshot.histories_pending => return snapshot,
-                    Ok(_) => last_mismatch = "histories still pending".into(),
+                match completed(&probe.worker, &snapshot, route, step) {
+                    Ok(()) => return snapshot,
                     Err(error) => last_mismatch = error,
                 }
             }
@@ -126,4 +172,96 @@ fn wait(probe: &mut Probe, generation: u64, route: &str, step: &Value) -> Box<Sn
         }
     }
     panic!("matched completion bound reached: {last_mismatch}");
+}
+
+fn completed(
+    worker: &Worker,
+    snapshot: &Snapshot,
+    route: &str,
+    step: &Value,
+) -> Result<(), String> {
+    if !worker.last_output_complete() {
+        return Err("reader generation remains pending".into());
+    }
+
+    payloads::validate(snapshot, route, step)?;
+    if snapshot.histories_pending {
+        return Err("histories still pending".into());
+    }
+
+    Ok(())
+}
+
+pub(crate) fn checks_pending_completion(root: &std::path::Path, step: &Value) {
+    let mut probe = Probe {
+        worker: Worker::start_recorded(root.to_owned()).unwrap(),
+        deadline: Instant::now() + Duration::from_secs(10),
+        snapshots: 0,
+    };
+    let hold = probe
+        .worker
+        .hold_measurement_stage(crate::live_source::measurement::Stage::Pending);
+    let generation = probe.worker.request(probe_request("overview")).unwrap();
+    assert_eq!(hold.entered(), generation);
+    let Some(Update::Ready(snapshot)) = probe.worker.take().unwrap() else {
+        panic!("missing early snapshot");
+    };
+    payloads::validate(&snapshot, "overview", step).unwrap();
+    assert!(!snapshot.histories_pending);
+    assert!(!probe.worker.last_output_complete());
+    assert!(completed(&probe.worker, &snapshot, "overview", step).is_err());
+    hold.release();
+    drop(hold);
+    let snapshot = wait(&mut probe, generation, "overview", step);
+    assert!(probe.worker.last_output_complete());
+    assert!(!snapshot.histories_pending);
+}
+
+pub(crate) fn checks_interrupted_read(root: &std::path::Path, step: &Value) {
+    let mut probe = Probe {
+        worker: Worker::start(root.to_owned()).unwrap(),
+        deadline: Instant::now() + Duration::from_secs(10),
+        snapshots: 0,
+    };
+    let generation = cancel_running(&mut probe.worker, probe_request("overview"));
+    let snapshot = wait(&mut probe, generation, "overview", step);
+    assert_eq!(snapshot.generation, generation);
+    assert!(probe.worker.last_output_complete());
+    let mut thread = probe.worker.retire();
+    join_observed(&mut thread, Instant::now() + Duration::from_secs(10)).unwrap();
+}
+
+pub(crate) fn checks_held_teardown(root: &std::path::Path) {
+    let mut worker = Worker::start(root.to_owned()).unwrap();
+    let hold = worker.hold_measurement_stage(crate::live_source::measurement::Stage::Reading);
+    let generation = worker.request(probe_request("overview")).unwrap();
+    assert_eq!(hold.entered(), generation);
+    let mut thread = worker.retire();
+
+    assert!(join_observed(&mut thread, Instant::now()).is_err());
+    assert!(!thread.as_ref().unwrap().is_finished());
+    hold.release();
+    join_observed(&mut thread, Instant::now() + Duration::from_secs(10)).unwrap();
+    assert!(thread.is_none());
+}
+
+fn join_observed(
+    slot: &mut Option<std::thread::JoinHandle<()>>,
+    deadline: Instant,
+) -> Result<(), String> {
+    for _attempt in 0..WAIT_STEPS_MAX {
+        if slot.as_ref().ok_or("missing retired worker")?.is_finished() {
+            return slot
+                .take()
+                .unwrap()
+                .join()
+                .map_err(|_| "worker thread panicked".into());
+        }
+
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("worker termination deadline elapsed")?;
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+    Err("worker termination attempt bound".into())
 }
