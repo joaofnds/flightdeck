@@ -42,6 +42,52 @@ mod tests {
     );
 
     #[test]
+    fn retains_unsealed_loss_after_a_producer_dies_during_overwrite() {
+        // Goal: loss without a readable successor never gets a durability receipt.
+        // Method: recover a frozen interrupted overwrite twice, then seal a healthy run.
+        let mut recording = RecordingHarness::start();
+        recording.leave_a_faulty_old_source(SourceFault::InterruptedOverwrite);
+
+        recording.restart_worker();
+        recording.wait_for_worker_exit();
+        recording.assert_old_source_unretired();
+        recording.restart_worker();
+        recording.wait_for_worker_exit();
+        recording.assert_old_source_unretired();
+        recording.restart_collection_with_new_window();
+        recording.restart_worker();
+        recording.wait_for_new_window();
+
+        recording.assert_old_source_unretired();
+        assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
+        assert!(recording.new_window_prior_loss_unknown());
+    }
+
+    #[test]
+    fn refuses_a_malformed_publication_without_sealing_or_retiring_it() {
+        // Goal: a stable malformed payload remains an error rather than missed readings.
+        // Method: forge a committed over-capacity row count and run the actual persister.
+        let mut recording = RecordingHarness::start();
+        recording.leave_a_faulty_old_source(SourceFault::MalformedPublication);
+
+        recording.restart_worker();
+
+        recording.wait_for_malformed_source_refusal();
+    }
+
+    #[test]
+    fn refuses_a_malformed_staged_publication_without_sealing_or_retiring_it() {
+        // Goal: staging cannot turn a decoder error into loss or commit a partial minute.
+        // Method: select a valid reading, then decode a malformed second reading in it.
+        let mut recording = RecordingHarness::start();
+        recording.leave_a_faulty_old_source(SourceFault::MalformedStagedPublication);
+
+        recording.restart_worker();
+
+        recording.wait_for_malformed_source_refusal();
+    }
+
+    #[test]
     fn drains_a_tail_when_its_pid_is_now_owned_by_another_user() {
         // Goal: refused usage alone stays unknown, but a different real UID proves reuse.
         // Method: register root launchd's PID for our old tail and recover through the worker.

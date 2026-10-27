@@ -44,6 +44,9 @@ pub enum SourceFault {
     Corrupt,
     Permission,
     Foreign,
+    InterruptedOverwrite,
+    MalformedPublication,
+    MalformedStagedPublication,
 }
 
 impl RecordingHarness {
@@ -92,6 +95,9 @@ impl RecordingHarness {
     pub fn leave_a_faulty_old_source(&mut self, fault: SourceFault) {
         let spawns = spawns();
         self.publish(0, 1_000, 7, false);
+        if matches!(fault, SourceFault::MalformedStagedPublication) {
+            self.publish(1, 1_001, 8, false);
+        }
         drop(self.writer.take());
         let source = open_source(&self.old_source);
         let name = format!("{}.99", self.old_source.rsplit_once('.').unwrap().0);
@@ -102,6 +108,27 @@ impl RecordingHarness {
         forge_source(&source, &name, &layout, |_, words| match fault {
             SourceFault::Unsupported => words[1] = 999,
             SourceFault::Corrupt => words[0] = 0,
+            SourceFault::InterruptedOverwrite => {
+                assert_eq!(words[1], 3);
+                // The header finished publication 2, but publication 3 began its only slot.
+                words[4] = 2;
+                words[8] = 1;
+                words[32] = 5;
+            }
+            SourceFault::MalformedPublication => {
+                // The committed v3 slot claims two processes where its shape holds one.
+                assert_eq!(words[1], 3);
+                words[32 + 9] = 2;
+            }
+            SourceFault::MalformedStagedPublication => {
+                // This fixture's v3 slot has fixed, CPU, interface, core, state, fan,
+                // process and coalition words. Only the second publication is malformed.
+                const SLOT_WORDS: usize = 42 + 2 + 10 + 1 + 2 + 1 + 18 + 10;
+                assert_eq!(words[1], 3);
+                assert_eq!(words[32], 2);
+                assert_eq!(words[32 + SLOT_WORDS], 4);
+                words[32 + SLOT_WORDS + 9] = 2;
+            }
             SourceFault::Permission | SourceFault::Foreign => {}
         });
         collector::ring::unlink_generation(&self.old_source).unwrap();
@@ -112,6 +139,15 @@ impl RecordingHarness {
         if matches!(fault, SourceFault::Foreign) {
             registry.runs[0].identity.recording = collector::ring::Identity([99, 1]);
         }
+        if matches!(fault, SourceFault::InterruptedOverwrite) {
+            registry.runs[0].collector_pid = 0;
+        }
+        if matches!(
+            fault,
+            SourceFault::MalformedPublication | SourceFault::MalformedStagedPublication
+        ) {
+            registry.runs[0].collector_pid = 0;
+        }
         registry.write(&self.root).unwrap();
         fs::write(&self.place.lock_path, &self.old_source).unwrap();
         drop(spawns);
@@ -119,6 +155,18 @@ impl RecordingHarness {
 
     pub fn assert_old_source_retained(&self) {
         drop(open_source(&self.old_source));
+    }
+
+    pub fn assert_old_source_unretired(&self) {
+        let registry = Registry::read(&self.root).unwrap();
+        let old = registry
+            .runs
+            .iter()
+            .find(|run| run.ring_name == self.old_source)
+            .unwrap();
+
+        assert!(!Registry::completed(&self.root, &old.identity, &old.ring_name).unwrap());
+        self.assert_old_source_retained();
     }
 
     pub fn new_window_prior_loss_unknown(&self) -> bool {
@@ -321,6 +369,15 @@ impl RecordingHarness {
         let status = wait_status(self.worker.as_mut().unwrap());
         assert!(status.success());
         self.worker = None;
+    }
+
+    pub fn wait_for_malformed_source_refusal(&mut self) {
+        let status = wait_status(self.worker.as_mut().unwrap());
+        self.worker = None;
+
+        assert_eq!(status.code(), Some(1));
+        assert!(!self.marker(&self.old_run, 0).exists());
+        self.assert_old_source_unretired();
     }
 
     pub fn wait_for_old_full_window(&self) {

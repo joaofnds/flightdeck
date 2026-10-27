@@ -18,6 +18,9 @@ use crate::{
 
 const WINDOW_NS: u64 = 60_000_000_000;
 
+mod scanning;
+mod staging;
+
 pub enum Outcome {
     Complete,
     Owned,
@@ -324,6 +327,7 @@ fn persist_one(
         }
         Staged::Waiting => Ok(Progress::Waiting),
         Staged::Complete => Ok(Progress::Complete),
+        Staged::Unavailable => Ok(Progress::Unavailable),
     }
 }
 
@@ -331,58 +335,81 @@ enum Staged {
     Window(Window),
     Waiting,
     Complete,
+    Unavailable,
 }
 
 // Owning the mapping here guarantees its release before the caller enters the engine.
 fn persist_one_stage(
-    mut reader: RingReader,
+    reader: RingReader,
     store: &Store,
     registered: &RegisteredRun,
     closed: bool,
     state: &mut RunState,
 ) -> Result<Staged> {
-    let limits = Limits::from_shape(&reader.shape())?;
-    let mut tick = crate::tick_buffer(&reader.shape())?;
-    let closed = persist_one_closed(&mut reader, &mut tick, registered.collector_pid, closed)?;
-    for _step in 0..reader.shape().slot_count + 2 {
-        match reader.read_into(&mut tick)? {
-            Found::Nothing => {
-                let complete = closed || reader.completed();
-                if complete {
-                    state.source = SourceState::Complete;
-                }
-                return Ok(if complete {
-                    Staged::Complete
-                } else {
-                    Staged::Waiting
-                });
-            }
-            Found::Missed { first, end } => {
-                state.losses.publications += end - first;
-                state.next_publication = reader.next_publication();
-            }
-            Found::Publication { publication, .. } => {
-                let identity = WindowIdentity {
-                    run: registered.identity,
-                    window: window_number(&reader, &tick)?,
-                };
-                if let Some(manifest) = store.existing(&identity)? {
-                    reader.seek_publication(manifest.publication_end)?;
-                    state.next_publication = manifest.publication_end;
-                    continue;
-                }
-                if !window_ready(&mut reader, &mut tick, &identity, closed)? {
-                    state.next_publication = publication;
-                    return Ok(Staged::Waiting);
-                }
-                reader.seek_publication(publication)?;
-                let window =
-                    stage_window(&mut reader, &mut tick, identity, limits, &mut state.losses)?;
-                return Ok(Staged::Window(window));
-            }
+    let mut scan = scanning::Scanning::new(reader, registered, closed)?;
+
+    for _step in 0..scan.steps() {
+        if let Some(result) = scan.read(store, registered, state)? {
+            return Ok(result);
         }
     }
-    Err(crate::Error::Bound("ring recovery scan"))
+
+    unreachable!("recovery scan exceeded its step bound")
+}
+
+fn persist_one_stage_end(
+    reader: &RingReader,
+    registered: &RegisteredRun,
+    closed: bool,
+    state: &mut RunState,
+) -> Result<Staged> {
+    let complete = closed || reader.completed();
+    if !complete {
+        return Ok(Staged::Waiting);
+    }
+
+    // Completion can follow a final publication after the read that returned Nothing.
+    // Observe its publication header after the completion acquire before retiring it.
+    if reader.next_publication() <= reader.publication_newest()? {
+        return Ok(Staged::Waiting);
+    }
+
+    let known_loss = state.losses.publications > 0 || state.losses.events > 0;
+    if known_loss {
+        source_unavailable(
+            registered,
+            state,
+            "unsealed loss without surviving readings",
+        );
+        return Ok(Staged::Unavailable);
+    }
+
+    state.source = SourceState::Complete;
+
+    Ok(Staged::Complete)
+}
+
+fn persist_one_stage_selected(
+    reader: &mut RingReader,
+    tick: &mut Tick,
+    identity: WindowIdentity,
+    limits: Limits,
+    state: &mut RunState,
+) -> Result<Option<Window>> {
+    let first = reader.next_publication();
+    let window = stage_window(reader, tick, identity, limits, &mut state.losses)?;
+    if window.tick_count() > 0 {
+        return Ok(Some(window));
+    }
+
+    let next = reader.next_publication();
+    if next <= first {
+        return Err(crate::Error::Bound("lost selection without progress"));
+    }
+
+    state.next_publication = next;
+
+    Ok(None)
 }
 
 fn persist_one_open(
@@ -442,56 +469,15 @@ fn stage_window(
     limits: Limits,
     losses: &mut Losses,
 ) -> Result<Window> {
-    let mut window = Window::new(identity, limits);
-    let captured = reader.dictionary_capacity().is_some();
-    let mut identities = Vec::with_capacity(if captured { limits.processes } else { 0 });
+    let mut staged = staging::Staging::new(reader, identity, limits);
 
     for _step in 0..=reader.shape().slot_count {
-        let found = if captured {
-            reader.read_identity_into(tick, &mut identities)?
-        } else {
-            reader.read_into(tick)?
-        };
-        match found {
-            Found::Nothing => break,
-            Found::Missed { first, end } => losses.publications += end - first,
-            Found::Publication { publication, .. } => {
-                if window_number(reader, tick)? != identity.window {
-                    break;
-                }
-
-                let mut events = ReadEvents {
-                    records: Vec::new(),
-                    identities: Vec::new(),
-                };
-                read_events(reader, tick, losses, &mut events)?;
-                let numbered = stage_window_numbered(&events);
-                let observation = Observation {
-                    publication,
-                    wall_ns: tick.times.map(|times| times.wall_ns),
-                    continuous_ns: tick.times.map(|times| times.continuous_ns),
-                    awake_ns: tick.times.map(|times| times.awake_ns),
-                };
-
-                if captured {
-                    window.push_tick_with_identity(
-                        &observation,
-                        tick,
-                        &numbered,
-                        &crate::IdentitySource {
-                            reader,
-                            processes: &identities,
-                            events: &events.identities,
-                        },
-                    )?;
-                } else {
-                    window.push_tick(&observation, tick, &numbered)?;
-                }
-            }
+        if !staged.read(reader, tick, losses)? {
+            break;
         }
     }
 
-    Ok(window)
+    Ok(staged.finish(losses))
 }
 
 struct ReadEvents {
@@ -731,6 +717,8 @@ fn persist_one_latest_awake_ns(reader: &mut RingReader, tick: &mut Tick) -> Resu
 mod tests {
     use super::*;
     use collector::ring::{Identity, Shape};
+
+    mod staging_tests;
 
     struct Directory(std::path::PathBuf);
 
