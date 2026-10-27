@@ -39,16 +39,17 @@ described at the end.
   achieve the same performance, and if it wouldn't be too much of a burden to
   maintain", 2026-10-13).
 
-Every cost here comes from release builds made before 1a4b016, which turned on overflow
-checks and abort on a panic. Measure that change on its own before comparing a new run
-with these rows.
+The original 2026-10-12/13 costs come from release builds made before 1a4b016, which turned
+on overflow checks and abort on a panic. Later measurements are dated separately.
+These historical results are not current-build performance guarantees; compare identical
+workloads and record the build and environment for each new measurement.
 
 Without root and once a second, the collector in Rust measured 2.29% and 1.75% of a core
 and 37.5 and 21.7 mW over two five-minute runs of this Mac's use. Seven of their ten
 minutes cost 1.2 to 2.2%, and the three that held a burst of forks cost 3.1 to 3.2%,
-all inside the budget. It does not yet read the GPU, open files, disk, per-process
-network, battery or most of the SMC, and adding the ones measured apart puts it at about
-2.7% and 2.2%, against the 2.0 to 2.2% estimated. IOReport costs the most of the rows
+all inside the budget. That build did not yet read the GPU's I/O Registry statistics,
+open files, disk, per-process network, battery or most of the SMC. Adding the ones measured
+apart put it at about 2.7% and 2.2%, against the 2.0 to 2.2% estimated. IOReport costs the most of the rows
 read every second, then the sweep of every process and the coalitions, and process
 tracking cost more than those three together in the busier run. Over 10-second windows
 the collector stayed at 1.0 to 2.6% while processes forked up to 161 times a second, as
@@ -198,6 +199,11 @@ call that resets it, `proc_reset_footprint_interval`, is exported by the system
 library but has no header in the SDK, so a peak per second rests on a private call.
 
 ### What is read, and how often
+
+This table records the original research build and its measurements. In particular,
+“not read yet” is historical: later builds added disk, battery and system readings.
+The [collector guide](collector.md#one-tick) describes current acquisition, including
+the decision to leave new process GPU attribution unavailable.
 
 | Every | What | Cost per read, measured apart | In the collector, ms of CPU a second |
 |---|---|---|---|
@@ -499,16 +505,19 @@ exceeding the source bound reports that the lost extent is unknown. An unreadabl
 source also leaves an explicit unknown extent while healthy collection continues.
 If registration fails, bounded anonymous-ring cleanup retains the current ring and its
 actual predecessor; those sources have no recording identity and recovery is unavailable.
-Each active ring holds two sealing windows, 120 ticks. Each slot
-holds full records with room for every process and coalition the collector's limits
-allow, about 500 MB of address space for the slots together, of which only the pages
-written take memory. The
-event log beside the slots holds 120 ticks of events at the tracker's bound, about
-300 MB, and the writer fills it in a circle, so once it wraps all of it is in memory: at
-the 43 to 418 events a second that runs on 2026-10-15 measured, that takes from about
-12.7 hours down to about 1.3. The object is
-796 MB, and after a restart two of them exist, both staying in memory or swap after the
-collector exits. A kernel panic or a power loss loses the open window, as decided.
+Each active ring holds 120 published ticks, normally two sealing windows. Each slot has
+room for the processes and coalitions allowed by its startup capacities. The current
+identity-event log reserves `120 × 16,384 × 24 × 8 = 377,487,360` bytes, or 360 MiB.
+The full native ring measured on 2026-10-26 reserved 1,025,585,336 bytes, about 978 MiB
+of virtual address space; other capacity and format combinations have other sizes.
+
+The writer advances through the whole event region. At the historical 43 to 418 events
+a second measured on 2026-10-15, one traversal would take about 12.7 to 1.3 hours.
+That arithmetic describes pages eventually touched, not simultaneous residency: backing
+can remain resident, become compressed or be swapped. Event-storage reuse within the
+retained tick horizon is planned with the ring redesign, not implemented. The registry
+can retain two rings after a restart. A kernel panic or power loss can lose unsealed
+readings, as decided.
 
 ## What aerospace, automotive and robotics systems do
 
@@ -745,7 +754,7 @@ and keeps them for as long as the lock file names a ring, so the collector print
 name to its log, and a process that once read the lock file knows the names of every later
 ring. A lock file lost or rewritten by another program, or a deleted directory, makes the
 next writer draw new bits, and the rings named under the old ones stay until the Mac
-restarts, about 800 MB of address space each at the default shape, since nothing knows
+restarts, retaining their shape-dependent backing, since nothing knows
 their names any more. The directory is outside both paths dirhelper's binary names. Its
 launch daemon runs it daily at 03:35 with `CLEAN_FILES_OLDER_THAN_DAYS` set to 3, as
 `/System/Library/LaunchDaemons/com.apple.bsd.dirhelper.plist` shows, and the only absolute
@@ -759,9 +768,11 @@ two readings, and no run has watched it.
 1. A Rust collector runs as the user's launch agent, registered with `SMAppService`, so
    recording goes on while the app is closed. It runs one clock that ticks each second,
    with groups at 10 and 60 seconds, on absolute deadlines at the default quality of
-   service, and records its own slips. It reads coalitions for per-app totals and
+   service, and records its own slips. It reads coalition totals independently of Apps and
    watches every process with kqueue, rescanning the pid list after every wake that
-   carries a fork, or at most once per interval as an option, and reading each exiting process's final usage, into an event queue that counts what it drops. Everything carries one tick number.
+   carries a fork, or at most once per interval as an option. Event admission precedes
+   optional payload acquisition, including final exit usage, and rejected events retain
+   lifecycle bookkeeping and explicit loss counts. Everything carries one tick number.
 2. It writes each tick into a shared-memory ring that only the user can read, holding
    two sealing windows. The writer never waits for a reader and wakes readers once a
    tick. The ring is written here, as Moving the data says, with process events in a
@@ -784,6 +795,20 @@ readings, with unknown observation timestamps and an all-zero unknown boot ident
 Choose UTF-8 recording roots without `*`, `?` or `[`. Creation accepts other paths, but
 the query API and checker refuse them so an engine file pattern cannot expand a private
 path into another recording.
+
+Current waiting passes use sequence-protected publication timing to decide whether a
+window can seal, and defer full Tick allocation and payload decoding until then. They
+still admit and map each source on each pass, validate the producer, and read registry
+and saved-progress metadata. Mappings are released before encoding. This removes
+premature payload work, not every waiting allocation or native call. The whole-process
+memory watchdog continues checking between operations; its threshold can be overshot.
+
+Both executables isolate stdout/stderr delivery behind a bounded diagnostic queue and
+a dedicated writer. Full queues, contention or failed destinations lose diagnostic groups
+with accounting instead of stopping recording. Normal exit bounds the final diagnostic
+drain; fatal watchdog exits do not wait for delivery. The [collector guide](collector.md)
+describes the current contracts and the distinction between measured work reductions and
+unverified whole-system CPU, memory or energy gains.
 
 ## Crates from outside the workspace
 
@@ -931,7 +956,8 @@ window failed that same check (31,081,048 to 99,369,608 bytes). A separate child
 watchdog observed 21,971,520 current/peak bytes against a 9,355,840-byte limit and
 terminated the child with status 74 before a successful encode. The observer polls
 `proc_pid_rusage` V6 every 100 ms, checks current physical footprint and kernel lifetime
-peak, and reports failure before process exit. This is an observed termination threshold
+peak, and now attempts a bounded diagnostic submission before immediate process exit;
+delivery is not guaranteed. This is an observed termination threshold
 with possible overshoot, not an OS allocation quota. The parent integrates refusal,
 reaping and continued collection separately. Another guard test reached real Parquet
 writes in a pending directory, exited with status 74, and left no canonical commit.
@@ -1018,8 +1044,10 @@ per-process records are kept under `target/polars_migration/` on this Mac
    interval. A benchmark that runs on CI decides it by weighing the CPU each costs
    against the processes each misses ("I think we should benchmark this and weigh the
    pros and cons and see what the tradeoffs are", 2026-10-13).
-2. The rows the collector does not read yet, against the room left in the budget: GPU
-   from the I/O Registry, open files, disk, battery, and the 10 s and 60 s rows.
+2. The cost of current disk, battery and machine GPU acquisition, and the cost of adding
+   the open-file/socket and full-temperature readings that remain unimplemented. The
+   [collector guide](collector.md#one-tick) gives current acquisition status. Process GPU
+   attribution needs trustworthy ownership evidence before it can be restored.
 3. Answered for Parquet, sealed DuckDB and DuckLake under Where it is kept: one process
    over a synthetic week at screen resolution, app CPU totals/ranking over a day and
    everything at one second. Peak-load storage remains measurement 4.

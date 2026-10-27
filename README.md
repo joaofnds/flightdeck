@@ -33,6 +33,10 @@ list after every wake that carries a fork. `--rescan-ms N` rescans at most once 
 instead, which costs less in bursts of forks and misses more of the processes that start
 and exit between two rescans.
 
+Reports use a bounded diagnostic queue and a separate writer thread. A slow or broken
+stdout/stderr destination can lose reports, with explicit loss accounting, while collection
+continues. The 5% figure is a target; the collector does not enforce a CPU cap.
+
 It hands each tick to a shared-memory ring that only its user can read. `--ring NAME`
 (default `flightdeck`) names the lock file that holds the ring's name,
 `~/Library/Application Support/Flightdeck/NAME.lock`, and the collector exits with an error
@@ -47,8 +51,9 @@ file patterns. The persister keeps immutable Parquet windows of 60 elapsed secon
 with shorter final windows and
 explicit availability and gaps. Stopping and restarting continues the recording.
 
-The ring stays after the collector exits, about 800 MB of address space, and the recording
-registry retains at most the active and one earlier ring. Disk recordings survive the
+The ring stays after the collector exits, with a virtual size determined by its capacities
+and format. The recording registry retains at most the active and one earlier ring.
+Disk recordings survive the
 rings' removal or a reboot; unsealed data may be lost. A missing, refused or failed
 persister reports failure while collection continues into the bounded ring. The collector
 starts it once at startup and does not respawn it during collection. Finite runs, Ctrl-C
@@ -56,6 +61,12 @@ and SIGTERM drain and reap their child, and report the drain's CPU separately. I
 earlier persister still owns the recording, its replacement reports that ownership and
 unavailable CPU while collection continues. Recording directories are created with
 owner-only access; files use mode 0600 and inherited access-control entries are removed.
+
+New process and App GPU time is unavailable because the driver client counters do not prove
+process ownership. Machine GPU activity, energy and memory remain recorded when available,
+and older recordings retain their values. Saved-history retention is not implemented yet,
+so disk use continues to grow. See the [collector guide](docs/collector.md#the-ring) for
+the ring's memory costs and the [current limits](docs/collector.md#limits).
 
 The diagnostic query API is `persistence::query::processes_at_second`. The native viewer
 uses `viewer::Session` for complete saved-tick inspection. `recording_check` compares a live

@@ -42,12 +42,15 @@ persister does, costs nothing when off. Its cost when on is not known: formattin
 scrape takes 0.56 ms, but reading every tick, keeping counters per App and per process
 name, and serving HTTP were not measured.
 
-Path A cannot retire the stack today. The machine dashboard reads 65 metrics, and these are
-missing from Flightdeck: per-process network, open files and sockets, the GPU's I/O
-Registry readings, every temperature and the thermal state, all To Do on m-1, and load
-average, boot time, open files against their limit, per-process GPU time and the chip and
-model the dashboard filters by, which have no card. The Claude plan limits, which a
-dashboard reads from VictoriaMetrics, and the Claude Code telemetry in ClickHouse are
+Path A cannot retire the stack today. The 2026-10-19 dashboard inventory used 65 metrics.
+Flightdeck still lacks per-process network, open-file and socket details, and the full
+temperature set. Later builds added load average, boot time, file counts and limits,
+thermal pressure, GPU memory and recorded machine facts. New process and App GPU time
+is intentionally unavailable: a driver's PID/name counter does not establish which process
+creation owns it. Machine GPU readings and historical values remain supported; see
+[the attribution decision](recording-research.md#reading-the-kernel-is-what-costs-cpu-not-moving-the-data).
+The Claude plan limits, which a dashboard reads from VictoriaMetrics, and the Claude Code
+telemetry in ClickHouse are
 outside what Flightdeck records.
 
 ## What exists today
@@ -72,8 +75,8 @@ An always-on daemon makes its running cost permanent. On a collector the app had
 over 332 seconds, the collector used 2.38% of a core with 50 MB resident and the persister
 0.33% with 64 MB. Since 2026-10-20 the persister also derives each window's App tables as it
 seals, and on 2026-10-22 it spent 0.32% of a core with 205 to 214 MB resident, the same CPU as
-the 2026-10-19 build run beside it. Its physical footprint, which leaves out the pages the
-allocator keeps after a seal, stood at 27 to 29 MB between seals and peaked at 146 MB during
+the 2026-10-19 build run beside it. Its physical footprint stood at 27 to 29 MB between
+seals and peaked at 146 MB during
 one on 2026-10-23, as Cost and budget in [collector.md](collector.md) explains.
 The recording research measured the collector at 37.5 and 21.7 mW over two five-minute runs. m-5 already accepts that cost.
 
@@ -147,18 +150,19 @@ belongs in the script.
   Self-monitoring page covers only Flightdeck's own pipeline, so while VictoriaMetrics,
   Grafana and ClickHouse run, this dashboard still has work to do.
 
-Flightdeck records most of the machine dashboard's readings. These are missing:
+The dashboard compatibility inventory below distinguishes missing readings from later
+additions. Export itself remains unimplemented.
 
 | Dashboard readings | Flightdeck |
 |---|---|
 | Per-process network bytes | TASK-25, To Do on m-1 |
 | Per-process open files and sockets | TASK-24, To Do on m-1 |
-| GPU readings from the I/O Registry | TASK-26, To Do on m-1 |
+| GPU readings from the I/O Registry | Machine GPU memory is recorded; broader GPU coverage remains TASK-26 |
 | Every SMC temperature | TASK-28, To Do on m-1 |
-| Thermal state | TASK-30, To Do on m-1 |
-| Load average, boot time, open files and their limit | not read, no card |
-| Per-process GPU time, which `sysmon-exporter` reads from the GPU's clients | not read, no card, and the recording research found only coalition totals |
-| Chip and model, which the dashboard's variables filter by | read for the Computer page, not recorded |
+| Thermal state | Thermal pressure is recorded; thermal-change event capture remains future work |
+| Load average, boot time, open files and their limit | Recorded when readable |
+| Per-process GPU time, which `sysmon-exporter` reads from the GPU's clients | New process/App attribution unavailable because client ownership is unverified; machine readings and historical values remain supported |
+| Chip and model, which the dashboard's variables filter by | Recorded as machine facts when readable |
 | Claude plan limits, Claude Code telemetry | outside the North Star, no card |
 
 Both stacks define an app the same way, as the outermost `.app` bundle a process runs
@@ -334,8 +338,9 @@ Subcommands that start the helpers give the one command asked for with no lastin
    and persistence today?
 3. Should the Claude plan limits and telemetry move into Flightdeck, or stay in a smaller
    sysmon? Retiring the stack depends on it.
-4. Should the readings the dashboards use and Flightdeck lacks, from load average to
-   per-process GPU time, become cards? Path A needs them to keep every panel.
+4. Which remaining dashboard readings should be prioritized before an exporter? Process
+   GPU parity requires trustworthy ownership evidence; reusing a PID-only join would
+   reintroduce incorrect attribution.
 
 ## Evidence
 

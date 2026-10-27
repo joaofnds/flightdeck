@@ -50,6 +50,27 @@ through local path dependencies. Viewer presentation code may allocate within it
 bounds; the collector's acquisition loop follows the stricter startup-allocation
 rules in [Tiger Style](tiger-style.md).
 
+## Collection and persistence boundaries
+
+The acquisition thread owns process watches, startup-sized buffers and ring publication.
+Between one-second deadlines, kqueue wakes it for process lifecycle events. A full event
+buffer rejects optional payload work before acquisition while retaining watch maintenance
+and loss counts. PID scans fill existing capacity without clearing unused storage.
+
+Each collector or persister process sends diagnostics through a fixed-capacity queue to
+its own output thread. The producer never waits for the destination; overload loses reports
+with explicit counters. Slow diagnostics therefore do not control the recording's progress.
+
+The persister first reads timing and completion information to decide whether a window is
+ready. Only then does it allocate payload buffers, copy the readings and encode them. It
+still admits and maps the source on each pass, and releases that mapping before encoding.
+Its memory watchdog stays active between operations, including while the main worker waits.
+
+New process and App GPU time remains unavailable because the inspected native client
+counters cannot establish process-creation ownership. Machine GPU measurements and existing
+recorded GPU values remain supported. The [collector guide](collector.md) explains these
+boundaries, recovery, diagnostic delivery and remaining resource limits in detail.
+
 ## Two reading paths inside the desktop
 
 Live Overview uses `viewer::store::Store` to retain machine and App readings and

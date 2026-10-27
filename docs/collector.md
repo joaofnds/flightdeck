@@ -20,11 +20,13 @@ flowchart TB
     coal["Resource coalitions<br/>energy, disk, GPU"]
   end
 
-  subgraph collector["collector process, one thread"]
+  subgraph collector["collector process"]
     wait["Wait<br/>kevent until the deadline"]
     read["Read every source<br/>into buffers sized at startup"]
     publish["Publish<br/>into the next ring slot"]
     wait --> read --> publish
+    reports["Bounded diagnostic queue"] --> output["Diagnostic writer thread"]
+    publish -.-> reports
   end
 
   procs --> read
@@ -41,14 +43,15 @@ flowchart TB
 
 There are two programs and one shared object between them.
 
-The collector is a single thread. It asks the kernel for every reading directly and writes
-each tick into the ring. It never waits for a reader and never writes a file of readings
-itself. The only programs it starts are the persister and a marker child at the start and
-end of a run, whose pids bound the count of processes it missed.
+One acquisition thread asks the kernel for readings and writes each tick into the ring.
+It never waits for a reader and never writes a file of readings itself. A separate diagnostic
+thread writes reports from a bounded queue, so a blocked output destination cannot stop
+acquisition. The collector starts the persister and a marker child at the start and end of
+a run, whose pids bound the count of processes it missed.
 
 The ring is a POSIX shared-memory object that only the user can open. It holds the last 120
-ticks, two minutes, and a log of process events beside them. Any process of the same user
-can map it read-only and read at its own pace.
+published ticks, normally two minutes, and a log of process events beside them. Any process
+of the same user can map it read-only and read at its own pace.
 
 The persister is a child the collector starts once at startup. It reads the ring and seals
 each window of 60 elapsed seconds into immutable Parquet files, the sealed minutes of the
@@ -69,21 +72,22 @@ sequenceDiagram
   K-->>C: a process forked
   C->>K: rescan the pid list, watch new pids
   K-->>C: a process exited
-  C->>K: read its final usage
+  C->>K: read final usage if the event fits
   Note over C: asleep in kevent
   K-->>C: timer: the tick's deadline
   C->>K: read battery, disks, system readings
   C->>K: read machine, interfaces, IOReport, SMC
   C->>K: read every process, then the coalitions
   C->>R: write slot, finish sequence, wake readers
-  P->>R: once a second, copy slots it has not seen
-  Note over P: when a 60-second window closes, seal it
+  P->>R: check identity, completion and publication timing
+  Note over P: when a window is ready, copy its payload and seal it
 ```
 
 Each tick has an absolute deadline, a whole number of seconds after the run started, on
 `mach_continuous_time`. That clock keeps counting while the Mac sleeps, so a sleep shows up
 as slipped ticks rather than as a pause in the clock. The collector registers the deadline as
-a kqueue timer and sleeps in `kevent` until it fires. While it sleeps it uses no CPU. The
+a kqueue timer and sleeps in `kevent` until it fires. The acquisition thread uses no CPU
+while asleep; the diagnostic writer may still be delivering a report. The
 same kqueue carries a watch on every process, so a fork, an exec or an exit wakes it early to
 handle that event, and it goes back to sleep until the deadline.
 
@@ -106,7 +110,7 @@ If the work ran past the next deadline, the next tick is the first deadline stil
 skipped ticks are counted as slips and have no readings, which is what the glossary calls a
 missed tick.
 
-Every 10 ticks and every 60 the collector prints a report of its own cost, broken down by
+Every 10 ticks and every 60 the collector submits a report of its own cost, broken down by
 source. The minute report gives the CPU of the collector and the persister together as a
 share of one core, to compare with the budget below.
 
@@ -124,20 +128,28 @@ comparing the list with the one it knows, and watching each new pid. An exec or 
 starts no rescan. The README describes `--rescan-ms`, which limits how often a burst of forks
 rescans.
 
+Each rescan reuses the PID buffer allocated at startup. The native call fills its spare
+capacity, and the collector exposes only the returned, count-checked and PID-validated
+prefix. It does not clear the unused suffix before another scan. This removes redundant
+memory writes without changing the default rescan cadence or the set of listed processes.
+
 When a process exits, its final usage stays readable until its parent reaps it, so the
-collector reads it on the exit event. A process a rescan finds already gone is read then, if
-it still can be. In five-minute runs the collector read the final usage of 82 to 84% of the
-processes that exited (Process starts and exits without root).
+collector reads it on an admitted exit event. A process a rescan finds already gone is read
+then if the event fits and its usage is still readable. In five-minute research runs the
+collector read the final usage of 82 to 84% of the processes that exited (Process starts and
+exits without root).
 
 A tick holds at most 16,384 process events. A burst past that drops the rest and counts the
-dropped events by kind in the tick, so a reader knows what is missing. After a tick that
+dropped events by kind in the tick, so a reader knows what is missing. One admission point
+checks capacity before optional Start/Exit payload acquisition and dictionary insertion.
+Rejected events still update watch lifecycle and loss accounting. After a tick that
 dropped a start, the collector reads the coalition of every listed process, not only the new
 ones, so it still learns the coalitions of the processes whose starts it dropped.
 
-When the collector first sees a process it reads the path of its executable with
-`proc_pidpath` and keeps it in a dictionary in the ring, which the persister saves with the
-process's readings. An App, as the glossary defines it, comes from the outermost `.app`
-bundle in that path.
+Admitted start events and the scheduled identity sweep read executable paths with
+`proc_pidpath`. Verified paths enter a dictionary in the ring, which the persister saves
+with the process's readings. A rejected start event does not consume a dictionary entry.
+An App, as the glossary defines it, comes from the outermost `.app` bundle in that path.
 
 ## The ring
 
@@ -157,20 +169,67 @@ Process events go to a log of their own beside the slots, so a tick with many ev
 overwrites no other tick. Each slot names the range of events that belong to it.
 
 The ring is sized when it is made for every process and coalition the collector's limits
-allow, about 800 MB of address space. Only the pages written take memory, and the event log is
-written in a circle, so once it wraps, after about 1.3 to 12.7 hours at measured event rates,
-all of its roughly 300 MB is resident (Moving the data). The ring's name carries 60 random
-bits written only to the lock file, so another user cannot guess it (Security). The lock file
+allow. Its exact size depends on those capacities and its format. The native run measured
+on 2026-10-26 reserved 1,025,585,336 bytes, about 978 MiB of virtual address space. In the
+current identity layout, the event region alone reserves
+`120 × 16,384 × 24 × 8 = 377,487,360` bytes, or 360 MiB.
+
+The event log advances around that whole region as events arrive. Long-running churn can
+therefore touch all of its backing even when a much smaller recent history is useful.
+Virtual reservation, touched backing, resident memory, physical footprint and compressed or
+swapped pages are different quantities; touching every page does not prove they all remain
+resident together. Reusing event storage by retained tick is planned with the ring redesign,
+and is not implemented. The ring's name carries 60 random bits written only to the lock file,
+so another user cannot guess it (Security). The lock file
 also stops a second collector from writing the same ring.
 
 ## The persister and the recording
+
+While waiting for a window to become ready, the persister reads sequence-protected timing
+and status fields instead of decoding full process, event and machine payloads. It allocates
+the shape-sized Tick buffer and stages readings only when a window is ready to seal. Each
+pass still reads the registry, admits and maps the source, checks the producer and looks up
+saved progress. A waiting pass drops its reader; no reader cache is retained across passes.
+The staging scope also drops the mapping before encoding begins.
+
+Recovery advances by publication number. If publications are overwritten during scanning
+or staging, it preserves surviving unsealed readings and records the loss instead of
+skipping the rest of that window. A completion marker is checked against the publication
+frontier before the source is retired, so completion cannot hide a final publication.
 
 The persister seals each window of 60 elapsed seconds into one Parquet file per table, sorted
 by series and compressed with Zstandard. Two of those tables, the per-App ranks and parts, are
 derived from the others as the window seals. A window becomes visible through a commit marker
 written only once every table of it is synced to disk, so a reader never sees half a minute.
-The persister checks its own memory every 100 ms against a limit, 2 GiB by default, and exits
-once it has passed it. That is a threshold it may overshoot, not a quota macOS enforces.
+The persister checks its current and kernel lifetime-peak physical footprint every 100 ms
+against a limit, 2 GiB by default, and exits if either exceeds it. That is a threshold it
+may overshoot, not a quota macOS enforces.
+This watchdog keeps checking between sealing operations because native allocations can
+outlive an operation. It also enforces active-operation deadlines. Parking it while the
+worker waits would weaken that protection, so its nominal ten checks a second remain.
+
+## Diagnostics cannot hold up recording
+
+The collector and persister install separate process-local diagnostic services at startup.
+If a writer cannot start, reporting is disabled without preventing recording.
+Each producer formats into fixed storage and attempts to submit a complete group using
+nonwaiting locks. Four queue slots each hold up to 8 KiB. A full queue, contention or an
+oversized group drops that diagnostic group and increments a reason-specific counter;
+it does not wait or end collection. The writer parks when there is no work and owns the
+potentially blocking writes to duplicated stdout and stderr descriptors.
+
+A failed destination is disabled. Loss summaries go to an available destination when
+delivery can proceed, and the desktop reports those gaps rather than treating a missing
+cost report as a zero-cost interval. If the writer itself blocks, diagnostic delivery can
+stop while ring publication and persistence continue.
+
+Normal exit releases recording resources and reaps the persister before allowing up to
+100 ms for final diagnostics. It then exits without waiting indefinitely for the writer.
+A fatal watchdog exit makes a nonwaiting reporting attempt and exits immediately.
+Diagnostic delivery is therefore best-effort; recorded readings use the ring and sealed
+files, not this queue.
+
+## Reading saved history
 
 The live window's store reads sealed minutes back one table at a time with Polars' Parquet
 reader, into typed rows and with no SQL, while the rest of the app reads the recording through
@@ -195,8 +254,8 @@ the persister fails or another one owns the recording.
 
 ## Stopping and failing
 
-On Ctrl-C, SIGTERM, the end of a `--seconds` run, or the exit of the app that started it, the
-collector stops collecting, waits for the persister to seal its last window, and reaps it. If
+On Ctrl-C, SIGTERM, the end of a `--seconds` run, or the process exit of the app that started
+it, the collector stops collecting, waits for the persister to seal its last window, and reaps it. If
 the persister takes longer than two minutes it is killed.
 
 A source that fails to open at startup, such as an SMC or IOReport a Mac does not have, is left
@@ -250,9 +309,10 @@ layout comes from XNU's source, so a macOS update can break it.
 **Buffers sized at startup, no allocation of its own per tick.** Every buffer the collector owns
 is sized at startup from the machine's limits (`kern.maxproc` for the pid list, the core count,
 the tracker's event bound) and a tick fills them without growing them, which assertions check.
-That keeps its heap flat over a run and its cost per tick steady. Its resident memory still grows
-as ring pages are written, as the ring section above says. Several macOS calls allocate memory
-of their own on each read: `IOReportCreateSamples`, `host_processor_info`, and the IOKit property
+That bounds collector-owned storage and removes buffer growth from the sampling path. It
+does not bound total cost independently of process count or fork rate. Shared-memory backing
+can grow as ring pages are touched, as the ring section above says. Several macOS calls
+allocate memory of their own on each read: `IOReportCreateSamples`, `host_processor_info`, and the IOKit property
 reads behind the disks, the battery and the GPU statistics. No call found gives the IOReport and
 CPU readings without root in memory the caller owns (Reading the kernel is what costs CPU), and
 the IOKit reads have not been searched for one.
@@ -296,9 +356,19 @@ started again.
 
 Collection and persistence together get 5% of one core, averaged over each minute (Decisions).
 The collector's minute report prints `combined_percent` against that budget, and its per-source
-report shows where the collector's share goes. That report is the current answer, since every
-cost in the research was measured before overflow checks were turned on and before the disks,
-system readings and process paths were read.
+report shows where the collector's share goes. Source meters measure thread CPU, not elapsed
+driver-call latency. Use current reports for current cost: older dated research describes
+older workloads and builds, including builds without today's source and identity reads.
+Diagnostic loss can make those reports incomplete.
+
+The budget is a target, not an enforced CPU cap. Removing discarded-event acquisition,
+unused PID-buffer clearing and premature persister payload work reduces specific operations;
+it does not establish that every workload stays below 5%. A 2026-10-26 run with 800 generated
+starts per second for 30 seconds reported 5.314656% combined minute CPU, with no event-buffer
+overflow. Other project activity and monitors were present, so that is a historical observed
+breach, not a controlled estimate of the current build's cost. Rescan-policy changes still
+need collector completeness and cost benchmarks. Whole-system power, wakeups, long-run memory
+and application latency also need separate measurements.
 
 In the research's runs, IOReport was the most expensive source read every tick, then the sweep of
 every process and the coalitions, and in the busier run process tracking cost more than those
@@ -312,8 +382,8 @@ On an M5 Pro on 2026-10-22, CPU time divided by elapsed time from `ps`, over the
 of a collector the app started, gave 2.86% of a core for the collector and 1.65% for the
 persister, 4.5% together.
 
-Most of the persister's cost is sealing. `persister/src/bin/seal_bench.rs` seals synthetic
-windows of 1,050 processes through the persister's own code and prints the median CPU of a seal
+`persister/src/bin/seal_bench.rs` seals synthetic windows of 1,050 processes through the
+persister's own code and prints the median CPU of a seal
 and of its derivation, so a change to sealing is measured without a live collector. Deriving each
 window's App ranks and App parts replays the window's processes and events as the persister
 staged them in memory, and writes two more tables. On an M5 Pro on 2026-10-22 a seal took a
@@ -321,6 +391,7 @@ median 135 ms of CPU, 84 ms of it deriving, against 219 ms and 146 ms for a buil
 the window's written tables to derive them.
 A profile of the seal puts about 15 ms in reading each process's sample and 10 ms in the
 derivation's queries and frames.
+These observations do not attribute the remaining CPU cost of current waiting passes.
 
 The pages are compressed with zstd at level 3. Re-encoding 20 sealed windows of a real recording,
 whose tables take 0.94 MB a window, compression cost about 8 ms of a window's 37 ms of writing,
@@ -346,9 +417,10 @@ Run side by side on 2026-10-22 for ten minutes, each build on its own scratch ri
 recording, the persister spent 1.93 s of CPU against 1.95 s for the 2026-10-19 build, which
 derived nothing, about 0.32% of a core each over 11 seals (Overhead in
 [headless-collector-research.md](headless-collector-research.md) measured that build at 0.33%).
-It kept 205 to 214 MB resident against 89 MB, which overstates its memory, since resident size
-also counts the pages the allocator keeps after a seal and hands back when macOS asks. On a
-scratch collector on 2026-10-23, the persister's physical footprint, what macOS charges it for
+It reported 205 to 214 MB resident against 89 MB. Resident size and physical footprint measure
+different quantities; these observations do not identify which allocator pages explain their
+difference or whether those pages are reclaimable. On a scratch collector on 2026-10-23,
+the persister's physical footprint, what macOS charges it for
 memory, stood at 27 to 29 MB at each minute report between seals and reached 146 MB while
 sealing, since a seal builds the whole window's tables at once. The 1.65% above came from a
 build that re-read the written tables, as did 0.53 to 0.55% measured once the load average
@@ -387,9 +459,12 @@ page-ins, resident memory and memory footprint, the figure Activity Monitor show
 process's memory. All but the two memory readings are counters since the process started. It
 and `proc_pidinfo` together cost about 4 to 12 µs a process.
 
-**Process identity.** macOS reuses pids, so the collector names a process by its pid together
-with the time it started on the awake clock, which `proc_pid_rusage` gives. Two processes that
-held one pid differ in that start time.
+**Process identity.** macOS reuses pids. Current identity publications carry the kernel's
+process unique ID and PID version, verified around usage and executable-path acquisition.
+The unique ID distinguishes process creations; the PID version also detects an exec during
+acquisition. The program dictionary binds the verified executable to that observation.
+Numeric usage still carries its awake-clock start time, which older formats use. Refused or
+changed identity is explicit and is never replaced by a PID-only guess.
 
 **sysctl.** macOS's named values about the system, such as `hw.memsize`, `vm.swapusage`,
 `kern.memorystatus_vm_pressure_level` and `kern.maxproc`, which the collector reads for the
@@ -514,7 +589,10 @@ earlier run, with each one's ring and collector pid (The persister and the recor
 - `collector/src/ring/`: the ring's layout, writer, readers and wake.
 - `collector/src/recording/`: registering a run with the recording and starting the persister.
 - `collector/src/cost.rs`: the per-source cost meter behind the reports.
+- `collector/src/diagnostics.rs` and `diagnostics/`: bounded report admission and output.
 - `persister/` and `persistence/src/worker.rs`: the loop that seals windows from the ring.
+- `persistence/src/worker/scanning.rs` and `staging.rs`: timing-only readiness and payload staging.
+- `persistence/src/resources.rs`: whole-process memory and operation-deadline protection.
 - `persister/src/bin/seal_bench.rs`: the CPU of a seal, measured on synthetic windows.
 - `persistence/src/encoder.rs`: how each table is written to Parquet.
 - `persistence/src/identity.rs`: the identity and usage a process or event row must hold to be
