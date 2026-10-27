@@ -95,7 +95,7 @@ impl Drop for Watchdog {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
             if thread.join().is_err() {
-                eprintln!("persister: memory watchdog panicked");
+                collector::diagnostics::error(format_args!("persister: memory watchdog panicked"));
                 std::process::abort();
             }
         }
@@ -110,7 +110,9 @@ fn watchdog_poll(stop: &AtomicBool, deadline_ms: &AtomicU64, epoch: Instant, lim
         let deadline = deadline_ms.load(Ordering::Acquire);
         if deadline > 0 {
             if epoch.elapsed().as_millis() >= u128::from(deadline) {
-                eprintln!("persister: operation exceeded drain deadline; unsealed history at risk");
+                collector::diagnostics::error(format_args!(
+                    "persister: operation exceeded drain deadline; unsealed history at risk"
+                ));
                 native::immediate_exit(75);
             }
         }
@@ -125,15 +127,19 @@ fn watchdog_memory(limit_bytes: u64) {
         Ok(memory) => {
             let charged_bytes = memory.current_bytes.max(memory.lifetime_bytes_max);
             if charged_bytes > limit_bytes {
-                eprintln!(
+                collector::diagnostics::error(format_args!(
                     "persister: memory limit current={} peak={} limit={}",
                     memory.current_bytes, memory.lifetime_bytes_max, limit_bytes
-                );
+                ));
                 native::immediate_exit(74);
             }
         }
         Err(error) => {
-            eprintln!("persister: memory observation failed: {error}");
+            collector::diagnostics::error(format_args!(
+                "persister: memory observation failed: kind={:?} errno={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ));
             native::immediate_exit(74);
         }
     }

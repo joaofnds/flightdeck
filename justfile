@@ -90,6 +90,7 @@ clippy:
 
 # Test the root workspace.
 test:
+    cargo build --locked -p collector -p persister --bin collector --bin persister
     cargo test --locked --workspace --no-fail-fast -- {{test_arguments}}
 
 # Check the formatting of the desktop workspace.

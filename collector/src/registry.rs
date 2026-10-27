@@ -53,7 +53,9 @@ impl Entry {
         // The collector reads children each tick and goes on after a failure, so the error
         // carries no message, whose text would allocate.
         if status != 0 {
-            eprintln!("collector: IORegistryEntryGetChildIterator returned {status:#x}");
+            crate::diagnostics::error(format_args!(
+                "collector: IORegistryEntryGetChildIterator returned {status:#x}"
+            ));
             return Err(io::Error::from(io::ErrorKind::Other));
         }
         let iterator = Self(iterator);
@@ -220,7 +222,9 @@ impl Drop for Entry {
         if self.0 != 0 {
             let status = unsafe { IOObjectRelease(self.0) };
             if status != 0 {
-                eprintln!("collector: registry entry release failed: {status:#x}");
+                crate::diagnostics::error(format_args!(
+                    "collector: registry entry release failed: {status:#x}"
+                ));
             }
         }
     }

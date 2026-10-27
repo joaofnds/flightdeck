@@ -106,7 +106,9 @@ impl<R: Registry> Source<R> {
                     snapshot.records[snapshot.count] = DiskReading::default();
                 }
 
-                eprintln!("collector: disk candidate failed: {error:?}");
+                crate::diagnostics::error(format_args!(
+                    "collector: disk candidate failed: {error:?}"
+                ));
                 if error == Error::Capacity {
                     snapshot.state = ScanState::Exhausted;
                 } else {
@@ -167,10 +169,10 @@ impl<R: Registry> Source<R> {
 
         self.read_into_scan_media_name(media, record)?;
         if let Err(error) = self.read_into_scan_media_counters(&driver, record) {
-            eprintln!(
+            crate::diagnostics::error(format_args!(
                 "collector: disk {} statistics failed: {error:?}",
                 record.driver_id
-            );
+            ));
             record.failed = true;
             if snapshot.state != ScanState::Exhausted {
                 snapshot.state = ScanState::Partial;
@@ -242,18 +244,24 @@ impl<R: Registry> Source<R> {
         }
 
         if unsafe { CFGetTypeID(value) } != unsafe { CFNumberGetTypeID() } {
-            eprintln!("collector: disk counter {index} has a non-number CF type");
+            crate::diagnostics::error(format_args!(
+                "collector: disk counter {index} has a non-number CF type"
+            ));
             return None;
         }
 
         if unsafe { CFNumberIsFloatType(value) } != 0 {
-            eprintln!("collector: disk counter {index} has a floating CF number");
+            crate::diagnostics::error(format_args!(
+                "collector: disk counter {index} has a floating CF number"
+            ));
             return None;
         }
 
         let mut number = 0_i64;
         if unsafe { CFNumberGetValue(value, 4, ptr::from_mut(&mut number).cast()) } == 0 {
-            eprintln!("collector: disk counter {index} cannot fit 64 bits");
+            crate::diagnostics::error(format_args!(
+                "collector: disk counter {index} cannot fit 64 bits"
+            ));
             return None;
         }
 
@@ -461,7 +469,9 @@ impl Drop for Service {
         if self.0 != 0 {
             let status = unsafe { IOObjectRelease(self.0) };
             if status != 0 {
-                eprintln!("collector: disk service release failed: {status:#x}");
+                crate::diagnostics::error(format_args!(
+                    "collector: disk service release failed: {status:#x}"
+                ));
             }
         }
     }

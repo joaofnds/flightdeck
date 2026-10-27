@@ -1,13 +1,20 @@
 use std::ffi::c_int;
 use std::path::PathBuf;
-use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    if let Err(error) = persistence::engine::initialize_process() {
-        eprintln!("persister startup: {error}");
-        return ExitCode::FAILURE;
-    }
+fn main() {
+    let initialized = persistence::engine::initialize_process();
+    collector::diagnostics::install(collector::diagnostics::Role::Persister);
+    let status = match initialized {
+        Ok(()) => run(),
+        Err(error) => {
+            collector::diagnostics::error(format_args!("persister startup: {error}"));
+            1
+        }
+    };
+    collector::diagnostics::exit(status);
+}
 
+fn run() -> i32 {
     // Every file the persister creates, recording windows included, is private to its user.
     unsafe {
         umask(0o077);
@@ -16,26 +23,33 @@ fn main() -> ExitCode {
     // minute its collector left. It exits once that collector is gone, and the collector kills
     // it after two minutes, so it never needs the signal to stop.
     if unsafe { signal(SIGTERM, SIG_IGN) } == SIG_ERR {
-        eprintln!("persister startup: {}", std::io::Error::last_os_error());
-        return ExitCode::FAILURE;
+        collector::diagnostics::error(format_args!(
+            "persister startup: {}",
+            std::io::Error::last_os_error()
+        ));
+        return 1;
     }
     let options = collector::arguments("persister").and_then(|words| options(&words));
     let derive = persistence::sealed_apps::SealedApps::default();
     match options {
         Ok((root, memory)) => match persistence::worker::run(&root, memory, &derive) {
-            Ok(persistence::worker::Outcome::Complete) => ExitCode::SUCCESS,
+            Ok(persistence::worker::Outcome::Complete) => 0,
             Ok(persistence::worker::Outcome::Owned) => {
-                eprintln!("recording owned by surviving persister; CPU not measured");
-                ExitCode::from(collector::recording::child::OWNERSHIP_EXIT_STATUS)
+                collector::diagnostics::error(format_args!(
+                    "recording owned by surviving persister; CPU not measured"
+                ));
+                i32::from(collector::recording::child::OWNERSHIP_EXIT_STATUS)
             }
             Err(error) => {
-                eprintln!("persister failed; unsealed history is at risk: {error}");
-                ExitCode::FAILURE
+                collector::diagnostics::error(format_args!(
+                    "persister failed; unsealed history is at risk: {error}"
+                ));
+                1
             }
         },
         Err(error) => {
-            eprintln!("{error}");
-            ExitCode::from(2)
+            collector::diagnostics::error(format_args!("{error}"));
+            2
         }
     }
 }

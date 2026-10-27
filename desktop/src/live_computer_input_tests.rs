@@ -267,6 +267,52 @@ fn computer_header_keeps_its_source_as_far_down_as_on_a_page_with_time_controls(
 }
 
 #[gpui::test]
+fn self_reports_disclose_receipt_time_dating(cx: &mut TestAppContext) {
+    // Goal: the self page discloses that diagnostic dates can follow the observations.
+    // Method: render Self-monitoring and find its visible receipt-time explanation.
+    let mut harness = InputHarness::setup_route(cx, "self");
+    harness.driver.seed_self_run();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("self-report-receipt-time")
+    );
+    assert!(
+        !harness
+            .driver
+            .reading_is_visible("self-diagnostics-incomplete")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn self_reports_disclose_diagnostic_loss(cx: &mut TestAppContext) {
+    // Goal: incomplete diagnostic reports have a visible explanation on the self page.
+    // Method: receive a real loss-summary record and render the resulting report state.
+    let mut harness = InputHarness::setup_route(cx, "self");
+    harness.driver.seed_self_run();
+    harness
+        .driver
+        .view
+        .update(&mut harness.driver.context, |dashboard, cx| {
+            std::rc::Rc::make_mut(&mut dashboard.self_reports).diagnostic(
+                "diagnostic loss role=collector stream=stdout queue_full=1 staging_contention=0 \
+             queue_contention=0 oversize=0 failed_delivery=0 setup_status=0 counts_inexact=0",
+            );
+            cx.notify();
+        });
+    harness.driver.context.run_until_parked();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("self-diagnostics-incomplete")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn self_latest_report_button_is_as_tall_as_the_prototypes(cx: &mut TestAppContext) {
     // Goal: the button that returns to the latest report is 44 px tall, as the prototype's is.
     // Method: open Self-monitoring with a run started long ago and measure the button.

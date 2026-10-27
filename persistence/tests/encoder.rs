@@ -499,6 +499,226 @@ mod tests {
     }
 
     #[test]
+    fn native_memory_refusal_ignores_a_stalled_diagnostic_sink() {
+        // Goal: a blocked reporter writer cannot postpone native memory refusal.
+        // Method: fill a child's private stderr socket and reap its real watchdog exit.
+        assert_eq!(diagnostic_child("memory-stalled").code(), Some(74));
+    }
+
+    #[test]
+    fn operation_deadline_ignores_a_stalled_diagnostic_sink() {
+        // Goal: a blocked reporter writer cannot postpone the operation deadline.
+        // Method: fill a child's private stderr socket and reap its real watchdog exit.
+        assert_eq!(diagnostic_child("deadline-stalled").code(), Some(75));
+    }
+
+    #[test]
+    fn native_memory_refusal_ignores_an_occupied_diagnostic_formatter() {
+        // Goal: a formatter holding diagnostic staging cannot postpone memory refusal.
+        // Method: witness Display entry before arming the child's real memory watchdog.
+        assert_eq!(diagnostic_child("memory-occupied").code(), Some(74));
+    }
+
+    #[test]
+    fn operation_deadline_ignores_an_occupied_diagnostic_formatter() {
+        // Goal: a formatter holding diagnostic staging cannot postpone the deadline.
+        // Method: witness Display entry before arming the child's real operation watchdog.
+        assert_eq!(diagnostic_child("deadline-occupied").code(), Some(75));
+    }
+
+    fn diagnostic_child(mode: &str) -> std::process::ExitStatus {
+        if let Ok(selected) = std::env::var("FLIGHTDECK_WATCHDOG_DIAGNOSTIC_TEST") {
+            assert_eq!(selected, mode);
+            diagnostic_child_run(mode);
+            panic!("watchdog did not terminate diagnostic fixture");
+        }
+
+        let test = match mode {
+            "memory-stalled" => "native_memory_refusal_ignores_a_stalled_diagnostic_sink",
+            "deadline-stalled" => "operation_deadline_ignores_a_stalled_diagnostic_sink",
+            "memory-occupied" => "native_memory_refusal_ignores_an_occupied_diagnostic_formatter",
+            "deadline-occupied" => "operation_deadline_ignores_an_occupied_diagnostic_formatter",
+            _ => panic!("unknown diagnostic watchdog fixture"),
+        };
+        let directory = Directory::new();
+        let stdout = directory.0.join("stdout");
+        let stderr = directory.0.join("stderr");
+        let ready = directory.0.join("ready");
+        let process = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("tests::{test}"), "--nocapture"])
+            .env("FLIGHTDECK_WATCHDOG_DIAGNOSTIC_TEST", mode)
+            .env("FLIGHTDECK_WATCHDOG_DIAGNOSTIC_READY", &ready)
+            .stdout(std::fs::File::create_new(&stdout).unwrap())
+            .stderr(std::fs::File::create_new(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let mut child = DiagnosticChild(Some(process));
+        let status = child.wait_bounded(&ready);
+        let output = std::fs::read_to_string(stdout).unwrap();
+        let errors = std::fs::read_to_string(stderr).unwrap();
+        assert!(
+            output
+                .lines()
+                .any(|line| line == "diagnostic_watchdog_ready"),
+            "fixture did not reach installed reporter: {status}\n{output}\n{errors}"
+        );
+        status
+    }
+
+    struct DiagnosticChild(Option<std::process::Child>);
+
+    impl DiagnosticChild {
+        fn wait_bounded(&mut self, ready: &std::path::Path) -> std::process::ExitStatus {
+            let mut deadline = Instant::now() + std::time::Duration::from_secs(10);
+            let mut armed = false;
+            for _poll in 0..10_000 {
+                if let Some(status) = self.0.as_mut().unwrap().try_wait().unwrap() {
+                    self.0 = None;
+                    return status;
+                }
+                if !armed {
+                    if ready.try_exists().unwrap() {
+                        deadline = Instant::now() + std::time::Duration::from_secs(2);
+                        armed = true;
+                    }
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            panic!("diagnostic watchdog child exceeded independent deadline");
+        }
+    }
+
+    impl Drop for DiagnosticChild {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                if child.try_wait().unwrap().is_none() {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                }
+            }
+        }
+    }
+
+    fn diagnostic_child_run(mode: &str) {
+        let sink = mode.ends_with("stalled").then(StalledDiagnostics::new);
+        collector::diagnostics::install(collector::diagnostics::Role::Persister);
+        let formatter = sink.is_none().then(OccupiedDiagnostic::start);
+        if sink.is_some() {
+            collector::diagnostics::error(format_args!("occupy stalled diagnostic sink"));
+        }
+        println!("diagnostic_watchdog_ready");
+        std::io::stdout().flush().unwrap();
+        let ready = std::env::var_os("FLIGHTDECK_WATCHDOG_DIAGNOSTIC_READY").unwrap();
+        std::fs::write(ready, b"ready").unwrap();
+
+        if mode.starts_with("memory") {
+            let baseline = Footprint::read().unwrap();
+            let guard = Watchdog::start(baseline.lifetime_bytes_max + 4 * 1024 * 1024).unwrap();
+            let native = NativeBlock::new(16 * 1024 * 1024);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            drop(native);
+            drop(guard);
+        } else {
+            let guard = Watchdog::with_operation_limit(
+                WORKING_BYTES_MAX,
+                std::time::Duration::from_millis(100),
+            )
+            .unwrap();
+            let operation = guard.operation().unwrap();
+            assert_eq!(unsafe { usleep(500_000) }, 0);
+            drop(operation);
+            drop(guard);
+        }
+        drop(formatter);
+        drop(sink);
+    }
+
+    struct StalledDiagnostics(std::os::unix::net::UnixStream);
+
+    impl StalledDiagnostics {
+        fn new() -> Self {
+            use std::os::fd::AsRawFd;
+
+            let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            writer.set_nonblocking(true).unwrap();
+            let mut full = false;
+            for _write in 0..4_096 {
+                match writer.write(&[b'x'; 4_096]) {
+                    Ok(count) => assert!(count > 0),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        full = true;
+                        break;
+                    }
+                    Err(error) => panic!("diagnostic socket fill failed: {error}"),
+                }
+            }
+            assert!(full, "diagnostic socket exceeded fixture fill bound");
+            writer.set_nonblocking(false).unwrap();
+            assert_eq!(unsafe { dup2(writer.as_raw_fd(), 2) }, 2);
+            Self(reader)
+        }
+    }
+
+    impl Drop for StalledDiagnostics {
+        fn drop(&mut self) {
+            self.0.shutdown(std::net::Shutdown::Both).unwrap();
+        }
+    }
+
+    struct OccupiedDiagnostic {
+        release: std::sync::mpsc::SyncSender<()>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    struct DiagnosticFormatter {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl OccupiedDiagnostic {
+        fn start() -> Self {
+            let (entered, witness) = std::sync::mpsc::sync_channel(0);
+            let (release, wait) = std::sync::mpsc::sync_channel(1);
+            let thread = std::thread::spawn(move || {
+                collector::diagnostics::error(format_args!(
+                    "{}",
+                    DiagnosticFormatter {
+                        entered,
+                        release: wait,
+                    }
+                ));
+            });
+            witness
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            Self {
+                release,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for OccupiedDiagnostic {
+        fn drop(&mut self) {
+            self.release.send(()).unwrap();
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+
+    impl std::fmt::Display for DiagnosticFormatter {
+        fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.entered.send(()).unwrap();
+            self.release
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            output.write_str("released diagnostic formatter")
+        }
+    }
+
+    #[test]
     fn terminates_native_encoding_before_a_pending_window_can_publish() {
         // Goal: real engine allocations during encoding cannot publish beyond the guard.
         // Method: encode a full window above a small native allowance after creating pending.
@@ -714,6 +934,7 @@ mod tests {
         }
     }
     unsafe extern "C" {
+        fn dup2(source: i32, target: i32) -> i32;
         fn usleep(microseconds: u32) -> i32;
         fn atexit(callback: extern "C" fn()) -> i32;
         fn _exit(status: i32) -> !;

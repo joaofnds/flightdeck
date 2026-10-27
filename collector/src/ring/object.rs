@@ -192,7 +192,10 @@ impl Mapping {
 impl Drop for Mapping {
     fn drop(&mut self) {
         if unsafe { munmap(self.address, self.word_count * size_of::<u64>()) } != 0 {
-            eprintln!("ring: munmap failed: {}", io::Error::last_os_error());
+            crate::diagnostics::error(format_args!(
+                "ring: munmap failed: {}",
+                io::Error::last_os_error()
+            ));
         }
     }
 }
@@ -338,7 +341,7 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
                 return Err(error);
             }
 
-            eprintln!("ring: numbering from 1, since {error}");
+            crate::diagnostics::error(format_args!("ring: numbering from 1, since {error}"));
             None
         }
     };
@@ -350,7 +353,9 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
     } else {
         if !name.is_empty() {
             // The name may hold a token, which other users must not learn from the log.
-            eprintln!("ring: numbering from 1, since the lock file names no ring of this place");
+            crate::diagnostics::error(format_args!(
+                "ring: numbering from 1, since the lock file names no ring of this place"
+            ));
         }
         (Token::random()?, 0)
     };
@@ -374,7 +379,9 @@ pub(super) fn create_previous(prefix: &str, lock: &File) -> io::Result<Previous>
         }
         Err(error) if error.raw_os_error() == Some(ENOENT) => (0, 0),
         Err(error) => {
-            eprintln!("ring: numbering from 1, since ring {generation} is unreadable: {error}");
+            crate::diagnostics::error(format_args!(
+                "ring: numbering from 1, since ring {generation} is unreadable: {error}"
+            ));
             (0, 0)
         }
     };
@@ -437,7 +444,9 @@ pub fn previous_generation(place: &super::Place) -> io::Result<Option<Generation
 /// `NUMBER_MAX`, which only another program of this user could have written.
 fn create_previous_continued(newest: u64, generation: u64) -> u64 {
     if newest > NUMBER_MAX {
-        eprintln!("ring: numbering from 1, since ring {generation} names number {newest}");
+        crate::diagnostics::error(format_args!(
+            "ring: numbering from 1, since ring {generation} names number {newest}"
+        ));
         return 0;
     }
 
@@ -517,10 +526,10 @@ fn create_object_named(name: &str, size_bytes: usize) -> io::Result<OwnedFd> {
         let error = io::Error::last_os_error();
         // An object of no size is no ring, and nothing else would remove it.
         if unsafe { shm_unlink(name.as_ptr()) } != 0 {
-            eprintln!(
+            crate::diagnostics::error(format_args!(
                 "ring: unlink of a ring it could not size failed: {}",
                 io::Error::last_os_error()
-            );
+            ));
         }
         return Err(error);
     }
@@ -535,10 +544,10 @@ pub(super) fn create_unlink(name: &str) {
         Err(error) => unreachable!("{error}"),
     };
     if unsafe { shm_unlink(name.as_ptr()) } != 0 {
-        eprintln!(
+        crate::diagnostics::error(format_args!(
             "ring: unlink of a ring a failed start made failed: {}",
             io::Error::last_os_error()
-        );
+        ));
     }
 }
 
@@ -572,7 +581,9 @@ pub(super) fn create_unlink_older(names: &RingNames, previous: u64) {
         if unsafe { shm_unlink(name.as_ptr()) } != 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(ENOENT) {
-                eprintln!("ring: unlink of ring {generation} failed: {error}");
+                crate::diagnostics::error(format_args!(
+                    "ring: unlink of ring {generation} failed: {error}"
+                ));
             }
         }
     }
@@ -590,7 +601,9 @@ fn create_unlink_older_holds_publications(name: &str, generation: u64) -> bool {
         }
         Err(error) => {
             if error.raw_os_error() != Some(ENOENT) {
-                eprintln!("ring: removing ring {generation}, which is unreadable: {error}");
+                crate::diagnostics::error(format_args!(
+                    "ring: removing ring {generation}, which is unreadable: {error}"
+                ));
             }
             false
         }

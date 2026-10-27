@@ -159,6 +159,17 @@ impl LiveDashboard {
                     .text_color(rgb(MUTED))
                     .child(status.clone()),
             )
+            .when(self.self_reports.incomplete, |element| {
+                element.child(
+                    caption("Diagnostics incomplete: some reports are unavailable.")
+                        .debug_selector(|| "self-diagnostics-incomplete".into())
+                        .text_color(rgb(ORANGE)),
+                )
+            })
+            .child(
+                caption("Reports are dated when received and may be delayed.")
+                    .debug_selector(|| "self-report-receipt-time".into()),
+            )
             .child(self_notice())
             .child(
                 div()

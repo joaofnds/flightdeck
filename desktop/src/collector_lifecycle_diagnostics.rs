@@ -16,6 +16,7 @@ struct Storage {
     line: Vec<u8>,
     /// Whether the line being written outgrew its bound or lost bytes, so it is not kept.
     line_damaged: bool,
+    discontinuous: bool,
     lines: VecDeque<String>,
 }
 
@@ -45,6 +46,7 @@ impl Output {
             peak_bytes: 0,
             line: Vec::with_capacity(LINE_BYTES_MAX),
             line_damaged: false,
+            discontinuous: false,
             lines: VecDeque::with_capacity(LINES_MAX),
         })))
     }
@@ -60,11 +62,13 @@ impl Output {
         if self.0.position > length {
             self.0.position = 0;
             self.0.line_damaged = true;
+            self.0.discontinuous = true;
         }
         let skipped_to = length.saturating_sub(tail_bytes);
         if self.0.position < skipped_to {
             self.0.position = skipped_to;
             self.0.line_damaged = true;
+            self.0.discontinuous = true;
         }
 
         self.drain_tail(length)?;
@@ -73,7 +77,13 @@ impl Output {
             // Diagnostic bytes appended concurrently with this truncation may be omitted.
             self.0.file.set_len(0)?;
             self.0.position = 0;
+            self.0.line_damaged = true;
+            self.0.discontinuous = true;
+        }
+        if self.0.discontinuous {
+            self.0.lines.clear();
             if !self.0.line.is_empty() {
+                self.0.line.clear();
                 self.0.line_damaged = true;
             }
         }
@@ -93,7 +103,11 @@ impl Output {
                 .file
                 .read_at(&mut self.0.buffer[..size], self.0.position)
             {
-                Ok(0) => return Ok(()),
+                Ok(0) => {
+                    self.0.line_damaged = true;
+                    self.0.discontinuous = true;
+                    return Ok(());
+                }
                 Ok(count) => {
                     self.0.position += u64::try_from(count).map_err(io::Error::other)?;
                     for index in 0..count {
@@ -115,10 +129,17 @@ impl Output {
         ))
     }
 
-    /// The whole lines read since the last call, oldest first. A line that lost bytes to a
-    /// skip or a truncation, or outgrew its bound, is left out.
-    pub fn take_lines(&mut self) -> VecDeque<String> {
-        std::mem::replace(&mut self.0.lines, VecDeque::with_capacity(LINES_MAX))
+    /// Whole lines in order, or none when a discontinuity invalidated the entire batch.
+    pub fn take_lines(&mut self) -> Option<VecDeque<String>> {
+        if std::mem::take(&mut self.0.discontinuous) {
+            assert!(self.0.lines.is_empty());
+            return None;
+        }
+
+        Some(std::mem::replace(
+            &mut self.0.lines,
+            VecDeque::with_capacity(LINES_MAX),
+        ))
     }
 
     pub fn text(&self) -> String {
@@ -137,6 +158,7 @@ impl Storage {
                 self.line.push(byte);
             } else {
                 self.line_damaged = true;
+                self.discontinuous = true;
             }
             return;
         }
@@ -144,9 +166,12 @@ impl Storage {
         if !self.line_damaged {
             if self.lines.len() == LINES_MAX {
                 assert!(self.lines.pop_front().is_some());
+                self.discontinuous = true;
             }
-            self.lines
-                .push_back(String::from_utf8_lossy(&self.line).into_owned());
+            match std::str::from_utf8(&self.line) {
+                Ok(line) => self.lines.push_back(line.to_owned()),
+                Err(_) => self.discontinuous = true,
+            }
         }
         self.line.clear();
         self.line_damaged = false;

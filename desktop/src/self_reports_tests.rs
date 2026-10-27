@@ -105,14 +105,157 @@ fn a_malformed_header_starts_no_report() {
 }
 
 #[test]
-fn a_minute_joins_its_cost_and_the_persister_footprint() {
-    // Goal: a minute report carries both CPU costs and the persister's footprint.
-    // Method: read the collector's minute line and the cumulative line after it.
+fn a_minute_without_its_co_ending_tick_is_not_published() {
+    // Goal: lost tick reports cannot give a later minute an older tick's chart position.
+    // Method: retain tick 20, then receive minute 60 and its recording cost.
     let mut reports = SelfReports::default();
+    read(&mut reports, &[HEADER, SOURCES, COVERAGE], 1_000);
 
     read(
         &mut reports,
         &[
+            "minute, ticks 1-60: collector CPU 1% of a core",
+            "recording minute elapsed_ns=60 collector_cpu_ns=1 persister_cpu_ns=1 \
+             combined_percent=1.5",
+            "recording cumulative current_footprint_bytes=1 lifetime_footprint_bytes_max=2",
+        ],
+        1_060,
+    );
+
+    assert!(reports.minutes.is_empty());
+    assert!(reports.incomplete);
+}
+
+#[test]
+fn a_stdout_loss_summary_on_stderr_invalidates_the_pending_minute() {
+    // Goal: cross-stream delivery still names the stdout report whose continuity was lost.
+    // Method: receive a pending minute, a collector stdout loss record on stderr, and an ending.
+    let mut reports = SelfReports::default();
+    let header = HEADER.replace("11-20", "51-60");
+    read(
+        &mut reports,
+        &[
+            &header,
+            SOURCES,
+            COVERAGE,
+            "minute, ticks 1-60: collector CPU 1% of a core",
+            "recording minute elapsed_ns=60 collector_cpu_ns=1 persister_cpu_ns=1 \
+             combined_percent=1.5",
+        ],
+        1_060,
+    );
+
+    reports.diagnostic(
+        "diagnostic loss role=collector stream=stdout queue_full=1 staging_contention=0 \
+         queue_contention=0 oversize=0 failed_delivery=0 setup_status=0 counts_inexact=0",
+    );
+    reports.standard(
+        "recording cumulative current_footprint_bytes=2 lifetime_footprint_bytes_max=3",
+        1_120,
+    );
+
+    assert!(reports.minutes.is_empty());
+    assert!(reports.incomplete);
+    assert_eq!(reports.seal_totals, super::SealTotals::default());
+}
+
+#[test]
+fn inexact_loss_counts_disclose_incompleteness_even_at_zero() {
+    // Goal: raced counter increments cannot make unavailable diagnostics appear complete.
+    // Method: receive a valid summary whose conservative counters are zero and inexact.
+    let mut reports = SelfReports::default();
+
+    reports.diagnostic(
+        "diagnostic loss role=persister stream=stderr queue_full=0 staging_contention=0 \
+         queue_contention=0 oversize=0 failed_delivery=0 setup_status=0 counts_inexact=1",
+    );
+
+    assert!(reports.incomplete);
+    assert_eq!(reports.seal_totals, super::SealTotals::default());
+}
+
+#[test]
+fn a_stderr_loss_summary_preserves_stdout_assembly() {
+    // Goal: a collector stderr failure cannot destroy an intact stdout tick report.
+    // Method: deliver a stderr summary between the tick header and its remaining lines.
+    let mut reports = SelfReports::default();
+    reports.standard(HEADER, 1_060);
+
+    reports.diagnostic(
+        "diagnostic loss role=collector stream=stderr queue_full=1 staging_contention=0 \
+         queue_contention=0 oversize=0 failed_delivery=0 setup_status=0 counts_inexact=0",
+    );
+    read(&mut reports, &[SOURCES, COVERAGE], 1_120);
+
+    assert_eq!(reports.ticks.len(), 1);
+    assert_eq!(reports.ticks[0].second, 1_060);
+    assert!(reports.incomplete);
+}
+
+#[test]
+fn a_persister_stdout_loss_summary_preserves_collector_stdout_assembly() {
+    // Goal: a loss record identifies its process as well as its stream.
+    // Method: deliver a persister stdout failure while a collector stdout tick is pending.
+    let mut reports = SelfReports::default();
+    reports.standard(HEADER, 1_060);
+
+    reports.diagnostic(
+        "diagnostic loss role=persister stream=stdout queue_full=0 staging_contention=0 \
+         queue_contention=0 oversize=0 failed_delivery=1 setup_status=0 counts_inexact=0",
+    );
+    read(&mut reports, &[SOURCES, COVERAGE], 1_120);
+
+    assert_eq!(reports.ticks.len(), 1);
+    assert!(reports.incomplete);
+}
+
+#[test]
+fn a_malformed_inexact_flag_is_not_a_loss_record() {
+    // Goal: invalid summary fields cannot manufacture diagnostic or recording loss.
+    // Method: receive a summary with a flag outside its wire range.
+    let mut reports = SelfReports::default();
+
+    reports.standard(
+        "diagnostic loss role=collector stream=stdout queue_full=1 staging_contention=0 \
+         queue_contention=0 oversize=0 failed_delivery=0 setup_status=0 counts_inexact=2",
+        1_060,
+    );
+
+    assert!(!reports.incomplete);
+    assert_eq!(reports.seal_totals, super::SealTotals::default());
+}
+
+#[test]
+fn queued_reports_share_their_receipt_second() {
+    // Goal: delayed reports retain receipt-time dating without invented observation times.
+    // Method: receive two tick groups in the same desktop drain second.
+    let mut reports = SelfReports::default();
+    let next = HEADER.replace("11-20", "21-30");
+
+    read(&mut reports, &[HEADER, SOURCES, COVERAGE], 1_060);
+    read(&mut reports, &[&next, SOURCES, COVERAGE], 1_060);
+
+    assert_eq!(reports.ticks.len(), 2);
+    assert_eq!(reports.ticks[0].second, 1_060);
+    assert_eq!(reports.ticks[1].second, 1_060);
+}
+
+#[test]
+fn a_minute_joins_its_cost_and_the_persister_footprint() {
+    // Goal: a minute report carries both CPU costs and the persister's footprint.
+    // Method: read the collector's minute line and the cumulative line after it.
+    let mut reports = SelfReports::default();
+    let header = HEADER.replace("11-20", "51-60");
+
+    read(
+        &mut reports,
+        &[
+            &header,
+            SOURCES,
+            COVERAGE,
+            "minute, ticks 1-60: collector CPU 1% of a core",
+            SOURCES,
+            COVERAGE,
             "recording minute elapsed_ns=60015526708 collector_cpu_ns=1897702834 \
              persister_cpu_ns=39109625 combined_cpu_ns=1936812459 combined_percent=3.227186",
             "recording cumulative collector_cpu_ns=2127517458 persister_cpu_ns=39109625 \
@@ -218,11 +361,13 @@ fn a_minute_shares_the_second_of_the_report_that_closes_it() {
     // Goal: inspecting the report that ends a minute finds that minute too.
     // Method: read a report in one second and the minute's lines in the next.
     let mut reports = SelfReports::default();
-    read(&mut reports, &[HEADER, SOURCES, COVERAGE], 1_000);
+    let header = HEADER.replace("11-20", "51-60");
+    read(&mut reports, &[&header, SOURCES, COVERAGE], 1_000);
 
     read(
         &mut reports,
         &[
+            "minute, ticks 1-60: collector CPU 1% of a core",
             "recording minute elapsed_ns=1 collector_cpu_ns=1 persister_cpu_ns=1 \
              combined_cpu_ns=2 combined_percent=1.5",
             "recording cumulative current_footprint_bytes=1 lifetime_footprint_bytes_max=2",

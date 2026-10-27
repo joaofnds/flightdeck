@@ -10,12 +10,12 @@ use std::ffi::c_int;
 use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::time::Duration;
 
 use collector::clock::{self, Timebase};
 use collector::collector::{Capacities, Collector};
 use collector::cost::{Cost, Meter, Snapshot, Source};
+use collector::diagnostics::{self, Group, Role};
 use collector::processes::{self, Unreadable, Usage};
 use collector::recording::child::{ChildCost, Persister};
 use collector::recording::{self, Registration};
@@ -41,21 +41,26 @@ unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: c_int) -> c_int;
 }
 
-fn main() -> ExitCode {
+fn main() {
+    diagnostics::install(Role::Collector);
+    diagnostics::exit(main_status());
+}
+
+fn main_status() -> i32 {
     let options =
         match collector::arguments("collector").and_then(|arguments| options_from(&arguments)) {
             Ok(options) => options,
             Err(usage) => {
-                eprintln!("{usage}");
-                return ExitCode::from(2);
+                diagnostics::error(format_args!("{usage}"));
+                return 2;
             }
         };
 
     match run(&options) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => 0,
         Err(error) => {
-            eprintln!("collector: {error}");
-            ExitCode::FAILURE
+            diagnostics::error(format_args!("collector: {error}"));
+            1
         }
     }
 }
@@ -113,35 +118,63 @@ fn run(options: &Options) -> io::Result<()> {
 
     let timebase = Timebase::read()?;
     let first_marker_pid = run_throwaway_child();
-    let mut out = io::stdout().lock();
+    let mut out = diagnostics::stdout_group();
     let place = Place::for_user(&options.ring_name)?;
     let recording = options
         .recording
         .clone()
         .unwrap_or_else(|| place.lock_path.with_extension("recording"));
-    let mut run = Run::start(
+    let started = Run::start(
         timebase,
         TICK_PERIOD_NS,
         options.rescan_interval,
         &place,
         &recording,
-        &mut out,
-    )?;
+        &mut *out,
+    );
+    if started.is_ok() {
+        out.submit();
+    } else {
+        out.begin();
+    }
+    let mut run = started?;
+    let result = run_collect(options, owner, &mut run, first_marker_pid, &mut out);
+    if result.is_ok() {
+        out.submit();
+    } else {
+        out.begin();
+    }
+
+    result
+}
+
+fn run_collect(
+    options: &Options,
+    owner: owner::Owner,
+    run: &mut Run,
+    first_marker_pid: io::Result<i32>,
+    out: &mut Group,
+) -> io::Result<()> {
     let mut tick = run.first_tick;
     // Tick 0 is the warm-up tick, which `Run::start` ran.
     assert!(tick > 0);
-    loop {
-        let result = run.tick(tick, &mut out);
+    for _step in 0..u64::MAX {
+        let result = run.tick(tick, out);
+        if result.is_ok() {
+            out.submit();
+        } else {
+            out.begin();
+        }
         let owner_departed = owner.departed();
         let following = match result {
             Ok(following) => following,
             Err(error) => {
                 if error.kind() == io::ErrorKind::Interrupted {
                     if stop::Stop::requested() {
-                        return run.finish_recording(&mut out);
+                        return run.finish_recording(out);
                     }
                     if owner_departed {
-                        return run.finish_recording(&mut out);
+                        return run.finish_recording(out);
                     }
                 }
                 return Err(error);
@@ -152,17 +185,18 @@ fn run(options: &Options) -> io::Result<()> {
             .seconds
             .is_some_and(|seconds| following > seconds.get());
         if elapsed {
-            return run_finish(&mut run, tick, first_marker_pid, &mut out);
+            return run_finish(run, tick, first_marker_pid, out);
         }
         if stop::Stop::requested() {
-            return run_finish(&mut run, tick, first_marker_pid, &mut out);
+            return run_finish(run, tick, first_marker_pid, out);
         }
         if owner_departed {
-            return run_finish(&mut run, tick, first_marker_pid, &mut out);
+            return run_finish(run, tick, first_marker_pid, out);
         }
 
         tick = following;
     }
+    unreachable!("collector exhausted its process-lifetime tick bound");
 }
 
 fn run_finish(
@@ -1190,6 +1224,7 @@ mod tests {
     use super::*;
 
     mod activation;
+    mod diagnostic_groups;
 
     const TEST_TICK_PERIOD_NS: u64 = 20_000_000;
 

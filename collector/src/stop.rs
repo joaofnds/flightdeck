@@ -84,10 +84,10 @@ impl SignalHandler {
 impl Drop for SignalHandler {
     fn drop(&mut self) {
         if unsafe { sigaction(self.signal, &raw const self.previous, std::ptr::null_mut()) } != 0 {
-            eprintln!(
+            collector::diagnostics::error(format_args!(
                 "collector: restoring stop handler failed: {}",
                 io::Error::last_os_error()
-            );
+            ));
         }
     }
 }

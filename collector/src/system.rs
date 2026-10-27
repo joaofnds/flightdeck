@@ -169,7 +169,11 @@ impl System {
 
         let capacity = self.gpu_times.capacity();
         if let Err(error) = clients.read(&mut self.gpu_times) {
-            eprintln!("collector: GPU clients read failed: {error}");
+            crate::diagnostics::error(format_args!(
+                "collector: GPU clients read failed: kind={:?} errno={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ));
             self.gpu_times.clear();
         }
         assert_eq!(self.gpu_times.capacity(), capacity);
@@ -216,10 +220,10 @@ pub fn gpu_ns_by_pid(
 /// count no driver keeps, or a sum of them, reaches.
 fn gpu_ns_by_pid_carried(found: &GpuClientTime) -> Option<u64> {
     if found.gpu_ns > crate::ring::GPU_NS_MAX {
-        eprintln!(
+        crate::diagnostics::error(format_args!(
             "collector: GPU time of pid {} read {} ns, past what the ring carries",
             found.pid, found.gpu_ns
-        );
+        ));
         return None;
     }
 
@@ -230,7 +234,9 @@ fn open_source<T>(name: &str, opened: io::Result<T>) -> Option<T> {
     match opened {
         Ok(source) => Some(source),
         Err(error) => {
-            eprintln!("collector: recording no {name} readings, since it failed to open: {error}");
+            crate::diagnostics::error(format_args!(
+                "collector: recording no {name} readings, since it failed to open: {error}"
+            ));
             None
         }
     }
@@ -241,7 +247,11 @@ fn reported<T>(name: &str, read: io::Result<T>) -> Option<T> {
     match read {
         Ok(value) => Some(value),
         Err(error) => {
-            eprintln!("collector: {name} read failed: {error}");
+            crate::diagnostics::error(format_args!(
+                "collector: {name} read failed: kind={:?} errno={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ));
             None
         }
     }
@@ -310,7 +320,9 @@ fn machine_facts() -> MachineFacts {
         Ok(Some(levels)) => machine_facts_levels(levels.logical_cpus),
         Ok(None) => None,
         Err(error) => {
-            eprintln!("collector: performance levels read failed: {error}");
+            crate::diagnostics::error(format_args!(
+                "collector: performance levels read failed: {error}"
+            ));
             None
         }
     };
@@ -319,13 +331,15 @@ fn machine_facts() -> MachineFacts {
             if let Ok(cores) = u32::try_from(cores) {
                 Some(cores)
             } else {
-                eprintln!("collector: GPU cores read {cores}, past a count");
+                crate::diagnostics::error(format_args!(
+                    "collector: GPU cores read {cores}, past a count"
+                ));
                 None
             }
         }
         Ok(None) => None,
         Err(error) => {
-            eprintln!("collector: GPU cores read failed: {error}");
+            crate::diagnostics::error(format_args!("collector: GPU cores read failed: {error}"));
             None
         }
     };
@@ -366,7 +380,7 @@ fn machine_facts_count(name: &CStr) -> Option<u32> {
     match u32::try_from(count) {
         Ok(count) if count > 0 => Some(count),
         _ => {
-            eprintln!("collector: {name:?} read {count}, no count");
+            crate::diagnostics::error(format_args!("collector: {name:?} read {count}, no count"));
             None
         }
     }
@@ -387,17 +401,19 @@ fn machine_facts_text(name: &CStr) -> Option<FactText> {
         )
     };
     if status != 0 {
-        eprintln!(
+        crate::diagnostics::error(format_args!(
             "collector: {name:?} read failed: {}",
             io::Error::last_os_error()
-        );
+        ));
         return None;
     }
     // The kernel counts the final NUL, which the text leaves out.
     let text = bytes.get(..count.checked_sub(1)?)?;
     let fact = FactText::new(text);
     if fact.is_none() {
-        eprintln!("collector: {name:?} holds no machine fact's text");
+        crate::diagnostics::error(format_args!(
+            "collector: {name:?} holds no machine fact's text"
+        ));
     }
     fact
 }
@@ -427,7 +443,9 @@ impl ThermalPressure {
         let mut state = 0_u64;
         let status = unsafe { notify_get_state(self.token, &raw mut state) };
         if status != NOTIFY_STATUS_OK {
-            eprintln!("collector: notify_get_state returned {status}");
+            crate::diagnostics::error(format_args!(
+                "collector: notify_get_state returned {status}"
+            ));
             return Err(io::Error::from(io::ErrorKind::Other));
         }
 
@@ -439,7 +457,7 @@ impl Drop for ThermalPressure {
     fn drop(&mut self) {
         let status = unsafe { notify_cancel(self.token) };
         if status != NOTIFY_STATUS_OK {
-            eprintln!("collector: notify_cancel returned {status}");
+            crate::diagnostics::error(format_args!("collector: notify_cancel returned {status}"));
         }
     }
 }

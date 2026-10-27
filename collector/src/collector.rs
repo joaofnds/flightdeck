@@ -167,7 +167,9 @@ impl Collector {
         if let Some(battery) = &mut self.battery {
             meter.measure(Source::Battery, || {
                 if let Err(error) = battery.refresh(continuous_ns) {
-                    eprintln!("collector: battery read failed: {error:?}");
+                    crate::diagnostics::error(format_args!(
+                        "collector: battery read failed: {error:?}"
+                    ));
                 }
 
                 Ok(())
@@ -182,7 +184,9 @@ impl Collector {
         if let Some(disks) = &mut self.disks {
             meter.measure(Source::Disks, || {
                 if let Err(error) = disks.refresh(continuous_ns) {
-                    eprintln!("collector: disks read failed: {error:?}");
+                    crate::diagnostics::error(format_args!(
+                        "collector: disks read failed: {error:?}"
+                    ));
                 }
 
                 Ok(())
@@ -303,7 +307,7 @@ fn new_battery() -> Option<Battery> {
     match Battery::open() {
         Ok(battery) => Some(battery),
         Err(error) => {
-            eprintln!("collector: battery open failed: {error:?}");
+            crate::diagnostics::error(format_args!("collector: battery open failed: {error:?}"));
             None
         }
     }
@@ -313,7 +317,7 @@ fn new_disks() -> Option<Disks> {
     match Disks::open() {
         Ok(disks) => Some(disks),
         Err(error) => {
-            eprintln!("collector: disks open failed: {error:?}");
+            crate::diagnostics::error(format_args!("collector: disks open failed: {error:?}"));
             None
         }
     }
@@ -325,7 +329,9 @@ fn new_source<T>(name: &str, opened: io::Result<T>) -> Option<T> {
     match opened {
         Ok(source) => Some(source),
         Err(error) => {
-            eprintln!("collector: recording no {name} readings, since it failed to open: {error}");
+            crate::diagnostics::error(format_args!(
+                "collector: recording no {name} readings, since it failed to open: {error}"
+            ));
             None
         }
     }

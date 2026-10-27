@@ -16,10 +16,10 @@ impl Drop for Readiness {
     fn drop(&mut self) {
         let status = (self.release)(self.name);
         if status != 0 {
-            eprintln!(
+            crate::diagnostics::error(format_args!(
                 "mach_port_deallocate readiness name={} status={status}",
                 self.name
-            );
+            ));
         }
     }
 }

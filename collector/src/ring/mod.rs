@@ -553,7 +553,9 @@ impl Writer {
             let name = match generation_name(self.name(), generation, &mut buffer) {
                 Ok(name) => name,
                 Err(error) => {
-                    eprintln!("ring: retention name refused: {error}");
+                    crate::diagnostics::error(format_args!(
+                        "ring: retention name refused: {error}"
+                    ));
                     continue;
                 }
             };
@@ -565,15 +567,19 @@ impl Writer {
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    eprintln!("ring: preserving undecodable generation {generation}: {error}");
+                    crate::diagnostics::error(format_args!(
+                        "ring: preserving undecodable generation {generation}: {error}"
+                    ));
                     continue;
                 }
             }
-            eprintln!(
+            crate::diagnostics::error(format_args!(
                 "recording retention eviction generation={generation}; unsealed extent unknown"
-            );
+            ));
             if let Err(error) = unlink_generation(name) {
-                eprintln!("ring: retention eviction refused: {error}");
+                crate::diagnostics::error(format_args!(
+                    "ring: retention eviction refused: {error}"
+                ));
             }
         }
     }
@@ -766,7 +772,9 @@ impl Writer {
         self.publication = publication;
         // A refused wake costs the readers it missed one wait at most, so the writer goes on.
         if let Err(errno) = wake_all(&words[HEADER_PUBLICATION_NEWEST]) {
-            eprintln!("ring: waking readers failed with errno {errno}");
+            crate::diagnostics::error(format_args!(
+                "ring: waking readers failed with errno {errno}"
+            ));
         }
     }
 

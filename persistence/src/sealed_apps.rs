@@ -139,10 +139,10 @@ fn derive_parts(
     match parts {
         Ok(table) => Ok(Some(table)),
         Err(error) => {
-            eprintln!(
+            collector::diagnostics::error(format_args!(
                 "persister derived no App parts window={}: {error}",
                 derivation.window.identity.window
-            );
+            ));
             let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
             match std::fs::remove_file(path) {
                 Ok(()) => Ok(None),

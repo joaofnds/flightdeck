@@ -59,7 +59,9 @@ fn acquire_exit_using(
 
 fn acquire_exit_report(pid: i32, creation: Result<ProcessCreation, CreationError>) {
     if let Err(error @ (CreationError::Syscall(_) | CreationError::Size(_))) = creation {
-        eprintln!("collector: exit creation read pid={pid} failed: {error:?}");
+        crate::diagnostics::error(format_args!(
+            "collector: exit creation read pid={pid} failed: {error:?}"
+        ));
     }
 }
 

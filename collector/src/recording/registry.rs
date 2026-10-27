@@ -176,7 +176,9 @@ impl Registry {
             }
             if !is_retired(root, &oldest.identity, &oldest.ring_name)? {
                 self.evictions = self.evictions.checked_add(1).ok_or_else(invalid)?;
-                eprintln!("recording retention: unsealed ring evicted; extent unknown");
+                crate::diagnostics::error(format_args!(
+                    "recording retention: unsealed ring evicted; extent unknown"
+                ));
             }
             let evicted = self.runs.remove(0);
             match unlink_generation(&evicted.ring_name) {
@@ -207,7 +209,9 @@ impl Registry {
             return Ok(());
         };
         if identity.recording != recording {
-            eprintln!("recording recovery: previous ring belongs to another recording; retained");
+            crate::diagnostics::error(format_args!(
+                "recording recovery: previous ring belongs to another recording; retained"
+            ));
             return Ok(());
         }
         self.add(
@@ -239,7 +243,9 @@ fn capture_previous_identity(
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => eprintln!("recording recovery unavailable: {error}"),
+        Err(error) => {
+            crate::diagnostics::error(format_args!("recording recovery unavailable: {error}"));
+        }
     }
     Ok(Some(RunIdentity {
         recording,

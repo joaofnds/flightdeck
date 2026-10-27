@@ -14,6 +14,12 @@ pub const SOURCES_MAX: usize = 16;
 pub const TICK_REPORT_SECONDS: u64 = 10;
 /// The seconds between two minute reports.
 pub const MINUTE_REPORT_SECONDS: u64 = 60;
+
+#[derive(Clone, Copy)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
 const _: () = {
     assert!(TICK_REPORTS_MAX * 10 == 900);
     assert!(MINUTE_REPORTS_MAX * 60 == 900);
@@ -72,6 +78,8 @@ pub struct SelfReports {
     pub started: Option<u64>,
     /// Counts every change, so a reader copies the reports only when they changed.
     pub revision: u64,
+    /// Diagnostic delivery lost reports; this says nothing about saved readings.
+    pub incomplete: bool,
     pub ticks: VecDeque<TickReport>,
     pub minutes: VecDeque<MinuteReport>,
     pub seals: VecDeque<Seal>,
@@ -96,12 +104,30 @@ enum Pending {
     /// A ten-second report whose cost and process lines have not arrived yet.
     Tick(Box<TickReport>),
     /// A minute's tick report, whose following lines belong to no ten-second report.
-    MinuteTicks,
+    MinuteTicks(u64),
     /// A minute's cost, whose footprint line follows.
     Minute(MinuteReport),
 }
 
 impl SelfReports {
+    /// Consumes one bounded output batch; a missing batch reports a delivery discontinuity.
+    pub fn output(&mut self, lines: Option<VecDeque<String>>, stream: OutputStream, second: u64) {
+        let Some(lines) = lines else {
+            if matches!(stream, OutputStream::Stdout) {
+                self.pending = Pending::None;
+            }
+            self.mark_incomplete();
+            return;
+        };
+
+        for line in lines {
+            match stream {
+                OutputStream::Stdout => self.standard(&line, second),
+                OutputStream::Stderr => self.diagnostic(&line),
+            }
+        }
+    }
+
     /// Forgets the previous run's reports when this app starts a collector.
     pub fn begin(&mut self, second: u64) {
         *self = Self {
@@ -113,6 +139,9 @@ impl SelfReports {
 
     /// Reads one line of the collector's standard output.
     pub fn standard(&mut self, line: &str, second: u64) {
+        if self.loss(line) {
+            return;
+        }
         if let Some(rest) = line.strip_prefix("ticks ") {
             self.pending = match tick_header(rest, second) {
                 Some(report) => Pending::Tick(Box::new(report)),
@@ -120,8 +149,13 @@ impl SelfReports {
             };
             return;
         }
-        if line.starts_with("minute, ticks ") {
-            self.pending = Pending::MinuteTicks;
+        if let Some(rest) = line.strip_prefix("minute, ticks ") {
+            self.pending = if let Some(second) = minute_ending(rest, self.ticks.back()) {
+                Pending::MinuteTicks(second)
+            } else {
+                self.mark_incomplete();
+                Pending::None
+            };
             return;
         }
         if let Some(rest) = line.strip_prefix("  ms of CPU a second: ") {
@@ -131,22 +165,11 @@ impl SelfReports {
             return;
         }
         if let Some(rest) = line.strip_prefix("  last tick read ") {
-            if let Pending::Tick(mut report) = std::mem::take(&mut self.pending) {
-                if processes(rest, &mut report).is_some() {
-                    push(&mut self.ticks, *report, TICK_REPORTS_MAX);
-                    self.revision = self.revision.wrapping_add(1);
-                }
-            }
+            self.standard_processes(rest);
             return;
         }
         if let Some(rest) = line.strip_prefix("recording minute ") {
-            // The minute ends with the ten-second report just read, so it shares that report's
-            // second and a chart inspecting the report finds the minute too.
-            let ending = self.ticks.back().map_or(second, |tick| tick.second);
-            self.pending = match minute(rest, ending) {
-                Some(report) => Pending::Minute(report),
-                None => Pending::None,
-            };
+            self.standard_minute(rest);
             return;
         }
         if let Some(rest) = line.strip_prefix("recording cumulative ") {
@@ -159,8 +182,55 @@ impl SelfReports {
         }
     }
 
+    fn standard_processes(&mut self, text: &str) {
+        if !matches!(self.pending, Pending::Tick(_)) {
+            return;
+        }
+
+        if let Pending::Tick(mut report) = std::mem::take(&mut self.pending) {
+            if processes(text, &mut report).is_some() {
+                push(&mut self.ticks, *report, TICK_REPORTS_MAX);
+                self.revision = self.revision.wrapping_add(1);
+            }
+        }
+    }
+
+    fn standard_minute(&mut self, text: &str) {
+        self.pending = if let Pending::MinuteTicks(second) = std::mem::take(&mut self.pending) {
+            match minute(text, second) {
+                Some(report) => Pending::Minute(report),
+                None => Pending::None,
+            }
+        } else {
+            self.mark_incomplete();
+            Pending::None
+        };
+    }
+
+    fn mark_incomplete(&mut self) {
+        if !self.incomplete {
+            self.incomplete = true;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    fn loss(&mut self, line: &str) -> bool {
+        let Some(affects_standard) = loss_summary(line) else {
+            return false;
+        };
+
+        if affects_standard {
+            self.pending = Pending::None;
+        }
+        self.mark_incomplete();
+        true
+    }
+
     /// Reads one line of the collector's diagnostic output, which the persister shares.
     pub fn diagnostic(&mut self, line: &str) {
+        if self.loss(line) {
+            return;
+        }
         let Some(rest) = line.strip_prefix("persister sealed ") else {
             return;
         };
@@ -178,6 +248,60 @@ impl SelfReports {
             self.revision = self.revision.wrapping_add(1);
         }
     }
+}
+
+/// Whether a valid loss summary invalidates collector stdout assembly.
+fn loss_summary(line: &str) -> Option<bool> {
+    let (role, rest) = line
+        .strip_prefix("diagnostic loss role=")?
+        .split_once(' ')?;
+    if !matches!(role, "collector" | "persister") {
+        return None;
+    }
+    let (stream, counts) = rest.strip_prefix("stream=")?.split_once(' ')?;
+    if !matches!(stream, "stdout" | "stderr") {
+        return None;
+    }
+    let counters = [
+        field::<u64>(counts, "queue_full=")?,
+        field::<u64>(counts, "staging_contention=")?,
+        field::<u64>(counts, "queue_contention=")?,
+        field::<u64>(counts, "oversize=")?,
+        field::<u64>(counts, "failed_delivery=")?,
+    ];
+    let setup_status: i32 = field(counts, "setup_status=")?;
+    let counts_inexact: u8 = field(counts, "counts_inexact=")?;
+    if counts_inexact > 1 {
+        return None;
+    }
+    if counts_inexact == 0 {
+        if counters.iter().all(|count| *count == 0) {
+            if setup_status == 0 {
+                return None;
+            }
+        }
+    }
+
+    Some(role == "collector" && stream == "stdout")
+}
+
+fn minute_ending(text: &str, tick: Option<&TickReport>) -> Option<u64> {
+    let tick = tick?;
+    let (range, _) = text.split_once(": ")?;
+    let (first, last) = range.split_once('-')?;
+    let first: u64 = first.parse().ok()?;
+    let last: u64 = last.parse().ok()?;
+    if first > tick.tick_first {
+        return None;
+    }
+    if tick.tick_first > tick.tick_last {
+        return None;
+    }
+    if last != tick.tick_last {
+        return None;
+    }
+
+    Some(tick.second)
 }
 
 fn push<T>(queue: &mut VecDeque<T>, item: T, limit: usize) {

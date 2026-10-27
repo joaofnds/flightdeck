@@ -70,7 +70,7 @@ impl Drop for Service {
 
         let released = unsafe { IOObjectRelease(self.0) };
         if let Err(error) = kern_return_check(released, "releasing an IOKit service") {
-            eprintln!("collector: {error}");
+            crate::diagnostics::error(format_args!("collector: {error}"));
         }
     }
 }
@@ -106,7 +106,7 @@ impl Drop for Connection {
 
         let closed = unsafe { IOServiceClose(self.0) };
         if let Err(error) = kern_return_check(closed, "closing the SMC connection") {
-            eprintln!("collector: {error}");
+            crate::diagnostics::error(format_args!("collector: {error}"));
         }
     }
 }

@@ -177,7 +177,9 @@ impl Source {
         if let Ok(value) = u64::try_from(value) {
             Some(value)
         } else {
-            eprintln!("collector: battery field {index} is negative: {value}");
+            crate::diagnostics::error(format_args!(
+                "collector: battery field {index} is negative: {value}"
+            ));
             None
         }
     }
@@ -197,7 +199,9 @@ fn dictionary_ref(value: *const c_void) -> Option<*const c_void> {
     if unsafe { CFGetTypeID(value) } == unsafe { CFDictionaryGetTypeID() } {
         Some(value)
     } else {
-        eprintln!("collector: battery snapshot member has a non-dictionary CF type");
+        crate::diagnostics::error(format_args!(
+            "collector: battery snapshot member has a non-dictionary CF type"
+        ));
         None
     }
 }
@@ -208,18 +212,24 @@ fn number(value: *const c_void, index: usize) -> Option<i64> {
     }
 
     if unsafe { CFGetTypeID(value) } != unsafe { CFNumberGetTypeID() } {
-        eprintln!("collector: battery field {index} has a non-number CF type");
+        crate::diagnostics::error(format_args!(
+            "collector: battery field {index} has a non-number CF type"
+        ));
         return None;
     }
 
     if unsafe { CFNumberIsFloatType(value) } != 0 {
-        eprintln!("collector: battery field {index} has a floating CF number");
+        crate::diagnostics::error(format_args!(
+            "collector: battery field {index} has a floating CF number"
+        ));
         return None;
     }
 
     let mut result = 0_i64;
     if unsafe { CFNumberGetValue(value, 4, ptr::from_mut(&mut result).cast()) } == 0 {
-        eprintln!("collector: battery field {index} cannot fit signed 64 bits");
+        crate::diagnostics::error(format_args!(
+            "collector: battery field {index} cannot fit signed 64 bits"
+        ));
         return None;
     }
 
@@ -232,7 +242,9 @@ fn boolean(value: *const c_void, index: usize) -> Option<bool> {
     }
 
     if unsafe { CFGetTypeID(value) } != unsafe { CFBooleanGetTypeID() } {
-        eprintln!("collector: battery field {index} has a non-boolean CF type");
+        crate::diagnostics::error(format_args!(
+            "collector: battery field {index} has a non-boolean CF type"
+        ));
         return None;
     }
 
@@ -256,7 +268,9 @@ impl Drop for Service {
         if self.0 != 0 {
             let status = unsafe { IOObjectRelease(self.0) };
             if status != 0 {
-                eprintln!("collector: battery service release failed: {status:#x}");
+                crate::diagnostics::error(format_args!(
+                    "collector: battery service release failed: {status:#x}"
+                ));
             }
         }
     }

@@ -153,7 +153,9 @@ impl Drop for Persister {
     fn drop(&mut self) {
         if let State::Running = self.state {
             if let Err(error) = self.terminate() {
-                eprintln!("collector: persistence child cleanup failed: {error}");
+                crate::diagnostics::error(format_args!(
+                    "collector: persistence child cleanup failed: {error}"
+                ));
             }
         }
     }

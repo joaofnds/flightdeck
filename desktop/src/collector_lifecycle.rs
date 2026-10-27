@@ -24,7 +24,7 @@ use diagnostics::Output;
 pub(super) use policy::Mode;
 use policy::{Action, Policy, RecordingStatus, Source, State};
 
-use crate::self_reports::SelfReports;
+use crate::self_reports::{OutputStream, SelfReports};
 
 pub(super) const STARTUP_LIMIT: Duration = policy::STARTUP_LIMIT;
 
@@ -311,15 +311,15 @@ impl CollectorSession {
         let second = wall_second()?;
         if let Some(standard) = &mut self.0.standard {
             standard.drain()?;
-            for line in standard.take_lines() {
-                self.0.reports.standard(&line, second);
-            }
+            self.0
+                .reports
+                .output(standard.take_lines(), OutputStream::Stdout, second);
         }
         if let Some(diagnostic) = &mut self.0.diagnostic {
             diagnostic.drain()?;
-            for line in diagnostic.take_lines() {
-                self.0.reports.diagnostic(&line);
-            }
+            self.0
+                .reports
+                .output(diagnostic.take_lines(), OutputStream::Stderr, second);
         }
         Ok(())
     }

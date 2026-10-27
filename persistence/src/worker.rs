@@ -79,10 +79,10 @@ fn run_paced(
                     drop(operation);
                     drop(watchdog);
                     let memory = crate::resources::Footprint::read()?;
-                    eprintln!(
+                    collector::diagnostics::error(format_args!(
                         "persister finished footprint_bytes={} footprint_bytes_max={}",
                         memory.current_bytes, memory.lifetime_bytes_max
-                    );
+                    ));
                     return Ok(Outcome::Complete);
                 }
             }
@@ -148,7 +148,9 @@ fn run_registry(
     if let Some(previous) = recovery.evictions {
         if evictions > previous {
             recovery.pending_unknown = true;
-            eprintln!("recording retention: retired ring evicted; unsealed extent unknown");
+            collector::diagnostics::error(format_args!(
+                "recording retention: retired ring evicted; unsealed extent unknown"
+            ));
         }
     } else {
         // The counter survives a worker crash before a seal; its extent remains unknown.
@@ -269,11 +271,11 @@ fn source_unavailable(
     state: &mut RunState,
     error: impl std::fmt::Display,
 ) {
-    eprintln!(
+    collector::diagnostics::error(format_args!(
         "recording unavailable run={} source={}: {error}; unsealed extent unknown",
         collector::recording::identity_text(registered.identity.run),
         registered.ring_name
-    );
+    ));
     state.source = SourceState::Unavailable;
 }
 
@@ -599,7 +601,7 @@ fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState)
         tables,
     };
     let committed = store.commit(pending, manifest)?;
-    eprintln!(
+    collector::diagnostics::error(format_args!(
         "persister sealed window={} publications={}..{} loss={} events_lost={} \
         seal_ns={} staged_bytes={} tables={}",
         committed.identity.window,
@@ -610,7 +612,7 @@ fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState)
         started.elapsed().as_nanos(),
         window.staged_bytes(),
         committed.tables.len()
-    );
+    ));
 
     Ok(true)
 }
@@ -627,10 +629,10 @@ fn seal_derived(derive: &dyn Derive, derivation: &Derivation<'_>) -> Result<Vec<
             Ok(tables)
         }
         Err(error) => {
-            eprintln!(
+            collector::diagnostics::error(format_args!(
                 "persister derived no tables window={}: {error}",
                 derivation.window.identity.window
-            );
+            ));
             for name in crate::schema::DERIVED_TABLES {
                 match std::fs::remove_file(derivation.pending.join(format!("{name}.parquet"))) {
                     Ok(()) => {}

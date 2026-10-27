@@ -1,0 +1,281 @@
+mod group;
+mod writer;
+
+use std::fmt;
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Barrier, Mutex, OnceLock};
+use std::thread::Thread;
+use std::time::{Duration, Instant};
+
+pub use group::Group;
+
+pub const GROUP_BYTES: usize = 8 * 1024;
+const QUEUE_SLOTS: usize = 4;
+const WRITER_STACK_BYTES: usize = 128 * 1024;
+const DRAIN_LIMIT: Duration = Duration::from_millis(100);
+
+const _: () = {
+    assert!(GROUP_BYTES > 5_028);
+    assert!(QUEUE_SLOTS > 1);
+    assert!(WRITER_STACK_BYTES > GROUP_BYTES * 2);
+};
+
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+static REPORTER: Reporter = Reporter::new();
+
+#[derive(Clone, Copy)]
+pub enum Role {
+    Collector,
+    Persister,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+impl Stream {
+    const fn index(self) -> usize {
+        match self {
+            Self::Stdout => 0,
+            Self::Stderr => 1,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
+}
+
+struct Reporter {
+    queue: Mutex<Queue>,
+    staging: Mutex<Group>,
+    loss: [Loss; 2],
+    enabled: [AtomicBool; 2],
+    role: AtomicU8,
+    thread: OnceLock<Thread>,
+    ready: Barrier,
+    stopping: AtomicBool,
+    stopped: AtomicBool,
+}
+
+struct Queue {
+    groups: [Group; QUEUE_SLOTS],
+    streams: [Stream; QUEUE_SLOTS],
+    first: usize,
+    count: usize,
+}
+
+struct Loss {
+    queue_full: AtomicU64,
+    staging_contention: AtomicU64,
+    queue_contention: AtomicU64,
+    oversize: AtomicU64,
+    failed_delivery: AtomicU64,
+    setup_status: AtomicI32,
+    counts_inexact: AtomicBool,
+}
+
+impl Loss {
+    const fn new() -> Self {
+        Self {
+            queue_full: AtomicU64::new(0),
+            staging_contention: AtomicU64::new(0),
+            queue_contention: AtomicU64::new(0),
+            oversize: AtomicU64::new(0),
+            failed_delivery: AtomicU64::new(0),
+            setup_status: AtomicI32::new(0),
+            counts_inexact: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Installs process-lifetime reporting before collection or persistence starts.
+pub fn install(role: Role) {
+    assert!(!INSTALLED.swap(true, Ordering::AcqRel));
+    REPORTER.role.store(
+        match role {
+            Role::Collector => 0,
+            Role::Persister => 1,
+        },
+        Ordering::Relaxed,
+    );
+    REPORTER.prepare();
+    writer::start(&REPORTER);
+}
+
+/// Allocates the collector's separate stdout staging buffer before collection starts.
+#[must_use]
+pub fn stdout_group() -> Box<Group> {
+    Box::new(Group::empty())
+}
+
+/// Reports one complete diagnostic event, retaining other callers' current policy.
+pub fn error(arguments: fmt::Arguments<'_>) {
+    if INSTALLED.load(Ordering::Acquire) {
+        REPORTER.diagnostic(arguments);
+    } else {
+        eprintln!("{arguments}");
+    }
+}
+
+/// Terminates normally after recording resources are released and a bounded final drain.
+pub fn exit(status: i32) -> ! {
+    if INSTALLED.load(Ordering::Acquire) {
+        REPORTER.stopping.store(true, Ordering::Release);
+        REPORTER.notify();
+        let deadline = Instant::now() + DRAIN_LIMIT;
+
+        for _attempt in 0..100 {
+            if REPORTER.stopped.load(Ordering::Acquire) {
+                break;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            std::thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
+    }
+    std::process::exit(status)
+}
+
+impl Reporter {
+    #[expect(
+        clippy::large_stack_arrays,
+        reason = "The production reporter is static; only tests construct local reporters."
+    )]
+    const fn new() -> Self {
+        Self {
+            queue: Mutex::new(Queue {
+                groups: [const { Group::empty() }; QUEUE_SLOTS],
+                streams: [Stream::Stdout; QUEUE_SLOTS],
+                first: 0,
+                count: 0,
+            }),
+            staging: Mutex::new(Group::empty()),
+            loss: [const { Loss::new() }; 2],
+            enabled: [const { AtomicBool::new(true) }; 2],
+            role: AtomicU8::new(0),
+            thread: OnceLock::new(),
+            ready: Barrier::new(2),
+            stopping: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+        }
+    }
+
+    fn prepare(&self) {
+        drop(match self.queue.lock() {
+            Ok(queue) => queue,
+            Err(error) => unreachable!("diagnostic queue poisoned: {error}"),
+        });
+        drop(match self.staging.lock() {
+            Ok(staging) => staging,
+            Err(error) => unreachable!("diagnostic staging poisoned: {error}"),
+        });
+    }
+
+    fn diagnostic(&self, arguments: fmt::Arguments<'_>) {
+        let stream = Stream::Stderr;
+        let loss = &self.loss[stream.index()];
+        if !self.enabled[stream.index()].load(Ordering::Relaxed) {
+            self.reject(loss, &loss.failed_delivery);
+            return;
+        }
+        let Ok(mut staging) = self.staging.try_lock() else {
+            self.reject(loss, &loss.staging_contention);
+            return;
+        };
+        staging.begin();
+        if fmt::write(&mut *staging, arguments).is_err() {
+            self.reject(loss, &loss.failed_delivery);
+            return;
+        }
+        if staging.write_all(b"\n").is_err() {
+            unreachable!("bounded staging absorbs byte-write errors");
+        }
+
+        self.admit(stream, &staging);
+    }
+
+    fn admit(&self, stream: Stream, group: &Group) {
+        let loss = &self.loss[stream.index()];
+        if !self.enabled[stream.index()].load(Ordering::Relaxed) {
+            self.reject(loss, &loss.failed_delivery);
+            return;
+        }
+        if group.oversized {
+            self.reject(loss, &loss.oversize);
+            return;
+        }
+        if group.length == 0 {
+            return;
+        }
+        let Ok(mut queue) = self.queue.try_lock() else {
+            self.reject(loss, &loss.queue_contention);
+            return;
+        };
+        assert!(queue.count <= QUEUE_SLOTS);
+        if queue.count == QUEUE_SLOTS {
+            self.reject(loss, &loss.queue_full);
+            return;
+        }
+        let index = (queue.first + queue.count) % QUEUE_SLOTS;
+        queue.groups[index].copy_from(group);
+        queue.streams[index] = stream;
+        queue.count += 1;
+        drop(queue);
+
+        self.notify();
+    }
+
+    fn take(&self, scratch: &mut Group) -> Option<Stream> {
+        let mut queue = match self.queue.lock() {
+            Ok(queue) => queue,
+            Err(error) => unreachable!("diagnostic queue poisoned: {error}"),
+        };
+        assert!(queue.count <= QUEUE_SLOTS);
+        if queue.count == 0 {
+            return None;
+        }
+        let first = queue.first;
+        scratch.copy_from(&queue.groups[first]);
+        let stream = queue.streams[first];
+        queue.first = (first + 1) % QUEUE_SLOTS;
+        queue.count -= 1;
+
+        Some(stream)
+    }
+
+    fn notify(&self) {
+        if let Some(thread) = self.thread.get() {
+            thread.unpark();
+        }
+    }
+
+    fn reject(&self, loss: &Loss, counter: &AtomicU64) {
+        increment(counter, &loss.counts_inexact);
+        self.notify();
+    }
+}
+
+fn increment(counter: &AtomicU64, counts_inexact: &AtomicBool) {
+    let count = counter.load(Ordering::Relaxed);
+    let result = counter.compare_exchange(
+        count,
+        count.saturating_add(1),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+
+    if result.is_err() {
+        counts_inexact.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests;

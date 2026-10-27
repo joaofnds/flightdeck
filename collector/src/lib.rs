@@ -4,6 +4,7 @@ pub mod clock_states;
 pub mod coalitions;
 pub mod collector;
 pub mod cost;
+pub mod diagnostics;
 pub mod disks;
 pub mod gpu_clients;
 pub mod gpu_memory;

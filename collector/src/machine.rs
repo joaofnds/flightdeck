@@ -328,7 +328,9 @@ impl Drop for MachMemory {
 
         let returned = self.drop_deallocate();
         if returned != kernel::KERN_SUCCESS {
-            eprintln!("collector: vm_deallocate returned {returned:#x}");
+            crate::diagnostics::error(format_args!(
+                "collector: vm_deallocate returned {returned:#x}"
+            ));
         }
     }
 }
