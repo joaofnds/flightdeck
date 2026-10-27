@@ -97,7 +97,7 @@ fn context_shape(observations: &Value) -> Result<&[Value], String> {
 }
 
 pub(crate) fn report(snapshot: &Snapshot) -> Result<Value, String> {
-    let resident = match snapshot.resident_history.as_deref() {
+    let resident = match snapshot.resident_history.as_deref().map(|value| &**value) {
         Some(ResidentHistory::Ready(_)) => json!({"state": "ready"}),
         Some(ResidentHistory::Unavailable(error)) => {
             json!({"state": "unavailable", "error": error})
@@ -109,7 +109,7 @@ pub(crate) fn report(snapshot: &Snapshot) -> Result<Value, String> {
             "power": attribution(Some(&histories.power)),
             "disk": attribution(Some(&histories.disk))})
     });
-    let process = match snapshot.process_history.as_deref() {
+    let process = match snapshot.process_history.as_deref().map(|value| &**value) {
         Some(
             crate::live_process_history::ProcessHistory::Ready { .. }
             | crate::live_process_history::ProcessHistory::All { .. },
@@ -122,7 +122,8 @@ pub(crate) fn report(snapshot: &Snapshot) -> Result<Value, String> {
     Ok(
         json!({"rankings": rankings(snapshot)?, "rank_window": rank_window(snapshot)?,
         "resident_history": resident, "overview_app_histories": overview,
-        "app_attribution_history": attribution(snapshot.app_attribution_history.as_deref()),
+        "app_attribution_history": attribution(
+            snapshot.app_attribution_history.as_deref().map(|value| &**value)),
         "process_history": process, "apps_present": snapshot.apps.is_some(),
         "detail_present": snapshot.detail.is_some(), "history_present": snapshot.history.is_some(),
         "app_parts_present": snapshot.app_parts.is_some(),
@@ -145,7 +146,7 @@ fn attribution(history: Option<&AppAttributionHistory>) -> Value {
 
 fn rankings(snapshot: &Snapshot) -> Result<Value, String> {
     use crate::live_rankings::Rankings;
-    let Some(rankings) = snapshot.rankings.as_deref() else {
+    let Some(rankings) = snapshot.rankings.as_deref().map(|value| &**value) else {
         return Ok(Value::Null);
     };
 

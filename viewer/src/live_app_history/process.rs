@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::trace::Totals;
 use super::{App, BYTES_MAX, History, Point, Target, TracePoint, apps, key};
+use crate::live_app_response::json::ProcessView;
 use crate::live_app_response::{Process, Sample};
 
 pub(crate) mod cohort;
@@ -332,6 +333,10 @@ pub(super) fn aggregate_totals(
 
 /// Adds a process of a sample to the totals of its group.
 fn add_process(totals: &mut apps::AppTotals, process: &Process) {
+    add_process_view(totals, &ProcessView::of(process));
+}
+
+pub(crate) fn add_process_view(totals: &mut apps::AppTotals, process: &ProcessView<'_>) {
     add(
         totals,
         &Member {

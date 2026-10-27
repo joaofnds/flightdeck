@@ -73,6 +73,7 @@ fn reconciliation_step(held: &mut super::Held, ring: &mut super::Ring, shared: &
 fn reconciliation_shared() -> super::Shared {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     super::Shared {
+        queries: None,
         mailbox: Mailbox::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),
@@ -134,7 +135,7 @@ fn resuming_preserves_the_first_unsealed_readings_machine_and_app_rates() {
     drop(view_where(&store, |_| true));
     fixture.publish_with_system_rows(101);
     let known = view_where(&store, |view| view.seconds.last().unwrap().publication == 2);
-    let expected = **known.seconds.last().unwrap();
+    let expected = (**known.seconds.last().unwrap()).clone();
     let expected_apps = std::sync::Arc::clone(known.apps.last().unwrap());
     drop(known);
     store.set_active(false);

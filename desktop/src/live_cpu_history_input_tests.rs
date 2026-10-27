@@ -218,13 +218,15 @@ impl CPUHistoryDriver {
             dashboard.accept(Box::new(Snapshot {
                 generation: dashboard.generation,
                 catalog: json!({"first_second":1000,"last_second":1001}),
-                selection: fixture.selection,
+                selection: crate::live_source::Presentation::Legacy(fixture.selection),
                 pages: BTreeMap::new(),
                 apps: None,
                 detail: None,
                 history: None,
                 cpu_detail: None,
-                cpu_history: Some(history),
+                cpu_history: Some(std::sync::Arc::new(
+                    crate::live_source::Presentation::Shared(history),
+                )),
                 resident_history: None,
                 app_attribution_history: None,
                 overview_app_histories: None,

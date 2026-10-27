@@ -122,8 +122,9 @@ impl InputDriver {
             sibling["publication"] = json!(3);
             sibling["wall_ns"] = json!(1_000_900_000_000_u64);
             sibling["battery"] = json!({"charge_percent":99,"power_watts":9});
-            snapshot.selection["summary"] = current.clone();
-            snapshot.selection["trends"] = json!([historical, current, sibling]);
+            snapshot.selection.legacy_mut().unwrap()["summary"] = current.clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"] =
+                json!([historical, current, sibling]);
             snapshot.catalog["path"] = json!("schematic-battery-input.recording");
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -170,10 +171,13 @@ impl InputDriver {
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = accepted_snapshot(generation);
             snapshot.catalog["path"] = preview.reading.catalog["path"].clone();
-            snapshot.selection["second"] = json!(preview.target.second);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.selection["summary"] = preview.reading.selection["summary"].clone();
-            snapshot.selection["trends"] = json!([snapshot.selection["summary"]]);
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(preview.target.second);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                preview.reading.selection["summary"].clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"] =
+                json!([snapshot.selection["summary"]]);
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             cx.notify();
         });
@@ -257,7 +261,7 @@ impl InputDriver {
         self.seed_schematic_battery(historical_battery);
         self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = dashboard.snapshot.as_mut().unwrap();
-            for point in snapshot.selection["trends"]
+            for point in snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
@@ -267,7 +271,8 @@ impl InputDriver {
                 point["memory_total_bytes"] = json!(34_359_738_368_u64);
                 point["fan_rpm"] = json!([1500, 1600]);
             }
-            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][1].clone();
             cx.notify();
         });
         self.context.run_until_parked();

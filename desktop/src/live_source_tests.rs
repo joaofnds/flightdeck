@@ -726,12 +726,16 @@ fn overview_ready(snapshot: &super::Snapshot) -> bool {
 
 /// Whether the snapshot carries the resident history, read rather than failed.
 fn resident_ready(snapshot: &super::Snapshot) -> bool {
-    snapshot.resident_history.as_deref().is_some_and(|history| {
-        matches!(
-            history,
-            crate::live_resident_history::ResidentHistory::Ready(_)
-        )
-    })
+    snapshot
+        .resident_history
+        .as_deref()
+        .map(|value| &**value)
+        .is_some_and(|history| {
+            matches!(
+                history,
+                crate::live_resident_history::ResidentHistory::Ready(_)
+            )
+        })
 }
 
 struct SnapshotReader {
@@ -745,6 +749,7 @@ impl SnapshotReader {
         Self {
             reader: super::Reader {
                 session: None,
+                store: None,
                 last_catalog: None,
                 last_generation: 0,
                 last_route: String::new(),
@@ -947,7 +952,7 @@ fn a_hover_read_brings_its_second_alone_and_keeps_the_context() {
     assert_eq!(snapshot.selection["summary"]["publication"], 2);
     assert!(snapshot.selection.get("trends").is_none());
     assert_eq!(
-        snapshot.cpu_detail.as_ref().unwrap().observation["publication"],
+        snapshot.cpu_detail.as_deref().unwrap().observation["publication"],
         2
     );
     assert!(snapshot.cpu_history.is_none());

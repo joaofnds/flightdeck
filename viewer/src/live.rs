@@ -805,6 +805,7 @@ impl LiveSession {
             context_last_second,
             context: &self.selected_context,
             live: self.cpu_history.as_ref(),
+            retained: None,
             saved: self
                 .history
                 .as_ref()

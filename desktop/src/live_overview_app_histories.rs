@@ -4,12 +4,12 @@ use std::sync::Arc;
 use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
 use crate::live_chart_view::AbsentChart;
 use crate::live_dashboard::LiveDashboard;
-use crate::live_source::Snapshot;
+use crate::live_source::{Presentation, Snapshot};
 
 pub struct OverviewAppHistories {
-    pub cpu: Arc<AppAttributionHistory>,
-    pub power: Arc<AppAttributionHistory>,
-    pub disk: Arc<AppAttributionHistory>,
+    pub cpu: Arc<Presentation<AppAttributionHistory>>,
+    pub power: Arc<Presentation<AppAttributionHistory>>,
+    pub disk: Arc<Presentation<AppAttributionHistory>>,
 }
 
 impl OverviewAppHistories {
@@ -31,7 +31,9 @@ impl Snapshot {
             return histories.history(metric);
         }
 
-        self.app_attribution_history.as_deref()
+        self.app_attribution_history
+            .as_deref()
+            .map(|history| &**history)
     }
 }
 

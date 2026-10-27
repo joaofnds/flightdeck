@@ -31,7 +31,7 @@ fn observe_next(mut fixture: Fixture, mut ring: Ring) -> (MachineSecond, AppsSec
     ring.read(|_, machine, apps| {
         let mut payload = AppsSecond::with_room();
         payload.take(apps, None, Some(&budget));
-        observed.push((*machine, payload));
+        observed.push((machine.clone(), payload));
         true
     })
     .unwrap();
@@ -230,7 +230,7 @@ fn an_overwritten_successor_does_not_resurrect_the_terminal_baseline() {
     ring.read(|_, machine, apps| {
         let mut captured = AppsSecond::with_room();
         captured.take(apps, None, Some(&budget));
-        observed.push((*machine, captured));
+        observed.push((machine.clone(), captured));
         true
     })
     .unwrap();
@@ -297,9 +297,9 @@ fn an_exhausted_terminal_publication_is_refused_without_wrapping() {
 }
 
 #[test]
-fn a_refused_terminal_sample_preserves_only_the_machine_predecessor() {
-    // Goal: a refused process sample neither erases machine state nor revives an old frame.
-    // Method: seal a normal/refused pair and read its adjacent successful successor from the ring.
+fn a_refused_terminal_presentation_preserves_the_valid_input_predecessor() {
+    // Goal: presentation capacity cannot erase the independently valid process predecessor.
+    // Method: seal a valid oversized sample, then read its adjacent successful successor.
     let mut fixture = Fixture::new_mode(true, 2_000, None);
     crate::store::tests::expand_program_dictionary(&mut fixture);
     crate::store::tests::publish_named_processes(&mut fixture, 58, &[b"small"], 1);
@@ -317,7 +317,7 @@ fn a_refused_terminal_sample_preserves_only_the_machine_predecessor() {
     })
     .unwrap();
     let terminal = outcome.terminal.unwrap();
-    assert!(terminal.process.is_none());
+    assert!(terminal.process.is_some());
     assert_eq!(terminal.machine.ticks.len(), 1);
     assert_eq!(terminal.machine.ticks[0].publication, 2);
     assert_eq!(
@@ -336,7 +336,7 @@ fn a_refused_terminal_sample_preserves_only_the_machine_predecessor() {
     ring.read(|_, machine, apps| {
         let mut second = AppsSecond::with_room();
         second.take(apps, None, Some(&budget));
-        observed.push((*machine, second));
+        observed.push((machine.clone(), second));
         true
     })
     .unwrap();
@@ -344,8 +344,18 @@ fn a_refused_terminal_sample_preserves_only_the_machine_predecessor() {
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].0.publication, 3);
     assert!(observed[0].0.follows);
-    assert_eq!(observed[0].1.processes.as_ref().unwrap().previous, None);
-    assert_eq!(observed[0].1.elapsed_ns, None);
+    assert_eq!(
+        observed[0]
+            .1
+            .processes
+            .as_ref()
+            .unwrap()
+            .previous
+            .unwrap()
+            .publication,
+        2
+    );
+    assert_eq!(observed[0].1.elapsed_ns, Some(1_000_000_000));
 }
 
 #[test]
@@ -358,6 +368,8 @@ fn cancellation_rejects_a_finished_report_before_installing_its_handoff() {
     let outcome = recording::Outcome {
         left_out: None,
         terminal: Some(terminal),
+        checked_catalog: None,
+        decoded_catalog: recording::DecodedCatalog::default(),
     };
     let mut held = crate::store::Held::new();
     let mut ring = Ring::new(fixture.root.clone());
@@ -378,6 +390,5 @@ fn cancellation_rejects_a_finished_report_before_installing_its_handoff() {
     assert!(published.is_err());
     assert!(mailbox.take().is_none());
     assert!(ring.terminal.is_none());
-    assert!(ring.source.as_ref().unwrap().previous.ticks.is_empty());
-    assert!(ring.source.as_ref().unwrap().previous_frame.is_none());
+    assert!(ring.source.is_none());
 }

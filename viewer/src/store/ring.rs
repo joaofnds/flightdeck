@@ -4,6 +4,7 @@
 use std::io::ErrorKind;
 use std::mem;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -15,18 +16,22 @@ use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
 use persistence::{Error, NumberedEvent};
 
 use super::apps::TickApps;
+use super::native::{Input, OwnedFrame, PrepareError, Prepared};
 use super::{Failure, MachineSecond, readings};
+use crate::cancellation::Operation;
 use crate::live_app_response::Sample;
 use crate::live_apps::committed::Endpoint;
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::recording::MachineMinute;
+#[path = "native_workspace.rs"]
+mod native_workspace;
 
 #[cfg(test)]
 #[path = "handoff_tests.rs"]
 mod handoff_tests;
 
 /// The ticks one read takes in, well above the ticks a ring publishes between two steps.
-const TICKS_PER_READ_MAX: usize = 256;
+pub(super) const TICKS_PER_READ_MAX: usize = 256;
 
 /// The steps between two looks at the runs registry for a newer run than the one the store
 /// follows, so a step between two of the ring's ticks reads no file.
@@ -37,6 +42,7 @@ const MAPPED_BYTES_MAX: usize = 1 << 30;
 
 pub(super) struct Ring {
     root: PathBuf,
+    budget: Option<Arc<super::ByteBudget>>,
     runs: PathBuf,
     registry: RegistryBuffer,
     source: Option<Source>,
@@ -57,6 +63,13 @@ pub(super) struct Ring {
 enum Delta {
     Covered,
     Overrun,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Status {
+    pub identity: RunIdentity,
+    pub completed: bool,
+    pub losses: persistence::Losses,
 }
 
 /// The ring of one run, and the room to take its ticks in.
@@ -80,11 +93,20 @@ struct Source {
     previous_endpoint: Option<Endpoint>,
     /// The App rule's sample of the tick read last.
     sample: Option<Box<Sample>>,
+    native_pending: Option<Prepared>,
+    native_frame: Option<OwnedFrame>,
+    native_events_ready: bool,
+    native_workspace: Option<super::ByteReservation>,
+    /// Saved minute capacities exceeding the two existing native machine buffers.
+    terminal_workspace: Option<super::ByteReservation>,
+    machine_workspace_bytes: usize,
+    losses: persistence::Losses,
 }
 
 impl Ring {
     pub(super) fn new(root: PathBuf) -> Self {
         Self {
+            budget: None,
             runs: root.join("runs"),
             root,
             registry: [0; _],
@@ -97,6 +119,68 @@ impl Ring {
             published: false,
             delta: None,
         }
+    }
+
+    pub(super) fn with_budget(root: PathBuf, budget: Arc<super::ByteBudget>) -> Self {
+        let mut ring = Self::new(root);
+        ring.budget = Some(budget);
+        ring
+    }
+
+    /// Prepares at most one publication so its payload sees the newest accepted App names.
+    pub(super) fn read_prepared(
+        &mut self,
+        budget: &Arc<super::ByteBudget>,
+        operation: &Operation,
+        previous_apps: Option<&super::AppsSecond>,
+        mut push: impl FnMut(&RunIdentity, &mut Prepared) -> bool,
+    ) -> Result<super::native::NativeRead, PrepareError> {
+        use super::native::NativeRead;
+        assert!(
+            self.budget
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, budget))
+        );
+        let Some(source) = &mut self.source else {
+            return Ok(NativeRead::Idle);
+        };
+        assert!(source.native_workspace.is_some());
+        operation.check().map_err(PrepareError::Source)?;
+        if source.native_pending.is_none() {
+            match source.read_tick().map_err(|error| {
+                source.complete = false;
+                PrepareError::Source(error.into())
+            })? {
+                Found::Publication { publication, .. } => {
+                    self.published = true;
+                    source.begin_native(publication)?;
+                }
+                Found::Missed { .. } => {
+                    source.complete = false;
+                    if self.delta.is_some() {
+                        self.delta = Some(Delta::Overrun);
+                    }
+                    return Ok(NativeRead::Missed);
+                }
+                Found::Nothing => return Ok(NativeRead::Idle),
+            }
+        }
+        source.prepare_native(budget, operation, previous_apps)?;
+        let prepared = source
+            .native_pending
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("native candidate"));
+        prepared.apps.metadata.origin = super::native::Origin::Live(source.losses);
+        if !push(&source.identity, prepared) {
+            return Ok(NativeRead::Blocked);
+        }
+        let accepted = source
+            .native_pending
+            .take()
+            .unwrap_or_else(|| unreachable!("accepted native candidate"));
+        source.native_frame = accepted.into_frame();
+        mem::swap(&mut source.current, &mut source.previous);
+        Ok(NativeRead::Accepted)
     }
 
     pub(super) fn accept(&mut self, terminal: Option<super::recording::Terminal>) {
@@ -199,6 +283,13 @@ impl Ring {
         if self.pending.is_some() {
             return Ok(false);
         }
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|source| source.native_pending.is_some())
+        {
+            return Ok(false);
+        }
 
         let Some(source) = &mut self.source else {
             return Ok(true);
@@ -231,6 +322,18 @@ impl Ring {
         }
 
         source.complete
+    }
+
+    pub(super) fn identity(&self) -> Option<RunIdentity> {
+        self.source.as_ref().map(|source| source.identity)
+    }
+
+    pub(super) fn status(&self) -> Option<Status> {
+        self.source.as_ref().map(|source| Status {
+            identity: source.identity,
+            completed: source.reader.completed(),
+            losses: source.losses,
+        })
     }
 
     /// Rechecks the source on show while keeping the current run's reader and rate predecessor.
@@ -283,7 +386,10 @@ impl Ring {
             .max(source.reader.publication_first());
         let cursor = match &self.pending {
             Some((second, _)) => second.publication,
-            None => source.reader.next_publication(),
+            None => source.native_pending.as_ref().map_or_else(
+                || source.reader.next_publication(),
+                |prepared| prepared.observation.stamp.publication,
+            ),
         };
         if cursor
             != checkpoint
@@ -369,10 +475,8 @@ impl Ring {
             }
         }
 
-        let mut source = Source::open(reader, identity)?;
-        if let Some(terminal) = self.terminal.take() {
-            source.accept(terminal)?;
-        }
+        let mut source = Source::open(reader, identity, self.budget.as_ref())?;
+        source.accept(&mut self.terminal, self.budget.as_ref())?;
         self.source = Some(source);
         self.registered = true;
         Ok(())
@@ -404,7 +508,7 @@ impl Ring {
             thread::sleep(timeout);
             return Ok(());
         };
-        if self.pending.is_some() {
+        if self.pending.is_some() || source.native_pending.is_some() {
             thread::sleep(timeout);
             return Ok(());
         }
@@ -439,35 +543,85 @@ impl Source {
         Ok(())
     }
 
-    fn accept(&mut self, terminal: super::recording::Terminal) -> Result<(), Failure> {
-        if terminal.run != self.identity {
+    fn accept(
+        &mut self,
+        terminal: &mut Option<super::recording::Terminal>,
+        budget: Option<&Arc<super::ByteBudget>>,
+    ) -> Result<(), Failure> {
+        let Some(incoming) = terminal.as_ref() else {
+            return Ok(());
+        };
+        if incoming.run != self.identity {
+            drop(terminal.take());
             return Ok(());
         }
-        assert_eq!(terminal.machine.ticks.len(), 1);
-        let publication = terminal.machine.ticks[0].publication;
+        assert_eq!(incoming.machine.ticks.len(), 1);
+        let publication = incoming.machine.ticks[0].publication;
         let next = publication.checked_add(1).ok_or(Failure::TickShape)?;
-        self.complete = next >= self.reader.next_publication();
+        let complete = next >= self.reader.next_publication();
+        let machine = budget
+            .map(|budget| {
+                budget
+                    .reserve(incoming.machine.heap_bytes())
+                    .ok_or(Failure::Budget)
+            })
+            .transpose()?;
+        let frame_reservation = budget
+            .map(|budget| {
+                incoming
+                    .process
+                    .as_ref()
+                    .map(|before| budget.reserve(before.bytes()).ok_or(Failure::Budget))
+                    .transpose()
+            })
+            .transpose()?
+            .flatten();
         self.reader
             .seek_publication(next)
             .map_err(|error| Failure::Ring(error.kind()))?;
+        let terminal = terminal
+            .take()
+            .unwrap_or_else(|| unreachable!("admitted terminal"));
+        self.complete = complete;
         self.previous = terminal.machine;
+        self.terminal_workspace = machine;
+        self.shrink_terminal_workspace();
         if let Some(before) = terminal.process {
             let (endpoint, frame) = before.into_parts();
             self.previous_endpoint = Some(endpoint);
-            self.previous_frame = Some(frame);
+            match frame_reservation {
+                Some(reservation) => {
+                    self.native_frame = Some(OwnedFrame::from_reserved(frame, reservation));
+                }
+                None => self.previous_frame = Some(frame),
+            }
         }
 
         Ok(())
     }
 
     /// The run's ring with room for its ticks, allocated once, as the run is followed.
-    fn open(reader: RingReader, identity: RunIdentity) -> Result<Self, Failure> {
+    fn open(
+        reader: RingReader,
+        identity: RunIdentity,
+        budget: Option<&Arc<super::ByteBudget>>,
+    ) -> Result<Self, Failure> {
         let shape = reader.shape();
+        let native_workspace = budget
+            .map(|budget| {
+                let bytes = native_workspace::bytes(&shape).map_err(|_| Failure::TickShape)?
+                    + size_of::<Self>();
+                budget.reserve(bytes).ok_or(Failure::Budget)
+            })
+            .transpose()?;
         let tick = persistence::tick_buffer(&shape).map_err(|_| Failure::TickShape)?;
 
         let processes = count(shape.process_capacity)?;
         let complete = reader.next_publication() == reader.publication_first();
 
+        let current = minute_of(&shape)?;
+        let previous = minute_of(&shape)?;
+        let machine_workspace_bytes = current.heap_bytes() + previous.heap_bytes();
         Ok(Self {
             reader,
             identity,
@@ -476,13 +630,96 @@ impl Source {
             identities: Vec::with_capacity(processes),
             events: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             event_identities: Vec::with_capacity(EVENTS_PER_TICK_MAX),
-            current: minute_of(&shape)?,
-            previous: minute_of(&shape)?,
+            current,
+            previous,
             frame: None,
             previous_frame: None,
             previous_endpoint: None,
             sample: None,
+            native_pending: None,
+            native_frame: None,
+            native_events_ready: false,
+            native_workspace,
+            terminal_workspace: None,
+            machine_workspace_bytes,
+            losses: persistence::Losses::default(),
         })
+    }
+
+    fn begin_native(&mut self, publication: u64) -> Result<(), PrepareError> {
+        if self.tick.times.is_none() {
+            self.losses.unknown = true;
+        }
+        self.current.clear();
+        self.current.push_tick(publication, &self.tick);
+        self.shrink_terminal_workspace();
+        self.native_pending = Some(Prepared::new(&Publication {
+            reader: &self.reader,
+            tick: &self.tick,
+            identities: &self.identities,
+            publication,
+        })?);
+        self.native_events_ready = false;
+        Ok(())
+    }
+
+    fn shrink_terminal_workspace(&mut self) {
+        if let Some(reservation) = &mut self.terminal_workspace {
+            let bytes = (self.current.heap_bytes() + self.previous.heap_bytes())
+                .saturating_sub(self.machine_workspace_bytes);
+            reservation.shrink_to(bytes);
+        }
+    }
+
+    fn prepare_native(
+        &mut self,
+        budget: &Arc<super::ByteBudget>,
+        operation: &Operation,
+        previous_apps: Option<&super::AppsSecond>,
+    ) -> Result<(), PrepareError> {
+        if self.native_frame.is_none() {
+            self.native_frame = OwnedFrame::adopt(&mut self.previous_frame, budget)?;
+        }
+        if !self.native_events_ready {
+            self.apps_capture_events().map_err(PrepareError::Source)?;
+            self.native_events_ready = true;
+        }
+        let prepared = self
+            .native_pending
+            .as_mut()
+            .unwrap_or_else(|| unreachable!("native candidate"));
+        if prepared.ready() {
+            return operation.check().map_err(PrepareError::Source);
+        }
+        let numbered: Vec<_> = self
+            .events
+            .iter()
+            .map(|(number, tick, event)| NumberedEvent {
+                number: *number,
+                tick: *tick,
+                event,
+            })
+            .collect();
+        prepared.resume(
+            &Input {
+                source: Publication {
+                    reader: &self.reader,
+                    tick: &self.tick,
+                    identities: &self.identities,
+                    publication: prepared.observation.stamp.publication,
+                },
+                events: PublicationEvents {
+                    events: &numbered,
+                    identities: &self.event_identities,
+                },
+                current: &self.current,
+                previous: &self.previous,
+                previous_frame: self.native_frame.as_ref().map(OwnedFrame::get),
+                previous_apps,
+            },
+            budget,
+            operation,
+        )
     }
 
     /// Reads the ring's next tick, with its processes' identities where the ring holds them.
@@ -505,6 +742,9 @@ impl Source {
                 publication,
                 persistence::work::ingestion::Kind::RingRead,
             );
+        }
+        if let Found::Missed { first, end } = found {
+            self.losses.publications += end - first;
         }
 
         Ok(found)
@@ -595,6 +835,7 @@ impl Source {
     fn apps_capture_events(&mut self) -> persistence::Result<()> {
         self.events.clear();
         self.event_identities.clear();
+        let mut losses = self.losses;
         if self.tick.events.is_empty() {
             return Ok(());
         }
@@ -603,6 +844,7 @@ impl Source {
         let identities = self.reader.dictionary_capacity().is_some();
         for _ in 0..=EVENTS_PER_TICK_MAX {
             if self.reader.next_event() >= self.tick.events.end {
+                self.losses = losses;
                 return Ok(());
             }
 
@@ -613,8 +855,14 @@ impl Source {
                 self.reader.read_event()?
             };
             match found {
-                FoundEvent::Nothing => return Ok(()),
-                FoundEvent::Missed { .. } => {}
+                FoundEvent::Nothing => {
+                    losses.unknown = true;
+                    self.losses = losses;
+                    return Ok(());
+                }
+                FoundEvent::Missed { first, end } => {
+                    losses.events += end.min(self.tick.events.end) - first;
+                }
                 FoundEvent::Event {
                     number,
                     tick,

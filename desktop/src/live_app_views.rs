@@ -143,7 +143,7 @@ impl LiveDashboard {
         let snapshot = self.reading_snapshot();
         if let Some(app) = self.current_app() {
             let loaded = snapshot
-                .and_then(|snapshot| snapshot.detail.as_ref())
+                .and_then(|snapshot| snapshot.detail.as_deref())
                 .and_then(|detail| detail["processes"].as_array())
                 .map_or(0, Vec::len);
             parts.push(format!(
@@ -158,7 +158,7 @@ impl LiveDashboard {
                 },
             ));
         }
-        if let Some(page) = snapshot.and_then(|snapshot| snapshot.apps.as_ref()) {
+        if let Some(page) = snapshot.and_then(|snapshot| snapshot.apps.as_deref()) {
             if page["ungrouped_members"]
                 .as_u64()
                 .is_some_and(|count| count > 0)
@@ -261,7 +261,7 @@ impl LiveDashboard {
 
     pub(crate) fn current_app(&self) -> Option<&Value> {
         let snapshot = self.reading_snapshot()?;
-        Some(&selected_detail(snapshot.detail.as_ref(), self.request.app.as_ref())?["app"])
+        Some(&selected_detail(snapshot.detail.as_deref(), self.request.app.as_ref())?["app"])
     }
 
     fn app_at(&self, index: usize) -> Option<&Value> {

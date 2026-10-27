@@ -64,6 +64,10 @@ impl Key<'_> {
 
 pub(crate) enum Sources<'a> {
     Saved(&'a crate::metrics::Tables),
+    Machine {
+        current: &'a crate::store::Reading<'a>,
+        previous: Option<&'a crate::store::Reading<'a>>,
+    },
     Native {
         current: &'a Raw,
         previous: Option<&'a Raw>,
@@ -86,6 +90,16 @@ impl<'a> Sources<'a> {
         name: &'static str,
     ) -> Result<Option<View<'a>>> {
         match self {
+            Self::Machine { current, previous } => {
+                let reading = if current.tick.publication == observation.publication {
+                    *current
+                } else {
+                    previous.ok_or(Error::Bound("native metric predecessor"))?
+                };
+                Ok(Some(View::Native(crate::live_raw::View::machine(
+                    reading, name,
+                )?)))
+            }
             Self::Saved(tables) => Ok(tables
                 .get(&(observation.window, name))
                 .and_then(|table| table.get(&observation.publication))
@@ -108,7 +122,7 @@ impl<'a> Sources<'a> {
     pub fn holds(&self, observation: &crate::session::Observation, name: &str) -> bool {
         match self {
             Self::Saved(tables) => tables.contains_key(&(observation.window, name)),
-            Self::Native { .. } => true,
+            Self::Native { .. } | Self::Machine { .. } => true,
         }
     }
 }

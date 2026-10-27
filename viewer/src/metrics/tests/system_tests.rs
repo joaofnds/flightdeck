@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn typed_presentation_preserves_legacy_machine_text_and_integer_ranges() {
+    // Goal: typed summary capture does not add the native fact decoder's admission rules.
+    // Method: keep an empty label, a long saved label and a full-width count in old output.
+    let mut fixture = system_fixture(&[]);
+    let long = "x".repeat(collector::system::FACT_BYTES_MAX + 1);
+    set(fixture.row("ticks", 2), 0, "machine_model", Some(""));
+    set(fixture.row("ticks", 2), 0, "machine_chip", Some(&long));
+    set(
+        fixture.row("ticks", 2),
+        0,
+        "machine_cpu_cores",
+        Some("18446744073709551615"),
+    );
+
+    let point = fixture.point();
+
+    assert_eq!(point["machine_model"], "");
+    assert_eq!(point["machine_chip"], long);
+    assert_eq!(point["machine_cpu_cores"], u64::MAX);
+}
+
+#[test]
 fn projects_the_system_readings_and_machine_facts_a_tick_recorded() {
     // Goal: every system reading and machine fact reaches the point as the collector recorded it.
     // Method: give the current tick a whole group of literal readings and read the point.

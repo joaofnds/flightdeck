@@ -1,4 +1,76 @@
 #[test]
+fn keeps_budgeted_raw_facts_charged_until_the_last_reader_releases_them() {
+    // Goal: a raw page's immutable owner keeps its reservation after cache eviction.
+    // Method: capture a native publication, share its owner, and release both readers.
+    let mut fixture = RingFixture::new_following();
+    fixture.publish_following(1);
+    let session = LiveSession::open(&fixture.root).unwrap();
+    let source = &session.sources[0];
+    let budget = Arc::new(crate::byte_budget::ByteBudget::new(128 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut raw = None;
+
+    Raw::capture_budgeted(
+        &Publication {
+            reader: &source.reader,
+            tick: &source.tick,
+            identities: &source.identities,
+            publication: 1,
+        },
+        &PublicationEvents {
+            events: &[],
+            identities: &[],
+        },
+        &operation,
+        Some(&budget),
+        &mut raw,
+    )
+    .unwrap();
+    let raw = Arc::new(raw.unwrap());
+    let reader = Arc::clone(&raw);
+    let charged = raw.bytes() + 2 * size_of::<usize>();
+    drop(raw);
+
+    assert_eq!(budget.used(), charged);
+    assert_eq!(reader.page("fans", 0, &operation).unwrap().rows.len(), 2);
+    drop(reader);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn refuses_raw_capture_before_allocating_without_changing_the_output_owner() {
+    // Goal: raw admission failure cannot publish an uncharged partial observation.
+    // Method: capture a valid native publication under a zero-byte shared budget.
+    let mut fixture = RingFixture::new_following();
+    fixture.publish_following(1);
+    let session = LiveSession::open(&fixture.root).unwrap();
+    let source = &session.sources[0];
+    let budget = Arc::new(crate::byte_budget::ByteBudget::new(0));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut raw = None;
+
+    let result = Raw::capture_budgeted(
+        &Publication {
+            reader: &source.reader,
+            tick: &source.tick,
+            identities: &source.identities,
+            publication: 1,
+        },
+        &PublicationEvents {
+            events: &[],
+            identities: &[],
+        },
+        &operation,
+        Some(&budget),
+        &mut raw,
+    );
+
+    assert!(matches!(result, Err(crate::live_raw::CaptureError::Budget)));
+    assert!(raw.is_none());
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn does_not_report_a_cancelled_raw_capture_as_complete() {
     // Goal: a cancelled candidate contributes attempted work but no completed raw capture.
     // Method: reuse a real publication and interrupt its operation before owned capture ends.
@@ -122,34 +194,9 @@ fn keeps_machine_decimal_presentation_and_multiplication_first_rates() {
 fn preserves_populated_live_core_level_states_without_retaining_a_table() {
     // Goal: the extra public live page survives typed retention and leaves saved behavior intact.
     // Method: publish four real cores, attach decoded level facts, then page and seal that tick.
-    let mut fixture = RingFixture::new_with_shape(&Shape {
-        slot_count: 2,
-        cpu_capacity: 4,
-        interface_capacity: 1,
-        core_capacity: 4,
-        state_capacity: 2,
-        fan_capacity: 1,
-        process_capacity: 1,
-        coalition_capacity: 1,
-        event_capacity: 8,
-    });
+    let mut fixture = RingFixture::new_with_shape(&TYPED_CORE_SHAPE);
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    typed_core_publish(&mut fixture);
-    assert!(matches!(
-        session.sources[0].read_tick().unwrap(),
-        Found::Publication { .. }
-    ));
-    let level = |name: &[u8]| collector::system::PerformanceLevel {
-        name: collector::system::FactText::new(name).unwrap(),
-        logical_cpus: 2,
-    };
-    session.sources[0].tick.system = Some(collector::ring::SystemSnapshot {
-        machine: collector::system::MachineFacts {
-            levels: Some([level(b"Fast"), level(b"Slow")]),
-            ..collector::system::MachineFacts::default()
-        },
-        ..collector::ring::SystemSnapshot::default()
-    });
+    typed_core_read(&mut fixture, &mut session);
     session.poll_publication(0, 1).unwrap();
     session.follow_latest().unwrap();
 
@@ -187,6 +234,150 @@ fn preserves_populated_live_core_level_states_without_retaining_a_table() {
     let mut saved = Session::open(&fixture.root).unwrap();
     saved.select(1000, 0).unwrap();
     assert!(saved.page("core_level_states", 0).is_err());
+}
+
+#[test]
+fn refuses_raw_core_validation_without_scratch_room_and_accepts_the_retry() {
+    // Goal: core validation cannot allocate outside the shared candidate admission.
+    // Method: leave only retained-fact room, then release scratch room and retry the same tick.
+    let mut fixture = RingFixture::new_with_shape(&TYPED_CORE_SHAPE);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    typed_core_read(&mut fixture, &mut session);
+    let source = &session.sources[0];
+    let mut probe = None;
+    typed_raw_capture(source, None, &mut probe).unwrap();
+    let charged = probe.as_ref().unwrap().bytes() + 2 * size_of::<usize>();
+    drop(probe);
+    let scratch = 64 * 1024;
+    let budget = Arc::new(crate::byte_budget::ByteBudget::new(charged + scratch));
+    let held = budget.reserve(scratch).unwrap();
+    let mut raw = None;
+
+    let refused = typed_raw_capture(source, Some(&budget), &mut raw);
+
+    assert!(matches!(
+        refused,
+        Err(crate::live_raw::CaptureError::Budget)
+    ));
+    assert!(raw.is_none());
+    assert_eq!(budget.used(), scratch);
+    drop(held);
+    typed_raw_capture(source, Some(&budget), &mut raw).unwrap();
+    assert_eq!(budget.used(), charged);
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    assert_eq!(
+        raw.as_ref()
+            .unwrap()
+            .page("core_level_states", 0, &operation)
+            .unwrap()
+            .rows
+            .len(),
+        4
+    );
+    drop(raw);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn keeps_core_validation_scratch_charged_only_while_building_the_candidate() {
+    // Goal: a completed Raw retains its facts while temporary validation room is released.
+    // Method: capture populated native levels and compare current and peak admission.
+    let mut fixture = RingFixture::new_with_shape(&TYPED_CORE_SHAPE);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    typed_core_read(&mut fixture, &mut session);
+    let budget = Arc::new(crate::byte_budget::ByteBudget::new(64 * 1024 * 1024));
+    let mut raw = None;
+
+    typed_raw_capture(&session.sources[0], Some(&budget), &mut raw).unwrap();
+
+    let charged = raw.as_ref().unwrap().bytes() + 2 * size_of::<usize>();
+    assert_eq!(budget.used(), charged);
+    assert!(budget.used_peak() > charged);
+    drop(raw);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn needs_no_core_validation_scratch_when_performance_levels_are_absent() {
+    // Goal: absent level metadata does not reserve temporary aggregation storage.
+    // Method: keep native core rows but capture without levels at the exact retained bound.
+    let mut fixture = RingFixture::new_with_shape(&TYPED_CORE_SHAPE);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    typed_core_read(&mut fixture, &mut session);
+    session.sources[0]
+        .tick
+        .system
+        .as_mut()
+        .unwrap()
+        .machine
+        .levels = None;
+    let source = &session.sources[0];
+    let mut probe = None;
+    typed_raw_capture(source, None, &mut probe).unwrap();
+    let charged = probe.as_ref().unwrap().bytes() + 2 * size_of::<usize>();
+    drop(probe);
+    let budget = Arc::new(crate::byte_budget::ByteBudget::new(charged));
+    let mut raw = None;
+
+    typed_raw_capture(source, Some(&budget), &mut raw).unwrap();
+
+    assert_eq!(budget.used(), charged);
+    assert_eq!(budget.used_peak(), charged);
+    drop(raw);
+    assert_eq!(budget.used(), 0);
+}
+
+const TYPED_CORE_SHAPE: Shape = Shape {
+    slot_count: 2,
+    cpu_capacity: 4,
+    interface_capacity: 1,
+    core_capacity: 4,
+    state_capacity: 2,
+    fan_capacity: 1,
+    process_capacity: 1,
+    coalition_capacity: 1,
+    event_capacity: 8,
+};
+
+fn typed_core_read(fixture: &mut RingFixture, session: &mut LiveSession) {
+    typed_core_publish(fixture);
+    assert!(matches!(
+        session.sources[0].read_tick().unwrap(),
+        Found::Publication { .. }
+    ));
+    let level = |name: &[u8]| collector::system::PerformanceLevel {
+        name: collector::system::FactText::new(name).unwrap(),
+        logical_cpus: 2,
+    };
+    session.sources[0].tick.system = Some(collector::ring::SystemSnapshot {
+        machine: collector::system::MachineFacts {
+            levels: Some([level(b"Fast"), level(b"Slow")]),
+            ..collector::system::MachineFacts::default()
+        },
+        ..collector::ring::SystemSnapshot::default()
+    });
+}
+
+fn typed_raw_capture(
+    source: &Source,
+    budget: Option<&Arc<crate::byte_budget::ByteBudget>>,
+    output: &mut Option<Raw>,
+) -> std::result::Result<(), crate::live_raw::CaptureError> {
+    Raw::capture_budgeted(
+        &Publication {
+            reader: &source.reader,
+            tick: &source.tick,
+            identities: &source.identities,
+            publication: 1,
+        },
+        &PublicationEvents {
+            events: &[],
+            identities: &[],
+        },
+        &Arc::new(Cancellation::default()).operation(0).unwrap(),
+        budget,
+        output,
+    )
 }
 
 fn typed_core_publish(fixture: &mut RingFixture) {

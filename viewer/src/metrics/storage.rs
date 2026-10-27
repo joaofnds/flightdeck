@@ -17,18 +17,82 @@ const RATE_FIELDS: [&str; 8] = [
     "write_mean_ms",
 ];
 
-pub(super) fn point(
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StoragePoint {
+    state: ScanState,
+    rates: [Option<f64>; 8],
+    devices: Vec<DevicePoint>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DevicePoint {
+    driver_id: u64,
+    media_id: u64,
+    name: [u8; collector::disks::NAME_BYTES],
+    rates: [Option<f64>; 8],
+}
+
+impl StoragePoint {
+    pub fn byte_rates(&self) -> [Option<f64>; 2] {
+        [self.rates[0], self.rates[1]]
+    }
+
+    pub fn json(&self) -> Value {
+        let mut value = rates_json(&self.rates);
+        value["state"] = json!(match self.state {
+            ScanState::Complete => "complete",
+            ScanState::Failed => "failed",
+            ScanState::Exhausted => "exhausted",
+            ScanState::Partial => "partial",
+        });
+        value["devices"] = json!(
+            self.devices
+                .iter()
+                .map(DevicePoint::json)
+                .collect::<Vec<_>>()
+        );
+        value
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.devices.capacity() * size_of::<DevicePoint>()
+    }
+
+    pub fn retained_bytes(count: usize) -> usize {
+        assert!(count <= DISKS_MAX);
+        count * size_of::<DevicePoint>()
+    }
+}
+
+impl DevicePoint {
+    fn json(&self) -> Value {
+        let mut value = rates_json(&self.rates);
+        value["driver_id"] = json!(self.driver_id);
+        value["media_id"] = json!(self.media_id);
+        let end = self
+            .name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or_else(|| unreachable!("validated disk name"));
+        let name = std::str::from_utf8(&self.name[..end])
+            .unwrap_or_else(|_| unreachable!("validated disk encoding"));
+        value["name"] = json!(name);
+        value
+    }
+}
+
+pub(super) fn capture(
     tables: &Sources<'_>,
     current: &Observation,
     previous: Option<&Observation>,
-) -> Result<Value> {
+) -> Result<Option<StoragePoint>> {
     let mut snapshot = DiskSnapshot::default();
     if !point_source(
         &get(tables, current, "ticks")?,
         current.continuous,
         &mut snapshot,
     )? {
-        return Ok(Value::Null);
+        return Ok(None);
     }
 
     let mut previous_snapshot = DiskSnapshot::default();
@@ -63,23 +127,21 @@ pub(super) fn point(
         if elapsed.is_some() {
             deltas[index] = point_delta(record, before);
         }
-        let mut device = point_rates(&deltas[index], elapsed);
-        device["driver_id"] = json!(record.driver_id);
-        device["media_id"] = json!(record.media_id);
-        device["name"] = json!(point_device_name(record)?);
-        devices.push(device);
+        point_device_name(record)?;
+        devices.push(DevicePoint {
+            driver_id: record.driver_id,
+            media_id: record.media_id,
+            name: record.name,
+            rates: point_rates(&deltas[index], elapsed),
+        });
     }
 
     let totals = point_totals(&snapshot, baseline, &deltas);
-    let mut value = point_rates(&totals, elapsed);
-    value["state"] = json!(match snapshot.state {
-        ScanState::Complete => "complete",
-        ScanState::Failed => "failed",
-        ScanState::Exhausted => "exhausted",
-        ScanState::Partial => "partial",
-    });
-    value["devices"] = json!(devices);
-    Ok(value)
+    Ok(Some(StoragePoint {
+        state: snapshot.state,
+        rates: point_rates(&totals, elapsed),
+        devices,
+    }))
 }
 
 fn point_source(table: &View<'_>, time: Option<u64>, snapshot: &mut DiskSnapshot) -> Result<bool> {
@@ -241,23 +303,21 @@ struct CompletedRequests {
     operations: Option<u64>,
 }
 
-fn point_rates(deltas: &[Option<u64>; 8], elapsed: Option<u64>) -> Value {
-    let mut value = json!({});
-    for (index, name) in RATE_FIELDS[..6].iter().enumerate() {
-        value[*name] = json!(
-            deltas[index]
-                .zip(elapsed)
-                .map(|(delta, elapsed)| number(delta) * 1_000_000_000.0 / number(elapsed))
-        );
+fn point_rates(deltas: &[Option<u64>; 8], elapsed: Option<u64>) -> [Option<f64>; 8] {
+    let mut value = [None; 8];
+    for index in 0..6 {
+        value[index] = deltas[index]
+            .zip(elapsed)
+            .map(|(delta, elapsed)| number(delta) * 1_000_000_000.0 / number(elapsed));
     }
-    value[RATE_FIELDS[6]] = json!(point_rates_mean(&CompletedRequests {
+    value[6] = point_rates_mean(&CompletedRequests {
         duration_ns: deltas[6],
         operations: deltas[2],
-    }));
-    value[RATE_FIELDS[7]] = json!(point_rates_mean(&CompletedRequests {
+    });
+    value[7] = point_rates_mean(&CompletedRequests {
         duration_ns: deltas[7],
         operations: deltas[3],
-    }));
+    });
     value
 }
 
@@ -272,4 +332,12 @@ fn point_rates_mean(completed: &CompletedRequests) -> Option<f64> {
     }
 
     Some(number(duration) / number(operations) / 1_000_000.0)
+}
+
+fn rates_json(rates: &[Option<f64>; 8]) -> Value {
+    let mut value = json!({});
+    for (name, rate) in RATE_FIELDS.iter().zip(rates) {
+        value[*name] = json!(rate);
+    }
+    value
 }

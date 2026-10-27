@@ -419,10 +419,17 @@ impl InputDriver {
             let histories = Arc::clone(preview.reading.overview_app_histories.as_ref().unwrap());
             let resident = Arc::clone(preview.reading.resident_history.as_ref().unwrap());
             let mut snapshot = route_ranked_snapshot(preview.generation.unwrap());
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][0].clone();
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(route_ranked_payload(
+                    &snapshot,
+                    RouteReading::Historical,
+                )),
+            ));
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(Arc::ptr_eq(
@@ -443,8 +450,8 @@ impl InputDriver {
             let mut snapshot = overview_history_snapshot(dashboard.generation);
             Arc::get_mut(snapshot.overview_app_histories.as_mut().unwrap())
                 .unwrap()
-                .power = Arc::new(AppAttributionHistory::Unavailable(
-                "Power read failed".into(),
+                .power = Arc::new(crate::live_source::Presentation::Legacy(
+                AppAttributionHistory::Unavailable("Power read failed".into()),
             ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -458,9 +465,15 @@ impl InputDriver {
             dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = route_ranked_snapshot(preview.generation.unwrap() + 1);
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(route_ranked_payload(
+                    &snapshot,
+                    RouteReading::Historical,
+                )),
+            ));
             assert!(!dashboard.preview_receive(Update::Ready(snapshot)));
             assert!(dashboard.preview.as_ref().unwrap().failure.is_none());
             cx.notify();
@@ -473,8 +486,13 @@ impl InputDriver {
             dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = route_ranked_snapshot(preview.generation.unwrap());
-            snapshot.selection["second"] = json!(999);
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Current));
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(route_ranked_payload(
+                    &snapshot,
+                    RouteReading::Current,
+                )),
+            ));
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             assert_eq!(
                 dashboard.preview.as_ref().unwrap().failure.as_deref(),
@@ -488,32 +506,41 @@ impl InputDriver {
 
 fn overview_history_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = route_ranked_snapshot(generation);
-    snapshot.selection["trends"][0]["cpu_percent"] = json!(13);
-    snapshot.selection["trends"][1]["cpu_percent"] = json!(87);
-    snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
-    snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Current));
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(13);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(87);
+    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot.rankings = Some(std::sync::Arc::new(
+        crate::live_source::Presentation::Shared(route_ranked_payload(
+            &snapshot,
+            RouteReading::Current,
+        )),
+    ));
     snapshot.overview_app_histories = Some(Arc::new(OverviewAppHistories {
-        cpu: Arc::new(AppAttributionHistory::prepare(
-            Metric::Cpu,
-            &fixture(Metric::Cpu),
-            &snapshot.selection,
+        cpu: Arc::new(crate::live_source::Presentation::Legacy(
+            AppAttributionHistory::prepare(Metric::Cpu, &fixture(Metric::Cpu), &snapshot.selection),
         )),
-        power: Arc::new(AppAttributionHistory::prepare(
-            Metric::Power,
-            &fixture(Metric::Power),
-            &snapshot.selection,
+        power: Arc::new(crate::live_source::Presentation::Legacy(
+            AppAttributionHistory::prepare(
+                Metric::Power,
+                &fixture(Metric::Power),
+                &snapshot.selection,
+            ),
         )),
-        disk: Arc::new(AppAttributionHistory::prepare(
-            Metric::Disk,
-            &crate::live_app_attribution_history::tests::disk_fixture(),
-            &snapshot.selection,
+        disk: Arc::new(crate::live_source::Presentation::Legacy(
+            AppAttributionHistory::prepare(
+                Metric::Disk,
+                &crate::live_app_attribution_history::tests::disk_fixture(),
+                &snapshot.selection,
+            ),
         )),
     }));
-    snapshot.resident_history = Some(Arc::new(
-        crate::live_resident_history::ResidentHistory::prepare(
-            &overview_resident_fixture(),
-            &snapshot.selection,
-        ),
+    snapshot.resident_history = Some(std::sync::Arc::new(
+        crate::live_source::Presentation::Shared(Arc::new(
+            crate::live_resident_history::ResidentHistory::prepare(
+                &overview_resident_fixture(),
+                &snapshot.selection,
+            ),
+        )),
     ));
 
     snapshot

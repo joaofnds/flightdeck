@@ -149,23 +149,23 @@ fn assert_historical_cpu_reference(driver: &mut InputDriver) {
 
 fn comparison_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = overview_history_snapshot(generation);
-    snapshot.selection["trends"][0]["cpu_percent_one_core"] = json!(150.0);
-    snapshot.selection["trends"][1]["cpu_percent_one_core"] = json!(450.0);
-    snapshot.selection["trends"][0]["storage"] = json!({"state":"complete",
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent_one_core"] = json!(150.0);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent_one_core"] = json!(450.0);
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["storage"] = json!({"state":"complete",
         "read_bps":2_000_000.0,"write_bps":1_000_000.0});
-    snapshot.selection["trends"][1]["storage"] = json!({"state":"complete",
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["storage"] = json!({"state":"complete",
         "read_bps":4_000_000.0,"write_bps":2_000_000.0});
-    snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
     let histories = Arc::get_mut(snapshot.overview_app_histories.as_mut().unwrap()).unwrap();
-    histories.cpu = Arc::new(AppAttributionHistory::prepare(
-        Metric::Cpu,
-        &fixture(Metric::Cpu),
-        &snapshot.selection,
+    histories.cpu = Arc::new(crate::live_source::Presentation::Legacy(
+        AppAttributionHistory::prepare(Metric::Cpu, &fixture(Metric::Cpu), &snapshot.selection),
     ));
-    histories.disk = Arc::new(AppAttributionHistory::prepare(
-        Metric::Disk,
-        &crate::live_app_attribution_history::tests::disk_fixture(),
-        &snapshot.selection,
+    histories.disk = Arc::new(crate::live_source::Presentation::Legacy(
+        AppAttributionHistory::prepare(
+            Metric::Disk,
+            &crate::live_app_attribution_history::tests::disk_fixture(),
+            &snapshot.selection,
+        ),
     ));
 
     snapshot
@@ -221,10 +221,8 @@ fn large_disk_snapshot(generation: u64) -> Box<Snapshot> {
     apps["points"][1]["apps"][0]["disk_io_bps"] = json!(4_503_599_627_370_496.0);
     Arc::get_mut(snapshot.overview_app_histories.as_mut().unwrap())
         .unwrap()
-        .disk = Arc::new(AppAttributionHistory::prepare(
-        Metric::Disk,
-        &apps,
-        &snapshot.selection,
+        .disk = Arc::new(crate::live_source::Presentation::Legacy(
+        AppAttributionHistory::prepare(Metric::Disk, &apps, &snapshot.selection),
     ));
 
     snapshot
@@ -322,15 +320,11 @@ fn collision_snapshot(generation: u64) -> Box<Snapshot> {
         point["apps"].as_array_mut().unwrap().push(app);
     }
     let histories = Arc::get_mut(snapshot.overview_app_histories.as_mut().unwrap()).unwrap();
-    histories.cpu = Arc::new(AppAttributionHistory::prepare(
-        Metric::Cpu,
-        &cpu,
-        &snapshot.selection,
+    histories.cpu = Arc::new(crate::live_source::Presentation::Legacy(
+        AppAttributionHistory::prepare(Metric::Cpu, &cpu, &snapshot.selection),
     ));
-    histories.disk = Arc::new(AppAttributionHistory::prepare(
-        Metric::Disk,
-        &disk,
-        &snapshot.selection,
+    histories.disk = Arc::new(crate::live_source::Presentation::Legacy(
+        AppAttributionHistory::prepare(Metric::Disk, &disk, &snapshot.selection),
     ));
 
     snapshot

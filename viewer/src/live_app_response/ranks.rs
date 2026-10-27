@@ -7,6 +7,9 @@ use std::sync::Arc;
 use super::{App, Error, KeyKind, Measure, Observation, Result, Sample};
 use crate::apps;
 
+mod identity;
+pub use identity::{AppIdentity, RankedApp};
+
 pub const RANKS_MAX: usize = 10;
 pub(crate) const METRICS: [Metric; 5] = [
     Metric::Cpu,
@@ -16,7 +19,7 @@ pub(crate) const METRICS: [Metric; 5] = [
     Metric::Gpu,
 ];
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Ranks {
     pub selected: Observation,
     pub app_count: u32,
@@ -35,7 +38,7 @@ pub enum Metric {
     Gpu,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Ranking {
     pub metric: Metric,
     /// At most `RANKS_MAX`, the largest total first.
@@ -48,20 +51,13 @@ pub struct Ranking {
     pub partial: u32,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Rank {
     pub app: Arc<RankedApp>,
     pub amount: u64,
     pub rate: Option<f64>,
     pub measured_members: u32,
     pub unavailable_members: u32,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct RankedApp {
-    pub kind: KeyKind,
-    pub bytes: Vec<u8>,
-    pub display_name: String,
 }
 
 const _: () = {
@@ -129,11 +125,11 @@ impl Rankable for App {
     }
 
     fn ranked(&self) -> Arc<RankedApp> {
-        Arc::new(RankedApp {
-            kind: self.key.kind,
-            bytes: self.key.bytes.clone(),
-            display_name: self.display_name.clone(),
-        })
+        Arc::new(RankedApp::named(
+            self.key.kind,
+            self.key.bytes.clone(),
+            self.display_name.clone(),
+        ))
     }
 }
 
@@ -165,28 +161,6 @@ struct Reading {
     measure: Measure,
     amount: u64,
     rate: Option<f64>,
-}
-
-impl RankedApp {
-    /// The App whose key is `bytes`, named as its sample names it.
-    pub(crate) fn new(kind: KeyKind, bytes: Vec<u8>) -> Result<Self> {
-        let display_name = super::capture::display_name(kind, &bytes)?;
-
-        Ok(Self {
-            kind,
-            bytes,
-            display_name,
-        })
-    }
-
-    /// The App's whole key as text, as the worker's App histories display it.
-    #[must_use]
-    pub fn display(&self) -> String {
-        let mut display = String::with_capacity(self.bytes.len() * 4);
-        crate::byte_display::append(&mut display, &self.bytes);
-
-        display
-    }
 }
 
 impl Ranking {

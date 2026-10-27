@@ -409,7 +409,7 @@ fn withholds_app_rates_but_keeps_exit_evidence_after_a_missed_run_tick() {
     let exited = harness.read_request(event_request).unwrap();
     let view = harness.view();
     harness.teardown();
-    let detail = snapshot.detail.as_ref().unwrap();
+    let detail = snapshot.detail.as_deref().unwrap();
     output::record_semantics("run-tick-gap", &harness, &snapshot, &view);
     output::record_semantics("run-tick-gap-exit", &harness, &exited, &view);
 
@@ -419,8 +419,8 @@ fn withholds_app_rates_but_keeps_exit_evidence_after_a_missed_run_tick() {
     assert_gap_intervals(detail);
     assert_eq!(detail["app"]["members"], 3);
     assert_eq!(detail["app"]["membership_complete"], false);
-    assert_eq!(snapshot.apps.as_ref().unwrap()["app_count"], 2);
-    assert_eq!(snapshot.apps.as_ref().unwrap()["process_count"], 4);
+    assert_eq!(snapshot.apps.as_deref().unwrap()["app_count"], 2);
+    assert_eq!(snapshot.apps.as_deref().unwrap()["process_count"], 4);
     assert_eq!(detail["processes"][0]["pid"], 41001);
     let stored = view.apps.last().unwrap();
     assert_eq!(stored.apps.len(), 2);

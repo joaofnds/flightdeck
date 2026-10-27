@@ -3,9 +3,11 @@
 //! events stay separate from App attribution, which is not a lossless raw observation.
 use collector::coalitions::Coalition;
 use collector::processes::Process;
-use collector::ring::{ProcessCreation, RingReader, Tick};
+use collector::ring::{ProcessCreation, RingReader, RunIdentity, Tick};
 use persistence::{Error, Result};
+use std::sync::Arc;
 
+use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::cancellation::Operation;
 use crate::recording::MachineMinute;
 
@@ -13,8 +15,11 @@ use crate::recording::MachineMinute;
 mod cells;
 #[path = "live_raw/identity.rs"]
 mod identity;
+#[path = "live_raw/page.rs"]
+mod page;
 pub(crate) use cells::{Cell, View};
 use identity::Identity;
+pub(crate) use page::AdmittedPage;
 
 /// A candidate may overlap the 128 MiB accepted cache. App Frame/Sample storage has its own
 /// existing bounds; the whole candidate is checked against that same ceiling before commit.
@@ -33,7 +38,7 @@ const PATH_BYTES: usize = persistence::schema::IDENTITY_PATH_BYTES_MAX;
 
 pub(crate) struct Raw {
     pub machine: MachineMinute,
-    pub system: Option<collector::ring::SystemSnapshot>,
+    identity: Option<RunIdentity>,
     processes: Vec<Process>,
     gpu_ns: Vec<Option<u64>>,
     coalitions: Vec<Coalition>,
@@ -45,6 +50,25 @@ pub(crate) struct Raw {
     gone: u32,
     event_range: std::ops::Range<u64>,
     dropped: collector::ring::Dropped,
+    reservation: Option<ByteReservation>,
+}
+
+#[derive(Debug)]
+pub(crate) enum CaptureError {
+    Budget,
+    Capture(Error),
+}
+
+impl From<Error> for CaptureError {
+    fn from(error: Error) -> Self {
+        Self::Capture(error)
+    }
+}
+
+struct CapturePlan {
+    bytes: usize,
+    identity_bytes: usize,
+    reservation: Option<ByteReservation>,
 }
 
 struct CapturedEvent {
@@ -61,7 +85,90 @@ impl Raw {
         operation: &Operation,
         output: &mut Option<Self>,
     ) -> Result<()> {
+        match Self::capture_budgeted(source, events, operation, None, output) {
+            Ok(()) => Ok(()),
+            Err(CaptureError::Budget) => Err(Error::Bound("live raw admission bytes")),
+            Err(CaptureError::Capture(error)) => Err(error),
+        }
+    }
+
+    pub(crate) fn capture_budgeted(
+        source: &super::live_apps::Publication<'_>,
+        events: &super::live_apps::PublicationEvents<'_>,
+        operation: &Operation,
+        budget: Option<&Arc<ByteBudget>>,
+        output: &mut Option<Self>,
+    ) -> std::result::Result<(), CaptureError> {
         assert!(output.is_none());
+        let mut candidate = None;
+        Self::capture_inner(source, events, operation, budget, &mut candidate)?;
+        *output = candidate;
+
+        Ok(())
+    }
+
+    fn capture_inner(
+        source: &super::live_apps::Publication<'_>,
+        events: &super::live_apps::PublicationEvents<'_>,
+        operation: &Operation,
+        budget: Option<&Arc<ByteBudget>>,
+        output: &mut Option<Self>,
+    ) -> std::result::Result<(), CaptureError> {
+        let tick = source.tick;
+        let CapturePlan {
+            bytes,
+            identity_bytes,
+            reservation,
+        } = Self::capture_plan(source, events, operation, budget)?;
+        Self::capture_storage(tick, events, identity_bytes, reservation, output)?;
+        let raw = output.as_mut().ok_or(Error::Bound("live raw storage"))?;
+        raw.identity = source.reader.identity();
+        let machine_capacity = machine_bytes(&raw.machine);
+        raw.machine.push_tick(source.publication, tick);
+        assert_eq!(machine_bytes(&raw.machine), machine_capacity);
+        if source.reader.dictionary_capacity().is_some() {
+            raw.identities = Some(identity::capture(
+                source.reader,
+                source.identities,
+                &mut raw.arena,
+                operation,
+            )?);
+        }
+        raw.capture_events(source.reader, events, operation)?;
+        assert_eq!(raw.bytes(), bytes + identity_bytes);
+        if raw.bytes() > RAW_BYTES_MAX {
+            return Err(Error::Bound("live raw retained bytes").into());
+        }
+
+        // The removed eager core query also ran before acceptance. Check its bounded integer
+        // aggregation now, so a refused derived page cannot first expose an invalid candidate.
+        let scratch = match budget {
+            Some(budget) => Some(
+                budget
+                    .reserve(View::native_scratch_bytes(
+                        raw,
+                        crate::metrics::core_frequency::CORE_LEVEL_STATES,
+                    ))
+                    .ok_or(CaptureError::Budget)?,
+            ),
+            None => None,
+        };
+        let mut view = None;
+        raw.view(crate::metrics::core_frequency::CORE_LEVEL_STATES, &mut view)?;
+        drop(view);
+        drop(scratch);
+        operation.check()?;
+        source.record_work(persistence::work::ingestion::Kind::RawCapture);
+
+        Ok(())
+    }
+
+    fn capture_plan(
+        source: &super::live_apps::Publication<'_>,
+        events: &super::live_apps::PublicationEvents<'_>,
+        operation: &Operation,
+        budget: Option<&Arc<ByteBudget>>,
+    ) -> std::result::Result<CapturePlan, CaptureError> {
         source.record_work(persistence::work::ingestion::Kind::RawCaptureAttempt);
         let tick = source.tick;
         capture_validate(source, events)?;
@@ -77,42 +184,30 @@ impl Raw {
             .checked_add(identity_bytes)
             .is_none_or(|bytes| bytes > RAW_BYTES_MAX)
         {
-            return Err(Error::Bound("live raw candidate bytes"));
+            return Err(Error::Bound("live raw candidate bytes").into());
         }
 
-        Self::capture_storage(tick, events, identity_bytes, output)?;
-        let raw = output.as_mut().ok_or(Error::Bound("live raw storage"))?;
-        let machine_capacity = machine_bytes(&raw.machine);
-        raw.machine.push_tick(source.publication, tick);
-        assert_eq!(machine_bytes(&raw.machine), machine_capacity);
-        if source.reader.dictionary_capacity().is_some() {
-            raw.identities = Some(identity::capture(
-                source.reader,
-                source.identities,
-                &mut raw.arena,
-                operation,
-            )?);
-        }
-        raw.capture_events(source.reader, events, operation)?;
-        assert_eq!(raw.bytes(), bytes + identity_bytes);
-        if raw.bytes() > RAW_BYTES_MAX {
-            return Err(Error::Bound("live raw retained bytes"));
-        }
+        let reservation = match budget {
+            Some(budget) => Some(
+                budget
+                    .reserve(bytes + identity_bytes + 2 * size_of::<usize>())
+                    .ok_or(CaptureError::Budget)?,
+            ),
+            None => None,
+        };
 
-        // The removed eager core query also ran before acceptance. Check its bounded integer
-        // aggregation now, so a refused derived page cannot first expose an invalid candidate.
-        let mut view = None;
-        raw.view(crate::metrics::core_frequency::CORE_LEVEL_STATES, &mut view)?;
-        drop(view);
-        operation.check()?;
-        source.record_work(persistence::work::ingestion::Kind::RawCapture);
-        Ok(())
+        Ok(CapturePlan {
+            bytes,
+            identity_bytes,
+            reservation,
+        })
     }
 
     fn capture_storage(
         tick: &Tick,
         events: &super::live_apps::PublicationEvents<'_>,
         identity_bytes: usize,
+        reservation: Option<ByteReservation>,
         output: &mut Option<Self>,
     ) -> Result<()> {
         assert!(output.is_none());
@@ -123,7 +218,7 @@ impl Raw {
         };
         *output = Some(Self {
             machine: MachineMinute::default(),
-            system: tick.system,
+            identity: None,
             processes: tick.processes.clone(),
             gpu_ns: tick.process_gpu_ns().to_vec(),
             coalitions: tick.coalitions.clone(),
@@ -135,6 +230,7 @@ impl Raw {
             gone: tick.processes_gone,
             event_range: tick.events.clone(),
             dropped: tick.dropped,
+            reservation,
         });
 
         machine_storage(
@@ -144,6 +240,27 @@ impl Raw {
                 .ok_or(Error::Bound("live raw storage"))?
                 .machine,
         )
+    }
+
+    /// The original source and clocks travel with the facts, independently of a cache key.
+    pub(crate) fn observation(&self) -> Option<crate::live_app_response::Observation> {
+        let identity = self.identity?;
+        let [tick] = self.machine.ticks.as_slice() else {
+            return None;
+        };
+
+        Some(crate::live_app_response::Observation {
+            recording: identity.recording.0,
+            stamp: crate::apps::Stamp {
+                boot: identity.boot.0,
+                run: identity.run.0,
+                publication: tick.publication,
+                continuous_ns: tick.continuous_ns,
+                awake_ns: tick.awake_ns,
+            },
+            run_tick: tick.run_tick,
+            wall_ns: tick.wall_ns,
+        })
     }
 
     fn capture_events(
@@ -177,7 +294,7 @@ impl Raw {
     /// Capacities, not requested lengths, determine the retained charge. Inline data is
     /// charged once in Self; no shared owners or reader-scoped references are retained.
     pub fn bytes(&self) -> usize {
-        size_of::<Self>()
+        let bytes = size_of::<Self>()
             + self.arena.capacity()
             + self.processes.capacity() * size_of::<Process>()
             + self.gpu_ns.capacity() * size_of::<Option<u64>>()
@@ -187,56 +304,16 @@ impl Raw {
                 .as_ref()
                 .map_or(0, |rows| rows.capacity() * size_of::<Identity>())
             + self.events.capacity() * size_of::<CapturedEvent>()
-            + machine_bytes(&self.machine)
+            + machine_bytes(&self.machine);
+        if let Some(reservation) = &self.reservation {
+            assert!(reservation.bytes() >= bytes + 2 * size_of::<usize>());
+        }
+
+        bytes
     }
 
     pub fn view<'a>(&'a self, name: &str, output: &mut Option<View<'a>>) -> Result<()> {
         View::native(self, name, output)
-    }
-
-    pub fn page(
-        &self,
-        name: &str,
-        offset: u64,
-        operation: &Operation,
-    ) -> Result<crate::data::Table> {
-        let mut view = None;
-        self.view(name, &mut view)?;
-        let view = view.as_ref().ok_or(Error::Bound("live raw page view"))?;
-        let start = usize::try_from(offset).map_err(|_| Error::Bound("page offset"))?;
-        if start > view.len() {
-            return Err(Error::Bound("page past end"));
-        }
-
-        // One ordering index, at most 1,048,576 entries (8 MiB on this target), and one
-        // 512-row result bounded by 32 MiB. Neither survives this page operation.
-        let order = view.order(operation)?;
-        let columns = view.columns();
-        let end = (start + 512).min(order.len());
-        let mut rows = Vec::with_capacity(end - start);
-        let mut bytes = columns.capacity() * size_of::<String>()
-            + rows.capacity() * size_of::<Vec<Option<String>>>();
-        for column in &columns {
-            bytes += column.capacity();
-        }
-        for index in &order[start..end] {
-            operation.check()?;
-            let mut row = Vec::with_capacity(columns.len());
-            bytes += row.capacity() * size_of::<Option<String>>();
-            for column in &columns {
-                let cell = view.cell(*index, column)?.format(column)?;
-                bytes += cell.as_ref().map_or(0, String::capacity);
-                if bytes > PAGE_BYTES_MAX {
-                    return Err(Error::Bound("live raw page bytes"));
-                }
-                row.push(cell);
-            }
-            rows.push(row);
-            #[cfg(test)]
-            operation.page_row()?;
-        }
-        operation.check()?;
-        Ok(crate::data::Table { columns, rows })
     }
 }
 
@@ -327,22 +404,51 @@ fn machine_bytes(machine: &MachineMinute) -> usize {
 }
 
 fn validate_numbers(tick: &Tick) -> Result<()> {
-    if tick.smc_read {
-        for number in [Some(tick.power_watts), Some(tick.soc_celsius)] {
-            if number.is_some_and(|number| !number.is_finite()) {
-                return Err(Error::Bound("unsupported or nonfinite cell"));
-            }
+    let smc = if tick.smc_read {
+        [Some(tick.power_watts), Some(tick.soc_celsius)]
+    } else {
+        [None; 2]
+    };
+
+    validate_machine_numbers(&MachineNumbers {
+        smc,
+        temperatures: [tick.cpu_celsius, tick.gpu_celsius],
+        system: tick.system.as_ref(),
+        disks: tick.disks.as_ref(),
+    })
+}
+
+pub(crate) fn validate_machine_tick(tick: &crate::recording::TickRow) -> Result<()> {
+    validate_machine_numbers(&MachineNumbers {
+        smc: [tick.power_watts, tick.soc_celsius],
+        temperatures: [tick.cpu_celsius, tick.gpu_celsius],
+        system: tick.system.as_ref(),
+        disks: tick.disks.as_ref(),
+    })
+}
+
+struct MachineNumbers<'tick> {
+    smc: [Option<f32>; 2],
+    temperatures: [Option<f32>; 2],
+    system: Option<&'tick collector::ring::SystemSnapshot>,
+    disks: Option<&'tick collector::disks::DiskSnapshot>,
+}
+
+fn validate_machine_numbers(numbers: &MachineNumbers<'_>) -> Result<()> {
+    for number in numbers.smc.into_iter().flatten() {
+        if !number.is_finite() {
+            return Err(Error::Bound("unsupported or nonfinite cell"));
         }
     }
-    for number in [tick.cpu_celsius, tick.gpu_celsius].into_iter().flatten() {
+    for number in numbers.temperatures.into_iter().flatten() {
         if collector::smc::usable_celsius(number).is_none() {
             return Err(Error::Bound("temperature reading"));
         }
     }
-    if let Some(system) = &tick.system {
+    if let Some(system) = numbers.system {
         validate_system(system)?;
     }
-    if let Some(disks) = &tick.disks {
+    if let Some(disks) = numbers.disks {
         let mut words = [0; collector::disks::encoding::WORDS_MAX];
         collector::disks::encoding::encode(disks, &mut words)
             .map_err(|_| Error::Bound("physical disk snapshot"))?;

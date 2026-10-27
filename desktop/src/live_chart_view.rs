@@ -1087,7 +1087,7 @@ fn process_history_payload<'a>(panel: &Panel, snapshot: &'a Snapshot) -> Option<
         return snapshot.process_history.as_ref()?.payload();
     }
 
-    snapshot.history.as_ref()
+    snapshot.history.as_deref()
 }
 
 fn target_index(
@@ -1495,10 +1495,12 @@ mod tests {
         Snapshot {
             generation: 1,
             catalog: Value::Null,
-            selection: json!({"second":1000,"context_last_second":1000,"trends":[
+            selection: crate::live_source::Presentation::Legacy(
+                json!({"second":1000,"context_last_second":1000,"trends":[
                 {"wall_ns":998_100_000_000_u64},
                 {"wall_ns":1_000_100_000_000_u64},
                 {"wall_ns":1_000_200_000_000_u64}]}),
+            ),
             pages: BTreeMap::new(),
             apps: None,
             detail: None,
@@ -1577,10 +1579,12 @@ mod tests {
                 "wall_ns": second * 1_000_000_000, "publication": publication})
         };
         let mut snapshot = snapshot();
-        snapshot.selection = json!({"second": 5000, "context_last_second": 5000,
+        snapshot.selection = crate::live_source::Presentation::Legacy(
+            json!({"second": 5000, "context_last_second": 5000,
             "earlier_stride_seconds": 10,
             "earlier_trends": [point(2000, 1), point(2010, 2)],
-            "trends": [point(4101, 3), point(5000, 4)]});
+            "trends": [point(4101, 3), point(5000, 4)]}),
+        );
         snapshot
     }
 

@@ -132,7 +132,7 @@ fn an_apps_hover_read_brings_the_apps_detail_without_its_history() {
     let snapshot = recording.inspect(request).unwrap();
 
     assert_eq!(snapshot.selection["selected"]["publication"], 2);
-    let detail = snapshot.detail.as_ref().unwrap();
+    let detail = snapshot.detail.as_deref().unwrap();
     assert_eq!(detail["processes"].as_array().unwrap().len(), 2);
     assert!(snapshot.history.is_none());
     assert!(snapshot.process_history.is_none());
@@ -147,7 +147,7 @@ fn real_named_process_history_includes_members_outside_the_loaded_page() {
 
     let snapshot = recording.read(request).unwrap();
 
-    let detail = snapshot.detail.as_ref().unwrap();
+    let detail = snapshot.detail.as_deref().unwrap();
     assert_eq!(detail["page"]["offset"], 512);
     assert_eq!(detail["page"]["total"], 513);
     assert_eq!(detail["processes"].as_array().unwrap().len(), 1);
@@ -520,7 +520,7 @@ fn all_groups_history_ignores_the_loaded_member_page() {
     let snapshot = recording.read(request).unwrap();
 
     assert_eq!(
-        snapshot.detail.as_ref().unwrap()["processes"]
+        snapshot.detail.as_deref().unwrap()["processes"]
             .as_array()
             .unwrap()
             .len(),
@@ -637,7 +637,9 @@ pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProces
     request.executable = None;
     let snapshot = recording.read(request).unwrap();
     match std::sync::Arc::try_unwrap(snapshot.process_history.unwrap()) {
-        Ok(crate::live_process_history::ProcessHistory::All { payload, .. }) => payload,
+        Ok(crate::live_source::Presentation::Legacy(
+            crate::live_process_history::ProcessHistory::All { payload, .. },
+        )) => payload,
         _ => panic!("Expected uniquely owned All history"),
     }
 }

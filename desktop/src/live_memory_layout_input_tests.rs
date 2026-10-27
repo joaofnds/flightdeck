@@ -165,7 +165,7 @@ impl InputDriver {
     fn seed_memory_band(&mut self, width: f32) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            for (index, point) in snapshot.selection["trends"]
+            for (index, point) in snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
@@ -173,7 +173,8 @@ impl InputDriver {
             {
                 memory_band_point(point, index);
             }
-            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][1].clone();
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

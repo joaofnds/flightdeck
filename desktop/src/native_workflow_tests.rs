@@ -467,13 +467,18 @@ fn snapshot() -> Box<Snapshot> {
     Box::new(Snapshot {
         generation: 1,
         catalog: json!({}),
-        selection: json!({"second":1000,"context_last_second":1000,"selected":{"publication":7},
+        selection: crate::live_source::Presentation::Legacy(
+            json!({"second":1000,"context_last_second":1000,"selected":{"publication":7},
             "summary":{"cpu_percent":12.5}}),
-        pages: BTreeMap::from([(
+        ),
+        pages: (BTreeMap::from([(
             "ticks".into(),
             json!({"columns":["known","missing"],
             "rows":[["9007199254740993",null]]}),
-        )]),
+        )]))
+        .into_iter()
+        .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
+        .collect(),
         apps: None,
         detail: None,
         history: None,
@@ -596,7 +601,7 @@ fn opening_a_recording_with_an_unpresentable_result_preserves_the_current_record
     dashboard.begin_recording(missing_recording());
     let mut invalid = snapshot();
     invalid.generation = dashboard.native.candidate.as_ref().unwrap().generation;
-    invalid.selection["selected"]["publication"] = json!(8);
+    invalid.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(8);
 
     assert!(dashboard.recording_receive(crate::live_source::Update::Ready(invalid)));
 
@@ -629,7 +634,7 @@ fn a_saved_source_becomes_recorded_only_when_its_open_commits() {
     dashboard.begin_recording(missing_recording());
     let mut ready = snapshot();
     ready.generation = dashboard.native.candidate.as_ref().unwrap().generation;
-    ready.pages.get_mut("ticks").unwrap()["offset"] = json!(0);
+    ready.pages.get_mut("ticks").unwrap().legacy_mut().unwrap()["offset"] = json!(0);
     assert_eq!(
         dashboard.native.source,
         crate::live_source_mode::SourceMode::Live
@@ -718,7 +723,9 @@ fn copying_an_expanded_reading_preserves_exact_counters_nulls_and_observation() 
 fn copying_during_app_switch_refuses_retained_details_from_the_previous_app() {
     // Selecting B cannot copy retained A details while B's query is pending.
     let mut snapshot = snapshot();
-    snapshot.detail = Some(json!({"app":{"key":{"kind":"bundle","bytes_hex":"41"}}}));
+    snapshot.detail = Some(crate::live_source::Presentation::Legacy(
+        json!({"app":{"key":{"kind":"bundle","bytes_hex":"41"}}}),
+    ));
     let mut request = fresh_request("apps");
     request.app = Some(AppKey {
         kind: "bundle".into(),
@@ -731,9 +738,11 @@ fn copying_during_app_switch_refuses_retained_details_from_the_previous_app() {
 fn copying_an_expanded_process_keeps_its_creation_identity_and_exact_counters() {
     // A selected process is copied as that process, rather than the entire App or a raw page.
     let mut snapshot = snapshot();
-    snapshot.detail = Some(json!({"app":{"key":{"kind":"bundle","bytes_hex":"41"}},
+    snapshot.detail = Some(crate::live_source::Presentation::Legacy(
+        json!({"app":{"key":{"kind":"bundle","bytes_hex":"41"}},
         "processes":[{"pid":123,"creation":{"unique_id":"987","pid_version":4},
-            "cpu_ns":{"known":"9007199254740993"}}]}));
+            "cpu_ns":{"known":"9007199254740993"}}]}),
+    ));
     let mut request = fresh_request("apps");
     request.app = Some(AppKey {
         kind: "bundle".into(),

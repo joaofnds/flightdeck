@@ -112,7 +112,7 @@ impl SampledSecond {
     ) {
         self.ranks = Err(Missing::Unread);
         self.reservation = None;
-        self.machine = *machine;
+        self.machine = machine.clone();
         self.observation = apps.observation.unwrap_or_else(|| unreachable!());
         assert_eq!(self.observation.stamp.publication, machine.publication);
         assert_eq!(self.observation.wall_ns, Some(machine.wall_ns));

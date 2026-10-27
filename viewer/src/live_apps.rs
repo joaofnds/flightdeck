@@ -19,13 +19,18 @@ pub(crate) const FRAME_BYTES_MAX: usize = size_of::<Frame>()
 const _: () = assert!(FRAME_BYTES_MAX <= 48 * 1024 * 1024);
 /// The aggregate owns no program bytes. Its result Vec is exact-reserved; both ordered
 /// trees have at most one node per five entries plus their root in CI's Rust 1.98.
-pub(crate) const AGGREGATE_WORK_BYTES_MAX: usize = size_of::<apps::Aggregate<'static>>()
-    + apps::PROCESS_INTERVALS_MAX * size_of::<apps::ProcessTotals<'static>>()
-    + (apps::PROCESS_INTERVALS_MAX.div_ceil(5) + 1)
-        * (11 * (size_of::<apps::AppKey<'static>>() + size_of::<apps::AppTotals>())
-            + 11 * size_of::<(i32, Option<u64>)>()
-            + 24 * size_of::<usize>()
-            + 64);
+pub(crate) const AGGREGATE_WORK_BYTES_MAX: usize =
+    aggregate_work_bytes(apps::PROCESS_INTERVALS_MAX);
+
+const fn aggregate_work_bytes(count: usize) -> usize {
+    size_of::<apps::Aggregate<'static>>()
+        + count * size_of::<apps::ProcessTotals<'static>>()
+        + (count.div_ceil(5) + 1)
+            * (11 * (size_of::<apps::AppKey<'static>>() + size_of::<apps::AppTotals>())
+                + 11 * size_of::<(i32, Option<u64>)>()
+                + 24 * size_of::<usize>()
+                + 64)
+}
 /// Join-view payload bound; the shared aggregate separately bounds its result/work storage.
 pub const TRANSIENT_VIEW_BYTES_MAX: usize = apps::PROCESS_INTERVALS_MAX
     * (2 * size_of::<Option<ProgramBytes<'static>>>()
@@ -148,6 +153,35 @@ pub struct PublicationEvents<'source> {
     pub identities: &'source [IdentityObservation],
 }
 
+/// Keeps the model's original input error separate from join and presentation failures.
+#[derive(Debug)]
+pub(crate) enum AggregateError {
+    Input(apps::Error),
+    View(apps::Error),
+    Presentation(Error),
+}
+
+impl AggregateError {
+    pub(crate) fn legacy(self) -> Error {
+        match self {
+            Self::Input(_) => Error::Bound("live App aggregate input"),
+            Self::View(_) => Error::Bound("live App exit interval bound"),
+            Self::Presentation(error) => error,
+        }
+    }
+
+    /// Joint work limits do not invalidate either captured Frame's source input.
+    pub(crate) fn retains_input(&self) -> bool {
+        match self {
+            Self::Input(error) | Self::View(error) => {
+                matches!(error, apps::Error::ProcessBound | apps::Error::ProgramBound)
+            }
+            Self::Presentation(Error::Bound(_)) => true,
+            Self::Presentation(Error::Engine(_) | Error::Io(_)) => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 #[cfg_attr(test, derive(Debug, PartialEq))]
 struct ProgramSpan {
@@ -267,6 +301,77 @@ impl Frame {
         Ok(())
     }
 
+    /// Upper capacity charge for this exact publication, before Frame allocates any storage.
+    pub(crate) fn capture_bytes(
+        source: &Publication<'_>,
+        events: &PublicationEvents<'_>,
+    ) -> Result<usize> {
+        validate(source)?;
+        if events.events.len() > collector::tracker::EVENTS_PER_TICK_MAX {
+            return Err(Error::Bound("live App exit event bound"));
+        }
+        let identified = source.reader.dictionary_capacity().is_some();
+        let count = if identified {
+            source.identities.len()
+        } else {
+            source.tick.processes.len()
+        };
+        let mut bytes = size_of::<Self>() + count * size_of::<Member>();
+        if identified {
+            if events.events.len() != events.identities.len() {
+                return Err(Error::Bound("live App exit identity count"));
+            }
+            let mut arena = capture::program_bytes(source, source.identities)?;
+            let mut programs = count;
+            for (numbered, identity) in events.events.iter().zip(events.identities) {
+                match numbered.event {
+                    collector::tracker::Event::Exit { .. } => bytes += size_of::<Exit>(),
+                    collector::tracker::Event::Start { .. } => bytes += size_of::<Start>(),
+                    collector::tracker::Event::Exec { .. } => bytes += size_of::<Exec>(),
+                }
+                if matches!(
+                    numbered.event,
+                    collector::tracker::Event::Start { .. }
+                        | collector::tracker::Event::Exec { .. }
+                ) {
+                    programs += 1;
+                    arena = arena
+                        .checked_add(capture::program_bytes(
+                            source,
+                            std::slice::from_ref(identity),
+                        )?)
+                        .ok_or(Error::Bound("live App program byte bound"))?;
+                }
+            }
+            if arena > PROGRAM_FRAME_BYTES_MAX {
+                return Err(Error::Bound("live App program byte bound"));
+            }
+            if programs > apps::PROCESS_INTERVALS_MAX {
+                return Err(Error::Bound("live App program interval bound"));
+            }
+            bytes += arena;
+        }
+        Ok(bytes)
+    }
+
+    /// Existing join/aggregate capacities sized to these two admitted Frames.
+    pub(crate) fn aggregate_work_bytes(&self, previous: Option<&Self>) -> usize {
+        let previous = previous.unwrap_or(self);
+        let programs = self.members.len()
+            + self.starts.len()
+            + self.execs.len()
+            + previous.members.len()
+            + previous.starts.len()
+            + previous.execs.len();
+        let selected = (self.members.len() + self.exits.len()).min(apps::PROCESS_INTERVALS_MAX);
+        let bytes = programs * size_of::<Option<ProgramBytes<'_>>>()
+            + (selected + previous.members.len()) * size_of::<apps::ProcessObservation<'_>>()
+            + selected * size_of::<apps::ProcessInterval<'_>>()
+            + aggregate_work_bytes(selected);
+        assert!(bytes <= TRANSIENT_VIEW_BYTES_MAX + AGGREGATE_WORK_BYTES_MAX);
+        bytes
+    }
+
     /// Charges owned vector capacities and the frame itself to the live observation cache.
     #[must_use]
     pub fn bytes(&self) -> usize {
@@ -319,6 +424,15 @@ impl Frame {
         previous: Option<&Self>,
         consume: impl FnOnce(&apps::Aggregate<'_>) -> Result<()>,
     ) -> Result<()> {
+        self.with_aggregate_typed(previous, consume)
+            .map_err(AggregateError::legacy)
+    }
+
+    pub(crate) fn with_aggregate_typed(
+        &self,
+        previous: Option<&Self>,
+        consume: impl FnOnce(&apps::Aggregate<'_>) -> Result<()>,
+    ) -> std::result::Result<(), AggregateError> {
         persistence::work::ingestion::record_publication(
             self.identity,
             self.stamp.publication,

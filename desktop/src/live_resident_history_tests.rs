@@ -3,6 +3,60 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn context_admission_metadata_preserves_the_same_resident_readings() {
+    // Goal: canonical context accounting replaces cache telemetry without hiding a chart.
+    // Method: change only the storage metadata of a valid legacy response and compare amounts.
+    let mut value = fixture();
+    let legacy = ResidentHistory::prepare(&value, &selection());
+    value["coverage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_bytes");
+    value["coverage"]["context_metadata_bytes"] = json!(512);
+
+    let history = ResidentHistory::prepare(&value, &selection());
+
+    assert_eq!(
+        history.amount(1, Some(1)),
+        legacy.amount(1, Some(1)),
+        "{}",
+        history.coverage(None)
+    );
+    assert!(history.panel().is_some());
+}
+
+#[test]
+fn history_without_cache_or_context_accounting_is_unavailable() {
+    // Goal: the adapter still refuses a response that supplies no storage accounting.
+    // Method: remove the sole bookkeeping field from an otherwise valid response.
+    let mut value = fixture();
+    value["coverage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_bytes");
+
+    let history = ResidentHistory::prepare(&value, &selection());
+
+    assert!(history.panel().is_none());
+}
+
+#[test]
+fn history_with_malformed_context_accounting_is_unavailable() {
+    // Goal: a canonical accounting marker does not bypass integer validation.
+    // Method: replace legacy cache metadata with a nonnumeric context byte count.
+    let mut value = fixture();
+    value["coverage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_bytes");
+    value["coverage"]["context_metadata_bytes"] = json!("invalid");
+
+    let history = ResidentHistory::prepare(&value, &selection());
+
+    assert!(history.panel().is_none());
+}
+
+#[test]
 fn resident_amounts_preserve_exact_bytes_while_readouts_and_plot_use_gib() {
     // Goal: a quantity beyond f64 integer precision stays exact where Apps are ordered, and
     // reads in binary units as the prototype's legend does.
@@ -238,17 +292,19 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
     let mut selected = selection();
     selected["trends"] = json!([{"run":[1,2],"boot":[3,4],"publication":2,
         "wall_ns":1_000_000_000_000_u64,"segment":0,"pressure":0}]);
-    let rankings = std::sync::Arc::new(crate::live_rankings::Rankings::Unavailable(
-        "Fixture ranking diagnostic".into(),
+    let rankings = std::sync::Arc::new(crate::live_source::Presentation::Legacy(
+        crate::live_rankings::Rankings::Unavailable("Fixture ranking diagnostic".into()),
     ));
     let snapshot = Box::new(crate::live_source::Snapshot {
         generation: 1,
         catalog: Value::Null,
-        selection: selected,
+        selection: crate::live_source::Presentation::Legacy(selected),
         pages: std::collections::BTreeMap::new(),
         apps: None,
         detail: None,
-        history: Some(json!({"context_seconds":900})),
+        history: Some(crate::live_source::Presentation::Legacy(
+            json!({"context_seconds":900}),
+        )),
         cpu_detail: None,
         cpu_history: None,
         resident_history: None,
@@ -287,7 +343,11 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         presentation.snapshot.rankings.as_ref().unwrap()
     ));
     assert!(matches!(
-        presentation.snapshot.resident_history.as_deref(),
+        presentation
+            .snapshot
+            .resident_history
+            .as_deref()
+            .map(|value| &**value),
         Some(ResidentHistory::Unavailable(_))
     ));
 }

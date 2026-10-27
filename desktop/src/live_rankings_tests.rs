@@ -127,13 +127,9 @@ fn sampled_metrics(name: &str) -> viewer::store::SampledSecond {
         resident_bytes: measure(1_024),
         footprint_bytes: measure(2_048),
     };
-    let name = Arc::new(RankedApp {
-        kind: KeyKind::Bundle,
-        bytes: vec![65],
-        display_name: name.into(),
-    });
+    let name = Arc::new(RankedApp::named(KeyKind::Bundle, vec![65], name.into()));
     let mut apps = crate::live_store_app_fixtures::apps_at(&second, &[]);
-    apps.apps = vec![AppRow::new(&app, name)];
+    apps.apps = vec![AppRow::new(&app, name)].try_into().unwrap();
     apps.totals = Totals::of(&apps.apps);
     apps.elapsed_ns = Some(2_000_000_000);
     SampledSecond::from_second(&second, &apps, &Arc::new(ByteBudget::new(536_870_912)))

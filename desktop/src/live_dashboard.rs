@@ -1612,13 +1612,18 @@ mod selection_tests {
         dashboard.snapshot = Some(Box::new(Snapshot {
             generation: dashboard.generation,
             catalog: json!({"first_second":1000,"last_second":1002}),
-            selection: json!({"second":1000,"context_last_second":1000,"selected":{"publication":1},
+            selection: crate::live_source::Presentation::Legacy(
+                json!({"second":1000,"context_last_second":1000,"selected":{"publication":1},
                 "summary":{"memory_total_bytes":4096},"trends":[]}),
-            pages: BTreeMap::from([(
+            ),
+            pages: (BTreeMap::from([(
                 "ticks".into(),
                 json!({"offset":0,"total":1,"rows":[["1"]],
                     "columns":["publication"]}),
-            )]),
+            )]))
+            .into_iter()
+            .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
+            .collect(),
             apps: None,
             detail: None,
             history: None,
@@ -1838,8 +1843,10 @@ mod selection_tests {
         dashboard.request.second = Some(1001);
         dashboard.submit();
         missing.generation = dashboard.generation;
-        missing.selection = json!({"second":1001,"context_last_second":1001,"selected":null,
-            "summary":null,"trends":[]});
+        missing.selection = crate::live_source::Presentation::Legacy(
+            json!({"second":1001,"context_last_second":1001,"selected":null,
+            "summary":null,"trends":[]}),
+        );
         missing.pages.clear();
 
         assert!(dashboard.receive(Update::Ready(missing)));
@@ -1876,8 +1883,8 @@ mod selection_tests {
         // Method: accept a same-second sibling publication with a different row at index zero.
         let mut next = dashboard().snapshot.take().unwrap();
         let mut dashboard = dashboard();
-        next.selection["selected"]["publication"] = json!(2);
-        next.pages.get_mut("ticks").unwrap()["rows"] = json!([["2"]]);
+        next.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(2);
+        next.pages.get_mut("ticks").unwrap().legacy_mut().unwrap()["rows"] = json!([["2"]]);
 
         dashboard.accept(next);
 
@@ -1907,7 +1914,7 @@ mod selection_tests {
         let mut next = dashboard().snapshot.take().unwrap();
         let mut dashboard = dashboard();
         dashboard.native.alternative_page = 5;
-        next.selection["selected"]["publication"] = json!(2);
+        next.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(2);
 
         dashboard.accept(next);
 

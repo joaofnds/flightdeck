@@ -83,7 +83,8 @@ fn real_saved_app_rankings_reach_later_pages_and_preserve_the_exact_sibling() {
 
     let snapshot = recording.read(request).unwrap();
 
-    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().map(|value| &**value).unwrap()
+    else {
         panic!("{:?}", snapshot.rankings);
     };
     crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])
@@ -111,7 +112,8 @@ fn real_saved_storage_rankings_reach_later_pages_at_the_exact_sibling() {
 
     let snapshot = recording.read(request).unwrap();
 
-    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().map(|value| &**value).unwrap()
+    else {
         panic!("{:?}", snapshot.rankings);
     };
     crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])
@@ -132,7 +134,8 @@ fn legacy_identity_absence_keeps_overview_scalar_readings_available() {
     let snapshot = recording.read(SealedRecording::request()).unwrap();
 
     assert_eq!(snapshot.selection["summary"]["memory_total_bytes"], 12_288);
-    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().map(|value| &**value).unwrap()
+    else {
         panic!("{:?}", snapshot.rankings);
     };
     assert_eq!(rankings.app_count, 0);
@@ -365,7 +368,7 @@ fn a_newly_opened_page_leaves_a_window_sealed_without_ranks_to_its_next_read() {
 
 /// The ranks a page keeps of the window of a sealed recording whose observations share the run
 /// and boot of the input tests' snapshots.
-pub(crate) fn kept_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
+pub(crate) fn kept_window_ranks() -> std::sync::Arc<crate::live_source::RanksWindow> {
     let recording = SealedRecording::with_ranked_apps();
 
     let snapshot = recording.read(ranked_request_at("overview", 3)).unwrap();
@@ -376,7 +379,7 @@ pub(crate) fn kept_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
 /// The ranks the first read of a newly opened page brings from a sealed recording whose
 /// minutes keep their App ranks, while its App histories wait for its next read, and whose
 /// observations share the run and boot of the input tests' snapshots.
-pub(crate) fn opened_window_ranks() -> std::sync::Arc<viewer::WindowRanks> {
+pub(crate) fn opened_window_ranks() -> std::sync::Arc<crate::live_source::RanksWindow> {
     let recording = SealedRecording::with_kept_ranks();
     let mut reader = super::SnapshotReader::new();
     reader.command.request = ranked_request_at("cpu", 3);
@@ -407,7 +410,8 @@ fn ranked_identity(publication: u64) -> serde_json::Value {
 
 fn assert_exact_ranked_snapshot(snapshot: &Snapshot) -> &TopApps {
     assert!(snapshot.rankings.is_some());
-    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap() else {
+    let Rankings::Ready(rankings) = snapshot.rankings.as_deref().map(|value| &**value).unwrap()
+    else {
         panic!("{:?}", snapshot.rankings);
     };
     crate::live_source::identity_validate(&rankings.selected, &snapshot.selection["selected"])

@@ -6,11 +6,21 @@ mod apps;
 mod attribution;
 mod buffers;
 mod context;
+mod context_cpu;
+mod context_response;
+mod coverage;
+mod native;
+mod native_acceptance;
 mod payload;
+mod query;
+mod raw_cache;
+mod raw_response;
 mod recording;
+mod response;
 mod ring;
 mod sampled;
 mod second;
+mod selection;
 
 #[cfg(test)]
 #[path = "store/startup_tests.rs"]
@@ -36,19 +46,29 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub use crate::byte_budget::{ByteBudget, ByteReservation};
-pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Missing};
+pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, DetachedAppsSecond, Missing};
 pub use attribution::{
     Attribution, AttributionReading, COHORT_MAX, OtherReading, Resident, ResidentOther, Totals,
 };
 pub use buffers::{Buffers, Mailbox, Span};
 pub use context::Cohorts;
+pub use native::AppMetadata;
 pub use payload::{AppDetails, Payload, ProcessName, ProcessRow};
+pub use query::{
+    QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome, QueryReply, QueryRequest, QuerySecond,
+    QuerySelection, QuerySubmitError, QueryToken, QueryUnavailable, SourceGeneration,
+};
+pub use response::{ContextPart, ContextParts, ContextRanks, Response};
 pub use sampled::{SampledRank, SampledRanking, SampledRanks, SampledSecond};
-pub use second::{BatterySecond, MachineSecond, MemorySecond, Reading, Traffic, readings};
+pub use second::{
+    BatterySecond, CompleteMachine, CompleteMachineState, CpuCounter, CpuInterval, CpuPrevious,
+    MachineAdmission, MachineCaptureError, MachineSecond, MemorySecond, Reading, Traffic, readings,
+};
 
 use apps::TickApps;
 use collector::ring::RunIdentity;
 use context::Context;
+use native_acceptance::{make_ring, read_native};
 use ring::Ring;
 
 use crate::apps::Stamp;
@@ -134,13 +154,7 @@ impl View {
                 observation.wall_ns.map(|wall| wall / 1_000_000_000) == Some(second)
             })
             .collect();
-        observations.sort_by_key(|observation| {
-            (
-                observation.wall_ns,
-                observation.stamp.run,
-                observation.stamp.publication,
-            )
-        });
+        observations.sort_by(selection::compare);
         observations
     }
 
@@ -171,6 +185,8 @@ pub enum Failure {
     Ring(io::ErrorKind),
     /// The ring's shape asks for buffers the store does not size.
     TickShape,
+    /// The shared native workspace reservation could not be admitted.
+    Budget,
     /// The recording's sealed minutes could not be listed.
     Commits(io::ErrorKind),
     /// A sealed minute did not show it committed or did not decode, so its seconds are missing.
@@ -189,6 +205,7 @@ pub struct Store {
 
 struct Shared {
     mailbox: Mailbox<View>,
+    queries: Option<query::Queries>,
     stop: AtomicBool,
     active: AtomicBool,
     catch_up: AtomicBool,
@@ -219,6 +236,7 @@ impl Store {
     fn start_inner(root: &Path, budget: Option<Arc<ByteBudget>>) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             mailbox: Mailbox::new(),
+            queries: budget.as_ref().map(|_| query::Queries::new()),
             stop: AtomicBool::new(false),
             active: AtomicBool::new(true),
             catch_up: AtomicBool::new(false),
@@ -244,8 +262,11 @@ impl Store {
             .spawn(move || {
                 let observation = observation.enter();
                 // A ring's mapping stays on the thread that maps it.
-                let mut ring = Ring::new(root.clone());
+                let mut ring = make_ring(&root, held.payload_budget.as_ref());
                 if let Err(error) = startup(&root, &mut held, &mut ring, &operation) {
+                    if let Some(queries) = &thread_shared.queries {
+                        queries.close();
+                    }
                     eprintln!("flightdeck store startup: {error}");
                     return;
                 }
@@ -259,6 +280,9 @@ impl Store {
                     &mut load_buffers,
                     operation,
                 );
+                if let Some(queries) = &thread_shared.queries {
+                    queries.close();
+                }
                 drop(observation);
             })?;
 
@@ -343,6 +367,15 @@ impl Store {
 
         self.shared.mailbox.take()
     }
+
+    /// An independent source-free query mailbox, enabled only by the complete-payload path.
+    #[must_use]
+    pub fn query_handle(&self) -> Option<QueryHandle> {
+        let queries = self.shared.queries.as_ref()?;
+        let thread = self.thread.as_ref()?;
+
+        Some(queries.handle(thread.thread().clone()))
+    }
 }
 
 impl Drop for Store {
@@ -366,10 +399,14 @@ impl Drop for Store {
 
 /// What the store thread holds between steps.
 struct Held {
+    checked_catalog: Option<recording::CheckedCatalog>,
+    source_generation: u64,
+    source_status: Option<ring::Status>,
     coverage_seconds: u64,
     ring_complete: bool,
     full_detail_evicted_through_ns: Option<u64>,
     payload_budget: Option<Arc<ByteBudget>>,
+    raw: Option<raw_cache::RawCache>,
     sampled: Option<Span<SampledSecond>>,
     span: Span<MachineSecond>,
     /// Each App's totals at each second of `span`, in the same order.
@@ -413,10 +450,14 @@ impl Held {
         });
 
         Self {
+            checked_catalog: None,
+            source_generation: 0,
+            source_status: None,
             coverage_seconds: 0,
             ring_complete: false,
             full_detail_evicted_through_ns: None,
             payload_budget: None,
+            raw: None,
             sampled: None,
             span: Span::new(SECONDS_MAX, seconds),
             apps: Span::new(SECONDS_MAX, apps),
@@ -443,12 +484,21 @@ impl Held {
     }
 
     fn reset(&mut self) {
+        self.checked_catalog = None;
+        self.source_status = None;
+        if let Some(raw) = &mut self.raw {
+            raw.clear();
+        }
         self.release_views();
         self.span.clear();
+        self.span
+            .release(|second| *second = MachineSecond::default());
         self.apps.clear();
         self.apps
             .release(|apps| apps.take(TickApps::Missing(&Missing::Unread), None, None));
         self.earlier.clear();
+        self.earlier
+            .release(|second| *second = MachineSecond::default());
         if let Some(sampled) = &mut self.sampled {
             sampled.clear();
             sampled.release(|sample| *sample = SampledSecond::empty());
@@ -477,8 +527,10 @@ impl Held {
 
         self.release_views();
 
-        let leaving = self.span.leaving().copied();
-        let kept = leaving.filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
+        let leaving = self.span.leaving().cloned();
+        let kept = leaving
+            .clone()
+            .filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
         if !self.span.has_room() {
             return false;
         }
@@ -542,7 +594,7 @@ impl Held {
         segment: u64,
     ) {
         let pushed = self.span.push(|buffer| {
-            *buffer = *second;
+            *buffer = second.clone();
             buffer.segment = segment;
         });
         assert!(pushed);
@@ -571,6 +623,13 @@ impl Held {
             view.sampled.clear();
             view.cohorts.clear();
         });
+        self.span
+            .release(|second| *second = MachineSecond::default());
+        self.earlier
+            .release(|second| *second = MachineSecond::default());
+        if let Some(sampled) = &mut self.sampled {
+            sampled.release(|second| *second = SampledSecond::empty());
+        }
     }
 
     /// Hands the main thread a View of what the store holds, or leaves it to the next step
@@ -725,6 +784,7 @@ fn startup_accept(
 ) -> persistence::Result<()> {
     let outcome = outcome?;
     operation.check()?;
+    coverage::accept_catalog(held, outcome.checked_catalog)?;
     held.left_out = outcome.left_out;
     if held.left_out.is_none() {
         held.coverage_seconds = crate::session::LOADED_SECONDS;
@@ -747,6 +807,9 @@ fn run(
     for _ in 0..STEPS_MAX {
         if shared.stop.load(Ordering::Acquire) {
             return;
+        }
+        if let Some(queries) = &shared.queries {
+            run_queries(held, ring, queries);
         }
         if !shared.active.load(Ordering::Acquire) {
             shared.paused.store(true, Ordering::Release);
@@ -798,10 +861,29 @@ fn run(
     unreachable!("the store thread steps until the store is dropped");
 }
 
+fn run_queries(held: &mut Held, ring: &mut Ring, queries: &query::Queries) {
+    let budget = held
+        .payload_budget
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("only the complete Store enables queries"));
+    let checked = match coverage::checked(held, ring) {
+        Ok(checked) => checked,
+        Err(failure) => {
+            held.failure = Some(failure);
+            held.unpublished = true;
+            None
+        }
+    };
+    queries.serve(held, checked.as_ref(), budget);
+}
+
 fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
     if !ring.reload_required() {
-        return false;
+        if !coverage::source_changed(held, ring) {
+            return false;
+        }
     }
+    held.checked_catalog = None;
     held.coverage_seconds = 0;
     held.ring_complete = false;
     shared.catch_up.store(true, Ordering::Release);
@@ -856,7 +938,7 @@ fn refresh(
                 Ok(false) => {}
                 Err(failure) => {
                     held.failure = Some(failure);
-                    *ring = Ring::new(root.to_owned());
+                    *ring = make_ring(root, held.payload_budget.as_ref());
                     return Ok(true);
                 }
             }
@@ -879,7 +961,8 @@ fn refresh_load(
     let seconds = shared.window_seconds.load(Ordering::Acquire);
     let mut accepted = true;
     let mut reset = false;
-    let mut next_ring = Ring::new(root.to_owned());
+    let mut checked_catalog = None;
+    let mut next_ring = make_ring(root, budget.as_ref());
     let mut take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
         if !shared.active.load(Ordering::Acquire) {
             accepted = false;
@@ -904,6 +987,7 @@ fn refresh_load(
         )?;
         if accepted {
             next_ring.accept(outcome.terminal);
+            checked_catalog = outcome.checked_catalog;
         }
         outcome.left_out
     } else {
@@ -921,6 +1005,9 @@ fn refresh_load(
         }
     }
     if accepted {
+        if budget.is_some() {
+            coverage::accept_catalog(held, checked_catalog)?;
+        }
         held.coverage_seconds = 0;
         if left_out.is_none() {
             held.coverage_seconds = seconds;
@@ -960,9 +1047,17 @@ fn step(
     operation: Option<&Operation>,
     publication: Publication,
 ) -> persistence::Result<()> {
+    if let Some(operation) = operation {
+        operation.check()?;
+    }
     let mut failure = waited.err();
 
-    let read = ring.read(|run, second, apps| held.take(run, second, apps));
+    let read = if held.payload_budget.is_some() {
+        let operation = operation.ok_or(persistence::Error::Bound("complete Store operation"))?;
+        read_native(held, ring, operation)
+    } else {
+        ring.read(|run, second, apps| held.take(run, second, apps))
+    };
     if let Err(read) = read {
         failure = Some(read);
     }
@@ -998,6 +1093,11 @@ fn step(
 }
 
 fn step_complete(held: &mut Held, ring: &mut Ring) -> bool {
+    let status = ring.status();
+    if held.source_status != status {
+        held.source_status = status;
+        held.unpublished = true;
+    }
     let complete = match ring.caught_up() {
         Ok(complete) => complete,
         Err(failure) => {

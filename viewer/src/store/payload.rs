@@ -5,7 +5,7 @@ use std::sync::Arc;
 use super::{AppsSecond, Missing};
 use crate::apps::{Amount, ProcessState, Stamp, Unavailable};
 use crate::byte_budget::{ByteBudget, ByteReservation};
-use crate::live_app_response::{Measure, Process, Sample};
+use crate::live_app_response::{Measure, Observation, Process, Sample};
 use collector::ring::{IdentityUnavailable, ProcessCreation};
 
 /// A complete observation's processes and additional App measures.
@@ -19,6 +19,7 @@ use collector::ring::{IdentityUnavailable, ProcessCreation};
 /// ```
 #[derive(Debug)]
 pub struct Payload {
+    pub(crate) selected: Observation,
     pub previous: Option<Stamp>,
     rows: Vec<ProcessRow>,
     apps: Vec<AppDetails>,
@@ -95,7 +96,9 @@ impl Payload {
             .reserve(Self::capture_bytes(sample))
             .ok_or(Missing::Budget)?;
         let mut rows = Vec::with_capacity(sample.processes().len());
-        let previous = previous.and_then(|apps| apps.processes.as_ref().ok());
+        let previous = previous
+            .and_then(|apps| apps.processes.as_ref().ok())
+            .map(Arc::as_ref);
         for process in sample.processes() {
             rows.push(ProcessRow::capture(process, previous));
         }
@@ -110,6 +113,7 @@ impl Payload {
             })
             .collect();
         Ok(Self {
+            selected: sample.selected,
             previous: sample.previous,
             rows,
             apps,
@@ -120,7 +124,8 @@ impl Payload {
     /// A conservative charge counts shared names once for each retaining payload.
     /// The reservation is acquired before copying any rows or name bytes.
     fn capture_bytes(sample: &Sample) -> usize {
-        let mut bytes = size_of::<Self>()
+        let mut bytes = 2 * size_of::<usize>()
+            + size_of::<Self>()
             + sample.processes().len() * size_of::<ProcessRow>()
             + sample.apps().len() * size_of::<AppDetails>();
         for process in sample.processes() {
@@ -142,6 +147,31 @@ impl Payload {
 }
 
 impl ProcessRow {
+    pub(crate) fn presentation(&self) -> crate::live_app_response::json::ProcessView<'_> {
+        crate::live_app_response::json::ProcessView {
+            pid: self.pid,
+            creation: self.creation,
+            app_index: self.app_index,
+            executable_name: self
+                .executable_name()
+                .map(|name| (name.bytes.as_slice(), name.display.as_str())),
+            program_unavailable: self.program_unavailable,
+            cpu_ns: self.cpu_ns(),
+            energy_nj: self.energy_nj(),
+            gpu_ns: self.gpu_ns(),
+            disk_read_bytes: self.disk_read_bytes(),
+            disk_written_bytes: self.disk_written_bytes(),
+            disk_io_bytes: self.disk_io_bytes(),
+            resident_bytes: self.resident_bytes(),
+            footprint_bytes: self.footprint_bytes(),
+            idle_wakeups: self.idle_wakeups(),
+            pageins: self.pageins(),
+            threads: self.threads(),
+            app_attribution: self.app_attribution,
+            state: self.state,
+        }
+    }
+
     #[must_use]
     pub fn cpu_ns(&self) -> Amount {
         self.cpu_ns.amount()
@@ -279,7 +309,10 @@ impl Deref for Payload {
 
 impl PartialEq for Payload {
     fn eq(&self, other: &Self) -> bool {
-        self.previous == other.previous && self.rows == other.rows && self.apps == other.apps
+        self.selected == other.selected
+            && self.previous == other.previous
+            && self.rows == other.rows
+            && self.apps == other.apps
     }
 }
 

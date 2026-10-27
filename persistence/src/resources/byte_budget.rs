@@ -71,6 +71,19 @@ impl ByteBudget {
 }
 
 impl ByteReservation {
+    /// Returns unused preflight room while the actual allocation keeps its owner.
+    pub fn shrink_to(&mut self, bytes: usize) {
+        assert!(bytes <= self.bytes);
+        let released = self.bytes - bytes;
+        if released == 0 {
+            return;
+        }
+
+        let before = self.budget.used.fetch_sub(released, Ordering::AcqRel);
+        assert!(before >= released);
+        self.bytes = bytes;
+    }
+
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.bytes

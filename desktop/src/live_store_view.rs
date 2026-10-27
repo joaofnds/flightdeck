@@ -347,7 +347,11 @@ impl LiveDashboard {
             }
         }
 
-        self.snapshot.as_ref()?.resident_history.as_deref()
+        self.snapshot
+            .as_ref()?
+            .resident_history
+            .as_deref()
+            .map(|value| &**value)
     }
 
     /// The second the page's readings show: the hovered one, or the newest, of the View the page
@@ -523,7 +527,11 @@ fn draw_store_view_panels_histories(
     older: Option<OverviewAppHistories>,
 ) -> OverviewAppHistories {
     let Some(older) = older else {
-        let history = |metric| Arc::new(AppAttributionHistory::from_view(metric, view));
+        let history = |metric| {
+            Arc::new(crate::live_source::Presentation::Legacy(
+                AppAttributionHistory::from_view(metric, view),
+            ))
+        };
         return OverviewAppHistories {
             cpu: history(Metric::Cpu),
             power: history(Metric::Power),
@@ -532,9 +540,28 @@ fn draw_store_view_panels_histories(
     };
 
     // The page holds the only reference to the charts it drew.
-    let history = |metric, older: Arc<AppAttributionHistory>| match Arc::into_inner(older) {
-        Some(older) => Arc::new(AppAttributionHistory::from_view_after(metric, view, older)),
-        None => Arc::new(AppAttributionHistory::from_view(metric, view)),
+    let history = |metric, older| {
+        use crate::live_source::Presentation;
+        let history = match Arc::into_inner(older) {
+            Some(Presentation::Legacy(older)) => {
+                Presentation::Legacy(AppAttributionHistory::from_view_after(metric, view, older))
+            }
+            Some(Presentation::Shared(older)) => match Arc::into_inner(older) {
+                Some(older) => Presentation::Legacy(AppAttributionHistory::from_view_after(
+                    metric, view, older,
+                )),
+                None => Presentation::Legacy(AppAttributionHistory::from_view(metric, view)),
+            },
+            Some(Presentation::Store(older)) => Presentation::Store(
+                older.map(|older| AppAttributionHistory::from_view_after(metric, view, older)),
+            ),
+            Some(Presentation::Canonical(older)) => Presentation::Canonical(
+                older.map(|older| AppAttributionHistory::from_view_after(metric, view, older)),
+            ),
+            None => Presentation::Legacy(AppAttributionHistory::from_view(metric, view)),
+        };
+
+        Arc::new(history)
     };
     OverviewAppHistories {
         cpu: history(Metric::Cpu, older.cpu),

@@ -96,7 +96,7 @@ fn an_overwrite_after_attachment_stays_unqualified_at_the_newest_cursor() {
         .unwrap();
     let mut held = super::Held::new();
     held.enable_payload(Arc::new(super::ByteBudget::new(64 * 1024 * 1024)));
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, held.payload_budget.as_ref());
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
     ring.follow().unwrap();
     for second in 10_002..10_010 {
@@ -130,7 +130,7 @@ fn a_missing_replacement_generation_republishes_unqualified_metadata() {
         .unwrap();
     let mut held = super::Held::new();
     held.enable_payload(Arc::new(super::ByteBudget::new(64 * 1024 * 1024)));
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, held.payload_budget.as_ref());
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);

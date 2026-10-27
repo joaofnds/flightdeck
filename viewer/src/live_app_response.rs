@@ -11,8 +11,8 @@ use crate::live_apps::Frame;
 pub(crate) use json::{Header, bounded};
 pub use part::AppPart;
 pub(crate) use part::Present;
+pub use ranks::{AppIdentity, Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 pub(crate) use ranks::{METRICS, Rankable, Ranked, rank_apps};
-pub use ranks::{Metric, RANKS_MAX, Rank, RankedApp, Ranking, Ranks};
 
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;
 pub const RESPONSE_BYTES_MAX: usize = 8 * 1024 * 1024;
@@ -285,8 +285,11 @@ const _: () = {
 impl Sample {
     /// Applies capture's aggregate and presentation admission without retaining a presentation.
     /// A rate predecessor needs its accepted raw frame, rather than copies of the App rows.
-    pub(crate) fn validate_capture(selected: &Frame, previous: Option<&Frame>) -> Result<()> {
-        selected.with_aggregate(previous, capture::validate)
+    pub(crate) fn validate_capture_typed(
+        selected: &Frame,
+        previous: Option<&Frame>,
+    ) -> std::result::Result<(), crate::live_apps::AggregateError> {
+        selected.with_aggregate_typed(previous, capture::validate)
     }
 
     /// Copies every borrowed fact before the aggregate callback returns.
@@ -296,11 +299,20 @@ impl Sample {
         previous: Option<&Frame>,
         output: &mut Option<Box<Self>>,
     ) -> Result<()> {
+        Self::capture_typed(selected, previous, output)
+            .map_err(crate::live_apps::AggregateError::legacy)
+    }
+
+    pub(crate) fn capture_typed(
+        selected: &Frame,
+        previous: Option<&Frame>,
+        output: &mut Option<Box<Self>>,
+    ) -> std::result::Result<(), crate::live_apps::AggregateError> {
         *output = None;
 
         let observation = selected.observation();
 
-        selected.with_aggregate(previous, |aggregate| {
+        selected.with_aggregate_typed(previous, |aggregate| {
             Self::from_aggregate(
                 &observation,
                 previous.map(|frame| *frame.stamp()),
@@ -311,7 +323,9 @@ impl Sample {
 
         let sample = output
             .as_mut()
-            .ok_or(Error::Bound("live App empty sample"))?;
+            .ok_or(crate::live_apps::AggregateError::Presentation(
+                Error::Bound("live App empty sample"),
+            ))?;
 
         sample.usage_refused = selected.usage_refused;
         sample.usage_gone = selected.usage_gone;
@@ -405,7 +419,7 @@ mod capture;
 mod capture_tests;
 #[cfg(test)]
 mod disk_history_tests;
-mod json;
+pub(crate) mod json;
 mod part;
 #[cfg(test)]
 mod part_tests;

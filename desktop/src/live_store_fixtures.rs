@@ -59,6 +59,8 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
         battery: None,
         thermal_pressure: Some(u8::try_from(wall_second % 5).unwrap()),
         performance_levels: Some(store_levels()),
+        complete: viewer::store::CompleteMachineState::Unread,
+        cpu_refused: None,
     }
 }
 
@@ -67,12 +69,12 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
 pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) -> View {
     View {
         version,
-        seconds: seconds.iter().copied().map(Arc::new).collect(),
+        seconds: seconds.iter().cloned().map(Arc::new).collect(),
         apps: seconds
             .iter()
             .map(|_| Arc::new(AppsSecond::default()))
             .collect(),
-        earlier: earlier.iter().copied().map(Arc::new).collect(),
+        earlier: earlier.iter().cloned().map(Arc::new).collect(),
         sampled: Vec::new(),
         cohorts: Cohorts::default(),
         failure: None,

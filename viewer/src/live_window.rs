@@ -92,6 +92,33 @@ impl<T> Clone for Held<T> {
 }
 
 impl<T: WindowValue> Window<T> {
+    /// The pinned `BTreeMap`'s node capacity for this many retained observation keys.
+    pub(crate) fn metadata_bytes_max(count: usize) -> usize {
+        assert!(count <= OBSERVATIONS_MAX);
+        let nodes = if count == 0 {
+            0
+        } else {
+            if count <= 11 {
+                1
+            } else {
+                1 + count.div_ceil(5)
+            }
+        };
+
+        size_of::<Self>()
+            + nodes
+                * (11 * (size_of::<ObservationKey>() + size_of::<Held<T>>())
+                    + 12 * size_of::<usize>()
+                    + 32)
+    }
+
+    pub(crate) fn held_values(&self) -> usize {
+        self.observations
+            .values()
+            .filter(|held| held.value.is_some())
+            .count()
+    }
+
     #[must_use]
     pub fn get(&self, key: &ObservationKey) -> Option<&T> {
         self.observations.get(key)?.value.as_deref()
@@ -101,19 +128,13 @@ impl<T: WindowValue> Window<T> {
         self.observations.contains_key(key)
     }
 
-    fn insert(&mut self, value: T) -> Result<()> {
+    pub(crate) fn insert(&mut self, value: T) -> Result<()> {
         // Only an observation with a wall clock lies in a window.
         let Some(wall_ns) = value.selected().wall_ns else {
             return Ok(());
         };
         let key = ObservationKey::of(value.selected());
-        if let Some(replaced) = self.observations.remove(&key) {
-            self.bytes -= replaced.bytes;
-        }
-        if self.observations.len() == OBSERVATIONS_MAX {
-            return Err(Error::Bound("window values"));
-        }
-
+        self.insert_prepare(&key)?;
         let bytes = value.bytes();
         let held = if bytes <= T::BYTES_MAX - self.bytes {
             Held {
@@ -128,12 +149,46 @@ impl<T: WindowValue> Window<T> {
                 value: None,
             }
         };
-        self.bytes += held.bytes;
-        self.observations.insert(key, held);
-        assert!(self.observations.len() <= OBSERVATIONS_MAX);
-        assert!(self.bytes <= T::BYTES_MAX);
+        self.insert_held(key, held);
 
         Ok(())
+    }
+
+    /// Retains an explicit unavailable observation alongside the window's complete siblings.
+    pub(crate) fn insert_missing(&mut self, observation: &Observation) -> Result<()> {
+        let Some(wall_ns) = observation.wall_ns else {
+            return Ok(());
+        };
+        let key = ObservationKey::of(observation);
+        self.insert_prepare(&key)?;
+        self.insert_held(
+            key,
+            Held {
+                wall_ns,
+                bytes: 0,
+                value: None,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn insert_prepare(&mut self, key: &ObservationKey) -> Result<()> {
+        if let Some(replaced) = self.observations.remove(key) {
+            self.bytes -= replaced.bytes;
+        }
+        if self.observations.len() == OBSERVATIONS_MAX {
+            return Err(Error::Bound("window values"));
+        }
+
+        Ok(())
+    }
+
+    fn insert_held(&mut self, key: ObservationKey, held: Held<T>) {
+        self.bytes += held.bytes;
+        assert!(self.observations.insert(key, held).is_none());
+        assert!(self.observations.len() <= OBSERVATIONS_MAX);
+        assert!(self.bytes <= T::BYTES_MAX);
     }
 
     /// Drops the observations outside the wall clock range.
@@ -193,7 +248,7 @@ impl<T: WindowValue> Window<T> {
 }
 
 impl ObservationKey {
-    fn of(observation: &Observation) -> Self {
+    pub(crate) fn of(observation: &Observation) -> Self {
         Self {
             run: observation.stamp.run,
             boot: observation.stamp.boot,
@@ -344,7 +399,7 @@ fn fill_window_saved<T: WindowValue>(
 
 #[cfg(test)]
 #[path = "live_window_fixture.rs"]
-pub(super) mod fixture;
+pub(crate) mod fixture;
 
 #[cfg(test)]
 #[path = "live_window_tests.rs"]

@@ -149,7 +149,7 @@ fn probe_wait(probe: &mut Probe, generation: u64) -> Result<Box<Snapshot>, Strin
 
 fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
     let panels =
-        crate::live_projection::panels(route, &snapshot.selection, snapshot.history.as_ref())?;
+        crate::live_projection::panels(route, &snapshot.selection, snapshot.history.as_deref())?;
     let limit = if route == "overview" {
         crate::live_projection::OVERVIEW_PANELS_MAX
     } else {
@@ -207,14 +207,16 @@ fn probe_app_attribution(snapshot: &Snapshot, route: &str) -> Result<(), String>
         .app_attribution_history
         .as_deref()
         .ok_or("Missing App attribution history")?;
-    if let AppAttributionHistory::Unavailable(error) = history {
+    if let AppAttributionHistory::Unavailable(error) = &**history {
         return Err(format!("App attribution unavailable: {error}"));
     }
     let index = history
         .index(None)
         .ok_or("Missing selected App attribution")?;
     let ranking = metric.ranking_index();
-    if let Some(crate::live_rankings::Rankings::Ready(rankings)) = snapshot.rankings.as_deref() {
+    if let Some(crate::live_rankings::Rankings::Ready(rankings)) =
+        snapshot.rankings.as_deref().map(|value| &**value)
+    {
         if !rankings.metrics[ranking].entries.is_empty() {
             if !(0..9).any(|line| history.amount(line, Some(index)).is_some()) {
                 return Err("Measured App rankings have no selected attribution rate".into());
@@ -230,7 +232,7 @@ fn rankings_report(snapshot: &Snapshot) -> Result<Value, String> {
         .rankings
         .as_deref()
         .ok_or("Overview App rankings payload is missing")?;
-    let rankings = match rankings {
+    let rankings = match &**rankings {
         crate::live_rankings::Rankings::Ready(rankings) => rankings,
         crate::live_rankings::Rankings::Unavailable(error) => {
             return Err(format!("Overview App rankings unavailable: {error}"));
@@ -479,11 +481,11 @@ fn probe_route_report(snapshot: &Snapshot) -> Result<Value, String> {
         "generation": snapshot.generation,
         "selected": snapshot.selection["selected"],
         "pages": snapshot.pages.keys().collect::<Vec<_>>(),
-        "app_count": snapshot.apps.as_ref().map(|apps| &apps["app_count"]),
+        "app_count": snapshot.apps.as_deref().map(|apps| &apps["app_count"]),
         "overview_rankings": rankings,
         "app_attribution": attribution_report(snapshot)?,
-        "logical_cpu_count": snapshot.cpu_detail.as_ref().map(|activity| activity.cpus.len()),
-        "cpu_interval_available": snapshot.cpu_detail.as_ref()
+        "logical_cpu_count": snapshot.cpu_detail.as_deref().map(|activity| activity.cpus.len()),
+        "cpu_interval_available": snapshot.cpu_detail.as_deref()
             .map(|activity| activity.interval_available),
         "read_ms": snapshot.read_ms
     }))

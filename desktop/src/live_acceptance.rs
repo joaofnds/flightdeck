@@ -14,14 +14,14 @@ pub struct Presentation {
 impl Presentation {
     pub fn prepare(request: &Request, mut snapshot: Box<Snapshot>) -> Result<Box<Self>, String> {
         prepare_context(&snapshot.selection)?;
-        let executables = crate::live_executables::groups(snapshot.detail.as_ref())?;
+        let executables = crate::live_executables::groups(snapshot.detail.as_deref())?;
         let mut panels = crate::live_projection::panels(
             &request.route,
             &snapshot.selection,
-            snapshot.history.as_ref(),
+            snapshot.history.as_deref(),
         )?;
         if request.route == "apps" {
-            prepare_app_names(&mut panels, snapshot.detail.as_ref())?;
+            prepare_app_names(&mut panels, snapshot.detail.as_deref())?;
             let mut group_panels = prepare_process_panels(request, &mut snapshot);
             group_panels.append(&mut panels);
             panels = group_panels;
@@ -30,10 +30,12 @@ impl Presentation {
             let payload = snapshot.history.take();
             if snapshot.resident_history.is_none() {
                 if let Some(payload) = payload {
-                    let resident = crate::live_resident_history::ResidentHistory::prepare(
-                        &payload,
-                        &snapshot.selection,
-                    );
+                    let resident = payload.map_ref(|value| {
+                        crate::live_resident_history::ResidentHistory::prepare(
+                            value,
+                            &snapshot.selection,
+                        )
+                    });
                     snapshot.resident_history = Some(std::sync::Arc::new(resident));
                 }
             }
@@ -155,7 +157,7 @@ pub(crate) fn prepare_overview_titles(panels: &mut [Rc<Panel>]) -> Result<(), St
 
 fn prepare_process_panels(request: &Request, snapshot: &mut Snapshot) -> Vec<Rc<Panel>> {
     use crate::live_process_history::ProcessHistory;
-    let Some(history) = snapshot.process_history.as_deref() else {
+    let Some(history) = snapshot.process_history.as_deref().map(|value| &**value) else {
         return Vec::new();
     };
 
@@ -164,18 +166,24 @@ fn prepare_process_panels(request: &Request, snapshot: &mut Snapshot) -> Vec<Rc<
         ProcessHistory::Ready { .. } | ProcessHistory::All { .. }
     ) {
         if !history.matches(request) {
-            snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::Unavailable(
-                "Process history belongs to another selected group".into(),
-            )));
+            snapshot.process_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(std::sync::Arc::new(
+                    ProcessHistory::Unavailable(
+                        "Process history belongs to another selected group".into(),
+                    ),
+                )),
+            ));
             return Vec::new();
         }
     }
     match history.panels(&snapshot.selection) {
         Ok(panels) => panels,
         Err(reason) => {
-            snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::Unavailable(
-                crate::bounded::bounded(&reason, 512),
-            )));
+            snapshot.process_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(std::sync::Arc::new(
+                    ProcessHistory::Unavailable(crate::bounded::bounded(&reason, 512)),
+                )),
+            ));
             Vec::new()
         }
     }

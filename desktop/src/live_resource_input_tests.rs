@@ -156,10 +156,11 @@ impl InputDriver {
             let selected = resource_point(&template, ResourceEpoch::Current);
             let observation = json!({"run":selected["run"], "boot":selected["boot"],
                 "publication":selected["publication"], "wall_ns":selected["wall_ns"]});
-            snapshot.selection["selected"] = observation.clone();
-            snapshot.selection["summary"] = selected.clone();
-            snapshot.selection["trends"] = json!([earlier, historical, selected]);
-            snapshot.selection["alternatives"] = json!([observation.clone()]);
+            snapshot.selection.legacy_mut().unwrap()["selected"] = observation.clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"] = selected.clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"] =
+                json!([earlier, historical, selected]);
+            snapshot.selection.legacy_mut().unwrap()["alternatives"] = json!([observation.clone()]);
             snapshot.catalog["path"] = json!("resource-input-fixture.recording");
             if later_selected_sibling {
                 let mut later = snapshot.selection["trends"][2].clone();
@@ -167,7 +168,7 @@ impl InputDriver {
                 later["wall_ns"] = json!(1_000_900_000_000_u64);
                 later["battery"]["charging"] = json!(true);
                 later["battery"]["charge_percent"] = json!(99);
-                snapshot.selection["trends"]
+                snapshot.selection.legacy_mut().unwrap()["trends"]
                     .as_array_mut()
                     .unwrap()
                     .push(later);

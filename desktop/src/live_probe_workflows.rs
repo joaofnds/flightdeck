@@ -70,7 +70,7 @@ fn run_apps_find(
     let mut request = pinned_request("apps", initial)?;
     for _page in 0..APP_PAGES_MAX {
         let snapshot = probe_read(probe, &request)?;
-        let apps = snapshot.apps.as_ref().ok_or("Missing live App list")?;
+        let apps = snapshot.apps.as_deref().ok_or("Missing live App list")?;
         identity_validate(&apps["selected"], &initial.selection["selected"])?;
         let rows = apps["apps"].as_array().ok_or("Missing captured App keys")?;
         if rows.len() > 512 {

@@ -14,6 +14,7 @@ use crate::chart_axes::TimeWindow;
 use crate::charts::{GRID, MUTED, PANEL, TEXT};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_hover::{Origin, Target};
+use crate::live_source::Presentation;
 use crate::time_range::Lens;
 
 /// The prototype's heatmap: a 244 pixel plot whose rows share 204 of them, below a 10 pixel
@@ -74,7 +75,7 @@ impl LiveDashboard {
 
     fn cpu_history_plot(
         &self,
-        history: &Arc<CPUHistory>,
+        history: &Arc<Presentation<CPUHistory>>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let Some(focus) = self.cpu_history_focus.as_ref() else {
@@ -128,7 +129,7 @@ impl LiveDashboard {
 
     fn cpu_history_cells(
         &self,
-        history: &Arc<CPUHistory>,
+        history: &Arc<Presentation<CPUHistory>>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let measured = Rc::new(Cell::new(Bounds::default()));
@@ -252,7 +253,7 @@ impl LiveDashboard {
         history.selected()
     }
 
-    fn cpu_history_matches_anchor(&self, history: &Arc<CPUHistory>) -> bool {
+    fn cpu_history_matches_anchor(&self, history: &Arc<Presentation<CPUHistory>>) -> bool {
         self.snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.cpu_history.as_ref())
@@ -355,7 +356,7 @@ impl LiveDashboard {
 
     pub(crate) fn cpu_history_hover(
         &mut self,
-        history: &Arc<CPUHistory>,
+        history: &Arc<Presentation<CPUHistory>>,
         bounds: Bounds<Pixels>,
         position: gpui::Point<Pixels>,
         hovered_at: Instant,
@@ -755,7 +756,7 @@ fn cpu_history_cursor(
 
 /// The history's cells, painted at the measured bounds, which it records for the pointer.
 fn cpu_history_cells_plot(
-    history: &Arc<CPUHistory>,
+    history: &Arc<Presentation<CPUHistory>>,
     inspection: Option<CPUInspection>,
     lens: Lens,
     measured: Rc<Cell<Bounds<Pixels>>>,

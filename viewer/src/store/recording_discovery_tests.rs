@@ -6,6 +6,178 @@ use crate::live::identity_fixture::Fixture;
 use crate::store::{ByteBudget, Failure};
 
 #[test]
+fn an_empty_completed_catalog_keeps_checked_absence_without_inventing_a_clock() {
+    // Goal: a recording with no sealed windows has checked absence, not unchecked history.
+    // Method: load a real registered recording before its first publication or commit.
+    let fixture = Fixture::new();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+    let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {
+        panic!("an empty recording has no chart readings");
+    })
+    .unwrap();
+
+    assert_eq!(outcome.left_out, None);
+    assert!(outcome.terminal.is_none());
+    assert_eq!(
+        outcome.checked_catalog,
+        Some(super::CheckedCatalog {
+            recording: fixture.writer.identity().unwrap().recording,
+            newest_run: fixture.writer.identity(),
+            first_ns: None,
+            windows: 0,
+            first_known_second: None,
+            last_known_second: None,
+            unknown_clock_ticks: Some(0),
+        })
+    );
+}
+
+#[test]
+fn a_successful_load_reports_the_actual_catalog_pruning_floor() {
+    // Goal: a catalog certificate reports what discovery selected rather than held timestamps.
+    // Method: load a real sealed window and compare its certificate with the pruning threshold.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(10_000, &[]);
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+    let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {}).unwrap();
+
+    assert_eq!(outcome.left_out, None);
+    let checked = outcome.checked_catalog.unwrap();
+    assert_eq!(checked.windows, 1);
+    assert_eq!(checked.first_known_second, Some(10_000));
+    assert_eq!(checked.last_known_second, Some(10_000));
+    assert_eq!(checked.unknown_clock_ticks, Some(0));
+    assert_eq!(
+        checked.first_ns,
+        Some(
+            (10_000 - crate::session::LOADED_SECONDS - crate::session::LEAD_IN_SECONDS)
+                * 1_000_000_000,
+        )
+    );
+}
+
+#[test]
+fn a_rollback_before_the_catalog_floor_does_not_certify_omitted_readings() {
+    // Goal: a latest low clock cannot widen checked coverage over windows discovery skipped.
+    // Method: load a high/low-clock minute after an omitted low-clock window.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(100, &[]);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_events(5_000, &[]);
+    fixture.publish_with_events(100, &[]);
+    fixture.seal_minute(1);
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut publications = Vec::new();
+
+    let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, second, _| {
+        publications.push((second.publication, second.wall_ns));
+    })
+    .unwrap();
+
+    assert_eq!(publications, [(2, 5_000_000_000_000), (3, 100_000_000_000)]);
+    assert_eq!(
+        outcome.checked_catalog.unwrap().first_ns,
+        Some(1_340_000_000_000)
+    );
+}
+
+#[test]
+fn a_registry_change_during_loading_revokes_the_checked_catalog() {
+    // Goal: successful old-file decoding cannot certify a source changed during that decode.
+    // Method: retire the registered source inside the real immutable input admission callback.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(100, &[]);
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let changed = std::sync::atomic::AtomicBool::new(false);
+
+    let outcome = super::load_payload_using(
+        &fixture.root,
+        &budget,
+        &operation,
+        &|file, budget| {
+            let input = persistence::engine::AdmittedTable::from_file_budgeted(file, budget)?;
+            if !changed.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                collector::recording::Registry {
+                    runs: Vec::new(),
+                    evictions: 1,
+                }
+                .write(&fixture.root)
+                .unwrap();
+            }
+
+            Ok(input)
+        },
+        |_, _, _| {},
+    )
+    .unwrap();
+
+    assert_eq!(outcome.left_out, Some(Failure::ChangedIdentity));
+    assert_eq!(outcome.checked_catalog, None);
+}
+
+#[test]
+fn input_admission_failure_does_not_certify_a_discovered_catalog() {
+    // Goal: discovering markers does not certify inputs the decoder could not admit.
+    // Method: load a real sealed minute with a byte budget too small for its first input.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(100, &[]);
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(1));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+    let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {
+        panic!("a denied input cannot produce an accepted reading");
+    })
+    .unwrap();
+
+    assert_eq!(outcome.left_out, Some(Failure::Refused));
+    assert_eq!(outcome.checked_catalog, None);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn an_unread_checkpoint_load_does_not_certify_skipped_old_windows() {
+    // Goal: a checkpoint alone cannot certify old inputs the current loader did not decode.
+    // Method: load only the work after publication 2 from a real three-window recording.
+    let mut fixture = Fixture::new();
+    for minute in 0..3 {
+        fixture.publish_with_events(100 + minute * 60, &[]);
+        fixture.skip_run_ticks(59);
+        fixture.seal_minute(minute);
+    }
+    let since = crate::store::Newest {
+        run: fixture.writer.identity().unwrap(),
+        publication: 2,
+        segment: 0,
+    };
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut publications = Vec::new();
+
+    let outcome = super::load_payload_since(
+        &fixture.root,
+        &budget,
+        &operation,
+        Some(&since),
+        |_, second, _| publications.push(second.publication),
+    )
+    .unwrap();
+
+    assert_eq!(publications, [2, 3]);
+    assert_eq!(outcome.left_out, None);
+    assert_eq!(outcome.checked_catalog, None);
+}
+
+#[test]
 fn payload_discovery_keeps_known_readings_when_the_minute_has_no_wall_bounds() {
     // Goal: unknown minute bounds cannot erase the minute's individually clocked readings.
     // Method: seal two real ticks with only the first wall clock absent, then read the payloads.
@@ -156,6 +328,12 @@ fn clockless_payload_history_preserves_its_raw_terminal_without_inventing_readin
 
     assert_eq!(accepted, 0);
     assert_eq!(outcome.left_out, None);
+    let checked = outcome.checked_catalog.unwrap();
+    assert_eq!(checked.first_ns, None);
+    assert_eq!(checked.windows, 1);
+    assert_eq!(checked.first_known_second, None);
+    assert_eq!(checked.last_known_second, None);
+    assert_eq!(checked.unknown_clock_ticks, Some(2));
     let mut terminal = outcome.terminal.unwrap();
     assert_eq!(terminal.machine.ticks.len(), 1);
     assert_eq!(terminal.machine.ticks[0].publication, 2);
@@ -214,6 +392,7 @@ fn a_capacity_stop_reports_incomplete_history_before_decoding() {
         super::load_payload(&fixture.root, &budget, &operation, |_, _, _| accepted += 1).unwrap();
 
     assert_eq!(outcome.left_out, left_out);
+    assert_eq!(outcome.checked_catalog, None);
     assert!(outcome.terminal.is_none());
     assert_eq!(accepted, 0);
     assert_eq!(budget.used(), 0);

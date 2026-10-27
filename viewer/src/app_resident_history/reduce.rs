@@ -54,6 +54,10 @@ pub(crate) struct Interval<'observation> {
 }
 
 const POINT_BYTES_MAX: usize = 2 * 1024 * 1024;
+pub(crate) const WORKING_BYTES_MAX: usize = super::means::BYTES_MAX
+    + POINT_BYTES_MAX
+    + size_of::<Reduction<'static>>()
+    + size_of::<[u16; 8]>();
 const EMPTY: Measure = Measure {
     known: 0,
     measured_members: 0,

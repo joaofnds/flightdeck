@@ -1,4 +1,4 @@
-use super::{Error, Exit, Frame, IdentityUnavailable, ProgramBytes, Result};
+use super::{Exit, Frame, IdentityUnavailable, ProgramBytes, Result};
 use crate::apps::{Aggregate, Interval, ProcessInterval, ProcessObservation, ProcessState};
 
 #[cfg(test)]
@@ -8,7 +8,7 @@ pub(super) fn with_aggregate(
     selected: &Frame,
     previous: Option<&Frame>,
     consume: impl FnOnce(&Aggregate<'_>) -> Result<()>,
-) -> Result<()> {
+) -> std::result::Result<(), super::AggregateError> {
     let previous = previous.unwrap_or(selected);
     let observation = selected.observation();
     let predecessor = previous.observation();
@@ -37,7 +37,8 @@ pub(super) fn with_aggregate(
         },
         &selected_programs,
         &mut selected_observations,
-    )?;
+    )
+    .map_err(super::AggregateError::View)?;
 
     let processes = with_aggregate_intervals(&previous_observations, &selected_observations);
 
@@ -59,9 +60,9 @@ pub(super) fn with_aggregate(
     let aggregate = aggregate.as_mut().unwrap_or_else(|| unreachable!());
     aggregate
         .compute(&interval, &processes)
-        .map_err(|_| Error::Bound("live App aggregate input"))?;
+        .map_err(super::AggregateError::Input)?;
 
-    consume(aggregate)
+    consume(aggregate).map_err(super::AggregateError::Presentation)
 }
 
 struct Predecessor<'frame> {
@@ -194,7 +195,7 @@ fn with_aggregate_exits<'frame>(
     previous: &Predecessor<'frame>,
     programs: &'frame [Option<ProgramBytes<'frame>>],
     output: &mut Vec<ProcessObservation<'frame>>,
-) -> Result<()> {
+) -> std::result::Result<(), crate::apps::Error> {
     let scheduled_count = output.len();
 
     for exit in &selected.exits {
@@ -214,7 +215,7 @@ fn with_aggregate_exits<'frame>(
             output[index] = observation;
         } else {
             if output.len() >= crate::apps::PROCESS_INTERVALS_MAX {
-                return Err(Error::Bound("live App exit interval bound"));
+                return Err(crate::apps::Error::ProcessBound);
             }
 
             output.push(observation);

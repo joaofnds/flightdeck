@@ -162,7 +162,8 @@ impl InputDriver {
     fn accept_a_later_reading(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection["trends"][1]["power_watts"] = serde_json::json!(31.0);
+            snapshot.selection.legacy_mut().unwrap()["trends"][1]["power_watts"] =
+                serde_json::json!(31.0);
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

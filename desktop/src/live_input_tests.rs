@@ -1242,8 +1242,8 @@ impl InputDriver {
             current["cpu_percent"] = json!(87);
             current["pressure"] = json!(0);
             current["swap_used_bytes"] = json!(7_516_192_768_u64);
-            snapshot.selection["summary"] = current.clone();
-            snapshot.selection["trends"] = json!([historical, current]);
+            snapshot.selection.legacy_mut().unwrap()["summary"] = current.clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"] = json!([historical, current]);
 
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -1270,8 +1270,9 @@ impl InputDriver {
             let mut selected = snapshot.selection["trends"][1].clone();
             selected["publication"] = json!(4);
             selected["soc_celsius"] = json!(40);
-            snapshot.selection["selected"]["publication"] = json!(4);
-            snapshot.selection["trends"] = json!([previous, latest, selected]);
+            snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(4);
+            snapshot.selection.legacy_mut().unwrap()["trends"] =
+                json!([previous, latest, selected]);
 
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
             assert!(dashboard.take_update(Update::Ready(snapshot)));
@@ -1294,11 +1295,12 @@ impl InputDriver {
             let selected = snapshot.selection["trends"][0].clone();
             let mut later = snapshot.selection["trends"][1].clone();
             later["power_watts"] = json!(90);
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["context_last_second"] = json!(context_last);
-            snapshot.selection["selected"]["publication"] = selected["publication"].clone();
-            snapshot.selection["summary"] = selected.clone();
-            snapshot.selection["trends"] = json!([selected, later]);
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["context_last_second"] = json!(context_last);
+            snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] =
+                selected["publication"].clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"] = selected.clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"] = json!([selected, later]);
 
             dashboard.request.second = Some(999);
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
@@ -1639,11 +1641,11 @@ impl InputDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             let identity = snapshot.selection["trends"][0].clone();
-            snapshot.selection["second"] = json!(second);
-            snapshot.selection["context_last_second"] = json!(context_last);
-            snapshot.selection["selected"] = json!({"run":identity["run"],
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(second);
+            snapshot.selection.legacy_mut().unwrap()["context_last_second"] = json!(context_last);
+            snapshot.selection.legacy_mut().unwrap()["selected"] = json!({"run":identity["run"],
                 "boot":identity["boot"],"publication":identity["publication"]});
-            snapshot.selection["trends"] = json!([identity]);
+            snapshot.selection.legacy_mut().unwrap()["trends"] = json!([identity]);
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             cx.notify();
         });
@@ -1782,8 +1784,10 @@ fn accepted_snapshot(generation: u64) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation,
         catalog: json!({"first_second":900,"last_second":1100}),
-        selection: json!({"second":1000,"context_last_second":1000,"selected":identity,
+        selection: crate::live_source::Presentation::Legacy(
+            json!({"second":1000,"context_last_second":1000,"selected":identity,
             "trends":[previous, selected]}),
+        ),
         pages: BTreeMap::new(),
         apps: None,
         detail: None,

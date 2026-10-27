@@ -2,7 +2,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::Store;
-use super::tests::view_where;
+use super::tests::{assert_app_facts_equal, view_where};
 use crate::live::identity_fixture::Fixture;
 
 #[test]
@@ -13,7 +13,7 @@ fn a_paused_store_catches_up_from_sealed_readings_missing_from_the_ring() {
     fixture.publish_with_system_rows(100);
     let store = Store::start(&fixture.root).unwrap();
     let retained = view_where(&store, |view| view.seconds.len() == 1);
-    let original = *retained.seconds[0];
+    let original = (*retained.seconds[0]).clone();
     store.set_active(false);
     wait_until_paused(&store);
 
@@ -60,6 +60,7 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
     let mut held = super::Held::new();
     let mut ring = super::Ring::new(fixture.root.clone());
     let shared = super::Shared {
+        queries: None,
         mailbox: super::Mailbox::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),
@@ -125,7 +126,15 @@ fn resumed_payload_ingestion_matches_a_fresh_store_without_changing_a_retained_v
     assert_eq!(actual.left_out, expected.left_out);
     assert_eq!(actual.failure, None);
     assert_eq!(retained.apps.len(), 1);
-    assert_eq!(retained.apps[0], expected.apps[0]);
+    assert_eq!(
+        retained.apps[0].metadata.origin,
+        super::native::Origin::Live(persistence::Losses::default())
+    );
+    assert_eq!(
+        expected.apps[0].metadata.origin,
+        super::native::Origin::Saved(persistence::Losses::default())
+    );
+    assert_app_facts_equal(&retained.apps[0], &expected.apps[0]);
     assert!(retained.apps[0].processes.is_ok());
 }
 
@@ -210,6 +219,7 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
         fixture.publish_with_system_rows(second);
     }
     let shared = super::Shared {
+        queries: None,
         mailbox: super::Mailbox::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),

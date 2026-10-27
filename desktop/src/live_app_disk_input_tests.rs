@@ -605,13 +605,13 @@ fn disk_readout_snapshot(generation: u64, epoch: AppEpoch, current: DiskReadout)
     };
     let mut snapshot = epoch.snapshot(generation);
     let app = disk_readout_app(readout, epoch);
-    snapshot.apps.as_mut().unwrap()["apps"][0] = app.clone();
-    let detail = snapshot.detail.as_mut().unwrap();
+    snapshot.apps.as_mut().unwrap().legacy_mut().unwrap()["apps"][0] = app.clone();
+    let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
     detail["app"] = app;
     detail["elapsed_ns"] = json!("2000000000");
     detail["page"]["total"] = json!(3);
     detail["processes"] = disk_readout_processes(readout);
-    snapshot.history.as_mut().unwrap()["points"] = json!([
+    snapshot.history.as_mut().unwrap().legacy_mut().unwrap()["points"] = json!([
         disk_readout_point(historical, AppEpoch::Historical),
         disk_readout_point(current, AppEpoch::Accepted)
     ]);
@@ -791,7 +791,7 @@ fn disk_readout_process_unavailable(process: &mut Value, metric: &str) {
 fn disk_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = AppEpoch::Accepted.snapshot(generation);
     let app = current_disk_app();
-    snapshot.apps.as_mut().unwrap()["apps"][0] = app.clone();
+    snapshot.apps.as_mut().unwrap().legacy_mut().unwrap()["apps"][0] = app.clone();
     let mut crossing = disk_process(
         12,
         DiskAmounts {
@@ -800,7 +800,7 @@ fn disk_snapshot(generation: u64) -> Box<Snapshot> {
         },
     );
     crossing["app_attribution"] = json!("exec");
-    let detail = snapshot.detail.as_mut().unwrap();
+    let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
     detail["app"] = app.clone();
     detail["elapsed_ns"] = json!("2000000000");
     detail["processes"] = json!([
@@ -820,7 +820,7 @@ fn disk_snapshot(generation: u64) -> Box<Snapshot> {
         ),
         crossing
     ]);
-    snapshot.history.as_mut().unwrap()["points"] = disk_history_points();
+    snapshot.history.as_mut().unwrap().legacy_mut().unwrap()["points"] = disk_history_points();
 
     snapshot
 }
@@ -828,8 +828,8 @@ fn disk_snapshot(generation: u64) -> Box<Snapshot> {
 fn historical_disk_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = AppEpoch::Historical.snapshot(generation);
     let app = historical_disk_app();
-    snapshot.apps.as_mut().unwrap()["apps"][0] = app.clone();
-    let detail = snapshot.detail.as_mut().unwrap();
+    snapshot.apps.as_mut().unwrap().legacy_mut().unwrap()["apps"][0] = app.clone();
+    let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
     detail["app"] = app;
     detail["elapsed_ns"] = json!("2000000000");
     detail["processes"] = json!([
@@ -856,7 +856,7 @@ fn historical_disk_snapshot(generation: u64) -> Box<Snapshot> {
     {
         process["executable_name"] = json!({"display":"Historical worker","bytes_hex":"63"});
     }
-    snapshot.history.as_mut().unwrap()["points"] = disk_history_points();
+    snapshot.history.as_mut().unwrap().legacy_mut().unwrap()["points"] = disk_history_points();
 
     snapshot
 }

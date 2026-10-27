@@ -6,6 +6,14 @@ use collector::disks::{DiskReading, DiskSnapshot, ScanState};
 use collector::machine::Pressure;
 use collector::smc::FANS_MAX;
 use collector::system::PerformanceLevel;
+use std::sync::Arc;
+
+#[path = "complete.rs"]
+mod complete;
+pub use complete::{
+    CompleteMachine, CompleteMachineState, CpuCounter, CpuInterval, CpuPrevious, CpuReading,
+    MachineAdmission, MachineCaptureError,
+};
 
 use crate::cpu_history_sample;
 use crate::metrics::{battery, reduction};
@@ -19,7 +27,7 @@ mod tests;
 
 /// One second of the machine's readings. A value the collector did not read, or a rate whose
 /// interval the readings do not show, is `None` and never zero.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MachineSecond {
     pub publication: u64,
     pub run_tick: u64,
@@ -57,6 +65,10 @@ pub struct MachineSecond {
     pub thermal_pressure: Option<u8>,
     /// The chip's two performance levels, level 0 the fastest, as the tick named them.
     pub performance_levels: Option<[PerformanceLevel; 2]>,
+    /// Shared complete data, populated only by the budgeted complete-ingestion path.
+    pub complete: CompleteMachineState,
+    /// Independent compact counters where another machine-summary facet was refused.
+    pub cpu_refused: Option<Arc<CpuReading>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +109,7 @@ pub struct Reading<'a> {
     pub memory: Option<&'a MemoryRow>,
     pub interfaces: &'a [InterfaceRow],
     pub gpu_states: &'a [GpuStateRow],
+    pub core_states: &'a [crate::recording::CoreStateRow],
     pub fans: &'a [FanRow],
 }
 
@@ -104,10 +117,82 @@ impl MachineSecond {
     /// The second `reading` shows, its rates over the interval since `previous`, the run's
     /// reading before it, where the two are consecutive. `None` when the tick has no wall
     /// clock, since a second without one has no place on a chart.
+    #[must_use]
     pub fn of(reading: &Reading<'_>, previous: Option<&Reading<'_>>) -> Option<Self> {
+        let mut second = Self::gauges(reading)?;
+        if let Some(previous) = previous {
+            if let Some(elapsed_ns) = interval_ns(previous.tick, reading.tick) {
+                second.follows = true;
+                second.cpu_percent = cpu_percent(reading.cpus, previous.cpus);
+                second.cpu_percent_one_core = cpu_percent_one_core(reading.cpus, previous.cpus);
+                second.cpu_level_percent = cpu_level_percent(reading, previous);
+                second.gpu_active_percent =
+                    gpu_active_percent(reading.gpu_states, previous.gpu_states, elapsed_ns);
+                second.network = traffic(reading.interfaces, previous.interfaces, elapsed_ns);
+                let [read, written] = disk_bytes(reading.tick, previous.tick);
+                second.disk_read_bps = read.map(|bytes| per_second(bytes, elapsed_ns));
+                second.disk_written_bps = written.map(|bytes| per_second(bytes, elapsed_ns));
+            }
+        }
+        Some(second)
+    }
+
+    /// Reduces the complete valid reading once. Only a projection refusal uses the legacy
+    /// compatibility reduction; admission failures return without accepting an observation.
+    pub fn complete_of(
+        reading: &Reading<'_>,
+        previous: Option<&Reading<'_>>,
+        budget: &Arc<crate::byte_budget::ByteBudget>,
+    ) -> Result<Option<Self>, MachineCaptureError> {
+        let Some(mut second) = Self::gauges(reading) else {
+            return Ok(None);
+        };
+        match CompleteMachine::capture(reading, previous, budget) {
+            Ok(complete) => {
+                let point = complete.point();
+                second.follows = previous
+                    .and_then(|previous| interval_ns(previous.tick, reading.tick))
+                    .is_some();
+                second.cpu_percent = point.cpu_percent;
+                if previous.is_some_and(|old| cpu_order_matches(reading.cpus, old.cpus)) {
+                    second.cpu_percent_one_core = point.cpu_percent_one_core;
+                }
+                second.cpu_level_percent = cpu_level_order(
+                    reading,
+                    previous,
+                    point.cpu_level_percent.unwrap_or([None; 2]),
+                );
+                second.gpu_active_percent = point.gpu_active_percent;
+                second.network =
+                    point.rates[6]
+                        .zip(point.rates[7])
+                        .map(|(received_bps, sent_bps)| Traffic {
+                            received_bps,
+                            sent_bps,
+                        });
+                let [read, written] = point
+                    .storage
+                    .as_ref()
+                    .map_or([None; 2], crate::metrics::storage::StoragePoint::byte_rates);
+                second.disk_read_bps = read;
+                second.disk_written_bps = written;
+                second.complete = CompleteMachineState::Available(complete);
+            }
+            Err(MachineCaptureError::Projection(persistence::Error::Bound(reason))) => {
+                let cpus = CpuReading::capture(reading, previous, budget)?;
+                second = Self::of(reading, previous).unwrap_or_else(|| unreachable!("placed tick"));
+                second.cpu_refused = cpus;
+                second.complete = CompleteMachineState::Refused(reason);
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(Some(second))
+    }
+
+    fn gauges(reading: &Reading<'_>) -> Option<Self> {
         let wall_ns = reading.tick.wall_ns?;
 
-        let mut second = Self {
+        let second = Self {
             publication: reading.tick.publication,
             run_tick: reading.tick.run_tick,
             wall_ns,
@@ -132,24 +217,98 @@ impl MachineSecond {
             battery: BatterySecond::of(reading.tick),
             thermal_pressure: reading.tick.thermal_pressure,
             performance_levels: reading.tick.performance_levels,
+            complete: CompleteMachineState::Unread,
+            cpu_refused: None,
         };
-        if let Some(previous) = previous {
-            if let Some(elapsed_ns) = interval_ns(previous.tick, reading.tick) {
-                second.follows = true;
-                second.cpu_percent = cpu_percent(reading.cpus, previous.cpus);
-                second.cpu_percent_one_core = cpu_percent_one_core(reading.cpus, previous.cpus);
-                second.cpu_level_percent = cpu_level_percent(reading, previous);
-                second.gpu_active_percent =
-                    gpu_active_percent(reading.gpu_states, previous.gpu_states, elapsed_ns);
-                second.network = traffic(reading.interfaces, previous.interfaces, elapsed_ns);
-                let [read, written] = disk_bytes(reading.tick, previous.tick);
-                second.disk_read_bps = read.map(|bytes| per_second(bytes, elapsed_ns));
-                second.disk_written_bps = written.map(|bytes| per_second(bytes, elapsed_ns));
-            }
-        }
-
         Some(second)
     }
+
+    /// Captures every machine summary group once, under the canonical Store's byte budget.
+    /// Legacy Overview-only callers may keep using `of` until their owner is migrated.
+    pub fn retain_complete(
+        &mut self,
+        reading: &Reading<'_>,
+        previous: Option<&Reading<'_>>,
+        budget: &Arc<crate::byte_budget::ByteBudget>,
+    ) -> Result<(), MachineCaptureError> {
+        assert_eq!(self.publication, reading.tick.publication);
+        assert_eq!(self.complete, CompleteMachineState::Unread);
+        self.complete =
+            CompleteMachineState::Available(CompleteMachine::capture(reading, previous, budget)?);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn complete(&self) -> Option<&CompleteMachine> {
+        match &self.complete {
+            CompleteMachineState::Available(complete) => {
+                Some(complete.as_ref()).filter(|complete| complete.matches(self))
+            }
+            CompleteMachineState::Unread | CompleteMachineState::Refused(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn cpu_counters(&self) -> Option<&[CpuCounter]> {
+        self.complete()
+            .map(CompleteMachine::cpu_counters)
+            .or_else(|| {
+                self.cpu_refused
+                    .as_ref()
+                    .and_then(|cpus| cpus.counters(self))
+            })
+    }
+
+    pub fn cpu_interval(&self) -> persistence::Result<Option<CpuInterval<'_>>> {
+        if let Some(complete) = self.complete() {
+            return complete.cpu_interval().map(Some);
+        }
+        match self.cpu_refused.as_ref() {
+            Some(cpus) => cpus.cpu_interval(self),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Overview's per-core sums require positional continuity even where aggregate CPU pairs IDs.
+fn cpu_order_matches(current: &[CpuRow], previous: &[CpuRow]) -> bool {
+    if current.len() != previous.len() {
+        return false;
+    }
+    assert!(current.len() <= cpu_history_sample::CPUS_MAX);
+    current
+        .iter()
+        .zip(previous)
+        .all(|(now, before)| now.cpu == before.cpu)
+}
+
+fn cpu_level_order(
+    reading: &Reading<'_>,
+    previous: Option<&Reading<'_>>,
+    mut percent: [Option<f64>; 2],
+) -> [Option<f64>; 2] {
+    let Some(previous) = previous else {
+        return [None; 2];
+    };
+    let Some(levels) = reading.tick.performance_levels else {
+        return [None; 2];
+    };
+    let [Ok(fast), Ok(slow)] = levels.map(|level| usize::try_from(level.logical_cpus)) else {
+        return [None; 2];
+    };
+    if fast.checked_add(slow) != Some(reading.cpus.len()) {
+        return [None; 2];
+    }
+    if previous.cpus.len() != reading.cpus.len() {
+        return [None; 2];
+    }
+    if !cpu_order_matches(&reading.cpus[slow..], &previous.cpus[slow..]) {
+        percent[0] = None;
+    }
+    if !cpu_order_matches(&reading.cpus[..slow], &previous.cpus[..slow]) {
+        percent[1] = None;
+    }
+    percent
 }
 
 impl MemorySecond {
@@ -472,6 +631,7 @@ pub fn readings(minute: &MachineMinute) -> impl Iterator<Item = Reading<'_>> {
     let mut memory = &minute.memory[..];
     let mut interfaces = &minute.interfaces[..];
     let mut gpu_states = &minute.gpu_states[..];
+    let mut core_states = &minute.core_states[..];
     let mut fans = &minute.fans[..];
     minute.ticks.iter().map(move |tick| {
         let publication = tick.publication;
@@ -485,6 +645,9 @@ pub fn readings(minute: &MachineMinute) -> impl Iterator<Item = Reading<'_>> {
         let (own_gpu_states, rest) =
             split_publication(gpu_states, publication, |row| row.publication);
         gpu_states = rest;
+        let (own_core_states, rest) =
+            split_publication(core_states, publication, |row| row.publication);
+        core_states = rest;
         let (own_fans, rest) = split_publication(fans, publication, |row| row.publication);
         fans = rest;
 
@@ -494,6 +657,7 @@ pub fn readings(minute: &MachineMinute) -> impl Iterator<Item = Reading<'_>> {
             memory: own_memory.first(),
             interfaces: own_interfaces,
             gpu_states: own_gpu_states,
+            core_states: own_core_states,
             fans: own_fans,
         }
     })

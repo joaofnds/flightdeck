@@ -199,18 +199,25 @@ impl InputDriver {
                 AppAttributionHistory, Metric, tests::disk_fixture,
             };
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection["trends"][0]["storage"] = json!({"state":"complete",
+            snapshot.selection.legacy_mut().unwrap()["trends"][0]["storage"] = json!({
+                "state":"complete",
                 "read_bps":3_000_000.0,"write_bps":1_500_000.0,
                 "devices":resource_devices(ResourceEpoch::Historical)});
-            snapshot.selection["trends"][1]["storage"] = json!({"state":"complete",
+            snapshot.selection.legacy_mut().unwrap()["trends"][1]["storage"] = json!({
+                "state":"complete",
                 "read_bps":8_000_000.0,"write_bps":4_000_000.0,
                 "devices":resource_devices(ResourceEpoch::Current)});
-            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][1].clone();
             let history =
                 AppAttributionHistory::prepare(Metric::Disk, &disk_fixture(), &snapshot.selection);
             assert!(history.panel().is_some(), "{}", history.coverage(None));
-            snapshot.app_attribution_history = Some(Arc::new(history));
-            snapshot.rankings = Some(Arc::new(disk_rankings(&snapshot)));
+            snapshot.app_attribution_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(Arc::new(history)),
+            ));
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(Arc::new(disk_rankings(&snapshot))),
+            ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -447,15 +454,19 @@ impl InputDriver {
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(!preview.request.load_app_attribution_history);
             let mut snapshot = accepted_snapshot(preview.generation.unwrap());
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.selection["summary"] = preview.reading.selection["summary"].clone();
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                preview.reading.selection["summary"].clone();
             let Rankings::Ready(mut rankings) = disk_rankings(&snapshot) else {
                 panic!("Disk fixture requires measured rankings");
             };
             rankings.metrics[3].entries[0].amount = 1_000_000;
             rankings.metrics[3].entries[0].rate = Some(500_000.0);
-            snapshot.rankings = Some(Arc::new(Rankings::Ready(rankings)));
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(Arc::new(Rankings::Ready(rankings))),
+            ));
             assert!(dashboard.preview_receive(crate::live_source::Update::Ready(snapshot)));
             cx.notify();
         });
@@ -486,7 +497,11 @@ impl InputDriver {
 
     fn disk_attribution_anchor(
         &self,
-    ) -> Arc<crate::live_app_attribution_history::AppAttributionHistory> {
+    ) -> Arc<
+        crate::live_source::Presentation<
+            crate::live_app_attribution_history::AppAttributionHistory,
+        >,
+    > {
         self.view.read_with(&self.context, |dashboard, _| {
             Arc::clone(
                 dashboard
@@ -502,7 +517,11 @@ impl InputDriver {
 
     fn assert_disk_attribution_anchor(
         &self,
-        retained: &Arc<crate::live_app_attribution_history::AppAttributionHistory>,
+        retained: &Arc<
+            crate::live_source::Presentation<
+                crate::live_app_attribution_history::AppAttributionHistory,
+            >,
+        >,
     ) {
         assert!(Arc::ptr_eq(retained, &self.disk_attribution_anchor()));
     }
@@ -527,11 +546,12 @@ impl InputDriver {
         use crate::live_app_attribution_history::{AppAttributionHistory, Metric};
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.app_attribution_history = Some(Arc::new(AppAttributionHistory::prepare(
-                Metric::Disk,
-                history,
-                &snapshot.selection,
-            )));
+            snapshot.app_attribution_history =
+                Some(std::sync::Arc::new(
+                    crate::live_source::Presentation::Shared(Arc::new(
+                        AppAttributionHistory::prepare(Metric::Disk, history, &snapshot.selection),
+                    )),
+                ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -585,11 +605,12 @@ impl InputDriver {
                 point["apps"][0]["disk_io_bytes"]["known"] = json!("20");
                 point["apps"][0]["disk_io_bps"] = json!(10.0);
             }
-            snapshot.app_attribution_history = Some(Arc::new(AppAttributionHistory::prepare(
-                Metric::Disk,
-                &history,
-                &snapshot.selection,
-            )));
+            snapshot.app_attribution_history =
+                Some(std::sync::Arc::new(
+                    crate::live_source::Presentation::Shared(Arc::new(
+                        AppAttributionHistory::prepare(Metric::Disk, &history, &snapshot.selection),
+                    )),
+                ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

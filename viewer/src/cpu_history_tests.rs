@@ -44,6 +44,7 @@ fn pages_a_maximum_domain_and_maximum_observation_count_inside_the_byte_bound() 
         context: &context,
         live: None,
         saved: Some(&cache),
+        retained: None,
         offset: 992,
     })
     .unwrap();
@@ -122,6 +123,7 @@ fn response(entries: Vec<Entry>, offset: u32) -> Result<Value> {
         context: &context,
         live: None,
         saved: Some(&cache),
+        retained: None,
         offset,
     })
 }
@@ -220,6 +222,7 @@ fn rejects_more_than_4096_context_observations() {
         context: &context,
         live: None,
         saved: None,
+        retained: None,
         offset: 0,
     });
 
@@ -378,7 +381,8 @@ macro_rules! complementary_case {
             let saved = Cache {range,entries:vec![missing]};
 
             let response = project(&Request {selected:&selected,context_last_second,
-                context:&context,live:live.as_ref(),saved:Some(&saved),offset:0}).unwrap();
+                context:&context,live:live.as_ref(),saved:Some(&saved),retained:None,
+                offset:0}).unwrap();
 
             assert_eq!(response["observations"][0]["interval_available"],true);
             assert_eq!(response["cpus"],json!([{ "cpu":0,"busy_percent":[25.0]},
@@ -414,6 +418,7 @@ fn rejects_a_cpu_history_response_above_seven_mib() {
         context: &context,
         live: None,
         saved: Some(&saved),
+        retained: None,
         offset: 0,
     });
 
@@ -469,6 +474,7 @@ fn reports_retention_limits_without_fabricating_dropped_cpu_values() {
         context: &context,
         live: Some(history),
         saved: None,
+        retained: None,
         offset: 0,
     })
     .unwrap();

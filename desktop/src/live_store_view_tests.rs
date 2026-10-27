@@ -63,9 +63,9 @@ fn pause_keeps_the_displayed_publication_among_same_second_siblings() {
         publication: 10_006,
         wall_ns: first.wall_ns + 500_000_000,
         cpu_percent: Some(91.0),
-        ..first
+        ..first.clone()
     };
-    let mut view = view(1, &[], &[first, shown]);
+    let mut view = view(1, &[], &[first.clone(), shown.clone()]);
     view.apps[0] = Arc::new(apps_of(&first, "Browser", 100_000_000));
     view.apps[1] = Arc::new(apps_of(&shown, "Browser", 900_000_000));
     dashboard.take_view(Arc::new(view));
@@ -84,9 +84,9 @@ fn a_retained_hover_does_not_substitute_a_different_publication() {
     let old = reading_at(8_200, 0);
     let newer = MachineSecond {
         publication: 8_201,
-        ..old
+        ..old.clone()
     };
-    let mut held = view(1, &[newer], &[reading_at(10_005, 0)]);
+    let mut held = view(1, std::slice::from_ref(&newer), &[reading_at(10_005, 0)]);
     let budget = Arc::new(viewer::store::ByteBudget::new(1_048_576));
     held.sampled
         .push(Arc::new(viewer::store::SampledSecond::from_second(
@@ -116,7 +116,7 @@ fn a_recent_hover_finds_the_exact_sibling_instead_of_the_last_in_its_second() {
     let newer = MachineSecond {
         publication: 10_006,
         cpu_percent: Some(91.0),
-        ..old
+        ..old.clone()
     };
     let old_apps = apps_of(&old, "Older", 10);
     let target = Target {
@@ -125,7 +125,7 @@ fn a_recent_hover_finds_the_exact_sibling_instead_of_the_last_in_its_second() {
             &old_apps.observation.unwrap().stamp,
         )),
     };
-    let mut held = view(1, &[], &[old, newer]);
+    let mut held = view(1, &[], &[old.clone(), newer.clone()]);
     held.apps = vec![Arc::new(old_apps), Arc::new(apps_of(&newer, "Newer", 20))];
     dashboard.take_view(Arc::new(held));
 
@@ -630,7 +630,8 @@ mod when_a_hover_shows_an_earlier_second {
         // take a View that ends at 10,005.
         let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
         let mut hover = preview(&dashboard);
-        hover.reading.selection = summary_selection(&reading_at(9_999, 0));
+        hover.reading.selection =
+            crate::live_source::Presentation::Legacy(summary_selection(&reading_at(9_999, 0)));
         dashboard.preview = Some(hover);
 
         dashboard.take_view(newer_view());
@@ -646,7 +647,8 @@ mod when_a_hover_shows_an_earlier_second {
         // a View that ends at 10,005, whose CPU was 2.5% busy.
         let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
         let mut hover = preview(&dashboard);
-        hover.reading.selection = summary_selection(&reading_at(9_999, 0));
+        hover.reading.selection =
+            crate::live_source::Presentation::Legacy(summary_selection(&reading_at(9_999, 0)));
         dashboard.preview = Some(hover);
 
         dashboard.take_view(newer_view());
@@ -707,7 +709,7 @@ fn opening_on(route: &str) -> LiveDashboard {
 /// the worker reads them.
 fn read_by_the_worker(seconds: &[MachineSecond]) -> LiveDashboard {
     let mut snapshot = readings(seconds);
-    snapshot.selection["summary"] = trend_point(seconds.last().unwrap());
+    snapshot.selection.legacy_mut().unwrap()["summary"] = trend_point(seconds.last().unwrap());
 
     let mut dashboard = opening();
     dashboard.accept(snapshot);
@@ -744,11 +746,11 @@ fn charted_view() -> View {
         .iter()
         .map(|second| Arc::new(apps_of(second, "Brave Browser", 750_000_000)))
         .collect();
-    let brave = Arc::new(RankedApp {
-        kind: KeyKind::Bundle,
-        bytes: b"Brave Browser".to_vec(),
-        display_name: "Brave Browser".into(),
-    });
+    let brave = Arc::new(RankedApp::named(
+        KeyKind::Bundle,
+        b"Brave Browser".to_vec(),
+        "Brave Browser".into(),
+    ));
     view.cohorts.seconds = seconds.len();
     view.cohorts.cpu = vec![Arc::clone(&brave)];
     view.cohorts.power = vec![Arc::clone(&brave)];
@@ -761,14 +763,20 @@ fn charted_view() -> View {
 /// drew of them.
 fn drawn_by_app(trends: &[MachineSecond]) -> LiveDashboard {
     let charted = charted_view();
-    let history = |metric| Arc::new(AppAttributionHistory::from_view(metric, &charted));
+    let history = |metric| {
+        Arc::new(crate::live_source::Presentation::Legacy(
+            AppAttributionHistory::from_view(metric, &charted),
+        ))
+    };
     let mut snapshot = readings(trends);
     snapshot.overview_app_histories = Some(Arc::new(OverviewAppHistories {
         cpu: history(Metric::Cpu),
         power: history(Metric::Power),
         disk: history(Metric::Disk),
     }));
-    snapshot.resident_history = Some(Arc::new(ResidentHistory::from_view(&charted)));
+    snapshot.resident_history = Some(std::sync::Arc::new(
+        crate::live_source::Presentation::Shared(Arc::new(ResidentHistory::from_view(&charted))),
+    ));
 
     let mut dashboard = opening();
     dashboard.accept(snapshot);
@@ -846,14 +854,15 @@ pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
         resident_bytes: measure(0),
         footprint_bytes: measure(0),
     };
-    let ranked = Arc::new(RankedApp {
-        kind: KeyKind::Bundle,
-        bytes: app.key.bytes.clone(),
-        display_name: app.display_name.clone(),
-    });
+    let ranked = Arc::new(RankedApp::named(
+        KeyKind::Bundle,
+        app.key.bytes.clone(),
+        app.display_name.clone(),
+    ));
     let apps = vec![AppRow::new(&app, ranked)];
 
     AppsSecond {
+        metadata: viewer::store::AppMetadata::default(),
         processes: Err(viewer::store::Missing::Unread),
         missing: None,
         observation: Some(Observation {
@@ -876,7 +885,7 @@ pub fn apps_of(second: &MachineSecond, name: &str, cpu_ns: u64) -> AppsSecond {
         usage_refused: 0,
         usage_gone: 0,
         totals: Totals::of(&apps),
-        apps,
+        apps: apps.try_into().unwrap(),
     }
 }
 
@@ -1077,7 +1086,7 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     let page = cx.update(|cx| {
         cx.new(|_| {
             let mut page = opening();
-            let mut snapshot = readings(&[stale]);
+            let mut snapshot = readings(std::slice::from_ref(&stale));
             snapshot.generation = page.generation;
             assert!(page.receive(Update::Ready(snapshot)));
             assert!(page.take_view(Arc::new(view(1, &[], &[stale]))));

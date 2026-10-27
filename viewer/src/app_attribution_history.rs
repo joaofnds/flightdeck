@@ -12,6 +12,7 @@ pub(crate) mod means;
 mod reduce;
 #[path = "app_attribution_history/sums.rs"]
 pub(crate) mod sums;
+pub(crate) use reduce::WORKING_BYTES_MAX;
 pub(crate) use reduce::{Capture, Reading, Reduction};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,7 +36,7 @@ pub const APP_ATTRIBUTION_HISTORIES_RESPONSE_BYTES_MAX: usize =
 const _: () = {
     assert!(APP_ATTRIBUTION_HISTORIES_RESPONSE_BYTES_MAX == 24 * 1024 * 1024);
     assert!(size_of::<Box<AppAttributionHistories>>() <= 16);
-    assert!(3 * reduce::WORKING_BYTES_MAX + 512 * 1024 < 40 * 1024 * 1024);
+    assert!(3 * WORKING_BYTES_MAX + 512 * 1024 < 40 * 1024 * 1024);
 };
 
 impl LiveSession {

@@ -28,6 +28,19 @@ pub(crate) struct Entry {
     pub values: Vec<Option<f64>>,
 }
 
+pub(crate) struct RetainedEntry<'a> {
+    pub identity: &'a Identity,
+    pub previous: Option<Identity>,
+    pub interval_available: bool,
+    pub values: &'a [Option<f64>],
+}
+
+#[derive(Clone, Copy)]
+enum EntryRef<'a> {
+    Owned(&'a Entry),
+    Retained(&'a RetainedEntry<'a>),
+}
+
 pub(crate) struct History {
     entries: VecDeque<Entry>,
     previous: Vec<CounterSample>,
@@ -40,6 +53,7 @@ pub(crate) struct Request<'a> {
     pub context: &'a [Identity],
     pub live: Option<&'a History>,
     pub saved: Option<&'a Cache>,
+    pub retained: Option<&'a [RetainedEntry<'a>]>,
     pub offset: u32,
 }
 
@@ -47,13 +61,15 @@ pub(crate) struct Request<'a> {
 struct Merged<'a> {
     live: Option<&'a Entry>,
     saved: Option<&'a Entry>,
+    retained: Option<&'a RetainedEntry<'a>>,
 }
 
 type Key<'a> = (&'a str, &'a str, u64);
 type Index<'a> = BTreeMap<Key<'a>, Merged<'a>>;
 
 const _: () = {
-    assert!(size_of::<Merged<'static>>() <= 16);
+    assert!(size_of::<Merged<'static>>() <= 3 * size_of::<usize>());
+    assert!(size_of::<EntryRef<'static>>() <= 16);
     assert!(PAGE_CPUS * OBSERVATIONS_MAX <= 131_072);
     assert!(RESPONSE_BYTES_MAX < 8 * 1024 * 1024);
     assert!(CACHE_BYTES_MAX > OBSERVATIONS_MAX * 1024 * size_of::<Option<f64>>());
@@ -280,7 +296,7 @@ pub(crate) fn project(request: &Request<'_>) -> Result<Value> {
     let selected = project_selected(request)?;
     let total = merged[selected]
         .primary()
-        .map_or(0, |entry| entry.values.len());
+        .map_or(0, |entry| entry.values().len());
     let offset = usize::try_from(request.offset).map_err(|_| Error::Bound("CPU history offset"))?;
     project_offset(offset, total)?;
 
@@ -292,10 +308,10 @@ pub(crate) fn project(request: &Request<'_>) -> Result<Value> {
             let primary = entry.primary();
             json!({"observation":identity.json(),
             "previous_observation":primary.and_then(|entry| {
-                entry.previous.as_ref().map(Identity::json)
+                entry.previous().map(Identity::json)
             }),
-            "interval_available":primary.is_some_and(|entry| entry.interval_available),
-            "cpu_count":primary.map_or(0, |entry| entry.values.len())})
+            "interval_available":primary.is_some_and(|entry| entry.interval_available()),
+            "cpu_count":primary.map_or(0, |entry| entry.values().len())})
         })
         .collect::<Vec<_>>();
     let mut cpus = Vec::with_capacity(PAGE_CPUS.min(total));
@@ -313,6 +329,20 @@ pub(crate) fn project(request: &Request<'_>) -> Result<Value> {
     project_bytes(&value)?;
 
     Ok(value)
+}
+
+pub(crate) fn retained_work_bytes(count: usize) -> Result<usize> {
+    if count > OBSERVATIONS_MAX {
+        return Err(Error::Bound("CPU history observations"));
+    }
+    // The pinned BTreeMap node contains eleven entries and twelve child pointers. Charging
+    // every possible node separately also covers the partially occupied root of a tiny query.
+    let node_bytes = 11 * size_of::<(Key<'_>, Merged<'_>)>() + 12 * size_of::<usize>() + 32;
+    let nodes = if count == 0 { 0 } else { 1 + count.div_ceil(5) };
+    let entry_bytes =
+        size_of::<Identity>() + size_of::<RetainedEntry<'_>>() + size_of::<Merged<'_>>() + 4 * 64;
+
+    Ok(4096 + count * entry_bytes + nodes * node_bytes)
 }
 
 pub(crate) fn project_bytes(value: &Value) -> Result<()> {
@@ -377,6 +407,17 @@ fn project_selected(request: &Request<'_>) -> Result<usize> {
 }
 
 fn project_index<'a>(request: &'a Request<'a>, output: &mut Index<'a>) -> Result<()> {
+    if let Some(retained) = request.retained {
+        if retained.len() > OBSERVATIONS_MAX {
+            return Err(Error::Bound("CPU history retained count"));
+        }
+        for entry in retained {
+            let slot = output.entry(key(entry.identity)).or_default();
+            if slot.retained.replace(entry).is_some() {
+                return Err(Error::Bound("duplicate retained CPU observation"));
+            }
+        }
+    }
     if let Some(saved) = request.saved {
         if saved.entries.len() > OBSERVATIONS_MAX {
             return Err(Error::Bound("CPU history saved count"));
@@ -441,25 +482,35 @@ fn key(identity: &Identity) -> Key<'_> {
 }
 
 impl<'a> Merged<'a> {
-    fn primary(self) -> Option<&'a Entry> {
+    fn primary(&self) -> Option<EntryRef<'a>> {
+        if let Some(entry) = self.retained {
+            return Some(EntryRef::Retained(entry));
+        }
         if self.live.is_some_and(|entry| entry.interval_available) {
-            return self.live;
+            return self.live.map(EntryRef::Owned);
         }
 
         if self.saved.is_some_and(|entry| entry.interval_available) {
-            return self.saved;
+            return self.saved.map(EntryRef::Owned);
         }
 
-        self.live.or(self.saved)
+        self.live.or(self.saved).map(EntryRef::Owned)
     }
 
-    fn validate(self, identity: &Identity) -> Result<()> {
-        for entry in [self.live, self.saved].into_iter().flatten() {
-            if !entry.identity.same(identity) {
+    fn validate(&self, identity: &Identity) -> Result<()> {
+        for entry in [
+            self.live.map(EntryRef::Owned),
+            self.saved.map(EntryRef::Owned),
+            self.retained.map(EntryRef::Retained),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !entry.identity().same(identity) {
                 return Err(Error::Bound("changed CPU history observation"));
             }
 
-            if entry.values.len() > cpu_history_sample::CPUS_MAX {
+            if entry.values().len() > cpu_history_sample::CPUS_MAX {
                 return Err(Error::Bound("logical CPU count"));
             }
         }
@@ -485,13 +536,13 @@ impl<'a> Merged<'a> {
         Ok(())
     }
 
-    fn value(self, cpu: usize) -> Option<f64> {
+    fn value(&self, cpu: usize) -> Option<f64> {
         let primary = self.primary()?;
-        if !primary.interval_available {
+        if !primary.interval_available() {
             return None;
         }
 
-        let value = primary.values.get(cpu).copied().flatten();
+        let value = primary.values().get(cpu).copied().flatten();
         if value.is_some() {
             return value;
         }
@@ -501,6 +552,36 @@ impl<'a> Merged<'a> {
             .and_then(|entry| entry.values.get(cpu))
             .copied()
             .flatten()
+    }
+}
+
+impl EntryRef<'_> {
+    fn identity(&self) -> &Identity {
+        match self {
+            Self::Owned(entry) => &entry.identity,
+            Self::Retained(entry) => entry.identity,
+        }
+    }
+
+    fn previous(&self) -> Option<&Identity> {
+        match self {
+            Self::Owned(entry) => entry.previous.as_ref(),
+            Self::Retained(entry) => entry.previous.as_ref(),
+        }
+    }
+
+    fn interval_available(&self) -> bool {
+        match self {
+            Self::Owned(entry) => entry.interval_available,
+            Self::Retained(entry) => entry.interval_available,
+        }
+    }
+
+    fn values(&self) -> &[Option<f64>] {
+        match self {
+            Self::Owned(entry) => &entry.values,
+            Self::Retained(entry) => entry.values,
+        }
     }
 }
 

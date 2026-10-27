@@ -4,6 +4,7 @@ use crate::app_process_groups_history::ProcessGroupReading;
 use crate::app_process_groups_history::reduce::{Capture, Phase, Reduction};
 use crate::cancellation::Operation;
 use crate::live_app_history::{History, Point, Target, key};
+use crate::live_app_response::json::ProcessView;
 use crate::live_app_response::{AppPart, Observation, Process, Sample};
 use crate::live_apps::Frame;
 
@@ -127,7 +128,12 @@ fn capture_members<'sample>(
     operation: &Operation,
 ) -> Result<()> {
     let mut groups = Vec::new();
-    capture_groups(members, processes, &mut groups, operation)?;
+    capture_groups(
+        members,
+        processes.map(ProcessView::of),
+        &mut groups,
+        operation,
+    )?;
     let named: u32 = groups.iter().map(|group| group.totals.members).sum();
     let unnamed = members
         .checked_sub(named)
@@ -152,16 +158,60 @@ fn capture_readings(
     for group in groups {
         operation.check()?;
         group.totals.membership_complete = snapshot.membership_complete;
-        let mut totals = None;
-        crate::live_app_history::trace::Totals::capture(&group.totals, &mut totals);
-        let totals = totals.ok_or(Error::Bound("process cohort saved totals"))?;
-        let mut reading = ProcessGroupReading::EMPTY;
-        totals.process_group_reading(&mut reading);
+        let reading = capture_reading(&group.totals)?;
         snapshot.groups.push(NamedReading {
             name: group.name.into(),
             reading,
         });
     }
+    Ok(())
+}
+
+fn capture_reading(app: &crate::apps::AppTotals) -> Result<ProcessGroupReading> {
+    let mut totals = None;
+    crate::live_app_history::trace::Totals::capture(app, &mut totals);
+    let totals = totals.ok_or(Error::Bound("process cohort saved totals"))?;
+    let mut reading = ProcessGroupReading::EMPTY;
+    totals.process_group_reading(&mut reading);
+
+    Ok(reading)
+}
+
+/// Visits one retained App's borrowed process rows through the same grouping and totals rule.
+pub(crate) fn visit_borrowed<'source>(
+    source: &Capture<'_>,
+    members: u32,
+    processes: impl Iterator<Item = ProcessView<'source>>,
+    reduction: &mut Reduction<'_>,
+    phase: Phase,
+    operation: &Operation,
+) -> Result<()> {
+    let mut groups = Vec::new();
+    capture_groups(members, processes, &mut groups, operation)?;
+    let named: u32 = groups.iter().map(|group| group.totals.members).sum();
+    let unnamed = members
+        .checked_sub(named)
+        .ok_or(Error::Bound("process cohort saved unnamed members"))?;
+    if !reduction.begin(
+        &Capture {
+            observation: source.observation,
+            elapsed_ns: source.elapsed_ns,
+            source_available: source.source_available,
+            membership_complete: source.membership_complete,
+            unnamed_members: Some(unnamed),
+            live: source.live,
+        },
+        phase,
+    )? {
+        return Ok(());
+    }
+
+    for group in &mut groups {
+        operation.check()?;
+        group.totals.membership_complete = source.membership_complete;
+        reduction.group(group.name, &capture_reading(&group.totals)?)?;
+    }
+
     Ok(())
 }
 
@@ -191,7 +241,7 @@ impl Snapshot {
 
 fn capture_groups<'sample>(
     members: u32,
-    processes: impl Iterator<Item = &'sample Process>,
+    processes: impl Iterator<Item = ProcessView<'sample>>,
     groups: &mut Vec<SavedGroup<'sample>>,
     operation: &Operation,
 ) -> Result<()> {
@@ -204,15 +254,15 @@ fn capture_groups<'sample>(
 
     for process in processes {
         operation.check()?;
-        let Some(name) = &process.executable_name else {
+        let Some((name, _display)) = process.executable_name else {
             continue;
         };
 
-        if name.bytes.is_empty() {
+        if name.is_empty() {
             continue;
         }
 
-        let index = match groups.binary_search_by(|group| group.name.cmp(&name.bytes)) {
+        let index = match groups.binary_search_by(|group| group.name.cmp(name)) {
             Ok(index) => index,
             Err(index) => {
                 if groups.len() == capacity {
@@ -222,7 +272,7 @@ fn capture_groups<'sample>(
                 groups.insert(
                     index,
                     SavedGroup {
-                        name: &name.bytes,
+                        name,
                         totals: crate::apps::AppTotals::default(),
                     },
                 );
@@ -230,7 +280,7 @@ fn capture_groups<'sample>(
             }
         };
 
-        super::add_process(&mut groups[index].totals, process);
+        super::add_process_view(&mut groups[index].totals, &process);
     }
 
     Ok(())

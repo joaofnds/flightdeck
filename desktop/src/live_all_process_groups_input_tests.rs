@@ -146,11 +146,11 @@ impl AppHoverDriver {
         history.points[1].readings[0].measures[9].known = 13;
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
-            snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::prepare_all(
-                history,
-                &dashboard.request,
-                &snapshot.selection,
-            )));
+            snapshot.process_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(std::sync::Arc::new(
+                    ProcessHistory::prepare_all(history, &dashboard.request, &snapshot.selection),
+                )),
+            ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

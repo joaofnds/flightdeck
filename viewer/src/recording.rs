@@ -91,6 +91,10 @@ impl ScopedSealedMinute<'_> {
         &self.manifest.identity.run
     }
 
+    pub(crate) fn losses(&self) -> &persistence::Losses {
+        &self.manifest.losses
+    }
+
     /// Verifies the marker at `marker` and every file the minute it names commits.
     pub fn open(root: &Path, marker: &Path) -> Result<Self, Refused> {
         let manifest = persistence::read_committed(root, marker).map_err(Refused::Commitment)?;
@@ -309,6 +313,9 @@ fn ordered<T, K: Ord>(
 #[cfg(test)]
 #[path = "recording/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use tests::sealed_system_minute;
 
 #[cfg(test)]
 #[path = "recording/ticks_input_tests.rs"]

@@ -40,11 +40,12 @@ fn reads_a_partial_cpu_page_from_real_saved_counters_at_the_exact_same_second_id
         vec![None, Some(34.0), Some(34.0)]
     );
     assert_eq!(snapshot.selection["selected"]["publication"], 3);
-    let activity = snapshot.cpu_detail.as_ref().unwrap();
+    let activity = snapshot.cpu_detail.as_deref().unwrap();
     crate::live_source::identity_validate(&activity.observation, &snapshot.selection["selected"])
         .unwrap();
     assert_eq!(activity.cpus[32].busy_percent, Some(32.0));
-    let crate::live_rankings::Rankings::Ready(rankings) = snapshot.rankings.as_deref().unwrap()
+    let crate::live_rankings::Rankings::Ready(rankings) =
+        snapshot.rankings.as_deref().map(|value| &**value).unwrap()
     else {
         panic!("Saved CPU App rankings are unavailable");
     };
@@ -102,7 +103,7 @@ fn hover_preview_shows_the_hovered_seconds_cores_as_the_worker_reads_them() {
 
     let preview = crate::live_hover::Preview::resident(&committed, &request, target);
 
-    let cores = preview.reading.cpu_detail.as_ref().unwrap();
+    let cores = preview.reading.cpu_detail.as_deref().unwrap();
     assert_eq!(cores.observation["publication"], 2);
     assert_eq!(cores.cpus, worker.cpu_detail.as_ref().unwrap().cpus);
 }

@@ -25,6 +25,69 @@ pub(crate) struct Interval<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct ObservedCounters<'a> {
+    pub observation: &'a Observation,
+    pub counters: &'a Counters,
+}
+
+pub(crate) struct ObservedInterval<'a> {
+    pub current: ObservedCounters<'a>,
+    pub previous: Option<ObservedCounters<'a>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpuPrevious {
+    pub publication: u64,
+    pub run_tick: u64,
+    pub wall_ns: u64,
+    pub continuous_ns: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct CpuInterval<'a> {
+    pub values: &'a [Option<f64>],
+    pub unavailable_reason: Option<&'static str>,
+    pub previous: Option<&'a CpuPrevious>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct CapturedInterval {
+    pub values: Vec<Option<f64>>,
+    pub unavailable_reason: Option<&'static str>,
+    pub previous: Option<CpuPrevious>,
+}
+
+impl CapturedInterval {
+    pub fn capture(interval: &ObservedInterval<'_>) -> Result<Self> {
+        let mut values = Vec::new();
+        let unavailable_reason = derive_observed_unavailable(interval);
+        derive_values(interval, unavailable_reason, &mut values)?;
+        Ok(Self {
+            values,
+            unavailable_reason,
+            previous: interval.previous.map(|previous| CpuPrevious {
+                publication: previous.observation.publication,
+                run_tick: previous.observation.run_tick,
+                wall_ns: previous.observation.wall,
+                continuous_ns: previous.observation.continuous,
+            }),
+        })
+    }
+
+    pub fn borrowed(&self) -> CpuInterval<'_> {
+        CpuInterval {
+            values: &self.values,
+            unavailable_reason: self.unavailable_reason,
+            previous: self.previous.as_ref(),
+        }
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.values.capacity() * size_of::<Option<f64>>()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct CounterInterval<'a> {
     pub current: &'a Counters,
     pub previous: &'a Counters,
@@ -161,10 +224,32 @@ pub(crate) fn derive(
     interval: &Interval<'_>,
     output: &mut Vec<Option<f64>>,
 ) -> Result<Option<&'static str>> {
+    let unavailable = derive_unavailable(interval);
+    derive_values(&observed(interval), unavailable, output)?;
+
+    Ok(unavailable)
+}
+
+fn observed<'a>(interval: &'a Interval<'_>) -> ObservedInterval<'a> {
+    ObservedInterval {
+        current: ObservedCounters {
+            observation: &interval.current.identity.observation,
+            counters: &interval.current.counters,
+        },
+        previous: interval.previous.map(|previous| ObservedCounters {
+            observation: &previous.identity.observation,
+            counters: &previous.counters,
+        }),
+    }
+}
+
+fn derive_values(
+    interval: &ObservedInterval<'_>,
+    unavailable: Option<&'static str>,
+    output: &mut Vec<Option<f64>>,
+) -> Result<()> {
     assert!(output.is_empty());
     assert!(interval.current.counters.len() <= CPUS_MAX);
-
-    let unavailable = derive_unavailable(interval);
     output.reserve_exact(interval.current.counters.len());
     for (cpu, current) in interval.current.counters.iter().enumerate() {
         let busy = if unavailable.is_none() {
@@ -181,7 +266,7 @@ pub(crate) fn derive(
         output.push(busy);
     }
 
-    Ok(unavailable)
+    Ok(())
 }
 
 pub(crate) fn sum_busy(interval: CounterInterval<'_>) -> Result<Option<f64>> {
@@ -273,10 +358,15 @@ fn derive_unavailable(interval: &Interval<'_>) -> Option<&'static str> {
         return Some("CPU readings belong to different boots");
     }
 
-    if !crate::metrics::compatible(
-        &previous.identity.observation,
-        &interval.current.identity.observation,
-    ) {
+    derive_observed_unavailable(&observed(interval))
+}
+
+fn derive_observed_unavailable(interval: &ObservedInterval<'_>) -> Option<&'static str> {
+    let Some(previous) = interval.previous else {
+        return Some("Previous CPU reading unavailable");
+    };
+
+    if !crate::metrics::compatible(previous.observation, interval.current.observation) {
         return Some("Requires consecutive compatible CPU readings");
     }
 

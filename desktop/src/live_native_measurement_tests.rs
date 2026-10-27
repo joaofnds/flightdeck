@@ -371,16 +371,17 @@ fn copies_native_readings_exactly_and_refuses_json_past_one_mibibyte() {
         Some(9_007_199_254_740_993)
     );
     assert_eq!(original["observation"], snapshot.selection["selected"]);
-    snapshot.selection["summary"]["padding"] = json!("");
+    snapshot.selection.legacy_mut().unwrap()["summary"]["padding"] = json!("");
     let overhead = copy(&snapshot).unwrap().len();
-    snapshot.selection["summary"]["padding"] = json!("x".repeat(1_048_576 - overhead));
+    snapshot.selection.legacy_mut().unwrap()["summary"]["padding"] =
+        json!("x".repeat(1_048_576 - overhead));
     let boundary = copy(&snapshot).unwrap();
     assert_eq!(boundary.len(), 1_048_576);
     let oversized = format!(
         "{}x",
         snapshot.selection["summary"]["padding"].as_str().unwrap()
     );
-    snapshot.selection["summary"]["padding"] = json!(oversized);
+    snapshot.selection.legacy_mut().unwrap()["summary"]["padding"] = json!(oversized);
 
     assert_eq!(
         copy(&snapshot).unwrap_err(),

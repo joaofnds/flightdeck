@@ -241,14 +241,15 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation: snapshot.generation,
         catalog: snapshot.catalog.clone(),
-        selection: json!({"second":target.second,
+        selection: crate::live_source::Presentation::Legacy(json!({"second":target.second,
             "context_last_second":snapshot.selection["context_last_second"],"selected":selected,
-            "summary":summary,"alternatives":[],"trends":[]}),
+            "summary":summary,"alternatives":[],"trends":[]})),
         pages: BTreeMap::new(),
         apps: None,
         detail: None,
         history: None,
-        cpu_detail: resident_cpu_detail(snapshot, target),
+        cpu_detail: resident_cpu_detail(snapshot, target)
+            .map(crate::live_source::Presentation::Legacy),
         cpu_history: None,
         resident_history: snapshot.resident_history.clone(),
         app_attribution_history: snapshot.app_attribution_history.clone(),
@@ -298,11 +299,11 @@ fn resident_app(
         offset,
         limit: viewer::live_app_response::PAGE_ROWS_MAX,
     };
-    let apps = crate::live_source::clamped_page(request.apps_offset, |offset| {
+    let apps = crate::live_source::clamped_presentation_page(request.apps_offset, |offset| {
         part.apps_paging(page(offset))
             .map_err(|error| error.to_string())
     })?;
-    let detail = crate::live_source::clamped_page(request.members_offset, |offset| {
+    let detail = crate::live_source::clamped_presentation_page(request.members_offset, |offset| {
         part.detail(page(offset)).map_err(|error| error.to_string())
     })?;
     let executables = crate::live_executables::groups(Some(&detail))?;
@@ -319,7 +320,7 @@ fn resident_app_part<'a>(
     snapshot: &'a Snapshot,
     target: &Target,
     request: &crate::live_source::Request,
-) -> Result<Option<&'a viewer::live_app_response::AppPart>, String> {
+) -> Result<Option<crate::live_source::Part<'a>>, String> {
     let Some(parts) = snapshot.app_parts.as_deref() else {
         return Ok(None);
     };
@@ -345,15 +346,35 @@ fn resident_app_part<'a>(
 fn resident_rankings(
     snapshot: &Snapshot,
     target: &Target,
-) -> Option<Arc<crate::live_rankings::Rankings>> {
+) -> Option<Arc<crate::live_source::Presentation<crate::live_rankings::Rankings>>> {
     let window = snapshot.app_ranks.as_ref()?;
     let identity = target.identity.as_ref()?;
     match crate::live_rankings::observation_key(identity) {
         Ok(key) => {
             let ranks = window.get(&key)?;
-            Some(Arc::new(crate::live_rankings::Rankings::Ready(Box::new(
-                crate::live_rankings::from_ranks(ranks),
-            ))))
+            let projected = match window.as_ref() {
+                crate::live_source::RanksWindow::Legacy(_) => {
+                    crate::live_source::Presentation::Legacy(crate::live_rankings::Rankings::Ready(
+                        Box::new(crate::live_rankings::from_ranks(ranks)),
+                    ))
+                }
+                crate::live_source::RanksWindow::Store(window) => {
+                    let retained = match window.selected_ranks_for(&ranks.selected) {
+                        Ok(retained) => retained,
+                        Err(error) => {
+                            eprintln!("Hover App ranks unavailable: {error}");
+                            return None;
+                        }
+                    };
+                    crate::live_source::Presentation::Canonical(retained.map(|ranks| {
+                        crate::live_rankings::Rankings::Ready(Box::new(
+                            crate::live_rankings::from_ranks(&ranks),
+                        ))
+                    }))
+                }
+            };
+
+            Some(Arc::new(projected))
         }
         Err(error) => {
             eprintln!("Hover App ranks unavailable: {error}");

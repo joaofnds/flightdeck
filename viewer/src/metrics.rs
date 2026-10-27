@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
+use crate::cpu_history_sample::{CapturedInterval, ObservedCounters, ObservedInterval};
 use crate::data::Table;
 use crate::metric_view::{Sources, View};
 use crate::session::{OBSERVATIONS_MAX, Observation, Reader, partition};
@@ -301,6 +302,15 @@ fn point_sources(
     previous: Option<&Observation>,
     segment: u64,
 ) -> Result<Value> {
+    Ok(capture_sources(tables, current, previous, None)?.json(current, segment))
+}
+
+fn capture_sources(
+    tables: &Sources<'_>,
+    current: &Observation,
+    previous: Option<&Observation>,
+    cpu_interval: Option<&mut Option<CapturedInterval>>,
+) -> Result<point::Point> {
     let ticks = get(tables, current, "ticks")?;
     let tick = only(&ticks)?;
     if !tables.holds(current, "fans") {
@@ -308,51 +318,33 @@ fn point_sources(
     }
     let fans = tables.optional(current, "fans")?;
     let fan_rpm =
-        crate::live_fan_history::capture_view(&ticks, fans.as_ref(), current.publication)?;
+        crate::live_fan_history::capture_typed(&ticks, fans.as_ref(), current.publication)?;
     let memory = get(tables, current, "memory")?;
     let row = only(&memory)?;
-    let mut value = json!({"wall_ns": current.wall, "publication": current.publication,
-        "run_tick": current.run_tick, "continuous_ns": current.continuous,
-        "segment": segment, "cpu_percent": null, "cpu_percent_one_core": null,
-        "cpu_level_percent": null, "cpu_level_ghz": null,
-        "gpu_active_percent": null, "gpu_watts": null,
-        "power_watts": ticks.number(tick, "power_watts")?,
-        "soc_celsius": ticks.number(tick, "soc_celsius")?,
-        "cpu_celsius": celsius(&ticks, tick, "cpu_celsius")?,
-        "gpu_celsius": celsius(&ticks, tick, "gpu_celsius")?, "fan_rpm": fan_rpm,
-        "interval_unavailable": "Requires consecutive compatible counter samples"});
-    value["battery"] = battery::point(&ticks, tick, current.continuous)?;
-    value["storage"] = storage::point(tables, current, previous)?;
-    let system = system::SystemTick {
-        ticks: &ticks,
-        tick,
-        wall_ns: current.wall,
+    let mut value = point::Point {
+        power_watts: ticks.number(tick, "power_watts")?,
+        soc_celsius: ticks.number(tick, "soc_celsius")?,
+        cpu_celsius: celsius(&ticks, tick, "cpu_celsius")?,
+        gpu_celsius: celsius(&ticks, tick, "gpu_celsius")?,
+        fan_rpm,
+        battery: battery::capture(&ticks, tick, current.continuous)?,
+        storage: storage::capture(tables, current, previous)?,
+        system: system::capture(&system::SystemTick {
+            ticks: &ticks,
+            tick,
+            wall_ns: current.wall,
+        })?,
+        logical_cpu_count: optional(tables, current, "cpus")?
+            .map(|cpus| u32::try_from(cpus.len()).map_err(|_| Error::Bound("logical CPU count")))
+            .transpose()?,
+        ..point::Point::default()
     };
-    system::point(&system, &mut value)?;
-    value["logical_cpu_count"] = json!(optional(tables, current, "cpus")?.map(|cpus| cpus.len()));
-    for (name, column) in [
-        ("memory_total_bytes", "total_bytes"),
-        ("memory_free_bytes", "free_bytes"),
-        ("memory_active_bytes", "active_bytes"),
-        ("memory_inactive_bytes", "inactive_bytes"),
-        ("memory_speculative_bytes", "speculative_bytes"),
-        ("memory_wired_bytes", "wired_bytes"),
-        ("memory_compressed_bytes", "compressed_bytes"),
-        ("memory_anonymous_bytes", "anonymous_bytes"),
-        ("memory_file_backed_bytes", "file_backed_bytes"),
-        ("memory_purgeable_bytes", "purgeable_bytes"),
-        ("swap_total_bytes", "swap_total_bytes"),
-        ("swap_used_bytes", "swap_used_bytes"),
-        ("pressure", "pressure"),
-    ] {
-        value[name] = json!(memory.integer(row, column)?);
-    }
-    for (name, _column) in MEMORY_RATES.into_iter().chain(TRAFFIC_RATES) {
-        value[name] = Value::Null;
+    for (index, (_name, column)) in point::MEMORY_FIELDS.iter().enumerate() {
+        value.memory[index] = memory.integer(row, column)?;
     }
     if let Some(previous) = previous {
         if compatible(previous, current) {
-            point_interval(tables, current, previous, &mut value)?;
+            point_interval(tables, current, previous, &mut value, cpu_interval)?;
         }
     }
     Ok(value)
@@ -414,11 +406,12 @@ fn point_interval(
     tables: &Sources<'_>,
     current: &Observation,
     previous: &Observation,
-    value: &mut Value,
+    value: &mut point::Point,
+    cpu_interval: Option<&mut Option<CapturedInterval>>,
 ) -> Result<()> {
     let cpus = get(tables, current, "cpus")?;
     let old_cpus = get(tables, previous, "cpus")?;
-    value["cpu_percent"] = json!(cpu_percent(&cpus, &old_cpus)?);
+    value.cpu_percent = cpu_percent(&cpus, &old_cpus)?;
     let mut current_counters = Vec::new();
     let mut previous_counters = Vec::new();
     crate::cpu_history_sample::counters_view(&cpus, current.publication, &mut current_counters)?;
@@ -431,11 +424,23 @@ fn point_interval(
         current: &current_counters,
         previous: &previous_counters,
     };
-    value["cpu_percent_one_core"] = json!(crate::cpu_history_sample::sum_busy(counters)?);
+    if let Some(output) = cpu_interval {
+        assert!(output.is_none());
+        *output = Some(CapturedInterval::capture(&ObservedInterval {
+            current: ObservedCounters {
+                observation: current,
+                counters: &current_counters,
+            },
+            previous: Some(ObservedCounters {
+                observation: previous,
+                counters: &previous_counters,
+            }),
+        })?);
+    }
+    value.cpu_percent_one_core = crate::cpu_history_sample::sum_busy(counters)?;
     let ticks = get(tables, current, "ticks")?;
     if let Some(levels) = system::levels(&ticks, only(&ticks)?)? {
-        value["cpu_level_percent"] =
-            json!(crate::cpu_history_sample::level_busy(counters, levels)?);
+        value.cpu_level_percent = Some(crate::cpu_history_sample::level_busy(counters, levels)?);
         let states = optional(tables, current, core_frequency::CORE_LEVEL_STATES)?;
         let old_states = optional(tables, previous, core_frequency::CORE_LEVEL_STATES)?;
         if let (Some(states), Some(old_states)) = (states, old_states) {
@@ -443,7 +448,7 @@ fn point_interval(
             // history, so the field stays null unless some level measured a clock.
             let ghz = core_frequency::level_ghz_view(&states, &old_states)?;
             if ghz.iter().any(Option::is_some) {
-                value["cpu_level_ghz"] = json!(ghz);
+                value.cpu_level_ghz = Some(ghz);
             }
         }
     }
@@ -458,9 +463,9 @@ fn point_interval(
     assert!(elapsed > 0);
     let memory = get(tables, current, "memory")?;
     let old_memory = get(tables, previous, "memory")?;
-    for (name, column) in MEMORY_RATES {
+    for (index, (_name, column)) in MEMORY_RATES.iter().enumerate() {
         let delta = counter_delta(&memory, &old_memory, &[], column)?;
-        value[name] = json!(per_second(delta, elapsed));
+        value.rates[index] = per_second(delta, elapsed);
     }
     point_gpu(tables, current, previous, elapsed, value)?;
     point_traffic(tables, current, previous, elapsed, value)
@@ -471,7 +476,7 @@ fn point_gpu(
     current: &Observation,
     previous: &Observation,
     elapsed: u64,
-    value: &mut Value,
+    value: &mut point::Point,
 ) -> Result<()> {
     let ticks = get(tables, current, "ticks")?;
     let tick = only(&ticks)?;
@@ -489,10 +494,9 @@ fn point_gpu(
         ticks.integer(tick, "gpu_energy_nj")?,
         old_ticks.integer(old_tick, "gpu_energy_nj")?,
     ) {
-        value["gpu_watts"] = json!(
-            now.checked_sub(before)
-                .map(|delta| number(delta) / number(elapsed))
-        );
+        value.gpu_watts = now
+            .checked_sub(before)
+            .map(|delta| number(delta) / number(elapsed));
     }
 
     let Some(count) = ticks.integer(tick, "gpu_state_count")? else {
@@ -514,8 +518,8 @@ fn point_gpu(
             if point_gpu_complete(&previous_states, count)? {
                 let delta =
                     counter_delta(&current_states, &previous_states, &["state"], "active_ns")?;
-                value["gpu_active_percent"] =
-                    json!(delta.map(|active| number(active) * 100.0 / number(elapsed)));
+                value.gpu_active_percent =
+                    delta.map(|active| number(active) * 100.0 / number(elapsed));
             }
         }
     }
@@ -562,7 +566,7 @@ fn point_traffic(
     current: &Observation,
     previous: &Observation,
     elapsed: u64,
-    value: &mut Value,
+    value: &mut point::Point,
 ) -> Result<()> {
     let interfaces = optional(tables, current, "interfaces")?;
     let old_interfaces = optional(tables, previous, "interfaces")?;
@@ -570,18 +574,18 @@ fn point_traffic(
         if old_interfaces.is_none() {
             if tables.holds(current, "interfaces") {
                 if tables.holds(previous, "interfaces") {
-                    for (name, _column) in TRAFFIC_RATES {
-                        value[name] = json!(0.0);
+                    for index in 6..12 {
+                        value.rates[index] = Some(0.0);
                     }
                 }
             }
         }
     }
     if let (Some(interfaces), Some(old_interfaces)) = (interfaces, old_interfaces) {
-        for (name, column) in TRAFFIC_RATES {
+        for (index, (_name, column)) in TRAFFIC_RATES.iter().enumerate() {
             let delta =
                 counter_delta(&interfaces, &old_interfaces, &["interface", "name"], column)?;
-            value[name] = json!(per_second(delta, elapsed));
+            value.rates[index + 6] = per_second(delta, elapsed);
         }
     }
     Ok(())
@@ -682,3 +686,5 @@ mod system;
 
 mod components;
 pub(crate) mod reduction;
+
+pub(crate) mod point;

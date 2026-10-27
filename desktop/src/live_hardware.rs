@@ -282,13 +282,16 @@ mod tests {
         Snapshot {
             generation: 1,
             catalog: Value::Null,
-            selection: json!({"selected":identity}),
-            pages: BTreeMap::from([(
+            selection: crate::live_source::Presentation::Legacy(json!({"selected":identity})),
+            pages: (BTreeMap::from([(
                 "fans".into(),
                 json!({"observation":identity,
                 "columns":["publication","fan","rpm"],
                 "rows":[["42","0","1530"],["42","1",null]]}),
-            )]),
+            )]))
+            .into_iter()
+            .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
+            .collect(),
             apps: None,
             detail: None,
             history: None,
@@ -317,7 +320,12 @@ mod tests {
     fn fans_refuse_other_observation() {
         // A fan payload for another exact publication must not decorate this reading.
         let mut snapshot = snapshot();
-        snapshot.pages.get_mut("fans").unwrap()["observation"]["publication"] = json!(43);
+        snapshot
+            .pages
+            .get_mut("fans")
+            .unwrap()
+            .legacy_mut()
+            .unwrap()["observation"]["publication"] = json!(43);
         assert!(fan_speeds(Some(&snapshot)).is_err());
     }
 
@@ -325,7 +333,12 @@ mod tests {
     fn fans_refuse_invalid_schema() {
         // A changed raw-table layout must fail visibly rather than reorder meanings silently.
         let mut snapshot = snapshot();
-        snapshot.pages.get_mut("fans").unwrap()["columns"][1] = json!("rpm");
+        snapshot
+            .pages
+            .get_mut("fans")
+            .unwrap()
+            .legacy_mut()
+            .unwrap()["columns"][1] = json!("rpm");
         assert!(fan_speeds(Some(&snapshot)).is_err());
     }
 

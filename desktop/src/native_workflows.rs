@@ -544,9 +544,11 @@ pub fn selected_copy(
         }
     }
     let value = if request.route == "apps" {
-        let detail =
-            crate::live_app_views::selected_detail(snapshot.detail.as_ref(), request.app.as_ref())
-                .ok_or("Selected App details are still loading")?;
+        let detail = crate::live_app_views::selected_detail(
+            snapshot.detail.as_deref(),
+            request.app.as_ref(),
+        )
+        .ok_or("Selected App details are still loading")?;
         let selected = selected_app_copy(detail, expanded)?;
         serde_json::json!({"second":snapshot.selection["second"],
             "observation":snapshot.selection["selected"],"detail":selected})

@@ -18,7 +18,7 @@ struct AppsGridReading {
     executable: Option<String>,
     preview_source: Option<String>,
     preview_load_history: Option<bool>,
-    context: Option<std::sync::Arc<ProcessHistory>>,
+    context: Option<std::sync::Arc<crate::live_source::Presentation<ProcessHistory>>>,
     chart_readings: [String; 4],
 }
 

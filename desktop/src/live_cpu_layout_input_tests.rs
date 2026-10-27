@@ -100,18 +100,20 @@ impl InputDriver {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             let levels = json!([{"name": "Super", "logical_cpus": 6},
                 {"name": "Performance", "logical_cpus": 12}]);
-            snapshot.selection["trends"][0]["performance_levels"] = levels.clone();
-            snapshot.selection["trends"][1]["performance_levels"] = levels.clone();
-            snapshot.selection["summary"]["performance_levels"] = levels;
-            snapshot.selection["context_seconds"] = json!(900);
-            snapshot.selection["trends"][0]["run_tick"] = json!(1);
-            snapshot.selection["trends"][1]["run_tick"] = json!(2);
-            snapshot.selection["trends"][0]["cpu_percent"] = json!(13);
-            snapshot.selection["trends"][1]["cpu_percent"] = json!(67);
+            snapshot.selection.legacy_mut().unwrap()["trends"][0]["performance_levels"] =
+                levels.clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"][1]["performance_levels"] =
+                levels.clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"]["performance_levels"] = levels;
+            snapshot.selection.legacy_mut().unwrap()["context_seconds"] = json!(900);
+            snapshot.selection.legacy_mut().unwrap()["trends"][0]["run_tick"] = json!(1);
+            snapshot.selection.legacy_mut().unwrap()["trends"][1]["run_tick"] = json!(2);
+            snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(13);
+            snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(67);
             let previous = snapshot.selection["trends"][0].clone();
             let selected = snapshot.selection["trends"][1].clone();
-            snapshot.selection["selected"] = selected.clone();
-            snapshot.cpu_detail = Some(
+            snapshot.selection.legacy_mut().unwrap()["selected"] = selected.clone();
+            snapshot.cpu_detail = Some(crate::live_source::Presentation::Legacy(
                 crate::live_cpu::CPUActivity::decode(
                     json!({"observation":selected,"previous_observation":previous,
                     "interval_available":true,"unavailable_reason":null,
@@ -120,10 +122,11 @@ impl InputDriver {
                     &selected,
                 )
                 .unwrap(),
-            );
-            snapshot.cpu_history = Some(Arc::new(
-                crate::live_cpu_history::CPUHistory::decode(
-                    json!({"observation":selected,"context_seconds":900,
+            ));
+            snapshot.cpu_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(Arc::new(
+                    crate::live_cpu_history::CPUHistory::decode(
+                        json!({"observation":selected,"context_seconds":900,
                     "first_ns":101_000_000_000_u64,"end_ns":1_001_000_000_000_u64,
                     "offset":0,"total":cpus,"retention_limited":false,
                     "observations":[
@@ -133,9 +136,10 @@ impl InputDriver {
                             "interval_available":true,"cpu_count":cpus}],
                     "cpus":(0..cpus).map(|cpu| json!({"cpu":cpu,"busy_percent":[null,67]}))
                         .collect::<Vec<_>>()}),
-                    &snapshot.selection,
-                )
-                .unwrap(),
+                        &snapshot.selection,
+                    )
+                    .unwrap(),
+                )),
             ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);

@@ -4,10 +4,10 @@ use std::io;
 use std::path::Path;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
-use collector::ring::RunIdentity;
+use collector::ring::{Identity, RunIdentity};
 use persistence::{Error, Manifest};
 
-use super::{Found, LoadWindow, MINUTES_MAX, find_unread};
+use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_unread};
 use crate::cancellation::Operation;
 use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 use crate::store::Failure;
@@ -17,7 +17,7 @@ pub(super) fn find(
     found: &mut Vec<Found>,
     window: &LoadWindow<'_>,
     operation: &Operation,
-) -> Result<(), Failure> {
+) -> Result<CheckedCatalog, Failure> {
     assert!(window.seconds > 0);
     assert!(window.seconds <= LOADED_SECONDS);
     let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
@@ -26,14 +26,7 @@ pub(super) fn find(
             return Err(Failure::ForeignRecording);
         }
     }
-    let mut buffer: RegistryBuffer = [0; _];
-    let registry = Registry::read_into(&root.join("runs"), &mut buffer)
-        .map_err(|error| Failure::Registry(error.kind()))?;
-    let runs = registry
-        .runs()
-        .map(|run| run.map(|run| run.identity))
-        .collect::<io::Result<Vec<_>>>()
-        .map_err(|error| Failure::Registry(error.kind()))?;
+    let runs = find_runs(root, recording)?;
     let mut catalog = Vec::new();
     let base = persistence::layout::base(root, persistence::layout::Kind::Commits);
     if !base
@@ -41,7 +34,7 @@ pub(super) fn find(
         .map_err(|error| Failure::Commits(error.kind()))?
     {
         find_checkpoint(window, &runs, &catalog)?;
-        return Ok(());
+        return metadata(recording, &runs, &catalog, None);
     }
     crate::session::discover(root, recording, &mut catalog, operation).map_err(find_failure)?;
     find_checkpoint(window, &runs, &catalog)?;
@@ -61,7 +54,65 @@ pub(super) fn find(
             find_unread(found, since);
         }
     }
+    metadata(recording, &runs, &catalog, first_ns)
+}
+
+fn metadata(
+    recording: Identity,
+    runs: &[RunIdentity],
+    catalog: &[Manifest],
+    first_ns: Option<u64>,
+) -> Result<CheckedCatalog, Failure> {
+    let windows =
+        u32::try_from(catalog.len()).map_err(|_| Failure::Commits(io::ErrorKind::InvalidData))?;
+    Ok(CheckedCatalog {
+        recording,
+        newest_run: runs.last().copied(),
+        first_ns,
+        windows,
+        first_known_second: catalog
+            .iter()
+            .filter_map(|minute| minute.wall_ns)
+            .map(|wall| wall.min / 1_000_000_000)
+            .min(),
+        last_known_second: catalog
+            .iter()
+            .filter_map(|minute| minute.wall_ns)
+            .map(|wall| wall.max / 1_000_000_000)
+            .max(),
+        unknown_clock_ticks: catalog.is_empty().then_some(0),
+    })
+}
+
+pub(super) fn revalidate(root: &Path, checked: &CheckedCatalog) -> Result<(), Failure> {
+    let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
+    if recording != checked.recording {
+        return Err(Failure::ForeignRecording);
+    }
+    let runs = find_runs(root, recording)?;
+    if runs.last().copied() != checked.newest_run {
+        return Err(Failure::ChangedIdentity);
+    }
+
     Ok(())
+}
+
+fn find_runs(root: &Path, recording: Identity) -> Result<Vec<RunIdentity>, Failure> {
+    let mut buffer: RegistryBuffer = [0; _];
+    let registry = Registry::read_into(&root.join("runs"), &mut buffer)
+        .map_err(|error| Failure::Registry(error.kind()))?;
+    let runs = registry
+        .runs()
+        .map(|run| run.map(|run| run.identity))
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(|error| Failure::Registry(error.kind()))?;
+    for run in &runs {
+        if run.recording != recording {
+            return Err(Failure::ForeignRecording);
+        }
+    }
+
+    Ok(runs)
 }
 
 fn find_checkpoint(

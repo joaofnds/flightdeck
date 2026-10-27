@@ -431,10 +431,10 @@ impl InputDriver {
         seconds: &[MachineSecond],
         bytes: usize,
     ) {
-        self.show_held_view_over_unread_tail(&[*older], seconds);
+        self.show_held_view_over_unread_tail(std::slice::from_ref(older), seconds);
         let budget = Arc::new(ByteBudget::new(bytes));
         let sample = SampledSecond::from_second(older, &held_apps(older), &budget);
-        let mut held = held_view(2, &[*older], seconds);
+        let mut held = held_view(2, std::slice::from_ref(older), seconds);
         Arc::get_mut(&mut held)
             .unwrap()
             .sampled
@@ -481,7 +481,8 @@ impl InputDriver {
     ) {
         let read = [reading_at(9_999, 0), reading_at(10_000, 0)];
         let mut snapshot = readings(&read);
-        snapshot.selection["earlier_trends"] = read_older.iter().map(trend_point).collect();
+        snapshot.selection.legacy_mut().unwrap()["earlier_trends"] =
+            read_older.iter().map(trend_point).collect();
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);

@@ -65,11 +65,11 @@ pub fn sliding(seconds: &[MachineSecond], cohort: &[&str]) -> View {
 
 /// The executable `name`, as a chart's cohort names it.
 pub fn ranked(name: &str) -> Arc<RankedApp> {
-    Arc::new(RankedApp {
-        kind: KeyKind::Executable,
-        bytes: name.as_bytes().to_vec(),
-        display_name: name.into(),
-    })
+    Arc::new(RankedApp::named(
+        KeyKind::Executable,
+        name.as_bytes().to_vec(),
+        name.into(),
+    ))
 }
 
 pub fn worker_measure(known: u64) -> Value {
@@ -104,6 +104,7 @@ pub fn apps_at(second: &MachineSecond, apps: &[(&str, u64)]) -> AppsSecond {
         .collect();
 
     AppsSecond {
+        metadata: viewer::store::AppMetadata::default(),
         processes: Err(viewer::store::Missing::Unread),
         missing: None,
         observation: Some(apps_at_observation(second)),
@@ -115,7 +116,7 @@ pub fn apps_at(second: &MachineSecond, apps: &[(&str, u64)]) -> AppsSecond {
         usage_refused: 0,
         usage_gone: 0,
         totals: Totals::of(&rows),
-        apps: rows,
+        apps: rows.try_into().unwrap(),
     }
 }
 
@@ -163,11 +164,11 @@ fn apps_at_row(name: &str, cpu_ns: u64) -> AppRow {
         resident_bytes: measure(cpu_ns),
         footprint_bytes: measure(0),
     };
-    let ranked = Arc::new(RankedApp {
-        kind: KeyKind::Executable,
-        bytes: app.key.bytes.clone(),
-        display_name: app.display_name.clone(),
-    });
+    let ranked = Arc::new(RankedApp::named(
+        KeyKind::Executable,
+        app.key.bytes.clone(),
+        app.display_name.clone(),
+    ));
 
     AppRow::new(&app, ranked)
 }

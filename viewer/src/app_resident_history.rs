@@ -21,6 +21,7 @@ mod means;
 mod reduce;
 #[path = "app_resident_history/saved.rs"]
 mod saved;
+pub(crate) use reduce::WORKING_BYTES_MAX;
 pub(crate) use reduce::{AppReading, Capture, Interval, Reduction, Source, consecutive, identity};
 pub(crate) use saved::{SavedResidents, capture, capture_header, kept_readings};
 

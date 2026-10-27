@@ -441,9 +441,10 @@ impl AppHoverDriver {
     fn seed_app_power(&mut self, watts: f64) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
-            let detail = snapshot.detail.as_mut().unwrap();
+            let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
             detail["app"]["energy_watts"] = json!(watts);
-            snapshot.apps.as_mut().unwrap()["apps"][0] = detail["app"].clone();
+            snapshot.apps.as_mut().unwrap().legacy_mut().unwrap()["apps"][0] =
+                detail["app"].clone();
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -454,7 +455,7 @@ impl AppHoverDriver {
     fn seed_scrollable_process_page(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
-            let detail = snapshot.detail.as_mut().unwrap();
+            let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
             for pid in 100..150 {
                 detail["processes"].as_array_mut().unwrap().push(process(
                     "Accepted worker",
@@ -465,7 +466,8 @@ impl AppHoverDriver {
             detail["app"]["members"] = json!(53);
             detail["app"]["live_members"] = json!(53);
             detail["page"]["total"] = json!(53);
-            snapshot.apps.as_mut().unwrap()["apps"][0] = detail["app"].clone();
+            snapshot.apps.as_mut().unwrap().legacy_mut().unwrap()["apps"][0] =
+                detail["app"].clone();
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -493,7 +495,8 @@ impl AppHoverDriver {
             });
             dashboard.picker = Some(crate::live_dashboard::Picker::App);
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
-            snapshot.history.as_mut().unwrap()["points"][0] = historical.history_point();
+            snapshot.history.as_mut().unwrap().legacy_mut().unwrap()["points"][0] =
+                historical.history_point();
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -513,7 +516,7 @@ impl AppHoverDriver {
             .simulate_mouse_move(position, None, Modifiers::none());
     }
 
-    fn keep_app_parts(&mut self, app: &str, parts: Arc<viewer::WindowParts>) {
+    fn keep_app_parts(&mut self, app: &str, parts: Arc<crate::live_source::PartsWindow>) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.request.app = Some(AppKey {
                 kind: "executable".into(),
@@ -639,20 +642,24 @@ impl AppEpoch {
         Box::new(Snapshot {
             generation,
             catalog: json!({"path":"/fixture/app-hover","first_second":999,"last_second":1000}),
-            selection: json!({"second":second,"context_last_second":second,"selected":selected,
+            selection: crate::live_source::Presentation::Legacy(
+                json!({"second":second,"context_last_second":second,"selected":selected,
                 "summary":null,"trends":[system_point(999,1),system_point(1000,2)]}),
+            ),
             pages: BTreeMap::new(),
-            apps: Some(
+            apps: Some(crate::live_source::Presentation::Legacy(
                 json!({"selected":selected,"apps":[app],"ungrouped_members":0,
                 "page":{"offset":0,"total":1,"next_offset":null}}),
-            ),
-            detail: Some(
+            )),
+            detail: Some(crate::live_source::Presentation::Legacy(
                 json!({"selected":selected,"app":app,"elapsed_ns":"1000000000",
                 "processes":self.processes(),
                 "page":{"offset":0,"total":app["members"],"next_offset":null}}),
-            ),
-            history: Some(json!({"selected":wire_observation(second,publication),
-                "context_seconds":900,"points":points})),
+            )),
+            history: Some(crate::live_source::Presentation::Legacy(
+                json!({"selected":wire_observation(second,publication),
+                "context_seconds":900,"points":points}),
+            )),
             cpu_detail: None,
             cpu_history: None,
             resident_history: None,

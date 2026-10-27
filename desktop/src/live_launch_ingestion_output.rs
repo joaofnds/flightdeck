@@ -69,7 +69,7 @@ pub(super) fn record_route(route: &str) {
 fn record_route_ready(route: &str, snapshot: &Snapshot) {
     if route == "apps" {
         assert!(matches!(
-            snapshot.process_history.as_deref(),
+            snapshot.process_history.as_deref().map(|value| &**value),
             Some(crate::live_process_history::ProcessHistory::All { .. })
         ));
     }
@@ -150,7 +150,10 @@ fn expanded_copy(
             assert!(pages.len() <= 128);
             let mut rows = Vec::new();
             for page in pages {
-                snapshot.pages.insert(table.clone(), page.clone());
+                snapshot.pages.insert(
+                    table.clone(),
+                    crate::live_source::Presentation::Legacy(page.clone()),
+                );
                 let count = page["rows"].as_array().unwrap().len();
                 assert!(count <= 512);
                 for row in 0..count {
@@ -389,7 +392,7 @@ fn ranked(ranks: &viewer::live_app_response::Ranks) -> Value {
 
 fn process_history(snapshot: &Snapshot) -> Value {
     use crate::live_process_history::ProcessHistory;
-    match snapshot.process_history.as_deref() {
+    match snapshot.process_history.as_deref().map(|value| &**value) {
         None => Value::Null,
         Some(ProcessHistory::Unavailable(error)) => json!({"error": error}),
         Some(ProcessHistory::Ready { payload, .. }) => payload.clone(),

@@ -25,7 +25,7 @@ fn cancellation_immediately_before_publication_leaves_no_startup_view() {
     ring.accept(outcome.terminal);
     let mailbox = super::Mailbox::new();
     let reader = Arc::clone(held.apps.newest_held().unwrap());
-    let charge = reader.processes.as_ref().unwrap().bytes();
+    let charge = retained_app_charge(&reader);
     cancellation.cancel().unwrap();
 
     let result = super::step(
@@ -119,7 +119,7 @@ fn cancellation_after_last_consumption_rejects_the_terminal_handoff() {
             cancellation.cancel().unwrap();
         });
     let reader = Arc::clone(held.apps.newest_held().unwrap());
-    let charge = reader.processes.as_ref().unwrap().bytes();
+    let charge = retained_app_charge(&reader);
     let mut ring = super::Ring::new(fixture.root.clone());
     let mailbox = super::Mailbox::new();
     let result = super::startup_accept(outcome, &mut held, &mut ring, &operation);
@@ -323,21 +323,35 @@ fn fixture_input_peak(fixture: &Fixture) -> usize {
 
 fn fixture_payload_charges(fixture: &Fixture) -> Vec<usize> {
     let budget = Arc::new(ByteBudget::new(usize::MAX));
-    let mut ring = super::ring::Ring::new(fixture.root.clone());
-    ring.follow().unwrap();
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
     let mut charges = Vec::with_capacity(3);
-    ring.read(|_, _, apps| {
-        let mut captured = AppsSecond::with_room();
-        captured.take(apps, None, Some(&budget));
-        let payload = captured.processes.as_ref().unwrap();
-        assert_eq!(payload.len(), 2);
-        charges.push(payload.bytes());
-        true
-    })
-    .unwrap();
+    let outcome =
+        super::recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
+            let super::apps::TickApps::Loaded(apps) = apps else {
+                panic!("valid fixture must load complete saved App rows");
+            };
+            assert_eq!(apps.processes.as_ref().unwrap().len(), 2);
+            charges.push(retained_app_charge(apps));
+        })
+        .unwrap();
+    assert_eq!(outcome.left_out, None);
+    drop(outcome);
     assert!(!charges.is_empty());
     assert_eq!(budget.used(), 0);
     charges
+}
+
+pub(super) fn retained_app_charge(apps: &AppsSecond) -> usize {
+    apps.processes.as_ref().unwrap().bytes()
+        + apps.metadata.bytes()
+        + apps.apps.reserved_bytes()
+        + apps
+            .apps
+            .iter()
+            .map(|app| app.name.reserved_bytes())
+            .sum::<usize>()
 }
 
 #[test]

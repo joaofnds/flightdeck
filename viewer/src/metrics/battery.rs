@@ -5,26 +5,49 @@ use serde_json::{Value, json};
 
 use crate::metric_view::View;
 
-pub(super) fn point(table: &View<'_>, row: usize, now: Option<u64>) -> Result<Value> {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BatteryPoint {
+    reading: BatteryReading,
+    age_seconds: f64,
+    charge_percent: Option<f64>,
+    health_percent: Option<f64>,
+    power_watts: Option<f64>,
+}
+
+pub(super) fn capture(
+    table: &View<'_>,
+    row: usize,
+    now: Option<u64>,
+) -> Result<Option<BatteryPoint>> {
     let Some(reading) = source(table, row)? else {
-        return Ok(Value::Null);
+        return Ok(None);
     };
 
     let Some(now) = now else {
-        return Ok(Value::Null);
+        return Ok(None);
     };
 
     if !reading.is_fresh_at(now) {
-        return Ok(Value::Null);
+        return Ok(None);
     }
 
-    Ok(json!({"source_continuous_ns": reading.source_continuous_ns,
-        "age_seconds": super::number(now - reading.source_continuous_ns) / 1_000_000_000.0,
-        "charge_percent": charge_percent(&reading),
-        "health_percent": ratio(reading.full_charge_capacity, reading.design_capacity),
-        "cycle_count": reading.cycle_count, "charging": reading.charging,
-        "external_power": reading.external_power, "power_watts": power_watts(&reading),
-        "adapter_watts": reading.adapter_watts}))
+    Ok(Some(BatteryPoint {
+        age_seconds: super::number(now - reading.source_continuous_ns) / 1_000_000_000.0,
+        charge_percent: charge_percent(&reading),
+        health_percent: ratio(reading.full_charge_capacity, reading.design_capacity),
+        power_watts: power_watts(&reading),
+        reading,
+    }))
+}
+
+impl BatteryPoint {
+    pub fn json(&self) -> Value {
+        json!({"source_continuous_ns": self.reading.source_continuous_ns,
+            "age_seconds": self.age_seconds, "charge_percent": self.charge_percent,
+            "health_percent": self.health_percent, "cycle_count": self.reading.cycle_count,
+            "charging": self.reading.charging, "external_power": self.reading.external_power,
+            "power_watts": self.power_watts, "adapter_watts": self.reading.adapter_watts})
+    }
 }
 
 /// The charge `reading` found in the battery, as a share of what it holds when full.

@@ -5,6 +5,95 @@ use serde_json::{Value, json};
 use super::{Amount, App, Detail, Error, Measure, Page, Process, Result, Sample, Stamp};
 use crate::apps;
 
+/// An App's presentation facts, borrowing its identity from the retained owner.
+pub(crate) struct AppView<'row> {
+    pub kind: super::KeyKind,
+    pub bytes: &'row [u8],
+    pub display_name: &'row str,
+    pub members: u32,
+    pub live_members: u32,
+    pub membership_complete: bool,
+    pub cpu_ns: Measure,
+    pub energy_nj: Measure,
+    pub gpu_ns: Measure,
+    pub disk_read_bytes: Measure,
+    pub disk_written_bytes: Measure,
+    pub disk_io_bytes: Measure,
+    pub resident_bytes: Measure,
+    pub footprint_bytes: Measure,
+}
+
+/// A process's presentation facts, borrowing only its captured executable name.
+pub(crate) struct ProcessView<'row> {
+    pub pid: i32,
+    pub creation: Option<apps::ProcessCreation>,
+    pub app_index: Option<u32>,
+    pub executable_name: Option<(&'row [u8], &'row str)>,
+    pub program_unavailable: Option<collector::ring::IdentityUnavailable>,
+    pub cpu_ns: Amount,
+    pub energy_nj: Amount,
+    pub gpu_ns: Amount,
+    pub disk_read_bytes: Amount,
+    pub disk_written_bytes: Amount,
+    pub disk_io_bytes: Amount,
+    pub resident_bytes: Amount,
+    pub footprint_bytes: Amount,
+    pub idle_wakeups: Amount,
+    pub pageins: Amount,
+    pub threads: Amount,
+    pub app_attribution: Option<apps::Unavailable>,
+    pub state: apps::ProcessState,
+}
+
+impl AppView<'_> {
+    pub(crate) fn of(value: &App) -> AppView<'_> {
+        AppView {
+            kind: value.key.kind,
+            bytes: &value.key.bytes,
+            display_name: &value.display_name,
+            members: value.members,
+            live_members: value.live_members,
+            membership_complete: value.membership_complete,
+            cpu_ns: value.cpu_ns,
+            energy_nj: value.energy_nj,
+            gpu_ns: value.gpu_ns,
+            disk_read_bytes: value.disk_read_bytes,
+            disk_written_bytes: value.disk_written_bytes,
+            disk_io_bytes: value.disk_io_bytes,
+            resident_bytes: value.resident_bytes,
+            footprint_bytes: value.footprint_bytes,
+        }
+    }
+}
+
+impl ProcessView<'_> {
+    pub(crate) fn of(value: &Process) -> ProcessView<'_> {
+        ProcessView {
+            pid: value.pid,
+            creation: value.creation,
+            app_index: value.app_index,
+            executable_name: value
+                .executable_name
+                .as_ref()
+                .map(|name| (name.bytes.as_slice(), name.display.as_str())),
+            program_unavailable: value.program_unavailable,
+            cpu_ns: value.cpu_ns,
+            energy_nj: value.energy_nj,
+            gpu_ns: value.gpu_ns,
+            disk_read_bytes: value.disk_read_bytes,
+            disk_written_bytes: value.disk_written_bytes,
+            disk_io_bytes: value.disk_io_bytes,
+            resident_bytes: value.resident_bytes,
+            footprint_bytes: value.footprint_bytes,
+            idle_wakeups: value.idle_wakeups,
+            pageins: value.pageins,
+            threads: value.threads,
+            app_attribution: value.app_attribution,
+            state: value.state,
+        }
+    }
+}
+
 /// The facts of a sample that every page of it carries.
 #[derive(Clone, Copy)]
 pub(crate) struct Header {
@@ -51,7 +140,7 @@ pub(super) fn apps_page(sample: &Sample, page: Page) -> Result<Value> {
     let values: Vec<_> = sample.apps[range.clone()]
         .iter()
         .enumerate()
-        .map(|(index, value)| app(value, range.start + index, sample.elapsed_ns))
+        .map(|(index, value)| app(&AppView::of(value), range.start + index, sample.elapsed_ns))
         .collect();
     result["apps"] = Value::Array(values);
 
@@ -59,7 +148,7 @@ pub(super) fn apps_page(sample: &Sample, page: Page) -> Result<Value> {
 }
 
 /// An Apps page without the Apps it lists, the same whether its sample or a part gives it.
-pub(super) fn apps_paging(header: &Header, page: Page) -> Result<Value> {
+pub(crate) fn apps_paging(header: &Header, page: Page) -> Result<Value> {
     let range = page_range(page, header.app_count)?;
     let mut result = header_json(header);
     result["page"] = page_json(page, range.end, header.app_count);
@@ -88,8 +177,17 @@ pub(super) fn app_detail(sample: &Sample, detail: &Detail<'_>) -> Result<Value> 
 
 /// The detail page of one App, the same whether its sample or its part gives it.
 pub(super) fn app_members_page(members: &AppMembers<'_>, page: Page) -> Result<Value> {
-    let mut result = processes_page(members.header, members.processes, page)?;
-    result["app"] = app(members.app, members.app_index, members.header.elapsed_ns);
+    let mut result = processes_page(
+        members.header,
+        members.processes.iter().map(|value| ProcessView::of(value)),
+        members.processes.len(),
+        page,
+    )?;
+    result["app"] = app(
+        &AppView::of(members.app),
+        members.app_index,
+        members.header.elapsed_ns,
+    );
 
     bounded(result)
 }
@@ -97,7 +195,12 @@ pub(super) fn app_members_page(members: &AppMembers<'_>, page: Page) -> Result<V
 pub(super) fn members_page(sample: &Sample, app_index: Option<u32>, page: Page) -> Result<Value> {
     let processes = members(sample, app_index);
 
-    processes_page(&Header::of(sample), &processes, page)
+    processes_page(
+        &Header::of(sample),
+        processes.iter().map(|value| ProcessView::of(value)),
+        processes.len(),
+        page,
+    )
 }
 
 fn members(sample: &Sample, app_index: Option<u32>) -> Vec<&Process> {
@@ -108,15 +211,21 @@ fn members(sample: &Sample, app_index: Option<u32>) -> Vec<&Process> {
         .collect()
 }
 
-fn processes_page(header: &Header, processes: &[&Process], page: Page) -> Result<Value> {
-    let range = page_range(page, processes.len())?;
-    let values: Vec<_> = processes[range.clone()]
-        .iter()
-        .map(|value| process(value, header.elapsed_ns))
+pub(crate) fn processes_page<'row>(
+    header: &Header,
+    processes: impl Iterator<Item = ProcessView<'row>>,
+    count: usize,
+    page: Page,
+) -> Result<Value> {
+    let range = page_range(page, count)?;
+    let values: Vec<_> = processes
+        .skip(range.start)
+        .take(range.len())
+        .map(|value| process(&value, header.elapsed_ns))
         .collect();
     let mut result = header_json(header);
     result["processes"] = Value::Array(values);
-    result["page"] = page_json(page, range.end, processes.len());
+    result["page"] = page_json(page, range.end, count);
 
     bounded(result)
 }
@@ -154,14 +263,17 @@ fn stamp(value: &Stamp) -> Value {
     })
 }
 
-fn app(value: &App, index: usize, elapsed_ns: Option<u64>) -> Value {
+pub(crate) fn app(value: &AppView<'_>, index: usize, elapsed_ns: Option<u64>) -> Value {
+    let mut key_display = String::with_capacity(value.bytes.len() * 4);
+    crate::byte_display::append(&mut key_display, value.bytes);
+
     json!({
         "app_index": index, "display_name": value.display_name,
         "key": {
-            "kind": match value.key.kind {
+            "kind": match value.kind {
                 super::KeyKind::Bundle => "bundle", super::KeyKind::Executable => "executable",
             },
-            "bytes_hex": hex(&value.key.bytes), "display": value.key.display,
+            "bytes_hex": hex(value.bytes), "display": key_display,
         },
         "members": value.members, "live_members": value.live_members,
         "membership_complete": value.membership_complete,
@@ -188,15 +300,15 @@ fn app(value: &App, index: usize, elapsed_ns: Option<u64>) -> Value {
     })
 }
 
-fn process(value: &Process, elapsed_ns: Option<u64>) -> Value {
+fn process(value: &ProcessView<'_>, elapsed_ns: Option<u64>) -> Value {
     json!({
         "pid": value.pid,
         "creation": value.creation.map(|creation| json!({
             "unique_id": creation.unique_id.to_string(), "pid_version": creation.pid_version,
         })),
         "app_index": value.app_index,
-        "executable_name": value.executable_name.as_ref().map(|name| json!({
-            "bytes_hex": hex(&name.bytes), "display": name.display,
+        "executable_name": value.executable_name.map(|(bytes, display)| json!({
+            "bytes_hex": hex(bytes), "display": display,
         })),
         "program_unavailable": value.program_unavailable.map(identity_reason),
         "cpu_ns": amount(value.cpu_ns), "energy_nj": amount(value.energy_nj),
@@ -316,7 +428,7 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
-fn page_range(page: Page, count: usize) -> Result<std::ops::Range<usize>> {
+pub(crate) fn page_range(page: Page, count: usize) -> Result<std::ops::Range<usize>> {
     if page.limit == 0 {
         return Err(Error::Bound("live App page limit"));
     }
@@ -338,21 +450,28 @@ fn page_json(page: Page, end: usize, count: usize) -> Value {
 }
 
 pub(crate) fn bounded(value: Value) -> Result<Value> {
-    let mut output = Envelope { bytes: 0 };
-    serde_json::to_writer(&mut output, &value)
-        .map_err(|_| Error::Bound("live App response bytes"))?;
-    assert!(output.bytes <= super::RESPONSE_BYTES_MAX);
+    bounded_bytes(&value, super::RESPONSE_BYTES_MAX)?;
 
     Ok(value)
 }
 
+pub(crate) fn bounded_bytes(value: &Value, maximum: usize) -> Result<()> {
+    let mut output = Envelope { bytes: 0, maximum };
+    serde_json::to_writer(&mut output, value)
+        .map_err(|_| Error::Bound("live App response bytes"))?;
+    assert!(output.bytes <= maximum);
+
+    Ok(())
+}
+
 struct Envelope {
     bytes: usize,
+    maximum: usize,
 }
 
 impl Write for Envelope {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > super::RESPONSE_BYTES_MAX - self.bytes {
+        if bytes.len() > self.maximum - self.bytes {
             return Err(io::Error::other("live App response bytes"));
         }
         self.bytes += bytes.len();

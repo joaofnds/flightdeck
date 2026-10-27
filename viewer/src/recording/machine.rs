@@ -5,15 +5,15 @@ use collector::disks::DiskSnapshot;
 use collector::interfaces::{IFNAMSIZ, Interface, Name};
 use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::ring::Tick;
-use collector::system::{FactText, PerformanceLevel};
+use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading};
 use persistence::engine::Cells;
 use persistence::schema::{
     BATTERY_FIELDS, BATTERY_VERSION, CORE_STATE_FREQUENCY_FIELD, SYSTEM_FIELDS, TEMPERATURE_FIELDS,
     TICK_COLUMNS_MAX, Table, pressure,
 };
 use polars::prelude::{
-    BooleanType, DataFrame, Float32Type, Int64Type, PolarsPhysicalType, StringType, UInt8Type,
-    UInt16Type, UInt32Type, UInt64Type,
+    BooleanType, DataFrame, Float32Type, Float64Type, Int64Type, PolarsPhysicalType, StringType,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 
 use super::{Refused, ScopedSealedMinute as SealedMinute, ordered, placement};
@@ -101,7 +101,7 @@ pub struct MachineMinute {
 }
 
 /// When a tick was taken and which sources it read.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TickRow {
     pub publication: u64,
     pub run_tick: u64,
@@ -123,6 +123,10 @@ pub struct TickRow {
     pub thermal_pressure: Option<u8>,
     /// `None` where the tick published no system readings or macOS named no levels.
     pub performance_levels: Option<[PerformanceLevel; 2]>,
+    /// All system readings and computer facts, decoded by the same saved machine boundary.
+    pub system: Option<collector::ring::SystemSnapshot>,
+    /// Saved labels outside the native fixed-text domain, in model/chip/architecture order.
+    pub saved_computer: Option<Box<[Option<String>; 3]>>,
     /// `None` where the tick published no battery reading.
     pub battery: Option<BatteryReading>,
     /// `None` where the tick published no disks.
@@ -173,6 +177,21 @@ pub struct FanRow {
 }
 
 impl MachineMinute {
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.ticks.capacity() * size_of::<TickRow>()
+            + self.cpus.capacity() * size_of::<CpuRow>()
+            + self.memory.capacity() * size_of::<MemoryRow>()
+            + self.interfaces.capacity() * size_of::<InterfaceRow>()
+            + self.gpu_states.capacity() * size_of::<GpuStateRow>()
+            + self.core_states.capacity() * size_of::<CoreStateRow>()
+            + self.fans.capacity() * size_of::<FanRow>()
+            + self
+                .ticks
+                .iter()
+                .map(TickRow::saved_computer_bytes)
+                .sum::<usize>()
+    }
+
     pub fn clear(&mut self) {
         self.ticks.clear();
         self.cpus.clear();
@@ -208,6 +227,8 @@ impl MachineMinute {
                 .as_ref()
                 .and_then(|system| system.machine.levels),
             battery: tick.battery,
+            system: tick.system,
+            saved_computer: None,
             disks: tick.disks,
         });
         for (cpu, ticks) in (0_u32..).zip(&tick.cpus) {
@@ -268,6 +289,29 @@ impl MachineMinute {
     }
 }
 
+impl TickRow {
+    pub(crate) fn computer_text(&self) -> [Option<&str>; 3] {
+        if let Some(saved) = self.saved_computer.as_deref() {
+            return saved.each_ref().map(|text| text.as_deref());
+        }
+        self.system.as_ref().map_or([None; 3], |system| {
+            [
+                system.machine.model.as_ref(),
+                system.machine.chip.as_ref(),
+                system.machine.architecture.as_ref(),
+            ]
+            .map(|text| text.map(FactText::as_str))
+        })
+    }
+
+    fn saved_computer_bytes(&self) -> usize {
+        self.saved_computer.as_ref().map_or(0, |texts| {
+            size_of::<[Option<String>; 3]>()
+                + texts.iter().flatten().map(String::capacity).sum::<usize>()
+        })
+    }
+}
+
 /// The clock of a core's state as a sealed minute holds it: none where the tick published no
 /// system readings, which carry the clocks, or the clock is 0, which the ring writes for one
 /// unknown.
@@ -310,7 +354,7 @@ fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refu
         columns.extend(temperatures);
     }
     if system_held {
-        columns.extend(SYSTEM_COLUMNS);
+        columns.extend(system);
     }
     if battery_held {
         columns.extend(battery);
@@ -367,6 +411,8 @@ fn read_ticks_rows(frame: &DataFrame, into: &mut Vec<TickRow>) -> Result<(), Ref
             gpu_celsius: None,
             thermal_pressure: None,
             performance_levels: None,
+            system: None,
+            saved_computer: None,
             battery: None,
             disks: None,
         });
@@ -402,8 +448,85 @@ fn read_ticks_system(frame: &DataFrame, into: &mut [TickRow]) -> Result<(), Refu
             (level0_name.optional(row)?, level0_cpus.optional(row)?),
             (level1_name.optional(row)?, level1_cpus.optional(row)?),
         ])?;
+        if read_ticks_system_present(frame, row)? {
+            tick.system = Some(read_ticks_system_snapshot(frame, row, tick)?);
+        }
     }
     Ok(())
+}
+
+fn read_ticks_system_present(frame: &DataFrame, row: usize) -> persistence::Result<bool> {
+    // The columns describe the whole minute; an all-null row carries no system facts.
+    for (name, _) in SYSTEM_FIELDS {
+        if !frame.column(name)?.get(row)?.is_null() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn read_ticks_system_snapshot(
+    frame: &DataFrame,
+    row: usize,
+    tick: &mut TickRow,
+) -> Result<collector::ring::SystemSnapshot, Refused> {
+    let averages = ["load_average_1", "load_average_5", "load_average_15"]
+        .map(|name| Cells::<Float64Type>::named(frame, name)?.optional(row));
+    let [one, five, fifteen] = averages;
+    let load_average = match (one?, five?, fifteen?) {
+        (Some(one), Some(five), Some(fifteen)) => Some([one, five, fifteen]),
+        _ => None,
+    };
+    let in_use_bytes =
+        Cells::<UInt64Type>::named(frame, "gpu_memory_in_use_bytes")?.optional(row)?;
+    let allocated_bytes =
+        Cells::<UInt64Type>::named(frame, "gpu_memory_allocated_bytes")?.optional(row)?;
+    Ok(collector::ring::SystemSnapshot {
+        reading: SystemReading {
+            load_average,
+            open_files: Cells::<UInt64Type>::named(frame, "open_files")?.optional(row)?,
+            open_files_limit: Cells::<UInt64Type>::named(frame, "open_files_limit")?
+                .optional(row)?,
+            thermal_pressure: tick.thermal_pressure,
+            gpu_memory: if in_use_bytes.is_some() || allocated_bytes.is_some() {
+                Some(collector::gpu_memory::GpuMemoryReading {
+                    in_use_bytes,
+                    allocated_bytes,
+                })
+            } else {
+                None
+            },
+            boot_wall_ns: Cells::<UInt64Type>::named(frame, "boot_wall_ns")?.optional(row)?,
+        },
+        machine: read_ticks_machine_facts(frame, row, tick)?,
+    })
+}
+
+fn read_ticks_machine_facts(
+    frame: &DataFrame,
+    row: usize,
+    tick: &mut TickRow,
+) -> Result<MachineFacts, Refused> {
+    let texts = ["machine_model", "machine_chip", "machine_architecture"]
+        .map(|name| Cells::<StringType>::named(frame, name)?.optional(row));
+    let [model, chip, architecture] = texts;
+    let texts = [model?, chip?, architecture?];
+    let native = texts.map(|text| text.and_then(|text| FactText::new(text.as_bytes())));
+    tick.saved_computer = texts
+        .iter()
+        .zip(&native)
+        .any(|(saved, native)| saved.is_some() && native.is_none())
+        .then(|| Box::new(texts.map(|text| text.map(str::to_owned))));
+    let [model, chip, architecture] = native;
+    Ok(MachineFacts {
+        model,
+        chip,
+        architecture,
+        cpu_cores: Cells::<UInt32Type>::named(frame, "machine_cpu_cores")?.optional(row)?,
+        gpu_cores: Cells::<UInt32Type>::named(frame, "machine_gpu_cores")?.optional(row)?,
+        memory_bytes: Cells::<UInt64Type>::named(frame, "machine_memory_bytes")?.optional(row)?,
+        levels: tick.performance_levels,
+    })
 }
 
 /// The performance levels of a tick's level `columns`, each a name and a count of logical

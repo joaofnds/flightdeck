@@ -21,6 +21,18 @@ use crate::recording::{self, AppMinute, SampleRow};
 #[path = "apps_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "presentation_tests.rs"]
+mod presentation_tests;
+
+#[path = "presentation.rs"]
+mod presentation;
+pub use presentation::DetachedAppsSecond;
+
+#[path = "app_rows.rs"]
+mod app_rows;
+pub use app_rows::AppRows;
+
 /// The Apps one second holds at most. The App rule finds about 470 Apps a tick on the user's
 /// M5 Pro, so a second past this bound holds none and says so.
 pub const APPS_PER_SECOND_MAX: usize = 2_048;
@@ -28,8 +40,10 @@ pub const APPS_PER_SECOND_MAX: usize = 2_048;
 /// Each App's totals at one second, and what the App rule found of the second as a whole.
 #[derive(Debug, PartialEq)]
 pub struct AppsSecond {
+    /// Provenance and the admission for non-row observation metadata.
+    pub metadata: super::native::AppMetadata,
     /// Complete process rows and additional App measures, or an explicit unavailable reason.
-    pub processes: Result<super::Payload, Missing>,
+    pub processes: Result<Arc<super::Payload>, Missing>,
     /// Why the second holds no Apps, or `None` where it holds every App of its tick.
     pub missing: Option<Missing>,
     /// The tick the second shows, which the store names for every second it takes in, holding
@@ -48,7 +62,7 @@ pub struct AppsSecond {
     pub usage_refused: u32,
     pub usage_gone: u32,
     /// Every App of the tick, once each, in key order.
-    pub apps: Vec<AppRow>,
+    pub apps: AppRows,
     /// Every App of `apps` added up, as `Totals::of` adds them, so a chart finds what the Apps
     /// it does not draw on lines of their own used without adding them up.
     pub totals: Totals,
@@ -112,7 +126,7 @@ impl AppsSecond {
     /// A second with room for `APPS_PER_SECOND_MAX` Apps, holding none.
     pub(super) fn with_room() -> Self {
         Self {
-            apps: Vec::with_capacity(APPS_PER_SECOND_MAX),
+            apps: AppRows::with_capacity(APPS_PER_SECOND_MAX),
             ..Self::default()
         }
     }
@@ -121,7 +135,7 @@ impl AppsSecond {
     /// none, as a loader holds what it read of a tick until the store takes it in.
     pub(super) fn with_room_for(count: usize) -> Self {
         Self {
-            apps: Vec::with_capacity(count.min(APPS_PER_SECOND_MAX)),
+            apps: AppRows::with_capacity(count.min(APPS_PER_SECOND_MAX)),
             ..Self::default()
         }
     }
@@ -138,25 +152,34 @@ impl AppsSecond {
             TickApps::Missing(missing) => self.clear(missing.clone()),
             TickApps::Derived(sample) => {
                 self.processes = Err(Missing::Unread);
-                self.fill(sample, previous);
+                self.fill(sample, previous, budget);
                 self.observation = Some(sample.selected);
                 if self.missing.is_none() {
                     self.processes = match budget {
-                        Some(budget) => super::Payload::capture(sample, previous, budget),
+                        Some(budget) => {
+                            super::Payload::capture(sample, previous, budget).map(Arc::new)
+                        }
                         None => Err(Missing::Unread),
                     };
                 }
             }
             TickApps::Refused(error) => self.clear(Missing::Refused(error.to_owned())),
             TickApps::Loaded(loaded) => {
-                // The second keeps the buffer the store made for it at start, so only the pages
-                // its Apps fill are written and the room past them stays out of resident memory.
-                let mut room = mem::take(&mut self.apps);
-                mem::swap(self, loaded);
-                room.clear();
-                room.append(&mut self.apps);
-                self.apps = room;
-                assert!(self.apps.capacity() >= APPS_PER_SECOND_MAX);
+                if budget.is_some() {
+                    assert_eq!(
+                        loaded.apps.reserved_bytes(),
+                        loaded.apps.capacity() * size_of::<AppRow>()
+                    );
+                    mem::swap(self, loaded);
+                } else {
+                    // Legacy loading writes only used pages of the startup-allocated pool.
+                    let mut room = mem::take(&mut self.apps);
+                    mem::swap(self, loaded);
+                    room.clear();
+                    room.append(&mut self.apps);
+                    self.apps = room;
+                    assert!(self.apps.capacity() >= APPS_PER_SECOND_MAX);
+                }
                 self.take_names(previous);
             }
         }
@@ -167,7 +190,7 @@ impl AppsSecond {
     fn take_names(&mut self, previous: Option<&Self>) {
         let previous = previous.map_or(&[][..], |previous| previous.apps.as_slice());
         let mut previous_index = 0;
-        for row in &mut self.apps {
+        for row in self.apps.rows_mut() {
             let name = &row.name;
             if let Some(held) = previous_name(name.kind, &name.bytes, previous, &mut previous_index)
             {
@@ -187,6 +210,7 @@ impl AppsSecond {
         let capacity = self.apps.capacity();
         let previous = previous.map_or(&[][..], |previous| previous.apps.as_slice());
         self.apps.clear();
+        self.metadata = super::native::AppMetadata::default();
         let mut previous_index = 0;
         for row in kept.rows {
             let bytes = kept.minute.key(row);
@@ -237,12 +261,18 @@ impl AppsSecond {
         self.usage_refused = 0;
         self.usage_gone = 0;
         self.apps.clear();
+        self.metadata = super::native::AppMetadata::default();
         self.totals = Totals::default();
     }
 
     /// Holds each App of `sample`. An App that `previous` holds keeps the name it holds there, so
     /// the store keeps one name for every second of an App.
-    fn fill(&mut self, sample: &Sample, previous: Option<&Self>) {
+    pub(super) fn fill(
+        &mut self,
+        sample: &Sample,
+        previous: Option<&Self>,
+        budget: Option<&Arc<super::ByteBudget>>,
+    ) {
         let apps = sample.apps();
         if apps.len() > APPS_PER_SECOND_MAX {
             self.clear(Missing::TooMany);
@@ -252,14 +282,19 @@ impl AppsSecond {
         let capacity = self.apps.capacity();
         let previous = previous.map_or(&[][..], |previous| previous.apps.as_slice());
         self.apps.clear();
+        self.metadata = super::native::AppMetadata::default();
         let mut previous_index = 0;
         for app in apps {
             if let Some(last) = self.apps.last() {
                 // The App rule finds each App by its key among a sample's Apps.
                 assert!(last.name.kind.key(&last.name.bytes) < app.key.kind.key(&app.key.bytes));
             }
-            let name = previous_name(app.key.kind, &app.key.bytes, previous, &mut previous_index)
-                .unwrap_or_else(|| app.ranked());
+            let previous_name =
+                previous_name(app.key.kind, &app.key.bytes, previous, &mut previous_index);
+            let Some(name) = fill_name(app, previous_name, budget) else {
+                self.clear(Missing::Budget);
+                return;
+            };
             self.apps.push(AppRow::new(app, name));
         }
         assert_eq!(self.apps.capacity(), capacity);
@@ -292,6 +327,20 @@ impl AppsSecond {
             ungrouped_members: self.ungrouped_members,
         };
         rank_apps(&ranked, &self.apps).map_err(|error| Missing::Refused(error.to_string()))
+    }
+}
+
+fn fill_name(
+    app: &App,
+    previous: Option<Arc<RankedApp>>,
+    budget: Option<&Arc<super::ByteBudget>>,
+) -> Option<Arc<RankedApp>> {
+    match budget {
+        Some(budget) => match previous {
+            Some(name) => RankedApp::retained(&name, budget),
+            None => RankedApp::captured(app, budget),
+        },
+        None => Some(previous.unwrap_or_else(|| app.ranked())),
     }
 }
 
@@ -340,6 +389,7 @@ impl Default for AppsSecond {
     /// any.
     fn default() -> Self {
         Self {
+            metadata: super::native::AppMetadata::default(),
             processes: Err(Missing::Unread),
             missing: Some(Missing::Unread),
             observation: None,
@@ -350,7 +400,7 @@ impl Default for AppsSecond {
             live_ungrouped_members: 0,
             usage_refused: 0,
             usage_gone: 0,
-            apps: Vec::new(),
+            apps: AppRows::default(),
             totals: Totals::default(),
         }
     }

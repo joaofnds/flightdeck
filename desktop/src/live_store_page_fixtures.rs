@@ -20,11 +20,14 @@ pub fn readings(trends: &[MachineSecond]) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation: 0,
         catalog: json!({"first_second": 9_000, "last_second": 10_000}),
-        selection,
-        pages: BTreeMap::from([(
+        selection: crate::live_source::Presentation::Legacy(selection),
+        pages: (BTreeMap::from([(
             "ticks".into(),
             json!({"offset":0,"total":1,"rows":[["1"]],"columns":["publication"]}),
-        )]),
+        )]))
+        .into_iter()
+        .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
+        .collect(),
         apps: None,
         detail: None,
         history: None,

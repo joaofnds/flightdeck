@@ -259,7 +259,8 @@ mod tests {
         let started = Instant::now();
         let mut observations = Observations::default();
         let mut refresh = snapshot(&observation(10));
-        refresh.selection["selected"]["reader_losses"] = json!({"publications": 3});
+        refresh.selection.legacy_mut().unwrap()["selected"]["reader_losses"] =
+            json!({"publications": 3});
         refresh.catalog["tail_ticks"] = json!(2);
 
         observations
@@ -381,9 +382,14 @@ mod tests {
             generation: 1,
             catalog: json!({"tail_ticks": 1, "tail_cache_bytes": 1024,
                 "tail_cache_bytes_max": 134_217_728, "collector_completed": false}),
-            selection: json!({"selected": selected, "context_last_second": second,
+            selection: crate::live_source::Presentation::Legacy(
+                json!({"selected": selected, "context_last_second": second,
                 "trends": [selected]}),
-            pages: BTreeMap::from([("fans".to_owned(), json!({"observation": selected}))]),
+            ),
+            pages: (BTreeMap::from([("fans".to_owned(), json!({"observation": selected}))]))
+                .into_iter()
+                .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
+                .collect(),
             apps: None,
             detail: None,
             history: None,
@@ -394,7 +400,9 @@ mod tests {
             overview_app_histories: None,
             histories_pending: false,
             process_history: None,
-            rankings: Some(std::sync::Arc::new(rankings)),
+            rankings: Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(std::sync::Arc::new(rankings)),
+            )),
             app_ranks: None,
             app_parts: None,
             read_ms: 5.0,

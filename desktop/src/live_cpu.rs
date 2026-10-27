@@ -253,7 +253,7 @@ impl LiveDashboard {
         }
         let Some(activity) = self
             .reading_snapshot()
-            .and_then(|snapshot| snapshot.cpu_detail.as_ref())
+            .and_then(|snapshot| snapshot.cpu_detail.as_deref())
         else {
             let notice = self.absent_reading(ACTIVITY_UNAVAILABLE);
             return cpu_activity_absent(panel, notice, levels.as_ref());

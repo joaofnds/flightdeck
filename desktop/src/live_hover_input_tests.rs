@@ -486,7 +486,7 @@ impl HoverDriver {
     fn inspect_same_second_memory_sibling(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
-            snapshot.selection["trends"][1]["wall_ns"] = json!(1000 * NS);
+            snapshot.selection.legacy_mut().unwrap()["trends"][1]["wall_ns"] = json!(1000 * NS);
             snapshot.pages.clear();
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -535,7 +535,8 @@ impl HoverDriver {
     fn remove_historical_free_memory(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
-            snapshot.selection["trends"][1]["memory_free_bytes"] = Value::Null;
+            snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_free_bytes"] =
+                Value::Null;
             snapshot.pages.clear();
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -663,7 +664,7 @@ impl HoverDriver {
 
     fn deliver_wrong_observation(&mut self, lookup: Lookup) {
         let mut snapshot = Epoch::Historical.snapshot(lookup.generation, true);
-        snapshot.selection["selected"] = Epoch::Older.observation();
+        snapshot.selection.legacy_mut().unwrap()["selected"] = Epoch::Older.observation();
         self.deliver_update(Update::Ready(snapshot));
     }
 
@@ -820,15 +821,20 @@ impl Epoch {
             generation,
             catalog: json!({"path":"/fixture/whole-page-hover",
                 "first_second":998,"last_second":1000}),
-            selection: json!({"second":self.second(),"context_last_second":self.second(),
+            selection: crate::live_source::Presentation::Legacy(
+                json!({"second":self.second(),"context_last_second":self.second(),
                 "selected":self.observation(),"summary":summary,"context_seconds":900,
                 "trends":points}),
-            pages: BTreeMap::from([(
+            ),
+            pages: (BTreeMap::from([(
                 "processes".into(),
                 json!({
                 "observation":self.observation(),"columns":["name"],
                 "rows":[["accepted-only-row"]],"total":1,"offset":0,"limit":512}),
-            )]),
+            )]))
+            .into_iter()
+            .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
+            .collect(),
             apps: None,
             detail: None,
             history: None,

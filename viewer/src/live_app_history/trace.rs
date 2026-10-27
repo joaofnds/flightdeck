@@ -1,5 +1,6 @@
 use super::{App, CompactMeasure, Selection, apps, count, key};
 use crate::app_process_groups_history::ProcessGroupReading;
+use crate::live_app_response::json::AppView;
 use crate::live_app_response::{self as response, AppPart, Measure, Observation};
 use crate::live_apps::Frame;
 use persistence::{Error, Result};
@@ -35,7 +36,7 @@ const _: () = {
 };
 
 impl TracePoint {
-    pub(super) fn source_available(&self) -> bool {
+    pub(crate) fn source_available(&self) -> bool {
         self.captured
     }
 
@@ -136,12 +137,45 @@ impl TracePoint {
         }
     }
 
-    pub(super) fn unavailable(observation: &Observation) -> Self {
+    pub(crate) fn unavailable(observation: &Observation) -> Self {
         Self {
             observation: *observation,
             elapsed_ns: None,
             totals: None,
             captured: false,
+        }
+    }
+
+    /// A retained App's borrowed measures, without creating another owned App or Sample.
+    pub(crate) fn from_app_view(
+        observation: &Observation,
+        elapsed_ns: Option<u64>,
+        app: Option<&AppView<'_>>,
+    ) -> Self {
+        Self {
+            observation: *observation,
+            elapsed_ns,
+            totals: app.map(Totals::of_view),
+            captured: true,
+        }
+    }
+
+    /// A named group's pure process totals, reduced from retained member amounts.
+    pub(crate) fn from_totals(
+        observation: &Observation,
+        elapsed_ns: Option<u64>,
+        app: Option<&apps::AppTotals>,
+    ) -> Self {
+        let mut totals = None;
+        if let Some(app) = app {
+            Totals::capture(app, &mut totals);
+        }
+
+        Self {
+            observation: *observation,
+            elapsed_ns,
+            totals,
+            captured: true,
         }
     }
 
@@ -275,6 +309,10 @@ impl Totals {
     /// The totals of an App's row, without the counts only a process group's history shows,
     /// as a live point gives them.
     fn of_app(app: &response::App) -> Self {
+        Self::of_view(&AppView::of(app))
+    }
+
+    fn of_view(app: &AppView<'_>) -> Self {
         Self {
             members: count(app.members),
             membership_complete: app.membership_complete,

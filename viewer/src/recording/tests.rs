@@ -43,6 +43,119 @@ use crate::live_apps::committed::Endpoint;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn complete_machine_projection_matches_native_and_sealed_groups() {
+    // Goal: every desktop machine group can be answered from the same held typed result.
+    // Method: reuse the real system ring/seal fixture, with all sources populated twice.
+    let mut fixture = Fixture::new_mode(false, 2, None);
+    system_ring(&mut fixture);
+    for step in 4..=5 {
+        publish_complete_machine(&mut fixture, step);
+    }
+    let mut native = MachineMinute::default();
+    for (publication, tick) in ring_ticks(&fixture) {
+        native.push_tick(publication, &tick);
+    }
+    fixture.seal_minute(0);
+    let sealed = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let mut saved = MachineMinute::default();
+    read_machine(&sealed, &mut saved).unwrap();
+    let budget = Arc::new(crate::byte_budget::ByteBudget::new(32 * 1024 * 1024));
+
+    let native = complete_machine_summary(&native, &budget);
+    let saved = complete_machine_summary(&saved, &budget);
+
+    assert_eq!(native, saved);
+    assert_eq!(saved["cpu_percent"], 75.0);
+    assert_eq!(saved["cpu_level_percent"], serde_json::json!([75.0, 75.0]));
+    assert_eq!(saved["cpu_level_ghz"], serde_json::json!([2.5, 2.5]));
+    assert_eq!(saved["gpu_active_percent"], 0.002);
+    assert_eq!(saved["gpu_watts"], 0.000_01);
+    assert_eq!(saved["memory_pageins_per_second"], 1000.0);
+    assert_eq!(saved["network_rx_packets_per_second"], 200.0);
+    assert_eq!(saved["storage"]["read_bps"], 1000.0);
+    assert_eq!(saved["storage"]["read_mean_ms"], 3.0);
+    assert_eq!(saved["battery"]["cycle_count"], 504);
+    assert_eq!(saved["fan_rpm"], serde_json::json!([1005.0, 2005.0]));
+    assert_eq!(saved["machine_model"], "Fixture Mac");
+    assert_eq!(saved["load_average"], serde_json::json!([0.5, 1.0, 1.5]));
+    assert_eq!(saved["open_files_percent"], 10.0);
+    assert_eq!(saved["gpu_memory_in_use_bytes"], 123);
+    assert_eq!(saved["uptime_seconds"], 1003);
+    assert_eq!(budget.used(), 0);
+}
+
+fn complete_machine_summary(
+    machine: &MachineMinute,
+    budget: &Arc<crate::byte_budget::ByteBudget>,
+) -> serde_json::Value {
+    let mut readings = crate::store::readings(machine);
+    let previous = readings.next().unwrap();
+    let current = readings.next().unwrap();
+    let mut second = crate::store::MachineSecond::of(&current, Some(&previous)).unwrap();
+    second
+        .retain_complete(&current, Some(&previous), budget)
+        .unwrap();
+    eprintln!(
+        "Populated two-CPU/two-fan/one-disk machine charge={}",
+        second.complete().unwrap().bytes()
+    );
+    second.complete().unwrap().summary(&second)
+}
+
+fn publish_complete_machine(fixture: &mut Fixture, step: u64) {
+    let reading = SystemReading {
+        load_average: Some([0.5, 1.0, 1.5]),
+        open_files: Some(10),
+        open_files_limit: Some(100),
+        thermal_pressure: Some(2),
+        gpu_memory: Some(collector::gpu_memory::GpuMemoryReading {
+            in_use_bytes: Some(123),
+            allocated_bytes: Some(456),
+        }),
+        boot_wall_ns: Some(2_000_000_000),
+    };
+    let level = |name: &[u8]| PerformanceLevel {
+        name: FactText::new(name).unwrap(),
+        logical_cpus: 1,
+    };
+    let machine = MachineFacts {
+        model: FactText::new(b"Fixture Mac"),
+        chip: FactText::new(b"Fixture Chip"),
+        architecture: FactText::new(b"arm64"),
+        cpu_cores: Some(2),
+        gpu_cores: Some(4),
+        memory_bytes: Some(8192),
+        levels: Some([level(b"Fast"), level(b"Slow")]),
+    };
+    let clock = ClockTables::from_tables(vec![vec![2_000_000, 3_000_000]]);
+    let system = SystemPublication {
+        reading: &reading,
+        machine: &machine,
+        clock: Some(&clock),
+        process_gpu_ns: &[],
+    };
+    let battery = battery(step);
+    let mut disks = disks(step);
+    disks.source_continuous_ns = step * 1_000_000_000;
+    let disk = &mut disks.records[0];
+    disk.read_operations = Some(10 * step);
+    disk.write_operations = Some(5 * step);
+    disk.read_errors = Some(step);
+    disk.write_errors = Some(step);
+    disk.read_time_ns = Some(30_000_000 * step);
+    disk.write_time_ns = Some(15_000_000 * step);
+    publish_machine(
+        fixture,
+        step,
+        Some(&SupplementalReadings {
+            battery: Some(&battery),
+            disks: Some(&disks),
+            system: Some(&system),
+        }),
+    );
+}
+
+#[test]
 fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
     // Goal: the recording and the ring hand the store the same machine readings, so one rate
     // rule serves both.
@@ -1158,7 +1271,7 @@ fn of_rows(row_kind: u8, value: Expr, name: &str) -> Expr {
 }
 
 /// A fixture whose ring held the ticks `publish_supplemented` publishes, sealed as minute 0.
-fn sealed_system_minute() -> Fixture {
+pub(crate) fn sealed_system_minute() -> Fixture {
     let mut fixture = Fixture::new_mode(false, 2, None);
     system_ring(&mut fixture);
     for step in 1..=3 {

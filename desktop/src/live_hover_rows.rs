@@ -476,7 +476,7 @@ impl LiveDashboard {
             }
         }
         let detail = crate::live_app_views::selected_detail(
-            snapshot.detail.as_ref(),
+            snapshot.detail.as_deref(),
             self.request.app.as_ref(),
         );
         let name = detail.map_or_else(

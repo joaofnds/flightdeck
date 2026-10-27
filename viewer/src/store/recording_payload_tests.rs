@@ -8,6 +8,112 @@ use crate::live::identity_fixture::Fixture;
 use crate::store::{AppsSecond, ByteBudget};
 
 #[test]
+fn saved_origin_carries_the_admitted_manifests_actual_losses() {
+    // Goal: saved facts distinguish window losses from live reader losses without a new scan.
+    // Method: set nonzero losses on a real sealed manifest, then use the complete Store loader.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let losses = persistence::Losses {
+        publications: 4,
+        events: 7,
+        unknown: true,
+    };
+    change_committed_losses(&fixture.root, &found[0].marker, &losses);
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut origins = Vec::new();
+
+    let outcome =
+        crate::store::recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
+            let crate::store::apps::TickApps::Loaded(apps) = apps else {
+                panic!("saved facts were not loaded");
+            };
+            origins.push(apps.metadata.origin);
+        })
+        .unwrap();
+
+    assert_eq!(outcome.left_out, None);
+    assert_eq!(origins, [crate::store::native::Origin::Saved(losses)]);
+    drop(outcome);
+    assert_eq!(budget.used(), 0);
+}
+
+fn change_committed_losses(
+    root: &std::path::Path,
+    marker: &std::path::Path,
+    losses: &persistence::Losses,
+) {
+    let mut bytes = std::fs::read(marker).unwrap();
+    // Format 1 puts the loss words after identities and the five window/range words.
+    let first = b"FDSEAL01".len()
+        + 2 * size_of::<u64>()
+        + 3 * size_of::<collector::ring::Identity>()
+        + 5 * size_of::<u64>();
+    for (index, amount) in [
+        losses.publications,
+        losses.events,
+        u64::from(losses.unknown),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let start = first + index * size_of::<u64>();
+        bytes[start..start + size_of::<u64>()].copy_from_slice(&amount.to_le_bytes());
+    }
+    std::fs::write(marker, bytes).unwrap();
+    assert_eq!(
+        persistence::read_committed(root, marker).unwrap().losses,
+        *losses
+    );
+}
+
+#[test]
+fn saved_computer_labels_keep_the_legacy_text_domain_through_the_store_loader() {
+    // Goal: decoding complete computer facts adds no native-only limit to saved summaries.
+    // Method: replace a real sealed model with 65 bytes and its chip with an empty label.
+    use polars::prelude::lit;
+    let fixture = crate::recording::sealed_system_minute();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
+    let path = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("ticks.parquet");
+    let model = "m".repeat(65);
+    let mut changed = persistence::engine::scan(&path)
+        .unwrap()
+        .with_column(lit(model.clone()).alias("machine_model"))
+        .with_column(lit("").alias("machine_chip"))
+        .collect()
+        .unwrap();
+    let replacement = fixture.root.join("changed-ticks.parquet");
+    events_loader_write(&replacement, &mut changed);
+    std::fs::rename(replacement, path).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut summaries = Vec::new();
+
+    let outcome = crate::store::recording::load_payload(
+        &fixture.root,
+        &budget,
+        &operation,
+        |_, second, _| summaries.push(second.complete().unwrap().summary(second)),
+    )
+    .unwrap();
+
+    assert_eq!(outcome.left_out, None);
+    assert_eq!(summaries.len(), 3);
+    assert_eq!(summaries[1]["machine_model"], model);
+    assert_eq!(summaries[1]["machine_chip"], "");
+    drop(outcome);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn terminal_only_load_preserves_the_full_decoders_first_successor() {
     // Goal: discarding presentations keeps exact machine and App rates across the saved tail.
     // Method: seed independent real ring readers from the full and terminal-only decoders.
@@ -63,7 +169,7 @@ fn terminal_successor(
     ring.read(|_, second, apps| {
         let mut owned = AppsSecond::with_room();
         owned.take(apps, None, None);
-        result.push((*second, owned));
+        result.push((second.clone(), owned));
         true
     })
     .unwrap();
@@ -198,7 +304,7 @@ fn terminal_only_load_refuses_a_malformed_earlier_frame_even_with_a_valid_last_f
 
 #[test]
 fn terminal_admission_preserves_presentation_refusal_and_recovery() {
-    // Goal: validation without copied presentations keeps the exact predecessor refusal chain.
+    // Goal: an oversized presentation cannot erase its validated predecessor input.
     // Method: expand committed process tables to exceed the 8 MiB bound at each observation.
     for oversized_publication in 1..=2 {
         let fixture = terminal_bound_recording(oversized_publication);
@@ -224,7 +330,7 @@ fn terminal_admission_preserves_presentation_refusal_and_recovery() {
         .unwrap()
         .unwrap();
 
-        assert_eq!(terminal.process.is_some(), oversized_publication == 1);
+        assert!(terminal.process.is_some());
         assert_eq!(terminal.process.is_some(), decoder.predecessor.is_some());
         if let Some(process) = terminal.process {
             let (endpoint, frame) = process.into_parts();
@@ -482,7 +588,7 @@ fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitme
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,
-        |endpoint, sample| {
+        |endpoint, sample, _losses| {
             assert!(sample.is_ok());
             consumed.push(endpoint.stamp.publication);
             if endpoint.stamp.publication == 2 {
@@ -578,7 +684,7 @@ fn a_sealed_boot_mismatch_cannot_seed_machine_rates_under_the_registry_identity(
     ring.follow().unwrap();
     let mut successors = Vec::new();
     ring.read(|_, second, _| {
-        successors.push(*second);
+        successors.push(second.clone());
         true
     })
     .unwrap();
@@ -718,7 +824,7 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
     })
     .unwrap();
     let reader = Arc::new(retained);
-    let charge = reader.processes.as_ref().unwrap().bytes();
+    let charge = crate::store::startup_tests::retained_app_charge(&reader);
     let completion = decoder.decode(
         &fixture.root,
         &found[1],
@@ -1040,6 +1146,7 @@ fn events_loader_legacy(
                 apps.last(),
                 Some(budget),
             );
+            second.metadata.origin = crate::store::native::Origin::Saved(*sealed.losses());
             apps.push(second);
 
             Ok(())
@@ -1251,7 +1358,7 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,
-        |endpoint, sample| {
+        |endpoint, sample, _losses| {
             assert!(sample.is_ok());
             consumed.push(endpoint.stamp.publication);
             if endpoint.stamp.publication == 2 {
@@ -1316,7 +1423,10 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
                 let crate::store::apps::TickApps::Loaded(apps) = apps else {
                     panic!("the fixture supplies complete process payloads");
                 };
-                selected = Some((*second, std::mem::replace(apps, AppsSecond::with_room())));
+                selected = Some((
+                    second.clone(),
+                    std::mem::replace(apps, AppsSecond::with_room()),
+                ));
             }
         },
     )

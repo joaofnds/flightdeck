@@ -21,10 +21,10 @@ fn hover_preview_on_the_apps_page_shows_a_saved_sibling_as_the_worker_reads_it()
 
     assert!(preview.complete);
     assert_eq!(preview.reading.detail, worker.detail);
-    assert_eq!(preview.reading.apps, Some(apps_paging(&worker)));
+    assert_eq!(preview.reading.apps.as_deref(), Some(&apps_paging(&worker)));
     assert_eq!(
         preview.executables,
-        crate::live_executables::groups(worker.detail.as_ref()).unwrap()
+        crate::live_executables::groups(worker.detail.as_deref()).unwrap()
     );
 }
 
@@ -71,7 +71,7 @@ fn hover_preview_on_the_apps_page_moves_past_the_end_pages_to_the_first_as_the_w
     let preview = Preview::resident(&committed, &request, target);
 
     assert_eq!(preview.reading.detail, worker.detail);
-    assert_eq!(preview.reading.apps, Some(apps_paging(&worker)));
+    assert_eq!(preview.reading.apps.as_deref(), Some(&apps_paging(&worker)));
     assert_eq!(preview.request.apps_offset, 0);
     assert_eq!(preview.request.members_offset, 0);
 }
@@ -93,7 +93,7 @@ fn hover_preview_on_the_apps_page_shows_an_app_absent_from_its_second_as_the_wor
 
     let preview = Preview::resident(&committed, &request, target);
 
-    assert_eq!(worker.detail, Some(Value::Null));
+    assert_eq!(worker.detail.as_deref(), Some(&Value::Null));
     assert!(preview.complete);
     assert_eq!(preview.reading.detail, worker.detail);
 }
@@ -147,7 +147,7 @@ fn hover_reads_on_the_apps_page_keep_no_app_parts() {
 
 /// The parts a page keeps of the App `app` names in the window of a sealed recording whose
 /// observations share the run and boot of the input tests' snapshots.
-pub(crate) fn kept_window_parts(app: &str) -> std::sync::Arc<viewer::WindowParts> {
+pub(crate) fn kept_window_parts(app: &str) -> std::sync::Arc<crate::live_source::PartsWindow> {
     let recording = SealedRecording::with_ranked_apps();
 
     let snapshot = recording.read(apps_request_at(3, app, 0)).unwrap();
@@ -168,7 +168,7 @@ fn apps_request_at(publication: u64, app: &str, apps_offset: u32) -> Request {
 
 /// The worker's Apps page without the Apps it lists, which a hover's Apps page leaves out.
 fn apps_paging(worker: &Snapshot) -> Value {
-    let mut apps = worker.apps.clone().unwrap();
+    let mut apps = worker.apps.as_deref().unwrap().clone();
     apps.as_object_mut().unwrap().remove("apps").unwrap();
 
     apps

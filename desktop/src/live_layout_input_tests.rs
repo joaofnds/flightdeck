@@ -533,15 +533,20 @@ impl InputDriver {
             dashboard.request.second = None;
             dashboard.request.identity = None;
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            let points = snapshot.selection["trends"].as_array_mut().unwrap();
+            let points = snapshot.selection.legacy_mut().unwrap()["trends"]
+                .as_array_mut()
+                .unwrap();
             points[0]["soc_celsius"] = json!(40);
             points[0]["fan_rpm"] = json!([1000, 1100]);
             points[0]["battery"] = json!({"charge_percent":80});
             points[1]["soc_celsius"] = json!(60);
             points[1]["fan_rpm"] = json!([2000, 2100]);
             points[1]["battery"] = json!({"charge_percent":50});
-            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
-            snapshot.rankings = Some(overview_context_rankings(&snapshot));
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][1].clone();
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(overview_context_rankings(&snapshot)),
+            ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -560,15 +565,17 @@ impl InputDriver {
             dashboard.request.identity = None;
             let mut snapshot = accepted_snapshot(dashboard.generation);
             for key in keys {
-                snapshot.selection["trends"][0][*key] = json!(readings[0]);
-                snapshot.selection["trends"][1][*key] = json!(readings[1]);
+                snapshot.selection.legacy_mut().unwrap()["trends"][0][*key] = json!(readings[0]);
+                snapshot.selection.legacy_mut().unwrap()["trends"][1][*key] = json!(readings[1]);
             }
-            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][1].clone();
             if summary == SummaryOwner::Sibling {
                 let publication = snapshot.selection["selected"]["publication"]
                     .as_u64()
                     .unwrap();
-                snapshot.selection["summary"]["publication"] = json!(publication + 1);
+                snapshot.selection.legacy_mut().unwrap()["summary"]["publication"] =
+                    json!(publication + 1);
             }
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -635,17 +642,17 @@ impl InputDriver {
     fn advance_overview_context(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection["second"] = json!(1001);
-            snapshot.selection["context_last_second"] = json!(1001);
-            snapshot.selection["selected"]["publication"] = json!(3);
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(1001);
+            snapshot.selection.legacy_mut().unwrap()["context_last_second"] = json!(1001);
+            snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(3);
             let mut point = snapshot.selection["trends"][1].clone();
             point["publication"] = json!(3);
             point["wall_ns"] = json!(1_001_000_000_000_u64);
             point["soc_celsius"] = json!(70);
             point["fan_rpm"] = json!([3000, null]);
             point["battery"] = json!({"charge_percent":45});
-            snapshot.selection["summary"] = point.clone();
-            snapshot.selection["trends"]
+            snapshot.selection.legacy_mut().unwrap()["summary"] = point.clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .push(point);
@@ -702,8 +709,8 @@ impl InputDriver {
                         "power_watts":8,"gpu_watts":2,"soc_celsius":40,"pressure":0})
                 })
                 .collect();
-            snapshot.selection["selected"]["publication"] = json!(1000);
-            snapshot.selection["trends"] = json!(points);
+            snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(1000);
+            snapshot.selection.legacy_mut().unwrap()["trends"] = json!(points);
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -731,7 +738,7 @@ impl InputDriver {
         use crate::live_app_attribution_history::{AppAttributionHistory, Metric, tests::fixture};
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            for (index, point) in snapshot.selection["trends"]
+            for (index, point) in snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
@@ -740,14 +747,17 @@ impl InputDriver {
                 point["soc_celsius"] = json!([20.0, 40.0][index]);
                 point["fan_rpm"] = json!([[1000.0], [1200.0]][index]);
             }
-            snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][1].clone();
             let history = AppAttributionHistory::prepare(
                 Metric::Power,
                 &fixture(Metric::Power),
                 &snapshot.selection,
             );
             assert!(history.panel().is_some(), "{}", history.coverage(None));
-            snapshot.app_attribution_history = Some(std::sync::Arc::new(history));
+            snapshot.app_attribution_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(std::sync::Arc::new(history)),
+            ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

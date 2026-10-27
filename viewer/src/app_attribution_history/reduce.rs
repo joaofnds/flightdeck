@@ -49,7 +49,7 @@ struct App {
     membership_complete: bool,
 }
 
-pub(super) const WORKING_BYTES_MAX: usize = super::means::BYTES_MAX
+pub(crate) const WORKING_BYTES_MAX: usize = super::means::BYTES_MAX
     + 4096 * size_of::<Point>()
     + 8 * (size_of::<Key>() + collector::ring::PROGRAM_PATH_BYTES_MAX)
     + size_of::<Reduction<'static>>();

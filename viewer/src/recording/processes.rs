@@ -94,6 +94,10 @@ pub struct Before {
 }
 
 impl Before {
+    pub(crate) fn bytes(&self) -> usize {
+        self.frame.bytes()
+    }
+
     pub(crate) fn into_parts(self) -> (Endpoint, Box<Frame>) {
         (self.endpoint, self.frame)
     }
@@ -140,8 +144,8 @@ fn derive_apps_samples(
 }
 
 impl SealedMinute<'_> {
-    /// Retains the last frame only when capture would admit its presentation. Each preceding
-    /// frame still passes the same validation, since a refusal breaks the rate predecessor.
+    /// Retains valid source input even when joint derivation or presentation reaches its bound.
+    /// Integrity failures still break the predecessor, by the same rule as native ingestion.
     pub(crate) fn terminal_processes(
         &self,
         operation: &Operation,
@@ -156,13 +160,17 @@ impl SealedMinute<'_> {
                         .can_use_predecessor(&before.endpoint.observation())
                 })
                 .map(|before| &*before.frame);
-            if Sample::validate_capture(&frame, previous).is_err() {
-                before = None;
-            } else {
+            let valid_input = match Sample::validate_capture_typed(&frame, previous) {
+                Ok(()) => true,
+                Err(error) => error.retains_input(),
+            };
+            if valid_input {
                 before = Some(Before {
                     endpoint: *endpoint,
                     frame,
                 });
+            } else {
+                before = None;
             }
             Ok(())
         })?;
@@ -171,7 +179,7 @@ impl SealedMinute<'_> {
     }
 
     /// Visits each observation's typed sample or refusal, including unattributed processes.
-    /// A refused sample clears the predecessor but does not suppress later observations.
+    /// A refused presentation preserves valid input without suppressing later observations.
     pub(crate) fn visit_samples(
         &self,
         before: &mut Option<Before>,
@@ -197,14 +205,22 @@ impl SealedMinute<'_> {
                         .can_use_predecessor(&before.endpoint.observation())
                 })
                 .map(|before| &*before.frame);
-            if let Err(error) = Sample::capture(&frame, previous, &mut sample) {
-                *before = None;
-                return consume(endpoint, Err(error));
+            match Sample::capture_typed(&frame, previous, &mut sample) {
+                Ok(()) => {
+                    let captured = sample
+                        .as_deref()
+                        .ok_or(persistence::Error::Bound("derived App sample"))?;
+                    consume(endpoint, Ok(captured))?;
+                }
+                Err(error) => {
+                    let valid_input = error.retains_input();
+                    consume(endpoint, Err(error.legacy()))?;
+                    if !valid_input {
+                        *before = None;
+                        return Ok(());
+                    }
+                }
             }
-            let captured = sample
-                .as_deref()
-                .ok_or(persistence::Error::Bound("derived App sample"))?;
-            consume(endpoint, Ok(captured))?;
             *before = Some(Before {
                 endpoint: *endpoint,
                 frame,

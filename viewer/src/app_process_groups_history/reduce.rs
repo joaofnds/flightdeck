@@ -60,6 +60,17 @@ impl<'operation> Reduction<'operation> {
         app_bytes: &[u8],
         operation: &'operation Operation,
     ) -> Result<Box<Self>> {
+        Self::with_room(selected, kind, app_bytes, operation, POINTS_MAX)
+    }
+
+    pub(crate) fn with_room(
+        selected: &Selected,
+        kind: KeyKind,
+        app_bytes: &[u8],
+        operation: &'operation Operation,
+        point_count: usize,
+    ) -> Result<Box<Self>> {
+        assert!(point_count <= POINTS_MAX);
         if app_bytes.len() > NAME_BYTES_MAX {
             return Err(Error::Bound("process cohort App key"));
         }
@@ -72,7 +83,7 @@ impl<'operation> Reduction<'operation> {
             named_group_count: 0,
             context_observations_unavailable: 0,
             groups: Vec::with_capacity(SERIES_GROUPS_MAX),
-            points: Vec::with_capacity(POINTS_MAX),
+            points: Vec::with_capacity(point_count),
         });
 
         result.validate_bytes()?;

@@ -40,6 +40,59 @@ use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 pub(super) struct Outcome {
     pub left_out: Option<Failure>,
     pub terminal: Option<Terminal>,
+    pub checked_catalog: Option<CheckedCatalog>,
+    pub decoded_catalog: DecodedCatalog,
+}
+
+/// Source discovery checked all catalog windows at or beyond this actual pruning floor.
+/// No floor means all discovered windows were decoded, including an empty catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CheckedCatalog {
+    pub recording: Identity,
+    pub newest_run: Option<RunIdentity>,
+    pub first_ns: Option<u64>,
+    pub windows: u32,
+    pub first_known_second: Option<u64>,
+    pub last_known_second: Option<u64>,
+    pub unknown_clock_ticks: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct DecodedCatalog {
+    pub windows: u32,
+    pub first_known_second: Option<u64>,
+    pub last_known_second: Option<u64>,
+    pub unknown_clock_ticks: u64,
+}
+
+impl DecodedCatalog {
+    fn observe(&mut self, wall_ns: Option<u64>) {
+        if let Some(wall_ns) = wall_ns {
+            let second = wall_ns / 1_000_000_000;
+            self.first_known_second = Some(
+                self.first_known_second
+                    .map_or(second, |first| first.min(second)),
+            );
+            self.last_known_second = Some(
+                self.last_known_second
+                    .map_or(second, |last| last.max(second)),
+            );
+        } else {
+            self.unknown_clock_ticks += 1;
+        }
+    }
+
+    fn extend(&mut self, other: &Self) {
+        self.windows += other.windows;
+        self.unknown_clock_ticks += other.unknown_clock_ticks;
+        if let Some(first) = other.first_known_second {
+            self.first_known_second =
+                Some(self.first_known_second.map_or(first, |own| own.min(first)));
+        }
+        if let Some(last) = other.last_known_second {
+            self.last_known_second = Some(self.last_known_second.map_or(last, |own| own.max(last)));
+        }
+    }
 }
 
 /// The last raw machine tick and process frame, accepted only by the same run's ring.
@@ -158,23 +211,78 @@ fn load_payload_window_using(
     operation: &crate::cancellation::Operation,
     capture: &crate::recording::InputCapture<'_>,
     window: &LoadWindow<'_>,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
     let discovered = catalog::find(root, &mut found, window, operation);
     operation.check()?;
-    if let Err(failure) = discovered {
-        return Ok(Outcome {
-            left_out: Some(failure),
-            terminal: None,
-        });
-    }
+    let checked = match discovered {
+        Ok(checked) => checked,
+        Err(failure) => {
+            return Ok(Outcome {
+                left_out: Some(failure),
+                terminal: None,
+                checked_catalog: None,
+                decoded_catalog: DecodedCatalog::default(),
+            });
+        }
+    };
     found.reverse();
-    let outcome = payload::load(root, &found, budget, operation, capture, take)?;
+    let mut admitted = true;
+    if window.unread {
+        if window.since.is_some() {
+            admitted = false;
+        }
+    }
+    let mut outcome = payload::load(
+        root,
+        &found,
+        budget,
+        operation,
+        capture,
+        |run, second, apps| {
+            if !load_payload_admitted(&apps) {
+                admitted = false;
+            }
+            take(run, second, apps);
+        },
+    )?;
+    operation.check()?;
+    if outcome.left_out.is_none() {
+        if admitted {
+            match catalog::revalidate(root, &checked) {
+                Ok(()) => {
+                    let mut checked = checked;
+                    if outcome.decoded_catalog.windows == checked.windows {
+                        checked.first_known_second = outcome.decoded_catalog.first_known_second;
+                        checked.last_known_second = outcome.decoded_catalog.last_known_second;
+                        checked.unknown_clock_ticks =
+                            Some(outcome.decoded_catalog.unknown_clock_ticks);
+                    }
+                    outcome.checked_catalog = Some(checked);
+                }
+                Err(failure) => outcome.left_out = Some(failure),
+            }
+        }
+    }
     operation.check()?;
 
     Ok(outcome)
+}
+
+fn load_payload_admitted(apps: &TickApps<'_>) -> bool {
+    match apps {
+        TickApps::Missing(Missing::Budget) => false,
+        TickApps::Loaded(apps) => {
+            if matches!(&apps.missing, Some(Missing::Budget)) {
+                return false;
+            }
+
+            !matches!(&apps.processes, Err(Missing::Budget))
+        }
+        TickApps::Missing(_) | TickApps::Derived(_) | TickApps::Refused(_) => true,
+    }
 }
 
 /// The sealed minutes the store reads at launch at most. The hour and its lead-in span 61

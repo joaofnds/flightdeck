@@ -673,11 +673,20 @@ pub(crate) fn validate_coverage(value: &Value) -> Result<(), String> {
     for (name, bound) in [
         ("context_app_count", 24_000),
         ("context_key_bytes", 8_388_608),
-        ("cache_bytes", cache_bytes_max),
     ] {
         if integer(&value[name])? > bound {
             return Err(format!("Resident App {name} exceeds its bound"));
         }
+    }
+    if let Some(cache_bytes) = value.get("cache_bytes") {
+        if integer(cache_bytes)? > cache_bytes_max {
+            return Err("Resident App cache_bytes exceeds its bound".into());
+        }
+    } else {
+        return integer(&value["context_metadata_bytes"]).map(|_| ());
+    }
+    if let Some(context_bytes) = value.get("context_metadata_bytes") {
+        integer(context_bytes)?;
     }
 
     Ok(())

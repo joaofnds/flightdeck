@@ -47,10 +47,10 @@ impl LiveDashboard {
     fn app_pages(&self) -> (Option<&Value>, Option<&Value>) {
         let apps = self
             .reading_snapshot()
-            .and_then(|snapshot| snapshot.apps.as_ref());
+            .and_then(|snapshot| snapshot.apps.as_deref());
         let detail = self.reading_snapshot().and_then(|snapshot| {
             crate::live_app_views::selected_detail(
-                snapshot.detail.as_ref(),
+                snapshot.detail.as_deref(),
                 self.request.app.as_ref(),
             )
         });
@@ -123,7 +123,7 @@ impl LiveDashboard {
         // A historical second may not list the group, whose history still names it.
         let history = self
             .reading_snapshot()
-            .and_then(|snapshot| snapshot.process_history.as_deref())
+            .and_then(|snapshot| snapshot.process_history.as_deref().map(|value| &**value))
             .and_then(crate::live_process_history::ProcessHistory::payload);
         match history {
             Some(payload) => crate::live_views::text(&payload["executable_name"]["display"]),
@@ -167,7 +167,11 @@ impl LiveDashboard {
         if let Some(reason) = ProcessHistory::filter_reason(filter) {
             return Some(reason.into());
         }
-        let history = self.reading_snapshot()?.process_history.as_deref();
+        let history = self
+            .reading_snapshot()?
+            .process_history
+            .as_deref()
+            .map(|value| &**value);
         match history {
             Some(ProcessHistory::Ready { .. }) => {
                 if filter.is_some() {

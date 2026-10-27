@@ -12,6 +12,404 @@ use crate::recording::{
 const SECOND_NS: u64 = 1_000_000_000;
 
 #[test]
+fn retained_cpu_interval_survives_source_drop_and_keeps_rollback_predecessor_identity() {
+    // Goal: wall-filtered queries retain the original predecessor and compatibility refusal.
+    // Method: capture adjacent continuous clocks with wall time rolling back, then drop input.
+    let before = Machine::at(1)
+        .cpus(&[(0, 0), (0, 0)])
+        .wall_ns(1000 * SECOND_NS);
+    let current = Machine::at(2)
+        .cpus(&[(40, 60), (50, 50)])
+        .wall_ns(999 * SECOND_NS);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+    drop(before);
+    drop(current);
+    let interval = second.cpu_interval().unwrap().unwrap();
+
+    assert_eq!(interval.values, [None, None]);
+    assert_eq!(
+        interval.unavailable_reason,
+        Some("Requires consecutive compatible CPU readings")
+    );
+    let previous = interval.previous.unwrap();
+    assert_eq!(previous.publication, 1);
+    assert_eq!(previous.run_tick, 0);
+    assert_eq!(previous.wall_ns, 1000 * SECOND_NS);
+    assert_eq!(previous.continuous_ns, Some(SECOND_NS));
+    drop(second);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn a_refused_summary_keeps_the_same_independent_cpu_interval_values() {
+    // Goal: a bad power sensor cannot erase valid per-core rates or their source identity.
+    // Method: compare available and NaN-summary captures of the same two-core interval.
+    let before = Machine::at(1).cpus(&[(0, 0), (0, 0)]);
+    let mut current = Machine::at(2).cpus(&[(40, 60), (50, 50)]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+    let complete = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+    current.tick.power_watts = Some(f32::NAN);
+
+    let refused = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+
+    assert!(refused.complete().is_none());
+    let available = complete.cpu_interval().unwrap().unwrap();
+    let independent = refused.cpu_interval().unwrap().unwrap();
+    assert_eq!(available.values, [Some(40.0), Some(50.0)]);
+    assert_eq!(independent.values, available.values);
+    assert_eq!(independent.previous, available.previous);
+    assert_eq!(independent.unavailable_reason, None);
+    drop(complete);
+    drop(refused);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn malformed_cpu_domains_refuse_detail_without_erasing_usable_overview() {
+    // Goal: strict CPU-detail admission stays independent of otherwise usable machine facts.
+    // Method: retain original ID7 counters while recording the shared decoder's domain refusal.
+    let mut before = Machine::at(1).cpus(&[(0, 0)]);
+    let mut current = Machine::at(2).cpus(&[(40, 60)]);
+    before.cpus[0].cpu = 7;
+    current.cpus[0].cpu = 7;
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(second.cpu_percent, Some(40.0));
+    assert_eq!(second.cpu_counters().unwrap()[0].cpu, 7);
+    assert!(matches!(
+        second.cpu_interval(),
+        Err(persistence::Error::Bound("incomplete logical CPU domain"))
+    ));
+}
+
+macro_rules! retained_cpu_gap {
+    ($name:ident, $change:expr, $reason:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: canonical per-core values preserve every shared CPU eligibility refusal.
+            // Method: change one original counter/clock/sequence fact before typed retention.
+            let before = Machine::at(1).cpus(&[(10, 0)]);
+            let mut current = Machine::at(2).cpus(&[(50, 60)]);
+            $change(&mut current);
+            let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+            let second =
+                MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+                    .unwrap()
+                    .unwrap();
+            let interval = second.cpu_interval().unwrap().unwrap();
+
+            assert_eq!(interval.values, [None]);
+            assert_eq!(interval.unavailable_reason, $reason);
+        }
+    };
+}
+
+retained_cpu_gap!(
+    retained_cpu_interval_withholds_a_missing_publication,
+    |current: &mut Machine| current.tick.publication = 3,
+    Some("Requires consecutive compatible CPU readings")
+);
+retained_cpu_gap!(
+    retained_cpu_interval_withholds_a_nonconsecutive_run_tick,
+    |current: &mut Machine| current.tick.run_tick = 3,
+    Some("Requires consecutive compatible CPU readings")
+);
+retained_cpu_gap!(
+    retained_cpu_interval_withholds_a_counter_reset,
+    |current: &mut Machine| current.cpus[0].ticks.user = 0,
+    None
+);
+
+#[test]
+fn retained_cpu_interval_never_invents_a_clock_for_a_clockless_predecessor() {
+    // Goal: CPU detail keeps the legacy absence of a predecessor without a saved wall clock.
+    // Method: retain a chartable current tick directly after an owned clockless tick.
+    let mut before = Machine::at(1).cpus(&[(0, 0)]);
+    before.tick.wall_ns = None;
+    let current = Machine::at(2).cpus(&[(40, 60)]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+    let interval = second.cpu_interval().unwrap().unwrap();
+
+    assert!(interval.previous.is_none());
+    assert_eq!(interval.values, [None]);
+    assert_eq!(
+        interval.unavailable_reason,
+        Some("Previous CPU reading unavailable")
+    );
+}
+
+#[test]
+fn complete_constructor_refuses_nonfinite_power_without_promoting_it_to_a_missing_gauge() {
+    // Goal: complete Store capture keeps Raw's numeric refusal for a nonfinite SMC source.
+    // Method: submit NaN power directly to the typed constructor, bypassing Raw capture.
+    let machine = Machine::at(1).smc(f32::NAN, 45.0);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&machine.reading(), None, &budget)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        second.complete,
+        super::CompleteMachineState::Refused("unsupported or nonfinite cell")
+    );
+    assert_eq!(second.power_watts, None);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn complete_constructor_refuses_nonfinite_load_without_promoting_the_system_group() {
+    // Goal: a nonfinite load average keeps the complete summary explicitly refused.
+    // Method: submit a typed system row with one NaN average and otherwise valid fields.
+    let mut machine = Machine::at(1);
+    machine.tick.system = Some(collector::ring::SystemSnapshot {
+        reading: collector::system::SystemReading {
+            load_average: Some([f64::NAN, 1.0, 1.0]),
+            ..collector::system::SystemReading::default()
+        },
+        ..collector::ring::SystemSnapshot::default()
+    });
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&machine.reading(), None, &budget)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        second.complete,
+        super::CompleteMachineState::Refused("system load average")
+    );
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn complete_constructor_keeps_nan_fans_as_individual_missing_channels() {
+    // Goal: a failed fan reading stays a per-channel absence and leaves the other facts usable.
+    // Method: retain NaN beside a stopped fan using the same complete numeric boundary.
+    let machine = Machine::at(1).smc(12.0, 45.0).fans(&[f32::NAN, 0.0]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&machine.reading(), None, &budget)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        second.complete().unwrap().summary(&second)["fan_rpm"],
+        serde_json::json!([null, 0.0])
+    );
+    assert_eq!(second.power_watts, Some(12.0));
+}
+
+#[test]
+fn complete_constructor_rejects_admission_without_accepting_an_overview_observation() {
+    // Goal: a denied scratch reservation cannot degrade a new observation to Overview-only.
+    // Method: admit the small retained owner but withhold the separately charged scratch.
+    let machine = Machine::at(1).cpus(&[(1, 1)]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(4096));
+
+    let result = MachineSecond::complete_of(&machine.reading(), None, &budget);
+
+    assert!(matches!(
+        result,
+        Err(super::MachineCaptureError::Admission(
+            super::MachineAdmission::ScratchBytes
+        ))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn complete_constructor_marks_the_legacy_summary_refusal_beside_usable_overview_facts() {
+    // Goal: a refused CPU detail domain retains explicit compatibility facts, without promotion.
+    // Method: a matching CPU 7 remains 25% busy while full summary capture rejects its domain.
+    let mut before = Machine::at(1).cpus(&[(0, 0)]);
+    let mut current = Machine::at(2).cpus(&[(25, 75)]);
+    before.cpus[0].cpu = 7;
+    current.cpus[0].cpu = 7;
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let second = MachineSecond::complete_of(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        second.complete,
+        super::CompleteMachineState::Refused("incomplete logical CPU domain")
+    );
+    assert_eq!(second.cpu_percent, Some(25.0));
+    assert!(second.complete().is_none());
+    assert_eq!(second.cpu_counters().unwrap()[0].cpu, 7);
+    assert!(budget.used() > 0);
+    drop(second);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn machine_pool_reclamation_releases_complete_owners_after_the_last_view() {
+    // Goal: resetting and reclaiming pools neither leaks reservations nor invalidates a View.
+    // Method: reset with a held View, then drop it and reclaim the free machine buffers.
+    use collector::ring::{Identity, RunIdentity};
+    let machine = Machine::at(1).cpus(&[(1, 1)]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+    let second = MachineSecond::complete_of(&machine.reading(), None, &budget)
+        .unwrap()
+        .unwrap();
+    let charged = second.complete().unwrap().bytes();
+    let mut held = crate::store::Held::new();
+    let run = RunIdentity {
+        recording: Identity([1, 2]),
+        run: Identity([3, 4]),
+        boot: Identity([5, 6]),
+    };
+    assert!(held.take(
+        &run,
+        &second,
+        crate::store::apps::TickApps::Missing(&crate::store::Missing::Unread,)
+    ));
+    let mailbox = crate::store::Mailbox::new();
+    held.publish(&mailbox);
+    let view = mailbox.take().unwrap();
+    drop(second);
+
+    held.reset();
+    assert_eq!(budget.used(), charged);
+    assert_eq!(view.seconds[0].complete().unwrap().cpu_counters()[0].cpu, 0);
+    drop(view);
+    held.release_views();
+
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn complete_projection_keeps_exact_memory_and_independent_rate_presentation() {
+    // Goal: a retained machine supplies the Memory page without reading its source again.
+    // Method: compare exact large counters and multiplication-first rates with frozen values.
+    let before = Machine::at(1).cpus(&[(0, 0)]);
+    let mut current = Machine::at(2).cpus(&[(25, 75)]);
+    current.tick.continuous_ns = Some(2_000_000_001);
+    current.memory.memory.total_bytes = 9_007_199_254_740_993;
+    current.memory.memory.pageins = 1;
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+    let mut second = current.second_after(&before);
+
+    second
+        .retain_complete(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap();
+    let summary = second.complete().unwrap().summary(&second);
+
+    assert_eq!(summary["memory_total_bytes"], 9_007_199_254_740_993_u64);
+    assert_eq!(summary["memory_pageins_per_second"], 0.999_999_999);
+    assert_eq!(summary["cpu_percent"], 25.0);
+    assert_eq!(summary["cpu_percent_one_core"], 25.0);
+    assert_eq!(summary["network_rx_packets_per_second"], 0.0);
+}
+
+#[test]
+fn complete_projection_matches_the_independent_frozen_desktop_summary() {
+    // Goal: every existing summary key and absence survives typed retention.
+    // Method: reproduce the native fixture's machine facts and compare its frozen old output.
+    let mut before = Machine::at(1).cpus(&[(0, 0)]);
+    let mut current = Machine::at(2).cpus(&[(1, 0)]);
+    for machine in [&mut before, &mut current] {
+        machine.tick.wall_ns = Some((1_799_999_999 + machine.tick.publication) * SECOND_NS);
+        machine.tick.continuous_ns = Some((99 + machine.tick.publication) * SECOND_NS);
+        machine.memory.memory = Memory {
+            total_bytes: 8_589_934_592,
+            free_bytes: 4_294_967_296,
+            ..Memory::default()
+        };
+    }
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+    let mut second = current.second_after(&before);
+    second.segment = 1;
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("summary_fixture.json")).unwrap();
+
+    second
+        .retain_complete(&current.reading(), Some(&before.reading()), &budget)
+        .unwrap();
+
+    assert_eq!(second.complete().unwrap().summary(&second), expected);
+}
+
+#[test]
+fn complete_projection_refusal_preserves_the_store_reading_with_noncontiguous_cpu_ids() {
+    // Goal: detail's contiguous CPU domain never becomes a new Store acceptance rule.
+    // Method: keep IDs 1 and 3 usable for Overview while the legacy full summary refuses them.
+    let mut before = Machine::at(1).cpus(&[(0, 0), (0, 0)]);
+    let mut current = Machine::at(2).cpus(&[(25, 75), (75, 25)]);
+    before.cpus[0].cpu = 1;
+    before.cpus[1].cpu = 3;
+    current.cpus[0].cpu = 1;
+    current.cpus[1].cpu = 3;
+    let mut second = current.second_after(&before);
+    let original = second.clone();
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+
+    let refusal = second.retain_complete(&current.reading(), Some(&before.reading()), &budget);
+
+    assert!(matches!(
+        refusal,
+        Err(super::MachineCaptureError::Projection(
+            persistence::Error::Bound("incomplete logical CPU domain")
+        ))
+    ));
+    assert_eq!(second, original);
+    assert_eq!(second.cpu_percent, Some(50.0));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn complete_projection_shares_one_charge_until_the_last_retainer_leaves() {
+    // Goal: a cloned second shares exact capacities and cannot relabel another observation.
+    // Method: retain one CPU, clone it, then alter its public identity and release both owners.
+    let machine = Machine::at(1).cpus(&[(1, 1)]);
+    let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+    let mut second = machine.first_second();
+    second
+        .retain_complete(&machine.reading(), None, &budget)
+        .unwrap();
+    let charged = second.complete().unwrap().bytes();
+    let retained = second.clone();
+
+    second.publication += 1;
+    assert!(second.complete().is_none());
+    drop(second);
+
+    assert_eq!(budget.used(), charged);
+    assert_eq!(retained.complete().unwrap().cpu_counters()[0].cpu, 0);
+    assert_eq!(
+        retained.complete().unwrap().cpu_counters()[0].ticks,
+        machine.cpus[0].ticks
+    );
+    eprintln!(
+        "MachineSecond={} CompleteMachine charge={} CPU row={}",
+        size_of::<MachineSecond>(),
+        charged,
+        size_of_val(&retained.complete().unwrap().cpu_counters()[0])
+    );
+    drop(retained);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn cpu_percent_is_the_busy_share_of_every_cpus_ticks_since_the_previous_second() {
     // Goal: the CPU chart draws the share of all CPUs' ticks that were busy over the second.
     // Method: two CPUs, one busy for 30 of 100 ticks and one for 50 of 100, read a second apart.
@@ -633,6 +1031,8 @@ impl Machine {
                 gpu_celsius: None,
                 thermal_pressure: None,
                 performance_levels: None,
+                system: None,
+                saved_computer: None,
                 battery: None,
                 disks: None,
             },
@@ -795,6 +1195,13 @@ impl Machine {
             logical_cpus,
         };
         self.tick.performance_levels = Some([level("Super", fast), level("Performance", slow)]);
+        self.tick.system = Some(collector::ring::SystemSnapshot {
+            machine: collector::system::MachineFacts {
+                levels: self.tick.performance_levels,
+                ..collector::system::MachineFacts::default()
+            },
+            ..collector::ring::SystemSnapshot::default()
+        });
         self
     }
 
@@ -836,16 +1243,29 @@ impl Machine {
             memory: Some(&self.memory),
             interfaces: &self.interfaces,
             gpu_states: &self.gpu_states,
+            core_states: &[],
             fans: &self.fans,
         }
     }
 
     fn first_second(&self) -> MachineSecond {
-        MachineSecond::of(&self.reading(), None).unwrap()
+        self.complete_second(None)
     }
 
     fn second_after(&self, before: &Self) -> MachineSecond {
-        MachineSecond::of(&self.reading(), Some(&before.reading())).unwrap()
+        self.complete_second(Some(&before.reading()))
+    }
+
+    fn complete_second(&self, before: Option<&Reading<'_>>) -> MachineSecond {
+        let budget = std::sync::Arc::new(crate::byte_budget::ByteBudget::new(16 * 1024 * 1024));
+        let expected = MachineSecond::of(&self.reading(), before).unwrap();
+        let mut second = MachineSecond::complete_of(&self.reading(), before, &budget)
+            .unwrap()
+            .unwrap();
+        second.complete = super::CompleteMachineState::Unread;
+        second.cpu_refused = None;
+        assert_eq!(second, expected);
+        second
     }
 
     fn push_into(self, minute: &mut MachineMinute) {

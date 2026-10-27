@@ -46,11 +46,11 @@ fn names_each_app_as_the_workers_history_names_it() {
     // a bundle by the last part of its path. Method: a cohort of a bundle and an executable,
     // labelled from the View and decoded from the cohort the worker writes of them.
     let path = "/Applications/Brave Browser.app";
-    let bundle = Arc::new(RankedApp {
-        kind: KeyKind::Bundle,
-        bytes: path.as_bytes().to_vec(),
-        display_name: "Brave Browser".into(),
-    });
+    let bundle = Arc::new(RankedApp::named(
+        KeyKind::Bundle,
+        path.as_bytes().to_vec(),
+        "Brave Browser".into(),
+    ));
     let hex = path.bytes().fold(String::new(), |mut hex, byte| {
         write!(hex, "{byte:02x}").unwrap();
         hex

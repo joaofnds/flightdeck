@@ -774,7 +774,11 @@ impl InputDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             let snapshot = dashboard.snapshot.as_mut().unwrap();
             let rankings = Arc::get_mut(snapshot.rankings.as_mut().unwrap()).unwrap();
-            let crate::live_rankings::Rankings::Ready(rankings) = rankings else {
+            let crate::live_source::Presentation::Shared(rankings) = rankings else {
+                panic!("The fixture owns shared legacy rankings");
+            };
+            let crate::live_rankings::Rankings::Ready(rankings) = Arc::get_mut(rankings).unwrap()
+            else {
                 panic!()
             };
             let entries = &mut rankings.metrics[0].entries;
@@ -822,7 +826,11 @@ impl InputDriver {
     ) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = ranked_overview(dashboard.generation);
-            snapshot.rankings = Some(Arc::new(rankings(&snapshot.selection["selected"])));
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(Arc::new(rankings(
+                    &snapshot.selection["selected"],
+                ))),
+            ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -859,7 +867,7 @@ impl InputDriver {
     }
 
     /// Delivers the page's read of its App histories, which brings the window's kept ranks.
-    fn finish_histories_with_ranks(&mut self, ranks: Arc<viewer::WindowRanks>) {
+    fn finish_histories_with_ranks(&mut self, ranks: Arc<crate::live_source::RanksWindow>) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = ranked_overview(dashboard.generation);
             snapshot.app_ranks = Some(ranks);
@@ -875,7 +883,7 @@ impl InputDriver {
         })
     }
 
-    fn keep_window_ranks(&mut self, ranks: Arc<viewer::WindowRanks>) {
+    fn keep_window_ranks(&mut self, ranks: Arc<crate::live_source::RanksWindow>) {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.snapshot.as_mut().unwrap().app_ranks = Some(ranks);
             cx.notify();
@@ -888,9 +896,17 @@ impl InputDriver {
             dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = accepted_snapshot(preview.generation.unwrap());
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.rankings = Some(ranked_payload(&snapshot, "Historical", "42", 20));
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(ranked_payload(
+                    &snapshot,
+                    "Historical",
+                    "42",
+                    20,
+                )),
+            ));
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             cx.notify();
         });
@@ -902,13 +918,17 @@ impl InputDriver {
             dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = accepted_snapshot(preview.generation.unwrap());
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
-            snapshot.selection["summary"]["cpu_percent"] = json!(13);
-            snapshot.rankings = Some(Arc::new(crate::live_rankings::Rankings::Unavailable(
-                "App response bound".into(),
-            )));
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][0].clone();
+            snapshot.selection.legacy_mut().unwrap()["summary"]["cpu_percent"] = json!(13);
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(Arc::new(
+                    crate::live_rankings::Rankings::Unavailable("App response bound".into()),
+                )),
+            ));
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             cx.notify();
         });
@@ -939,7 +959,7 @@ impl InputDriver {
             let snapshot = dashboard.snapshot.as_mut().unwrap();
             let mut sibling = snapshot.selection["trends"][1].clone();
             sibling["publication"] = json!(3);
-            snapshot.selection["trends"]
+            snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .push(sibling);
@@ -972,14 +992,23 @@ impl InputDriver {
     pub(super) fn complete_ranked_selection(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.generation);
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = dashboard.request.identity.clone().unwrap();
-            snapshot.selection["trends"]
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                dashboard.request.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .truncate(1);
-            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
-            snapshot.rankings = Some(ranked_payload(&snapshot, "Historical", "42", 20));
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][0].clone();
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(ranked_payload(
+                    &snapshot,
+                    "Historical",
+                    "42",
+                    20,
+                )),
+            ));
             assert!(dashboard.take_update(crate::live_source::Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -1017,10 +1046,12 @@ impl InputDriver {
 /// The Overview's readings of its committed second, ranked, at 87% CPU after 13%.
 fn ranked_overview(generation: u64) -> Box<Snapshot> {
     let mut snapshot = accepted_snapshot(generation);
-    snapshot.selection["trends"][0]["cpu_percent"] = json!(13);
-    snapshot.selection["trends"][1]["cpu_percent"] = json!(87);
-    snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
-    snapshot.rankings = Some(ranked_payload(&snapshot, "Current", "41", 80));
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(13);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(87);
+    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot.rankings = Some(std::sync::Arc::new(
+        crate::live_source::Presentation::Shared(ranked_payload(&snapshot, "Current", "41", 80)),
+    ));
 
     snapshot
 }
@@ -1050,7 +1081,12 @@ impl InputDriver {
     fn seed_route_rankings(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = route_ranked_snapshot(dashboard.generation);
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Current));
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(route_ranked_payload(
+                    &snapshot,
+                    RouteReading::Current,
+                )),
+            ));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -1065,10 +1101,12 @@ impl InputDriver {
             dashboard.preview_tick(cx);
             let preview = dashboard.preview.as_ref().unwrap();
             let mut snapshot = route_ranked_snapshot(preview.generation.unwrap());
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
-            snapshot.selection["trends"]
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][0].clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .truncate(1);
@@ -1076,7 +1114,12 @@ impl InputDriver {
                 snapshot.selection["summary"],
                 preview.reading.selection["summary"]
             );
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(route_ranked_payload(
+                    &snapshot,
+                    RouteReading::Historical,
+                )),
+            ));
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             cx.notify();
         });
@@ -1086,15 +1129,19 @@ impl InputDriver {
 
 fn route_ranked_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = accepted_snapshot(generation);
-    snapshot.selection["trends"][0]["memory_active_bytes"] = json!(2_147_483_648_u64);
-    snapshot.selection["trends"][0]["memory_anonymous_bytes"] = json!(2_147_483_648_u64);
-    snapshot.selection["trends"][0]["memory_purgeable_bytes"] = json!(0);
-    snapshot.selection["trends"][0]["power_watts"] = json!(3.0);
-    snapshot.selection["trends"][1]["memory_active_bytes"] = json!(6_442_450_944_u64);
-    snapshot.selection["trends"][1]["memory_anonymous_bytes"] = json!(6_442_450_944_u64);
-    snapshot.selection["trends"][1]["memory_purgeable_bytes"] = json!(0);
-    snapshot.selection["trends"][1]["power_watts"] = json!(9.0);
-    snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["memory_active_bytes"] =
+        json!(2_147_483_648_u64);
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["memory_anonymous_bytes"] =
+        json!(2_147_483_648_u64);
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["memory_purgeable_bytes"] = json!(0);
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["power_watts"] = json!(3.0);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_active_bytes"] =
+        json!(6_442_450_944_u64);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_anonymous_bytes"] =
+        json!(6_442_450_944_u64);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_purgeable_bytes"] = json!(0);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["power_watts"] = json!(9.0);
+    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
 
     snapshot
 }
@@ -1128,14 +1175,21 @@ impl InputDriver {
     fn complete_route_ranked_selection(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = route_ranked_snapshot(dashboard.generation);
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = dashboard.request.identity.clone().unwrap();
-            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
-            snapshot.selection["trends"]
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                dashboard.request.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][0].clone();
+            snapshot.selection.legacy_mut().unwrap()["trends"]
                 .as_array_mut()
                 .unwrap()
                 .truncate(1);
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(route_ranked_payload(
+                    &snapshot,
+                    RouteReading::Historical,
+                )),
+            ));
             assert!(dashboard.take_update(crate::live_source::Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -1220,8 +1274,10 @@ impl InputDriver {
                 metric.entries[0].app = Arc::clone(&app);
             }
             ready.metrics[1].entries[0].amount = 100;
-            snapshot.rankings = Some(rankings);
-            snapshot.history = Some(history);
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(rankings),
+            ));
+            snapshot.history = Some(crate::live_source::Presentation::Legacy(history));
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -1409,7 +1465,7 @@ impl InputDriver {
     fn resident_history_anchors(
         &self,
     ) -> (
-        Arc<crate::live_resident_history::ResidentHistory>,
+        Arc<crate::live_source::Presentation<crate::live_resident_history::ResidentHistory>>,
         std::rc::Rc<crate::data::Panel>,
     ) {
         self.view.read_with(&self.context, |dashboard, _| {
@@ -1432,7 +1488,7 @@ impl InputDriver {
     fn assert_resident_history_anchors(
         &self,
         retained: &(
-            Arc<crate::live_resident_history::ResidentHistory>,
+            Arc<crate::live_source::Presentation<crate::live_resident_history::ResidentHistory>>,
             std::rc::Rc<crate::data::Panel>,
         ),
     ) {

@@ -3,6 +3,47 @@ use std::sync::Arc;
 use super::ByteBudget;
 
 #[test]
+fn releases_unused_capacity_without_detaching_the_remaining_owner() {
+    // Goal: bounded preflight room can return without an unaccounted ownership gap.
+    // Method: shrink one of two owners and reuse exactly the newly available capacity.
+    let budget = Arc::new(ByteBudget::new(100));
+    let mut first = budget.reserve(80).unwrap();
+    let second = budget.reserve(10).unwrap();
+
+    first.shrink_to(30);
+
+    assert_eq!(first.bytes(), 30);
+    assert_eq!(budget.used(), 40);
+    assert_eq!(budget.used_peak(), 90);
+    let reused = budget.reserve(60).unwrap();
+    assert_eq!(budget.used(), 100);
+    drop(first);
+    assert_eq!(budget.used(), 70);
+    drop(second);
+    drop(reused);
+    assert_eq!(budget.used(), 0);
+    assert_eq!(budget.used_peak(), 100);
+}
+
+#[test]
+fn permits_an_unchanged_or_empty_reservation_without_releasing_twice() {
+    // Goal: no-op and full release preserve accounting through the owner's later drop.
+    // Method: shrink one owner to its current charge and then to zero.
+    let budget = Arc::new(ByteBudget::new(80));
+    let mut reservation = budget.reserve(80).unwrap();
+
+    reservation.shrink_to(80);
+    assert_eq!(budget.used(), 80);
+    reservation.shrink_to(0);
+
+    assert_eq!(reservation.bytes(), 0);
+    assert_eq!(budget.used(), 0);
+    assert_eq!(budget.used_peak(), 80);
+    drop(reservation);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn retains_the_largest_overlapping_reservation_after_release() {
     // Goal: the peak records overlap rather than the limit or cumulative requests.
     // Method: release part of a peak, reserve again below it, then release every owner.

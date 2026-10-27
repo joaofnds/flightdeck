@@ -254,11 +254,11 @@ impl AppHoverDriver {
     fn deliver_named_process_history(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
-            snapshot.process_history = Some(std::sync::Arc::new(ProcessHistory::prepare(
-                payload(),
-                &dashboard.request,
-                &snapshot.selection,
-            )));
+            snapshot.process_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(std::sync::Arc::new(
+                    ProcessHistory::prepare(payload(), &dashboard.request, &snapshot.selection),
+                )),
+            ));
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -282,12 +282,15 @@ impl AppHoverDriver {
             match refusal {
                 ProcessRefusal::App => {
                     dashboard.request.app.as_mut().unwrap().bytes_hex = "42".into();
-                    snapshot.detail.as_mut().unwrap()["app"]["key"]["bytes_hex"] = json!("42");
+                    snapshot.detail.as_mut().unwrap().legacy_mut().unwrap()["app"]["key"]
+                        ["bytes_hex"] = json!("42");
                 }
                 ProcessRefusal::Name => dashboard.request.executable = Some("hex:62".into()),
                 _ => {}
             }
-            snapshot.process_history = Some(std::sync::Arc::new(history));
+            snapshot.process_history = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(std::sync::Arc::new(history)),
+            ));
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -317,7 +320,7 @@ impl AppHoverDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             let retained = dashboard.snapshot.as_ref().unwrap().process_history.clone();
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
-            snapshot.detail.as_mut().unwrap()["processes"] = json!([]);
+            snapshot.detail.as_mut().unwrap().legacy_mut().unwrap()["processes"] = json!([]);
             snapshot.process_history = retained;
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -376,7 +379,9 @@ impl AppHoverDriver {
         self.assert_named_process_order();
     }
 
-    fn named_process_context(&self) -> std::sync::Arc<ProcessHistory> {
+    fn named_process_context(
+        &self,
+    ) -> std::sync::Arc<crate::live_source::Presentation<ProcessHistory>> {
         self.view.read_with(&self.context, |dashboard, _| {
             std::sync::Arc::clone(
                 dashboard
@@ -407,7 +412,10 @@ impl AppHoverDriver {
         self.context.run_until_parked();
     }
 
-    fn assert_named_preview_context(&self, retained: &std::sync::Arc<ProcessHistory>) {
+    fn assert_named_preview_context(
+        &self,
+        retained: &std::sync::Arc<crate::live_source::Presentation<ProcessHistory>>,
+    ) {
         self.view.read_with(&self.context, |dashboard, _| {
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(!preview.request.load_process_history);
@@ -469,13 +477,15 @@ fn captured_process_table_cells_keep_metric_order_and_exact_thread_counts(cx: &m
         .view
         .update(&mut harness.driver.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
-            let second = &mut snapshot.detail.as_mut().unwrap()["processes"][1];
+            let second =
+                &mut snapshot.detail.as_mut().unwrap().legacy_mut().unwrap()["processes"][1];
             second["idle_wakeups"] = json!({"known":"2","unavailable":null});
             second["pageins"] = json!({"known":"1","unavailable":null});
             second["threads"] = json!({"known":"3","unavailable":null});
             second["idle_wakeups_per_second"] = json!(2.0);
             second["pageins_per_second"] = json!(1.0);
-            let helper = &mut snapshot.detail.as_mut().unwrap()["processes"][2];
+            let helper =
+                &mut snapshot.detail.as_mut().unwrap().legacy_mut().unwrap()["processes"][2];
             helper["idle_wakeups"] = json!({"known":"42","unavailable":null});
             helper["pageins"] = json!({"known":"43","unavailable":null});
             helper["threads"] = json!({"known":"44","unavailable":null});

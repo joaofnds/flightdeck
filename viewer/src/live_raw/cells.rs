@@ -16,7 +16,8 @@ pub(crate) enum Cell<'a> {
 }
 
 pub(crate) struct View<'a> {
-    raw: &'a Raw,
+    raw: Option<&'a Raw>,
+    machine: crate::store::Reading<'a>,
     table: &'static catalog::Table,
     levels: Vec<LevelState>,
     derived: bool,
@@ -29,7 +30,34 @@ struct LevelState {
     frequency_khz: Option<u64>,
 }
 
+const LEVEL_COLUMNS: [&str; 5] = [
+    "publication",
+    "level",
+    "state",
+    "active_ns",
+    "frequency_khz",
+];
+
 impl<'a> View<'a> {
+    pub(super) fn native_scratch_bytes(raw: &Raw, name: &str) -> usize {
+        if name != "core_level_states" {
+            return 0;
+        }
+        if raw
+            .machine
+            .ticks
+            .first()
+            .is_none_or(|tick| tick.performance_levels.is_none())
+        {
+            return 0;
+        }
+
+        let count = raw.machine.core_states.len().min(512);
+        let node = 11 * size_of::<((u64, u64), LevelState)>() + 12 * size_of::<usize>() + 32;
+
+        count * (node + size_of::<LevelState>())
+    }
+
     pub fn native(raw: &'a Raw, name: &str, output: &mut Option<Self>) -> Result<()> {
         assert!(output.is_none());
         let derived = name == "core_level_states";
@@ -43,7 +71,10 @@ impl<'a> View<'a> {
         };
 
         *output = Some(Self {
-            raw,
+            raw: Some(raw),
+            machine: crate::store::readings(&raw.machine)
+                .next()
+                .ok_or(Error::Bound("native machine reading"))?,
             table,
             levels: Vec::new(),
             derived,
@@ -58,24 +89,60 @@ impl<'a> View<'a> {
         Ok(())
     }
 
+    /// Borrows already decoded machine rows; the native catalog and cell mapping stay shared.
+    pub fn machine(reading: &crate::store::Reading<'a>, name: &str) -> Result<Self> {
+        let derived = name == "core_level_states";
+        let table = if derived {
+            &catalog::CORE_STATES
+        } else {
+            catalog::TABLES
+                .into_iter()
+                .find(|table| table.name == name)
+                .ok_or(Error::Bound("table name"))?
+        };
+        let mut view = Self {
+            raw: None,
+            machine: *reading,
+            table,
+            levels: Vec::new(),
+            derived,
+        };
+        if derived {
+            view.aggregate_levels()?;
+        }
+        Ok(view)
+    }
+
+    fn raw(&self) -> &'a Raw {
+        self.raw.unwrap_or_else(|| unreachable!("raw-only table"))
+    }
+
     fn aggregate_levels(&mut self) -> Result<()> {
-        let Some(levels) = self.raw.machine.ticks[0].performance_levels else {
+        let Some(levels) = self.machine.tick.performance_levels else {
             return Ok(());
         };
 
         // At most two levels times 256 states; this bounded scratch is never retained.
         let mut states = std::collections::BTreeMap::new();
-        for row in &self.raw.machine.core_states {
+        for row in self.machine.core_states {
             let level = u64::from(row.core < levels[1].logical_cpus);
             let frequency = row.frequency_khz.map(u64::from);
-            let state = states
-                .entry((level, u64::from(row.state)))
-                .or_insert(LevelState {
-                    level,
-                    state: u64::from(row.state),
-                    active_ns: 0,
-                    frequency_khz: frequency,
-                });
+            let full = states.len() == 512;
+            let state = match states.entry((level, u64::from(row.state))) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    if full {
+                        return Err(Error::Bound("core level states"));
+                    }
+
+                    entry.insert(LevelState {
+                        level,
+                        state: u64::from(row.state),
+                        active_ns: 0,
+                        frequency_khz: frequency,
+                    })
+                }
+            };
             state.active_ns = state
                 .active_ns
                 .checked_add(row.active_ns)
@@ -84,9 +151,7 @@ impl<'a> View<'a> {
                 state.frequency_khz = None;
             }
         }
-        if states.len() > 512 {
-            return Err(Error::Bound("core level states"));
-        }
+        assert!(states.len() <= 512);
 
         self.levels = states.into_values().collect();
         Ok(())
@@ -97,35 +162,29 @@ impl<'a> View<'a> {
             return self.levels.len();
         }
 
-        let machine = &self.raw.machine;
+        let machine = &self.machine;
         match self.table.name {
-            "ticks" | "memory" => 1,
+            "ticks" => 1,
+            "memory" => usize::from(machine.memory.is_some()),
             "cpus" => machine.cpus.len(),
             "interfaces" => machine.interfaces.len(),
             "gpu_states" => machine.gpu_states.len(),
             "core_states" => machine.core_states.len(),
             "fans" => machine.fans.len(),
-            "coalitions" => self.raw.coalitions.len(),
+            "coalitions" => self.raw().coalitions.len(),
             "processes" => self
-                .raw
+                .raw()
                 .identities
                 .as_ref()
-                .map_or(self.raw.processes.len(), Vec::len),
-            "events" => self.raw.events.len(),
+                .map_or(self.raw().processes.len(), Vec::len),
+            "events" => self.raw().events.len(),
             _ => unreachable!("catalog raw table"),
         }
     }
 
     pub fn holds(&self, name: &str) -> bool {
         if self.derived {
-            return [
-                "publication",
-                "level",
-                "state",
-                "active_ns",
-                "frequency_khz",
-            ]
-            .contains(&name);
+            return LEVEL_COLUMNS.contains(&name);
         }
         self.table
             .columns
@@ -135,29 +194,21 @@ impl<'a> View<'a> {
     }
 
     fn captured_group(&self, group: &[catalog::Column]) -> bool {
-        let tick = &self.raw.machine.ticks[0];
+        let tick = &self.machine.tick;
         match group[0].name {
             "battery_version" => tick.battery.is_some(),
             "physical_disks" => tick.disks.is_some(),
             "cpu_celsius" => tick.cpu_celsius.is_some() || tick.gpu_celsius.is_some(),
-            "load_average_1" | "frequency_khz" => self.raw.system.is_some(),
-            "identity_version" => self.raw.identities.is_some(),
-            "gpu_ns" => self.raw.system.is_some() && self.raw.identities.is_some(),
+            "load_average_1" | "frequency_khz" => self.machine.tick.system.is_some(),
+            "identity_version" => self.raw().identities.is_some(),
+            "gpu_ns" => self.machine.tick.system.is_some() && self.raw().identities.is_some(),
             _ => unreachable!("catalog optional group"),
         }
     }
 
     pub fn columns(&self) -> Vec<String> {
         if self.derived {
-            return [
-                "publication",
-                "level",
-                "state",
-                "active_ns",
-                "frequency_khz",
-            ]
-            .map(String::from)
-            .to_vec();
+            return LEVEL_COLUMNS.map(String::from).to_vec();
         }
         // Query normalization appended absent groups after the encoder's captured groups.
         // Preserve that public order, including a system-only or battery-only tick.
@@ -177,6 +228,28 @@ impl<'a> View<'a> {
         columns
     }
 
+    pub(super) fn column_storage_bytes(&self) -> usize {
+        if self.derived {
+            return LEVEL_COLUMNS.len() * size_of::<String>()
+                + LEVEL_COLUMNS.iter().map(|name| name.len()).sum::<usize>();
+        }
+
+        let columns = self
+            .table
+            .columns
+            .iter()
+            .chain(self.table.groups.iter().flat_map(|group| group.iter()));
+        let mut count = 0;
+        let mut names = 0;
+        for column in columns {
+            count += 1;
+            names += column.name.len();
+        }
+
+        // Geometric growth can briefly keep the old and replacement column vectors together.
+        3 * count * size_of::<String>() + names
+    }
+
     pub fn order(&self, operation: &Operation) -> Result<Vec<usize>> {
         if self.len() > crate::data::ROWS_MAX {
             return Err(Error::Bound("live raw rows"));
@@ -187,14 +260,15 @@ impl<'a> View<'a> {
         match self.table.name {
             "processes" => order.sort_unstable_by_key(|index| self.process_key(*index)),
             "events" => order.sort_unstable_by_key(|index| {
-                let event = &self.raw.events[*index];
+                let event = &self.raw().events[*index];
                 let (pid, usage, _, _, _, _) = event_facts(&event.event);
                 let awake = usage.map(|usage| usage.awake_ns_at_start);
                 (pid, awake.is_none(), awake, event.number)
             }),
-            "interfaces" => order
-                .sort_unstable_by_key(|index| self.raw.machine.interfaces[*index].interface.index),
-            "coalitions" => order.sort_unstable_by_key(|index| self.raw.coalitions[*index].id),
+            "interfaces" => {
+                order.sort_unstable_by_key(|index| self.machine.interfaces[*index].interface.index);
+            }
+            "coalitions" => order.sort_unstable_by_key(|index| self.raw().coalitions[*index].id),
             _ => {}
         }
         operation.check()?;
@@ -215,27 +289,27 @@ impl<'a> View<'a> {
         Option<&'a collector::processes::Process>,
         Option<&'a super::Identity>,
     ) {
-        if let Some(identities) = &self.raw.identities {
+        if let Some(identities) = &self.raw().identities {
             let identity = &identities[index];
             let process = if identity.usage == schema::availability::MEASURED {
                 let index = self
-                    .raw
+                    .raw()
                     .processes
                     .binary_search_by_key(&identity.pid, |process| process.pid)
                     .unwrap_or_else(|_| unreachable!("capture validated each measured identity"));
-                Some(&self.raw.processes[index])
+                Some(&self.raw().processes[index])
             } else {
                 None
             };
             (identity.pid, process, Some(identity))
         } else {
-            let process = &self.raw.processes[index];
+            let process = &self.raw().processes[index];
             (process.pid, Some(process), None)
         }
     }
 
     pub fn disks(&self, snapshot: &mut collector::disks::DiskSnapshot) -> bool {
-        if let Some(disks) = self.raw.machine.ticks[0].disks {
+        if let Some(disks) = self.machine.tick.disks {
             *snapshot = disks;
             true
         } else {
@@ -252,7 +326,7 @@ impl<'a> View<'a> {
             return Err(Error::Bound("missing schema column"));
         }
 
-        let publication = self.raw.machine.ticks[0].publication;
+        let publication = self.machine.tick.publication;
         if name == "publication" {
             return Ok(Cell::Unsigned(publication));
         }
@@ -274,14 +348,14 @@ impl<'a> View<'a> {
             "cpus" => self.cpu(row, name),
             "interfaces" => self.interface(row, name),
             "gpu_states" => match name {
-                "state" => unsigned(self.raw.machine.gpu_states[row].state),
-                "active_ns" => unsigned(self.raw.machine.gpu_states[row].active_ns),
+                "state" => unsigned(self.machine.gpu_states[row].state),
+                "active_ns" => unsigned(self.machine.gpu_states[row].active_ns),
                 _ => unreachable!("GPU columns"),
             },
             "core_states" => self.core(row, name),
             "fans" => match name {
-                "fan" => unsigned(self.raw.machine.fans[row].fan),
-                "rpm" => Cell::Float32(self.raw.machine.fans[row].rpm),
+                "fan" => unsigned(self.machine.fans[row].fan),
+                "rpm" => Cell::Float32(self.machine.fans[row].rpm),
                 _ => unreachable!("fan columns"),
             },
             "processes" => self.process_cell(row, name),
@@ -293,6 +367,22 @@ impl<'a> View<'a> {
 }
 
 impl Cell<'_> {
+    pub(super) fn formatted_capacity(&self, column: &str) -> Result<usize> {
+        match self {
+            Self::Null => Ok(0),
+            Self::Bool(_) | Self::Unsigned(_) | Self::Signed(_) => Ok(128),
+            Self::Float32(value) if value.is_finite() => Ok(128),
+            Self::Float64(value) if value.is_finite() => Ok(1024),
+            Self::Float32(_) if column == "rpm" => Ok(0),
+            Self::Float32(_) | Self::Float64(_) => {
+                Err(Error::Bound("unsupported or nonfinite cell"))
+            }
+            Self::Text(text) => Ok(text.len()),
+            Self::Bytes(bytes) => Ok(bytes.len() * 4),
+            Self::Disks(_) => Ok(persistence::disks::HEX_BYTES_MAX),
+        }
+    }
+
     pub fn number(&self) -> Result<Option<f64>> {
         match self {
             Self::Null => Ok(None),
@@ -406,7 +496,7 @@ fn event_facts(
 
 impl<'a> View<'a> {
     fn tick(&self, name: &str) -> Cell<'a> {
-        let tick = &self.raw.machine.ticks[0];
+        let tick = &self.machine.tick;
         match name {
             "run_tick" => unsigned(tick.run_tick),
             "wall_ns" => optional_unsigned(tick.wall_ns),
@@ -419,17 +509,15 @@ impl<'a> View<'a> {
             "soc_celsius" => tick.soc_celsius.map_or(Cell::Null, Cell::Float32),
             "cpu_celsius" => tick.cpu_celsius.map_or(Cell::Null, Cell::Float32),
             "gpu_celsius" => tick.gpu_celsius.map_or(Cell::Null, Cell::Float32),
-            "processes_refused" => unsigned(self.raw.refused),
-            "processes_gone" => unsigned(self.raw.gone),
-            "events_first" => unsigned(self.raw.event_range.start),
-            "events_end" => unsigned(self.raw.event_range.end),
-            "dropped_starts" => unsigned(self.raw.dropped.starts),
-            "dropped_execs" => unsigned(self.raw.dropped.execs),
-            "dropped_exits" => unsigned(self.raw.dropped.exits),
-            "gpu_state_count" => {
-                unsigned(collector::u64_from_usize(self.raw.machine.gpu_states.len()))
-            }
-            "core_count" => unsigned(self.raw.core_count),
+            "processes_refused" => unsigned(self.raw().refused),
+            "processes_gone" => unsigned(self.raw().gone),
+            "events_first" => unsigned(self.raw().event_range.start),
+            "events_end" => unsigned(self.raw().event_range.end),
+            "dropped_starts" => unsigned(self.raw().dropped.starts),
+            "dropped_execs" => unsigned(self.raw().dropped.execs),
+            "dropped_exits" => unsigned(self.raw().dropped.exits),
+            "gpu_state_count" => unsigned(collector::u64_from_usize(self.machine.gpu_states.len())),
+            "core_count" => unsigned(self.raw().core_count),
             "physical_disks" => tick.disks.as_ref().map_or(Cell::Null, Cell::Disks),
             _ if name.starts_with("battery_") => self.battery(name),
             _ => self.system(name),
@@ -437,7 +525,7 @@ impl<'a> View<'a> {
     }
 
     fn battery(&self, name: &str) -> Cell<'a> {
-        let reading = self.raw.machine.ticks[0].battery.as_ref();
+        let reading = self.machine.tick.battery.as_ref();
         match name {
             "battery_version" => optional_unsigned(reading.map(|_| schema::BATTERY_VERSION)),
             "battery_source_continuous_ns" => {
@@ -474,8 +562,9 @@ impl<'a> View<'a> {
     }
 
     fn system(&self, name: &str) -> Cell<'a> {
-        let reading = self.raw.system.as_ref().map(|system| &system.reading);
-        let machine = self.raw.system.as_ref().map(|system| &system.machine);
+        let system = self.machine.tick.system.as_ref();
+        let reading = system.map(|system| &system.reading);
+        let machine = system.map(|system| &system.machine);
         match name {
             "load_average_1" => reading
                 .and_then(|reading| reading.load_average)
@@ -504,15 +593,11 @@ impl<'a> View<'a> {
                     .and_then(|reading| reading.gpu_memory)
                     .and_then(|memory| memory.allocated_bytes),
             ),
-            "machine_model" => machine
-                .and_then(|machine| machine.model.as_ref())
-                .map_or(Cell::Null, |text| Cell::Text(text.as_str())),
-            "machine_chip" => machine
-                .and_then(|machine| machine.chip.as_ref())
-                .map_or(Cell::Null, |text| Cell::Text(text.as_str())),
-            "machine_architecture" => machine
-                .and_then(|machine| machine.architecture.as_ref())
-                .map_or(Cell::Null, |text| Cell::Text(text.as_str())),
+            "machine_model" => self.machine.tick.computer_text()[0].map_or(Cell::Null, Cell::Text),
+            "machine_chip" => self.machine.tick.computer_text()[1].map_or(Cell::Null, Cell::Text),
+            "machine_architecture" => {
+                self.machine.tick.computer_text()[2].map_or(Cell::Null, Cell::Text)
+            }
             "machine_cpu_cores" => optional_unsigned(machine.and_then(|machine| machine.cpu_cores)),
             "machine_gpu_cores" => optional_unsigned(machine.and_then(|machine| machine.gpu_cores)),
             "machine_memory_bytes" => {
@@ -539,7 +624,11 @@ impl<'a> View<'a> {
     }
 
     fn memory(&self, name: &str) -> Cell<'a> {
-        let memory = &self.raw.machine.memory[0].memory;
+        let memory = &self
+            .machine
+            .memory
+            .unwrap_or_else(|| unreachable!("memory row"))
+            .memory;
         match name {
             "total_bytes" => unsigned(memory.total_bytes),
             "free_bytes" => unsigned(memory.free_bytes),
@@ -569,7 +658,7 @@ impl<'a> View<'a> {
     }
 
     fn cpu(&self, row: usize, name: &str) -> Cell<'a> {
-        let cpu = &self.raw.machine.cpus[row];
+        let cpu = &self.machine.cpus[row];
         match name {
             "cpu" => unsigned(cpu.cpu),
             "user_ticks" => unsigned(cpu.ticks.user),
@@ -581,7 +670,7 @@ impl<'a> View<'a> {
     }
 
     fn interface(&self, row: usize, name: &str) -> Cell<'a> {
-        let interface = &self.raw.machine.interfaces[row].interface;
+        let interface = &self.machine.interfaces[row].interface;
         match name {
             "interface" => unsigned(interface.index),
             "name" => Cell::Text(interface.name.as_str()),
@@ -597,7 +686,7 @@ impl<'a> View<'a> {
     }
 
     fn core(&self, row: usize, name: &str) -> Cell<'a> {
-        let core = &self.raw.machine.core_states[row];
+        let core = &self.machine.core_states[row];
         match name {
             "core" => unsigned(core.core),
             "state" => unsigned(core.state),
@@ -608,7 +697,7 @@ impl<'a> View<'a> {
     }
 
     fn coalition(&self, row: usize, name: &str) -> Cell<'a> {
-        let coalition = &self.raw.coalitions[row];
+        let coalition = &self.raw().coalitions[row];
         match name {
             "coalition" => unsigned(coalition.id),
             "tasks_started" => unsigned(coalition.tasks_started),
@@ -628,7 +717,7 @@ impl<'a> View<'a> {
         let (pid, process, identity) = self.process(row);
         match name {
             "pid" => Cell::Signed(i64::from(pid)),
-            "gpu_ns" => optional_unsigned(self.raw.gpu_ns.get(row).copied().flatten()),
+            "gpu_ns" => optional_unsigned(self.raw().gpu_ns.get(row).copied().flatten()),
             "threads" => process.map_or(Cell::Null, |process| {
                 Cell::Signed(i64::from(process.task.threads))
             }),
@@ -684,19 +773,19 @@ impl<'a> View<'a> {
             "executable_name" => identity
                 .and_then(|identity| identity.name.as_ref())
                 .map_or(Cell::Null, |range| {
-                    Cell::Bytes(&self.raw.arena[range.clone()])
+                    Cell::Bytes(&self.raw().arena[range.clone()])
                 }),
             "app_path" => identity
                 .and_then(|identity| identity.app.as_ref())
                 .map_or(Cell::Null, |range| {
-                    Cell::Bytes(&self.raw.arena[range.clone()])
+                    Cell::Bytes(&self.raw().arena[range.clone()])
                 }),
             _ => unreachable!("identity columns"),
         }
     }
 
     fn event_cell(&self, row: usize, name: &str) -> Cell<'a> {
-        let event = &self.raw.events[row];
+        let event = &self.raw().events[row];
         let (pid, measured, kind, coalition, availability, noticed) = event_facts(&event.event);
         match name {
             "event" => unsigned(event.number),

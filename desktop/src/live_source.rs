@@ -12,6 +12,11 @@ use serde_json::Value;
 use viewer::live_app_response::KeyKind;
 use viewer::{Cancellation, LiveSession};
 
+#[path = "live_store_reader.rs"]
+mod store_reader;
+pub use store_reader::ownership::{Part, PartsWindow, RanksWindow};
+pub use store_reader::presentation::Presentation;
+
 pub struct Worker {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
@@ -95,26 +100,26 @@ pub fn app_key_from_json(app: &Value) -> Result<AppKey, String> {
 pub struct Snapshot {
     pub generation: u64,
     pub catalog: Value,
-    pub selection: Value,
-    pub pages: BTreeMap<String, Value>,
-    pub apps: Option<Value>,
-    pub detail: Option<Value>,
-    pub history: Option<Value>,
-    pub cpu_detail: Option<crate::live_cpu::CPUActivity>,
-    pub cpu_history: Option<Arc<crate::live_cpu_history::CPUHistory>>,
-    pub resident_history: Option<Arc<crate::live_resident_history::ResidentHistory>>,
+    pub selection: Presentation<Value>,
+    pub pages: BTreeMap<String, Presentation<Value>>,
+    pub apps: Option<Presentation<Value>>,
+    pub detail: Option<Presentation<Value>>,
+    pub history: Option<Presentation<Value>>,
+    pub cpu_detail: Option<Presentation<crate::live_cpu::CPUActivity>>,
+    pub cpu_history: Option<Arc<Presentation<crate::live_cpu_history::CPUHistory>>>,
+    pub resident_history: Option<Arc<Presentation<crate::live_resident_history::ResidentHistory>>>,
     pub app_attribution_history:
-        Option<Arc<crate::live_app_attribution_history::AppAttributionHistory>>,
+        Option<Arc<Presentation<crate::live_app_attribution_history::AppAttributionHistory>>>,
     pub overview_app_histories:
         Option<Arc<crate::live_overview_app_histories::OverviewAppHistories>>,
-    pub process_history: Option<Arc<crate::live_process_history::ProcessHistory>>,
-    pub rankings: Option<Arc<crate::live_rankings::Rankings>>,
+    pub process_history: Option<Arc<Presentation<crate::live_process_history::ProcessHistory>>>,
+    pub rankings: Option<Arc<Presentation<crate::live_rankings::Rankings>>>,
     /// The top Apps of each observation of the selected window the viewer has ranked, so a
     /// hover shows its observation's at once.
-    pub app_ranks: Option<Arc<viewer::WindowRanks>>,
+    pub app_ranks: Option<Arc<RanksWindow>>,
     /// The selected App's part of each observation of the selected window the viewer has kept,
     /// so a hover on the Apps page shows its observation's App at once.
-    pub app_parts: Option<Arc<viewer::WindowParts>>,
+    pub app_parts: Option<Arc<PartsWindow>>,
     /// The page's App histories, or the older tail its charts draw, are still being read, and
     /// a later snapshot carries them.
     pub histories_pending: bool,
@@ -196,6 +201,7 @@ enum Context {
 
 struct Reader {
     session: Option<LiveSession>,
+    store: Option<store_reader::StoreReader>,
     last_catalog: Option<Value>,
     last_generation: u64,
     /// The route of the last published snapshot, so a newly opened page is told apart.
@@ -260,6 +266,15 @@ impl Worker {
         Self::start_mode(root, SourceMode::Recorded, Rest::Following)
     }
 
+    /// Starts the source-free live client over the canonical Store's independent query handle.
+    #[cfg(test)]
+    pub fn start_from_store(
+        root: PathBuf,
+        handle: viewer::store::QueryHandle,
+    ) -> std::io::Result<Self> {
+        Self::start_reader(root, SourceMode::Live, Rest::Idle, Some(handle))
+    }
+
     pub fn mode(&self) -> SourceMode {
         self.mode
     }
@@ -281,6 +296,15 @@ impl Worker {
     }
 
     fn start_mode(root: PathBuf, mode: SourceMode, rest: Rest) -> std::io::Result<Self> {
+        Self::start_reader(root, mode, rest, None)
+    }
+
+    fn start_reader(
+        root: PathBuf,
+        mode: SourceMode,
+        rest: Rest,
+        store: Option<viewer::store::QueryHandle>,
+    ) -> std::io::Result<Self> {
         let shared = Arc::new(Shared::with_rest(rest));
         let control = Arc::clone(&shared);
         let observation =
@@ -290,7 +314,7 @@ impl Worker {
             .stack_size(4 * 1024 * 1024)
             .spawn(move || {
                 let observation = observation.enter();
-                worker_run(&root, &control);
+                worker_run(&root, &control, store);
                 drop(observation);
             })?;
 
@@ -501,10 +525,11 @@ impl Drop for Worker {
     }
 }
 
-fn worker_run(root: &std::path::Path, shared: &Shared) {
+fn worker_run(root: &std::path::Path, shared: &Shared, store: Option<viewer::store::QueryHandle>) {
     let mut command = None;
     let mut reader = Reader {
         session: None,
+        store: store.map(store_reader::StoreReader::new),
         last_catalog: None,
         last_generation: 0,
         last_route: String::new(),
@@ -709,12 +734,18 @@ fn worker_publish(shared: &Shared, generation: u64, output: Update) {
 /// shows its readings before its App histories.
 fn reader_rest(reader: &mut Reader) {
     reader.last_route.clear();
+    if let Some(store) = &mut reader.store {
+        store.rest();
+    }
 }
 
 /// Keeps a resting reader's session following the recording, so the next page reads only what
 /// arrived since this step rather than everything since its window closed. A reader without a
 /// session opens one, and a session that fails to follow is dropped for the next step to open.
 fn reader_follow(reader: &mut Reader, root: &std::path::Path, shared: &Shared) {
+    if reader.store.is_some() {
+        return;
+    }
     let Some(session) = &mut reader.session else {
         reader_follow_open(reader, root, shared);
         return;
@@ -756,6 +787,9 @@ fn reader_read(
     command: &mut Command,
     shared: &Shared,
 ) -> Option<Update> {
+    if reader.store.is_some() {
+        return store_reader::read(reader, command, shared);
+    }
     if Instant::now() < reader.retry_after {
         return None;
     }
@@ -1019,6 +1053,14 @@ fn reader_route_has_histories(route: &str) -> bool {
 
 /// A snapshot of the catalog and selection, before the route's payload is read.
 fn reader_snapshot_new(generation: u64, catalog: Value, selection: Value) -> Box<Snapshot> {
+    reader_snapshot_owned(generation, catalog, Presentation::Legacy(selection))
+}
+
+fn reader_snapshot_owned(
+    generation: u64,
+    catalog: Value,
+    selection: Presentation<Value>,
+) -> Box<Snapshot> {
     Box::new(Snapshot {
         generation,
         catalog,
@@ -1226,28 +1268,26 @@ fn reader_payload_read(
         "overview" => &["fans"],
         _ => &[],
     };
-    for table in tables {
-        let page = reader_page(session, table, 0)?;
-        identity_validate(&page["observation"], &snapshot.selection["selected"])?;
-        snapshot.pages.insert((*table).to_owned(), page);
-    }
+    reader_payload_read_pages(session, tables, snapshot)?;
     if request.route == "apps" {
         reader_apps(session, request, context, histories, snapshot)?;
     }
     let ranked = route_ranks_apps(&request.route);
     if ranked {
-        snapshot.rankings = Some(Arc::new(crate::live_rankings::from_selected(
-            session.selected_ranks().map_err(|error| error.to_string()),
+        snapshot.rankings = Some(Arc::new(Presentation::Legacy(
+            crate::live_rankings::from_selected(
+                session.selected_ranks().map_err(|error| error.to_string()),
+            ),
         )));
     }
     if request.route == "cpu" {
         let detail = session.cpu_detail().map_err(|error| error.to_string())?;
         #[cfg(test)]
         measurement::payload("cpu_detail", &detail);
-        snapshot.cpu_detail = Some(crate::live_cpu::CPUActivity::decode(
+        snapshot.cpu_detail = Some(Presentation::Legacy(crate::live_cpu::CPUActivity::decode(
             detail,
             &snapshot.selection["selected"],
-        )?);
+        )?));
         if context != Context::Keep {
             reader_cpu_history(session, request, snapshot)?;
         }
@@ -1273,8 +1313,24 @@ fn reader_payload_read(
             } else {
                 reader_app_ranks(session.rank_window_kept());
             }
-            snapshot.app_ranks = Some(session.app_ranks());
+            snapshot.app_ranks = Some(Arc::new(RanksWindow::Legacy(session.app_ranks())));
         }
+    }
+
+    Ok(())
+}
+
+fn reader_payload_read_pages(
+    session: &mut LiveSession,
+    tables: &[&str],
+    snapshot: &mut Snapshot,
+) -> Result<(), String> {
+    for table in tables {
+        let page = reader_page(session, table, 0)?;
+        identity_validate(&page["observation"], &snapshot.selection["selected"])?;
+        snapshot
+            .pages
+            .insert((*table).to_owned(), Presentation::Legacy(page));
     }
 
     Ok(())
@@ -1310,7 +1366,7 @@ fn reader_app_parts(
         Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
         Err(error) => eprintln!("App parts of the selected window unavailable: {error}"),
     }
-    snapshot.app_parts = Some(session.app_parts());
+    snapshot.app_parts = Some(Arc::new(PartsWindow::Legacy(session.app_parts())));
 
     Ok(())
 }
@@ -1342,7 +1398,7 @@ fn reader_app_attribution_history(
     session: &LiveSession,
     selection: &Value,
     metric: crate::live_app_attribution_history::Metric,
-) -> Arc<crate::live_app_attribution_history::AppAttributionHistory> {
+) -> Arc<Presentation<crate::live_app_attribution_history::AppAttributionHistory>> {
     reader_app_attribution_result(
         session.app_attribution_history(metric.source()),
         selection,
@@ -1354,9 +1410,9 @@ fn reader_app_attribution_result(
     result: persistence::Result<Value>,
     selection: &Value,
     metric: crate::live_app_attribution_history::Metric,
-) -> Arc<crate::live_app_attribution_history::AppAttributionHistory> {
+) -> Arc<Presentation<crate::live_app_attribution_history::AppAttributionHistory>> {
     use crate::live_app_attribution_history::AppAttributionHistory;
-    Arc::new(match result {
+    Arc::new(Presentation::Legacy(match result {
         Ok(payload) => {
             #[cfg(test)]
             measurement::payload(metric.panel_id(), &payload);
@@ -1365,7 +1421,7 @@ fn reader_app_attribution_result(
         Err(error) => {
             AppAttributionHistory::Unavailable(crate::bounded::bounded(&error.to_string(), 512))
         }
-    })
+    }))
 }
 
 fn reader_overview_app_histories(session: &LiveSession, snapshot: &mut Snapshot) {
@@ -1381,9 +1437,9 @@ fn reader_overview_app_histories_result(
     let histories = match result {
         Ok(histories) => histories,
         Err(error) => {
-            let unavailable = Arc::new(AppAttributionHistory::Unavailable(
+            let unavailable = Arc::new(Presentation::Legacy(AppAttributionHistory::Unavailable(
                 crate::bounded::bounded(&error.to_string(), 512),
-            ));
+            )));
             snapshot.overview_app_histories = Some(Arc::new(OverviewAppHistories {
                 cpu: Arc::clone(&unavailable),
                 power: Arc::clone(&unavailable),
@@ -1411,7 +1467,7 @@ fn reader_resident_history(session: &LiveSession, snapshot: &mut Snapshot) {
             crate::bounded::bounded(&error.to_string(), 512),
         ),
     };
-    snapshot.resident_history = Some(Arc::new(history));
+    snapshot.resident_history = Some(Arc::new(Presentation::Legacy(history)));
 }
 
 fn reader_cpu_history(
@@ -1434,10 +1490,9 @@ fn reader_cpu_history(
         .map_err(|error| error.to_string())?;
     #[cfg(test)]
     measurement::payload("cpu_history", &payload);
-    snapshot.cpu_history = Some(Arc::new(crate::live_cpu_history::CPUHistory::decode(
-        payload,
-        &snapshot.selection,
-    )?));
+    snapshot.cpu_history = Some(Arc::new(Presentation::Legacy(
+        crate::live_cpu_history::CPUHistory::decode(payload, &snapshot.selection)?,
+    )));
 
     Ok(())
 }
@@ -1472,17 +1527,17 @@ fn reader_apps(
                     .app_history(kind, &bytes)
                     .map_err(|error| error.to_string())?;
                 identity_validate(&history["selected"], &snapshot.selection["selected"])?;
-                snapshot.history = Some(history);
+                snapshot.history = Some(Presentation::Legacy(history));
             }
         }
-        snapshot.detail = Some(detail);
+        snapshot.detail = Some(Presentation::Legacy(detail));
     }
     if request.load_process_history {
         if histories == Histories::Read {
             reader_process_history(session, request, snapshot);
         }
     }
-    snapshot.apps = Some(apps);
+    snapshot.apps = Some(Presentation::Legacy(apps));
 
     Ok(())
 }
@@ -1527,7 +1582,7 @@ fn reader_process_history(session: &LiveSession, request: &Request, snapshot: &m
         Ok(history) => history,
         Err(error) => ProcessHistory::Unavailable(crate::bounded::bounded(&error, 512)),
     };
-    snapshot.process_history = Some(Arc::new(history));
+    snapshot.process_history = Some(Arc::new(Presentation::Legacy(history)));
 }
 
 fn reader_apps_remember(request: &mut Request, apps: &Value) -> Result<(), String> {
@@ -1570,6 +1625,23 @@ pub(crate) fn clamped_page(
     if offset == 0 {
         return Ok(first);
     }
+    read(u32::try_from(offset).map_err(|error| error.to_string())?)
+}
+
+pub(crate) fn clamped_presentation_page(
+    requested: u32,
+    read: impl Fn(u32) -> Result<Presentation<Value>, String>,
+) -> Result<Presentation<Value>, String> {
+    let first = read(0)?;
+    if first.is_null() {
+        return Ok(first);
+    }
+    let offset = page_offset(u64::from(requested), &first["page"]["total"])?;
+    if offset == 0 {
+        return Ok(first);
+    }
+    drop(first);
+
     read(u32::try_from(offset).map_err(|error| error.to_string())?)
 }
 

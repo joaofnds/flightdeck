@@ -648,8 +648,9 @@ impl InputDriver {
     fn deliver_selection_reply(&mut self, metric: Metric) -> bool {
         let received = self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = attributed_snapshot(dashboard.generation, metric);
-            snapshot.selection["second"] = json!(dashboard.request.second);
-            snapshot.selection["context_last_second"] = json!(dashboard.request.second);
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(dashboard.request.second);
+            snapshot.selection.legacy_mut().unwrap()["context_last_second"] =
+                json!(dashboard.request.second);
             let received = dashboard.take_update(Update::Ready(snapshot));
             cx.notify();
             received
@@ -674,7 +675,7 @@ impl InputDriver {
     fn deliver_live_reading(&mut self, metric: Metric) -> bool {
         let received = self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = attributed_snapshot(dashboard.generation, metric);
-            snapshot.selection["trends"][0]["cpu_percent"] = json!(21);
+            snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(21);
             let received = dashboard.preview_receive(Update::Ready(snapshot));
             cx.notify();
             received
@@ -690,17 +691,29 @@ impl InputDriver {
             let preview = dashboard.preview.as_ref().unwrap();
             assert!(!preview.request.load_app_attribution_history);
             let mut snapshot = attribution_snapshot(preview.generation.unwrap());
-            snapshot.selection["second"] = json!(999);
-            snapshot.selection["selected"] = preview.target.identity.clone().unwrap();
-            snapshot.selection["summary"] = snapshot.selection["trends"][0].clone();
-            snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Historical));
+            snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
+            snapshot.selection.legacy_mut().unwrap()["selected"] =
+                preview.target.identity.clone().unwrap();
+            snapshot.selection.legacy_mut().unwrap()["summary"] =
+                snapshot.selection["trends"][0].clone();
+            snapshot.rankings = Some(std::sync::Arc::new(
+                crate::live_source::Presentation::Shared(route_ranked_payload(
+                    &snapshot,
+                    RouteReading::Historical,
+                )),
+            ));
             assert!(dashboard.preview_receive(Update::Ready(snapshot)));
             cx.notify();
         });
         self.context.run_until_parked();
     }
 
-    fn attribution_anchors(&self) -> (Arc<AppAttributionHistory>, std::rc::Rc<crate::data::Panel>) {
+    fn attribution_anchors(
+        &self,
+    ) -> (
+        Arc<crate::live_source::Presentation<AppAttributionHistory>>,
+        std::rc::Rc<crate::data::Panel>,
+    ) {
         self.view.read_with(&self.context, |dashboard, _| {
             let history = dashboard
                 .snapshot
@@ -720,7 +733,10 @@ impl InputDriver {
 
     fn assert_attribution_anchors(
         &self,
-        retained: &(Arc<AppAttributionHistory>, std::rc::Rc<crate::data::Panel>),
+        retained: &(
+            Arc<crate::live_source::Presentation<AppAttributionHistory>>,
+            std::rc::Rc<crate::data::Panel>,
+        ),
     ) {
         let current = self.attribution_anchors();
         assert!(Arc::ptr_eq(&retained.0, &current.0));
@@ -772,19 +788,26 @@ impl InputDriver {
 /// The page's snapshot once its App history of `metric` is read, with the current App totals.
 fn attributed_snapshot(generation: u64, metric: Metric) -> Box<Snapshot> {
     let mut snapshot = attribution_snapshot(generation);
-    snapshot.rankings = Some(route_ranked_payload(&snapshot, RouteReading::Current));
+    snapshot.rankings = Some(std::sync::Arc::new(
+        crate::live_source::Presentation::Shared(route_ranked_payload(
+            &snapshot,
+            RouteReading::Current,
+        )),
+    ));
     let history = AppAttributionHistory::prepare(metric, &fixture(metric), &snapshot.selection);
     assert!(history.panel().is_some(), "{}", history.coverage(None));
-    snapshot.app_attribution_history = Some(Arc::new(history));
+    snapshot.app_attribution_history = Some(std::sync::Arc::new(
+        crate::live_source::Presentation::Shared(Arc::new(history)),
+    ));
 
     snapshot
 }
 
 fn attribution_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = route_ranked_snapshot(generation);
-    snapshot.selection["trends"][0]["cpu_percent"] = json!(13);
-    snapshot.selection["trends"][1]["cpu_percent"] = json!(87);
-    snapshot.selection["summary"] = snapshot.selection["trends"][1].clone();
+    snapshot.selection.legacy_mut().unwrap()["trends"][0]["cpu_percent"] = json!(13);
+    snapshot.selection.legacy_mut().unwrap()["trends"][1]["cpu_percent"] = json!(87);
+    snapshot.selection.legacy_mut().unwrap()["summary"] = snapshot.selection["trends"][1].clone();
 
     snapshot
 }

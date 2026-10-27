@@ -1,5 +1,6 @@
 use collector::smc::FANS_MAX;
 use persistence::{Error, Result};
+#[cfg(test)]
 use serde_json::Value;
 
 use crate::data::Table;
@@ -14,11 +15,20 @@ pub(crate) fn capture(ticks: &Table, fans: Option<&Table>, publication: u64) -> 
     )
 }
 
+#[cfg(test)]
 pub(crate) fn capture_view(
     ticks: &crate::metric_view::View<'_>,
     fans: Option<&crate::metric_view::View<'_>>,
     publication: u64,
 ) -> Result<Value> {
+    Ok(serde_json::json!(capture_typed(ticks, fans, publication)?))
+}
+
+pub(crate) fn capture_typed(
+    ticks: &crate::metric_view::View<'_>,
+    fans: Option<&crate::metric_view::View<'_>>,
+    publication: u64,
+) -> Result<Option<Vec<Option<f64>>>> {
     if ticks.len() != 1 {
         return Err(Error::Bound("fan tick rows"));
     }
@@ -42,14 +52,14 @@ pub(crate) fn capture_view(
                 capture_channels(fans, publication, &mut channels)?;
             }
 
-            Ok(Value::Array(channels))
+            Ok(Some(channels))
         }
         Some("false") => {
             if fans.is_some_and(|fans| fans.len() > 0) {
                 return Err(Error::Bound("unread fan rows"));
             }
 
-            Ok(Value::Null)
+            Ok(None)
         }
         _ => Err(Error::Bound("fan SMC availability")),
     }
@@ -71,7 +81,7 @@ fn source_view(fans: &crate::metric_view::View<'_>) -> Result<()> {
 fn capture_channels(
     fans: &crate::metric_view::View<'_>,
     publication: u64,
-    values: &mut Vec<Value>,
+    values: &mut Vec<Option<f64>>,
 ) -> Result<()> {
     assert!(fans.len() <= usize::from(FANS_MAX));
     assert!(values.is_empty());
@@ -89,7 +99,7 @@ fn capture_channels(
 
         let value = capture_rpm(fans, row)?;
 
-        values.push(value.map_or(Value::Null, Value::from));
+        values.push(value);
     }
 
     Ok(())

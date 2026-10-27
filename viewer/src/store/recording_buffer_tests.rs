@@ -112,7 +112,7 @@ fn capture(
             let TickApps::Loaded(apps) = apps else {
                 panic!("the fixture's App parts must decode");
             };
-            captured.push((*run, *second, std::mem::take(apps)));
+            captured.push((*run, second.clone(), std::mem::take(apps)));
         },
     );
     assert_eq!(failure, None);

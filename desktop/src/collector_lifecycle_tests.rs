@@ -430,10 +430,10 @@ impl Recording {
                 "run":identity_text(identity.run).to_string(),
                 "boot":identity_text(identity.boot).to_string(),
                 "publication":self.publication}}),
-            selection: json!({"second":1000,"selected":{
+            selection: crate::live_source::Presentation::Legacy(json!({"second":1000,"selected":{
                 "run":identity_text(identity.run).to_string(),
                 "boot":identity_text(identity.boot).to_string(),
-                "publication":self.publication}}),
+                "publication":self.publication}})),
             pages: BTreeMap::new(),
             apps: None,
             detail: None,

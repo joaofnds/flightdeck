@@ -112,8 +112,9 @@ impl InputDriver {
             previous["gpu_watts"] = json!(100);
             let mut selected = snapshot.selection["trends"][1].clone();
             selected["publication"] = json!(3);
-            snapshot.selection["selected"]["publication"] = json!(3);
-            snapshot.selection["trends"] = json!([missing, previous, selected]);
+            snapshot.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(3);
+            snapshot.selection.legacy_mut().unwrap()["trends"] =
+                json!([missing, previous, selected]);
             dashboard.request.identity = Some(snapshot.selection["selected"].clone());
             dashboard.accept(snapshot);
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);

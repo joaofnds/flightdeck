@@ -457,7 +457,7 @@ fn preview_accept(preview: &mut Preview, mut snapshot: Box<Snapshot>) -> Result<
     snapshot
         .overview_app_histories
         .clone_from(&preview.reading.overview_app_histories);
-    let executables = crate::live_executables::groups(snapshot.detail.as_ref())?;
+    let executables = crate::live_executables::groups(snapshot.detail.as_deref())?;
     preview.executables = executables;
     preview.reading = snapshot;
 

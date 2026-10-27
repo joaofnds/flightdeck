@@ -22,6 +22,13 @@ pub(crate) enum Source {
     Native(cpu_history_sample::Counters),
 }
 
+pub(crate) struct Presentation<'a> {
+    pub identity: &'a Value,
+    pub previous: Option<&'a Value>,
+    pub unavailable: Option<&'static str>,
+    pub values: &'a [Option<f64>],
+}
+
 pub(crate) fn project(current: &Sample, previous: Option<&Sample>) -> Result<Value> {
     let mut after = None;
     let mut before = None;
@@ -38,14 +45,25 @@ pub(crate) fn project(current: &Sample, previous: Option<&Sample>) -> Result<Val
         },
         &mut values,
     )?;
-    let cpus = values
+    project_values(&Presentation {
+        identity: &current.identity,
+        previous: previous.map(|sample| &sample.identity),
+        unavailable,
+        values: &values,
+    })
+}
+
+pub(crate) fn project_values(presentation: &Presentation<'_>) -> Result<Value> {
+    let cpus = presentation
+        .values
         .iter()
         .enumerate()
         .map(|(cpu, busy)| json!({"cpu":cpu,"busy_percent":busy}))
         .collect::<Vec<_>>();
-    let value = json!({"observation":current.identity,
-        "previous_observation":previous.map(|sample| &sample.identity),
-        "interval_available":unavailable.is_none(),"unavailable_reason":unavailable,
+    let value = json!({"observation":presentation.identity,
+        "previous_observation":presentation.previous,
+        "interval_available":presentation.unavailable.is_none(),
+        "unavailable_reason":presentation.unavailable,
         "cpus":cpus});
     if serde_json::to_vec(&value)
         .map_err(std::io::Error::other)?
