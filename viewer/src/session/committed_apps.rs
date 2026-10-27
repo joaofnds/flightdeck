@@ -107,10 +107,11 @@ impl Session {
         if let Some(window) = predecessor_window {
             if let Some(publication) = publication.checked_sub(1) {
                 if let Some(endpoint) = self.with_app_sample_endpoint(window, publication)? {
-                    if current
-                        .as_deref()
-                        .is_some_and(|current| current.takes_rates_from(&endpoint))
-                    {
+                    if current.as_deref().is_some_and(|current| {
+                        current
+                            .observation()
+                            .can_use_predecessor(&endpoint.observation())
+                    }) {
                         self.with_app_sample_frame(window, &endpoint, &mut source, &mut previous)?;
                     }
                 }

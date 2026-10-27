@@ -388,10 +388,9 @@ fn customize(input: Input, readings: &mut collector::ring::Readings<'_>) {
 }
 
 #[test]
-fn characterizes_different_app_predecessors_after_a_missed_run_tick() {
-    // Goal: expose the existing App and process interval disagreement before canonicalization.
+fn withholds_app_rates_but_keeps_exit_evidence_after_a_missed_run_tick() {
+    // Goal: both launch-created consumers retain App evidence without crossing a missed tick.
     // Method: give both launch-created consumers two native publications with run ticks 0 and 2.
-    // TODO(GUI item 2, doc-102): replace this baseline with shared consecutive-run-tick admission.
     let mut harness = None;
     Harness::setup(Input::RunTickGap, &mut harness);
     let mut harness = harness.unwrap();
@@ -417,19 +416,16 @@ fn characterizes_different_app_predecessors_after_a_missed_run_tick() {
     assert_eq!(snapshot.selection["selected"]["publication"], 2);
     assert_eq!(snapshot.selection["selected"]["run_tick"], 2);
     assert_eq!(detail["previous"]["publication"], "1");
-    assert_eq!(detail["elapsed_ns"], "1000000000");
-    assert_eq!(detail["app"]["cpu_ns"]["known"], "300000000");
-    assert_eq!(detail["app"]["cpu_percent_one_core"], 30.0);
+    assert_gap_intervals(detail);
     assert_eq!(detail["app"]["members"], 3);
     assert_eq!(detail["app"]["membership_complete"], false);
     assert_eq!(snapshot.apps.as_ref().unwrap()["app_count"], 2);
     assert_eq!(snapshot.apps.as_ref().unwrap()["process_count"], 4);
     assert_eq!(detail["processes"][0]["pid"], 41001);
-    assert_eq!(detail["processes"][0]["cpu_ns"]["known"], "300000000");
-    assert_eq!(detail["processes"][0]["cpu_percent_one_core"], 30.0);
     let stored = view.apps.last().unwrap();
-    assert_eq!(stored.apps.len(), 1);
+    assert_eq!(stored.apps.len(), 2);
     let exited_detail = exited.detail.as_ref().unwrap();
+    assert_gap_intervals(exited_detail);
     assert_eq!(exited_detail["processes"][0]["pid"], 42001);
     assert_eq!(exited_detail["processes"][0]["state"], "exited_verified");
     assert_eq!(stored.observation.unwrap().run_tick, 2);
@@ -444,6 +440,63 @@ fn characterizes_different_app_predecessors_after_a_missed_run_tick() {
     assert_eq!(measure.known, 0);
     assert_eq!(measure.measured_members, 0);
     assert_eq!(measure.unavailable_members, 3);
+}
+
+fn assert_gap_intervals(detail: &serde_json::Value) {
+    assert_eq!(detail["elapsed_ns"], serde_json::Value::Null);
+    let interval = json!({"known": "0", "measured_members": 0,
+        "unavailable_members": detail["app"]["members"], "overflowed": false});
+    for field in [
+        "cpu_ns",
+        "energy_nj",
+        "gpu_ns",
+        "disk_read_bytes",
+        "disk_written_bytes",
+        "disk_io_bytes",
+    ] {
+        assert_eq!(detail["app"][field], interval, "{field}");
+    }
+    for process in detail["processes"].as_array().unwrap() {
+        for field in [
+            "cpu_ns",
+            "energy_nj",
+            "gpu_ns",
+            "disk_read_bytes",
+            "disk_written_bytes",
+            "disk_io_bytes",
+            "idle_wakeups",
+            "pageins",
+        ] {
+            assert_eq!(
+                process[field],
+                json!({"known": null, "unavailable": "interval"})
+            );
+        }
+        for field in [
+            "cpu_percent_one_core",
+            "energy_joules",
+            "energy_watts",
+            "gpu_percent",
+            "disk_read_bps",
+            "disk_written_bps",
+            "disk_io_bps",
+            "idle_wakeups_per_second",
+            "pageins_per_second",
+        ] {
+            assert_eq!(process[field], serde_json::Value::Null, "{field}");
+        }
+    }
+    for field in [
+        "cpu_percent_one_core",
+        "energy_joules",
+        "energy_watts",
+        "gpu_percent",
+        "disk_read_bps",
+        "disk_written_bps",
+        "disk_io_bps",
+    ] {
+        assert_eq!(detail["app"][field], serde_json::Value::Null, "{field}");
+    }
 }
 
 #[test]

@@ -150,7 +150,11 @@ impl SealedMinute<'_> {
         read_processes_with_operation(self, operation, |endpoint, frame| {
             let previous = before
                 .as_ref()
-                .filter(|before| frame.takes_rates_from(&before.endpoint))
+                .filter(|before| {
+                    frame
+                        .observation()
+                        .can_use_predecessor(&before.endpoint.observation())
+                })
                 .map(|before| &*before.frame);
             if Sample::validate_capture(&frame, previous).is_err() {
                 before = None;
@@ -187,7 +191,11 @@ impl SealedMinute<'_> {
         let result = read_processes_with_operation(self, operation, |endpoint, frame| {
             let previous = before
                 .as_ref()
-                .filter(|before| frame.takes_rates_from(&before.endpoint))
+                .filter(|before| {
+                    frame
+                        .observation()
+                        .can_use_predecessor(&before.endpoint.observation())
+                })
                 .map(|before| &*before.frame);
             if let Err(error) = Sample::capture(&frame, previous, &mut sample) {
                 *before = None;

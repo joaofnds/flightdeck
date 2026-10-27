@@ -10,7 +10,9 @@ pub(super) fn with_aggregate(
     consume: impl FnOnce(&Aggregate<'_>) -> Result<()>,
 ) -> Result<()> {
     let previous = previous.unwrap_or(selected);
-    let compatible = with_aggregate_compatible(previous, selected);
+    let observation = selected.observation();
+    let predecessor = previous.observation();
+    let compatible = observation.can_use_predecessor(&predecessor);
     let mut previous_programs =
         Vec::with_capacity(previous.members.len() + previous.starts.len() + previous.execs.len());
     let mut previous_observations = Vec::with_capacity(previous.members.len());
@@ -42,7 +44,7 @@ pub(super) fn with_aggregate(
     let interval = Interval {
         previous: previous.stamp,
         selected: selected.stamp,
-        observations_complete: compatible,
+        observations_complete: observation.takes_rates_from(&predecessor),
         events_complete: false,
     };
     let view_bytes = (selected_programs.capacity() + previous_programs.capacity())
@@ -157,28 +159,6 @@ fn with_aggregate_observations<'frame>(
             state: ProcessState::Live,
         });
     }
-}
-
-fn with_aggregate_compatible(previous: &Frame, selected: &Frame) -> bool {
-    if previous.identity.recording != selected.identity.recording {
-        return false;
-    }
-    if previous.stamp.boot != selected.stamp.boot {
-        return false;
-    }
-    if previous.stamp.run != selected.stamp.run {
-        return false;
-    }
-    if previous.stamp.publication.checked_add(1) != Some(selected.stamp.publication) {
-        return false;
-    }
-    let (Some(previous), Some(selected)) =
-        (previous.stamp.continuous_ns, selected.stamp.continuous_ns)
-    else {
-        return false;
-    };
-
-    previous < selected
 }
 
 fn with_aggregate_predecessor(

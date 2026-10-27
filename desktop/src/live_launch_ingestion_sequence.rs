@@ -471,10 +471,9 @@ fn characterizes_exact_successor_after_a_refused_publication_is_overwritten() {
 }
 
 #[test]
-fn characterizes_app_predecessors_across_a_physically_spaced_run_tick_gap() {
+fn withholds_app_rates_across_a_physically_spaced_run_tick_gap() {
     // Goal: distinguish App predecessor policies with native clocks spaced by two seconds.
     // Method: acknowledge tick0, then publish tick2 as publication2 and retain full detail.
-    // TODO(GUI item 2, doc-102): replace the baseline rate disagreement with canonical admission.
     let mut sequence = None;
     Sequence::setup(&mut sequence);
     let mut sequence = sequence.unwrap();
@@ -503,17 +502,15 @@ fn characterizes_app_predecessors_across_a_physically_spaced_run_tick_gap() {
         1_800_000_002_000_000_000_u64
     );
     assert_eq!(detail["previous"]["publication"], "1");
-    assert_eq!(detail["elapsed_ns"], "2000000000");
-    assert_eq!(detail["app"]["cpu_ns"]["known"], "600000000");
-    assert_eq!(detail["app"]["cpu_percent_one_core"], 30.0);
+    super::assert_gap_intervals(detail);
     assert_eq!(input[1]["continuous_ns"], "102000000000");
-    assert_eq!(detail["processes"][0]["cpu_ns"]["known"], "600000000");
+    super::assert_gap_intervals(exited.detail.as_ref().unwrap());
     assert_eq!(
         exited.detail.as_ref().unwrap()["processes"][0]["state"],
         "exited_verified"
     );
     assert_eq!(successor.apps.as_ref().unwrap()["app_count"], 2);
-    assert_eq!(second.apps.last().unwrap().apps.len(), 1);
+    assert_eq!(second.apps.last().unwrap().apps.len(), 2);
     assert_eq!(second.apps.last().unwrap().elapsed_ns, None);
     output::record_sequence_case(
         "spaced-run-tick-gap",

@@ -292,11 +292,11 @@ fn rejects_publication_adjacent_rates_when_a_scheduled_run_tick_is_missing() {
     let restored = session.with_app_sample(&selected, page).unwrap();
 
     assert_eq!(restored["selected"]["run_tick"], "2");
-    assert_missing_interval(&restored);
+    assert_rates_unavailable(&restored, Some("0"));
 }
 
 #[test]
-fn rejects_a_predecessor_without_a_saved_wall_clock() {
+fn retains_predecessor_evidence_without_rates_when_its_saved_wall_clock_is_missing() {
     // Goal: a clockless predecessor cannot supply rates even when its counters are readable.
     // Method: commit publication one's absent wall clock with valid interval clocks.
     let mut fixture = Fixture::new();
@@ -313,11 +313,11 @@ fn rejects_a_predecessor_without_a_saved_wall_clock() {
 
     let restored = session.with_app_sample(&selected, page).unwrap();
 
-    assert_missing_interval(&restored);
+    assert_rates_unavailable(&restored, Some("0"));
 }
 
 #[test]
-fn rejects_a_predecessor_whose_awake_clock_is_after_the_selected_clock() {
+fn retains_predecessor_evidence_without_rates_when_its_saved_awake_clock_decreases() {
     // Goal: decreasing awake time prevents a committed interval from becoming measured.
     // Method: commit an increasing continuous pair with predecessor awake two seconds.
     let mut fixture = Fixture::new();
@@ -334,11 +334,11 @@ fn rejects_a_predecessor_whose_awake_clock_is_after_the_selected_clock() {
 
     let restored = session.with_app_sample(&selected, page).unwrap();
 
-    assert_missing_interval(&restored);
+    assert_rates_unavailable(&restored, Some("2000000000"));
 }
 
 #[test]
-fn rejects_a_predecessor_without_a_saved_awake_clock() {
+fn retains_predecessor_evidence_without_rates_when_its_saved_awake_clock_is_missing() {
     // Goal: missing awake time keeps a committed interval unavailable.
     // Method: commit a predecessor with wall and continuous clocks but no awake clock.
     let mut fixture = Fixture::new();
@@ -355,7 +355,7 @@ fn rejects_a_predecessor_without_a_saved_awake_clock() {
 
     let restored = session.with_app_sample(&selected, page).unwrap();
 
-    assert_missing_interval(&restored);
+    assert_rates_unavailable(&restored, None);
 }
 
 #[test]
@@ -382,9 +382,47 @@ fn retains_a_measured_interval_when_the_saved_awake_clocks_are_equal() {
     assert_eq!(restored["apps"][0]["cpu_ns"]["measured_members"], 1);
 }
 
-fn assert_missing_interval(restored: &Value) {
+fn assert_saved_wall_rates(previous_wall: u64, alternative: usize) {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal_with_observations(&[persistence::Observation {
+        publication: 1,
+        wall_ns: Some(previous_wall),
+        continuous_ns: Some(0),
+        awake_ns: Some(0),
+    }]);
+    let mut session = Session::open(&fixture.root).unwrap();
+    let selected = session.select(1002, alternative).unwrap()["selected"].clone();
+    let restored = session.with_app_sample(&selected, page).unwrap();
     assert_eq!(restored["selected"]["stamp"]["publication"], "2");
-    assert_eq!(restored["previous"], Value::Null);
+    assert_eq!(restored["previous"]["publication"], "1");
+    assert_eq!(restored["elapsed_ns"], "1000000000");
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored["apps"][0]["cpu_ns"]["measured_members"], 1);
+}
+
+#[test]
+fn retains_app_rates_when_the_saved_wall_clock_stays_equal() {
+    // Goal: equal selected wall time preserves a valid App continuous-time interval.
+    // Method: select publication two through the explicit repeated-wall alternative.
+    assert_saved_wall_rates(1_002_000_000_000, 1);
+}
+
+#[test]
+fn retains_app_rates_when_the_saved_wall_clock_decreases() {
+    // Goal: selected wall rollback preserves a valid App continuous-time interval.
+    // Method: save the predecessor with later wall time, retaining its true interval clocks.
+    assert_saved_wall_rates(1_003_000_000_000, 0);
+}
+
+fn assert_rates_unavailable(restored: &Value, awake_ns: Option<&str>) {
+    assert_eq!(restored["selected"]["stamp"]["publication"], "2");
+    let mut previous = restored["selected"]["stamp"].clone();
+    previous["publication"] = serde_json::json!("1");
+    previous["continuous_ns"] = serde_json::json!("0");
+    previous["awake_ns"] = serde_json::json!(awake_ns);
+    assert_eq!(restored["previous"], previous);
     assert_eq!(restored["elapsed_ns"], Value::Null);
     assert_eq!(restored["apps"][0]["key"]["display"], "/Apps/Current.app");
     assert_eq!(restored["apps"][0]["resident_bytes"]["known"], "11");

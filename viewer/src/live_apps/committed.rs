@@ -128,43 +128,19 @@ impl FrameSize {
     }
 }
 
-impl Frame {
-    /// Whether this frame's sample takes its rates from `previous`: the observation before it in
-    /// its run, which the collector took on the tick before with a wall clock, and whose
-    /// continuous clock is behind this one's and awake clock not ahead of it.
-    pub(crate) fn takes_rates_from(&self, previous: &Endpoint) -> bool {
-        if previous.identity != self.identity {
-            return false;
+impl Endpoint {
+    /// Projects real committed metadata before deciding whether to load its Frame.
+    pub(crate) fn observation(&self) -> super::Observation {
+        super::Observation {
+            recording: self.identity.recording.0,
+            stamp: self.stamp,
+            run_tick: self.run_tick,
+            wall_ns: self.wall_ns,
         }
-
-        if previous.stamp.publication.checked_add(1) != Some(self.stamp.publication) {
-            return false;
-        }
-
-        if previous.run_tick.checked_add(1) != Some(self.run_tick) {
-            return false;
-        }
-
-        if previous.wall_ns.is_none() {
-            return false;
-        }
-
-        let (Some(before), Some(after)) = (previous.stamp.continuous_ns, self.stamp.continuous_ns)
-        else {
-            return false;
-        };
-
-        if before >= after {
-            return false;
-        }
-
-        let (Some(before), Some(after)) = (previous.stamp.awake_ns, self.stamp.awake_ns) else {
-            return false;
-        };
-
-        before <= after
     }
+}
 
+impl Frame {
     pub(crate) fn committed(
         endpoint: &Endpoint,
         connection: &Engine,

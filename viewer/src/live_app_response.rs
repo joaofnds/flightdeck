@@ -34,13 +34,7 @@ pub struct Sample {
     processes: Vec<Process>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Observation {
-    pub recording: [u64; 2],
-    pub stamp: Stamp,
-    pub run_tick: u64,
-    pub wall_ns: Option<u64>,
-}
+pub use crate::live_apps::Observation;
 
 /// The selected observation and the last second of the context read with it, which every
 /// history of the selection spans: the 900 seconds that end at that second, and the lead-in
@@ -304,12 +298,7 @@ impl Sample {
     ) -> Result<()> {
         *output = None;
 
-        let observation = Observation {
-            recording: selected.identity().recording.0,
-            stamp: *selected.stamp(),
-            run_tick: selected.run_tick(),
-            wall_ns: selected.wall_ns(),
-        };
+        let observation = selected.observation();
 
         selected.with_aggregate(previous, |aggregate| {
             Self::from_aggregate(

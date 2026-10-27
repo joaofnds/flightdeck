@@ -32,6 +32,64 @@ pub const TRANSIENT_VIEW_BYTES_MAX: usize = apps::PROCESS_INTERVALS_MAX
         + 2 * size_of::<apps::ProcessObservation<'static>>()
         + size_of::<apps::ProcessInterval<'static>>());
 
+/// Exact observation metadata, independent of captured process and program ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Observation {
+    pub recording: [u64; 2],
+    pub stamp: Stamp,
+    pub run_tick: u64,
+    pub wall_ns: Option<u64>,
+}
+
+impl Observation {
+    /// Whether metadata permits captured predecessor evidence; this does not validate its rows.
+    pub(crate) fn can_use_predecessor(&self, previous: &Self) -> bool {
+        if previous.recording != self.recording {
+            return false;
+        }
+
+        if previous.stamp.boot != self.stamp.boot {
+            return false;
+        }
+
+        if previous.stamp.run != self.stamp.run {
+            return false;
+        }
+
+        if previous.stamp.publication.checked_add(1) != Some(self.stamp.publication) {
+            return false;
+        }
+
+        let (Some(before), Some(after)) = (previous.stamp.continuous_ns, self.stamp.continuous_ns)
+        else {
+            return false;
+        };
+
+        before < after
+    }
+
+    /// Whether that predecessor also establishes a consecutive App counter interval.
+    pub(crate) fn takes_rates_from(&self, previous: &Self) -> bool {
+        if !self.can_use_predecessor(previous) {
+            return false;
+        }
+
+        if previous.run_tick.checked_add(1) != Some(self.run_tick) {
+            return false;
+        }
+
+        if previous.wall_ns.is_none() {
+            return false;
+        }
+
+        let (Some(before), Some(after)) = (previous.stamp.awake_ns, self.stamp.awake_ns) else {
+            return false;
+        };
+
+        before <= after
+    }
+}
+
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Frame {
     identity: RunIdentity,
@@ -147,6 +205,16 @@ const _: () = {
 };
 
 impl Frame {
+    /// Projects only this frame's captured metadata, without another retained owner.
+    pub(crate) fn observation(&self) -> Observation {
+        Observation {
+            recording: self.identity.recording.0,
+            stamp: self.stamp,
+            run_tick: self.run_tick,
+            wall_ns: self.wall_ns,
+        }
+    }
+
     /// Owns copied source bytes and numeric readings. A refusal leaves output empty.
     pub fn capture(source: &Publication<'_>, output: &mut Option<Box<Self>>) -> Result<()> {
         *output = None;

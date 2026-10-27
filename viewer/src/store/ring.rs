@@ -581,9 +581,11 @@ impl Source {
         )?;
 
         let previous = self.previous_frame.as_deref().filter(|_| {
-            self.previous_endpoint
-                .as_ref()
-                .is_some_and(|previous| frame.takes_rates_from(previous))
+            self.previous_endpoint.as_ref().is_some_and(|previous| {
+                frame
+                    .observation()
+                    .can_use_predecessor(&previous.observation())
+            })
         });
         Sample::capture(frame, previous, &mut self.sample)
     }

@@ -852,7 +852,10 @@ fn sample_predecessor<'frame>(
     current: &Frame,
 ) -> Option<&'frame Frame> {
     let previous = previous?;
-    if current.takes_rates_from(&previous.endpoint()) {
+    if current
+        .observation()
+        .can_use_predecessor(&previous.observation)
+    {
         return previous_frame;
     }
 

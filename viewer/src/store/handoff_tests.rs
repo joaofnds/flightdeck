@@ -90,9 +90,54 @@ fn changed_clocks(
 fn assert_rates(observed: &(MachineSecond, AppsSecond), machine: bool, process: bool) {
     assert_eq!(observed.0.follows, machine);
     assert_eq!(observed.0.cpu_percent, machine.then_some(50.0));
-    let payload = observed.1.processes.as_ref().unwrap();
-    assert_eq!(payload.previous.is_some(), process);
     assert_eq!(observed.1.elapsed_ns, process.then_some(1_000_000_000));
+    assert_rates_amounts(&observed.1, process);
+}
+
+fn assert_rates_amounts(apps: &AppsSecond, measured: bool) {
+    use crate::apps::{Amount, Unavailable};
+    let payload = apps.processes.as_ref().unwrap();
+    let row = payload.iter().find(|row| row.pid == 7).unwrap();
+    let amount = |known| {
+        if measured {
+            Amount::Known(known)
+        } else {
+            Amount::Unavailable(Unavailable::Interval)
+        }
+    };
+    assert_eq!(row.cpu_ns(), amount(100_000_000));
+    assert_eq!(row.energy_nj(), amount(0));
+    assert_eq!(row.disk_read_bytes(), amount(17));
+    assert_eq!(row.disk_written_bytes(), amount(43));
+    assert_eq!(row.resident_bytes(), Amount::Known(11));
+    let app = apps
+        .apps
+        .iter()
+        .find(|app| app.name.bytes == b"/Apps/Current.app")
+        .unwrap();
+    let chart = apps.attribution(crate::AppAttributionMetric::Cpu, &[Arc::clone(&app.name)]);
+    let reading = chart.apps[0].unwrap();
+    assert_eq!(reading.rate, measured.then_some(10.0));
+    let measure = reading.measure.unwrap();
+    assert_eq!(measure.known, if measured { 100_000_000 } else { 0 });
+    assert_eq!(measure.measured_members, u32::from(measured));
+    assert_eq!(measure.unavailable_members, u32::from(!measured));
+    assert!(!measure.overflowed);
+}
+
+fn assert_previous(
+    observed: &(MachineSecond, AppsSecond),
+    publication: u64,
+    clocks: [Option<u64>; 2],
+) {
+    let mut previous = observed.1.observation.unwrap().stamp;
+    previous.publication = publication;
+    previous.continuous_ns = clocks[0];
+    previous.awake_ns = clocks[1];
+    assert_eq!(
+        observed.1.processes.as_ref().unwrap().previous,
+        Some(previous)
+    );
 }
 
 #[test]
@@ -103,6 +148,7 @@ fn overlapping_ring_prefix_is_skipped_to_the_next_publication() {
     let observed = observe_handoff(fixture, terminal);
 
     assert_rates(&observed, true, true);
+    assert_previous(&observed, 1, [Some(59_000_000_000), Some(59_000_000_000)]);
 }
 
 #[test]
@@ -112,6 +158,7 @@ fn missing_awake_clock_refuses_process_rates_only() {
     let observed = changed_clocks(|observation| observation.awake_ns = None);
 
     assert_rates(&observed, true, false);
+    assert_previous(&observed, 1, [Some(59_000_000_000), None]);
 }
 
 #[test]
@@ -121,15 +168,17 @@ fn reversed_awake_clock_refuses_process_rates_only() {
     let observed = changed_clocks(|observation| observation.awake_ns = Some(61_000_000_000));
 
     assert_rates(&observed, true, false);
+    assert_previous(&observed, 1, [Some(59_000_000_000), Some(61_000_000_000)]);
 }
 
 #[test]
-fn missing_wall_clock_refuses_both_predecessors() {
+fn missing_wall_clock_withholds_both_rates_but_keeps_process_evidence() {
     // Goal: neither adapter takes rates from a terminal tick lacking wall time.
     // Method: decode a raw sealed tick without a wall clock, then hand it to the matching ring.
     let observed = changed_clocks(|observation| observation.wall_ns = None);
 
     assert_rates(&observed, false, false);
+    assert_previous(&observed, 1, [Some(59_000_000_000), Some(59_000_000_000)]);
 }
 
 #[test]
@@ -139,6 +188,7 @@ fn missing_continuous_clock_refuses_both_predecessors() {
     let observed = changed_clocks(|observation| observation.continuous_ns = None);
 
     assert_rates(&observed, false, false);
+    assert_eq!(observed.1.processes.as_ref().unwrap().previous, None);
 }
 
 #[test]
@@ -148,10 +198,11 @@ fn equal_continuous_clock_refuses_both_predecessors() {
     let observed = changed_clocks(|observation| observation.continuous_ns = Some(60_000_000_000));
 
     assert_rates(&observed, false, false);
+    assert_eq!(observed.1.processes.as_ref().unwrap().previous, None);
 }
 
 #[test]
-fn tick_gap_refuses_both_predecessors() {
+fn tick_gap_withholds_both_rates_but_keeps_process_evidence() {
     // Goal: an adjacent publication does not hide a missed collection tick.
     // Method: hand off a real sealed tick at 58, then publish its successor at tick 60.
     let (mut fixture, terminal) = sealed_predecessor_at_tick(58);
@@ -159,6 +210,7 @@ fn tick_gap_refuses_both_predecessors() {
     let observed = observe_handoff(fixture, terminal);
 
     assert_rates(&observed, false, false);
+    assert_previous(&observed, 1, [Some(58_000_000_000), Some(58_000_000_000)]);
 }
 
 #[test]
@@ -186,7 +238,13 @@ fn an_overwritten_successor_does_not_resurrect_the_terminal_baseline() {
     assert_eq!(observed.len(), 8);
     assert_eq!(observed[0].0.publication, 3);
     assert_rates(&observed[0], false, false);
+    assert_eq!(observed[0].1.processes.as_ref().unwrap().previous, None);
     assert_rates(&observed[1], true, true);
+    assert_previous(
+        &observed[1],
+        3,
+        [Some(61_000_000_000), Some(61_000_000_000)],
+    );
 }
 
 fn assert_foreign_terminal(change: impl FnOnce(&mut collector::ring::RunIdentity)) {

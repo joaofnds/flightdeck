@@ -275,14 +275,30 @@ fn admits_prior_events_at_the_combined_program_view_bound() {
 
 macro_rules! excludes_predecessor {
     ($name:ident, $change:expr) => {
-        #[test]
-        fn $name() {
-            // Goal: incompatible or ambiguous predecessor metadata cannot name an App.
-            // Method: alter one requirement of an otherwise matching adjacent event pair.
-            let mut scenario = Scenario::new();
-            $change(&mut scenario);
+        mod $name {
+            use super::*;
 
-            scenario.assert_absent();
+            fn observe(run_tick: u64) {
+                let mut scenario = Scenario::new();
+                scenario.selected.run_tick = run_tick;
+                $change(&mut scenario);
+
+                scenario.assert_absent();
+            }
+
+            #[test]
+            fn adjacent() {
+                // Goal: incompatible predecessor metadata cannot name an App.
+                // Method: alter one fact of an otherwise matching adjacent pair.
+                observe(2);
+            }
+
+            #[test]
+            fn after_a_missed_tick() {
+                // Goal: a tick gap does not weaken predecessor evidence exclusions.
+                // Method: apply the same conflict across a skipped scheduled tick.
+                observe(3);
+            }
         }
     };
 }
@@ -323,32 +339,48 @@ excludes_predecessor!(excludes_an_interrupted_start, |s: &mut Scenario| {
 
 macro_rules! current_unavailable {
     ($name:ident, $creation:expr, $reason:expr) => {
-        #[test]
-        fn $name() {
-            // Goal: newer unavailable Exec evidence blocks stale prior App bytes.
-            // Method: put an unavailable Exec before the verified selected Exit.
-            let mut scenario = Scenario::new();
-            scenario.selected.execs.push(Exec {
-                number: 1,
-                pid: 7,
-                creation: $creation,
-                program: Err($reason),
-            });
-            scenario.selected.exits[0].number = 2;
+        mod $name {
+            use super::*;
 
-            scenario
-                .selected
-                .with_aggregate(Some(&scenario.previous), |aggregate| {
-                    assert!(aggregate.apps.is_empty());
-                    assert_eq!(aggregate.ungrouped_members, 1);
-                    assert_eq!(aggregate.processes[0].program_unavailable, Some($reason));
-                    assert_eq!(
-                        aggregate.processes[0].resident_bytes_last,
-                        Some(104_857_600)
-                    );
-                    Ok(())
-                })
-                .unwrap();
+            fn observe(run_tick: u64) {
+                let mut scenario = Scenario::new();
+                scenario.selected.run_tick = run_tick;
+                scenario.selected.execs.push(Exec {
+                    number: 1,
+                    pid: 7,
+                    creation: $creation,
+                    program: Err($reason),
+                });
+                scenario.selected.exits[0].number = 2;
+
+                scenario
+                    .selected
+                    .with_aggregate(Some(&scenario.previous), |aggregate| {
+                        assert!(aggregate.apps.is_empty());
+                        assert_eq!(aggregate.ungrouped_members, 1);
+                        assert_eq!(aggregate.processes[0].program_unavailable, Some($reason));
+                        assert_eq!(
+                            aggregate.processes[0].resident_bytes_last,
+                            Some(104_857_600)
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+
+            #[test]
+            fn adjacent() {
+                // Goal: newer unavailable Exec evidence blocks stale prior App bytes.
+                // Method: put an unavailable Exec before the verified selected Exit.
+                observe(2);
+            }
+
+            #[test]
+            fn after_a_missed_tick() {
+                // Goal: a tick gap cannot permit stale bytes after an unavailable Exec.
+                // Method: put the conflict before Exit across a skipped scheduled tick.
+                observe(3);
+            }
         }
     };
 }
@@ -387,6 +419,111 @@ fn keeps_scheduled_predecessor_identity_ahead_of_prior_event_fallback() {
                 aggregate.processes[0].program_unavailable,
                 Some(IdentityUnavailable::Refused)
             );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn preserves_the_supplied_frame_stamp_when_it_cannot_supply_evidence() {
+    // Goal: Sample.previous records supplied metadata even when no predecessor is usable.
+    // Method: capture an exit across a publication gap and inspect its exact predecessor stamp.
+    let mut scenario = Scenario::new();
+    scenario.selected.stamp.publication = 3;
+    let mut sample = None;
+    crate::live_app_response::Sample::capture(
+        &scenario.selected,
+        Some(&scenario.previous),
+        &mut sample,
+    )
+    .unwrap();
+    let sample = sample.unwrap();
+    assert_eq!(sample.previous, Some(scenario.previous.stamp));
+    assert_eq!(sample.elapsed_ns, None);
+    assert!(sample.apps().is_empty());
+}
+
+fn assert_app_wall_interval(wall_ns: Option<u64>) {
+    let mut scenario = Scenario::new();
+    scenario.selected.wall_ns = wall_ns;
+    scenario
+        .selected
+        .with_aggregate(Some(&scenario.previous), |aggregate| {
+            assert_eq!(aggregate.elapsed_ns, Some(1_000_000_000));
+            assert_eq!(aggregate.processes.len(), 1);
+            assert_eq!(
+                aggregate.processes[0].resident_bytes_last,
+                Some(104_857_600)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn keeps_app_intervals_when_selected_wall_time_is_equal() {
+    // Goal: equal wall clocks do not suppress a valid App continuous-time interval.
+    // Method: aggregate an ordinary pair with equal wall time.
+    assert_app_wall_interval(Some(1_001_000_000_000));
+}
+
+#[test]
+fn keeps_app_intervals_when_selected_wall_time_rolls_back() {
+    // Goal: wall rollback does not import machine eligibility into the App proof.
+    // Method: aggregate an ordinary pair with selected wall time before the predecessor.
+    assert_app_wall_interval(Some(1_000_000_000_000));
+}
+
+#[test]
+fn keeps_app_intervals_without_selected_wall_time() {
+    // Goal: only the predecessor wall clock is required for App interval eligibility.
+    // Method: aggregate an ordinary pair with absent selected wall time.
+    assert_app_wall_interval(None);
+}
+
+#[test]
+fn keeps_live_unavailable_gauges_absent_across_a_run_tick_gap() {
+    // Goal: usable prior evidence never replaces an unavailable current live gauge.
+    // Method: keep the same captured identity with measured prior and refused current usage.
+    let mut scenario = Scenario::new();
+    scenario.selected.run_tick = 3;
+    scenario.selected.exits.clear();
+    scenario.selected.arena.clone_from(&scenario.previous.arena);
+    scenario.previous.members.push(crate::live_apps::Member {
+        pid: 7,
+        creation: Some(creation()),
+        program: Ok(program()),
+        usage: Ok(usage()),
+        gpu_ns: None,
+        threads: None,
+    });
+    scenario.selected.members.push(crate::live_apps::Member {
+        pid: 7,
+        creation: Some(creation()),
+        program: Ok(program()),
+        usage: Err(Unavailable::Refused),
+        gpu_ns: None,
+        threads: None,
+    });
+    scenario
+        .selected
+        .with_aggregate(Some(&scenario.previous), |aggregate| {
+            assert_eq!(aggregate.elapsed_ns, None);
+            assert_eq!(aggregate.apps.len(), 1);
+            assert_eq!(aggregate.processes.len(), 1);
+            assert_eq!(aggregate.processes[0].state, ProcessState::Live);
+            assert_eq!(aggregate.processes[0].resident_bytes_last, None);
+            assert_eq!(aggregate.processes[0].footprint_bytes_last, None);
+            assert_eq!(
+                aggregate.processes[0].cpu_ns,
+                Amount::Unavailable(Unavailable::Interval)
+            );
+            let app = &aggregate.apps[&AppKey::Bundle(b"/Applications/B.app")];
+            assert_eq!(app.members, 1);
+            assert_eq!(app.live_members, 1);
+            assert_eq!(app.resident_bytes.known, 0);
+            assert_eq!(app.resident_bytes.measured_members, 0);
+            assert_eq!(app.resident_bytes.unavailable_members, 1);
             Ok(())
         })
         .unwrap();
