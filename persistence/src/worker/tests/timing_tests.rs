@@ -2,6 +2,7 @@ use super::*;
 use crate::allocation_tests::{Observation as Allocations, observe};
 use crate::resources::ByteBudget;
 use collector::ring::{ObservationTimes, Place, Readings, Writer};
+use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -416,10 +417,52 @@ fn refused_usage_observation(parent: u32) {
 #[test]
 fn preserves_unknown_loss_after_a_registered_object_disappears() {
     // Goal: an absent source earns no receipt and its unknown loss reaches the next seal.
-    // Method: unlink an actual registered ring, then drain a completed healthy successor.
-    let mut source = Scenario::new();
+    // Method: unlink a real ring and drain its successor in a child with no concurrent spawns.
+    missing_source_process();
+}
+
+fn missing_source_process() {
+    const ISOLATED: &str = "FLIGHTDECK_MISSING_SOURCE_ISOLATED";
+    const TEST: &str = concat!(
+        "worker::tests::timing_tests::",
+        "preserves_unknown_loss_after_a_registered_object_disappears"
+    );
+    const COMPLETED: &str = "missing source unknown loss observed";
+    if let Some(root) = std::env::var_os(ISOLATED) {
+        missing_source_observation(Path::new(&root));
+        println!("\n{COMPLETED}");
+        return;
+    }
+
+    // A concurrent fork can retain a dropped Store's CLOEXEC lock until exec.
+    // Create this scenario only after exec, away from the other tests' process spawns.
+    let fixture = MissingSource::new();
+    let output_path = fixture.root.0.join("child-output");
+    let output = std::fs::File::create(&output_path).unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+        .env(ISOLATED, &fixture.root.0)
+        .stdin(std::process::Stdio::null())
+        .stdout(output)
+        .stderr(std::process::Stdio::inherit());
+    let timebase = collector::clock::Timebase::read().unwrap();
+    let mut child =
+        collector::recording::child::Persister::spawn_command(&mut command, timebase).unwrap();
+
+    let finished = child.finish(Duration::from_secs(20)).unwrap();
+    assert!(std::fs::metadata(&output_path).unwrap().len() <= 8_192);
+    let output = std::fs::read_to_string(output_path).unwrap();
+
+    print!("{output}");
+    assert!(finished.successful());
+    assert_eq!(output.lines().filter(|line| *line == COMPLETED).count(), 1);
+}
+
+fn missing_source_observation(root: &Path) {
+    let mut source = Scenario::at(Directory(root.join("source")));
     source.publish(0);
-    let successor_root = Directory::new();
+    let successor_root = Directory(root.join("successor"));
     let mut successor = registered(source.store.recording());
     successor.identity.run = Identity([7, 8]);
     let mut ring = WaitingRing::new(&successor_root, &mut successor, 1);
@@ -474,6 +517,61 @@ fn preserves_unknown_loss_after_a_registered_object_disappears() {
     );
 }
 
+struct MissingSource {
+    root: Directory,
+}
+
+impl MissingSource {
+    fn new() -> Self {
+        let fixture = Self {
+            root: Directory::new(),
+        };
+        for name in ["source", "successor"] {
+            collector::recording::private::create_private_dir(&fixture.root.0.join(name)).unwrap();
+        }
+        fixture
+    }
+
+    fn unlink(root: &Path) {
+        let file = match std::fs::File::open(root.join("ring.lock")) {
+            Ok(file) => file,
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::NotFound);
+                return;
+            }
+        };
+        let mut name = String::new();
+        file.take(u64::try_from(collector::ring::GENERATION_BUFFER_SIZE).unwrap())
+            .read_to_string(&mut name)
+            .unwrap();
+        let Some((_, generation)) = name.rsplit_once('.') else {
+            return;
+        };
+        if generation.is_empty() {
+            return;
+        }
+
+        // Startup names generation zero before creating any object. A killed child may
+        // leave that name or a completed name; this fresh fixture makes at most one writer.
+        let mut buffer = [0; collector::ring::GENERATION_BUFFER_SIZE];
+        for generation in 1..=collector::ring::GENERATION_SCAN_MAX {
+            let name = collector::ring::generation_name(&name, generation, &mut buffer).unwrap();
+            if let Err(error) = collector::ring::unlink_generation(name) {
+                assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            }
+        }
+    }
+}
+
+impl Drop for MissingSource {
+    fn drop(&mut self) {
+        // The child is declared after this owner and is reaped before these resources go.
+        for name in ["source", "successor"] {
+            Self::unlink(&self.root.0.join(name));
+        }
+    }
+}
+
 fn assert_invalid_payload(result: Result<Progress>) {
     assert!(matches!(result, Err(crate::Error::Io(error))
         if error.kind() == io::ErrorKind::InvalidData));
@@ -492,7 +590,10 @@ struct Scenario {
 
 impl Scenario {
     fn new() -> Self {
-        let root = Directory::new();
+        Self::at(Directory::new())
+    }
+
+    fn at(root: Directory) -> Self {
         let store = Store::open(&root.0).unwrap();
         let mut registered = registered(store.recording());
         registered.collector_pid = std::process::id();
