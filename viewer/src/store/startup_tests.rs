@@ -54,6 +54,9 @@ fn primary_startup_serves_selected_apps_before_historical_apps() {
     let complete = query_context(&mut held, &mut ring);
     assert_eq!(complete.readiness(), super::QueryReadiness::Complete);
     assert_eq!(complete.source, primary.source);
+    let mut completed_work = Vec::new();
+    trace.snapshot(&mut completed_work).unwrap();
+    assert_canonical_ticks_work(&completed_work);
     fixture.publish_with_usage(1122, &usage(122));
     drop(scope);
 }
@@ -116,6 +119,7 @@ fn assert_primary_work(trace: &persistence::work::ingestion::Trace) {
     use persistence::work::ingestion::{Key, Kind, Purpose};
     let mut events = Vec::new();
     trace.snapshot(&mut events).unwrap();
+    assert_canonical_ticks_work(&events);
     assert_eq!(
         events
             .iter()
@@ -146,6 +150,29 @@ fn assert_primary_work(trace: &persistence::work::ingestion::Trace) {
             .count(),
         2
     );
+}
+
+fn assert_canonical_ticks_work(events: &[persistence::work::ingestion::Event]) {
+    use persistence::work::ingestion::Kind;
+    let captures: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == Kind::ContentCapture)
+        .filter(|event| event.table == Some("ticks"))
+        .collect();
+    assert_eq!(captures.len(), 3);
+    for capture in captures {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, Kind::ProjectionDecode | Kind::NativeCollect))
+                .filter(|event| event.table == Some("ticks"))
+                .filter(|event| event.key == capture.key)
+                .count(),
+            1,
+            "one canonical ticks projection for {:?}",
+            capture.key
+        );
+    }
 }
 
 #[test]

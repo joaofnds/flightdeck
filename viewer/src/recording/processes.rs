@@ -16,6 +16,7 @@ use polars::prelude::{
 };
 
 use super::apps::AppMinute;
+use super::ticks_input::TicksTable;
 use super::{Refused, ScopedSealedMinute as SealedMinute, SealedTable, ordered, placement};
 use crate::apps::Stamp;
 use crate::cancellation::{Cancellation, Operation};
@@ -73,7 +74,7 @@ const BATCH_COLUMNS: [&str; 28] = [
     "gpu_ns",
 ];
 /// The tick columns of an observation's endpoint.
-const TICK_COLUMNS: [&str; 9] = [
+pub(super) const TICK_COLUMNS: [&str; 9] = [
     "publication",
     "run_tick",
     "wall_ns",
@@ -386,22 +387,35 @@ pub(super) fn read_processes_endpoints(minute: &SealedMinute) -> Result<Vec<Endp
     let limit =
         u32::try_from(ENDPOINTS_MAX + 1).map_err(|_| persistence::Error::Bound("process ticks"))?;
     let ticks = minute.ticks()?;
+    check_endpoint_count(&ticks)?;
+    let frame = ticks.collect(&TICK_COLUMNS, Some(limit))?;
+
+    read_processes_endpoints_rows(minute, &frame)
+}
+
+pub(super) fn check_endpoint_count(ticks: &TicksTable<'_>) -> Result<(), Refused> {
     if let Some(rows) = ticks.row_count() {
         if rows > collector::u64_from_usize(ENDPOINTS_MAX) {
             return Err(persistence::Error::Bound("committed App batch endpoints").into());
         }
     }
-    let frame = ticks.collect(&TICK_COLUMNS, Some(limit))?;
 
-    let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
-    let run_tick = Cells::<UInt64Type>::named(&frame, "run_tick")?;
-    let wall_ns = Cells::<UInt64Type>::named(&frame, "wall_ns")?;
-    let continuous_ns = Cells::<UInt64Type>::named(&frame, "continuous_ns")?;
-    let awake_ns = Cells::<UInt64Type>::named(&frame, "awake_ns")?;
-    let refused = Cells::<UInt32Type>::named(&frame, "processes_refused")?;
-    let gone = Cells::<UInt32Type>::named(&frame, "processes_gone")?;
-    let events_first = Cells::<UInt64Type>::named(&frame, "events_first")?;
-    let events_end = Cells::<UInt64Type>::named(&frame, "events_end")?;
+    Ok(())
+}
+
+pub(super) fn read_processes_endpoints_rows(
+    minute: &SealedMinute,
+    frame: &DataFrame,
+) -> Result<Vec<Endpoint>, Refused> {
+    let publication = Cells::<UInt64Type>::named(frame, "publication")?;
+    let run_tick = Cells::<UInt64Type>::named(frame, "run_tick")?;
+    let wall_ns = Cells::<UInt64Type>::named(frame, "wall_ns")?;
+    let continuous_ns = Cells::<UInt64Type>::named(frame, "continuous_ns")?;
+    let awake_ns = Cells::<UInt64Type>::named(frame, "awake_ns")?;
+    let refused = Cells::<UInt32Type>::named(frame, "processes_refused")?;
+    let gone = Cells::<UInt32Type>::named(frame, "processes_gone")?;
+    let events_first = Cells::<UInt64Type>::named(frame, "events_first")?;
+    let events_end = Cells::<UInt64Type>::named(frame, "events_end")?;
     let identity = minute.manifest.identity.run;
     let mut endpoints = Vec::with_capacity(frame.height());
     for row in 0..frame.height() {
@@ -425,6 +439,7 @@ pub(super) fn read_processes_endpoints(minute: &SealedMinute) -> Result<Vec<Endp
     ordered(&endpoints, "process tick order", |endpoint| {
         endpoint.stamp.publication
     })?;
+
     Ok(endpoints)
 }
 

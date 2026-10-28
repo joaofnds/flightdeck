@@ -12,7 +12,7 @@ use crate::cancellation::Operation;
 use crate::live_app_response::Observation;
 use crate::live_apps::committed::Endpoint;
 use crate::recording::{
-    Before, MachineMinute, Refused, ScopedSealedMinute, SealedSource, read_machine,
+    Before, MachineMinute, Refused, ScopedSealedMinute, SealedSource, read_machine_and_endpoints,
 };
 use crate::store::apps::TickApps;
 use crate::store::{AppsSecond, Held, Missing, SampledSecond};
@@ -229,9 +229,8 @@ impl Startup {
             input.operation,
             &AdmittedTable::from_file_budgeted,
         )?;
-        let endpoints = sealed.endpoints()?;
         let mut machine = MachineMinute::default();
-        read_machine(&sealed, &mut machine)?;
+        let endpoints = read_machine_and_endpoints(&sealed, &mut machine)?;
         let machine_reservation = input
             .budget
             .reserve(machine.heap_bytes())

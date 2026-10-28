@@ -544,7 +544,7 @@ fn prepare_replacement(root: &Path, ticks: &Path) -> PathBuf {
     replacement
 }
 
-fn write_ticks(path: &Path, mut frame: DataFrame) {
+pub(super) fn write_ticks(path: &Path, mut frame: DataFrame) {
     let file = private::open_private_file(path, true).unwrap();
     ParquetWriter::new(file)
         .with_compression(ParquetCompression::Zstd(Some(

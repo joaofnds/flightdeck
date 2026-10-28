@@ -16,7 +16,9 @@ use polars::prelude::{
     UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 
-use super::{Refused, ScopedSealedMinute as SealedMinute, ordered, placement};
+use super::ticks_input::TicksTable;
+use super::{Refused, ScopedSealedMinute as SealedMinute, ordered, placement, processes};
+use crate::live_apps::committed::{ENDPOINTS_MAX, Endpoint, committed_endpoints};
 
 #[cfg(test)]
 #[path = "machine_saved_load_tests.rs"]
@@ -35,6 +37,17 @@ const TICK_COLUMNS: [&str; 10] = [
     "power_watts",
     "soc_celsius",
 ];
+const DISK_COLUMNS: [&str; 1] = [persistence::disks::FIELD];
+
+const _: () = assert!(
+    TICK_COLUMNS.len()
+        + processes::TICK_COLUMNS.len()
+        + TEMPERATURE_FIELDS.len()
+        + SYSTEM_FIELDS.len()
+        + BATTERY_FIELDS.len()
+        + DISK_COLUMNS.len()
+        <= TICK_COLUMNS_MAX
+);
 
 /// The system group's columns the store reads, of those `SYSTEM_FIELDS` names.
 const SYSTEM_COLUMNS: [&str; 5] = [
@@ -342,6 +355,39 @@ pub fn read_machine(minute: &SealedMinute, into: &mut MachineMinute) -> Result<(
     into.clear();
     read_ticks(minute, &mut into.ticks)?;
 
+    read_machine_tables(minute, into)
+}
+
+/// Reads canonical machine ticks and endpoint witnesses from one admitted projection.
+pub(crate) fn read_machine_and_endpoints(
+    minute: &SealedMinute,
+    into: &mut MachineMinute,
+) -> Result<Vec<Endpoint>, Refused> {
+    into.clear();
+    let endpoints = read_machine_and_endpoints_ticks(minute, &mut into.ticks)?;
+    read_machine_tables(minute, into)?;
+
+    Ok(endpoints)
+}
+
+fn read_machine_and_endpoints_ticks(
+    minute: &SealedMinute,
+    into: &mut Vec<TickRow>,
+) -> Result<Vec<Endpoint>, Refused> {
+    assert!(into.is_empty());
+    let table = minute.ticks()?;
+    processes::check_endpoint_count(&table)?;
+    let limit =
+        u32::try_from(ENDPOINTS_MAX + 1).map_err(|_| persistence::Error::Bound("process ticks"))?;
+    let source = read_ticks_frame(table, &processes::TICK_COLUMNS, Some(limit))?;
+    let endpoints = processes::read_processes_endpoints_rows(minute, &source)?;
+    committed_endpoints(&endpoints)?;
+    read_ticks_readings(&source, into)?;
+
+    Ok(endpoints)
+}
+
+fn read_machine_tables(minute: &SealedMinute, into: &mut MachineMinute) -> Result<(), Refused> {
     // Every other table's rows are readings of the minute's ticks.
     let ticks: Vec<u64> = into.ticks.iter().map(|tick| tick.publication).collect();
     read_cpus(minute, &ticks, &mut into.cpus)?;
@@ -349,20 +395,30 @@ pub fn read_machine(minute: &SealedMinute, into: &mut MachineMinute) -> Result<(
     read_interfaces(minute, &ticks, &mut into.interfaces)?;
     read_gpu_states(minute, &ticks, &mut into.gpu_states)?;
     read_core_states(minute, &ticks, &mut into.core_states)?;
+
     read_fans(minute, &ticks, &mut into.fans)
 }
 
 fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refused> {
     assert!(into.is_empty());
+    let source = read_ticks_frame(minute.ticks()?, &[], None)?;
+
+    read_ticks_readings(&source, into)
+}
+
+fn read_ticks_frame(
+    table: TicksTable<'_>,
+    additional_columns: &[&str],
+    row_limit: Option<u32>,
+) -> Result<DataFrame, Refused> {
+    assert!(additional_columns.len() <= processes::TICK_COLUMNS.len());
     let temperatures = TEMPERATURE_FIELDS.map(|(name, _)| name);
     let system = SYSTEM_FIELDS.map(|(name, _)| name);
     let battery = BATTERY_FIELDS.map(|(name, _)| name);
-    let disks = [persistence::disks::FIELD];
-    let table = minute.ticks()?;
     let temperatures_held = table.holds(&temperatures)?;
     let system_held = table.holds(&system)?;
     let battery_held = table.holds(&battery)?;
-    let disks_held = table.holds(&disks)?;
+    let disks_held = table.holds(&DISK_COLUMNS)?;
 
     let mut columns = Vec::with_capacity(TICK_COLUMNS_MAX);
     columns.extend(TICK_COLUMNS);
@@ -376,25 +432,42 @@ fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refu
         columns.extend(battery);
     }
     if disks_held {
-        columns.extend(disks);
+        columns.extend(DISK_COLUMNS);
     }
-    let frame = table.collect(&columns, None)?;
+    for name in additional_columns {
+        if !columns.contains(name) {
+            columns.push(name);
+        }
+    }
+    assert!(columns.len() <= TICK_COLUMNS_MAX);
 
-    read_ticks_rows(&frame, into)?;
+    table.collect(&columns, row_limit)
+}
+
+fn read_ticks_readings(frame: &DataFrame, into: &mut Vec<TickRow>) -> Result<(), Refused> {
+    read_ticks_rows(frame, into)?;
     ordered(into, "tick order", |tick| tick.publication)?;
-    if temperatures_held {
-        read_ticks_temperatures(&frame, into)?;
+    if read_ticks_readings_holds(frame, TEMPERATURE_FIELDS[0].0) {
+        read_ticks_temperatures(frame, into)?;
     }
-    if system_held {
-        read_ticks_system(&frame, into)?;
+    if read_ticks_readings_holds(frame, SYSTEM_FIELDS[0].0) {
+        read_ticks_system(frame, into)?;
     }
-    if battery_held {
-        read_ticks_battery(&frame, into)?;
+    if read_ticks_readings_holds(frame, BATTERY_FIELDS[0].0) {
+        read_ticks_battery(frame, into)?;
     }
-    if disks_held {
-        read_ticks_disks(&frame, into)?;
+    if read_ticks_readings_holds(frame, DISK_COLUMNS[0]) {
+        read_ticks_disks(frame, into)?;
     }
+
     Ok(())
+}
+
+fn read_ticks_readings_holds(frame: &DataFrame, name: &str) -> bool {
+    frame
+        .columns()
+        .iter()
+        .any(|column| column.name().as_str() == name)
 }
 
 /// Appends a row for each of `frame`'s ticks from the columns every minute holds, with the

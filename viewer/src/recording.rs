@@ -10,6 +10,9 @@ pub(crate) mod processes;
 mod ticks_input;
 use ticks_input::TicksInput;
 
+#[cfg(test)]
+mod shared_ticks_tests;
+
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +21,7 @@ use persistence::schema::Table;
 use polars::prelude::{DataFrame, Expr, LazyFrame, SchemaRef, UInt64Type, col};
 
 pub use apps::{AppMinute, AppParts, AppRow, Previous, SampleRow, read_apps};
+pub(crate) use machine::read_machine_and_endpoints;
 pub use machine::{
     CoreStateRow, CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
     read_machine,

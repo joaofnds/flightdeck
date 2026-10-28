@@ -1501,7 +1501,7 @@ fn publish_machine(fixture: &mut Fixture, step: u64, supplemental: Option<&Suppl
 }
 
 /// Every tick the ring holds, oldest first, each with its publication.
-fn ring_ticks(fixture: &Fixture) -> Vec<(u64, Tick)> {
+pub(super) fn ring_ticks(fixture: &Fixture) -> Vec<(u64, Tick)> {
     let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
     let shape = reader.shape();
     let mut ticks = Vec::with_capacity(8);

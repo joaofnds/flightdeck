@@ -1,4 +1,5 @@
 use super::*;
+use crate::recording::read_machine;
 
 #[path = "startup_boundary_tests.rs"]
 mod boundaries;
@@ -447,17 +448,22 @@ fn endpoint_stage_accepts_the_legal_61_endpoint_control() {
 fn endpoint_stage_refuses_the_62nd_sentinel_before_accepting_machine_state() {
     // Goal: the sentinel header cannot become accepted machine or App state.
     // Method: save 62 otherwise legal ordered endpoints and drive discovery and machine loading.
-    assert_endpoint_refusal(62, false, "committed App batch endpoints");
+    assert_endpoint_refusal(62, false, "committed App batch endpoints", 0);
 }
 
 #[test]
 fn endpoint_stage_refuses_a_reversed_event_range_before_accepting_machine_state() {
     // Goal: process header integrity is checked before machine or source acceptance.
     // Method: reverse one saved event range while preserving every other valid input field.
-    assert_endpoint_refusal(1, true, "committed App event range");
+    assert_endpoint_refusal(1, true, "committed App event range", 1);
 }
 
-fn assert_endpoint_refusal(count: u64, reversed: bool, reason: &'static str) {
+fn assert_endpoint_refusal(
+    count: u64,
+    reversed: bool,
+    reason: &'static str,
+    native_ticks_decodes: usize,
+) {
     let fixture = endpoint_fixture(count, reversed);
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let trace =
@@ -478,6 +484,16 @@ fn assert_endpoint_refusal(count: u64, reversed: bool, reason: &'static str) {
     assert_eq!(stage.held.source_generation, 0);
     assert!(stage.held.startup == crate::store::StartupState::Loading);
     assert_eq!(machine_work(&trace), 0);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == persistence::work::ingestion::Kind::ProjectionDecode)
+            .filter(|event| event.table == Some("ticks"))
+            .count(),
+        native_ticks_decodes
+    );
     drop((stage, scope));
     assert_eq!(budget.used(), 0);
 }
