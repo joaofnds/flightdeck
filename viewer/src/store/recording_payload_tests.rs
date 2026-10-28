@@ -897,7 +897,7 @@ fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitme
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,
-        |endpoint, sample, _losses| {
+        |endpoint, sample, _losses, _count| {
             assert!(sample.is_ok());
             consumed.push(endpoint.stamp.publication);
             if endpoint.stamp.publication == 2 {
@@ -1667,7 +1667,7 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,
-        |endpoint, sample, _losses| {
+        |endpoint, sample, _losses, _count| {
             assert!(sample.is_ok());
             consumed.push(endpoint.stamp.publication);
             if endpoint.stamp.publication == 2 {
@@ -1768,4 +1768,260 @@ fn catch_up_fixture() -> Fixture {
     fixture.publish_with_system_rows(220);
     fixture.seal_minute(2);
     fixture
+}
+
+#[test]
+fn a_sealed_name_namespace_from_another_budget_refuses_without_transferring_charge() {
+    // Goal: a retained name index cannot charge one caller while supplying another.
+    // Method: pass a foreign empty namespace into the real sealed sample callback.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let original = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut names = Some(crate::store::payload::ProcessNames::new(4, &original).unwrap());
+    let original_charge = original.used();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut replay_decoder = Decoder::default();
+    let mut calls = 0;
+
+    super::load_minute_visit(
+        &fixture.root,
+        &found[0],
+        &mut replay_decoder,
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+        |_, sample, _losses, count| {
+            let mut second = AppsSecond::default();
+            assert!(sample.is_ok());
+            super::load_minute_rows(&sample, None, &budget, &mut second);
+            assert!(second.missing.is_none());
+            super::load_minute_payload(&sample, &budget, count, &mut names, &mut second);
+            assert!(matches!(
+                second.processes,
+                Err(crate::store::Missing::Budget)
+            ));
+            calls += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(calls, 1);
+    assert_eq!(names.as_ref().unwrap().observation().0, 0);
+    assert_eq!(original.used(), original_charge);
+    assert_eq!(budget.used(), 0);
+    drop(names);
+    assert_eq!(original.used(), 0);
+}
+
+#[test]
+fn a_sealed_index_admission_refusal_preserves_apps_and_the_next_exact_interval() {
+    // Goal: refusing the input index leaves complete App facts and predecessor eligibility intact.
+    // Method: exhaust the budget after real App fill, then retry the next saved observation.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.seal();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut replay_decoder = Decoder::default();
+    let mut names = None;
+    let mut seconds = Vec::new();
+
+    super::load_minute_visit(
+        &fixture.root,
+        &found[0],
+        &mut replay_decoder,
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+        |_, sample, _losses, count| {
+            let mut second = AppsSecond::default();
+            super::load_minute_rows(&sample, seconds.last(), &budget, &mut second);
+            assert!(second.missing.is_none());
+            assert!(!second.apps.is_empty());
+            assert!(second.metadata.bytes() > 0);
+            if seconds.is_empty() {
+                let pressure = budget.reserve(budget.maximum() - budget.used()).unwrap();
+                super::load_minute_payload(&sample, &budget, count, &mut names, &mut second);
+                assert!(names.is_none());
+                assert!(matches!(
+                    second.processes,
+                    Err(crate::store::Missing::Budget)
+                ));
+                assert_eq!(second.observation, Some(sample.as_ref().unwrap().selected));
+                assert!(second.missing.is_none());
+                assert!(!second.apps.is_empty());
+                drop(pressure);
+            } else {
+                super::load_minute_payload(&sample, &budget, count, &mut names, &mut second);
+                let payload = second.processes.as_ref().unwrap();
+                assert_eq!(payload.selected.stamp.publication, 2);
+                assert_eq!(payload.previous.unwrap().publication, 1);
+                assert_eq!(
+                    payload.iter().find(|row| row.pid == 7).unwrap().cpu_ns(),
+                    crate::apps::Amount::Known(1)
+                );
+            }
+            seconds.push(second);
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(seconds.len(), 2);
+    assert!(names.is_some());
+    assert!(replay_decoder.predecessor.is_some());
+    drop((seconds, names, replay_decoder, fixture));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn late_full_decoder_refusal_releases_its_index_and_preserves_an_earlier_reader() {
+    // Goal: a late commitment failure cannot leak an index or invalidate accepted readers.
+    // Method: change consumed ticks privacy during real events admission, then restore and retry.
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = catch_up_fixture();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let observer = Arc::new(ByteBudget::new(64 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    let mut decoder = Decoder::default();
+    let mut accepted = decoder.decode(
+        &fixture.root,
+        &found[0],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    );
+    assert_eq!(accepted.left_out, None);
+    let reader = std::mem::take(accepted.seconds[0].apps.as_mut().unwrap());
+    let original = reader.processes.as_ref().unwrap().selected;
+    let held = budget.used();
+    let manifest = persistence::read_committed(&fixture.root, &found[1].marker).unwrap();
+    let ticks = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("ticks.parquet");
+    let trace = crate::store::payload::NameTrace::new(4, &observer);
+    let capture = |file, budget: &Arc<ByteBudget>| {
+        let input = AdmittedTable::from_file_budgeted(file, budget)?;
+        if input.contains_column("event") {
+            std::fs::set_permissions(&ticks, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        Ok(input)
+    };
+
+    let refused = decoder.decode(&fixture.root, &found[1], &budget, &operation, &capture);
+    let records = trace.finish();
+
+    assert_eq!(refused.left_out, Some(crate::store::Failure::Refused));
+    assert!(refused.seconds.is_empty());
+    assert!(records.values().iter().any(|record| record.committed));
+    assert_eq!(budget.used(), held);
+    assert_eq!(reader.processes.as_ref().unwrap().selected, original);
+    std::fs::set_permissions(&ticks, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let retry = decoder.decode(
+        &fixture.root,
+        &found[1],
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    );
+    assert_eq!(retry.left_out, None);
+    assert_eq!(retry.seconds.len(), 2);
+    assert!(
+        retry
+            .seconds
+            .iter()
+            .all(|loaded| loaded.apps.as_ref().unwrap().processes.is_ok())
+    );
+    assert_retry_matches_original_minute(&fixture, &found[1], &retry);
+    drop((retry, refused, accepted, reader, decoder, records, fixture));
+    assert_eq!(budget.used(), 0);
+    assert_eq!(observer.used(), 0);
+}
+
+fn assert_retry_matches_original_minute(
+    fixture: &Fixture,
+    found: &crate::store::recording::Found,
+    retry: &crate::store::recording::Batch,
+) {
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let source = crate::recording::SealedSource {
+        root: &fixture.root,
+        marker: &found.marker,
+    };
+    let (_, expected) = events_loader_legacy(&source, &budget, &operation);
+    assert_eq!(retry.seconds.len(), expected.len());
+    for (actual, expected) in retry.seconds.iter().zip(&expected) {
+        assert_eq!(actual.apps.as_ref().unwrap(), expected);
+        assert_eq!(
+            actual.second.publication,
+            expected.observation.unwrap().stamp.publication
+        );
+    }
+    drop(expected);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn a_full_minute_shares_captured_names_between_its_exact_observations() {
+    // Goal: ordinary minute decoding keeps one admitted name owner across its observations.
+    // Method: retain both real payloads after the minute/source die and compare owner identities.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let mut replay_decoder = Decoder::default();
+
+    let (machine, seconds) = super::load_minute(
+        &fixture.root,
+        &found[0],
+        &mut replay_decoder,
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap();
+    let first = Arc::clone(seconds[0].processes.as_ref().unwrap());
+    let second = Arc::clone(seconds[1].processes.as_ref().unwrap());
+
+    assert_eq!(first.selected.stamp.publication, 1);
+    assert_eq!(second.selected.stamp.publication, 2);
+    assert_eq!(second.previous.unwrap().publication, 1);
+    let mut name_bytes = 0;
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 2);
+    for (first, second) in first.iter().zip(second.iter()) {
+        assert_eq!(first.pid, second.pid);
+        let first_name = first.executable_name().unwrap();
+        assert!(std::ptr::eq(first_name, second.executable_name().unwrap()));
+        name_bytes += first_name.reserved_bytes();
+    }
+    assert_eq!(
+        second.iter().find(|row| row.pid == 7).unwrap().cpu_ns(),
+        crate::apps::Amount::Known(1)
+    );
+    drop((machine, seconds, replay_decoder, found, fixture));
+    assert_eq!(budget.used(), first.bytes() + second.bytes() + name_bytes);
+    assert_eq!(first[1].executable_name().unwrap().bytes, b"current");
+    drop(first);
+    assert_eq!(budget.used(), second.bytes() + name_bytes);
+    assert_eq!(second[1].executable_name().unwrap().bytes, b"current");
+    drop(second);
+    assert_eq!(budget.used(), 0);
 }

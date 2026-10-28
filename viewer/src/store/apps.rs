@@ -156,9 +156,7 @@ impl AppsSecond {
                 self.observation = Some(sample.selected);
                 if self.missing.is_none() {
                     self.processes = match budget {
-                        Some(budget) => {
-                            super::Payload::capture(sample, previous, budget).map(Arc::new)
-                        }
+                        Some(budget) => super::Payload::capture(sample, budget).map(Arc::new),
                         None => Err(Missing::Unread),
                     };
                 }

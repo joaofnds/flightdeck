@@ -19,6 +19,7 @@ pub(in crate::store::recording) trait Target {
 
 pub(in crate::store::recording) struct Captured<'sample> {
     pub endpoint: Endpoint,
+    pub names_capacity: usize,
     pub sample: Option<Result<&'sample Sample, AggregateError>>,
     pub before: Option<Before>,
 }
@@ -41,6 +42,13 @@ impl Decoder {
         input: &mut Input<'_>,
         target: &mut T,
     ) -> Result<(), T::Error> {
+        let names_capacity = batch
+            .rows
+            .height()
+            .checked_add(self.predecessor.as_ref().map_or(0, Before::program_count))
+            .ok_or(Refused::Decode(persistence::Error::Bound(
+                "sealed name count",
+            )))?;
         let mut sample = None;
         let mut failure = None;
         Frame::placed_many_from(
@@ -57,6 +65,7 @@ impl Decoder {
                     &mut sample,
                     target.derives(endpoint),
                     input.budget,
+                    names_capacity,
                 )
                 .map_err(T::Error::from)
                 .and_then(|captured| target.consume(captured));
@@ -90,12 +99,15 @@ impl Decoder {
         *next += 1;
     }
 
-    pub(super) fn visit_samples(
+    pub(super) fn visit_samples<F>(
         &mut self,
         sealed: &ScopedSealedMinute<'_>,
         operation: &Operation,
-        consume: impl FnMut(&Endpoint, persistence::Result<&Sample>) -> persistence::Result<()>,
-    ) -> Result<(), Refused> {
+        consume: F,
+    ) -> Result<(), Refused>
+    where
+        F: FnMut(&Endpoint, persistence::Result<&Sample>, usize) -> persistence::Result<()>,
+    {
         let result = self.visit_samples_replay(sealed, operation, consume);
         if result.is_err() {
             self.predecessor = None;
@@ -103,12 +115,15 @@ impl Decoder {
         result
     }
 
-    fn visit_samples_replay(
+    fn visit_samples_replay<F>(
         &mut self,
         sealed: &ScopedSealedMinute<'_>,
         operation: &Operation,
-        consume: impl FnMut(&Endpoint, persistence::Result<&Sample>) -> persistence::Result<()>,
-    ) -> Result<(), Refused> {
+        consume: F,
+    ) -> Result<(), Refused>
+    where
+        F: FnMut(&Endpoint, persistence::Result<&Sample>, usize) -> persistence::Result<()>,
+    {
         operation.check()?;
         let batch = crate::recording::processes::read_processes_batch(sealed)?;
         operation.check()?;
@@ -132,6 +147,7 @@ fn replay_capture<'sample>(
     sample: &'sample mut Option<Box<Sample>>,
     derives: bool,
     budget: Option<&Arc<ByteBudget>>,
+    names_capacity: usize,
 ) -> Result<Captured<'sample>, Refused> {
     let previous = before.and_then(|before| {
         let (endpoint, previous) = before.previous();
@@ -166,6 +182,7 @@ fn replay_capture<'sample>(
     };
     Ok(Captured {
         endpoint: *endpoint,
+        names_capacity,
         sample,
         before,
     })
@@ -177,7 +194,7 @@ struct Visitor<F> {
 
 impl<F> Target for Visitor<F>
 where
-    F: FnMut(&Endpoint, persistence::Result<&Sample>) -> persistence::Result<()>,
+    F: FnMut(&Endpoint, persistence::Result<&Sample>, usize) -> persistence::Result<()>,
 {
     type Error = Refused;
 
@@ -189,7 +206,11 @@ where
         let sample = captured
             .sample
             .unwrap_or_else(|| unreachable!("derived sample"));
-        (self.consume)(&captured.endpoint, sample.map_err(AggregateError::legacy))?;
+        (self.consume)(
+            &captured.endpoint,
+            sample.map_err(AggregateError::legacy),
+            captured.names_capacity,
+        )?;
         Ok(Progress::Accepted(captured.before))
     }
 }

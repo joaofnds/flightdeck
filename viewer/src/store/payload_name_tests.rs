@@ -98,7 +98,12 @@ fn a_partial_name_refusal_releases_the_unpublished_payload_and_all_new_names() {
     // Method: leave room for containers and the first name at the real ingestion boundary.
     let sample = native_sample();
     assert_eq!(sample.processes().len(), 2);
-    let first_name = sample.processes()[0].executable_name.as_ref().unwrap();
+    let first_name = sample
+        .processes()
+        .iter()
+        .filter_map(|row| row.executable_name.as_ref())
+        .min_by(|left, right| left.bytes.cmp(&right.bytes))
+        .unwrap();
     let payload_bytes = 2 * size_of::<usize>()
         + size_of::<Payload>()
         + sample.processes().len() * size_of::<ProcessRow>()
@@ -118,8 +123,10 @@ fn a_partial_name_refusal_releases_the_unpublished_payload_and_all_new_names() {
         })
         .sum();
     let budget = Arc::new(ByteBudget::new(64 * 1024));
+    let work_bytes =
+        sample.processes().len() * (2 * size_of::<Arc<ProcessName>>() + size_of::<&Bytes>());
     let pressure = budget
-        .reserve(budget.maximum() - app_names - payload_bytes - first_name_bytes)
+        .reserve(budget.maximum() - app_names - payload_bytes - first_name_bytes - work_bytes)
         .unwrap();
     let mut refused = AppsSecond::with_room_for(sample.apps().len());
 
@@ -179,6 +186,54 @@ fn an_owned_name_preserves_raw_and_display_bytes_after_its_source_is_gone() {
     assert_eq!(budget.used(), 0);
 }
 
+#[test]
+fn rejected_name_additions_leave_the_accepted_namespace_unchanged_and_retry_exactly() {
+    // Goal: partial name allocation never becomes reachable from the accepted input index.
+    // Method: leave room for the first sorted name only, refuse, then retry the same real Sample.
+    let sample = native_sample();
+    let budget = Arc::new(ByteBudget::new(64 * 1024));
+    let mut names = super::ProcessNames::new(sample.processes().len(), &budget).unwrap();
+    let first = sample
+        .processes()
+        .iter()
+        .filter_map(|row| row.executable_name.as_ref())
+        .min_by(|left, right| left.bytes.cmp(&right.bytes))
+        .unwrap();
+    let name =
+        2 * size_of::<usize>() + size_of::<ProcessName>() + first.bytes.len() + first.display.len();
+    let scratch = sample.processes().len() * (size_of::<&Bytes>() + size_of::<Arc<ProcessName>>());
+    let pressure = budget
+        .reserve(
+            budget.maximum() - budget.used() - Payload::capture_bytes(&sample) - scratch - name,
+        )
+        .unwrap();
+    let before = budget.used();
+
+    assert!(matches!(
+        Payload::capture_with_names(&sample, &names),
+        Err(crate::store::Missing::Budget)
+    ));
+
+    assert_eq!(budget.used(), before);
+    assert_eq!(names.observation().0, 0);
+    drop(pressure);
+    let (payload, additions) = Payload::capture_with_names(&sample, &names).unwrap();
+    names.commit(additions);
+    assert_eq!(names.observation().0, 2);
+    for (actual, expected) in payload.iter().zip(sample.processes()) {
+        assert_eq!(actual.pid, expected.pid);
+        assert_eq!(actual.creation, expected.creation);
+        assert_eq!(
+            actual.executable_name().unwrap().bytes,
+            expected.executable_name.as_ref().unwrap().bytes
+        );
+    }
+    drop(names);
+    assert_eq!(budget.used(), payload.bytes() + name_bytes(&payload));
+    drop(payload);
+    assert_eq!(budget.used(), 0);
+}
+
 fn name_bytes(payload: &Payload) -> usize {
     let mut seen = std::collections::HashSet::new();
     let mut bytes = 0;
@@ -193,7 +248,7 @@ fn name_bytes(payload: &Payload) -> usize {
     bytes
 }
 
-fn native_sample() -> Box<Sample> {
+pub(super) fn native_sample() -> Box<Sample> {
     use crate::live_apps::{Frame, Publication};
     use collector::ring::{Found, RingReader};
 

@@ -265,6 +265,7 @@ fn load_minute(
     capture: &crate::recording::InputCapture<'_>,
 ) -> Result<(MachineMinute, Vec<AppsSecond>), Refused> {
     let mut apps = Vec::with_capacity(crate::live_apps::committed::ENDPOINTS_MAX);
+    let mut names = None;
     let machine = load_minute_visit(
         root,
         found,
@@ -272,9 +273,10 @@ fn load_minute(
         budget,
         operation,
         capture,
-        |endpoint, sample, losses| {
+        |endpoint, sample, losses, count| {
             let mut second = AppsSecond::default();
-            load_minute_second(&sample, apps.last(), budget, &mut second);
+            load_minute_rows(&sample, apps.last(), budget, &mut second);
+            load_minute_payload(&sample, budget, count, &mut names, &mut second);
             second.observation = Some(crate::live_app_response::Observation {
                 recording: endpoint.identity.recording.0,
                 stamp: endpoint.stamp,
@@ -288,21 +290,6 @@ fn load_minute(
     )?;
 
     Ok((machine, apps))
-}
-
-pub(super) fn load_minute_second(
-    sample: &persistence::Result<&crate::live_app_response::Sample>,
-    previous: Option<&AppsSecond>,
-    budget: &Arc<ByteBudget>,
-    second: &mut AppsSecond,
-) {
-    load_minute_rows(sample, previous, budget, second);
-    if second.missing.is_none() {
-        if let Ok(sample) = sample {
-            second.processes =
-                super::super::Payload::capture(sample, previous, budget).map(Arc::new);
-        }
-    }
 }
 
 pub(super) fn load_minute_rows(
@@ -345,6 +332,46 @@ pub(super) fn load_minute_rows(
     second.metadata = metadata;
 }
 
+pub(super) fn load_minute_payload(
+    sample: &persistence::Result<&crate::live_app_response::Sample>,
+    budget: &Arc<ByteBudget>,
+    count: usize,
+    names: &mut Option<super::super::payload::ProcessNames>,
+    second: &mut AppsSecond,
+) {
+    if second.missing.is_some() {
+        return;
+    }
+
+    let Ok(sample) = sample else {
+        return;
+    };
+
+    if names.is_none() {
+        match super::super::payload::ProcessNames::new(count, budget) {
+            Ok(captured) => *names = Some(captured),
+            Err(missing) => {
+                second.processes = Err(missing);
+                return;
+            }
+        }
+    }
+    let names = names
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("sealed name namespace"));
+    if !Arc::ptr_eq(names.budget(), budget) {
+        second.processes = Err(super::super::Missing::Budget);
+        return;
+    }
+    second.processes = match super::super::Payload::capture_with_names(sample, names) {
+        Ok((payload, additions)) => {
+            names.commit(additions);
+            Ok(Arc::new(payload))
+        }
+        Err(missing) => Err(missing),
+    };
+}
+
 fn load_minute_visit(
     root: &Path,
     found: &Found,
@@ -356,6 +383,7 @@ fn load_minute_visit(
         &crate::live_apps::committed::Endpoint,
         persistence::Result<&crate::live_app_response::Sample>,
         &persistence::Losses,
+        usize,
     ) -> persistence::Result<()>,
 ) -> Result<MachineMinute, Refused> {
     operation.check()?;
@@ -364,8 +392,8 @@ fn load_minute_visit(
     read_machine(&sealed, &mut machine)?;
     operation.check()?;
 
-    decoder.visit_samples(&sealed, operation, |endpoint, sample| {
-        consume(endpoint, sample, sealed.losses())
+    decoder.visit_samples(&sealed, operation, |endpoint, sample, count| {
+        consume(endpoint, sample, sealed.losses(), count)
     })?;
     operation.check()?;
 

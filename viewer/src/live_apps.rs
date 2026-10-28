@@ -354,6 +354,13 @@ impl Frame {
         Ok(bytes)
     }
 
+    /// Program slots bound distinct names inherited by a new input namespace.
+    pub(crate) fn program_count(&self) -> usize {
+        let count = self.members.len() + self.starts.len() + self.execs.len();
+        assert!(count <= apps::PROCESS_INTERVALS_MAX);
+        count
+    }
+
     /// Existing join/aggregate capacities sized to these two admitted Frames.
     pub(crate) fn aggregate_work_bytes(&self, previous: Option<&Self>) -> usize {
         let previous = previous.unwrap_or(self);

@@ -95,6 +95,10 @@ pub struct Before {
 }
 
 impl Before {
+    pub(crate) fn program_count(&self) -> usize {
+        self.frame.program_count()
+    }
+
     pub(crate) fn from_frame(endpoint: Endpoint, frame: Box<Frame>) -> Self {
         Self {
             endpoint,

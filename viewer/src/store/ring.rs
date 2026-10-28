@@ -99,6 +99,7 @@ struct Source {
     /// The App rule's sample of the tick read last.
     sample: Option<Box<Sample>>,
     native_pending: Option<Prepared>,
+    process_names: Option<super::payload::ProcessNames>,
     native_frame: Option<OwnedFrame>,
     native_events_ready: bool,
     native_workspace: Option<super::ByteReservation>,
@@ -179,10 +180,16 @@ impl Ring {
         if !push(&source.identity, prepared) {
             return Ok(NativeRead::Blocked);
         }
-        let accepted = source
+        let mut accepted = source
             .native_pending
             .take()
             .unwrap_or_else(|| unreachable!("accepted native candidate"));
+        accepted.commit_names(
+            source
+                .process_names
+                .as_mut()
+                .unwrap_or_else(|| unreachable!("native captured-name namespace")),
+        );
         source.native_frame = accepted.into_frame();
         mem::swap(&mut source.current, &mut source.previous);
         Ok(NativeRead::Accepted)
@@ -327,6 +334,15 @@ impl Ring {
         }
 
         source.complete
+    }
+
+    #[cfg(test)]
+    pub(super) fn name_observation(&self) -> Option<(usize, String, usize)> {
+        self.source
+            .as_ref()?
+            .process_names
+            .as_ref()
+            .map(super::payload::ProcessNames::observation)
     }
 
     pub(super) fn identity(&self) -> Option<RunIdentity> {
@@ -543,7 +559,9 @@ impl Source {
         reader
             .seek_publication(next)
             .map_err(|error| Failure::Ring(error.kind()))?;
+        assert!(self.native_pending.is_none());
         self.reader = reader;
+        self.process_names = None;
 
         Ok(())
     }
@@ -655,6 +673,7 @@ impl Source {
             previous_endpoint: None,
             sample: None,
             native_pending: None,
+            process_names: None,
             native_frame: None,
             native_events_ready: false,
             native_workspace,
@@ -689,6 +708,38 @@ impl Source {
         }
     }
 
+    fn prepare_native_names(
+        &mut self,
+        budget: &Arc<super::ByteBudget>,
+    ) -> Result<(), PrepareError> {
+        if let Some(names) = &self.process_names {
+            if !Arc::ptr_eq(names.budget(), budget) {
+                return Err(PrepareError::Source(Error::Bound("name budget owner")));
+            }
+
+            return Ok(());
+        }
+
+        let dictionary = self
+            .reader
+            .dictionary_capacity()
+            .map_or(0, |capacity| capacity.entries);
+        let dictionary = usize::try_from(dictionary)
+            .map_err(|_| PrepareError::Source(Error::Bound("native name count")))?;
+        let inherited = self
+            .native_frame
+            .as_ref()
+            .map_or(0, |frame| frame.get().program_count());
+        let count = dictionary
+            .checked_add(inherited)
+            .ok_or(PrepareError::Source(Error::Bound("native name count")))?;
+        self.process_names = Some(
+            super::payload::ProcessNames::new(count, budget)
+                .map_err(|_| PrepareError::Admission(super::native::Admission::NameIndex))?,
+        );
+        Ok(())
+    }
+
     fn prepare_native(
         &mut self,
         budget: &Arc<super::ByteBudget>,
@@ -698,6 +749,7 @@ impl Source {
         if self.native_frame.is_none() {
             self.native_frame = OwnedFrame::adopt(&mut self.previous_frame, budget)?;
         }
+        self.prepare_native_names(budget)?;
         if !self.native_events_ready {
             match self.capture_events().map_err(PrepareError::Source)? {
                 EventCapture::Ready => {}
@@ -730,6 +782,10 @@ impl Source {
             .collect();
         prepared.resume(
             &Input {
+                names: self
+                    .process_names
+                    .as_ref()
+                    .unwrap_or_else(|| unreachable!("admitted native name namespace")),
                 source: Publication {
                     reader: &self.reader,
                     tick: &self.tick,

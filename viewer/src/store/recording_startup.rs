@@ -571,6 +571,7 @@ fn process_minute(
             budget: Some(input.budget),
         },
         &mut InstallTarget {
+            names: None,
             held,
             pending,
             input,
@@ -609,6 +610,7 @@ fn target(held: &Held, observation: &Observation) -> Target {
 }
 
 struct InstallTarget<'step, 'input> {
+    names: Option<crate::store::payload::ProcessNames>,
     held: &'step mut Held,
     pending: &'step mut Option<Candidate>,
     input: &'step Input<'input>,
@@ -622,7 +624,7 @@ impl ReplayTarget for InstallTarget<'_, '_> {
     }
 
     fn consume(&mut self, captured: Captured<'_>) -> Result<Progress, Failure> {
-        let mut candidate = capture_candidate(captured, self.input, self.held)?;
+        let mut candidate = capture_candidate(captured, self.input, self.held, &mut self.names)?;
         self.input.operation.check()?;
         if !install_ready(&mut candidate, self.held, self.input.budget)? {
             *self.pending = Some(candidate);
@@ -636,6 +638,7 @@ fn capture_candidate(
     captured: Captured<'_>,
     input: &Input<'_>,
     held: &Held,
+    names: &mut Option<crate::store::payload::ProcessNames>,
 ) -> Result<Candidate, Failure> {
     let observation = captured.endpoint.observation();
     let mut apps = AppsSecond::default();
@@ -653,7 +656,14 @@ fn capture_candidate(
         };
         match target {
             Target::Recent(_) => {
-                payload::load_minute_second(&sample, previous, input.budget, &mut apps);
+                payload::load_minute_rows(&sample, previous, input.budget, &mut apps);
+                payload::load_minute_payload(
+                    &sample,
+                    input.budget,
+                    captured.names_capacity,
+                    names,
+                    &mut apps,
+                );
             }
             Target::Older(_) => {
                 payload::load_minute_rows(&sample, previous, input.budget, &mut apps);

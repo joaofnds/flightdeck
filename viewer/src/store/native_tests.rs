@@ -852,3 +852,7 @@ fn publish_smc_identity(fixture: &mut Fixture) -> IdentityObservation {
         },
     }
 }
+
+#[cfg(test)]
+#[path = "native_name_retry_tests.rs"]
+mod name_retry_tests;

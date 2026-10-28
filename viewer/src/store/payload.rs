@@ -3,7 +3,13 @@ use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use super::{AppsSecond, Missing};
+#[path = "payload_names.rs"]
+mod names;
+#[cfg(test)]
+pub(super) use names::NameTrace;
+pub(super) use names::{NameAdditions, ProcessNames};
+
+use super::Missing;
 use crate::apps::{Amount, ProcessState, Stamp, Unavailable};
 use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::live_app_response::{Bytes, Measure, Observation, Process, Sample};
@@ -95,22 +101,41 @@ impl Payload {
         &self.apps
     }
 
-    pub(super) fn capture(
+    pub(super) fn capture(sample: &Sample, budget: &Arc<ByteBudget>) -> Result<Self, Missing> {
+        let names = ProcessNames::new(sample.processes().len(), budget)?;
+        let (payload, additions) = Self::capture_with_names(sample, &names)?;
+        drop(additions);
+
+        Ok(payload)
+    }
+
+    pub(super) fn capture_with_names(
         sample: &Sample,
-        previous: Option<&AppsSecond>,
-        budget: &Arc<ByteBudget>,
-    ) -> Result<Self, Missing> {
-        let reservation = budget
+        names: &ProcessNames,
+    ) -> Result<(Self, NameAdditions), Missing> {
+        let reservation = names
+            .budget()
             .reserve(Self::capture_bytes(sample))
             .ok_or(Missing::Budget)?;
+        #[cfg(test)]
+        let before = names.work_snapshot();
+        let additions = match names.additions(sample) {
+            Ok(additions) => additions,
+            Err(missing) => {
+                #[cfg(test)]
+                names.record_receipt(sample.selected, before, false);
+                return Err(missing);
+            }
+        };
         let mut rows = Vec::with_capacity(sample.processes().len());
-        let previous = previous
-            .and_then(|apps| apps.processes.as_ref().ok())
-            .map(Arc::as_ref);
         for process in sample.processes() {
-            let name = Self::capture_name(process, previous, budget)?;
+            let name = process
+                .executable_name
+                .as_ref()
+                .map(|name| names.name(name, &additions));
             rows.push(ProcessRow::capture(process, name));
         }
+
         let apps = sample
             .apps()
             .iter()
@@ -121,13 +146,17 @@ impl Payload {
                 footprint_bytes: app.footprint_bytes,
             })
             .collect();
-        Ok(Self {
-            selected: sample.selected,
-            previous: sample.previous,
-            rows,
-            apps,
-            reservation,
-        })
+
+        Ok((
+            Self {
+                selected: sample.selected,
+                previous: sample.previous,
+                rows,
+                apps,
+                reservation,
+            },
+            additions,
+        ))
     }
 
     /// Names own separate reservations; this admission precedes either container allocation.
@@ -136,28 +165,6 @@ impl Payload {
             + size_of::<Self>()
             + sample.processes().len() * size_of::<ProcessRow>()
             + sample.apps().len() * size_of::<AppDetails>()
-    }
-
-    fn capture_name(
-        process: &Process,
-        previous: Option<&Self>,
-        budget: &Arc<ByteBudget>,
-    ) -> Result<Option<Arc<ProcessName>>, Missing> {
-        let Some(name) = &process.executable_name else {
-            return Ok(None);
-        };
-
-        if let Some(previous) = previous {
-            for row in &previous.rows {
-                if let Some(held) = &row.executable_name {
-                    if held.bytes == name.bytes {
-                        return Ok(Some(Arc::clone(held)));
-                    }
-                }
-            }
-        }
-
-        ProcessName::capture(name, budget).map(Some)
     }
 
     /// This payload's header and containers, excluding separately admitted shared names.
@@ -400,3 +407,7 @@ mod tests;
 #[cfg(test)]
 #[path = "payload_name_tests.rs"]
 mod name_tests;
+
+#[cfg(test)]
+#[path = "payload_namespace_tests.rs"]
+mod namespace_tests;

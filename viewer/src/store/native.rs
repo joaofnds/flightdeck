@@ -29,10 +29,12 @@ pub(super) struct Prepared {
     sample_refused: Option<Unavailable>,
     stage: Stage,
     metadata_ready: bool,
+    name_additions: Option<super::payload::NameAdditions>,
     predecessor_eligible: bool,
 }
 
 pub(super) struct Input<'source> {
+    pub names: &'source super::payload::ProcessNames,
     pub source: Publication<'source>,
     pub events: PublicationEvents<'source>,
     pub current: &'source MachineMinute,
@@ -91,6 +93,7 @@ impl std::error::Error for PrepareError {}
 pub(super) enum Admission {
     Frame,
     FrameWork,
+    NameIndex,
     Sample,
     Derivation,
     AppMetadata,
@@ -167,6 +170,7 @@ impl Prepared {
             sample_refused: None,
             stage: Stage::Frame,
             metadata_ready: false,
+            name_additions: None,
             predecessor_eligible: false,
         })
     }
@@ -220,10 +224,17 @@ impl Prepared {
 
     pub fn into_frame(self) -> Option<OwnedFrame> {
         assert!(self.stage == Stage::Ready);
+        assert!(self.name_additions.is_none());
         if self.predecessor_eligible {
             self.frame
         } else {
             None
+        }
+    }
+
+    pub(super) fn commit_names(&mut self, names: &mut super::payload::ProcessNames) {
+        if let Some(additions) = self.name_additions.take() {
+            names.commit(additions);
         }
     }
 
@@ -402,14 +413,13 @@ impl Prepared {
                 .as_ref()
                 .unwrap_or_else(|| unreachable!("sample"))
                 .get();
-            self.apps.processes = Ok(Arc::new(
-                super::Payload::capture(sample, input.previous_apps, budget).map_err(
-                    |missing| match missing {
-                        Missing::Budget => PrepareError::Admission(Admission::Payload),
-                        _ => unreachable!("payload capture refuses only its byte budget"),
-                    },
-                )?,
-            ));
+            let (payload, additions) = super::Payload::capture_with_names(sample, input.names)
+                .map_err(|missing| match missing {
+                    Missing::Budget => PrepareError::Admission(Admission::Payload),
+                    _ => unreachable!("payload capture refuses only its byte budget"),
+                })?;
+            self.apps.processes = Ok(Arc::new(payload));
+            self.name_additions = Some(additions);
         }
         self.stage = Stage::Ready;
         Ok(())

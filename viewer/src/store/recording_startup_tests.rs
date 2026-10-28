@@ -550,3 +550,88 @@ fn write_ticks(path: &Path, frame: &mut polars::prelude::DataFrame) {
         .finish(frame)
         .unwrap();
 }
+
+#[test]
+fn selected_startup_payloads_share_one_input_name_owner_after_startup_retires() {
+    // Goal: the staged startup caller uses the same bounded ownership rule as full loading.
+    // Method: retain both selected-minute payloads, inspect per-capture work, and retire startup.
+    let fixture = crate::store::startup_tests::primary_fixture();
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let observer = Arc::new(ByteBudget::new(64 * 1024));
+    let trace = crate::store::payload::NameTrace::new(4, &observer);
+    let mut held = Held::with_payload(Arc::clone(&budget));
+    held.startup = crate::store::StartupState::Loading;
+    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut startup = Startup::new();
+    let input = Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+
+    crate::store::startup_tests::drive_primary(&mut startup, &input, &mut held, &mut ring);
+    let first = Arc::clone(held.apps.get(4).unwrap().processes.as_ref().unwrap());
+    let second = Arc::clone(held.apps.get(5).unwrap().processes.as_ref().unwrap());
+    let records = trace.finish();
+
+    assert_eq!(first.selected.stamp.publication, 5);
+    assert_eq!(second.selected.stamp.publication, 6);
+    assert_eq!(first.selected.run_tick, 120);
+    assert_eq!(second.selected.run_tick, 121);
+    assert_selected_payload_identity(&first, &fixture.writer.identity().unwrap());
+    assert_selected_payload_identity(&second, &fixture.writer.identity().unwrap());
+    assert_eq!(first.previous.unwrap().publication, 4);
+    assert_eq!(second.previous.unwrap().publication, 5);
+    assert_eq!(records.values().len(), 2);
+    assert_eq!(records.values()[0].index_capacity, 9);
+    assert_eq!(records.values()[1].index_capacity, 9);
+    assert_eq!(records.values()[0].work.new_names, 2);
+    assert_eq!(records.values()[1].work.new_names, 0);
+    let mut name_bytes = 0;
+    for (first, second) in first.iter().zip(second.iter()) {
+        assert_eq!(first.pid, second.pid);
+        let first_name = first.executable_name().unwrap();
+        assert!(std::ptr::eq(first_name, second.executable_name().unwrap()));
+        name_bytes += first_name.reserved_bytes();
+    }
+    println!("startup_name_work={:?}", records.values());
+    drop((startup, held, ring, fixture));
+    assert_eq!(budget.used(), first.bytes() + second.bytes() + name_bytes);
+    drop((first, second, records));
+    assert_eq!(budget.used(), 0);
+    assert_eq!(observer.used(), 0);
+}
+
+fn assert_selected_payload_identity(
+    payload: &crate::store::Payload,
+    identity: &collector::ring::RunIdentity,
+) {
+    assert_eq!(payload.selected.recording, identity.recording.0);
+    assert_eq!(payload.selected.stamp.run, identity.run.0);
+    assert_eq!(payload.selected.stamp.boot, identity.boot.0);
+    let continuous_ns = payload.selected.run_tick * 1_000_000_000;
+    assert_eq!(payload.selected.stamp.continuous_ns, Some(continuous_ns));
+    assert_eq!(payload.selected.stamp.awake_ns, Some(continuous_ns));
+    assert_eq!(
+        payload.selected.wall_ns,
+        Some((1000 + payload.selected.run_tick) * 1_000_000_000)
+    );
+    assert_eq!(payload.len(), 2);
+    for (row, (pid, name)) in payload
+        .iter()
+        .zip([(1, &b"refused\xff"[..]), (7, &b"current"[..])])
+    {
+        assert_eq!(row.pid, pid);
+        assert_eq!(
+            row.creation,
+            Some(collector::ring::ProcessCreation {
+                unique_id: u64::try_from(pid).unwrap(),
+                pid_version: -pid,
+            })
+        );
+        assert_eq!(row.executable_name().unwrap().bytes, name);
+    }
+}
