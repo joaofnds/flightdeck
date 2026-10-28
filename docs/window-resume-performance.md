@@ -202,7 +202,28 @@ about 10 ms of each on the main thread, nearly all of it in building the charts 
 the View, and about 7 ms of that in attributing the Apps of each second and stretch.
 
 The process footprint read 790 to 818 MB for this revision and 739 to 762 MB for the base.
-Which part of the View holds the difference was not measured.
+
+The Store's startup was measured alone, with `resume_bench` built from each revision with
+one addition: after its startup record it takes Views until one holds the Apps of every
+loaded minute and reports that View. These probe builds ran five times each, alternating
+between builds, on a fresh fixture of the same 150 windows. Their SHA-256 identities are
+`8fe612867acd362a2e1cd25802867c6dda23b0a27376a85796f0a6c2dadee52a` for this revision and
+`feca0529ffbb8224ac372f1d5bac5b7cd0a109e715977b2d465c81f028b6a8b2` for the base.
+
+| Store startup, five runs | This revision | Base |
+| --- | --- | --- |
+| Wall time to a View with every App | 324.9 to 385.6 ms, median 364.8 | 253.7 to 288.7 ms, median 256.7 |
+| Process CPU | 1,382 to 1,611 ms, median 1,535 | 815 to 879 ms, median 826 |
+| Process footprint | 343.7 to 352.8 MiB, median 348.8 | 236.0 to 251.7 MiB, median 243.0 |
+
+Both read 516,553 App rows and no bytes from disk. In an earlier run of each that recorded
+both Views, the startup record's View already held every App, so the Store published no
+View before it held the whole hour's Apps, and its first View comes that much later.
+`vmmap -summary` of one process of each, once it held every App, put 43 MB more in live
+malloc regions for this revision and 59 MB more in freed regions that stay dirty, and an
+earlier pair put the freed difference at 88 MB. The live difference is above the 19 MB
+the stretches were estimated at when they were chosen, and below the 135 MB that holding
+every App at every second of the hour would take.
 
 ## Profiling and reproduction
 
