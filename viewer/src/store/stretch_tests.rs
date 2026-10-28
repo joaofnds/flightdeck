@@ -169,15 +169,7 @@ fn a_stretch_of_more_apps_than_it_holds_holds_none() {
     // Method: seconds 1,000 and 1,001 each hold a different half of one App more than a
     // stretch holds, and the chart's Other of the stretch is read.
     let mut held = Held::new();
-    let keys: Vec<Vec<u8>> = (0..=APPS_PER_SECOND_MAX)
-        .map(|index| format!("/{index:05}.app").into_bytes())
-        .collect();
-    let (first, second) = keys.split_at(keys.len() / 2);
-
-    for (wall_second, keys) in [(1_000, first), (1_001, second)] {
-        let used: Vec<_> = keys.iter().map(|key| cpu(key, 1_000)).collect();
-        take(&mut held, wall_second, &used);
-    }
+    take_more_apps_than_a_stretch_holds(&mut held, 1_000);
     take(&mut held, 1_010, &[]);
 
     let view = published(&mut held);
@@ -356,6 +348,33 @@ fn a_window_counts_no_stretch_from_before_the_clock_was_set_back() {
     assert_eq!(chosen_from_stretches.cpu, chosen.cpu);
     assert_eq!(chosen.cpu, ["/Y.app"]);
     assert_eq!(chosen_from_stretches.seconds, 15);
+}
+
+#[test]
+fn a_window_chooses_its_apps_past_a_stretch_of_more_apps_than_it_holds() {
+    // Goal: a stretch that holds no Apps, since its seconds came to more than it holds, adds
+    // none to an App chart's leaders, as a second of more Apps than it holds adds none, and
+    // leaves the chart the Apps of its other seconds. Method: seconds 1,000 and 1,001 each hold
+    // a different half of one App more than a stretch holds, and A uses CPU at every second
+    // from 1,010 to 1,020. The window of 1,000 to 1,020 is chosen from the View's stretches.
+    let mut held = Held::new();
+    take_more_apps_than_a_stretch_holds(&mut held, 1_000);
+    for wall_second in 1_010..=1_020 {
+        take(&mut held, wall_second, &[cpu(b"/A.app", 1_000)]);
+    }
+    let view = published(&mut held);
+    let readings = Readings {
+        stretches: &view.stretches,
+        ..window_one_by_one(&view)
+    };
+    let window = WallSeconds {
+        first: 1_000,
+        last: 1_020,
+    };
+
+    let chosen = chosen_over(&mut Leaders::new(), &readings, window);
+
+    assert_eq!(chosen.cpu, ["/A.app"]);
 }
 
 /// A recording of the ticks `minutes` names, as `seal_minutes` seals them.
@@ -546,6 +565,20 @@ fn resident(key: &[u8], resident_bytes: u64) -> Used<'_> {
 }
 
 /// Takes the second at `wall_second` into `held`, with the Apps `used` names, in key order.
+/// Takes in `wall_second` and the second after it, each holding a different half of one App
+/// more than a stretch holds.
+fn take_more_apps_than_a_stretch_holds(held: &mut Held, wall_second: u64) {
+    let keys: Vec<Vec<u8>> = (0..=APPS_PER_SECOND_MAX)
+        .map(|index| format!("/{index:05}.app").into_bytes())
+        .collect();
+    let (first, second) = keys.split_at(keys.len() / 2);
+
+    for (wall_second, keys) in [(wall_second, first), (wall_second + 1, second)] {
+        let used: Vec<_> = keys.iter().map(|key| cpu(key, 1_000)).collect();
+        take(held, wall_second, &used);
+    }
+}
+
 fn take(held: &mut Held, wall_second: u64, used: &[Used<'_>]) {
     take_published(held, wall_second, wall_second, used);
 }

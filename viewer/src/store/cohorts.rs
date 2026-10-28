@@ -187,12 +187,13 @@ impl Leaders {
         self.choose_cohorts(cohorts);
     }
 
-    /// Adds the Apps of `stretches`. Returns false where they come to more than `APPS_MAX`
-    /// Apps, or a stretch held too many to add them up.
+    /// Adds the Apps of `stretches`, none of a stretch that held too many to add them up, as a
+    /// second that held too many adds none. Returns false where they come to more than
+    /// `APPS_MAX` Apps.
     fn choose_add_stretches(&mut self, stretches: &[Arc<AppsStretch>]) -> bool {
         for stretch in stretches {
             let Some(rows) = stretch.apps() else {
-                return false;
+                continue;
             };
             if !self.choose_add(rows, choose_add_stretch) {
                 return false;
