@@ -305,9 +305,11 @@ pub(super) fn primary_fixture() -> Fixture {
 }
 
 #[test]
-fn staged_history_and_native_clock_jumps_rebuild_cohorts_before_incremental_updates_resume() {
-    // Goal: historical replacement cannot subtract rows that the incremental means never entered.
-    // Method: upgrade old A, append real native N across its cutoff, finish, then roll back.
+fn staged_history_then_a_clock_set_back_leave_the_leaders_of_the_seconds_after_it() {
+    // Goal: once a staged startup completes, the leaders a View yields come from the history it
+    // loaded and the native seconds after it, and after the clock is set back only from the
+    // seconds after the set-back. Method: upgrade old A, append real native N across its
+    // cutoff, finish, then publish a second at an earlier wall second.
     let mut fixture = primary_fixture();
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)

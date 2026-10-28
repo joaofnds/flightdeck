@@ -580,8 +580,6 @@ fn resident_measured_of(stretch: &AppsStretch) -> Vec<Option<(u64, u32)>> {
     rows.iter().map(StretchRow::resident_measured).collect()
 }
 
-/// What A, C, D and E use at `wall_second`, in key order: the CPU time each uses is also the
-/// resident memory it holds.
 /// A View of seconds 100 to 139, each with the Apps `window_used` names.
 fn window_view() -> Arc<View> {
     let mut held = Held::new();
@@ -692,7 +690,6 @@ fn resident(key: &[u8], resident_bytes: u64) -> Used<'_> {
     }
 }
 
-/// Takes the second at `wall_second` into `held`, with the Apps `used` names, in key order.
 /// Takes in `wall_second` and the second after it, each holding a different half of one App
 /// more than a stretch holds.
 fn take_more_apps_than_a_stretch_holds(held: &mut Held, wall_second: u64) {
@@ -707,6 +704,7 @@ fn take_more_apps_than_a_stretch_holds(held: &mut Held, wall_second: u64) {
     }
 }
 
+/// Takes the second at `wall_second` into `held`, with the Apps `used` names, in key order.
 fn take(held: &mut Held, wall_second: u64, used: &[Used<'_>]) {
     take_published(held, wall_second, wall_second, used);
 }
