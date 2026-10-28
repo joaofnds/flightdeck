@@ -96,19 +96,24 @@ impl Totals {
     /// Every App of `apps` added up.
     #[must_use]
     pub fn of(apps: &[AppRow]) -> Self {
+        Self::of_rows(apps)
+    }
+
+    /// Every App of `rows`, one chart point's, added up.
+    pub(super) fn of_rows<R: PointRow>(rows: &[R]) -> Self {
         let mut totals = Self::default();
-        for row in apps {
+        for row in rows {
             totals.add(row);
         }
 
         totals
     }
 
-    fn add(&mut self, row: &AppRow) {
+    fn add<R: PointRow>(&mut self, row: &R) {
         for (sum, metric) in self.sums.iter_mut().zip(METRICS) {
             sum.add(&row.measure(ranked_metric(metric)));
         }
-        if !row.membership_complete {
+        if !row.membership_complete() {
             self.incomplete += 1;
         }
         let resident = row.measure(Metric::Resident);
@@ -157,6 +162,41 @@ impl Sum {
     }
 }
 
+/// One App's readings at one chart point, one second's or one stretch's.
+pub(super) trait PointRow: Rankable {
+    fn name(&self) -> &RankedApp;
+    /// Whether the App rule found every member of the App at each second of the point.
+    fn membership_complete(&self) -> bool;
+}
+
+/// The Apps one chart point shows, one second's or one stretch's.
+pub(super) trait PointApps {
+    type Row: PointRow;
+
+    /// Every App of the point, once each, in key order.
+    fn rows(&self) -> &[Self::Row];
+    /// Every App of `rows` added up, as `Totals::of` adds them.
+    fn totals(&self) -> &Totals;
+    /// The interval the point's rates are taken over, where it is known.
+    fn elapsed_ns(&self) -> Option<u64>;
+    /// Whether the point holds its Apps.
+    fn holds_apps(&self) -> bool;
+    /// How completely the point's readings found the Mac's processes.
+    fn completeness(&self) -> Completeness;
+}
+
+/// How completely one chart point's readings found the Mac's processes.
+#[derive(Clone, Copy)]
+pub(super) struct Completeness {
+    pub(super) membership_complete: bool,
+    pub(super) ungrouped_members: u32,
+    /// The ungrouped members live at the point, which the chart of resident memory counts,
+    /// since an exited process holds no memory.
+    pub(super) live_ungrouped_members: u32,
+    pub(super) usage_refused: u32,
+    pub(super) usage_gone: u32,
+}
+
 impl AppsSecond {
     /// What the second shows on the App chart of `metric` whose own lines draw `cohort`.
     #[must_use]
@@ -165,164 +205,228 @@ impl AppsSecond {
         metric: AppAttributionMetric,
         cohort: &[Arc<RankedApp>],
     ) -> Attribution {
-        assert!(cohort.len() <= COHORT_MAX);
-        let Some(place) = METRICS.iter().position(|each| *each == metric) else {
-            unreachable!("Overview draws no App chart of GPU time");
-        };
-
-        let mut attribution = Attribution {
-            apps: [None; COHORT_MAX],
-            other: None,
-        };
-        if self.missing.is_some() {
-            return attribution;
-        }
-
-        let mut taken = Totals::default();
-        let mut found = 0;
-        for (reading, name) in attribution.apps.iter_mut().zip(cohort) {
-            let Some(row) = self.row(name) else {
-                continue;
-            };
-            let measure = row.measure(ranked_metric(metric));
-
-            *reading = Some(AttributionReading {
-                rate: attribution_rate(metric, &measure, self.elapsed_ns),
-                measure: Some(measure),
-                membership_complete: row.membership_complete,
-            });
-            taken.add(row);
-            found += 1;
-        }
-        attribution.other = Some(self.attribution_other(metric, place, &taken, found));
-
-        attribution
-    }
-
-    /// The Other of the chart of `metric`, the resource at `place` among `METRICS`, where the
-    /// chart's own lines draw the `found` Apps `taken` adds up.
-    fn attribution_other(
-        &self,
-        metric: AppAttributionMetric,
-        place: usize,
-        taken: &Totals,
-        found: usize,
-    ) -> OtherReading {
-        assert!(found <= self.apps.len());
-        let Ok(app_count) = u32::try_from(self.apps.len() - found) else {
-            unreachable!("a second holds at most `APPS_PER_SECOND_MAX` Apps");
-        };
-
-        if app_count == 0 {
-            return OtherReading {
-                app_count,
-                reading: self.attribution_other_empty(metric),
-            };
-        }
-        let measure = self.totals.sums[place].without(&taken.sums[place]);
-        OtherReading {
-            app_count,
-            reading: AttributionReading {
-                rate: attribution_rate(metric, &measure, self.elapsed_ns),
-                measure: Some(measure),
-                membership_complete: self.totals.incomplete == taken.incomplete,
-            },
-        }
-    }
-
-    /// The Other of a chart whose own lines draw every App of the second, which used nothing
-    /// where the second's readings found every process, and is unknown where they missed one.
-    fn attribution_other_empty(&self, metric: AppAttributionMetric) -> AttributionReading {
-        if !self.found_every_process(self.ungrouped_members) {
-            return AttributionReading {
-                rate: None,
-                measure: None,
-                membership_complete: true,
-            };
-        }
-
-        AttributionReading {
-            rate: metric.rate(0, self.elapsed_ns),
-            measure: Some(Measure {
-                known: 0,
-                measured_members: 0,
-                unavailable_members: 0,
-                overflowed: false,
-            }),
-            membership_complete: true,
-        }
+        attribution(self, metric, cohort)
     }
 
     /// What the second shows on the chart of resident memory by App whose own lines draw
     /// `cohort`.
     #[must_use]
     pub fn resident(&self, cohort: &[Arc<RankedApp>]) -> Resident {
-        assert!(cohort.len() <= COHORT_MAX);
+        resident(self, cohort)
+    }
+}
 
-        let mut resident = Resident {
-            apps: [None; COHORT_MAX],
-            other: None,
+impl PointApps for AppsSecond {
+    type Row = AppRow;
+
+    fn rows(&self) -> &[AppRow] {
+        &self.apps
+    }
+
+    fn totals(&self) -> &Totals {
+        &self.totals
+    }
+
+    fn elapsed_ns(&self) -> Option<u64> {
+        self.elapsed_ns
+    }
+
+    fn holds_apps(&self) -> bool {
+        self.missing.is_none()
+    }
+
+    fn completeness(&self) -> Completeness {
+        Completeness {
+            membership_complete: self.membership_complete,
+            ungrouped_members: self.ungrouped_members,
+            live_ungrouped_members: self.live_ungrouped_members,
+            usage_refused: self.usage_refused,
+            usage_gone: self.usage_gone,
+        }
+    }
+}
+
+impl PointRow for AppRow {
+    fn name(&self) -> &RankedApp {
+        &self.name
+    }
+
+    fn membership_complete(&self) -> bool {
+        self.membership_complete
+    }
+}
+
+/// What `point` shows on the App chart of `metric` whose own lines draw `cohort`.
+pub(super) fn attribution<P: PointApps>(
+    point: &P,
+    metric: AppAttributionMetric,
+    cohort: &[Arc<RankedApp>],
+) -> Attribution {
+    assert!(cohort.len() <= COHORT_MAX);
+    let Some(place) = METRICS.iter().position(|each| *each == metric) else {
+        unreachable!("Overview draws no App chart of GPU time");
+    };
+
+    let mut attribution = Attribution {
+        apps: [None; COHORT_MAX],
+        other: None,
+    };
+    if !point.holds_apps() {
+        return attribution;
+    }
+
+    let mut taken = Totals::default();
+    let mut found = 0;
+    for (reading, name) in attribution.apps.iter_mut().zip(cohort) {
+        let Some(row) = row(point, name) else {
+            continue;
         };
-        if self.missing.is_some() {
-            return resident;
-        }
+        let measure = row.measure(ranked_metric(metric));
 
-        let mut taken = Totals::default();
-        for (reading, name) in resident.apps.iter_mut().zip(cohort) {
-            let Some(row) = self.row(name) else {
-                continue;
-            };
-            let measure = row.measure(Metric::Resident);
-            if !has_resident(&measure) {
-                continue;
-            }
-
-            *reading = Some(measure);
-            taken.add(row);
-        }
-        resident.other = Some(self.resident_other(&taken));
-
-        resident
+        *reading = Some(AttributionReading {
+            rate: attribution_rate(metric, &measure, point.elapsed_ns()),
+            measure: Some(measure),
+            membership_complete: row.membership_complete(),
+        });
+        taken.add(row);
+        found += 1;
     }
+    attribution.other = Some(attribution_other(point, metric, place, &taken, found));
 
-    /// The Other of the chart of resident memory, where its own lines draw the Apps `taken` adds
-    /// up.
-    fn resident_other(&self, taken: &Totals) -> ResidentOther {
-        assert!(taken.resident_apps <= self.totals.resident_apps);
-        let app_count = self.totals.resident_apps - taken.resident_apps;
+    attribution
+}
 
-        if app_count == 0 {
-            let found_every_process = self.found_every_process(self.live_ungrouped_members);
-            return ResidentOther {
-                app_count,
-                resident: found_every_process.then_some(Measure {
-                    known: 0,
-                    measured_members: 0,
-                    unavailable_members: 0,
-                    overflowed: false,
-                }),
-            };
-        }
-        ResidentOther {
+/// The Other of `point`'s chart of `metric`, the resource at `place` among `METRICS`, where the
+/// chart's own lines draw the `found` Apps `taken` adds up.
+fn attribution_other<P: PointApps>(
+    point: &P,
+    metric: AppAttributionMetric,
+    place: usize,
+    taken: &Totals,
+    found: usize,
+) -> OtherReading {
+    assert!(found <= point.rows().len());
+    let Ok(app_count) = u32::try_from(point.rows().len() - found) else {
+        unreachable!("a point holds at most `APPS_PER_SECOND_MAX` Apps");
+    };
+
+    if app_count == 0 {
+        return OtherReading {
             app_count,
-            resident: Some(self.totals.resident.without(&taken.resident)),
+            reading: attribution_other_empty(point, metric),
+        };
+    }
+    let totals = point.totals();
+    let measure = totals.sums[place].without(&taken.sums[place]);
+    OtherReading {
+        app_count,
+        reading: AttributionReading {
+            rate: attribution_rate(metric, &measure, point.elapsed_ns()),
+            measure: Some(measure),
+            membership_complete: totals.incomplete == taken.incomplete,
+        },
+    }
+}
+
+/// The Other of a chart whose own lines draw every App of `point`, which used nothing where the
+/// point's readings found every process, and is unknown where they missed one.
+fn attribution_other_empty<P: PointApps>(
+    point: &P,
+    metric: AppAttributionMetric,
+) -> AttributionReading {
+    let completeness = point.completeness();
+    if !completeness.found_every_process(completeness.ungrouped_members) {
+        return AttributionReading {
+            rate: None,
+            measure: None,
+            membership_complete: true,
+        };
+    }
+
+    AttributionReading {
+        rate: metric.rate(0, point.elapsed_ns()),
+        measure: Some(Measure {
+            known: 0,
+            measured_members: 0,
+            unavailable_members: 0,
+            overflowed: false,
+        }),
+        membership_complete: true,
+    }
+}
+
+/// What `point` shows on the chart of resident memory by App whose own lines draw `cohort`.
+pub(super) fn resident<P: PointApps>(point: &P, cohort: &[Arc<RankedApp>]) -> Resident {
+    assert!(cohort.len() <= COHORT_MAX);
+
+    let mut resident = Resident {
+        apps: [None; COHORT_MAX],
+        other: None,
+    };
+    if !point.holds_apps() {
+        return resident;
+    }
+
+    let mut taken = Totals::default();
+    for (reading, name) in resident.apps.iter_mut().zip(cohort) {
+        let Some(row) = row(point, name) else {
+            continue;
+        };
+        let measure = row.measure(Metric::Resident);
+        if !has_resident(&measure) {
+            continue;
         }
+
+        *reading = Some(measure);
+        taken.add(row);
     }
+    resident.other = Some(resident_other(point, &taken));
 
-    /// The row of the App `name` names, where the second holds it.
-    fn row(&self, name: &RankedApp) -> Option<&AppRow> {
-        let key = name.kind.key(&name.bytes);
-        let index = self
-            .apps
-            .binary_search_by(|row| row.name.kind.key(&row.name.bytes).cmp(&key))
-            .ok()?;
+    resident
+}
 
-        Some(&self.apps[index])
+/// The Other of `point`'s chart of resident memory, where its own lines draw the Apps `taken`
+/// adds up.
+fn resident_other<P: PointApps>(point: &P, taken: &Totals) -> ResidentOther {
+    let totals = point.totals();
+    assert!(taken.resident_apps <= totals.resident_apps);
+    let app_count = totals.resident_apps - taken.resident_apps;
+
+    if app_count == 0 {
+        let completeness = point.completeness();
+        let found_every_process =
+            completeness.found_every_process(completeness.live_ungrouped_members);
+        return ResidentOther {
+            app_count,
+            resident: found_every_process.then_some(Measure {
+                known: 0,
+                measured_members: 0,
+                unavailable_members: 0,
+                overflowed: false,
+            }),
+        };
     }
+    ResidentOther {
+        app_count,
+        resident: Some(totals.resident.without(&taken.resident)),
+    }
+}
 
-    /// Whether the second's readings found every process, where `ungrouped_members` of them
-    /// joined no App.
-    fn found_every_process(&self, ungrouped_members: u32) -> bool {
+/// The row of the App `name` names, where `point` holds it.
+fn row<'point, P: PointApps>(point: &'point P, name: &RankedApp) -> Option<&'point P::Row> {
+    let key = name.kind.key(&name.bytes);
+    let rows = point.rows();
+    let index = rows
+        .binary_search_by(|row| row.name().kind.key(&row.name().bytes).cmp(&key))
+        .ok()?;
+
+    Some(&rows[index])
+}
+
+impl Completeness {
+    /// Whether the readings found every process, where `ungrouped_members` of them joined no
+    /// App.
+    fn found_every_process(self, ungrouped_members: u32) -> bool {
         let complete = [
             self.membership_complete,
             ungrouped_members == 0,
