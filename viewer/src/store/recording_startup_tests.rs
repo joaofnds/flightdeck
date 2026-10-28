@@ -3,6 +3,9 @@ use super::*;
 #[path = "startup_boundary_tests.rs"]
 mod boundaries;
 
+#[path = "startup_pending_tests.rs"]
+mod pending;
+
 #[test]
 fn staged_machine_work_counts_the_refused_projection_and_its_compatibility_reduction() {
     // Goal: staged source-work accounting includes the existing compatibility fallback.
