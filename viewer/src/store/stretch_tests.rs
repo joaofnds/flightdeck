@@ -190,6 +190,28 @@ fn the_store_lets_go_of_the_oldest_stretch_past_the_loaded_hour() {
 }
 
 #[test]
+fn a_reset_store_holds_no_stretch_of_the_seconds_before_it() {
+    // Goal: a store reset for a load that replaces what it held keeps no stretch of the seconds
+    // it held before, closed or open. Method: close stretch 100 and open 101, each holding A,
+    // reset the store, take wall seconds 10,000 and 10,010, and read the View's stretches.
+    let mut held = Held::new();
+    take(&mut held, 1_000, &[cpu(b"/A.app", 1_000)]);
+    take(&mut held, 1_010, &[cpu(b"/A.app", 1_000)]);
+
+    held.reset();
+    take(&mut held, 10_000, &[]);
+    take(&mut held, 10_010, &[]);
+
+    let view = published(&mut held);
+    let stretches: Vec<_> = view
+        .stretches
+        .iter()
+        .map(|stretch| stretch.stretch)
+        .collect();
+    assert_eq!(stretches, [1_000]);
+}
+
+#[test]
 fn a_view_of_the_whole_loaded_hour_holds_back_no_second_the_live_span_has_room_for() {
     // Goal: while the main thread holds a View of every stretch the store holds, the store takes
     // each second its live span has a spare buffer for, since those seconds close fewer stretches
