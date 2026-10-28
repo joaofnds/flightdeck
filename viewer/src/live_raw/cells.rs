@@ -566,15 +566,15 @@ impl<'a> View<'a> {
         let reading = system.map(|system| &system.reading);
         let machine = system.map(|system| &system.machine);
         match name {
-            "load_average_1" => reading
-                .and_then(|reading| reading.load_average)
-                .map_or(Cell::Null, |averages| Cell::Float64(averages[0])),
-            "load_average_5" => reading
-                .and_then(|reading| reading.load_average)
-                .map_or(Cell::Null, |averages| Cell::Float64(averages[1])),
-            "load_average_15" => reading
-                .and_then(|reading| reading.load_average)
-                .map_or(Cell::Null, |averages| Cell::Float64(averages[2])),
+            "load_average_1" => {
+                self.machine.tick.load_average()[0].map_or(Cell::Null, Cell::Float64)
+            }
+            "load_average_5" => {
+                self.machine.tick.load_average()[1].map_or(Cell::Null, Cell::Float64)
+            }
+            "load_average_15" => {
+                self.machine.tick.load_average()[2].map_or(Cell::Null, Cell::Float64)
+            }
             "open_files" => optional_unsigned(reading.and_then(|reading| reading.open_files)),
             "open_files_limit" => {
                 optional_unsigned(reading.and_then(|reading| reading.open_files_limit))

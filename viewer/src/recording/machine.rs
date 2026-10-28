@@ -18,6 +18,10 @@ use polars::prelude::{
 
 use super::{Refused, ScopedSealedMinute as SealedMinute, ordered, placement};
 
+#[cfg(test)]
+#[path = "machine_saved_load_tests.rs"]
+mod saved_load_tests;
+
 /// The ticks table's columns every minute holds, of those the store reads.
 const TICK_COLUMNS: [&str; 10] = [
     "publication",
@@ -127,6 +131,8 @@ pub struct TickRow {
     pub system: Option<collector::ring::SystemSnapshot>,
     /// Saved labels outside the native fixed-text domain, in model/chip/architecture order.
     pub saved_computer: Option<Box<[Option<String>; 3]>>,
+    /// Partial saved averages whose individual cells the native array cannot express.
+    pub saved_load_average: Option<[Option<f64>; 3]>,
     /// `None` where the tick published no battery reading.
     pub battery: Option<BatteryReading>,
     /// `None` where the tick published no disks.
@@ -229,6 +235,7 @@ impl MachineMinute {
             battery: tick.battery,
             system: tick.system,
             saved_computer: None,
+            saved_load_average: None,
             disks: tick.disks,
         });
         for (cpu, ticks) in (0_u32..).zip(&tick.cpus) {
@@ -290,6 +297,15 @@ impl MachineMinute {
 }
 
 impl TickRow {
+    pub(crate) fn load_average(&self) -> [Option<f64>; 3] {
+        self.saved_load_average.unwrap_or_else(|| {
+            self.system
+                .as_ref()
+                .and_then(|system| system.reading.load_average)
+                .map_or([None; 3], |averages| averages.map(Some))
+        })
+    }
+
     pub(crate) fn computer_text(&self) -> [Option<&str>; 3] {
         if let Some(saved) = self.saved_computer.as_deref() {
             return saved.each_ref().map(|text| text.as_deref());
@@ -413,6 +429,7 @@ fn read_ticks_rows(frame: &DataFrame, into: &mut Vec<TickRow>) -> Result<(), Ref
             performance_levels: None,
             system: None,
             saved_computer: None,
+            saved_load_average: None,
             battery: None,
             disks: None,
         });
@@ -473,9 +490,14 @@ fn read_ticks_system_snapshot(
     let averages = ["load_average_1", "load_average_5", "load_average_15"]
         .map(|name| Cells::<Float64Type>::named(frame, name)?.optional(row));
     let [one, five, fifteen] = averages;
-    let load_average = match (one?, five?, fifteen?) {
-        (Some(one), Some(five), Some(fifteen)) => Some([one, five, fifteen]),
-        _ => None,
+    let averages = [one?, five?, fifteen?];
+    let load_average = match averages {
+        [Some(one), Some(five), Some(fifteen)] => Some([one, five, fifteen]),
+        [None, None, None] => None,
+        _ => {
+            tick.saved_load_average = Some(averages);
+            None
+        }
     };
     let in_use_bytes =
         Cells::<UInt64Type>::named(frame, "gpu_memory_in_use_bytes")?.optional(row)?;

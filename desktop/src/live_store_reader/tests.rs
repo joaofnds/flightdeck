@@ -207,6 +207,7 @@ fn core_tick(publication: u64) -> viewer::recording::TickRow {
             ..collector::ring::SystemSnapshot::default()
         }),
         saved_computer: None,
+        saved_load_average: None,
         battery: None,
         disks: None,
     }

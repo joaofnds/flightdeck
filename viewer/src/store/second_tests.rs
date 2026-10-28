@@ -1033,6 +1033,7 @@ impl Machine {
                 performance_levels: None,
                 system: None,
                 saved_computer: None,
+                saved_load_average: None,
                 battery: None,
                 disks: None,
             },

@@ -413,6 +413,11 @@ fn validate_numbers(tick: &Tick) -> Result<()> {
     validate_machine_numbers(&MachineNumbers {
         smc,
         temperatures: [tick.cpu_celsius, tick.gpu_celsius],
+        load_average: tick
+            .system
+            .as_ref()
+            .and_then(|system| system.reading.load_average)
+            .map_or([None; 3], |averages| averages.map(Some)),
         system: tick.system.as_ref(),
         disks: tick.disks.as_ref(),
     })
@@ -422,6 +427,7 @@ pub(crate) fn validate_machine_tick(tick: &crate::recording::TickRow) -> Result<
     validate_machine_numbers(&MachineNumbers {
         smc: [tick.power_watts, tick.soc_celsius],
         temperatures: [tick.cpu_celsius, tick.gpu_celsius],
+        load_average: tick.load_average(),
         system: tick.system.as_ref(),
         disks: tick.disks.as_ref(),
     })
@@ -430,6 +436,7 @@ pub(crate) fn validate_machine_tick(tick: &crate::recording::TickRow) -> Result<
 struct MachineNumbers<'tick> {
     smc: [Option<f32>; 2],
     temperatures: [Option<f32>; 2],
+    load_average: [Option<f64>; 3],
     system: Option<&'tick collector::ring::SystemSnapshot>,
     disks: Option<&'tick collector::disks::DiskSnapshot>,
 }
@@ -445,6 +452,7 @@ fn validate_machine_numbers(numbers: &MachineNumbers<'_>) -> Result<()> {
             return Err(Error::Bound("temperature reading"));
         }
     }
+    validate_machine_numbers_load_average(&numbers.load_average)?;
     if let Some(system) = numbers.system {
         validate_system(system)?;
     }
@@ -472,17 +480,19 @@ fn copy_event(event: &collector::tracker::Event) -> collector::tracker::Event {
     }
 }
 
-fn validate_system(system: &collector::ring::SystemSnapshot) -> Result<()> {
-    if let Some(averages) = system.reading.load_average {
-        for average in averages {
-            if !average.is_finite() {
-                return Err(Error::Bound("system load average"));
-            }
-            if average < 0.0 {
-                return Err(Error::Bound("system load average"));
-            }
+fn validate_machine_numbers_load_average(averages: &[Option<f64>; 3]) -> Result<()> {
+    for average in averages.iter().flatten() {
+        if !average.is_finite() {
+            return Err(Error::Bound("system load average"));
+        }
+        if *average < 0.0 {
+            return Err(Error::Bound("system load average"));
         }
     }
+    Ok(())
+}
+
+fn validate_system(system: &collector::ring::SystemSnapshot) -> Result<()> {
     let machine = &system.machine;
     for text in [
         machine.model.as_ref(),
