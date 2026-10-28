@@ -5,7 +5,8 @@ use super::apps::TickApps;
 use super::stretch::StretchRow;
 use super::{
     APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Cohorts, Held, Leaders,
-    MachineSecond, Mailbox, Missing, Readings, STRETCHES_MAX, View, WallSeconds, recording,
+    MachineSecond, Mailbox, Missing, Readings, SECONDS_HELD_MAX, STRETCHES_MAX, View, WallSeconds,
+    recording,
 };
 use crate::AppAttributionMetric;
 use crate::live::identity_fixture::Fixture;
@@ -186,6 +187,36 @@ fn the_store_lets_go_of_the_oldest_stretch_past_the_loaded_hour() {
     let view = published(&mut held);
     assert_eq!(view.stretches.len(), STRETCHES_MAX);
     assert_eq!(view.stretches[0].stretch, 102);
+}
+
+#[test]
+fn a_view_of_the_whole_loaded_hour_holds_back_no_second_the_live_span_has_room_for() {
+    // Goal: while the main thread holds a View of every stretch the store holds, the store takes
+    // each second its live span has a spare buffer for, since those seconds close fewer stretches
+    // than there are spare ones. Method: fill every span from wall second 1,000 up to the last
+    // second of a stretch, hold the View, take a second at a time until the store refuses one,
+    // and count the seconds it took beside the spare seconds.
+    let mut held = Held::new();
+    let newest = 1_000 + (u64::try_from(STRETCHES_MAX).unwrap() + 2) * 10 - 1;
+    for wall_second in 1_000..=newest {
+        let unread = TickApps::Missing(&Missing::Unread);
+        assert!(held.take(&RUN, &second_at(wall_second), unread));
+    }
+    let view = published(&mut held);
+    assert_eq!(view.stretches.len(), STRETCHES_MAX);
+
+    let spare = u64::try_from(SECONDS_HELD_MAX).unwrap();
+    let mut taken = 0;
+    for wall_second in newest + 1..=newest + spare + 1 {
+        let unread = TickApps::Missing(&Missing::Unread);
+        if !held.take(&RUN, &second_at(wall_second), unread) {
+            break;
+        }
+        taken += 1;
+    }
+
+    assert_eq!(taken, spare);
+    assert_eq!(view.stretches[0].stretch, 101);
 }
 
 #[test]
