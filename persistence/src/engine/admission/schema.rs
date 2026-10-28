@@ -111,6 +111,7 @@ fn validate_arrow_field(
     physical: &SchemaElement,
     remaining: &mut usize,
 ) -> Result<()> {
+    field.nullable().map_err(arrow_error)?;
     let name = field
         .name()
         .map_err(arrow_error)?

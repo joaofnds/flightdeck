@@ -13,7 +13,9 @@ use polars::prelude::{
 use polars_arrow_format::ipc;
 use polars_parquet::parquet::metadata::ThriftFileMetadata;
 use polars_parquet_format::thrift::protocol::TCompactOutputProtocol;
-use polars_parquet_format::{ConvertedType, DecimalType, KeyValue, LogicalType};
+use polars_parquet_format::{
+    ConvertedType, DecimalType, FieldRepetitionType, KeyValue, LogicalType,
+};
 
 use super::{validate_footer, validate_metadata};
 use crate::Error;
@@ -53,6 +55,32 @@ fn reads_legacy_raw_arrow_metadata_without_changing_saved_counter_types() {
         let bytes = STANDARD.decode(metadata.value.as_ref().unwrap()).unwrap();
         assert_eq!(&bytes[..4], &[255; 4]);
         metadata.value = Some(STANDARD.encode(&bytes[8..]));
+    });
+
+    let values = fixture.counters();
+
+    assert_eq!(values, [0, u64::MAX]);
+}
+
+#[test]
+fn reads_a_nonnullable_arrow_override_for_optional_physical_storage() {
+    // Goal: validating nullable offsets preserves native override and storage differences.
+    // Method: declare a nonnullable Arrow counter above the writer's optional physical field.
+    let fixture = Fixture::new();
+    let encoded = arrow_fields_metadata(vec![arrow_counter_field()]);
+    fixture.change_metadata(|metadata| {
+        assert_eq!(
+            metadata.schema[1].repetition_type,
+            Some(FieldRepetitionType::OPTIONAL)
+        );
+        let entry = metadata
+            .key_value_metadata
+            .as_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry.key == "ARROW:schema")
+            .unwrap();
+        entry.value = Some(encoded);
     });
 
     let values = fixture.counters();
@@ -217,6 +245,22 @@ fn refuses_arrow_names_that_disagree_with_physical_column_names() {
         result,
         Err(Error::Bound("parquet Arrow schema metadata"))
     ));
+}
+
+#[test]
+fn refuses_an_arrow_nullability_offset_outside_the_schema_buffer() {
+    // Goal: malformed nullability returns an inline refusal before native schema inference.
+    // Method: corrupt only the nullable slot in an otherwise valid scalar Arrow override.
+    let fixture = Fixture::new();
+    let encoded = arrow_invalid_nullability_metadata();
+    fixture.change_arrow_metadata(|metadata| metadata.value = Some(encoded));
+
+    let result = fixture.query_result();
+
+    assert!(
+        matches!(result, Err(Error::Bound("parquet Arrow schema metadata"))),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -495,4 +539,54 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.root).unwrap();
     }
+}
+
+struct ArrowTableSlot {
+    table: usize,
+    index: usize,
+}
+
+fn arrow_invalid_nullability_metadata() -> String {
+    let mut field = arrow_counter_field();
+    field.nullable = true;
+    let mut bytes = STANDARD.decode(arrow_fields_metadata(vec![field])).unwrap();
+    let message = arrow_invalid_nullability_indirect(&bytes, 0);
+    let schema_field = arrow_invalid_nullability_slot(
+        &bytes,
+        &ArrowTableSlot {
+            table: message,
+            index: 2,
+        },
+    );
+    let schema = arrow_invalid_nullability_indirect(&bytes, schema_field);
+    let fields_field = arrow_invalid_nullability_slot(
+        &bytes,
+        &ArrowTableSlot {
+            table: schema,
+            index: 1,
+        },
+    );
+    let fields = arrow_invalid_nullability_indirect(&bytes, fields_field);
+    let field = arrow_invalid_nullability_indirect(&bytes, fields + 4);
+    let distance = i32::from_le_bytes(bytes[field..field + 4].try_into().unwrap());
+    let vtable = usize::try_from(i64::try_from(field).unwrap() - i64::from(distance)).unwrap();
+    let nullable_slot = vtable + 6;
+    assert_ne!(&bytes[nullable_slot..nullable_slot + 2], &[0, 0]);
+    assert!(bytes.len() < usize::from(u16::MAX));
+    bytes[nullable_slot..nullable_slot + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+    STANDARD.encode(bytes)
+}
+
+fn arrow_invalid_nullability_indirect(bytes: &[u8], position: usize) -> usize {
+    let relative = u32::from_le_bytes(bytes[position..position + 4].try_into().unwrap());
+    position + usize::try_from(relative).unwrap()
+}
+
+fn arrow_invalid_nullability_slot(bytes: &[u8], slot: &ArrowTableSlot) -> usize {
+    let distance = i32::from_le_bytes(bytes[slot.table..slot.table + 4].try_into().unwrap());
+    let vtable = usize::try_from(i64::try_from(slot.table).unwrap() - i64::from(distance)).unwrap();
+    let position = vtable + 4 + 2 * slot.index;
+    let relative = u16::from_le_bytes(bytes[position..position + 2].try_into().unwrap());
+    assert!(relative > 0);
+    slot.table + usize::from(relative)
 }
