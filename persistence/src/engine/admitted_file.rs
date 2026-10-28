@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use polars::prelude::{DataFrame, ParallelStrategy, ParquetReader, SerReader};
 use polars_buffer::Buffer;
+use polars_parquet::parquet::metadata::FileMetadata;
 
 use super::admission;
 use crate::resources::{ByteBudget, ByteReservation};
@@ -65,6 +66,19 @@ impl AdmittedFile {
         columns: &[&str],
         row_limit: Option<u32>,
     ) -> Result<DataFrame> {
+        self.read_prefix_with_metadata(columns, row_limit, |footer| {
+            polars_parquet::parquet::read::deserialize_metadata(footer)
+                .map_err(polars::error::PolarsError::from)
+                .map_err(Error::from)
+        })
+    }
+
+    pub(super) fn read_prefix_with_metadata(
+        &self,
+        columns: &[&str],
+        row_limit: Option<u32>,
+        materialize: impl FnOnce(Buffer<u8>) -> Result<FileMetadata>,
+    ) -> Result<DataFrame> {
         if let Some(reservation) = &self.reservation {
             assert_eq!(reservation.bytes(), self.bytes.capacity());
         }
@@ -89,8 +103,7 @@ impl AdmittedFile {
         crate::work::ingestion::record_content(crate::work::ingestion::Kind::ProjectionDecode, 0);
         // Native statistics borrow the footer; all metadata aliases must die inside this scope.
         Buffer::with_slice(self.read_prefix_footer()?, |footer| {
-            let metadata = polars_parquet::parquet::read::deserialize_metadata(footer)
-                .map_err(polars::error::PolarsError::from)?;
+            let metadata = materialize(footer)?;
             let mut reader = ParquetReader::new(Cursor::new(self.bytes.as_slice()))
                 .set_rechunk(false)
                 .with_slice(slice)
@@ -107,7 +120,7 @@ impl AdmittedFile {
         })
     }
 
-    fn read_prefix_footer(&self) -> Result<&[u8]> {
+    pub(super) fn read_prefix_footer(&self) -> Result<&[u8]> {
         let end = self
             .bytes
             .len()

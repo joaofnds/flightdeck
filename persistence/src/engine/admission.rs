@@ -23,6 +23,7 @@ use polars_parquet_format::{
 
 use crate::{Error, Result};
 use protocol::BoundedProtocol;
+pub(super) use protocol::VECTOR_BYTES_MAX;
 
 pub(super) const FILE_BYTES_MAX: u64 = 512 * 1024 * 1024;
 const FOOTER_BYTES_MAX: u64 = 4 * 1024 * 1024;
@@ -74,7 +75,7 @@ pub(super) fn cursor_scratch_bytes() -> Result<usize> {
         usize::try_from(FOOTER_BYTES_MAX).map_err(|_| Error::Bound("parquet footer bytes"))?;
     let header =
         usize::try_from(PAGE_HEADER_BYTES_MAX).map_err(|_| Error::Bound("parquet page header"))?;
-    let metadata = protocol::VECTOR_BYTES_MAX + 8 * footer;
+    let metadata = VECTOR_BYTES_MAX + 8 * footer;
     // Fresh native byte vectors request max(8, n) <= 8n; typed lists reserve exactly.
     // Take(n) and read_to_end's EOF probe prevent later growth, including on short input.
     // The cumulative ledgers cover replaced fields; footer metadata survives every phase.

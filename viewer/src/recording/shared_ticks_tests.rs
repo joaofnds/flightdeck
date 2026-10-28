@@ -11,6 +11,57 @@ use crate::live::identity_fixture::Fixture;
 use crate::live_apps::committed::Endpoint;
 
 #[test]
+fn exhausted_native_metadata_budget_defers_the_machine_union_without_losing_its_input() {
+    // Goal: admitted ticks cannot allocate native metadata outside the shared budget.
+    // Method: deny after capture, then release competing ownership and retry exact readings.
+    let (fixture, marker) = shared_fixture();
+    let original = ScopedSealedMinute::open(&fixture.root, &marker).unwrap();
+    let mut expected = MachineMinute::default();
+    super::read_machine(&original, &mut expected).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let minute = ScopedSealedMinute::open_with_inputs_using(
+        &SealedSource {
+            root: &fixture.root,
+            marker: &marker,
+        },
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
+    let trace = persistence::work::ingestion::Trace::new(manifest.identity.run.recording);
+    let retained = budget.reserve(budget.maximum() - budget.used()).unwrap();
+    let mut machine = MachineMinute::default();
+
+    let scope = trace.enter();
+    let refused = read_machine_and_endpoints(&minute, &mut machine);
+    drop(scope);
+
+    assert!(matches!(
+        refused,
+        Err(super::Refused::Input(
+            persistence::engine::AdmissionRefusal::Budget
+        ))
+    ));
+    assert_eq!(machine, MachineMinute::default());
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|event| { event.kind == persistence::work::ingestion::Kind::ProjectionDecode })
+    );
+    drop(retained);
+    let endpoints = read_machine_and_endpoints(&minute, &mut machine).unwrap();
+    assert_eq!(machine, expected);
+    assert_endpoints(&endpoints, &manifest);
+    drop((minute, original, machine, expected, endpoints));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn one_projection_preserves_complete_machine_rows_and_exact_endpoint_fields() {
     // Goal: canonical ticks retain complete machine readings and every endpoint-only field.
     // Method: read repeated-wall and clockless real rows, with independent endpoint expectations.

@@ -8,7 +8,7 @@ use polars_parquet_format::thrift::{Error, ProtocolError, ProtocolErrorKind, Res
 
 const CONTAINER_ITEMS_MAX: u32 = 16_384;
 const STRUCT_DEPTH_MAX: usize = 16;
-pub(super) const VECTOR_BYTES_MAX: usize = 8 * 1024 * 1024;
+pub(in crate::engine) const VECTOR_BYTES_MAX: usize = 8 * 1024 * 1024;
 const CONTEXT_DEPTH_MAX: usize = 48;
 
 const _: () = {

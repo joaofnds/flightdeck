@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::sync::Arc;
 
-use persistence::engine::{AdmissionRefusal, AdmittedTable};
+use persistence::engine::{AdmissionRefusal, AdmittedReadRefusal, AdmittedTable};
 use persistence::resources::ByteBudget;
 use polars::prelude::DataFrame;
 
@@ -156,9 +156,12 @@ impl TicksTable<'_> {
                 input.operation.check()?;
                 let _observation =
                     persistence::work::ingestion::minute_source(self.manifest, Some("ticks"));
-                let result = input.table.read(columns, row_limit);
+                let result = input.table.read_metadata_budgeted(columns, row_limit);
                 input.operation.check()?;
-                Ok(result?)
+                result.map_err(|refusal| match refusal {
+                    AdmittedReadRefusal::Admission(refusal) => Refused::Input(refusal),
+                    AdmittedReadRefusal::Decode(error) => Refused::Decode(error),
+                })
             }
             _ => unreachable!("ticks adapter must select exactly one input"),
         }

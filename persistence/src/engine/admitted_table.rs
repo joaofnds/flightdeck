@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Cursor, Read, Seek};
 use std::sync::Arc;
 
-use super::{AdmissionRefusal, AdmittedFile, admission, admitted_file};
+use super::{AdmissionRefusal, AdmittedFile, admission, admitted_file, native_metadata};
 use crate::resources::{ByteBudget, ByteReservation};
 use crate::{Error, Result};
 
@@ -11,6 +11,15 @@ pub struct AdmittedTable {
     input: AdmittedFile,
     names: ColumnNames,
     rows: u64,
+    metadata_bytes: usize,
+    budget: Arc<ByteBudget>,
+}
+
+/// Separates a retryable shared-budget refusal from an ordinary native-read failure.
+#[derive(Debug)]
+pub enum AdmittedReadRefusal {
+    Admission(AdmissionRefusal),
+    Decode(Error),
 }
 
 /// Admission-derived names whose backing cannot escape its reservation.
@@ -38,6 +47,9 @@ mod tests;
 
 #[cfg(test)]
 mod buffer_tests;
+
+#[cfg(test)]
+mod metadata_tests;
 
 impl AdmittedTable {
     /// Moves compressed storage into a shared native source without copying it.
@@ -97,6 +109,31 @@ impl AdmittedTable {
         self.input.read_prefix(columns, row_limit)
     }
 
+    /// Reserves native footer-metadata construction before entering its borrowed buffer scope.
+    /// The lease covers metadata through destruction, including inline metadata refusals.
+    /// Arrow inference, projection, value decoding and returned results need separate bounds.
+    pub fn read_metadata_budgeted(
+        &self,
+        columns: &[&str],
+        row_limit: Option<u32>,
+    ) -> std::result::Result<polars::prelude::DataFrame, AdmittedReadRefusal> {
+        let reservation = self
+            .budget
+            .reserve(self.metadata_bytes)
+            .ok_or(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))?;
+        let result = self
+            .input
+            .read_prefix_with_metadata(columns, row_limit, |footer| {
+                polars_parquet::parquet::read::deserialize_metadata(footer).map_err(|error| {
+                    drop(error);
+                    Error::Bound("native parquet footer metadata")
+                })
+            });
+        drop(reservation);
+
+        result.map_err(AdmittedReadRefusal::Decode)
+    }
+
     fn from_reader_capture(
         mut file: impl Read + Seek,
         size: u64,
@@ -107,7 +144,15 @@ impl AdmittedTable {
             .map_err(Error::from)
             .map_err(admitted_file::refuse)?;
         let bytes = admitted_file::capture_bytes(&mut file, size).map_err(admitted_file::refuse)?;
-        let metadata = admission::validate_reader_metadata(&mut Cursor::new(&bytes), size)
+        let input = AdmittedFile {
+            bytes,
+            reservation: Some(input),
+        };
+        let metadata = admission::validate_reader_metadata(&mut Cursor::new(&input.bytes), size)
+            .map_err(admitted_file::refuse)?;
+        let footer = input.read_prefix_footer().map_err(admitted_file::refuse)?;
+        assert!(footer.len() >= 8);
+        let metadata_bytes = native_metadata::requested_bytes(&metadata, footer.len() - 8)
             .map_err(admitted_file::refuse)?;
         let rows = u64::try_from(metadata.num_rows)
             .map_err(|_| AdmissionRefusal::Bound("parquet file rows"))?;
@@ -115,12 +160,11 @@ impl AdmittedTable {
         drop(metadata);
 
         Ok(Self {
-            input: AdmittedFile {
-                bytes,
-                reservation: Some(input),
-            },
+            input,
             names,
             rows,
+            metadata_bytes,
+            budget: Arc::clone(budget),
         })
     }
 }
