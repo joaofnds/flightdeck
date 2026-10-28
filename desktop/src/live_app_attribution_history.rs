@@ -173,23 +173,34 @@ impl AppAttributionHistory {
         }
     }
 
-    /// The chart of `metric` drawn from the store's `view`.
-    pub fn from_view(metric: Metric, view: &viewer::store::View) -> Self {
-        match History::from_view(metric, view, None) {
+    /// The chart of `metric` drawn from the store's `view`, drawing on lines of their own the
+    /// Apps `cohorts` chose for it.
+    pub fn from_view(
+        metric: Metric,
+        view: &viewer::store::View,
+        cohorts: &viewer::store::Cohorts,
+    ) -> Self {
+        match History::from_view(metric, view, cohorts, None) {
             Ok(history) => Self::Ready(history),
             Err(error) => Self::Unavailable(error),
         }
     }
 
-    /// The chart of `metric` drawn from the store's `view` after `older`, the chart of an older
-    /// View, which gives it the points of the seconds both Views hold.
-    pub fn from_view_after(metric: Metric, view: &viewer::store::View, older: Self) -> Self {
+    /// The chart of `metric` drawn from the store's `view`, drawing on lines of their own the
+    /// Apps `cohorts` chose for it, after `older`, the chart of an older View, which gives it the
+    /// points of the seconds both Views hold.
+    pub fn from_view_after(
+        metric: Metric,
+        view: &viewer::store::View,
+        cohorts: &viewer::store::Cohorts,
+        older: Self,
+    ) -> Self {
         let older = match older {
             Self::Ready(history) => Some(history),
             Self::Unavailable(_) => None,
         };
 
-        match History::from_view(metric, view, older) {
+        match History::from_view(metric, view, cohorts, older) {
             Ok(history) => Self::Ready(history),
             Err(error) => Self::Unavailable(error),
         }

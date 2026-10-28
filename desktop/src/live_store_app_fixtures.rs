@@ -9,7 +9,7 @@ use num_traits::ToPrimitive;
 use serde_json::{Value, json};
 use viewer::apps::Stamp;
 use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedApp};
-use viewer::store::{AppRow, AppsSecond, AppsStretch, MachineSecond, Totals, View};
+use viewer::store::{AppRow, AppsSecond, AppsStretch, Cohorts, MachineSecond, Totals, View};
 
 use crate::data::Panel;
 use crate::live_store_fixtures::{NANOSECONDS_PER_SECOND, reading_at, view};
@@ -26,8 +26,8 @@ pub fn seconds() -> [MachineSecond; 4] {
 
 /// The View of `seconds`, at each of which but the third the executables A, B and C used 0.5,
 /// 0.25 and 0.125 s of CPU and held as many bytes resident as they used nanoseconds, the third
-/// holding no Apps, and whose CPU chart draws A and B on lines of their own.
-pub fn charted(seconds: &[MachineSecond; 4]) -> View {
+/// holding no Apps, and the cohorts that draw A and B on lines of their own on the CPU chart.
+pub fn charted(seconds: &[MachineSecond; 4]) -> (View, Cohorts) {
     let mut view = view(1, &[], seconds);
     let used = [("A", 500_000_000), ("B", 250_000_000), ("C", 125_000_000)];
     for (index, consecutive) in [(0, false), (1, true), (3, false)] {
@@ -41,16 +41,20 @@ pub fn charted(seconds: &[MachineSecond; 4]) -> View {
         consecutive: true,
         ..AppsSecond::default()
     });
-    view.cohorts.seconds = seconds.len();
-    view.cohorts.cpu = vec![ranked("A"), ranked("B")];
+    let cohorts = Cohorts {
+        seconds: seconds.len(),
+        cpu: vec![ranked("A"), ranked("B")],
+        ..Cohorts::default()
+    };
 
-    view
+    (view, cohorts)
 }
 
 /// The View of `seconds`, at each of which the executables A, B and C used 0.5, 0.25 and 0.125 s
-/// of CPU, whose CPU chart and chart of resident memory draw the Apps `cohort` names on lines of
-/// their own over all of them. Of the seconds of `seconds()`, only 102 follows the one before it.
-pub fn sliding(seconds: &[MachineSecond], cohort: &[&str]) -> View {
+/// of CPU, and the cohorts chosen over all of them that draw the Apps `cohort` names on lines of
+/// their own on the CPU chart and the chart of resident memory. Of the seconds of `seconds()`,
+/// only 102 follows the one before it.
+pub fn sliding(seconds: &[MachineSecond], cohort: &[&str]) -> (View, Cohorts) {
     let mut view = view(1, &[], seconds);
     let used = [("A", 500_000_000), ("B", 250_000_000), ("C", 125_000_000)];
     for (apps, second) in view.apps.iter_mut().zip(seconds) {
@@ -59,11 +63,15 @@ pub fn sliding(seconds: &[MachineSecond], cohort: &[&str]) -> View {
             ..apps_at(second, &used)
         });
     }
-    view.cohorts.seconds = seconds.len();
-    view.cohorts.cpu = cohort.iter().map(|name| ranked(name)).collect();
-    view.cohorts.resident = view.cohorts.cpu.clone();
+    let cpu: Vec<_> = cohort.iter().map(|name| ranked(name)).collect();
+    let cohorts = Cohorts {
+        seconds: seconds.len(),
+        resident: cpu.clone(),
+        cpu,
+        ..Cohorts::default()
+    };
 
-    view
+    (view, cohorts)
 }
 
 /// The executable `name`, as a chart's cohort names it.
@@ -179,8 +187,9 @@ fn apps_at_row(name: &str, cpu_ns: u64) -> AppRow {
 /// The newest second of `hour()`.
 pub const HOUR_NEWEST: u64 = 10_000;
 
-/// The View of a store that holds the loaded hour up to `HOUR_NEWEST`, as `hour_until` gives it.
-pub fn hour() -> View {
+/// The View of a store that holds the loaded hour up to `HOUR_NEWEST`, and its cohorts, as
+/// `hour_until` gives them.
+pub fn hour() -> (View, Cohorts) {
     hour_until(HOUR_NEWEST)
 }
 
@@ -190,8 +199,9 @@ pub fn hour() -> View {
 /// resident as they use nanoseconds of CPU: B 0.25 s and C 0.125 s, and A 0.5 s and a further
 /// 10 ms for each second past the start of its stretch, but in stretch 900, where A uses 0.07 s
 /// at its first second and 0.27 s at each of the other nine, 0.25 s a second over the stretch.
-/// The CPU chart and the chart of resident memory draw A and B on lines of their own.
-pub fn hour_until(newest: u64) -> View {
+/// The cohorts draw A and B on lines of their own on the CPU chart and the chart of resident
+/// memory.
+pub fn hour_until(newest: u64) -> (View, Cohorts) {
     assert_eq!(newest % 10, 0);
     let used = |second: u64| {
         let a = match second {
@@ -228,11 +238,14 @@ pub fn hour_until(newest: u64) -> View {
         .zip((live_first - 20) / 10..)
         .map(|(seconds, stretch)| Arc::new(AppsStretch::of_seconds(stretch, seconds)))
         .collect();
-    view.cohorts.seconds = 960;
-    view.cohorts.cpu = vec![ranked("A"), ranked("B")];
-    view.cohorts.resident = view.cohorts.cpu.clone();
+    let cohorts = Cohorts {
+        seconds: 960,
+        cpu: vec![ranked("A"), ranked("B")],
+        resident: vec![ranked("A"), ranked("B")],
+        ..Cohorts::default()
+    };
 
-    view
+    (view, cohorts)
 }
 
 /// `panel` with where it draws each reading given as a wall millisecond rather than as a share

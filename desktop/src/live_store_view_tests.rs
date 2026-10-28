@@ -765,7 +765,7 @@ fn drawn_by_app(trends: &[MachineSecond]) -> LiveDashboard {
     let charted = charted_view();
     let history = |metric| {
         Arc::new(crate::live_source::Presentation::Legacy(
-            AppAttributionHistory::from_view(metric, &charted),
+            AppAttributionHistory::from_view(metric, &charted, &charted.cohorts),
         ))
     };
     let mut snapshot = readings(trends);
@@ -775,7 +775,10 @@ fn drawn_by_app(trends: &[MachineSecond]) -> LiveDashboard {
         disk: history(Metric::Disk),
     }));
     snapshot.resident_history = Some(std::sync::Arc::new(
-        crate::live_source::Presentation::Shared(Arc::new(ResidentHistory::from_view(&charted))),
+        crate::live_source::Presentation::Shared(Arc::new(ResidentHistory::from_view(
+            &charted,
+            &charted.cohorts,
+        ))),
     ));
 
     let mut dashboard = opening();
@@ -809,7 +812,9 @@ fn expected_by_app(view: &View) -> Vec<(String, String, Vec<Line>)> {
         (Metric::Power, "Energy by app"),
         (Metric::Disk, "Disk by app"),
     ];
-    let resident = ResidentHistory::from_view(view).panel().unwrap();
+    let resident = ResidentHistory::from_view(view, &view.cohorts)
+        .panel()
+        .unwrap();
 
     let mut expected = vec![(
         resident.id.clone(),
@@ -817,7 +822,7 @@ fn expected_by_app(view: &View) -> Vec<(String, String, Vec<Line>)> {
         resident.lines.clone(),
     )];
     expected.extend(titled.into_iter().map(|(metric, title)| {
-        let panel = AppAttributionHistory::from_view(metric, view)
+        let panel = AppAttributionHistory::from_view(metric, view, &view.cohorts)
             .panel()
             .unwrap();
         (panel.id.clone(), title.into(), panel.lines.clone())

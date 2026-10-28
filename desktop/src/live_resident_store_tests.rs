@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use viewer::live_app_response::{KeyKind, RankedApp};
-use viewer::store::{MachineSecond, View};
+use viewer::store::{Cohorts, MachineSecond, View};
 
 use super::super::{ResidentHistory, decode_cohort};
 use super::from_view_labels;
@@ -22,8 +22,9 @@ fn draws_each_second_as_the_workers_history_of_those_seconds_draws_it() {
     // two charts on the clock.
     let seconds = seconds();
     let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
+    let (view, cohorts) = charted_resident(&seconds);
 
-    let drawn = ResidentHistory::from_view(&charted_resident(&seconds)).panel();
+    let drawn = ResidentHistory::from_view(&view, &cohorts).panel();
 
     assert!(drawn.is_some());
     assert_eq!(on_the_clock(drawn), on_the_clock(worker.panel()));
@@ -36,8 +37,9 @@ fn describes_each_second_as_the_workers_history_of_those_seconds_describes_it() 
     // what the hover shows at each of them, the missing third included.
     let seconds = seconds();
     let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
+    let (view, cohorts) = charted_resident(&seconds);
 
-    let drawn = ResidentHistory::from_view(&charted_resident(&seconds));
+    let drawn = ResidentHistory::from_view(&view, &cohorts);
 
     assert_eq!(hovered(&drawn), hovered(&worker));
 }
@@ -81,12 +83,13 @@ mod after_the_chart_of_an_older_view {
         // first, a newer View of its last two and a later second, and the chart drawn after the
         // older one's beside the chart the newer View draws alone.
         let seconds = seconds();
-        let older = ResidentHistory::from_view(&sliding(&seconds[..3], &["A", "B"]));
-        let newer = sliding(&seconds[1..], &["A", "B"]);
+        let (view, cohorts) = sliding(&seconds[..3], &["A", "B"]);
+        let older = ResidentHistory::from_view(&view, &cohorts);
+        let (newer, cohorts) = sliding(&seconds[1..], &["A", "B"]);
 
-        let drawn = ResidentHistory::from_view_after(&newer, older);
+        let drawn = ResidentHistory::from_view_after(&newer, &cohorts, older);
 
-        let alone = ResidentHistory::from_view(&newer);
+        let alone = ResidentHistory::from_view(&newer, &cohorts);
         assert_eq!(drawn.panel(), alone.panel());
         assert_eq!(hovered(&drawn), hovered(&alone));
     }
@@ -100,12 +103,13 @@ mod after_the_chart_of_an_older_view {
             // of their own is the chart the newer View draws alone. Method: the Views of the
             // test above, the older drawing B and A where the newer draws A and B.
             let seconds = seconds();
-            let older = ResidentHistory::from_view(&sliding(&seconds[..3], &["B", "A"]));
-            let newer = sliding(&seconds[1..], &["A", "B"]);
+            let (view, cohorts) = sliding(&seconds[..3], &["B", "A"]);
+            let older = ResidentHistory::from_view(&view, &cohorts);
+            let (newer, cohorts) = sliding(&seconds[1..], &["A", "B"]);
 
-            let drawn = ResidentHistory::from_view_after(&newer, older);
+            let drawn = ResidentHistory::from_view_after(&newer, &cohorts, older);
 
-            let alone = ResidentHistory::from_view(&newer);
+            let alone = ResidentHistory::from_view(&newer, &cohorts);
             assert_eq!(drawn.panel(), alone.panel());
             assert_eq!(hovered(&drawn), hovered(&alone));
         }
@@ -118,11 +122,11 @@ mod when_the_seconds_hold_more_apps_than_the_store_adds_up {
     #[test]
     fn draws_no_chart() {
         // Goal: a chart whose Apps the store could not choose draws nothing rather than lines
-        // of the wrong Apps, and says why. Method: a View whose cohorts the store refused.
-        let mut view = charted_resident(&seconds());
-        view.cohorts.refused = true;
+        // of the wrong Apps, and says why. Method: a View whose cohorts were refused.
+        let (view, mut cohorts) = charted_resident(&seconds());
+        cohorts.refused = true;
 
-        let drawn = ResidentHistory::from_view(&view);
+        let drawn = ResidentHistory::from_view(&view, &cohorts);
 
         assert!(drawn.panel().is_none());
         assert_eq!(
@@ -132,13 +136,13 @@ mod when_the_seconds_hold_more_apps_than_the_store_adds_up {
     }
 }
 
-/// The View `charted` draws of `seconds`, whose chart of resident memory draws A and B on lines
-/// of their own.
-fn charted_resident(seconds: &[MachineSecond; 4]) -> View {
-    let mut view = charted(seconds);
-    view.cohorts.resident = view.cohorts.cpu.clone();
+/// The View `charted` draws of `seconds`, and its cohorts, which also draw A and B on lines of
+/// their own on the chart of resident memory.
+fn charted_resident(seconds: &[MachineSecond; 4]) -> (View, Cohorts) {
+    let (view, mut cohorts) = charted(seconds);
+    cohorts.resident = cohorts.cpu.clone();
 
-    view
+    (view, cohorts)
 }
 
 /// What hovering `history` shows at each of the four seconds of `seconds`, line by line.
@@ -204,9 +208,9 @@ mod over_the_loaded_hour {
         // Method: a View of the hour whose oldest stretch has A hold 70 MB at its first second
         // and 270 MB at each of the other nine, the chart drawn from it beside the machine CPU
         // chart, and A at the chart's first point.
-        let view = hour();
+        let (view, cohorts) = hour();
 
-        let drawn = ResidentHistory::from_view(&view);
+        let drawn = ResidentHistory::from_view(&view, &cohorts);
 
         let machine = crate::live_projection::overview_panels(&view, None)
             .unwrap()

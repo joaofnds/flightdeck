@@ -20,8 +20,9 @@ fn draws_each_second_as_the_workers_history_of_those_seconds_draws_it() {
         &worker_history(&seconds),
         &selection(&[], &seconds),
     );
+    let (view, cohorts) = charted(&seconds);
 
-    let drawn = AppAttributionHistory::from_view(Metric::Cpu, &charted(&seconds)).panel();
+    let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts).panel();
 
     assert!(drawn.is_some());
     assert_eq!(on_the_clock(drawn), on_the_clock(worker.panel()));
@@ -38,8 +39,9 @@ fn describes_each_second_as_the_workers_history_of_those_seconds_describes_it() 
         &worker_history(&seconds),
         &selection(&[], &seconds),
     );
+    let (view, cohorts) = charted(&seconds);
 
-    let drawn = AppAttributionHistory::from_view(Metric::Cpu, &charted(&seconds));
+    let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
 
     assert_eq!(hovered(&drawn), hovered(&worker));
 }
@@ -56,13 +58,13 @@ mod after_the_chart_of_an_older_view {
         // first, a newer View of its last two and a later second, and the chart drawn after the
         // older one's beside the chart the newer View draws alone.
         let seconds = seconds();
-        let older =
-            AppAttributionHistory::from_view(Metric::Cpu, &sliding(&seconds[..3], &["A", "B"]));
-        let newer = sliding(&seconds[1..], &["A", "B"]);
+        let (view, cohorts) = sliding(&seconds[..3], &["A", "B"]);
+        let older = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
+        let (newer, cohorts) = sliding(&seconds[1..], &["A", "B"]);
 
-        let drawn = AppAttributionHistory::from_view_after(Metric::Cpu, &newer, older);
+        let drawn = AppAttributionHistory::from_view_after(Metric::Cpu, &newer, &cohorts, older);
 
-        let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer);
+        let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer, &cohorts);
         assert_eq!(drawn.panel(), alone.panel());
         assert_eq!(hovered(&drawn), hovered(&alone));
     }
@@ -76,13 +78,14 @@ mod after_the_chart_of_an_older_view {
             // of their own is the chart the newer View draws alone. Method: the Views of the
             // test above, the older drawing B and A where the newer draws A and B.
             let seconds = seconds();
-            let older =
-                AppAttributionHistory::from_view(Metric::Cpu, &sliding(&seconds[..3], &["B", "A"]));
-            let newer = sliding(&seconds[1..], &["A", "B"]);
+            let (view, cohorts) = sliding(&seconds[..3], &["B", "A"]);
+            let older = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
+            let (newer, cohorts) = sliding(&seconds[1..], &["A", "B"]);
 
-            let drawn = AppAttributionHistory::from_view_after(Metric::Cpu, &newer, older);
+            let drawn =
+                AppAttributionHistory::from_view_after(Metric::Cpu, &newer, &cohorts, older);
 
-            let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer);
+            let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer, &cohorts);
             assert_eq!(drawn.panel(), alone.panel());
             assert_eq!(hovered(&drawn), hovered(&alone));
         }
@@ -95,12 +98,12 @@ mod when_the_seconds_hold_more_apps_than_the_store_adds_up {
     #[test]
     fn draws_no_chart() {
         // Goal: a chart whose Apps the store could not choose draws nothing rather than lines
-        // of the wrong Apps. Method: a View whose cohorts the store refused.
-        let mut view = charted(&seconds());
-        view.cohorts.refused = true;
+        // of the wrong Apps. Method: a View whose cohorts were refused.
+        let (view, mut cohorts) = charted(&seconds());
+        cohorts.refused = true;
 
         assert!(
-            AppAttributionHistory::from_view(Metric::Cpu, &view)
+            AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts)
                 .panel()
                 .is_none()
         );
@@ -170,9 +173,9 @@ mod over_the_loaded_hour {
         // of the hour whose oldest stretch has A use 0.07 s at its first second and 0.27 s at
         // each of the other nine, the chart drawn from it beside the machine CPU chart, and A at
         // the chart's first point.
-        let view = hour();
+        let (view, cohorts) = hour();
 
-        let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view);
+        let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
 
         let machine = crate::live_projection::overview_panels(&view, None)
             .unwrap()
@@ -193,12 +196,13 @@ mod over_the_loaded_hour {
         // stretch of the older part. Method: the hour's View, and a View twenty seconds newer,
         // whose older part draws as a stretch at second 9,050 what the older chart drew as that
         // second, and the chart drawn after the older one's beside the chart drawn alone.
-        let older = AppAttributionHistory::from_view(Metric::Cpu, &hour());
-        let newer = hour_until(HOUR_NEWEST + 20);
+        let (view, cohorts) = hour();
+        let older = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
+        let (newer, cohorts) = hour_until(HOUR_NEWEST + 20);
 
-        let drawn = AppAttributionHistory::from_view_after(Metric::Cpu, &newer, older);
+        let drawn = AppAttributionHistory::from_view_after(Metric::Cpu, &newer, &cohorts, older);
 
-        let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer);
+        let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer, &cohorts);
         assert_eq!(drawn.panel(), alone.panel());
         assert_eq!(hovered(&drawn), hovered(&alone));
     }

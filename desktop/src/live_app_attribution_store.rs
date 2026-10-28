@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use viewer::live_app_response::{KeyKind, RankedApp};
-use viewer::store::{Attribution, AttributionReading, MachineSecond, View};
+use viewer::store::{Attribution, AttributionReading, Cohorts, MachineSecond, View};
 
 use super::machine_reference::MachineReference;
 use super::{History, Measure, Metric, Other, Point, Reading};
@@ -18,14 +18,14 @@ mod tests;
 impl History {
     /// The chart of `metric` drawn from the store's `view`, following its newest second, with a
     /// point wherever its machine charts draw one: a second's Apps for each full-detail second,
-    /// and a stretch's for each older one. The chart takes the points it shares with `older`,
-    /// the chart of an older View.
+    /// and a stretch's for each older one. It draws on lines of their own the Apps `cohorts`
+    /// chose for it, and takes the points it shares with `older`, the chart of an older View.
     pub(super) fn from_view(
         metric: Metric,
         view: &View,
+        cohorts: &Cohorts,
         older: Option<Self>,
     ) -> Result<Self, String> {
-        let cohorts = &view.cohorts;
         if cohorts.refused {
             return Err("App rate history holds more Apps than it adds up".into());
         }
@@ -38,7 +38,7 @@ impl History {
             return Err("App rate history is empty".into());
         }
         let Some(drawn) = crate::live_projection::overview_app_points(view)? else {
-            unreachable!("the store chose the chart's Apps over seconds the View holds");
+            unreachable!("the chart's Apps were chosen over seconds the View holds");
         };
 
         let count = drawn.points.len();

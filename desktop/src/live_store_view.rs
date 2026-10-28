@@ -9,7 +9,7 @@ use std::sync::Arc;
 use gpui::{App, Global};
 use num_traits::ToPrimitive;
 use serde_json::{Value, json};
-use viewer::store::{AppsSecond, MachineSecond, Store, View};
+use viewer::store::{AppsSecond, Cohorts, MachineSecond, Store, View};
 
 use super::LiveDashboard;
 use crate::data::Panel;
@@ -185,10 +185,11 @@ impl LiveDashboard {
     ) -> Result<StorePanels, String> {
         let levels = draw_store_view_panels_levels(view);
         let mut panels = crate::live_projection::overview_panels(view, levels.as_ref())?;
-        let histories = draw_store_view_panels_histories(view, older.histories);
+        let cohorts = &view.cohorts;
+        let histories = draw_store_view_panels_histories(view, cohorts, older.histories);
         let resident = match older.resident {
-            Some(older) => ResidentHistory::from_view_after(view, older),
-            None => ResidentHistory::from_view(view),
+            Some(older) => ResidentHistory::from_view_after(view, cohorts, older),
+            None => ResidentHistory::from_view(view, cohorts),
         };
         let rates = APP_METRICS
             .iter()
@@ -509,15 +510,17 @@ fn store_view_matches(
     crate::live_source::identity_validate(identity, &stamp_identity(&observation.stamp)).is_ok()
 }
 
-/// The charts by App of `view`.
+/// The charts by App of `view`, each drawing on lines of their own the Apps `cohorts` chose for
+/// it.
 fn draw_store_view_panels_histories(
     view: &View,
+    cohorts: &Cohorts,
     older: Option<OverviewAppHistories>,
 ) -> OverviewAppHistories {
     let Some(older) = older else {
         let history = |metric| {
             Arc::new(crate::live_source::Presentation::Legacy(
-                AppAttributionHistory::from_view(metric, view),
+                AppAttributionHistory::from_view(metric, view, cohorts),
             ))
         };
         return OverviewAppHistories {
@@ -531,22 +534,28 @@ fn draw_store_view_panels_histories(
     let history = |metric, older| {
         use crate::live_source::Presentation;
         let history = match Arc::into_inner(older) {
-            Some(Presentation::Legacy(older)) => {
-                Presentation::Legacy(AppAttributionHistory::from_view_after(metric, view, older))
-            }
+            Some(Presentation::Legacy(older)) => Presentation::Legacy(
+                AppAttributionHistory::from_view_after(metric, view, cohorts, older),
+            ),
             Some(Presentation::Shared(older)) => match Arc::into_inner(older) {
                 Some(older) => Presentation::Legacy(AppAttributionHistory::from_view_after(
-                    metric, view, older,
+                    metric, view, cohorts, older,
                 )),
-                None => Presentation::Legacy(AppAttributionHistory::from_view(metric, view)),
+                None => {
+                    Presentation::Legacy(AppAttributionHistory::from_view(metric, view, cohorts))
+                }
             },
-            Some(Presentation::Store(older)) => Presentation::Store(
-                older.map(|older| AppAttributionHistory::from_view_after(metric, view, older)),
-            ),
-            Some(Presentation::Canonical(older)) => Presentation::Canonical(
-                older.map(|older| AppAttributionHistory::from_view_after(metric, view, older)),
-            ),
-            None => Presentation::Legacy(AppAttributionHistory::from_view(metric, view)),
+            Some(Presentation::Store(older)) => {
+                Presentation::Store(older.map(|older| {
+                    AppAttributionHistory::from_view_after(metric, view, cohorts, older)
+                }))
+            }
+            Some(Presentation::Canonical(older)) => {
+                Presentation::Canonical(older.map(|older| {
+                    AppAttributionHistory::from_view_after(metric, view, cohorts, older)
+                }))
+            }
+            None => Presentation::Legacy(AppAttributionHistory::from_view(metric, view, cohorts)),
         };
 
         Arc::new(history)
