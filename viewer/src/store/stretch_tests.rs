@@ -24,9 +24,9 @@ const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 #[test]
 fn a_closed_stretch_adds_up_the_apps_of_its_seconds() {
     // Goal: an App chart's point of ten seconds shows what its App used over those seconds, as
-    // the seconds themselves add up. Method: take in seconds 1,000 to 1,010, A using more CPU
-    // each second, so 1,010 closes the stretch of 1,000 to 1,009, and compare that stretch's
-    // reading with the readings of its ten seconds added up.
+    // the seconds themselves add up. Method: take in seconds 1,000 to 1,010, A using 1,000 ns
+    // of CPU times its wall second at each, so 1,010 closes the stretch of 1,000 to 1,009, over
+    // which A used 10,045,000 ns, and read that stretch.
     let mut held = Held::new();
     for wall_second in 1_000..=1_010 {
         take(
@@ -38,17 +38,12 @@ fn a_closed_stretch_adds_up_the_apps_of_its_seconds() {
 
     let view = published(&mut held);
 
-    let a = name(b"/A.app");
-    let known: u64 = view.apps[..10]
-        .iter()
-        .map(|second| cpu_of(&second.attribution(AppAttributionMetric::Cpu, &[Arc::clone(&a)])))
-        .sum();
-    let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[a]);
+    let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[name(b"/A.app")]);
     assert_eq!(view.stretches.len(), 1);
-    assert_eq!(cpu_of(&shown), known);
+    assert_eq!(cpu_of(&shown), 10_045_000);
     assert_eq!(
         shown.apps[0].unwrap().rate,
-        AppAttributionMetric::Cpu.rate(known, Some(10 * NANOSECONDS_PER_SECOND))
+        AppAttributionMetric::Cpu.rate(10_045_000, Some(10 * NANOSECONDS_PER_SECOND))
     );
 }
 
