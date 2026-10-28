@@ -45,6 +45,30 @@ fn describes_each_second_as_the_workers_history_of_those_seconds_describes_it() 
 }
 
 #[test]
+fn says_its_leaders_lead_over_the_range_shown() {
+    // Goal: the help of a chart of resident memory drawn from the store's View says it draws the
+    // Apps that led over the range shown, since the page chooses them over the range the reader
+    // picked, where the worker's chart chooses them over the interval it holds. Method: the help
+    // of the chart drawn from the View of the chart test beside the worker's.
+    let seconds = seconds();
+    let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
+    let (view, cohorts) = charted_resident(&seconds);
+
+    let drawn = ResidentHistory::from_view(&view, &cohorts).panel();
+
+    let help = |panel: Option<std::rc::Rc<crate::data::Panel>>| panel.unwrap().help.clone();
+    let help = (help(drawn).unwrap(), help(worker.panel()).unwrap());
+    assert!(
+        help.0
+            .contains("Eight leaders use their mean over the range shown.")
+    );
+    assert!(
+        help.1
+            .contains("Eight leaders use the complete interval's mean.")
+    );
+}
+
+#[test]
 fn names_each_app_as_the_workers_history_names_it() {
     // Goal: the chart drawn from the View labels its Apps as the worker's history labels them,
     // a bundle by the last part of its path. Method: a cohort of a bundle and an executable,
