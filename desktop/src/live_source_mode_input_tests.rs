@@ -300,6 +300,7 @@ pub(crate) struct LiveRecording {
     lock_path: PathBuf,
     writer: Writer,
     publication: u64,
+    clock_offset_seconds: u64,
 }
 
 impl LiveRecording {
@@ -326,7 +327,43 @@ impl LiveRecording {
             lock_path: place.lock_path,
             writer,
             publication: 0,
+            clock_offset_seconds: 0,
         }
+    }
+
+    pub(crate) fn restart(&mut self) -> collector::ring::RunIdentity {
+        let shape = collector::ring::RingReader::open_generation(self.writer.name())
+            .unwrap()
+            .shape();
+        let mut identity = self.writer.identity().unwrap();
+        identity.run = random_identity().unwrap();
+        self.writer.finish();
+        self.clock_offset_seconds += self.publication;
+        let place = Place {
+            lock_path: self.root.join("restart.lock"),
+            name_prefix: format!("/fdr{}", std::process::id()),
+        };
+        let writer = Writer::create_recording(
+            &place,
+            shape,
+            &identity,
+            (self.clock_offset_seconds + 1) * 1_000_000_000,
+        )
+        .unwrap();
+        let mut registry = collector::recording::Registry::read(&self.root).unwrap();
+        assert_eq!(registry.runs.len(), 1);
+        registry.runs.push(collector::recording::RegisteredRun {
+            identity,
+            ring_name: writer.name().to_owned(),
+            collector_pid: 0,
+        });
+        registry.write(&self.root).unwrap();
+        let previous = std::mem::replace(&mut self.writer, writer);
+        collector::ring::unlink_generation(previous.name()).unwrap();
+        drop(previous);
+        self.publication = 0;
+
+        identity
     }
 
     pub(crate) fn publish(&mut self) {
@@ -347,16 +384,17 @@ impl LiveRecording {
         self.writer.publish_observed(
             &readings,
             &ObservationTimes {
-                wall_ns: (1000 + self.publication) * 1_000_000_000,
-                continuous_ns: (self.publication + 1) * 1_000_000_000,
-                awake_ns: (self.publication + 1) * 1_000_000_000,
+                wall_ns: (1000 + self.clock_offset_seconds + self.publication) * 1_000_000_000,
+                continuous_ns: (self.clock_offset_seconds + self.publication + 1) * 1_000_000_000,
+                awake_ns: (self.clock_offset_seconds + self.publication + 1) * 1_000_000_000,
             },
         );
         self.publication += 1;
     }
 
     pub(crate) fn publish_resources(&mut self) {
-        let count = u32::try_from(self.publication).unwrap();
+        let elapsed = self.clock_offset_seconds + self.publication;
+        let count = u32::try_from(elapsed).unwrap();
         let cpus = [collector::machine::CPUTicks {
             user: count,
             idle: count,
@@ -371,10 +409,10 @@ impl LiveRecording {
         let interfaces = [collector::interfaces::Interface {
             index: 7,
             name: collector::interfaces::Name::from_bytes(name, 3).unwrap(),
-            received_bytes: self.publication,
-            sent_bytes: self.publication,
-            received_packets: self.publication,
-            sent_packets: self.publication,
+            received_bytes: elapsed,
+            sent_bytes: elapsed,
+            received_packets: elapsed,
+            sent_packets: elapsed,
             receive_errors: 0,
             send_errors: 0,
             receive_drops: 0,
@@ -401,9 +439,9 @@ impl LiveRecording {
                 dropped: collector::ring::Dropped::default(),
             },
             &ObservationTimes {
-                wall_ns: (1000 + self.publication) * 1_000_000_000,
-                continuous_ns: (self.publication + 1) * 1_000_000_000,
-                awake_ns: (self.publication + 1) * 1_000_000_000,
+                wall_ns: (1000 + elapsed) * 1_000_000_000,
+                continuous_ns: (elapsed + 1) * 1_000_000_000,
+                awake_ns: (elapsed + 1) * 1_000_000_000,
             },
         );
         self.publication += 1;
@@ -412,7 +450,7 @@ impl LiveRecording {
     /// The wall-clock second of the newest tick published.
     pub(crate) fn last_second(&self) -> u64 {
         assert!(self.publication > 0);
-        1000 + self.publication - 1
+        1000 + self.clock_offset_seconds + self.publication - 1
     }
 }
 

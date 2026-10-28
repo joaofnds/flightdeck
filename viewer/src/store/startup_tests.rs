@@ -5,6 +5,675 @@ use super::{AppsSecond, ByteBudget};
 use crate::live::identity_fixture::Fixture;
 
 #[test]
+fn primary_startup_serves_selected_apps_before_historical_apps() {
+    // Goal: the selected minute becomes queryable before older App derivations run.
+    // Method: stage six real sealed observations across a gap and a consecutive boundary.
+    let mut fixture = primary_fixture();
+    let trace =
+        persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
+    let scope = trace.enter();
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+
+    held.startup = super::StartupState::Loading;
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+    assert_primary_work(&trace);
+
+    assert_eq!(
+        held.apps.newest().unwrap().observation.unwrap().run_tick,
+        121
+    );
+    assert_eq!(
+        held.apps.get(0).unwrap().missing,
+        Some(super::Missing::Unread)
+    );
+    assert_selected_minute(&held);
+    let primary = query_context(&mut held, &mut ring);
+    assert_eq!(primary.readiness(), super::QueryReadiness::Primary);
+    assert!(primary.seconds().iter().all(super::QuerySecond::detached));
+    assert_pending_histories(&primary, &budget);
+    let machine = held.span.newest().unwrap().clone();
+    drive_complete(&mut startup, &input, &mut held, &mut ring);
+    assert!(held.startup == super::StartupState::Complete);
+    assert_eq!(held.span.newest().unwrap(), &machine);
+    assert!(
+        held.apps
+            .held()
+            .all(|apps| apps.missing != Some(super::Missing::Unread))
+    );
+    let complete = query_context(&mut held, &mut ring);
+    assert_eq!(complete.readiness(), super::QueryReadiness::Complete);
+    assert_eq!(complete.source, primary.source);
+    fixture.publish_with_usage(1122, &usage(122));
+    drop(scope);
+}
+
+fn assert_selected_minute(held: &super::Held) {
+    for index in 4..6 {
+        let apps = held.apps.get(index).unwrap();
+        assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
+        let payload = apps.processes.as_ref().unwrap();
+        assert_eq!(
+            payload.previous.unwrap().publication,
+            u64::try_from(index).unwrap()
+        );
+        let process = payload.iter().find(|process| process.pid == 7).unwrap();
+        assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
+        assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
+    }
+}
+
+fn assert_pending_histories(context: &Arc<super::QueryContext>, budget: &Arc<ByteBudget>) {
+    use crate::live_app_response::KeyKind;
+    let cancellation = Arc::new(crate::Cancellation::default());
+    let used = budget.used();
+    assert!(matches!(
+        context.app_resident_history(&cancellation, 0),
+        Err(super::HistoryError::Pending)
+    ));
+    assert!(matches!(
+        context.app_attribution_history(
+            crate::app_attribution_history::AppAttributionMetric::Cpu,
+            &cancellation,
+            0
+        ),
+        Err(super::HistoryError::Pending)
+    ));
+    assert!(matches!(
+        context.app_history(KeyKind::Executable, b"N", &cancellation, 0),
+        Err(super::HistoryError::Pending)
+    ));
+    assert!(matches!(
+        context.app_process_history(KeyKind::Executable, b"N", b"N", &cancellation, 0),
+        Err(super::HistoryError::Pending)
+    ));
+    assert!(matches!(
+        context.app_process_groups_history(KeyKind::Executable, b"N", &cancellation, 0),
+        Err(super::HistoryError::Pending)
+    ));
+    assert!(matches!(
+        context.app_ranks(),
+        Err(super::HistoryError::Pending)
+    ));
+    assert!(matches!(
+        context.app_parts(KeyKind::Executable, b"N"),
+        Err(super::HistoryError::Pending)
+    ));
+    assert_eq!(budget.used(), used);
+}
+
+fn assert_primary_work(trace: &persistence::work::ingestion::Trace) {
+    use persistence::work::ingestion::{Key, Kind, Purpose};
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == Kind::AppDerivation && event.purpose == Purpose::Ordinary)
+            .count(),
+        0
+    );
+    assert_eq!(events.iter().filter(|event| event.kind == Kind::AppDerivation
+        && event.purpose == Purpose::Selection).count(), 2);
+    for publication in 1..=6 {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == Kind::MachineReduction)
+                .filter(
+                    |event| matches!(event.key, Key::Publication { publication: value, .. }
+                if value == publication)
+                )
+                .count(),
+            1
+        );
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.kind == Kind::CommittedFrameCapture
+                && event.purpose == Purpose::Predecessor)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn cancellation_between_primary_and_complete_releases_only_unretained_startup_owners() {
+    // Goal: a cancelled historical continuation cannot authorize Complete or drop a reader's data.
+    // Method: retain a real detached Primary, cancel before history, then release each owner.
+    let fixture = primary_fixture();
+    let cancellation = Arc::new(crate::Cancellation::default());
+    let operation = Arc::clone(&cancellation).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+    let primary = query_context(&mut held, &mut ring);
+    cancellation.cancel().unwrap();
+
+    let result = startup.advance(&input, &mut held, &mut ring);
+
+    assert!(
+        matches!(result, Err(super::recording::staged::Failure::Read(
+        crate::recording::Refused::Decode(persistence::Error::Io(error))))
+        if error.kind() == std::io::ErrorKind::Interrupted)
+    );
+    drop((startup, ring, held));
+    assert!(budget.used() > 0);
+    assert_eq!(primary.selected().observation.stamp.publication, 6);
+    drop(primary);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn payload_construction_keeps_legacy_app_row_capacity_outside_the_opt_in_owner() {
+    // Goal: opt-in buffers cannot preallocate unadmitted legacy App rows.
+    // Method: inspect every free pool slot immediately after both real Held constructors.
+    let mut legacy = super::Held::new();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut payload = super::Held::with_payload(Arc::clone(&budget));
+    let mut legacy_count = 0;
+    let mut payload_count = 0;
+
+    legacy.release_views();
+    payload.release_views();
+    legacy.apps.release(|apps| {
+        assert_eq!(apps.apps.capacity(), super::APPS_PER_SECOND_MAX);
+        legacy_count += 1;
+    });
+    payload.apps.release(|apps| {
+        assert_eq!(apps.apps.capacity(), 0);
+        payload_count += 1;
+    });
+
+    assert_eq!(legacy_count, super::SECONDS_MAX + super::SECONDS_HELD_MAX);
+    assert_eq!(payload_count, legacy_count);
+    assert_eq!(budget.used(), 0);
+}
+
+pub(super) fn drive_primary(
+    startup: &mut super::recording::staged::Startup,
+    input: &super::recording::staged::Input<'_>,
+    held: &mut super::Held,
+    ring: &mut super::Ring,
+) {
+    for _ in 0..super::recording::MINUTES_MAX * 2 {
+        if matches!(
+            startup.advance(input, held, ring).unwrap(),
+            super::recording::staged::Advance::Primary
+        ) {
+            super::step(
+                held,
+                ring,
+                Ok(()),
+                &super::Mailbox::new(),
+                Some(input.operation),
+                super::Publication::Deferred,
+            )
+            .unwrap();
+            if ring.caught_up().unwrap() {
+                startup.primary(held).unwrap();
+                return;
+            }
+        }
+    }
+    panic!("bounded startup did not become Primary");
+}
+
+fn query_context(held: &mut super::Held, ring: &mut super::Ring) -> Arc<super::QueryContext> {
+    let queries = super::query::Queries::new();
+    let handle = queries.handle(std::thread::current());
+    handle
+        .submit(super::QueryRequest {
+            epoch: 0,
+            source: None,
+            selection: super::QuerySelection::FollowLatest,
+        })
+        .unwrap();
+    super::run_queries(held, ring, &queries);
+    match handle.take().unwrap().outcome {
+        super::QueryOutcome::Ready(context) => context,
+        outcome => panic!("expected query context: {outcome:?}"),
+    }
+}
+
+pub(super) fn primary_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_usage(1000, &usage(0));
+    fixture.publish_with_usage(1001, &usage(1));
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(116);
+    fixture.publish_with_usage(1118, &usage(118));
+    fixture.publish_with_usage(1119, &usage(119));
+    fixture.seal_minute(1);
+    fixture.publish_with_usage(1120, &usage(120));
+    fixture.publish_with_usage(1121, &usage(121));
+    fixture.seal_minute(2);
+    fixture
+}
+
+#[test]
+fn staged_history_and_native_clock_jumps_rebuild_cohorts_before_incremental_updates_resume() {
+    // Goal: historical replacement cannot subtract rows that the incremental means never entered.
+    // Method: upgrade old A, append real native N across its cutoff, finish, then roll back.
+    let mut fixture = primary_fixture();
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+    let primary = query_context(&mut held, &mut ring);
+    startup.advance(&input, &mut held, &mut ring).unwrap();
+    startup.advance(&input, &mut held, &mut ring).unwrap();
+    assert_eq!(held.apps.get(0).unwrap().missing, None);
+    assert_eq!(
+        held.apps.get(2).unwrap().missing,
+        Some(super::Missing::Unread)
+    );
+
+    publish_named(&mut fixture, 122, 2000);
+    super::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();
+    let mut cohorts = super::Cohorts::with_room();
+    held.context.choose(&mut cohorts);
+    assert_eq!(cohorts.seconds, 0);
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_complete(&mut startup, &input, &mut held, &mut ring);
+
+    cohorts.clear();
+    held.context.choose(&mut cohorts);
+    assert_eq!(cohorts.seconds, 5);
+    let mut names: Vec<_> = cohorts
+        .resident
+        .iter()
+        .map(|app| app.bytes.as_slice())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, [b"/Apps/Current.app".as_slice(), b"N".as_slice()]);
+    assert_eq!(primary.selected().observation.stamp.publication, 6);
+    publish_named(&mut fixture, 123, 1000);
+    super::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();
+    cohorts.clear();
+    held.context.choose(&mut cohorts);
+    assert_eq!(cohorts.seconds, 1);
+    assert_eq!(cohorts.resident[0].bytes.as_slice(), b"N");
+}
+
+pub(super) fn drive_complete(
+    startup: &mut super::recording::staged::Startup,
+    input: &super::recording::staged::Input<'_>,
+    held: &mut super::Held,
+    ring: &mut super::Ring,
+) {
+    for _ in 0..super::recording::MINUTES_MAX * 2 {
+        if matches!(
+            startup.advance(input, held, ring).unwrap(),
+            super::recording::staged::Advance::Complete
+        ) {
+            return;
+        }
+    }
+    panic!("bounded startup did not become Complete");
+}
+
+fn publish_named(fixture: &mut Fixture, run_tick: u64, wall_second: u64) {
+    let identity = publish_named_identity(fixture);
+    let process = collector::processes::Process {
+        pid: 7,
+        usage: usage(run_tick),
+        task: collector::processes::Task {
+            threads: 1,
+            faults: 0,
+            context_switches: 0,
+            mach_syscalls: 0,
+            unix_syscalls: 0,
+        },
+    };
+    let counter = u32::try_from(run_tick).unwrap();
+    fixture
+        .writer
+        .publish_with_identity(
+            &collector::ring::Readings {
+                run_tick,
+                cpus: &[collector::machine::CPUTicks {
+                    user: counter,
+                    idle: counter,
+                    ..collector::machine::CPUTicks::default()
+                }],
+                memory: &collector::machine::Memory::default(),
+                interfaces: &[],
+                ioreport: None,
+                smc: None,
+                processes: &[process],
+                processes_refused: 0,
+                processes_gone: 0,
+                coalitions: &[],
+                events: &[],
+                dropped: collector::ring::Dropped::default(),
+            },
+            Some(&collector::ring::ObservationTimes {
+                wall_ns: wall_second * 1_000_000_000,
+                continuous_ns: run_tick * 1_000_000_000,
+                awake_ns: run_tick * 1_000_000_000,
+            }),
+            &collector::ring::IdentityPublication {
+                processes: &[identity],
+                events: &[],
+            },
+        )
+        .unwrap();
+}
+
+fn publish_named_identity(fixture: &mut Fixture) -> collector::ring::IdentityObservation {
+    use collector::ring::{
+        IdentityObservation, ProcessCreation, ProcessIdentity, ProgramBytes, UsageAvailability,
+    };
+    let mut program = None;
+    fixture
+        .writer
+        .intern_program(
+            &ProgramBytes {
+                executable_name: b"N",
+                app_path: None,
+            },
+            &mut program,
+        )
+        .unwrap();
+    IdentityObservation {
+        pid: 7,
+        usage: UsageAvailability::Measured,
+        identity: ProcessIdentity::Measured {
+            creation: ProcessCreation {
+                unique_id: 7,
+                pid_version: -7,
+            },
+            program: program.unwrap(),
+        },
+    }
+}
+
+#[test]
+fn selected_apps_use_an_available_source_predecessor_below_wall_pruning() {
+    // Goal: pruning by wall time cannot turn an available consecutive App boundary into a gap.
+    // Method: jump the wall clock between run ticks 59 and 60 in two real sealed minutes.
+    let fixture = pruned_boundary_fixture();
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+
+    assert_eq!(held.apps.get(0).unwrap().observation.unwrap().run_tick, 60);
+    let payload = held.apps.get(0).unwrap().processes.as_ref().unwrap();
+    assert_eq!(payload.previous.unwrap().publication, 1);
+    assert_eq!(
+        payload
+            .iter()
+            .find(|process| process.pid == 7)
+            .unwrap()
+            .disk_read_bytes(),
+        crate::apps::Amount::Known(17)
+    );
+}
+
+#[test]
+fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
+    // Goal: history's first retained older sample has a separate exact source predecessor.
+    // Method: keep only two recent slots after a wall-pruned boundary and replay its older rank.
+    let mut fixture = pruned_boundary_fixture();
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_usage(5060, &usage(120));
+    fixture.publish_with_usage(5061, &usage(121));
+    fixture.seal_minute(2);
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    held.span = super::Span::new(2, super::Buffers::new(3, super::MachineSecond::default));
+    held.apps = super::Span::new(2, super::Buffers::new(3, AppsSecond::default));
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+
+    drive_complete(&mut startup, &input, &mut held, &mut ring);
+
+    let older = held.sampled.as_ref().unwrap().get(0).unwrap();
+    assert_eq!(older.observation.stamp.publication, 2);
+    let ranks = older.ranks().unwrap();
+    let disk = ranks
+        .metrics
+        .iter()
+        .find(|rank| rank.metric == crate::live_app_response::Metric::Disk)
+        .unwrap();
+    let app = disk
+        .entries()
+        .find(|entry| entry.app.bytes.as_slice() == b"/Apps/Current.app")
+        .unwrap();
+    assert_eq!(app.amount, 60);
+    assert!((app.rate.unwrap() - 60.0).abs() <= f64::EPSILON * 60.0);
+}
+
+fn pruned_boundary_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_usage(1000, &usage(59));
+    fixture.seal_minute(0);
+    fixture.publish_with_usage(5000, &usage(60));
+    fixture.publish_with_usage(5001, &usage(61));
+    fixture.seal_minute(1);
+    fixture
+}
+
+#[test]
+fn unread_machine_retention_needs_no_admission_even_after_recent_and_older_evictions() {
+    // Goal: the pre-Primary pool installation is infallible after machine admission.
+    // Method: fill and evict the real default pools with zero free admitted bytes and no readers.
+    let fixture = Fixture::new();
+    let run = fixture.writer.identity().unwrap();
+    let budget = Arc::new(ByteBudget::new(1024));
+    let lease = budget.reserve(budget.maximum()).unwrap();
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    held.startup = super::StartupState::Loading;
+
+    for publication in 1..=1200 {
+        let second = super::MachineSecond {
+            publication,
+            run_tick: publication - 1,
+            wall_ns: publication * 2_000_000_000,
+            ..super::MachineSecond::default()
+        };
+        let mut apps = AppsSecond {
+            observation: Some(super::take_observation(&run, &second)),
+            ..AppsSecond::default()
+        };
+        assert!(held.take(&run, &second, super::TickApps::Loaded(&mut apps)));
+    }
+
+    assert_eq!(held.span.len(), super::SECONDS_MAX);
+    assert_eq!(held.apps.len(), super::SECONDS_MAX);
+    assert_eq!(held.earlier.len(), 25);
+    assert!(
+        held.sampled
+            .as_ref()
+            .unwrap()
+            .held()
+            .all(|sample| matches!(sample.ranks(), Err(super::Missing::Unread)))
+    );
+    assert_eq!(budget.used(), budget.maximum());
+    drop(lease);
+}
+
+#[test]
+fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_boundary() {
+    // Goal: an unused prefix cannot consume a predecessor-only schedule slot.
+    // Method: retain one recent/older pair from three loaded minutes after a pruned source minute.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_usage(1000, &usage(59));
+    fixture.seal_minute(0);
+    for minute in 1..=3 {
+        if minute > 1 {
+            fixture.skip_run_ticks(59);
+        }
+        fixture.publish_with_usage(5000 + minute * 60, &usage(minute * 60));
+        fixture.seal_minute(minute);
+    }
+    let trace =
+        persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
+    let scope = trace.enter();
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    held.span = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
+    held.apps = super::Span::new(1, super::Buffers::new(2, AppsSecond::default));
+    held.earlier = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
+    held.sampled = Some(super::Span::new(
+        1,
+        super::Buffers::new(2, super::SampledSecond::empty),
+    ));
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+    drive_complete(&mut startup, &input, &mut held, &mut ring);
+
+    assert_eq!(
+        held.sampled
+            .as_ref()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .observation
+            .stamp
+            .publication,
+        3
+    );
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    assert!(events.iter().all(|event| !matches!(
+        event.key,
+        persistence::work::ingestion::Key::Publication { publication: 1, .. }
+    )));
+    drop(scope);
+}
+
+#[test]
+fn a_clockless_source_tail_is_handed_off_once_after_an_earlier_displayable_selection() {
+    // Goal: selection and the source terminal remain independent across a clockless minute.
+    // Method: select A, seal clockless B, then read real native C using B's exact predecessor.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_usage(100, &usage(0));
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_usage(160, &usage(60));
+    fixture.seal_window(
+        Some(1),
+        &[persistence::Observation {
+            publication: 2,
+            wall_ns: None,
+            continuous_ns: Some(60_000_000_000),
+            awake_ns: Some(60_000_000_000),
+        }],
+        &crate::live::identity_fixture::Underived,
+    );
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    held.startup = super::StartupState::Loading;
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut startup = super::recording::staged::Startup::new();
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_primary(&mut startup, &input, &mut held, &mut ring);
+    assert_eq!(held.newest.unwrap().publication, 1);
+
+    fixture.publish_with_usage(161, &usage(61));
+    super::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();
+
+    assert_eq!(held.newest.unwrap().publication, 3);
+    assert_eq!(held.span.newest().unwrap().cpu_percent, None);
+    assert!(!held.span.newest().unwrap().follows);
+    let apps = held.apps.newest().unwrap();
+    let payload = apps.processes.as_ref().unwrap();
+    assert_eq!(payload.previous.unwrap().publication, 2);
+    assert_eq!(apps.elapsed_ns, None);
+    assert_eq!(
+        payload
+            .iter()
+            .find(|process| process.pid == 7)
+            .unwrap()
+            .disk_read_bytes(),
+        crate::apps::Amount::Unavailable(crate::apps::Unavailable::Interval)
+    );
+    let input = super::recording::staged::Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+    drive_complete(&mut startup, &input, &mut held, &mut ring);
+}
+
+#[test]
 fn cancellation_immediately_before_publication_leaves_no_startup_view() {
     // Goal: a populated startup cannot publish after its caller cancels.
     // Method: consume real sealed data, cancel, then invoke the Store's actual publication step.

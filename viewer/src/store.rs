@@ -55,8 +55,9 @@ pub use context::Cohorts;
 pub use native::AppMetadata;
 pub use payload::{AppDetails, Payload, ProcessName, ProcessRow};
 pub use query::{
-    QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome, QueryReply, QueryRequest, QuerySecond,
-    QuerySelection, QuerySubmitError, QueryToken, QueryUnavailable, SourceGeneration,
+    HistoryError, HistoryResult, QueryContext, QueryHandle, QueryNeedsLoad, QueryOutcome,
+    QueryReadiness, QueryReply, QueryRequest, QuerySecond, QuerySelection, QuerySubmitError,
+    QueryToken, QueryUnavailable, SourceGeneration,
 };
 pub use response::{ContextPart, ContextParts, ContextRanks, Response};
 pub use sampled::{SampledRank, SampledRanking, SampledRanks, SampledSecond};
@@ -68,6 +69,7 @@ pub use second::{
 use apps::TickApps;
 use collector::ring::RunIdentity;
 use context::Context;
+use native::NativeRead;
 use native_acceptance::{make_ring, read_native};
 use ring::Ring;
 
@@ -245,10 +247,10 @@ impl Store {
             window_seconds: AtomicU64::new(crate::session::LOADED_SECONDS),
             cancellation: Arc::new(Cancellation::default()),
         });
-        let mut held = Held::new();
-        if let Some(budget) = budget {
-            held.enable_payload(budget);
-        }
+        let mut held = match budget {
+            Some(budget) => Held::with_payload(budget),
+            None => Held::new(),
+        };
         let root = root.to_owned();
         let operation = Arc::clone(&shared.cancellation)
             .operation(0)
@@ -263,7 +265,12 @@ impl Store {
                 let observation = observation.enter();
                 // A ring's mapping stays on the thread that maps it.
                 let mut ring = make_ring(&root, held.payload_budget.as_ref());
-                if let Err(error) = startup(&root, &mut held, &mut ring, &operation) {
+                let started = if held.payload_budget.is_some() {
+                    startup_staged(&root, &mut held, &mut ring, &thread_shared, &operation)
+                } else {
+                    startup(&root, &mut held, &mut ring, &operation)
+                };
+                if let Err(error) = started {
                     if let Some(queries) = &thread_shared.queries {
                         queries.close();
                     }
@@ -399,6 +406,7 @@ impl Drop for Store {
 
 /// What the store thread holds between steps.
 struct Held {
+    startup: StartupState,
     checked_catalog: Option<recording::CheckedCatalog>,
     source_generation: u64,
     source_status: Option<ring::Status>,
@@ -431,10 +439,27 @@ struct Newest {
     segment: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartupState {
+    Loading,
+    Primary,
+    Complete,
+}
+
 impl Held {
     fn new() -> Self {
+        Self::with_apps(AppsSecond::with_room)
+    }
+
+    fn with_payload(budget: Arc<ByteBudget>) -> Self {
+        let mut held = Self::with_apps(AppsSecond::default);
+        held.enable_payload(budget);
+        held
+    }
+
+    fn with_apps(make_apps: impl FnMut() -> AppsSecond) -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
-        let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, AppsSecond::with_room);
+        let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, make_apps);
         let earlier = Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, MachineSecond::default);
         let views = Buffers::new(VIEWS_MAX, || View {
             version: 0,
@@ -450,6 +475,7 @@ impl Held {
         });
 
         Self {
+            startup: StartupState::Complete,
             checked_catalog: None,
             source_generation: 0,
             source_status: None,
@@ -531,35 +557,20 @@ impl Held {
         let kept = leaving
             .clone()
             .filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
-        if !self.span.has_room() {
+        if !self.take_room(kept.is_some()) {
             return false;
         }
-        if !self.apps.has_room() {
+        let Ok(prepared_sample) = self.take_sample(kept.as_ref()) else {
             return false;
-        }
-        if kept.is_some() {
-            if !self.earlier.has_room() {
-                return false;
-            }
-            if self
-                .sampled
-                .as_ref()
-                .is_some_and(|sampled| !sampled.has_room())
-            {
-                return false;
-            }
-        }
-
+        };
         let segment = segment(self.newest.as_ref(), run, second);
-        self.context.leave(&self.apps);
+        if self.startup == StartupState::Complete {
+            self.context.leave(&self.apps);
+        }
         if let Some(kept) = kept {
             if let Some(sampled) = &mut self.sampled {
-                let apps = self.apps.leaving().unwrap_or_else(|| unreachable!());
-                let budget = self
-                    .payload_budget
-                    .as_ref()
-                    .unwrap_or_else(|| unreachable!());
-                let pushed = sampled.push(|buffer| buffer.take(&kept, apps, budget));
+                let sample = prepared_sample.unwrap_or_else(|| unreachable!("admitted sample"));
+                let pushed = sampled.push(|buffer| *buffer = sample);
                 assert!(pushed);
             }
             let pushed = self.earlier.push(|buffer| *buffer = kept);
@@ -584,6 +595,54 @@ impl Held {
         });
         self.unpublished = true;
         true
+    }
+
+    fn take_room(&self, kept: bool) -> bool {
+        if !self.span.has_room() {
+            return false;
+        }
+
+        if !self.apps.has_room() {
+            return false;
+        }
+
+        if kept {
+            if !self.earlier.has_room() {
+                return false;
+            }
+
+            if self
+                .sampled
+                .as_ref()
+                .is_some_and(|sampled| !sampled.has_room())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn take_sample(&self, kept: Option<&MachineSecond>) -> Result<Option<SampledSecond>, Missing> {
+        let Some(kept) = kept else {
+            return Ok(None);
+        };
+
+        let Some(budget) = &self.payload_budget else {
+            return Ok(None);
+        };
+
+        let apps = self
+            .apps
+            .leaving()
+            .unwrap_or_else(|| unreachable!("departing Apps"));
+        if apps.missing == Some(Missing::Unread) {
+            return Ok(Some(SampledSecond::unread(
+                kept,
+                apps.observation
+                    .unwrap_or_else(|| unreachable!("departing identity")),
+            )));
+        }
+        SampledSecond::admitted(kept, apps, budget).map(Some)
     }
 
     fn take_current(
@@ -612,7 +671,9 @@ impl Held {
         if let Some(observation) = self.apps.newest().and_then(|apps| apps.observation) {
             assert_eq!(observation.stamp.publication, second.publication);
         }
-        self.context.follow(&self.span, &self.apps);
+        if self.startup == StartupState::Complete {
+            self.context.follow(&self.span, &self.apps);
+        }
     }
 
     fn release_views(&mut self) {
@@ -623,6 +684,17 @@ impl Held {
             view.sampled.clear();
             view.cohorts.clear();
         });
+        if self.payload_budget.is_some() {
+            self.apps.release(|apps| {
+                if apps.apps.reserved_bytes() == 0 {
+                    if apps.apps.capacity() > 0 {
+                        apps.take(TickApps::Missing(&Missing::Unread), None, None);
+                        return;
+                    }
+                }
+                *apps = AppsSecond::default();
+            });
+        }
         self.span
             .release(|second| *second = MachineSecond::default());
         self.earlier
@@ -792,6 +864,193 @@ fn startup_accept(
     ring.accept(outcome.terminal);
 
     Ok(())
+}
+
+/// The opt-in constructor uses the same producer while yielding between finite source steps.
+fn startup_staged(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+    operation: &Operation,
+) -> persistence::Result<()> {
+    use recording::staged::{Failure as StartupFailure, Input, Startup};
+    let budget = Arc::clone(
+        held.payload_budget
+            .as_ref()
+            .unwrap_or_else(|| unreachable!()),
+    );
+    let input = Input {
+        root,
+        budget: &budget,
+        operation,
+    };
+    let mut startup = Startup::new();
+    let mut blocked = None;
+    held.startup = StartupState::Loading;
+    for _ in 0..STEPS_MAX {
+        operation.check()?;
+        match startup_staged_turn(&input, held, ring, shared, &mut startup, &mut blocked) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(StartupFailure::Catalog(Failure::ChangedIdentity | Failure::ForeignRecording)) => {
+                held.reset();
+                held.startup = StartupState::Loading;
+                *ring = make_ring(root, Some(&budget));
+                startup = Startup::new();
+                blocked = None;
+            }
+            Err(error) => return Err(startup_error(error)),
+        }
+    }
+    unreachable!("startup finishes or the Store is cancelled");
+}
+
+fn startup_staged_turn(
+    input: &recording::staged::Input<'_>,
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+    startup: &mut recording::staged::Startup,
+    blocked: &mut Option<StartupCapacity>,
+) -> Result<bool, recording::staged::Failure> {
+    use recording::staged::{Advance, Failure as StartupFailure};
+    if !shared.active.load(Ordering::Acquire) {
+        shared.paused.store(true, Ordering::Release);
+        thread::park();
+        shared.paused.store(false, Ordering::Release);
+        startup.revalidate(input)?;
+        return Ok(false);
+    }
+
+    if held.startup == StartupState::Primary {
+        let queries = shared.queries.as_ref().unwrap_or_else(|| unreachable!());
+        if queries.requested() {
+            startup.revalidate(input)?;
+            run_queries(held, ring, queries);
+        }
+        startup_staged_native(input, held, ring, shared)?;
+        if coverage::source_changed(held, ring) {
+            return Err(StartupFailure::Catalog(Failure::ChangedIdentity));
+        }
+    }
+    if let Some(previous) = blocked {
+        held.release_views();
+        let capacity = startup_capacity(held, input.budget);
+        if !capacity.improved(previous) {
+            startup_staged_follow(held, ring);
+            thread::park_timeout(WAIT);
+            return Ok(false);
+        }
+    }
+    match startup.advance(input, held, ring)? {
+        Advance::Progress => *blocked = None,
+        Advance::Blocked => {
+            *blocked = Some(startup_capacity(held, input.budget));
+            thread::park_timeout(WAIT);
+        }
+        Advance::Primary => {
+            if startup_staged_native(input, held, ring, shared)? == NativeRead::Blocked {
+                *blocked = Some(startup_capacity(held, input.budget));
+                thread::park_timeout(WAIT);
+                return Ok(false);
+            }
+
+            *blocked = None;
+            if ring.caught_up().map_err(StartupFailure::Catalog)? {
+                if held.failure.is_none() {
+                    startup.primary(held)?;
+                }
+            }
+            if held.failure.is_some() {
+                thread::park_timeout(WAIT);
+            }
+        }
+        Advance::Complete => return Ok(true),
+    }
+    Ok(false)
+}
+
+fn startup_staged_follow(held: &mut Held, ring: &mut Ring) {
+    if held.startup == StartupState::Loading {
+        if ring.identity().is_some() {
+            let failure = ring.follow().err();
+            if failure != held.failure {
+                held.failure = failure;
+                held.unpublished = true;
+            }
+        }
+    }
+}
+
+fn startup_staged_native(
+    input: &recording::staged::Input<'_>,
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+) -> Result<NativeRead, recording::staged::Failure> {
+    let progress = step(
+        held,
+        ring,
+        Ok(()),
+        &shared.mailbox,
+        Some(input.operation),
+        Publication::Deferred,
+    )?;
+    if ring.reload_required() {
+        return Err(recording::staged::Failure::Catalog(
+            Failure::ChangedIdentity,
+        ));
+    }
+    Ok(progress)
+}
+
+#[derive(PartialEq, Eq)]
+struct StartupCapacity {
+    bytes: usize,
+    apps: usize,
+    sampled: usize,
+    newest: Option<(RunIdentity, u64)>,
+}
+
+impl StartupCapacity {
+    fn improved(&self, previous: &Self) -> bool {
+        if self.bytes < previous.bytes {
+            return true;
+        }
+
+        if self.apps > previous.apps {
+            return true;
+        }
+
+        if self.sampled > previous.sampled {
+            return true;
+        }
+
+        self.newest != previous.newest
+    }
+}
+
+fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
+    StartupCapacity {
+        bytes: budget.used(),
+        apps: held.apps.free(),
+        sampled: held.sampled.as_ref().map_or(0, Span::free),
+        newest: held.newest.map(|newest| (newest.run, newest.publication)),
+    }
+}
+
+fn startup_error(error: recording::staged::Failure) -> persistence::Error {
+    match error {
+        recording::staged::Failure::Blocked => persistence::Error::Bound("startup admission"),
+        recording::staged::Failure::Read(crate::recording::Refused::Decode(error)) => error,
+        recording::staged::Failure::Read(error) => {
+            persistence::Error::Io(io::Error::other(format!("{error:?}")))
+        }
+        recording::staged::Failure::Catalog(error) => {
+            persistence::Error::Io(io::Error::other(format!("{error:?}")))
+        }
+    }
 }
 
 /// Steps until the store is dropped.
@@ -1035,10 +1294,12 @@ fn refresh_load_finish(held: &mut Held, ring: &mut Ring, next: Ring, reset: bool
 enum Publication {
     Complete,
     Progress,
+    Deferred,
 }
 
 /// Takes in what the ring published since the last step, follows the newest run, and hands
 /// over a View where anything changed. `waited` is how the wait before the step went.
+/// The return value reports native admission; the legacy path performs no native read.
 fn step(
     held: &mut Held,
     ring: &mut Ring,
@@ -1046,7 +1307,7 @@ fn step(
     mailbox: &Mailbox<View>,
     operation: Option<&Operation>,
     publication: Publication,
-) -> persistence::Result<()> {
+) -> persistence::Result<NativeRead> {
     if let Some(operation) = operation {
         operation.check()?;
     }
@@ -1057,10 +1318,15 @@ fn step(
         read_native(held, ring, operation)
     } else {
         ring.read(|run, second, apps| held.take(run, second, apps))
+            .map(|()| NativeRead::Idle)
     };
-    if let Err(read) = read {
-        failure = Some(read);
-    }
+    let progress = match read {
+        Ok(progress) => progress,
+        Err(read) => {
+            failure = Some(read);
+            NativeRead::Idle
+        }
+    };
 
     if let Err(followed) = ring.follow() {
         failure = Some(followed);
@@ -1071,7 +1337,7 @@ fn step(
     }
 
     if ring.reload_required() {
-        return Ok(());
+        return Ok(progress);
     }
 
     if failure != held.failure {
@@ -1080,16 +1346,19 @@ fn step(
     }
     let complete = step_complete(held, ring);
     if held.unpublished {
+        if matches!(publication, Publication::Deferred) {
+            return Ok(progress);
+        }
         if matches!(publication, Publication::Complete) {
             if !complete {
                 if held.failure.is_none() {
-                    return Ok(());
+                    return Ok(progress);
                 }
             }
         }
         held.publish(mailbox);
     }
-    Ok(())
+    Ok(progress)
 }
 
 fn step_complete(held: &mut Held, ring: &mut Ring) -> bool {

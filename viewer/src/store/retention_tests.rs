@@ -9,6 +9,48 @@ const RUN: collector::ring::RunIdentity = collector::ring::RunIdentity {
 };
 
 #[test]
+fn complete_retention_admits_an_explicit_refusal_before_evicting_its_recent_owner() {
+    // Goal: complete native retention never installs an older Budget in place of a refusal.
+    // Method: deny the exact fallible ranking seam with a real shared reservation, then retry.
+    let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
+    let mut held = Held::with_payload(Arc::clone(&budget));
+    held.span = super::Span::new(1, super::Buffers::new(2, MachineSecond::default));
+    held.apps = super::Span::new(1, super::Buffers::new(2, super::AppsSecond::default));
+    let mut refused = super::AppsSecond::default();
+    refused.take(
+        super::TickApps::Refused("store tick events"),
+        None,
+        Some(&budget),
+    );
+    refused.observation = Some(super::take_observation(&RUN, &second(1)));
+    assert!(held.take(&RUN, &second(1), super::TickApps::Loaded(&mut refused)));
+    let lease = budget.reserve(budget.maximum() - budget.used()).unwrap();
+    let mut next = super::AppsSecond {
+        observation: Some(super::take_observation(&RUN, &second(2))),
+        missing: None,
+        ..super::AppsSecond::default()
+    };
+
+    assert!(!held.take(&RUN, &second(2), super::TickApps::Loaded(&mut next)));
+    assert_eq!(held.newest.unwrap().publication, 1);
+    assert!(held.earlier.is_empty());
+    assert_eq!(
+        held.apps.newest().unwrap().missing,
+        Some(super::Missing::Refused(String::from("store tick events")))
+    );
+    drop(lease);
+    assert!(held.take(&RUN, &second(2), super::TickApps::Loaded(&mut next)));
+
+    assert_eq!(held.newest.unwrap().publication, 2);
+    let older = held.sampled.as_ref().unwrap().newest().unwrap();
+    assert_eq!(older.observation.stamp.publication, 1);
+    let Err(super::Missing::Refused(reason)) = older.ranks() else {
+        panic!("explicit refusal");
+    };
+    assert_eq!(reason, "store tick events");
+}
+
+#[test]
 fn a_sparse_history_without_eviction_preserves_its_gaps() {
     // Goal: the first retained reading does not turn a valid preceding gap into an eviction.
     // Method: retain two distant observations without filling the full-detail span.

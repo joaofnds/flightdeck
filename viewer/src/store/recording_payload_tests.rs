@@ -9,8 +9,7 @@ use crate::store::{AppsSecond, ByteBudget};
 
 #[test]
 fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
-    // Goal: each step releases one minute while the completed cursor keeps the exact raw tail.
-    // Method: advance three real sealed minutes separately and compare the terminal-only reader.
+    // Goal: preserve the exact terminal. Method: compare three real steps with its own reader.
     let fixture = catch_up_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
@@ -23,21 +22,27 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
         operation: &operation,
         capture: &AdmittedTable::from_file_budgeted,
     };
-    let mut cursor = Cursor::new(&found);
+    let mut cursor = Cursor::new(found.len());
     let mut accepted = Vec::new();
 
     cursor
-        .step(&input, |_, second, _| accepted.push(second.publication))
+        .step(&input, &found[0], |_, second, _| {
+            accepted.push(second.publication);
+        })
         .unwrap();
     assert_eq!(accepted, [1]);
     assert_eq!(budget.used(), 0);
     cursor
-        .step(&input, |_, second, _| accepted.push(second.publication))
+        .step(&input, &found[1], |_, second, _| {
+            accepted.push(second.publication);
+        })
         .unwrap();
     assert_eq!(accepted, [1, 2, 3]);
     assert_eq!(budget.used(), 0);
     cursor
-        .step(&input, |_, second, _| accepted.push(second.publication))
+        .step(&input, &found[2], |_, second, _| {
+            accepted.push(second.publication);
+        })
         .unwrap();
     let outcome = cursor.finish(&operation).unwrap();
     let expected = super::terminal(
@@ -90,7 +95,7 @@ fn cursor_steps_preserve_the_first_live_successor() {
         operation: &operation,
         capture: &AdmittedTable::from_file_budgeted,
     };
-    let mut cursor = Cursor::new(&found);
+    let mut cursor = Cursor::new(found.len());
     let expected = super::terminal(
         &fixture.root,
         &found[2],
@@ -101,9 +106,9 @@ fn cursor_steps_preserve_the_first_live_successor() {
     .unwrap()
     .unwrap();
 
-    cursor.step(&input, |_, _, _| {}).unwrap();
-    cursor.step(&input, |_, _, _| {}).unwrap();
-    cursor.step(&input, |_, _, _| {}).unwrap();
+    cursor.step(&input, &found[0], |_, _, _| {}).unwrap();
+    cursor.step(&input, &found[1], |_, _, _| {}).unwrap();
+    cursor.step(&input, &found[2], |_, _, _| {}).unwrap();
     let actual = cursor.finish(&operation).unwrap().terminal.unwrap();
     fixture.publish_with_system_rows(221);
     let expected = terminal_successor(&fixture.root, expected);
@@ -132,8 +137,8 @@ fn cursor_refuses_a_terminal_handoff_before_all_minutes_are_consumed() {
         operation: &operation,
         capture: &AdmittedTable::from_file_budgeted,
     };
-    let mut cursor = Cursor::new(&found);
-    cursor.step(&input, |_, _, _| {}).unwrap();
+    let mut cursor = Cursor::new(found.len());
+    cursor.step(&input, &found[0], |_, _, _| {}).unwrap();
 
     let result = cursor.finish(&operation);
 
@@ -163,10 +168,10 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
         operation: &operation,
         capture: &AdmittedTable::from_file_budgeted,
     };
-    let mut cursor = Cursor::new(&found);
+    let mut cursor = Cursor::new(found.len());
     let mut retained = AppsSecond::with_room();
     cursor
-        .step(&input, |_, _, apps| {
+        .step(&input, &found[0], |_, _, apps| {
             retained.take(apps, None, Some(&budget));
         })
         .unwrap();
@@ -175,7 +180,9 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
     let mut accepted = 0;
     cancellation.cancel().unwrap();
 
-    let result = cursor.step(&input, |_, _, _| accepted += 1);
+    let result = cursor.step(&input, &found[1], |_, _, _| {
+        accepted += 1;
+    });
     let finished = cursor.finish(&operation);
 
     assert_eq!(accepted, 0);
@@ -207,22 +214,22 @@ fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
         operation: &operation,
         capture: &AdmittedTable::from_file_budgeted,
     };
-    let mut cursor = Cursor::new(&found);
+    let mut cursor = Cursor::new(found.len());
     let mut accepted = Vec::new();
 
     cursor
-        .step(&input, |_, second, _| {
+        .step(&input, &found[0], |_, second, _| {
             accepted.push((second.publication, second.follows));
         })
         .unwrap();
     cursor
-        .step(&input, |_, second, _| {
+        .step(&input, &found[1], |_, second, _| {
             accepted.push((second.publication, second.follows));
         })
         .unwrap();
     assert_eq!(accepted, [(1, false)]);
     cursor
-        .step(&input, |_, second, _| {
+        .step(&input, &found[2], |_, second, _| {
             accepted.push((second.publication, second.follows));
         })
         .unwrap();
@@ -731,13 +738,13 @@ fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
     });
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut before = None;
+    let mut replay_decoder = Decoder::default();
     let captures = AtomicU64::new(0);
 
     let (machine, apps) = super::load_minute(
         &fixture.root,
         &found[0],
-        &mut before,
+        &mut replay_decoder,
         &budget,
         &operation,
         &|file, budget| {
@@ -753,7 +760,7 @@ fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
 
     assert_loader_clocks(&machine, &apps, &fixture.writer.identity().unwrap());
     assert_eq!(captures.load(Ordering::Relaxed), 1);
-    assert!(before.is_some());
+    assert!(replay_decoder.predecessor.is_some());
     drop(apps);
     assert_eq!(budget.used(), 0);
 }
@@ -880,13 +887,13 @@ fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitme
         .join("ticks.parquet");
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut before = None;
+    let mut replay_decoder = Decoder::default();
     let mut consumed = Vec::new();
 
     let result = super::load_minute_visit(
         &fixture.root,
         &found[0],
-        &mut before,
+        &mut replay_decoder,
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,
@@ -924,12 +931,12 @@ fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
     let budget = Arc::new(ByteBudget::new(1024));
     let charge = budget.reserve(1024).unwrap();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut before = None;
+    let mut replay_decoder = Decoder::default();
 
     let result = super::load_minute(
         &fixture.root,
         &found[0],
-        &mut before,
+        &mut replay_decoder,
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,
@@ -1240,14 +1247,14 @@ fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let expected = events_loader_legacy(&source, &budget, &operation);
     let expected_captures = events_loader_consumed_inodes(&source);
-    let mut before = None;
+    let mut replay_decoder = Decoder::default();
     let events_captures = AtomicU64::new(0);
     let captures = Mutex::new(Vec::new());
 
     let (machine, apps) = super::load_minute(
         source.root,
         &found[0],
-        &mut before,
+        &mut replay_decoder,
         &budget,
         &operation,
         &|file, budget| {
@@ -1272,7 +1279,7 @@ fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
     let mut captures = captures.into_inner().unwrap();
     captures.sort_unstable();
     assert_eq!(captures, expected_captures);
-    assert!(before.is_some());
+    assert!(replay_decoder.predecessor.is_some());
     assert_eq!(
         persistence::read_committed(source.root, source.marker).unwrap(),
         manifest
@@ -1565,12 +1572,12 @@ fn events_capture_budget_denial_remains_typed_without_legacy_retry() {
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let held = Mutex::new(None);
     let attempts = AtomicU64::new(0);
-    let mut before = None;
+    let mut replay_decoder = Decoder::default();
 
     let result = super::load_minute(
         &fixture.root,
         &found[0],
-        &mut before,
+        &mut replay_decoder,
         &budget,
         &operation,
         &|file, budget| {
@@ -1591,7 +1598,7 @@ fn events_capture_budget_denial_remains_typed_without_legacy_retry() {
         ))
     ));
     assert_eq!(attempts.load(Ordering::Relaxed), 1);
-    assert!(before.is_none());
+    assert!(replay_decoder.predecessor.is_none());
     let held = held.into_inner().unwrap().unwrap();
     assert_eq!(budget.used(), held.bytes());
     drop(held);
@@ -1608,13 +1615,13 @@ fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let mut before = None;
+    let mut replay_decoder = Decoder::default();
     let captures = AtomicU64::new(0);
 
     let result = super::load_minute(
         &fixture.root,
         &found[0],
-        &mut before,
+        &mut replay_decoder,
         &budget,
         &operation,
         &|file, budget| {
@@ -1631,7 +1638,7 @@ fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
     assert!(matches!(result, Err(crate::recording::Refused::Decode(
         persistence::Error::Io(error))) if error.kind() == std::io::ErrorKind::Interrupted));
     assert_eq!(captures.load(Ordering::Relaxed), 1);
-    assert!(before.is_none());
+    assert!(replay_decoder.predecessor.is_none());
     assert_eq!(budget.used(), 0);
 }
 
@@ -1650,13 +1657,13 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
         .join("events.parquet");
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut before = None;
+    let mut replay_decoder = Decoder::default();
     let mut consumed = Vec::new();
 
     let result = super::load_minute_visit(
         &fixture.root,
         &found[0],
-        &mut before,
+        &mut replay_decoder,
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,

@@ -6,7 +6,7 @@
 pub(crate) mod apps;
 mod machine;
 mod minute_ticks;
-mod processes;
+pub(crate) mod processes;
 mod ticks_input;
 use ticks_input::TicksInput;
 
@@ -75,6 +75,15 @@ impl From<persistence::Error> for Refused {
 }
 
 impl ScopedSealedMinute<'_> {
+    pub(crate) fn into_manifest(self) -> persistence::Manifest {
+        self.manifest
+    }
+
+    pub(crate) fn endpoints(&self) -> Result<Vec<crate::live_apps::committed::Endpoint>, Refused> {
+        let endpoints = processes::read_processes_endpoints(self)?;
+        crate::live_apps::committed::committed_endpoints(&endpoints)?;
+        Ok(endpoints)
+    }
     pub(crate) fn revalidate_full(&self) -> Result<(), Refused> {
         let current =
             persistence::read_committed(&self.root, &self.marker).map_err(Refused::Commitment)?;

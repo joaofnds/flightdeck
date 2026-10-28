@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use viewer::store::{
-    QueryContext, QueryHandle, QueryOutcome, QueryRequest, QuerySelection, QueryToken,
+    QueryContext, QueryHandle, QueryOutcome, QueryReadiness, QueryRequest, QuerySelection,
+    QueryToken,
 };
 
 use super::{Command, Context, Histories, Reader, Shared, Snapshot, Update};
@@ -68,8 +69,14 @@ impl StoreReader {
         }
         if self.published == command.generation {
             if command.request.second.is_some() {
-                if command.request.route != "computer" {
-                    return Ok(None);
+                if self
+                    .context
+                    .as_ref()
+                    .is_some_and(|context| context.readiness() == QueryReadiness::Complete)
+                {
+                    if command.request.route != "computer" {
+                        return Ok(None);
+                    }
                 }
             }
             let mailbox = shared.mailbox.lock().map_err(|error| error.to_string())?;
@@ -82,7 +89,10 @@ impl StoreReader {
         }
         if let Some(context) = &self.context {
             if command.request.second == Some(context.selected_second()) {
-                if context.selected().detached() {
+                if context.readiness() == QueryReadiness::Complete {
+                    if !context.selected().detached() {
+                        return self.snapshot_query(command, shared);
+                    }
                     let identity_matches = match &command.request.identity {
                         Some(identity) => {
                             context
@@ -103,6 +113,22 @@ impl StoreReader {
     }
 
     fn snapshot_kept(
+        &mut self,
+        command: &mut Command,
+        shared: &Shared,
+    ) -> Result<Option<Box<Snapshot>>, String> {
+        if self
+            .context
+            .as_ref()
+            .is_some_and(|context| context.readiness() == QueryReadiness::Primary)
+        {
+            return self.snapshot_kept_refresh(command, shared);
+        }
+
+        self.snapshot_kept_present(command, shared)
+    }
+
+    fn snapshot_kept_present(
         &mut self,
         command: &mut Command,
         shared: &Shared,
@@ -131,6 +157,52 @@ impl StoreReader {
         }
 
         payload::snapshot(context, command, shared, Some(&observation)).map(Some)
+    }
+
+    fn snapshot_kept_refresh(
+        &mut self,
+        command: &mut Command,
+        shared: &Shared,
+    ) -> Result<Option<Box<Snapshot>>, String> {
+        let context = self.context.as_ref().ok_or("Missing Store context")?;
+        if self.pending.is_none() {
+            let token = self
+                .handle
+                .submit(QueryRequest {
+                    epoch: command.epoch,
+                    source: Some(context.source),
+                    selection: QuerySelection::Exact {
+                        observation: context.selected().observation,
+                        context_last_second: context.context_last_second(),
+                    },
+                })
+                .map_err(|error| format!("Store kept query: {error:?}"))?;
+            self.pending = Some((command.generation, token));
+            return Ok(None);
+        }
+
+        let Some(reply) = self.handle.take() else {
+            return Ok(None);
+        };
+
+        if self.pending != Some((command.generation, reply.token)) {
+            return Ok(None);
+        }
+
+        self.pending = None;
+        match reply.outcome {
+            QueryOutcome::Ready(context) => {
+                if context.readiness() == QueryReadiness::Primary {
+                    return Ok(None);
+                }
+
+                self.context = Some(context);
+                self.snapshot_kept_present(command, shared)
+            }
+            QueryOutcome::NeedsLoad(viewer::store::QueryNeedsLoad::AppsPending) => Ok(None),
+            QueryOutcome::NeedsLoad(reason) => Err(format!("Store kept coverage: {reason:?}")),
+            QueryOutcome::Unavailable(reason) => Err(format!("Store kept unavailable: {reason:?}")),
+        }
     }
 
     fn snapshot_kept_raw(
@@ -201,6 +273,7 @@ impl StoreReader {
         self.pending = None;
         let context = match reply.outcome {
             QueryOutcome::Ready(context) => context,
+            QueryOutcome::NeedsLoad(viewer::store::QueryNeedsLoad::AppsPending) => return Ok(None),
             QueryOutcome::NeedsLoad(reason) => {
                 return Err(format!("Store coverage unavailable: {reason:?}"));
             }
@@ -251,11 +324,17 @@ impl StoreReader {
         command: &Command,
         selection: QuerySelection,
     ) -> Result<(), String> {
+        let source = match selection {
+            QuerySelection::FollowLatest => None,
+            QuerySelection::Second { .. } | QuerySelection::Exact { .. } => {
+                self.context.as_ref().map(|context| context.source)
+            }
+        };
         let token = self
             .handle
             .submit(QueryRequest {
                 epoch: command.epoch,
-                source: None,
+                source,
                 selection,
             })
             .map_err(|error| format!("Store query: {error:?}"))?;
@@ -269,6 +348,12 @@ impl StoreReader {
             return false;
         };
         if previous.source != context.source {
+            return false;
+        }
+        if previous.readiness() != context.readiness() {
+            return false;
+        }
+        if previous.context_last_second() != context.context_last_second() {
             return false;
         }
 
@@ -317,7 +402,12 @@ pub(super) fn read(reader: &mut Reader, command: &mut Command, shared: &Shared) 
         Ok(Some(mut snapshot)) => {
             snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
             store.published = command.generation;
-            super::reader_snapshot_record(reader, command, &snapshot, Histories::Read);
+            let histories = if snapshot.histories_pending {
+                Histories::Defer
+            } else {
+                Histories::Read
+            };
+            super::reader_snapshot_record(reader, command, &snapshot, histories);
             Some(Update::Ready(snapshot))
         }
         Ok(None) => None,

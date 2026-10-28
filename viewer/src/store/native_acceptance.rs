@@ -23,7 +23,7 @@ pub(super) fn read_native(
     held: &mut Held,
     ring: &mut Ring,
     operation: &Operation,
-) -> Result<(), Failure> {
+) -> Result<NativeRead, Failure> {
     let budget = Arc::clone(
         held.payload_budget
             .as_ref()
@@ -32,7 +32,9 @@ pub(super) fn read_native(
     if held.raw.is_none() {
         held.raw = Some(RawCache::new(&budget).map_err(|_| Failure::Budget)?);
     }
+    let mut progress = NativeRead::Idle;
     for _ in 0..super::ring::TICKS_PER_READ_MAX {
+        held.release_views();
         let previous = held.apps.newest_held().map(Arc::clone);
         let mut refused = false;
         let read = ring.read_prepared(&budget, operation, previous.as_deref(), |run, prepared| {
@@ -42,12 +44,14 @@ pub(super) fn read_native(
             return Err(Failure::Refused);
         }
         match read.map_err(read_failure)? {
-            NativeRead::Accepted | NativeRead::Missed => {}
-            NativeRead::Idle | NativeRead::Blocked => return Ok(()),
+            NativeRead::Accepted => progress = NativeRead::Accepted,
+            NativeRead::Missed => progress = NativeRead::Missed,
+            NativeRead::Idle => return Ok(progress),
+            NativeRead::Blocked => return Ok(NativeRead::Blocked),
         }
     }
 
-    Ok(())
+    Ok(progress)
 }
 
 fn take(

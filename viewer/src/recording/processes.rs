@@ -91,9 +91,41 @@ const TICKLESS: &str = "process of no tick";
 pub struct Before {
     endpoint: Endpoint,
     frame: Box<Frame>,
+    reservation: Option<crate::byte_budget::ByteReservation>,
 }
 
 impl Before {
+    pub(crate) fn from_frame(endpoint: Endpoint, frame: Box<Frame>) -> Self {
+        Self {
+            endpoint,
+            frame,
+            reservation: None,
+        }
+    }
+
+    pub(crate) fn is_admitted(&self) -> bool {
+        self.reservation.is_some()
+    }
+    pub(crate) fn admitted(
+        endpoint: Endpoint,
+        frame: Box<Frame>,
+        budget: &Arc<crate::byte_budget::ByteBudget>,
+    ) -> Option<Self> {
+        let reservation = budget.reserve(frame.bytes())?;
+        Some(Self {
+            endpoint,
+            frame,
+            reservation: Some(reservation),
+        })
+    }
+
+    pub(crate) fn previous(&self) -> (&Endpoint, &Frame) {
+        (&self.endpoint, &self.frame)
+    }
+
+    pub(crate) fn take_reservation(&mut self) -> Option<crate::byte_budget::ByteReservation> {
+        self.reservation.take()
+    }
     pub(crate) fn bytes(&self) -> usize {
         self.frame.bytes()
     }
@@ -168,6 +200,7 @@ impl SealedMinute<'_> {
                 before = Some(Before {
                     endpoint: *endpoint,
                     frame,
+                    reservation: None,
                 });
             } else {
                 before = None;
@@ -224,6 +257,7 @@ impl SealedMinute<'_> {
             *before = Some(Before {
                 endpoint: *endpoint,
                 frame,
+                reservation: None,
             });
             Ok(())
         });
@@ -276,6 +310,13 @@ fn read_processes_with_operation(
 pub(crate) fn read_processes_batch(minute: &SealedMinute) -> Result<ProcessBatch, Refused> {
     let endpoints = read_processes_endpoints(minute)?;
 
+    read_processes_batch_with_endpoints(minute, endpoints)
+}
+
+pub(crate) fn read_processes_batch_with_endpoints(
+    minute: &SealedMinute,
+    endpoints: Vec<Endpoint>,
+) -> Result<ProcessBatch, Refused> {
     let processes = minute.table(Table::Processes)?;
     let gpu_ns = if processes.holds(&[PROCESS_GPU_FIELD.0])? {
         col("gpu_ns")

@@ -678,6 +678,9 @@ fn worker_step_follows(shared: &Shared) -> bool {
 fn worker_pause(reader: &Reader, command: &Command) -> Duration {
     if reader.last_generation == command.generation {
         if reader_pending(reader, command.generation) {
+            if reader.store.is_some() {
+                return POLL_INTERVAL;
+            }
             return Duration::ZERO;
         }
     }

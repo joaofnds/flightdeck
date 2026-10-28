@@ -19,19 +19,20 @@ impl QueryContext {
         bytes: &[u8],
         cancellation: &Arc<Cancellation>,
         epoch: u64,
-    ) -> Result<Response<Value>> {
+    ) -> crate::store::HistoryResult<Response<Value>> {
+        self.history_ready()?;
         kind.checked_key(bytes)?;
         let operation = Arc::clone(cancellation).operation(epoch)?;
         let reservation = self.reserve_response(history_result_bytes(self, TRACE_POINT_BYTES))?;
         let scratch = self.reserve_response(self.seconds().len() * size_of::<&QuerySecond>())?;
 
-        operation.run(|| {
+        Ok(operation.run(|| {
             let value = self.response_trace(&Target { kind, bytes }, &operation)?;
             let response = Response::json(reservation, value)?;
             drop(scratch);
 
             Ok(response)
-        })
+        })?)
     }
 
     /// One captured executable-name group within one App, using retained process amounts.
@@ -42,7 +43,8 @@ impl QueryContext {
         executable: &[u8],
         cancellation: &Arc<Cancellation>,
         epoch: u64,
-    ) -> Result<Response<Value>> {
+    ) -> crate::store::HistoryResult<Response<Value>> {
+        self.history_ready()?;
         let target = GroupTarget {
             app: Target {
                 kind,
@@ -58,14 +60,14 @@ impl QueryContext {
         )?;
         let scratch = self.reserve_response(self.seconds().len() * size_of::<&QuerySecond>())?;
 
-        operation.run(|| {
+        Ok(operation.run(|| {
             let mut response = self.response_trace(&target, &operation)?;
             target.identify(&mut response)?;
             let response = Response::json(reservation, response)?;
             drop(scratch);
 
             Ok(response)
-        })
+        })?)
     }
 
     fn response_trace(&self, target: &dyn Selection, operation: &Operation) -> Result<Value> {

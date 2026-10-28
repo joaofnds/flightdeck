@@ -178,9 +178,27 @@ impl Context {
     /// Takes in the newest second of the span, `seconds` and `apps`, and lets go of the oldest
     /// seconds that lie before the newest `CHARTED_SECONDS` wall seconds.
     pub(super) fn follow(&mut self, seconds: &Span<MachineSecond>, apps: &Span<AppsSecond>) {
+        self.follow_prefix(seconds, apps, apps.len());
+    }
+
+    pub(super) fn rebuild(&mut self, seconds: &Span<MachineSecond>, apps: &Span<AppsSecond>) {
+        self.clear();
+        for count in 1..=apps.len() {
+            self.follow_prefix(seconds, apps, count);
+        }
+    }
+
+    fn follow_prefix(
+        &mut self,
+        seconds: &Span<MachineSecond>,
+        apps: &Span<AppsSecond>,
+        count: usize,
+    ) {
         assert_eq!(seconds.len(), apps.len());
-        assert!(self.held < apps.len());
-        let (Some(newest), Some(newest_apps)) = (seconds.newest(), apps.newest()) else {
+        assert!(count <= apps.len());
+        assert!(self.held < count);
+        let (Some(newest), Some(newest_apps)) = (seconds.get(count - 1), apps.get(count - 1))
+        else {
             unreachable!("the context follows a second the span took in");
         };
 
@@ -197,7 +215,7 @@ impl Context {
 
         let first = second.saturating_sub(CHARTED_SECONDS - 1);
         for _ in 0..self.held {
-            let index = apps.len() - self.held;
+            let index = count - self.held;
             let (Some(oldest), Some(oldest_apps)) = (seconds.get(index), apps.get(index)) else {
                 unreachable!("a context holds only seconds of the span");
             };
@@ -208,12 +226,12 @@ impl Context {
             self.exit(oldest_apps);
             self.held -= 1;
         }
-        self.follow_rebuild(apps);
+        self.follow_rebuild(apps, count);
     }
 
     /// Adds the context's seconds of `apps` up again where it held too many Apps and has taken
     /// in `REBUILD_SECONDS` seconds since.
-    fn follow_rebuild(&mut self, apps: &Span<AppsSecond>) {
+    fn follow_rebuild(&mut self, apps: &Span<AppsSecond>, count: usize) {
         let Some(waiting) = self.refused else {
             return;
         };
@@ -224,7 +242,7 @@ impl Context {
 
         self.refused = None;
         self.entries.clear();
-        for index in apps.len() - self.held..apps.len() {
+        for index in count - self.held..count {
             let Some(second) = apps.get(index) else {
                 unreachable!("a context holds only seconds of the span");
             };

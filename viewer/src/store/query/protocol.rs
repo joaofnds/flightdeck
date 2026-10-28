@@ -68,6 +68,15 @@ struct State {
 }
 
 impl Queries {
+    pub(crate) fn requested(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .request
+            .is_some()
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             shared: Arc::new(Shared {

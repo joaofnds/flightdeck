@@ -22,6 +22,28 @@ pub(super) struct TicksTable<'minute> {
 }
 
 impl<'input> SealedMinute<'input> {
+    /// Reopens process tables against the exact machine-pass commitment, without ticks input.
+    pub(crate) fn open_processes_using(
+        source: &SealedSource<'_>,
+        witness: &persistence::Manifest,
+        budget: &'input Arc<ByteBudget>,
+        operation: &'input Operation,
+        capture: &'input super::InputCapture<'input>,
+    ) -> Result<Self, Refused> {
+        operation.check()?;
+        let mut minute = Self::open(source.root, source.marker)?;
+        if minute.manifest != *witness {
+            return Err(Refused::Commitment(std::io::ErrorKind::InvalidData.into()));
+        }
+
+        minute.inputs = Some(super::TableInputs {
+            budget,
+            operation,
+            capture,
+        });
+        Ok(minute)
+    }
+
     pub(crate) fn open_with_inputs_using(
         source: &SealedSource<'_>,
         budget: &'input Arc<ByteBudget>,

@@ -18,18 +18,19 @@ impl QueryContext {
         &self,
         cancellation: &Arc<Cancellation>,
         epoch: u64,
-    ) -> Result<Response<Value>> {
+    ) -> crate::store::HistoryResult<Response<Value>> {
+        self.history_ready()?;
         let operation = Arc::clone(cancellation).operation(epoch)?;
         let reservation =
             self.reserve_response(history_result_bytes(self, RESIDENT_POINT_BYTES))?;
         let scratch = self.reserve_response(resident_history::WORKING_BYTES_MAX)?;
 
-        operation.run(|| {
+        Ok(operation.run(|| {
             let response = Response::json(reservation, self.response_resident(&operation)?)?;
             drop(scratch);
 
             Ok(response)
-        })
+        })?)
     }
 
     fn response_resident(&self, operation: &Operation) -> Result<Value> {
@@ -65,19 +66,20 @@ impl QueryContext {
         metric: AppAttributionMetric,
         cancellation: &Arc<Cancellation>,
         epoch: u64,
-    ) -> Result<Response<Value>> {
+    ) -> crate::store::HistoryResult<Response<Value>> {
+        self.history_ready()?;
         let operation = Arc::clone(cancellation).operation(epoch)?;
         let reservation =
             self.reserve_response(history_result_bytes(self, ATTRIBUTION_POINT_BYTES))?;
         let scratch = self.reserve_response(app_attribution_history::WORKING_BYTES_MAX)?;
 
-        operation.run(|| {
+        Ok(operation.run(|| {
             let response =
                 Response::json(reservation, self.response_attribution(metric, &operation)?)?;
             drop(scratch);
 
             Ok(response)
-        })
+        })?)
     }
 
     fn response_attribution(

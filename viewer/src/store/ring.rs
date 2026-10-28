@@ -564,34 +564,47 @@ impl Source {
         let publication = incoming.machine.ticks[0].publication;
         let next = publication.checked_add(1).ok_or(Failure::TickShape)?;
         let complete = next >= self.reader.next_publication();
-        let machine = budget
-            .map(|budget| {
-                budget
-                    .reserve(incoming.machine.heap_bytes())
-                    .ok_or(Failure::Budget)
-            })
-            .transpose()?;
-        let frame_reservation = budget
-            .map(|budget| {
-                incoming
-                    .process
-                    .as_ref()
-                    .map(|before| budget.reserve(before.bytes()).ok_or(Failure::Budget))
-                    .transpose()
-            })
-            .transpose()?
-            .flatten();
+        let machine = if incoming.machine_reservation.is_some() {
+            None
+        } else {
+            budget
+                .map(|budget| {
+                    budget
+                        .reserve(incoming.machine.heap_bytes())
+                        .ok_or(Failure::Budget)
+                })
+                .transpose()?
+        };
+        let frame_reservation = if incoming
+            .process
+            .as_ref()
+            .is_some_and(crate::recording::Before::is_admitted)
+        {
+            None
+        } else {
+            budget
+                .map(|budget| {
+                    incoming
+                        .process
+                        .as_ref()
+                        .map(|before| budget.reserve(before.bytes()).ok_or(Failure::Budget))
+                        .transpose()
+                })
+                .transpose()?
+                .flatten()
+        };
         self.reader
             .seek_publication(next)
             .map_err(|error| Failure::Ring(error.kind()))?;
-        let terminal = terminal
+        let mut terminal = terminal
             .take()
             .unwrap_or_else(|| unreachable!("admitted terminal"));
         self.complete = complete;
         self.previous = terminal.machine;
-        self.terminal_workspace = machine;
+        self.terminal_workspace = terminal.machine_reservation.take().or(machine);
         self.shrink_terminal_workspace();
-        if let Some(before) = terminal.process {
+        if let Some(mut before) = terminal.process {
+            let frame_reservation = before.take_reservation().or(frame_reservation);
             let (endpoint, frame) = before.into_parts();
             self.previous_endpoint = Some(endpoint);
             match frame_reservation {

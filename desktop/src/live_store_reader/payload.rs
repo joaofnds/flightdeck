@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use viewer::live_app_response::{Observation, Page};
-use viewer::store::{QueryContext, Response};
+use viewer::store::{QueryContext, QueryReadiness, Response};
 
 use super::ownership::{PartsWindow, RanksWindow};
 use super::presentation::Presentation;
@@ -39,6 +39,7 @@ pub(super) fn snapshot_with_raw(
         context.catalog(),
         Presentation::Store(selection),
     );
+    snapshot.histories_pending = context.readiness() == QueryReadiness::Primary;
     if command.request.route == "overview" {
         let page = raw
             .raw_page_for(&observation, "fans", 0, &shared.cancellation, command.epoch)
@@ -49,13 +50,22 @@ pub(super) fn snapshot_with_raw(
     }
     if crate::live_source::route_ranks_apps(&command.request.route) {
         let ranks = context
-            .selected_ranks_for(&observation)
+            .selected_rank_status_for(&observation)
             .map_err(|error| error.to_string())?;
-        let ranks = ranks.map(|ranks| {
-            crate::live_rankings::Rankings::Ready(Box::new(crate::live_rankings::from_ranks(
-                &ranks,
-            )))
-        });
+        let ranks = ranks.try_map(|ranks| match ranks {
+            Ok(ranks) => Ok(crate::live_rankings::Rankings::Ready(Box::new(
+                crate::live_rankings::from_ranks(&ranks),
+            ))),
+            Err(viewer::store::Missing::Refused(reason)) => Ok(
+                crate::live_rankings::Rankings::Unavailable(crate::bounded::bounded(&reason, 512)),
+            ),
+            Err(viewer::store::Missing::TooMany) => {
+                Ok(crate::live_rankings::Rankings::Unavailable(String::from(
+                    "This observation has too many Apps",
+                )))
+            }
+            Err(error) => Err(error.to_string()),
+        })?;
         snapshot.rankings = Some(Arc::new(Presentation::Canonical(ranks)));
     }
     if command.request.route == "cpu" {
@@ -65,7 +75,9 @@ pub(super) fn snapshot_with_raw(
         apps(context, &observation, command, shared, &mut snapshot)?;
     }
     if command.context != Context::Keep {
-        histories(context, command, shared, &mut snapshot)?;
+        if context.readiness() == QueryReadiness::Complete {
+            histories(context, command, shared, &mut snapshot)?;
+        }
     }
 
     Ok(snapshot)
@@ -148,16 +160,18 @@ fn apps(
         }
         snapshot.detail = Some(Presentation::Store(detail));
         if command.context != Context::Keep {
-            let history = context
-                .app_history(kind, &bytes, &shared.cancellation, command.epoch)
-                .map_err(|error| error.to_string())?;
-            snapshot.history = Some(Presentation::Store(history));
-            if command.request.load_process_history {
-                snapshot.app_parts = Some(Arc::new(PartsWindow::Store(
-                    context
-                        .app_parts(kind, &bytes)
-                        .map_err(|error| error.to_string())?,
-                )));
+            if context.readiness() == QueryReadiness::Complete {
+                let history = context
+                    .app_history(kind, &bytes, &shared.cancellation, command.epoch)
+                    .map_err(|error| error.to_string())?;
+                snapshot.history = Some(Presentation::Store(history));
+                if command.request.load_process_history {
+                    snapshot.app_parts = Some(Arc::new(PartsWindow::Store(
+                        context
+                            .app_parts(kind, &bytes)
+                            .map_err(|error| error.to_string())?,
+                    )));
+                }
             }
         }
     }

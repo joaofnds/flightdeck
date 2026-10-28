@@ -180,6 +180,21 @@ fn find_range(
             marker: persistence::layout::WindowKey::from(&manifest.identity).marker(root),
             wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
             publication_end: manifest.publication_end,
+            previous_source: catalog
+                .iter()
+                .filter(|previous| {
+                    if previous.identity.run != manifest.identity.run {
+                        return false;
+                    }
+
+                    previous.publication_end <= manifest.publication_first
+                })
+                .max_by_key(|previous| previous.publication_end)
+                .map(|previous| super::BoundaryKey {
+                    run: previous.identity.run,
+                    marker: persistence::layout::WindowKey::from(&previous.identity).marker(root),
+                    publication_end: previous.publication_end,
+                }),
         });
     }
     Ok(())

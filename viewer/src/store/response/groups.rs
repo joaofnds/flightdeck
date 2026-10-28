@@ -19,7 +19,8 @@ impl QueryContext {
         bytes: &[u8],
         cancellation: &Arc<Cancellation>,
         epoch: u64,
-    ) -> Result<Response<Box<AppProcessGroupsHistory>>> {
+    ) -> crate::store::HistoryResult<Response<Box<AppProcessGroupsHistory>>> {
+        self.history_ready()?;
         kind.checked_key(bytes)?;
         let operation = Arc::clone(cancellation).operation(epoch)?;
         let mut reservation = self.reserve_response(
@@ -27,7 +28,7 @@ impl QueryContext {
                 + cohort::CAPTURE_WORK_BYTES_MAX,
         )?;
 
-        operation.run(|| {
+        Ok(operation.run(|| {
             let selected = Selected::new(self.selected().observation, self.context_last_second())?;
             let mut reduction =
                 Reduction::with_room(&selected, kind, bytes, &operation, self.seconds().len())?;
@@ -54,7 +55,7 @@ impl QueryContext {
                 .shrink_to(size_of::<Response<Box<AppProcessGroupsHistory>>>() + value.bytes());
 
             Ok(Response::reserved(reservation, value))
-        })
+        })?)
     }
 }
 

@@ -78,6 +78,21 @@ pub struct Span<T> {
 }
 
 impl<T> Span<T> {
+    pub(super) fn free(&self) -> usize {
+        self.buffers.free()
+    }
+
+    /// Replaces one owner using a free spare; a retained reader keeps the displaced owner.
+    pub(super) fn replace(&mut self, index: usize, fill: impl FnOnce(&mut T)) -> bool {
+        assert!(index < self.held.len());
+        let Some(reading) = self.buffers.write(fill) else {
+            return false;
+        };
+
+        self.held[index] = reading;
+        true
+    }
+
     pub(super) fn clear(&mut self) {
         self.held.clear();
     }

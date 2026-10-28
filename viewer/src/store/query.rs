@@ -43,6 +43,7 @@ pub(crate) struct CheckedCoverage {
 /// Neither retains raw frames or derived samples.
 #[derive(Debug)]
 pub struct QueryContext {
+    readiness: QueryReadiness,
     pub source: SourceGeneration,
     catalog: Option<super::recording::CheckedCatalog>,
     status: Option<super::ring::Status>,
@@ -94,6 +95,7 @@ pub enum QueryOutcome {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryNeedsLoad {
+    AppsPending,
     UncheckedCoverage,
     OutsideCoverage,
     FullDetailEvicted,
@@ -101,6 +103,38 @@ pub enum QueryNeedsLoad {
     SourceChanged,
     MissingObservation,
 }
+
+/// The Store has accepted machine/selected data, or all represented App history too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryReadiness {
+    Primary,
+    Complete,
+}
+
+#[derive(Debug)]
+pub enum HistoryError {
+    Pending,
+    Read(persistence::Error),
+}
+
+pub type HistoryResult<T> = Result<T, HistoryError>;
+
+impl From<persistence::Error> for HistoryError {
+    fn from(error: persistence::Error) -> Self {
+        Self::Read(error)
+    }
+}
+
+impl std::fmt::Display for HistoryError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => output.write_str("App history is still being read"),
+            Self::Read(error) => error.fmt(output),
+        }
+    }
+}
+
+impl std::error::Error for HistoryError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryUnavailable {
@@ -153,6 +187,17 @@ impl CheckedCoverage {
 }
 
 impl QueryContext {
+    #[must_use]
+    pub fn readiness(&self) -> QueryReadiness {
+        self.readiness
+    }
+
+    pub(super) fn history_ready(&self) -> HistoryResult<()> {
+        match self.readiness {
+            QueryReadiness::Primary => Err(HistoryError::Pending),
+            QueryReadiness::Complete => Ok(()),
+        }
+    }
     #[must_use]
     pub fn has_committed_history(&self) -> bool {
         self.catalog
@@ -352,22 +397,56 @@ fn build(
         Err(outcome) => return Some(outcome),
     };
 
-    let retention = match request.selection {
-        QuerySelection::FollowLatest => Retention::Followed,
-        QuerySelection::Second { .. } | QuerySelection::Exact { .. } => Retention::Fixed,
-    };
-    let target = BuildTarget {
-        source: coverage.source,
-        selection,
-        selected,
-        range,
-        retention,
+    let target = match build_target(held, coverage.source, request, selection, selected, range) {
+        Ok(target) => target,
+        Err(outcome) => return Some(outcome),
     };
     match build_context(held, &target, budget, contexts, current) {
         Ok(Some(context)) => Some(QueryOutcome::Ready(Arc::new(context))),
         Ok(None) => None,
         Err(unavailable) => Some(QueryOutcome::Unavailable(unavailable)),
     }
+}
+
+fn build_target(
+    held: &Held,
+    source: SourceGeneration,
+    request: &QueryRequest,
+    selection: ContextSelection,
+    selected: Observation,
+    range: ContextRange,
+) -> Result<BuildTarget, QueryOutcome> {
+    if held.startup == super::StartupState::Primary {
+        if held.apps.held().any(|apps| {
+            if apps.observation != Some(selected) {
+                return false;
+            }
+
+            apps.missing == Some(Missing::Unread)
+        }) {
+            return Err(QueryOutcome::NeedsLoad(QueryNeedsLoad::AppsPending));
+        }
+    }
+    let followed = matches!(request.selection, QuerySelection::FollowLatest);
+    let mut retention = match request.selection {
+        QuerySelection::FollowLatest => Retention::Followed,
+        QuerySelection::Second { .. } | QuerySelection::Exact { .. } => Retention::Fixed,
+    };
+    let readiness = if held.startup == super::StartupState::Primary {
+        retention = Retention::Fixed;
+        QueryReadiness::Primary
+    } else {
+        QueryReadiness::Complete
+    };
+    Ok(BuildTarget {
+        followed,
+        readiness,
+        source,
+        selection,
+        selected,
+        range,
+        retention,
+    })
 }
 
 fn build_selection(
@@ -500,6 +579,8 @@ fn build_covered(
 }
 
 struct BuildTarget {
+    followed: bool,
+    readiness: QueryReadiness,
     source: SourceGeneration,
     selection: ContextSelection,
     selected: Observation,
@@ -537,6 +618,7 @@ fn build_context(
     };
 
     Ok(Some(QueryContext {
+        readiness: target.readiness,
         source: target.source,
         catalog: held.checked_catalog,
         status: held.source_status,
@@ -556,7 +638,7 @@ fn build_context(
             .raw
             .as_ref()
             .map_or(0, super::raw_cache::RawCache::bytes),
-        followed: matches!(target.retention, Retention::Followed),
+        followed: target.followed,
         raw: held.raw.as_ref().and_then(|raw| raw.find(&target.selected)),
         selection: target.selection,
         selected: target.selected,

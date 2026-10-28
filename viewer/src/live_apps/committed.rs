@@ -203,6 +203,23 @@ impl Frame {
         operation: &Operation,
         mut consume: impl FnMut(&Endpoint, Box<Self>) -> Result<()>,
     ) -> Result<()> {
+        Self::placed_many_from(endpoints, rows, order, 0, operation, |endpoint, frame| {
+            consume(endpoint, frame)?;
+            Ok(true)
+        })?;
+        Ok(())
+    }
+
+    /// Resumes after accepted endpoints without capturing their Frames again.
+    pub(crate) fn placed_many_from(
+        endpoints: &[Endpoint],
+        rows: &DataFrame,
+        order: &[usize],
+        first: usize,
+        operation: &Operation,
+        mut consume: impl FnMut(&Endpoint, Box<Self>) -> Result<bool>,
+    ) -> Result<()> {
+        assert!(first <= endpoints.len());
         assert_eq!(rows.width(), BATCH_COLUMNS);
         assert!(order.len() <= rows.height());
 
@@ -222,8 +239,17 @@ impl Frame {
         }
         assert_eq!(placed, order.len());
 
-        for (endpoint, size) in endpoints.iter().zip(&sizes) {
+        for (index, (endpoint, size)) in endpoints.iter().zip(&sizes).enumerate() {
             operation.check()?;
+            if index < first {
+                for _ in 0..size.count {
+                    cursor
+                        .rows
+                        .next()
+                        .ok_or(Error::Bound("committed process prefix"))?;
+                }
+                continue;
+            }
             let mut frame = committed_frame(endpoint, size);
             committed_many_members(&mut cursor, &mut frame, endpoint, size, operation)?;
             committed_finish(&frame, size)?;
@@ -233,7 +259,9 @@ impl Frame {
                 endpoint.stamp.publication,
                 persistence::work::ingestion::Kind::CommittedFrameCapture,
             );
-            consume(endpoint, frame)?;
+            if !consume(endpoint, frame)? {
+                return operation.check();
+            }
         }
         assert!(cursor.rows.next().is_none());
 
@@ -401,7 +429,7 @@ fn committed_many_publications(endpoints: &[Endpoint]) -> Result<String> {
 
 /// Refuses `endpoints` unless they are a batch's, at most `ENDPOINTS_MAX` of one run in
 /// increasing publication order, each with an event range.
-fn committed_endpoints(endpoints: &[Endpoint]) -> Result<()> {
+pub(crate) fn committed_endpoints(endpoints: &[Endpoint]) -> Result<()> {
     if endpoints.len() > ENDPOINTS_MAX {
         return Err(Error::Bound("committed App batch endpoints"));
     }

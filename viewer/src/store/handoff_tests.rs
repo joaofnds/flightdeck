@@ -79,6 +79,7 @@ fn changed_clocks(
         .unwrap();
     assert!(process.is_some());
     let terminal = recording::Terminal {
+        machine_reservation: None,
         run: *sealed.identity(),
         machine,
         process,

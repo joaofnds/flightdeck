@@ -103,8 +103,10 @@ fn a_superseded_history_request_returns_no_partial_response() {
 
     let result = context.app_resident_history(&cancellation, 0);
 
-    assert!(matches!(result, Err(persistence::Error::Io(error))
-        if error.kind() == std::io::ErrorKind::Interrupted));
+    assert!(
+        matches!(result, Err(crate::store::HistoryError::Read(persistence::Error::Io(error)))
+        if error.kind() == std::io::ErrorKind::Interrupted)
+    );
 }
 
 fn measurements(response: &Value) -> [&Value; 4] {

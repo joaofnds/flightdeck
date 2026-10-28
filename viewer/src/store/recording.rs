@@ -16,6 +16,9 @@ mod payload;
 #[path = "recording_catalog.rs"]
 mod catalog;
 
+#[path = "recording_startup.rs"]
+pub(super) mod staged;
+
 #[cfg(test)]
 #[path = "recording_buffer_tests.rs"]
 mod buffer_tests;
@@ -100,6 +103,7 @@ pub(super) struct Terminal {
     pub run: RunIdentity,
     pub machine: MachineMinute,
     pub process: Option<crate::recording::Before>,
+    pub machine_reservation: Option<super::ByteReservation>,
 }
 
 impl Terminal {
@@ -128,6 +132,7 @@ impl Terminal {
             run,
             machine,
             process,
+            machine_reservation: None,
         })
     }
 }
@@ -287,7 +292,7 @@ fn load_payload_admitted(apps: &TickApps<'_>) -> bool {
 
 /// The sealed minutes the store reads at launch at most. The hour and its lead-in span 61
 /// minutes, and each stop or recovery of a collector seals a shorter one.
-const MINUTES_MAX: usize = 128;
+pub(super) const MINUTES_MAX: usize = 128;
 
 /// How far before the newest sealed second the store reads Apps: the live span's 18 minutes.
 const APPS_NS: u64 = 1_080 * 1_000_000_000;
@@ -356,6 +361,13 @@ struct Found {
     run: RunIdentity,
     marker: PathBuf,
     wall_ns_max: Option<u64>,
+    publication_end: u64,
+    previous_source: Option<BoundaryKey>,
+}
+
+struct BoundaryKey {
+    run: RunIdentity,
+    marker: PathBuf,
     publication_end: u64,
 }
 
@@ -895,6 +907,7 @@ impl FindRun<'_> {
                     marker,
                     wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
                     publication_end: manifest.publication_end,
+                    previous_source: None,
                 });
             }
         }

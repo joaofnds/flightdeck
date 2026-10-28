@@ -459,16 +459,34 @@ fn a_missed_tick_resets_process_rates_in_both_adapters() {
 #[test]
 fn an_exhausted_ingestion_budget_accepts_no_partial_observation() {
     // Goal: an over-budget observation never publishes partial machine or process facts.
-    // Method: give a two-process observation no working bytes and inspect the refusal.
+    // Method: queue a query with no admitted bytes and observe the public paused boundary.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     let budget = Arc::new(super::ByteBudget::new(0));
 
     let store = Store::start_with_budget(&fixture.root, Arc::clone(&budget)).unwrap();
-    let view = view_where(&store, |view| view.failure == Some(Failure::Budget));
+    let handle = store.query_handle().unwrap();
+    handle
+        .submit(super::QueryRequest {
+            epoch: 0,
+            source: None,
+            selection: super::QuerySelection::FollowLatest,
+        })
+        .unwrap();
+    store.set_active(false);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..1000 {
+        if store.is_paused() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "budgeted Store never paused");
+        thread::sleep(Duration::from_millis(10));
+    }
 
-    assert!(view.seconds.is_empty());
-    assert!(view.apps.is_empty());
+    assert!(store.is_paused());
+    assert!(handle.pending());
+    assert!(handle.take().is_none());
+    assert!(store.take().is_none());
     assert_eq!(budget.used(), 0);
 }
 

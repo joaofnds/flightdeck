@@ -7,7 +7,10 @@ use collector::ring::RunIdentity;
 
 use super::readings;
 use super::{AppsSecond, Batch, Failure, Found, Loaded, MachineSecond, Refused, TICKS_PER_MINUTE};
-use crate::byte_budget::ByteBudget;
+
+#[path = "recording_replay.rs"]
+pub(super) mod replay;
+use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::cancellation::Operation;
 use crate::recording::{Before, MachineMinute, ScopedSealedMinute, SealedSource, read_machine};
 use crate::store::apps::TickApps;
@@ -52,18 +55,18 @@ pub(super) fn load(
         operation,
         capture,
     };
-    let mut cursor = Cursor::new(minutes);
-    for _ in 0..minutes.len() {
-        cursor.step(&input, &mut take)?;
+    let mut cursor = Cursor::new(minutes.len());
+    for found in minutes {
+        cursor.step(&input, found, &mut take)?;
     }
 
     cursor.finish(operation)
 }
 
-struct Cursor<'a> {
-    minutes: &'a [Found],
-    next_minute_index: usize,
-    decoder: Decoder,
+pub(super) struct Cursor {
+    minute_count: usize,
+    pub(super) next_minute_index: usize,
+    pub(super) decoder: Decoder,
     left_out: Option<Failure>,
 }
 
@@ -74,12 +77,12 @@ struct LoadInput<'a> {
     capture: &'a crate::recording::InputCapture<'a>,
 }
 
-impl<'a> Cursor<'a> {
-    fn new(minutes: &'a [Found]) -> Self {
-        assert!(minutes.len() <= super::MINUTES_MAX);
+impl Cursor {
+    pub(super) fn new(minute_count: usize) -> Self {
+        assert!(minute_count <= super::MINUTES_MAX);
 
         Self {
-            minutes,
+            minute_count,
             next_minute_index: 0,
             decoder: Decoder::default(),
             left_out: None,
@@ -89,12 +92,15 @@ impl<'a> Cursor<'a> {
     fn step(
         &mut self,
         input: &LoadInput<'_>,
+        found: &Found,
         take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
     ) -> persistence::Result<()> {
         input.operation.check()?;
-        let Some(found) = self.minutes.get(self.next_minute_index) else {
+        if self.next_minute_index == self.minute_count {
             return Err(persistence::Error::Bound("sealed payload cursor exhausted"));
-        };
+        }
+
+        assert!(self.next_minute_index < self.minute_count);
 
         let completion = self.decoder.decode(
             input.root,
@@ -106,21 +112,29 @@ impl<'a> Cursor<'a> {
         if let Some(failure) = load_consume(completion, input.operation, take)? {
             self.left_out = Some(failure);
         }
-        self.next_minute_index += 1;
-        assert!(self.next_minute_index <= self.minutes.len());
+        self.accept_minute();
 
         Ok(())
     }
 
+    pub(super) fn accept_minute(&mut self) {
+        assert!(self.next_minute_index < self.minute_count);
+        self.next_minute_index += 1;
+    }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.next_minute_index == self.minute_count
+    }
+
     fn finish(mut self, operation: &Operation) -> persistence::Result<super::Outcome> {
         operation.check()?;
-        if self.next_minute_index < self.minutes.len() {
+        if self.next_minute_index < self.minute_count {
             return Err(persistence::Error::Bound(
                 "sealed payload cursor unfinished",
             ));
         }
 
-        assert_eq!(self.next_minute_index, self.minutes.len());
+        assert_eq!(self.next_minute_index, self.minute_count);
         let decoded_catalog = mem::take(&mut self.decoder.decoded_catalog);
 
         Ok(super::Outcome {
@@ -153,18 +167,54 @@ fn load_consume(
 }
 
 #[derive(Default)]
-struct Decoder {
-    predecessor: Option<Before>,
+pub(super) struct Decoder {
+    pub(super) predecessor: Option<Before>,
     previous: MachineMinute,
     previous_run: Option<RunIdentity>,
-    decoded_catalog: super::DecodedCatalog,
+    pub(super) decoded_catalog: super::DecodedCatalog,
+    machine_reservation: Option<ByteReservation>,
 }
 
 impl Decoder {
-    fn terminal(self) -> Option<super::Terminal> {
-        let run = self.previous_run?;
+    pub(super) fn terminal(&mut self) -> Option<super::Terminal> {
+        let run = self.previous_run.take()?;
+        let terminal = super::Terminal::from_minute(
+            run,
+            mem::take(&mut self.previous),
+            self.predecessor.take(),
+        );
+        terminal.map(|mut terminal| {
+            terminal.machine_reservation = self.machine_reservation.take();
+            terminal
+        })
+    }
 
-        super::Terminal::from_minute(run, self.previous, self.predecessor)
+    pub(super) fn project_machine(
+        &self,
+        found: &Found,
+        machine: &MachineMinute,
+        budget: &Arc<ByteBudget>,
+        take: impl FnMut(MachineSecond),
+    ) -> Result<super::DecodedCatalog, crate::store::MachineCaptureError> {
+        let before = if self.previous_run == Some(found.run) {
+            readings(&self.previous).last()
+        } else {
+            None
+        };
+        project_machine(found, machine, before, budget, take)
+    }
+
+    pub(super) fn accept_machine(
+        &mut self,
+        run: RunIdentity,
+        machine: MachineMinute,
+        decoded: &super::DecodedCatalog,
+        reservation: Option<ByteReservation>,
+    ) {
+        self.decoded_catalog.extend(decoded);
+        self.previous = machine;
+        self.machine_reservation = reservation;
+        self.previous_run = Some(run);
     }
 
     fn decode(
@@ -179,34 +229,17 @@ impl Decoder {
             seconds: Vec::with_capacity(TICKS_PER_MINUTE),
             left_out: None,
         };
-        let loaded = load_minute(
-            root,
-            found,
-            &mut self.predecessor,
-            budget,
-            operation,
-            capture,
-        );
-        let Ok((mut machine, mut apps)) = loaded else {
+        let loaded = load_minute(root, found, self, budget, operation, capture);
+        let Ok((machine, mut apps)) = loaded else {
             batch.left_out = Some(Failure::Refused);
             self.predecessor = None;
             self.previous_run = None;
             return batch;
         };
-        let before = if self.previous_run == Some(found.run) {
-            readings(&self.previous).last()
-        } else {
-            None
-        };
-        let decoded_catalog = match project_machine(
-            found,
-            &machine,
-            before,
-            &mut apps,
-            budget,
-            &mut batch.seconds,
-        ) {
-            Ok(decoded_catalog) => decoded_catalog,
+        let decoded = match self.project_machine(found, &machine, budget, |second| {
+            project_machine_apps(found.run, second, &mut apps, &mut batch.seconds);
+        }) {
+            Ok(decoded) => decoded,
             Err(error) => {
                 batch.seconds.clear();
                 batch.left_out = Some(Failure::Refused);
@@ -217,9 +250,7 @@ impl Decoder {
                 return batch;
             }
         };
-        self.decoded_catalog.extend(&decoded_catalog);
-        mem::swap(&mut machine, &mut self.previous);
-        self.previous_run = Some(found.run);
+        self.accept_machine(found.run, machine, &decoded, None);
 
         batch
     }
@@ -228,7 +259,7 @@ impl Decoder {
 fn load_minute(
     root: &Path,
     found: &Found,
-    before: &mut Option<Before>,
+    decoder: &mut Decoder,
     budget: &Arc<ByteBudget>,
     operation: &Operation,
     capture: &crate::recording::InputCapture<'_>,
@@ -237,7 +268,7 @@ fn load_minute(
     let machine = load_minute_visit(
         root,
         found,
-        before,
+        decoder,
         budget,
         operation,
         capture,
@@ -259,7 +290,22 @@ fn load_minute(
     Ok((machine, apps))
 }
 
-fn load_minute_second(
+pub(super) fn load_minute_second(
+    sample: &persistence::Result<&crate::live_app_response::Sample>,
+    previous: Option<&AppsSecond>,
+    budget: &Arc<ByteBudget>,
+    second: &mut AppsSecond,
+) {
+    load_minute_rows(sample, previous, budget, second);
+    if second.missing.is_none() {
+        if let Ok(sample) = sample {
+            second.processes =
+                super::super::Payload::capture(sample, previous, budget).map(Arc::new);
+        }
+    }
+}
+
+pub(super) fn load_minute_rows(
     sample: &persistence::Result<&crate::live_app_response::Sample>,
     previous: Option<&AppsSecond>,
     budget: &Arc<ByteBudget>,
@@ -288,7 +334,7 @@ fn load_minute_second(
             second.take(TickApps::Missing(&missing), previous, Some(budget));
             return;
         }
-        second.take(TickApps::Derived(sample), previous, Some(budget));
+        second.fill(sample, previous, Some(budget));
     } else {
         second.take(
             TickApps::Refused(reason.as_deref().unwrap_or_else(|| unreachable!("refusal"))),
@@ -302,7 +348,7 @@ fn load_minute_second(
 fn load_minute_visit(
     root: &Path,
     found: &Found,
-    before: &mut Option<Before>,
+    decoder: &mut Decoder,
     budget: &Arc<ByteBudget>,
     operation: &Operation,
     capture: &crate::recording::InputCapture<'_>,
@@ -318,7 +364,7 @@ fn load_minute_visit(
     read_machine(&sealed, &mut machine)?;
     operation.check()?;
 
-    sealed.visit_samples_with_operation(before, operation, |endpoint, sample| {
+    decoder.visit_samples(&sealed, operation, |endpoint, sample| {
         consume(endpoint, sample, sealed.losses())
     })?;
     operation.check()?;
@@ -329,7 +375,7 @@ fn load_minute_visit(
     Ok(machine)
 }
 
-fn open_minute<'input>(
+pub(super) fn open_minute<'input>(
     root: &Path,
     found: &Found,
     budget: &'input Arc<ByteBudget>,
@@ -355,17 +401,38 @@ fn open_minute<'input>(
     Ok(sealed)
 }
 
-/// Admission failure rejects the candidate; a refused summary keeps explicit compatibility data.
-fn project_machine<'reading>(
+fn project_machine_apps(
+    run: RunIdentity,
+    second: MachineSecond,
+    apps: &mut [AppsSecond],
+    seconds: &mut Vec<Loaded>,
+) {
+    let index = apps.iter().position(|apps| {
+        apps.observation
+            .is_some_and(|observation| observation.stamp.publication == second.publication)
+    });
+    let payload = index
+        .map(|index| mem::take(&mut apps[index]))
+        .ok_or_else(|| {
+            super::Missing::Refused(String::from(
+                "the minute has no process sample for this publication",
+            ))
+        });
+    seconds.push(Loaded {
+        run,
+        second,
+        apps: payload,
+    });
+}
+
+/// Attempts count before fallible capture; refused compatibility summaries count their fallback.
+pub(super) fn project_machine<'reading>(
     found: &Found,
     machine: &'reading MachineMinute,
     mut before: Option<super::Reading<'reading>>,
-    apps: &mut [AppsSecond],
     budget: &Arc<ByteBudget>,
-    seconds: &mut Vec<Loaded>,
+    mut take: impl FnMut(MachineSecond),
 ) -> Result<super::DecodedCatalog, crate::store::MachineCaptureError> {
-    assert!(seconds.is_empty());
-    assert!(seconds.capacity() >= TICKS_PER_MINUTE);
     let mut decoded = super::DecodedCatalog {
         windows: 1,
         ..super::DecodedCatalog::default()
@@ -379,7 +446,7 @@ fn project_machine<'reading>(
         );
         if let Some(second) = MachineSecond::complete_of(&reading, before.as_ref(), budget)? {
             if matches!(
-                &second.complete,
+                second.complete,
                 crate::store::CompleteMachineState::Refused(_)
             ) {
                 persistence::work::ingestion::record_publication(
@@ -388,22 +455,7 @@ fn project_machine<'reading>(
                     persistence::work::ingestion::Kind::MachineReduction,
                 );
             }
-            let index = apps.iter().position(|apps| {
-                apps.observation
-                    .is_some_and(|observation| observation.stamp.publication == second.publication)
-            });
-            let payload = index
-                .map(|index| mem::take(&mut apps[index]))
-                .ok_or_else(|| {
-                    super::Missing::Refused(String::from(
-                        "the minute has no process sample for this publication",
-                    ))
-                });
-            seconds.push(Loaded {
-                run: found.run,
-                second,
-                apps: payload,
-            });
+            take(second);
         }
         before = Some(reading);
     }

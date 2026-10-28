@@ -57,18 +57,28 @@ impl QueryContext {
         self: &Arc<Self>,
         observation: &Observation,
     ) -> Result<ContextRanks<Ranks>> {
+        self.selected_rank_status_for(observation)?
+            .try_map(|ranks| ranks.map_err(|_| Error::Bound("selected ranks")))
+    }
+
+    /// Keeps supported facet refusal distinct from retained-byte admission and source errors.
+    pub fn selected_rank_status_for(
+        self: &Arc<Self>,
+        observation: &Observation,
+    ) -> Result<ContextRanks<std::result::Result<Ranks, super::Missing>>> {
         let second = self
             .inspect(observation)
             .map_err(|_| Error::Bound("selected ranks"))?;
         let reservation = self.reserve_response(
-            size_of::<ContextRanks<Ranks>>()
+            size_of::<ContextRanks<std::result::Result<Ranks, super::Missing>>>()
                 + 5 * (RANKS_MAX + 1) * size_of::<Rank>()
-                + response_rank_display_bytes(second),
+                + response_rank_display_bytes(second)
+                + match &second.apps().missing {
+                    Some(super::Missing::Refused(reason)) => reason.len(),
+                    _ => 0,
+                },
         )?;
-        let ranks = second
-            .apps()
-            .ranks()
-            .map_err(|_| Error::Bound("selected ranks"))?;
+        let ranks = second.apps().ranks();
 
         Ok(ContextRanks {
             budget: self.response_budget(),
@@ -78,7 +88,8 @@ impl QueryContext {
     }
 
     /// The ranks of each retained observation in the 900-second context, excluding its lead-in.
-    pub fn app_ranks(self: &Arc<Self>) -> Result<Arc<ContextRanks<WindowRanks>>> {
+    pub fn app_ranks(self: &Arc<Self>) -> super::HistoryResult<Arc<ContextRanks<WindowRanks>>> {
+        self.history_ready()?;
         let range = ContextRange::ending_at(self.context_last_second())?;
         let count = self
             .seconds()
@@ -129,7 +140,12 @@ impl QueryContext {
     }
 
     /// A borrowed hover view of one App, sharing this context's existing admission lease.
-    pub fn app_parts(self: &Arc<Self>, kind: KeyKind, bytes: &[u8]) -> Result<Arc<ContextParts>> {
+    pub fn app_parts(
+        self: &Arc<Self>,
+        kind: KeyKind,
+        bytes: &[u8],
+    ) -> super::HistoryResult<Arc<ContextParts>> {
+        self.history_ready()?;
         kind.checked_key(bytes)?;
         let reservation = self
             .reserve_response(size_of::<ContextParts>() + 2 * size_of::<usize>() + bytes.len())?;

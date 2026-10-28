@@ -69,6 +69,37 @@ pub struct SampledRank<'sample> {
 }
 
 impl SampledSecond {
+    pub(super) fn unread(machine: &MachineSecond, observation: Observation) -> Self {
+        Self {
+            machine: machine.clone(),
+            observation,
+            ranks: Err(Missing::Unread),
+            reservation: None,
+        }
+    }
+
+    /// Admission precedes retention mutation. Explicit presentation refusals remain resolved.
+    pub(super) fn admitted(
+        machine: &MachineSecond,
+        apps: &AppsSecond,
+        budget: &Arc<ByteBudget>,
+    ) -> Result<Self, Missing> {
+        if apps.missing == Some(Missing::Budget) {
+            return Err(Missing::Budget);
+        }
+
+        let reservation = budget
+            .reserve(Self::take_bytes(apps))
+            .ok_or(Missing::Budget)?;
+        Ok(Self {
+            machine: machine.clone(),
+            observation: apps
+                .observation
+                .unwrap_or_else(|| unreachable!("sampled identity")),
+            ranks: apps.ranks(),
+            reservation: Some(reservation),
+        })
+    }
     /// Retains one observation's machine reading and bounded hover rankings on `budget`.
     pub fn from_second(
         machine: &MachineSecond,
