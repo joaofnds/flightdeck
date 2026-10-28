@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::apps::TickApps;
-use super::stretch::StretchRow;
+use super::stretch::{Folded, Folding, StretchRow};
 use super::{
     APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Cohorts, Held, Leaders,
     MachineSecond, Mailbox, Missing, Readings, SECONDS_HELD_MAX, STRETCHES_MAX, View, WallSeconds,
@@ -230,6 +230,34 @@ fn a_stretch_of_more_apps_than_it_holds_holds_none() {
 
     let view = published(&mut held);
     let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[]);
+    assert_eq!(shown.other, None);
+}
+
+#[test]
+fn a_stretch_a_load_added_up_part_of_holds_none_where_that_part_holds_more_apps_than_it_holds() {
+    // Goal: a stretch holds no Apps where the part of it a load added up held more than a
+    // stretch holds, rather than showing the Apps of its other seconds as all of them. Method:
+    // a load adds up seconds 1,000 and 1,001, each holding a different half of one App more than
+    // a stretch holds, and hands them to 1,000. The store takes both in, then 1,002 with A, closes
+    // the stretch at 1,010, and the chart's Other of the stretch is read.
+    let mut folding = Folding::new();
+    for (_, apps) in more_apps_than_a_stretch_holds(1_000) {
+        assert!(folding.add(100, &apps).is_none());
+    }
+    let folded = Folded {
+        apps: folding.finish().unwrap(),
+        publication: 1_001,
+    };
+    let mut held = Held::new();
+    assert!(held.take(&RUN, &second_at(1_000), TickApps::Folded(&folded)));
+    let unread = TickApps::Missing(&Missing::Unread);
+    assert!(held.take(&RUN, &second_at(1_001), unread));
+    take(&mut held, 1_002, &[cpu(b"/A.app", 1_000)]);
+    take(&mut held, 1_010, &[]);
+
+    let view = published(&mut held);
+    let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[]);
+    assert_eq!(view.stretches[0].stretch, 100);
     assert_eq!(shown.other, None);
 }
 
@@ -794,15 +822,24 @@ fn resident(key: &[u8], resident_bytes: u64) -> Used<'_> {
 /// Takes in `wall_second` and the second after it, each holding a different half of one App
 /// more than a stretch holds.
 fn take_more_apps_than_a_stretch_holds(held: &mut Held, wall_second: u64) {
+    for (wall_second, mut apps) in more_apps_than_a_stretch_holds(wall_second) {
+        let second = second_at(wall_second);
+        assert!(held.take(&RUN, &second, TickApps::Loaded(&mut apps)));
+    }
+}
+
+/// The Apps at `wall_second` and the second after it, each beside its wall second and a
+/// different half of one App more than a stretch holds.
+fn more_apps_than_a_stretch_holds(wall_second: u64) -> [(u64, AppsSecond); 2] {
     let keys: Vec<Vec<u8>> = (0..=APPS_PER_SECOND_MAX)
         .map(|index| format!("/{index:05}.app").into_bytes())
         .collect();
     let (first, second) = keys.split_at(keys.len() / 2);
 
-    for (wall_second, keys) in [(wall_second, first), (wall_second + 1, second)] {
+    [(wall_second, first), (wall_second + 1, second)].map(|(wall_second, keys)| {
         let used: Vec<_> = keys.iter().map(|key| cpu(key, 1_000)).collect();
-        take(held, wall_second, &used);
-    }
+        (wall_second, second_with(wall_second, &used))
+    })
 }
 
 /// Takes the second at `wall_second` into `held`, with the Apps `used` names, in key order.
