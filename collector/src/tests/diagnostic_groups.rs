@@ -1,9 +1,8 @@
 use super::*;
 
-#[path = "../../tests/support/process.rs"]
-mod process;
-
 const TEST: &str = "tests::diagnostic_groups::delivers_a_co_ending_minute_through_group_admission";
+const OVERSHOOT_TEST: &str =
+    "tests::diagnostic_groups::finishes_an_overdue_run_at_its_last_publication";
 const ROOT: &str = "FLIGHTDECK_GROUP_TEST_ROOT";
 const RING: &str = "FLIGHTDECK_GROUP_TEST_RING";
 
@@ -11,11 +10,28 @@ const RING: &str = "FLIGHTDECK_GROUP_TEST_RING";
 fn delivers_a_co_ending_minute_through_group_admission() {
     // Goal: a minute's co-ending tick and recording reports survive actual group admission.
     // Method: run the collector orchestration on its existing accelerated test schedule.
+    minute_case(false);
+}
+
+#[test]
+fn finishes_an_overdue_run_at_its_last_publication() {
+    // Goal: finite overshoot ends after one acquisition and reports the actual final ordinal.
+    // Method: give the real run a schedule already overdue at startup, without delaying a wait.
+    minute_case(true);
+}
+
+fn minute_case(overdue: bool) {
     if let Some(root) = std::env::var_os(ROOT) {
-        minute_child(&PathBuf::from(root));
+        minute_child(&PathBuf::from(root), overdue);
     }
-    let ring = TestRing::new("diagnosticminute");
-    let root = std::env::temp_dir().join(format!("flightdeck-minute-group-{}", std::process::id()));
+    let name = if overdue {
+        "diagnosticovershoot"
+    } else {
+        "diagnosticminute"
+    };
+    let test = if overdue { OVERSHOOT_TEST } else { TEST };
+    let ring = TestRing::new(name);
+    let root = std::env::temp_dir().join(format!("flightdeck-{name}-{}", std::process::id()));
     recording::private::create_private_dir(&root).unwrap();
     eprintln!(
         "minute group fixture retained on failure: {}",
@@ -23,7 +39,7 @@ fn delivers_a_co_ending_minute_through_group_admission() {
     );
     let mut child = process::OwnedChild::spawn(
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
+            .args(["--exact", test, "--nocapture"])
             .env(ROOT, &root)
             .env(RING, &ring.place.lock_path)
             .stdout(std::fs::File::create(root.join("stdout")).unwrap())
@@ -34,13 +50,42 @@ fn delivers_a_co_ending_minute_through_group_admission() {
 
     assert_eq!(Some(29), status.code());
     let output = std::fs::read_to_string(root.join("stdout")).unwrap();
-    assert_minute_pair(&output);
+    let mut reader = Reader::open(&ring.place.lock_path).unwrap();
+    let mut last_tick = 0;
+    let mut publications = 0;
+    for _publication in 0..RING_SLOTS {
+        let found = reader.read().unwrap();
+        if let Found::Publication { tick, .. } = found {
+            last_tick = tick;
+            publications += 1;
+        } else {
+            assert_eq!(found, Found::Nothing);
+            break;
+        }
+    }
+    assert!(last_tick > 0);
+    assert_minute_pair(&output, last_tick);
+    let whole = output
+        .lines()
+        .find(|line| line.starts_with("whole run, ticks "))
+        .unwrap();
+    assert_eq!(report_range(whole, "whole run, ticks ").1, last_tick);
+    assert!(
+        collector::ring::RingReader::open(&ring.place.lock_path)
+            .unwrap()
+            .completed()
+    );
+    if overdue {
+        assert_eq!(publications, 2);
+        assert!(last_tick > TICKS_PER_MINUTE);
+    }
     if std::env::var_os("FLIGHTDECK_DIAGNOSTIC_RETAIN").is_none() {
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
 
-fn minute_child(root: &Path) -> ! {
+fn minute_child(root: &Path, overdue: bool) -> ! {
+    let overdue_schedule = Schedule::starting_now(1).unwrap();
     diagnostics::install(Role::Collector);
     let lock = PathBuf::from(std::env::var_os(RING).unwrap());
     let name = lock.file_stem().unwrap().to_str().unwrap();
@@ -68,6 +113,10 @@ fn minute_child(root: &Path) -> ! {
         )
         .unwrap();
         out.submit();
+        if overdue {
+            assert!(overdue_schedule.first_ahead_of(clock::now()) > TICKS_PER_MINUTE + 1);
+            run.schedule = overdue_schedule;
+        }
 
         run_collect(
             &options,
@@ -84,7 +133,7 @@ fn minute_child(root: &Path) -> ! {
     diagnostics::exit(29);
 }
 
-fn assert_minute_pair(output: &str) {
+fn assert_minute_pair(output: &str, last_tick: u64) {
     let lines: Vec<_> = output.lines().collect();
     let minute = lines
         .iter()
@@ -99,7 +148,7 @@ fn assert_minute_pair(output: &str) {
 
     assert_eq!(minute_range.1, tick_range.1);
     assert!(minute_range.0 <= tick_range.0);
-    assert!(minute_range.1 <= TICKS_PER_MINUTE);
+    assert_eq!(minute_range.1, last_tick);
     assert_eq!(minute, tick + 3);
     let recording = lines[minute + 1..]
         .iter()

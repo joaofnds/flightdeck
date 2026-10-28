@@ -46,6 +46,65 @@ fn owns_live_metadata_and_computes_known_totals_after_source_scratch_reuse() {
     assert!(selected.bytes() >= size_of::<Frame>());
 }
 
+#[test]
+fn recovers_app_rates_on_the_consecutive_tick_after_a_delayed_observation() {
+    // Goal: the resumed observation has gauges only; its consecutive successor recovers rates.
+    // Method: capture real-ring frames with independent ordinals and 800 ms recovery clocks.
+    let mut fixture = None;
+    Fixture::initialize(&mut fixture, true);
+    let fixture = fixture.as_mut().unwrap();
+    let times = |continuous_ns| collector::ring::ObservationTimes {
+        wall_ns: 1_800_000_000_000_000_000 + continuous_ns,
+        continuous_ns,
+        awake_ns: continuous_ns,
+    };
+    fixture.publish_observed(10, &times(10_000_000_000), Change::None);
+    let mut baseline = None;
+    fixture.capture(&mut baseline);
+    fixture.publish_observed(20, &times(20_200_000_000), Change::None);
+    let mut resumed = None;
+    fixture.capture(&mut resumed);
+    fixture.publish_observed(21, &times(21_000_000_000), Change::None);
+    let mut recovered = None;
+    fixture.capture(&mut recovered);
+
+    resumed
+        .as_ref()
+        .unwrap()
+        .with_aggregate(baseline.as_deref(), |totals| {
+            let app = &totals.apps[&apps::AppKey::Bundle(b"/Applications/A.app")];
+            assert_eq!(totals.elapsed_ns, None);
+            assert_eq!(app.cpu_ns.known, 0);
+            assert_eq!(app.cpu_ns.unavailable_members, 3);
+            assert_eq!(app.resident_bytes.known, 157_286_400);
+            assert_eq!(
+                totals.processes[0].cpu_ns,
+                apps::Amount::Unavailable(apps::Unavailable::Interval)
+            );
+            Ok(())
+        })
+        .unwrap();
+    recovered
+        .as_ref()
+        .unwrap()
+        .with_aggregate(resumed.as_deref(), |totals| {
+            let app = &totals.apps[&apps::AppKey::Bundle(b"/Applications/A.app")];
+            assert_eq!(totals.elapsed_ns, Some(800_000_000));
+            assert_eq!(app.cpu_ns.known, 500_000_000);
+            assert_eq!(app.cpu_ns.unavailable_members, 1);
+            assert_eq!(app.resident_bytes.known, 157_286_400);
+            assert_eq!(
+                apps::cpu_percent_one_core(apps::CpuRate {
+                    cpu_ns: app.cpu_ns.known,
+                    elapsed_ns: totals.elapsed_ns.unwrap(),
+                }),
+                Some(62.5)
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
 mod fixture;
 use fixture::{Change, Fixture};
 

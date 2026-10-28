@@ -99,13 +99,22 @@ impl Fixture {
     }
 
     pub fn publish(&mut self, second: u64, change: Change) {
+        let times = ObservationTimes {
+            wall_ns: 1_800_000_000_000_000_000 + second * 1_000_000_000,
+            continuous_ns: (second + 1) * 1_000_000_000,
+            awake_ns: (second + 1) * 1_000_000_000,
+        };
+        self.publish_observed(second, &times, change);
+    }
+
+    pub fn publish_observed(&mut self, tick: u64, times: &ObservationTimes, change: Change) {
         let mut processes = Vec::with_capacity(4);
         let mut identities = Vec::with_capacity(5);
-        self.publish_members(second, change, &mut processes, &mut identities);
+        self.publish_members(tick, change, &mut processes, &mut identities);
         let writer = self.writer.as_mut().unwrap();
         let memory = Memory::default();
         let readings = collector::ring::Readings {
-            run_tick: second,
+            run_tick: tick,
             cpus: &[],
             memory: &memory,
             interfaces: &[],
@@ -118,16 +127,11 @@ impl Fixture {
             events: &[],
             dropped: Dropped::default(),
         };
-        let times = ObservationTimes {
-            wall_ns: 1_800_000_000_000_000_000 + second * 1_000_000_000,
-            continuous_ns: (second + 1) * 1_000_000_000,
-            awake_ns: (second + 1) * 1_000_000_000,
-        };
         if self.identity {
             writer
                 .publish_with_identity(
                     &readings,
-                    Some(&times),
+                    Some(times),
                     &IdentityPublication {
                         processes: &identities,
                         events: &[],
@@ -135,7 +139,7 @@ impl Fixture {
                 )
                 .unwrap();
         } else {
-            writer.publish_observed(&readings, &times);
+            writer.publish_observed(&readings, times);
         }
     }
 

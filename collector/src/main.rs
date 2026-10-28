@@ -166,8 +166,8 @@ fn run_collect(
             out.begin();
         }
         let owner_departed = owner.departed();
-        let following = match result {
-            Ok(following) => following,
+        let step = match result {
+            Ok(step) => step,
             Err(error) => {
                 if error.kind() == io::ErrorKind::Interrupted {
                     if stop::Stop::requested() {
@@ -180,21 +180,22 @@ fn run_collect(
                 return Err(error);
             }
         };
-        assert!(following > tick);
+        assert_eq!(step.requested, tick);
+        assert!(step.following > step.observed);
         let elapsed = options
             .seconds
-            .is_some_and(|seconds| following > seconds.get());
+            .is_some_and(|seconds| step.following > seconds.get());
         if elapsed {
-            return run_finish(run, tick, first_marker_pid, out);
+            return run_finish(run, step.observed, first_marker_pid, out);
         }
         if stop::Stop::requested() {
-            return run_finish(run, tick, first_marker_pid, out);
+            return run_finish(run, step.observed, first_marker_pid, out);
         }
         if owner_departed {
-            return run_finish(run, tick, first_marker_pid, out);
+            return run_finish(run, step.observed, first_marker_pid, out);
         }
 
-        tick = following;
+        tick = step.following;
     }
     unreachable!("collector exhausted its process-lifetime tick bound");
 }
@@ -734,44 +735,46 @@ impl Run {
         live_at_first_scan
     }
 
-    /// Runs `tick`, writes the reports of the spans it closes, and returns the tick that
-    /// follows it, past any tick the run slipped.
-    fn tick(&mut self, tick: u64, out: &mut impl Write) -> io::Result<u64> {
-        self.tick_with_observation(tick, out, recording::observation_times)
+    /// Runs one observation after the requested deadline and reports the spans it closes.
+    fn tick(&mut self, requested: u64, out: &mut impl Write) -> io::Result<Step> {
+        self.tick_with_observation(requested, out, clock::now, recording::observation_times)
     }
 
     fn tick_with_observation(
         &mut self,
-        tick: u64,
+        requested: u64,
         out: &mut impl Write,
+        mut now: impl FnMut() -> u64,
         observe: impl FnOnce(Timebase) -> io::Result<ObservationTimes>,
-    ) -> io::Result<u64> {
-        assert!(tick >= self.first_tick);
+    ) -> io::Result<Step> {
+        assert!(requested >= self.first_tick);
 
-        let deadline = self.schedule.deadline(tick);
+        let deadline = self.schedule.deadline(requested);
         self.publication.wait_until(
             &mut self.collector,
             deadline,
             &mut self.meter,
             &mut self.ring,
         )?;
-        let late_ticks = clock::now().saturating_sub(deadline);
+        let started_at = now();
+        let observed = requested.max(self.schedule.first_ahead_of(started_at).saturating_sub(1));
+        let late_ticks = started_at.saturating_sub(deadline);
         let late = Duration::from_nanos(self.timebase.nanoseconds(late_ticks)?);
-        let observed = observation_or_unavailable(observe(self.timebase), out)?;
+        let times = observation_or_unavailable(observe(self.timebase), out)?;
         self.publication.read(
             &mut self.collector,
             &mut self.meter,
             &mut self.ring,
-            observed.as_ref(),
+            times.as_ref(),
         )?;
         self.meter.measure(Source::Ring, || {
             self.publication
-                .publish(&mut self.ring, &self.collector, tick, observed.as_ref())
+                .publish(&mut self.ring, &self.collector, observed, times.as_ref())
         })?;
 
         self.persistence.poll(out)?;
-        let following = self.schedule.first_ahead_of(clock::now()).max(tick + 1);
-        let slips = following - tick - 1;
+        let following = self.schedule.first_ahead_of(now()).max(observed + 1);
+        let slips = following - requested - 1;
         self.whole.tally.add(late, slips, &self.collector);
         self.minute.tally.add(late, slips, &self.collector);
         self.window.tally.add(late, slips, &self.collector);
@@ -782,22 +785,26 @@ impl Run {
         assert_eq!(following, self.minute.following());
         assert_eq!(following, self.window.following());
 
-        let step = Step { tick, following };
+        let step = Step {
+            requested,
+            observed,
+            following,
+        };
         if step.closes_span(TICKS_PER_WINDOW) {
             let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
-            self.window.report(out, "ticks", tick, &now)?;
+            self.window.report(out, "ticks", observed, &now)?;
             self.window = Span::begin(now, following);
         }
         if step.closes_span(TICKS_PER_MINUTE) {
             let now = Mark::take(&self.meter, self.timebase, &self.collector)?;
-            self.minute.report(out, "minute, ticks", tick, &now)?;
+            self.minute.report(out, "minute, ticks", observed, &now)?;
             self.persistence
                 .report("minute", now.snapshot.cpu_ns(), self.timebase, out)?;
             self.publication.report(&self.ring, "minute", out)?;
             self.minute = Span::begin(now, following);
         }
 
-        Ok(following)
+        Ok(step)
     }
 
     /// Writes the whole run's report, which ends at `last_tick`, and the processes it missed.
@@ -897,23 +904,25 @@ impl Span {
     }
 }
 
-/// A tick the run ran and the tick that follows it, past any tick the run slipped.
+/// The requested deadline, the observation it led to, and the next deadline still ahead.
 struct Step {
-    tick: u64,
+    requested: u64,
+    observed: u64,
     following: u64,
 }
 
 impl Step {
-    /// Whether the span of `ticks_per_span` ticks that holds the tick ends before the one
-    /// that follows it, with spans counted from tick 1.
+    /// Whether the requested tick's span ends before the following tick, even if the
+    /// observation is already beyond that boundary. Spans count from tick 1.
     fn closes_span(&self, ticks_per_span: u64) -> bool {
         // `Run::start` runs the warm-up tick, 0, apart from every span.
-        assert!(self.tick > 0);
-        assert!(self.following > self.tick);
+        assert!(self.requested > 0);
+        assert!(self.requested <= self.observed);
+        assert!(self.observed < self.following);
         assert!(ticks_per_span > 0);
 
         // Each division floors, to the span the tick falls in.
-        (self.following - 1) / ticks_per_span > (self.tick - 1) / ticks_per_span
+        (self.following - 1) / ticks_per_span > (self.requested - 1) / ticks_per_span
     }
 }
 
@@ -1225,6 +1234,9 @@ mod tests {
 
     mod activation;
     mod diagnostic_groups;
+    #[path = "../../tests/support/process.rs"]
+    mod process;
+    mod tick_timing;
 
     const TEST_TICK_PERIOD_NS: u64 = 20_000_000;
 
@@ -1396,7 +1408,7 @@ mod tests {
             allocator_calls_in(|| {
                 let mut tick = run.first_tick;
                 while tick <= TICKS_PER_MINUTE {
-                    tick = run.tick(tick, &mut sink).unwrap();
+                    tick = run.tick(tick, &mut sink).unwrap().following;
                 }
             })
         });
@@ -1428,7 +1440,7 @@ mod tests {
             .unwrap();
 
         let next = run.tick(run.first_tick, &mut output).unwrap();
-        run.tick(next, &mut output).unwrap();
+        run.tick(next.following, &mut output).unwrap();
 
         let after = collector::ring::RingReader::open(&recording.ring.place.lock_path)
             .unwrap()
@@ -1494,7 +1506,7 @@ mod tests {
         .unwrap();
 
         let calls = allocator_calls_in(|| {
-            run.tick_with_observation(run.first_tick, &mut output, |_timebase| {
+            run.tick_with_observation(run.first_tick, &mut output, clock::now, |_timebase| {
                 Err(io::Error::from(io::ErrorKind::InvalidData))
             })
             .unwrap();
@@ -1533,7 +1545,7 @@ mod tests {
         while_forking(|| {
             let mut tick = run.first_tick;
             while tick <= 10 {
-                tick = run.tick(tick, &mut sink).unwrap();
+                tick = run.tick(tick, &mut sink).unwrap().following;
             }
         });
 
@@ -2038,7 +2050,8 @@ mod tests {
         // Goal: a window closes after its tenth tick.
         // Method: ask whether tick 10 closes a window, with tick 11 following it.
         let step = Step {
-            tick: 10,
+            requested: 10,
+            observed: 10,
             following: 11,
         };
         assert!(step.closes_span(TICKS_PER_WINDOW));
@@ -2049,7 +2062,8 @@ mod tests {
         // Goal: a window stays open through its ninth tick.
         // Method: ask whether tick 9 closes a window, with tick 10 following it.
         let step = Step {
-            tick: 9,
+            requested: 9,
+            observed: 9,
             following: 10,
         };
         assert!(!step.closes_span(TICKS_PER_WINDOW));
@@ -2060,7 +2074,8 @@ mod tests {
         // Goal: a window whose tenth tick slipped still closes, after the tick before it.
         // Method: ask whether tick 9 closes a window, with tick 11 following it.
         let step = Step {
-            tick: 9,
+            requested: 9,
+            observed: 9,
             following: 11,
         };
         assert!(step.closes_span(TICKS_PER_WINDOW));
@@ -2071,19 +2086,21 @@ mod tests {
         // Goal: a minute closes after its sixtieth tick.
         // Method: ask whether tick 60 closes a minute, with tick 61 following it.
         let step = Step {
-            tick: 60,
+            requested: 60,
+            observed: 60,
             following: 61,
         };
         assert!(step.closes_span(TICKS_PER_MINUTE));
     }
 
     #[test]
-    #[should_panic(expected = "self.tick > 0")]
+    #[should_panic(expected = "self.requested > 0")]
     fn refuses_the_warm_up_tick() {
         // Goal: the warm-up tick, which `Run::start` runs apart, never reaches a span.
         // Method: ask whether tick 0 closes a window.
         let step = Step {
-            tick: 0,
+            requested: 0,
+            observed: 0,
             following: 1,
         };
         step.closes_span(TICKS_PER_WINDOW);

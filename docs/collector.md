@@ -106,9 +106,15 @@ therefore skips this acquisition. Machine GPU activity, energy and memory, and r
 coalition readings remain available. Existing recordings retain their recorded values.
 
 It then writes the tick into the next slot of the ring and wakes any reader waiting on it.
-If the work ran past the next deadline, the next tick is the first deadline still ahead. The
-skipped ticks are counted as slips and have no readings, which is what the glossary calls a
-missed tick.
+If a wait runs past additional deadlines, a regular observation takes the tick number of
+the most recent deadline already reached. The missed ticks leave a gap before it, so its App
+rates are unavailable and a valid consecutive successor can recover rates. The clocks still
+record when acquisition started. The special startup warm-up remains tick 0.
+
+If acquisition runs past later deadlines, the observation keeps its starting tick number
+and clocks; the next tick is the first deadline still ahead after the work finishes. Both
+kinds of skipped ticks count as slips and have no readings. The collector takes one
+observation per acquisition and does not fill gaps with catch-up readings.
 
 Every 10 ticks and every 60 the collector submits a report of its own cost, broken down by
 source. The minute report gives the CPU of the collector and the persister together as a
