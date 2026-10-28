@@ -191,6 +191,10 @@ fn worker_reading(cpu_ns: u64, cpu_percent_one_core: f64) -> Value {
 }
 
 mod over_the_loaded_hour {
+    use std::sync::Arc;
+
+    use viewer::store::MachineSecond;
+
     use super::{AppAttributionHistory, Metric, hovered};
     use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_until};
 
@@ -234,5 +238,47 @@ mod over_the_loaded_hour {
         let alone = AppAttributionHistory::from_view(Metric::Cpu, &newer, &cohorts);
         assert_eq!(drawn.panel(), alone.panel());
         assert_eq!(hovered(&drawn), hovered(&alone));
+    }
+
+    #[test]
+    fn breaks_its_line_in_the_older_part_where_the_machine_charts_break_theirs() {
+        // Goal: the chart breaks its line between two stretches of the older part where the
+        // machine charts break theirs, though a stretch always follows the one before it.
+        // Method: a View of the hour whose second older second stands in a segment of its own,
+        // and the chart's segments beside the machine CPU chart's.
+        let (mut view, cohorts) = hour();
+        view.earlier[1] = Arc::new(MachineSecond {
+            segment: 1,
+            ..MachineSecond::clone(&view.earlier[1])
+        });
+
+        let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
+
+        let machine = crate::live_projection::overview_panels(&view, None)
+            .unwrap()
+            .into_iter()
+            .find(|panel| panel.id == "live-cpu")
+            .unwrap();
+        let panel = drawn.panel().unwrap();
+        assert_eq!(machine.segments.as_ref().unwrap()[..3], [0, 1, 2]);
+        assert_eq!(panel.segments, machine.segments);
+    }
+
+    #[test]
+    fn breaks_its_line_at_an_older_point_the_view_holds_no_stretch_for() {
+        // Goal: the chart breaks its line across an older point whose stretch the View holds no
+        // Apps of, though the machine charts draw the point in the same segment as its
+        // neighbours. Method: a View of the hour without the Apps of its third stretch, one of the
+        // five the chart draws before its full-detail seconds, and the segments of the chart's
+        // points on either side of it.
+        let (mut view, cohorts) = hour();
+        view.stretches.remove(2);
+
+        let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
+
+        let panel = drawn.panel().unwrap();
+        let segments = panel.segments.as_ref().unwrap();
+        assert_eq!(segments[..2], [0; 2]);
+        assert_eq!(segments[2], 1);
     }
 }
