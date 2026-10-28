@@ -457,10 +457,7 @@ fn load_window_inner(
         Err(failure) => return Some(failure),
     };
 
-    let apps_from_ns = found
-        .first()
-        .and_then(|newest| newest.wall_ns_max)
-        .map_or(0, |newest| newest.saturating_sub(APPS_NS));
+    let from_ns = apps_from_ns(&found);
     found.reverse();
     // A load that continues the store's seconds hands over seconds the store holds already,
     // which it takes in no second time.
@@ -469,10 +466,38 @@ fn load_window_inner(
         Continuity::Replace => None,
     };
 
+    load_found(
+        root,
+        &found,
+        AppsLoad { from_ns, held },
+        buffers,
+        |run, second, apps| take(continuity, run, second, apps),
+    )
+}
+
+/// The oldest wall time of the seconds whose Apps the store holds one by one, where `found`
+/// holds the loaded hour's minutes newest first.
+fn apps_from_ns(found: &[Found]) -> u64 {
+    found
+        .first()
+        .and_then(|newest| newest.wall_ns_max)
+        .map_or(0, |newest| newest.saturating_sub(APPS_NS))
+}
+
+/// Hands `take` the run, the second and the Apps of each tick of the minutes of `found`, oldest
+/// first, as `apps` says the load reads their Apps. Returns why it handed over fewer than the
+/// minutes sealed, where it did.
+fn load_found(
+    root: &Path,
+    found: &[Found],
+    apps: AppsLoad<'_>,
+    buffers: Option<&mut LoadBuffers>,
+    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> Option<Failure> {
     let mut left_out = None;
-    for mut batch in load_batches(root, &found, apps_from_ns, held, buffers) {
+    for mut batch in load_batches(root, found, apps, buffers) {
         for loaded in &mut batch.seconds {
-            take(continuity, &loaded.run, &loaded.second, loaded.apps.tick());
+            take(&loaded.run, &loaded.second, loaded.apps.tick());
         }
         if let Some(failure) = batch.left_out {
             left_out = Some(failure);
@@ -548,23 +573,31 @@ impl From<Result<AppsSecond, Missing>> for LoadedApps {
     }
 }
 
+/// What a load does with the Apps of the loaded hour's minutes.
+#[derive(Clone, Copy)]
+struct AppsLoad<'since> {
+    /// The oldest wall time of the seconds whose Apps the store holds one by one. The Apps of a
+    /// minute whose ticks do not reach it are added up over each stretch.
+    from_ns: u64,
+    /// The newest second the store holds already. The loader adds up none of the seconds whose
+    /// Apps the store holds.
+    held: Option<&'since super::Newest>,
+}
+
 /// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
-/// batch on a loader of its own, with the Apps at each second of each minute whose ticks reach
-/// `apps_from_ns`, and those of older minutes added up over each stretch but the seconds of
-/// `held`, the newest second the store holds already. Returns the batches in the order of
-/// `found`.
+/// batch on a loader of its own, with their Apps as `apps` says. Returns the batches in the
+/// order of `found`.
 fn load_batches(
     root: &Path,
     found: &[Found],
-    apps_from_ns: u64,
-    held: Option<&super::Newest>,
+    apps: AppsLoad<'_>,
     buffers: Option<&mut LoadBuffers>,
 ) -> Vec<Batch> {
     thread::scope(|scope| {
         let mut loaders = Vec::with_capacity(LOADERS_MAX);
         let mut buffers = buffers.map(|buffers| buffers.apps.iter_mut());
         for batch in load_batches_split(found.len()) {
-            let apps = buffers.as_mut().map(|buffers| {
+            let buffer = buffers.as_mut().map(|buffers| {
                 buffers
                     .next()
                     .unwrap_or_else(|| unreachable!("one buffer per bounded batch"))
@@ -579,7 +612,7 @@ fn load_batches(
                 .name(String::from("flightdeck-loader"))
                 .spawn_scoped(scope, move || {
                     let observation = observation.enter();
-                    let result = load_batch_using(root, before, minutes, apps_from_ns, held, apps);
+                    let result = load_batch_using(root, before, minutes, apps, buffer);
                     drop(observation);
                     result
                 });
@@ -627,17 +660,16 @@ fn load_batch_using(
     root: &Path,
     before: Option<&Found>,
     minutes: &[Found],
-    apps_from_ns: u64,
-    held: Option<&super::Newest>,
-    apps: Option<&mut AppMinute>,
+    apps: AppsLoad<'_>,
+    buffer: Option<&mut AppMinute>,
 ) -> Batch {
     let mut fresh = AppMinute::default();
     load_batch(
         root,
         before,
         minutes,
-        &mut Fold::new(apps_from_ns, held),
-        apps.unwrap_or(&mut fresh),
+        &mut Fold::new(apps),
+        buffer.unwrap_or(&mut fresh),
     )
 }
 
@@ -686,7 +718,7 @@ fn load_batch(
             run: &minute.run,
             machine: &current,
             apps: missing.map_or(Ok(&*apps), Err),
-            folded: !minute.apps_by_second(fold.apps_from_ns),
+            folded: !minute.apps_by_second(fold.apps.from_ns),
         };
         load_minute(&decoded, before, &mut batch.seconds, fold);
 
@@ -700,12 +732,9 @@ fn load_batch(
 }
 
 /// What a loader adds up of the Apps of the minutes older than those whose Apps the store holds
-/// at each second, the minutes whose ticks do not reach `apps_from_ns`.
+/// at each second, as `apps` says.
 struct Fold<'since> {
-    apps_from_ns: u64,
-    /// The newest second the store holds already. The loader adds up none of the seconds whose
-    /// Apps the store holds.
-    held: Option<&'since super::Newest>,
+    apps: AppsLoad<'since>,
     stretches: Folding,
     /// The Apps of the second being added up and those of the second added up before it, whose
     /// names it shares.
@@ -725,10 +754,9 @@ struct Part {
 }
 
 impl<'since> Fold<'since> {
-    fn new(apps_from_ns: u64, held: Option<&'since super::Newest>) -> Self {
+    fn new(apps: AppsLoad<'since>) -> Self {
         Self {
-            apps_from_ns,
-            held,
+            apps,
             stretches: Folding::new(),
             current: AppsSecond::with_room(),
             previous: AppsSecond::with_room(),
@@ -820,6 +848,7 @@ fn load_minute_fold(
     seconds: &mut [Loaded],
 ) -> LoadedApps {
     if fold
+        .apps
         .held
         .is_some_and(|held| held.holds_apps(minute.run, second))
     {
