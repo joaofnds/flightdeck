@@ -57,6 +57,17 @@ Between one-second deadlines, kqueue wakes it for process lifecycle events. A fu
 buffer rejects optional payload work before acquisition while retaining watch maintenance
 and loss counts. PID scans fill existing capacity without clearing unused storage.
 
+Tick numbers describe the one-second schedule; publication numbers count actual writes to
+the ring. A delayed observation skips the missed tick numbers and retains its acquisition
+timestamps. Consumers can distinguish collection gaps from overwritten publications and
+withhold rates across a gap. The collector never fills missed deadlines with catch-up reads.
+
+Each IOReport and SMC reader owns the validity of its current reading. It invalidates that
+reading before acquisition and exposes it only after the whole read succeeds. A returned
+read error leaves that source unavailable for the tick, while other sources continue. The
+reader retains its handle and buffers for the next tick; partial updates cannot escape as
+fresh readings. A native call that hangs can still block the acquisition thread.
+
 Each collector or persister process sends diagnostics through a fixed-capacity queue to
 its own output thread. The producer never waits for the destination; overload loses reports
 with explicit counters. Slow diagnostics therefore do not control the recording's progress.

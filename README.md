@@ -37,6 +37,12 @@ Reports use a bounded diagnostic queue and a separate writer thread. A slow or b
 stdout/stderr destination can lose reports, with explicit loss accounting, while collection
 continues. The 5% figure is a target; the collector does not enforce a CPU cap.
 
+Delayed observations carry the tick number of the deadline actually reached, leaving gaps
+instead of inventing catch-up samples. A returned IOReport or SMC read error makes that
+source unavailable for the tick while collection continues; the next tick tries again with
+the same resources. See [timing](docs/collector.md#one-tick) and
+[failure handling](docs/collector.md#stopping-and-failing) for the recovery rules and limits.
+
 It hands each tick to a shared-memory ring that only its user can read. `--ring NAME`
 (default `flightdeck`) names the lock file that holds the ring's name,
 `~/Library/Application Support/Flightdeck/NAME.lock`, and the collector exits with an error

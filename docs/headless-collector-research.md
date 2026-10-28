@@ -14,9 +14,10 @@ and keep the dashboards there as they are".
 
 The daemon is mostly built. The collector runs headless until stopped, the app only
 attaches to it or starts it, and any process of the user can read its ring. Missing:
-launchd registration (TASK-23), surviving a failed source read (TASK-1), restarting a
-persister that dies, which nothing does today, and the waits TASK-5 and TASK-6 describe,
-sleep counted as slipped ticks and a stalled SMC call stalling ticks.
+launchd registration (TASK-23), restarting a persister that dies, which nothing does today,
+and the waits TASK-5 and TASK-6 describe, sleep counted as slipped ticks and a stalled SMC
+call stalling ticks. Returned IOReport and SMC read errors now leave only that source
+unavailable for the tick; collection continues and the next tick attempts another read.
 
 Grafana can keep its dashboards in two ways, called paths A and B below:
 
@@ -60,16 +61,19 @@ outside what Flightdeck records.
   without a window.
 - The collector starts `persister` as its child, and the persister seals each minute to
   Parquet. The collector does not start it again if it exits, so after a persister crash,
-  collection continues into a ring that holds two minutes and recording stops.
+  collection continues into a ring that holds 120 publications, normally two minutes, and
+  recording stops.
 - The app attaches to an advancing collector or starts its own, and stops only one it
   started. The bundle ships both programs in `Contents/Helpers`.
 - The ring was designed for several readers: "the live view, the persister, and any tool
   you point at it" (Moving the data, `docs/recording-research.md`). A reader maps it
   read-only, so it cannot corrupt it, and the writer never waits for a reader.
 - TASK-23, on m-5, plans the collector and persister as the user's launch agent registered
-  with `SMAppService`. TASK-1, keep recording when one source fails, is in Inbox, deferred
-  until TASK-23 starts. Today one failed IOReport or SMC read after a successful open ends
-  the run.
+  with `SMAppService`. Optional-source failure isolation is implemented: an IOReport or SMC
+  read error invalidates the whole current reading and retains the reader's resources for
+  the next tick. Partial values and stale readings are not published as current data.
+  [Failure handling](collector.md#stopping-and-failing) distinguishes returned errors from
+  native calls that hang and mandatory-source errors that still end the run.
 
 An always-on daemon makes its running cost permanent. On a collector the app had started,
 over 332 seconds, the collector used 2.38% of a core with 50 MB resident and the persister
@@ -316,9 +320,11 @@ Subcommands that start the helpers give the one command asked for with no lastin
   hardening, or the exposure is accepted as it is today with `sysmon-exporter`. Path B
   puts the one server to harden in Flightdeck. Either way the export carries no command
   lines, and serving other machines is a separate feature.
-- **Always-on duties.** A permanent daemon needs TASK-1, so one failed read does not stop
-  collection, a persister that is restarted when it exits, TASK-5, so the Mac's sleep is
-  not counted as slipped ticks, and TASK-6, so a stalled SMC call does not stall ticks.
+- **Always-on duties.** Optional IOReport and SMC read errors no longer stop collection.
+  A permanent daemon still needs a persister that is restarted when it exits, TASK-5, so
+  the Mac's sleep is not counted as slipped ticks, and TASK-6, so a stalled SMC call does
+  not stall ticks. Delayed observations now place the gap before the resumed sample and
+  keep their actual acquisition clocks; this does not change the treatment of sleep.
   `SMAppService` registration can leave the agent waiting for the user's approval in
   System Settings, which TASK-23 lists as uncertain.
 - **Version skew.** An app update can replace the helpers while an older collector keeps

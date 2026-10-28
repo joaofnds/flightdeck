@@ -1,11 +1,11 @@
 # How the collector works
 
-The collector reads the Mac and every process once a second, without root, and hands each
-tick to whoever wants it. A separate persister saves those ticks as the recording, and the
-desktop app draws them live. This page describes how the parts fit together, what happens
-in one tick, and why each part is built the way it is. The measurements behind the choices
-are in [recording-research.md](recording-research.md), and this page names the section each
-number comes from. [Terms](#terms) explains the macOS calls and the parts of the ring and the
+The collector reads available system and process counters on a one-second schedule, without
+root, and hands each tick to whoever wants it. A separate persister saves those ticks as the
+recording, and the desktop app draws them live. This page describes how the parts fit together,
+what happens in one tick, and why each part is built the way it is. The measurements behind
+the choices are in [recording-research.md](recording-research.md), and this page names the
+section each number comes from. [Terms](#terms) explains the macOS calls and the parts of the ring and the
 recording that the page names. How to build, run and inspect the collector is in the
 [README](../README.md#collector).
 
@@ -41,13 +41,14 @@ flowchart TB
   recording --> app
 ```
 
-There are two programs and one shared object between them.
+Collection and persistence run in separate processes, joined by the ring. The desktop is
+another reader of the ring and saved recording.
 
 One acquisition thread asks the kernel for readings and writes each tick into the ring.
 It never waits for a reader and never writes a file of readings itself. A separate diagnostic
 thread writes reports from a bounded queue, so a blocked output destination cannot stop
-acquisition. The collector starts the persister and a marker child at the start and end of
-a run, whose pids bound the count of processes it missed.
+acquisition. Marker children at the start and end of a run supply the pids that bound the
+count of processes it missed.
 
 The ring is a POSIX shared-memory object that only the user can open. It holds the last 120
 published ticks, normally two minutes, and a log of process events beside them. Any process
@@ -115,6 +116,12 @@ If acquisition runs past later deadlines, the observation keeps its starting tic
 and clocks; the next tick is the first deadline still ahead after the work finishes. Both
 kinds of skipped ticks count as slips and have no readings. The collector takes one
 observation per acquisition and does not fill gaps with catch-up readings.
+
+For example, if tick 10 was published and the next wait ends just after deadline 20, the next
+publication carries tick 20. Ticks 11 through 19 have no readings. Its gauges are still usable,
+but App rates are unavailable across that gap. A valid tick 21 can recover rates using the
+actual elapsed acquisition time since tick 20. Publication numbers remain consecutive, so
+this gap does not look like ring data lost by a slow reader.
 
 Every 10 ticks and every 60 the collector submits a report of its own cost, broken down by
 source. The minute report gives the CPU of the collector and the persister together as a
@@ -268,10 +275,12 @@ A source that fails to open at startup, such as an SMC or IOReport a Mac does no
 out and every other source is recorded. A failed battery or disk read is reported and the tick
 goes on. A returned SMC or IOReport read error is reported through the bounded diagnostic queue
 and charged to that source. Its whole reading is unavailable for that tick, including any
-values acquired before the failure. The collector keeps the connection and buffers for the
-next tick's attempt. A complete successful read restores SMC gauges immediately; IOReport
-rates need two consecutive successful observations and never bridge a failed tick. There is no
-retry within the tick, and a native call that does not return still blocks collection.
+values acquired before the failure. Each reader invalidates its current reading before the
+attempt and exposes it to publication only after complete success. The collector keeps the
+connection and buffers for the next tick's attempt. A complete successful read restores SMC
+gauges immediately; IOReport rates need two consecutive successful observations and never
+bridge a failed tick. There is no retry within the tick, and a native call that does not
+return still blocks collection.
 A failed read of the machine, the interfaces, the processes or the coalitions ends the run,
 as does a metering failure or a failed assertion, since the release build aborts on a panic.
 Nothing restarts the collector on its own. The desktop app shows a Retry control when the
@@ -521,8 +530,9 @@ mapped into a process with `mmap`. It is not a file on disk, and it stays until 
 or the Mac restarts, which is why a ring outlives its collector. The collector maps it to write
 and every reader maps it read-only.
 
-**Slot.** One of the ring's 120 places for a tick, so the ring holds the last two minutes. The
-collector writes each tick into the slot after the previous one and wraps around at the end.
+**Slot.** One of the ring's 120 places for a published tick, normally two minutes of readings.
+Delays can stretch the elapsed span those publications cover. The collector writes each tick
+into the slot after the previous one and wraps around at the end.
 
 **Publication.** The number of one write into the ring, which rises by one with each tick
 written. Publication `p` lands in slot `(p - 1) mod 120`. A new ring numbers on from the newest
