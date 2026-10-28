@@ -236,7 +236,8 @@ impl AppsStretch {
         self.totals = Totals::default();
     }
 
-    /// Moves out what the stretch holds, and holds no second.
+    /// Copies out what the stretch holds, and holds no second. Its rows are copied rather than
+    /// moved, which keeps the room it holds for its Apps for the next stretch.
     fn detach(&mut self) -> Self {
         let detached = Self {
             stretch: self.stretch,
