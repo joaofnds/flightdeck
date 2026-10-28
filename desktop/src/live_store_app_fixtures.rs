@@ -2,13 +2,16 @@
 //! of Overview's App charts drawn from the store compare with the charts the worker's histories
 //! draw.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
+use num_traits::ToPrimitive;
 use serde_json::{Value, json};
 use viewer::apps::Stamp;
 use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedApp};
-use viewer::store::{AppRow, AppsSecond, MachineSecond, Totals, View};
+use viewer::store::{AppRow, AppsSecond, AppsStretch, MachineSecond, Totals, View};
 
+use crate::data::Panel;
 use crate::live_store_fixtures::{NANOSECONDS_PER_SECOND, reading_at, view};
 
 /// Seconds 100, 101, 102 and 104, the last in a segment of its own.
@@ -171,4 +174,82 @@ fn apps_at_row(name: &str, cpu_ns: u64) -> AppRow {
     ));
 
     AppRow::new(&app, ranked)
+}
+
+/// The newest second of `hour()`.
+pub const HOUR_NEWEST: u64 = 10_000;
+
+/// The View of a store that holds the loaded hour up to `HOUR_NEWEST`, as `hour_until` gives it.
+pub fn hour() -> View {
+    hour_until(HOUR_NEWEST)
+}
+
+/// The View of a store that holds the loaded hour up to `newest`, a multiple of ten: the first
+/// seconds of the two stretches before its live span, the 981 seconds up to `newest` in it, and
+/// the Apps of each closed stretch. At each second the executables A, B and C hold as many bytes
+/// resident as they use nanoseconds of CPU: B 0.25 s and C 0.125 s, and A 0.5 s and a further
+/// 10 ms for each second past the start of its stretch, but in stretch 900, where A uses 0.07 s
+/// at its first second and 0.27 s at each of the other nine, 0.25 s a second over the stretch.
+/// The CPU chart and the chart of resident memory draw A and B on lines of their own.
+pub fn hour_until(newest: u64) -> View {
+    assert_eq!(newest % 10, 0);
+    let used = |second: u64| {
+        let a = match second {
+            9_000 => 70_000_000,
+            9_001..9_010 => 270_000_000,
+            _ => 500_000_000 + second % 10 * 10_000_000,
+        };
+        [("A", a), ("B", 250_000_000), ("C", 125_000_000)]
+    };
+    let apps = |seconds: std::ops::Range<u64>| -> Vec<Arc<AppsSecond>> {
+        seconds
+            .map(|second| Arc::new(apps_at(&reading_at(second, 0), &used(second))))
+            .collect()
+    };
+
+    let live_first = newest - 980;
+    let earlier = [
+        reading_at(live_first - 20, 0),
+        reading_at(live_first - 10, 0),
+    ];
+    let live: Vec<MachineSecond> = (live_first..=newest)
+        .map(|second| reading_at(second, 0))
+        .collect();
+    let mut view = view(1, &earlier, &live);
+    view.apps = apps(live_first..newest + 1);
+    let older = [
+        apps(live_first - 20..live_first - 10),
+        apps(live_first - 10..live_first),
+    ];
+    view.stretches = older
+        .iter()
+        .map(Vec::as_slice)
+        .chain(view.apps[..view.apps.len() - 1].chunks(10))
+        .zip((live_first - 20) / 10..)
+        .map(|(seconds, stretch)| Arc::new(AppsStretch::of_seconds(stretch, seconds)))
+        .collect();
+    view.cohorts.seconds = 960;
+    view.cohorts.cpu = vec![ranked("A"), ranked("B")];
+    view.cohorts.resident = view.cohorts.cpu.clone();
+
+    view
+}
+
+/// `panel` with where it draws each reading given as a wall millisecond rather than as a share
+/// of its span, so charts of the same readings drawn across different spans compare equal.
+pub fn on_the_clock(panel: Option<Rc<Panel>>) -> Option<(Panel, Vec<u64>)> {
+    let mut panel = Rc::unwrap_or_clone(panel?);
+    let window = panel.window.take()?;
+    let positions = panel.positions.take()?;
+    let first = f64::from(u32::try_from(window.first).unwrap());
+    let span = f64::from(u32::try_from(window.span).unwrap());
+    let milliseconds = positions
+        .iter()
+        .map(|position| {
+            let second = first + f64::from(*position) * span;
+            (second * 1_000.0).round().to_u64().unwrap()
+        })
+        .collect();
+
+    Some((panel, milliseconds))
 }

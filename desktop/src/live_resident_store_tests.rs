@@ -8,23 +8,25 @@ use viewer::store::{MachineSecond, View};
 use super::super::{ResidentHistory, decode_cohort};
 use super::from_view_labels;
 use crate::live_store_app_fixtures::{
-    apps_at_observation, charted, ranked, seconds, worker_app, worker_measure, worker_observation,
+    apps_at_observation, charted, on_the_clock, ranked, seconds, worker_app, worker_measure,
+    worker_observation,
 };
 use crate::live_store_fixtures::selection;
 
 #[test]
 fn draws_each_second_as_the_workers_history_of_those_seconds_draws_it() {
     // Goal: Overview's chart of resident memory by App drawn from the store's View is the chart
-    // the worker's history of resident memory of the same seconds draws. Method: a View of four
-    // seconds, whose third holds no Apps and whose fourth does not follow the third, beside the
-    // history the worker writes of them, and compare the two charts.
+    // the worker's history of resident memory of the same seconds draws, but for the span it is
+    // drawn across. Method: a View of four seconds, whose third holds no Apps and whose fourth
+    // does not follow the third, beside the history the worker writes of them, and compare the
+    // two charts on the clock.
     let seconds = seconds();
     let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
 
     let drawn = ResidentHistory::from_view(&charted_resident(&seconds)).panel();
 
     assert!(drawn.is_some());
-    assert_eq!(drawn, worker.panel());
+    assert_eq!(on_the_clock(drawn), on_the_clock(worker.panel()));
 }
 
 #[test]
@@ -188,4 +190,33 @@ fn worker_missing_point(observation: &Value) -> Value {
     json!({"observation": observation, "segment": "0", "source_available": false,
         "membership_complete": null, "ungrouped_members": null, "usage_refused": null,
         "usage_gone": null, "apps": [null, null], "other": null})
+}
+
+mod over_the_loaded_hour {
+    use super::ResidentHistory;
+    use crate::live_store_app_fixtures::hour;
+
+    #[test]
+    fn draws_each_older_stretch_where_the_machine_charts_draw_it_with_its_mean() {
+        // Goal: the chart of resident memory by App draws the older part of the loaded hour as
+        // the machine charts do, one point for each stretch of ten seconds at the machine charts'
+        // point, and shows each App's mean memory over the stretch rather than one second's.
+        // Method: a View of the hour whose oldest stretch has A hold 70 MB at its first second
+        // and 270 MB at each of the other nine, the chart drawn from it beside the machine CPU
+        // chart, and A at the chart's first point.
+        let view = hour();
+
+        let drawn = ResidentHistory::from_view(&view);
+
+        let machine = crate::live_projection::overview_panels(&view, None)
+            .unwrap()
+            .into_iter()
+            .find(|panel| panel.id == "live-cpu")
+            .unwrap();
+        let panel = drawn.panel().unwrap();
+        assert_eq!(panel.window, machine.window);
+        assert_eq!(panel.positions, machine.positions);
+        assert_eq!(panel.segments, machine.segments);
+        assert_eq!(drawn.amount(1, Some(0)), Some(250_000_000));
+    }
 }

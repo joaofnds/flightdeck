@@ -8,6 +8,7 @@ use std::sync::Arc;
 use super::attribution::{self, Completeness, PointApps, PointRow, Totals};
 use super::buffers::{Buffers, Span};
 use super::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Attribution, Resident};
+use crate::EARLIER_STRIDE_SECONDS;
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::apps::AppKey;
 use crate::live_app_response::{Measure, Metric, Observation, Rankable, RankedApp};
@@ -324,6 +325,46 @@ impl AppsStretch {
         Some(&self.rows)
     }
 
+    /// Stretch `stretch` of `seconds`, the Apps of seconds of that stretch oldest first, added up
+    /// and closed as the store closes a stretch.
+    #[must_use]
+    pub fn of_seconds(stretch: u64, seconds: &[Arc<AppsSecond>]) -> Self {
+        assert!(!seconds.is_empty());
+        assert!(u64::try_from(seconds.len()).is_ok_and(|count| count <= EARLIER_STRIDE_SECONDS));
+
+        let mut added = Self::with_room();
+        let mut spare = Vec::with_capacity(STRETCH_APPS_MAX);
+        for second in seconds {
+            added.add_second(stretch, second, &mut spare);
+        }
+        added.close();
+        added
+    }
+
+    /// The interval the stretch's rates are taken over, the intervals of its seconds added up,
+    /// where they measured any.
+    #[must_use]
+    pub fn elapsed_ns(&self) -> Option<u64> {
+        (self.elapsed_ns > 0).then_some(self.elapsed_ns)
+    }
+
+    /// Whether the stretch holds its Apps: some of its seconds held theirs, and they came to no
+    /// more Apps than a stretch holds.
+    #[must_use]
+    pub fn holds_apps(&self) -> bool {
+        if self.too_many {
+            return false;
+        }
+
+        self.seconds > 0
+    }
+
+    /// How completely the readings of the stretch's seconds found the Mac's processes.
+    #[must_use]
+    pub fn completeness(&self) -> Completeness {
+        self.completeness
+    }
+
     /// What the stretch shows on the App chart of `metric` whose own lines draw `cohort`.
     #[must_use]
     pub fn attribution(
@@ -545,19 +586,15 @@ impl PointApps for AppsStretch {
     }
 
     fn elapsed_ns(&self) -> Option<u64> {
-        (self.elapsed_ns > 0).then_some(self.elapsed_ns)
+        Self::elapsed_ns(self)
     }
 
     fn holds_apps(&self) -> bool {
-        if self.too_many {
-            return false;
-        }
-
-        self.seconds > 0
+        Self::holds_apps(self)
     }
 
     fn completeness(&self) -> Completeness {
-        self.completeness
+        Self::completeness(self)
     }
 }
 

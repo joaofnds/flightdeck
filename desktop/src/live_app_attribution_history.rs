@@ -49,6 +49,9 @@ pub struct History {
 struct Point {
     observation: Observation,
     segment: u64,
+    /// Whether the point stands for a stretch of the older part of the chart rather than for
+    /// one second.
+    stretch: bool,
     elapsed_ns: Option<u64>,
     source_available: bool,
     membership_complete: Option<bool>,

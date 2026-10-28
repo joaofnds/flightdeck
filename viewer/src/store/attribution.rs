@@ -187,14 +187,14 @@ pub(super) trait PointApps {
 
 /// How completely one chart point's readings found the Mac's processes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Completeness {
-    pub(super) membership_complete: bool,
-    pub(super) ungrouped_members: u32,
+pub struct Completeness {
+    pub membership_complete: bool,
+    pub ungrouped_members: u32,
     /// The ungrouped members live at the point, which the chart of resident memory counts,
     /// since an exited process holds no memory.
-    pub(super) live_ungrouped_members: u32,
-    pub(super) usage_refused: u32,
-    pub(super) usage_gone: u32,
+    pub live_ungrouped_members: u32,
+    pub usage_refused: u32,
+    pub usage_gone: u32,
 }
 
 impl AppsSecond {
@@ -213,6 +213,18 @@ impl AppsSecond {
     #[must_use]
     pub fn resident(&self, cohort: &[Arc<RankedApp>]) -> Resident {
         resident(self, cohort)
+    }
+
+    /// How completely the second's readings found the Mac's processes.
+    #[must_use]
+    pub fn completeness(&self) -> Completeness {
+        Completeness {
+            membership_complete: self.membership_complete,
+            ungrouped_members: self.ungrouped_members,
+            live_ungrouped_members: self.live_ungrouped_members,
+            usage_refused: self.usage_refused,
+            usage_gone: self.usage_gone,
+        }
     }
 }
 
@@ -236,13 +248,7 @@ impl PointApps for AppsSecond {
     }
 
     fn completeness(&self) -> Completeness {
-        Completeness {
-            membership_complete: self.membership_complete,
-            ungrouped_members: self.ungrouped_members,
-            live_ungrouped_members: self.live_ungrouped_members,
-            usage_refused: self.usage_refused,
-            usage_gone: self.usage_gone,
-        }
+        Self::completeness(self)
     }
 }
 

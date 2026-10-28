@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use collector::machine::Pressure;
 use num_traits::ToPrimitive;
-use viewer::store::{MachineSecond, View};
+use viewer::store::{AppsSecond, AppsStretch, MachineSecond, View};
 
 use super::{
     Coordinates, Domain, FAN_MEAN_KEY, NANOSECONDS_PER_SECOND, OBSERVATIONS_MAX,
@@ -97,14 +97,23 @@ fn overview_panels_domain(newest: &MachineSecond) -> Result<Domain, String> {
 /// the full-detail ones, the first of each stretch the older tail keeps, and every full-detail
 /// second after them.
 fn overview_panels_points<'a>(view: &'a View, domain: &Domain) -> Vec<&'a MachineSecond> {
+    overview_panels_indices(view, domain)
+        .into_iter()
+        .map(|index| overview_panels_second(view, index))
+        .collect()
+}
+
+/// Where each second `overview_panels_points` gives sits among the seconds of `view`'s older
+/// tail and then its live span.
+fn overview_panels_indices(view: &View, domain: &Domain) -> Vec<usize> {
     // The older tail ends where the stretch that holds the first full-detail second starts, so
     // that stretch draws only its full-detail seconds. The divisions floor, as the store's and
     // the older tail's stretches do.
     let tail_stretch_end = domain.recent_first / domain.stride;
 
-    let mut points = Vec::with_capacity(view.earlier.len() + view.seconds.len());
+    let mut indices = Vec::with_capacity(view.earlier.len() + view.seconds.len());
     let mut stretch = None;
-    for second in view.earlier.iter().chain(&view.seconds) {
+    for (index, second) in view.earlier.iter().chain(&view.seconds).enumerate() {
         let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
         if !(domain.first..domain.end).contains(&wall_second) {
             continue;
@@ -120,11 +129,114 @@ fn overview_panels_points<'a>(view: &'a View, domain: &Domain) -> Vec<&'a Machin
             stretch = Some(current);
         }
 
-        points.push(second.as_ref());
+        indices.push(index);
     }
 
-    assert!(points.len() <= OBSERVATIONS_MAX);
-    points
+    assert!(indices.len() <= OBSERVATIONS_MAX);
+    indices
+}
+
+/// The second at `index` among the seconds of `view`'s older tail and then its live span.
+fn overview_panels_second(view: &View, index: usize) -> &MachineSecond {
+    match index.checked_sub(view.earlier.len()) {
+        Some(live) => &view.seconds[live],
+        None => &view.earlier[index],
+    }
+}
+
+/// What one point of Overview's App charts of a View shows: the Apps of a second of its live
+/// span, or those of a stretch of its older part.
+#[derive(Clone, Copy)]
+pub enum OverviewApps<'view> {
+    Second(&'view AppsSecond),
+    Stretch(&'view AppsStretch),
+}
+
+/// One point of Overview's App charts of a View, drawn where its machine charts draw one.
+pub struct OverviewAppPoint<'view> {
+    /// The machine readings the machine charts draw at the point.
+    pub machine: &'view MachineSecond,
+    /// Where the point sits across the span the charts draw, from 0 to 1.
+    pub position: f32,
+    /// The segment of the machine charts' point, numbered from zero in the order the segments
+    /// first appear.
+    pub segment: u64,
+    /// The Apps the point shows, or none where the View holds none for it.
+    pub apps: Option<OverviewApps<'view>>,
+}
+
+/// The points of Overview's App charts of a View, and the span they are drawn across.
+pub struct OverviewAppPoints<'view> {
+    pub window: crate::chart_axes::TimeWindow,
+    pub points: Vec<OverviewAppPoint<'view>>,
+}
+
+/// The points of Overview's App charts of `view`, following its newest second: one wherever its
+/// machine charts draw a point, so an App chart spans the loaded hour as they do. None where the
+/// View holds no second.
+pub fn overview_app_points(view: &View) -> Result<Option<OverviewAppPoints<'_>>, String> {
+    let Some(newest) = view.seconds.last() else {
+        return Ok(None);
+    };
+
+    let domain = overview_panels_domain(newest)?;
+    let indices = overview_panels_indices(view, &domain);
+    let seconds: Vec<&MachineSecond> = indices
+        .iter()
+        .map(|index| overview_panels_second(view, *index))
+        .collect();
+    let coordinates = overview_panels_coordinates(&seconds, &domain)?;
+    let apps = overview_app_points_apps(view, &seconds, &indices, &domain);
+
+    assert_eq!(apps.len(), seconds.len());
+    assert_eq!(coordinates.positions.len(), seconds.len());
+    let points = seconds
+        .into_iter()
+        .zip(coordinates.positions)
+        .zip(coordinates.segments)
+        .zip(apps)
+        .map(|(((machine, position), segment), apps)| OverviewAppPoint {
+            machine,
+            position,
+            segment,
+            apps,
+        })
+        .collect();
+    Ok(Some(OverviewAppPoints {
+        window: coordinates.window,
+        points,
+    }))
+}
+
+/// The Apps each of `seconds`, which `indices` place among the seconds of `view`'s older tail
+/// and then its live span, shows on the App charts of `domain`: a full-detail second its own, an
+/// older second those of its stretch, and none where the View holds none for it.
+fn overview_app_points_apps<'view>(
+    view: &'view View,
+    seconds: &[&MachineSecond],
+    indices: &[usize],
+    domain: &Domain,
+) -> Vec<Option<OverviewApps<'view>>> {
+    assert_eq!(seconds.len(), indices.len());
+    assert_eq!(domain.stride, viewer::EARLIER_STRIDE_SECONDS);
+
+    // The store's stretches run oldest first, as the points do.
+    let mut stretches = view.stretches.iter().peekable();
+    let mut apps = Vec::with_capacity(seconds.len());
+    for (second, index) in seconds.iter().zip(indices) {
+        let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
+        if wall_second < domain.recent_first {
+            // The division floors, as the store's stretches do.
+            let stretch = wall_second / domain.stride;
+            while stretches.next_if(|held| held.stretch < stretch).is_some() {}
+            let held = stretches.next_if(|held| held.stretch == stretch);
+            apps.push(held.map(|held| OverviewApps::Stretch(held)));
+        } else {
+            let live = index.checked_sub(view.earlier.len());
+            apps.push(live.map(|live| OverviewApps::Second(&view.apps[live])));
+        }
+    }
+    apps
 }
 
 /// Where each of `points` sits in `domain`, and its segment, numbered from zero in the order

@@ -110,6 +110,7 @@ impl Point {
         let point = Self {
             observation: Observation::decode(&value["observation"])?,
             segment: integer(&value["segment"])?,
+            stretch: false,
             elapsed_ns: optional_integer(&value["elapsed_ns"])?,
             source_available: boolean(&value["source_available"])?,
             membership_complete: optional_boolean(&value["membership_complete"])?,

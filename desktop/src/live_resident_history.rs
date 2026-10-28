@@ -43,6 +43,9 @@ pub struct History {
 struct Point {
     observation: Observation,
     segment: u64,
+    /// Whether the point stands for a stretch of the older part of the chart rather than for
+    /// one second.
+    stretch: bool,
     source_available: bool,
     membership_complete: Option<bool>,
     ungrouped_members: Option<u32>,
@@ -339,6 +342,7 @@ impl Point {
         let point = Self {
             observation: Observation::decode(&value["observation"])?,
             segment: integer(&value["segment"])?,
+            stretch: false,
             source_available: boolean(&value["source_available"])?,
             membership_complete: optional_boolean(&value["membership_complete"])?,
             ungrouped_members: optional_count(&value["ungrouped_members"])?,

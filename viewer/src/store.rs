@@ -52,7 +52,8 @@ use std::time::Duration;
 pub use crate::byte_budget::{ByteBudget, ByteReservation};
 pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, DetachedAppsSecond, Missing};
 pub use attribution::{
-    Attribution, AttributionReading, COHORT_MAX, OtherReading, Resident, ResidentOther, Totals,
+    Attribution, AttributionReading, COHORT_MAX, Completeness, OtherReading, Resident,
+    ResidentOther, Totals,
 };
 pub use buffers::{Buffers, Mailbox, Span};
 pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
