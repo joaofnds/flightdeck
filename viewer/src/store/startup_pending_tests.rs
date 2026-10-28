@@ -141,6 +141,77 @@ fn pending_older_candidate_resolves_outside_without_overwriting_the_native_sampl
     assert_eq!(budget.used(), 0);
 }
 
+#[test]
+fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
+    // Goal: a queued query cannot bypass witness validation while history is capacity-blocked.
+    // Method: receive a real Primary control, change its pending seal, then query the same caller.
+    let mut run = PendingStage::new(recent_fixture(), 6, RECENT_TICKS);
+    let budget = Arc::clone(&run.budget);
+    let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
+    let scope = trace.enter();
+    run.reach_phase(Phase::SelectedBoundary);
+    let pinned = Arc::clone(run.stage.held.apps.newest_held().unwrap());
+    run.reach_primary();
+    run.reach_phase(Phase::History);
+    assert!(!run.turn());
+    run.assert_pending_recent(1);
+    let handle = run
+        .shared
+        .queries
+        .as_ref()
+        .unwrap()
+        .handle(std::thread::current());
+    let selected = run.observation(6);
+
+    let retained = run.primary_reply(&handle);
+
+    assert_primary_query(&retained, &selected);
+    let accepted = run.stage.accepted();
+    let root = run.fixture.root.clone();
+    change_loss_word(&root, &run.stage.startup.minutes[0].found.marker);
+    let token = run.submit_primary_query(&handle);
+    assert_eq!(
+        token,
+        crate::store::QueryToken {
+            epoch: 0,
+            sequence: 2
+        }
+    );
+
+    let result = run.try_turn();
+
+    assert!(
+        matches!(result, Err(Failure::Read(Refused::Commitment(error)))
+        if error.kind() == std::io::ErrorKind::InvalidData)
+    );
+    assert!(handle.take().is_none());
+    assert!(handle.pending());
+    assert!(run.shared.queries.as_ref().unwrap().requested());
+    assert!(run.shared.mailbox.take().is_none());
+    assert_eq!(run.stage.accepted(), accepted);
+    run.assert_pending_recent(1);
+    run.assert_progress(&ReplayPosition {
+        minute: 0,
+        next_endpoint: 0,
+        previous: None,
+    });
+    assert_eq!(run.stage.held.newest.unwrap().publication, 6);
+    assert_eq!(
+        publication_work(&trace, &run.observation(1), Kind::AppDerivation),
+        1
+    );
+    assert_primary_query(&retained, &selected);
+    handle.cancel().unwrap();
+    assert!(!handle.pending());
+    assert!(!run.shared.queries.as_ref().unwrap().requested());
+    drop((handle, pinned, run, scope, trace));
+    assert!(!root.try_exists().unwrap());
+    assert!(budget.used() > 0);
+    assert_primary_query(&retained, &selected);
+    drop(retained);
+    assert_eq!(budget.used(), 0);
+}
+
 struct PendingStage {
     stage: GuardStage,
     shared: crate::store::Shared,
@@ -210,6 +281,10 @@ impl PendingStage {
     }
 
     fn turn(&mut self) -> bool {
+        self.try_turn().unwrap()
+    }
+
+    fn try_turn(&mut self) -> Result<bool, Failure> {
         // The existing caller's park consumes this token; no timing threshold or gate is added.
         std::thread::current().unpark();
         crate::store::startup_staged_turn(
@@ -224,7 +299,39 @@ impl PendingStage {
             &mut self.stage.startup,
             &mut self.blocked,
         )
-        .unwrap()
+    }
+
+    fn submit_primary_query(&self, handle: &crate::store::QueryHandle) -> crate::store::QueryToken {
+        let token = handle
+            .submit(crate::store::QueryRequest {
+                epoch: 0,
+                source: Some(crate::store::SourceGeneration {
+                    recording: self.fixture.writer.identity().unwrap().recording,
+                    generation: 1,
+                }),
+                selection: crate::store::QuerySelection::FollowLatest,
+            })
+            .unwrap();
+        assert!(self.shared.queries.as_ref().unwrap().requested());
+        assert!(handle.pending());
+        assert!(handle.take().is_none());
+        token
+    }
+
+    fn primary_reply(
+        &mut self,
+        handle: &crate::store::QueryHandle,
+    ) -> Arc<crate::store::QueryContext> {
+        let token = self.submit_primary_query(handle);
+        assert!(!self.turn());
+        let reply = handle.take().unwrap();
+        assert_eq!(reply.token, token);
+        assert!(!handle.pending());
+        assert!(!self.shared.queries.as_ref().unwrap().requested());
+        let crate::store::QueryOutcome::Ready(context) = reply.outcome else {
+            panic!("unchanged witness did not serve a real Ready control");
+        };
+        context
     }
 
     fn reach_phase(&mut self, phase: Phase) {
@@ -519,6 +626,34 @@ impl PendingStage {
             assert_eq!(sample.machine, **machine);
         }
     }
+}
+
+fn assert_primary_query(context: &crate::store::QueryContext, selected: &Observation) {
+    assert_eq!(context.readiness(), crate::store::QueryReadiness::Primary);
+    assert_eq!(
+        context.source,
+        crate::store::SourceGeneration {
+            recording: collector::ring::Identity(selected.recording),
+            generation: 1,
+        }
+    );
+    assert_eq!(context.selected().observation, *selected);
+    assert_eq!(context.context_last_second(), 1063);
+    assert_eq!(context.seconds().len(), 6);
+    assert!(
+        context
+            .seconds()
+            .iter()
+            .all(crate::store::QuerySecond::detached)
+    );
+    assert_eq!(context.selected().machine().cpu_percent, Some(50.0));
+    let selection = context
+        .selection(&Arc::new(crate::Cancellation::default()), 0)
+        .unwrap();
+    assert_eq!(selection["selected"]["publication"], 6);
+    assert_eq!(selection["selected"]["run_tick"], 121);
+    assert_eq!(selection["selected"]["wall_ns"], 1_063_000_000_000_u64);
+    assert_eq!(selection["summary"]["cpu_percent"], 50.0);
 }
 
 fn recent_fixture() -> Fixture {
