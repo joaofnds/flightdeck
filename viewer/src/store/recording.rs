@@ -726,7 +726,7 @@ struct Fold<'since> {
 /// The seconds of one stretch of one run that a loader adds up.
 struct Part {
     /// Where the oldest of them stands among the batch's seconds.
-    first: usize,
+    first_index: usize,
     run: RunIdentity,
     /// The publication of the newest of them.
     publication: u64,
@@ -759,7 +759,7 @@ impl<'since> Fold<'since> {
         let Some(part) = self.part.take() else {
             unreachable!("a stretch adds up at least one second");
         };
-        let apps = &mut seconds[part.first].apps;
+        let apps = &mut seconds[part.first_index].apps;
         assert!(matches!(apps, LoadedApps::Missing(Missing::Unread)));
 
         *apps = LoadedApps::Folded(Folded {
@@ -870,7 +870,7 @@ fn load_minute_fold(
         Some(part) => part.publication = second.publication,
         None => {
             fold.part = Some(Part {
-                first: seconds.len(),
+                first_index: seconds.len(),
                 run: *minute.run,
                 publication: second.publication,
             });
