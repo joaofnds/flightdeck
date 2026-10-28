@@ -17,17 +17,18 @@ use crate::live_app_response::{Measure, Metric, Observation, Rankable, RankedApp
 /// says so.
 const STRETCH_APPS_MAX: usize = APPS_PER_SECOND_MAX;
 
-/// The resources an App uses at a rate, in the order a stretch adds them up.
-const RATES: [Metric; 4] = [Metric::Cpu, Metric::Power, Metric::Disk, Metric::Gpu];
+/// The resources an App uses at a rate that Overview draws an App chart of, in the order a
+/// stretch adds them up.
+const RATES: [Metric; 3] = [Metric::Cpu, Metric::Power, Metric::Disk];
 
 const _: () = {
-    assert!(size_of::<StretchRow>() <= 184);
+    assert!(size_of::<StretchRow>() <= 152);
 };
 
-/// Where `metric`, a rate, stands among `RATES`.
+/// Where `metric`, a rate a stretch adds up, stands among `RATES`.
 fn rate_place(metric: Metric) -> usize {
     let Some(place) = RATES.iter().position(|rate| *rate == metric) else {
-        unreachable!("resident memory is not a rate");
+        unreachable!("a stretch adds up no GPU time, and resident memory is not a rate");
     };
     place
 }
@@ -509,7 +510,7 @@ impl StretchRow {
         self.membership_complete &= app.membership_complete;
     }
 
-    /// What the App used of `metric`, a rate, over the stretch's seconds that measured it, and
+    /// What the App used of `metric`, a rate of `RATES`, over the stretch's seconds that measured it, and
     /// the intervals they measured it over, added up. An App whose sums overflowed counts none
     /// of the stretch, where its seconds one by one would count those that did not.
     pub(super) fn rate_measured(&self, metric: Metric) -> Option<(u64, u64)> {
@@ -649,8 +650,9 @@ impl PointRow for StretchRow {
 }
 
 impl Rankable for StretchRow {
-    /// What the App used of `metric` over the stretch, which a chart takes over the stretch's
-    /// interval, and its resident memory over the stretch's seconds.
+    /// What the App used of `metric`, a resource Overview draws an App chart of, over the
+    /// stretch, which a chart takes over the stretch's interval, and its resident memory over the
+    /// stretch's seconds.
     fn measure(&self, metric: Metric) -> Measure {
         if metric == Metric::Resident {
             return self.resident.measure(self.resident_bytes);
