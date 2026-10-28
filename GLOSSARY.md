@@ -99,4 +99,5 @@ Buckets start at multiples of their length, so a point keeps its place as the ch
 Readings further apart, such as the collector's ten-second reports or the older readings of a
 chart that reaches back more than sixteen minutes, which stand ten seconds apart, make buckets
 at least that long and points that cover at least four times that, so forty seconds for readings
-ten seconds apart.
+ten seconds apart. Each older reading of a chart by App is the App's mean over the seconds of its
+ten that the recording holds, while a chart of the whole Mac keeps the first of those seconds.
