@@ -32,7 +32,7 @@ use collector::ring::{Identity, RunIdentity};
 use persistence::layout::{self, Kind, WINDOWS_PER_DAY, WindowKey};
 
 use super::apps::{Kept, TickApps};
-use super::stretch::Folding;
+use super::stretch::{Folded, Folding};
 use super::{AppsSecond, AppsStretch, Failure, MachineSecond, Missing, Reading, readings};
 use crate::recording::{
     AppMinute, AppParts, AppRow, MachineMinute, Refused, SampleRow, SealedMinute, read_apps,
@@ -513,11 +513,11 @@ enum LoadedApps {
     /// The tick's Apps.
     Second(AppsSecond),
     /// Why the loader holds none of them at the tick. It holds those of a tick it adds up into
-    /// its stretch at the newest second of the stretch it adds up, and says here they are unread.
+    /// its stretch at the oldest second of the stretch it adds up, and says here they are unread.
     Missing(Missing),
     /// What the loader added up of the Apps of the tick's stretch, from the tick and the seconds
-    /// before it since it last handed over a stretch.
-    Folded(AppsStretch),
+    /// of the stretch and run it added up after it.
+    Folded(Folded),
 }
 
 impl LoadedApps {
@@ -711,16 +711,25 @@ fn load_batch(
 /// at each second, the minutes whose ticks do not reach `apps_from_ns`.
 struct Fold<'since> {
     apps_from_ns: u64,
-    /// The newest second the store holds already. The loader adds up none of the seconds the
-    /// store holds.
+    /// The newest second the store holds already. The loader adds up none of the seconds whose
+    /// Apps the store holds.
     held: Option<&'since super::Newest>,
     stretches: Folding,
     /// The Apps of the second being added up and those of the second added up before it, whose
     /// names it shares.
     current: AppsSecond,
     previous: AppsSecond,
-    /// Where the newest second added up stands among the batch's seconds.
-    newest: Option<usize>,
+    /// The seconds of the stretch it is adding up, where it added up any.
+    part: Option<Part>,
+}
+
+/// The seconds of one stretch of one run that a loader adds up.
+struct Part {
+    /// Where the oldest of them stands among the batch's seconds.
+    first: usize,
+    run: RunIdentity,
+    /// The publication of the newest of them.
+    publication: u64,
 }
 
 impl<'since> Fold<'since> {
@@ -731,28 +740,32 @@ impl<'since> Fold<'since> {
             stretches: Folding::new(),
             current: AppsSecond::with_room(),
             previous: AppsSecond::with_room(),
-            newest: None,
+            part: None,
         }
     }
 
-    /// Hands the stretch it is adding up to the newest second of `seconds` it added up, where it
-    /// added any.
+    /// Hands the stretch it is adding up to the oldest second of `seconds` it added up into it,
+    /// where it added any.
     fn finish(&mut self, seconds: &mut [Loaded]) {
         if let Some(folded) = self.stretches.finish() {
             self.hand_over(folded, seconds);
         }
     }
 
-    /// Hands `folded`, the stretch it added up, to the newest second of `seconds` it added up,
-    /// which holds none of its Apps until then.
+    /// Hands `folded`, the stretch it added up, to the oldest second of `seconds` it added up
+    /// into it, which holds none of its Apps until then. A load that stops after that second
+    /// leaves the store holding the Apps of every second of the stretch it added up.
     fn hand_over(&mut self, folded: AppsStretch, seconds: &mut [Loaded]) {
-        let Some(newest) = self.newest.take() else {
+        let Some(part) = self.part.take() else {
             unreachable!("a stretch adds up at least one second");
         };
-        let apps = &mut seconds[newest].apps;
+        let apps = &mut seconds[part.first].apps;
         assert!(matches!(apps, LoadedApps::Missing(Missing::Unread)));
 
-        *apps = LoadedApps::Folded(folded);
+        *apps = LoadedApps::Folded(Folded {
+            apps: folded,
+            publication: part.publication,
+        });
     }
 }
 
@@ -802,10 +815,11 @@ fn load_minute(
 }
 
 /// Adds the Apps `minute` keeps of `second` to the stretch `fold` adds up, where it keeps them
-/// and the store does not hold the second already, and hands the stretch it added up before to
-/// the newest of `seconds` it added up, where `second` belongs to another. `kept` is where the
-/// walk through the minute's Apps stands. Returns what the loader holds of the second's Apps at
-/// the second, which `fold` makes the stretch it hands over at the newest second it adds up.
+/// and the store does not hold them already, and hands the stretch it added up before to the
+/// oldest of `seconds` it added up into it, where `second` belongs to another stretch or run.
+/// `kept` is where the walk through the minute's Apps stands. Returns what the loader holds of
+/// the second's Apps at the second, which `fold` makes the stretch it hands over at the oldest
+/// second it adds up.
 fn load_minute_fold(
     minute: &Decoded<'_>,
     second: &MachineSecond,
@@ -813,7 +827,10 @@ fn load_minute_fold(
     fold: &mut Fold<'_>,
     seconds: &mut [Loaded],
 ) -> LoadedApps {
-    if fold.held.is_some_and(|held| held.holds(minute.run, second)) {
+    if fold
+        .held
+        .is_some_and(|held| held.holds_apps(minute.run, second))
+    {
         return LoadedApps::Missing(Missing::Unread);
     }
     let apps = match &minute.apps {
@@ -836,11 +853,29 @@ fn load_minute_fold(
         return LoadedApps::Missing(missing.clone());
     }
 
+    // A stretch the loader hands over holds one run's seconds, whose publications say how far
+    // the store holds their Apps.
+    if fold
+        .part
+        .as_ref()
+        .is_some_and(|part| part.run != *minute.run)
+    {
+        fold.finish(seconds);
+    }
     if let Some(folded) = fold.stretches.add(super::stretch(second), &fold.current) {
         fold.hand_over(folded, seconds);
     }
     mem::swap(&mut fold.current, &mut fold.previous);
-    fold.newest = Some(seconds.len());
+    match &mut fold.part {
+        Some(part) => part.publication = second.publication,
+        None => {
+            fold.part = Some(Part {
+                first: seconds.len(),
+                run: *minute.run,
+                publication: second.publication,
+            });
+        }
+    }
     LoadedApps::Missing(Missing::Unread)
 }
 

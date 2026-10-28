@@ -1701,6 +1701,7 @@ fn catch_up_keeps_only_unseen_minutes_and_their_predecessor_for_decoding() {
         run: fixture.writer.identity().unwrap(),
         publication: 3,
         segment: 0,
+        apps_publication: 3,
     };
     let mut found = Vec::new();
 
@@ -1719,6 +1720,7 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
         run: fixture.writer.identity().unwrap(),
         publication: 3,
         segment: 0,
+        apps_publication: 3,
     };
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();

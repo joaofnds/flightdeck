@@ -43,9 +43,8 @@ impl Fixture {
 
     pub fn new_mode(identity: bool, process_capacity: u64, recording: Option<&Self>) -> Self {
         if let Some(recording) = recording {
-            assert!(!identity);
             assert_eq!(process_capacity, 2);
-            return recording.new_mode_legacy();
+            return recording.new_mode_next_run(identity);
         }
 
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -115,15 +114,36 @@ impl Fixture {
         .unwrap();
     }
 
-    fn new_mode_legacy(&self) -> Self {
+    /// A fixture that records the run after `self`'s into the same recording, which keeps each
+    /// process's identity where `identity` says so.
+    fn new_mode_next_run(&self, identity: bool) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-        let place = Place {
-            lock_path: self.root.join("legacy.lock"),
-            name_prefix: format!("/fdvl{}x{serial}", std::process::id()),
+        let mut run_identity = self.writer.identity().unwrap();
+        run_identity.run.0[0] ^= 1;
+        let writer = if identity {
+            assert!(self.identity);
+            let place = Place {
+                lock_path: self.root.join("next.lock"),
+                name_prefix: format!("/fdvn{}x{serial}", std::process::id()),
+            };
+            let capacity = DictionaryCapacity {
+                entries: 4,
+                arena_bytes: 32_768,
+            };
+            Writer::create_with_identity(&place, SHAPE, capacity, &run_identity, 0).unwrap()
+        } else {
+            let place = Place {
+                lock_path: self.root.join("legacy.lock"),
+                name_prefix: format!("/fdvl{}x{serial}", std::process::id()),
+            };
+            Writer::create_recording(&place, SHAPE, &run_identity, 0).unwrap()
         };
-        let mut identity = self.writer.identity().unwrap();
-        identity.run.0[0] ^= 1;
-        let writer = Writer::create_recording(&place, SHAPE, &identity, 0).unwrap();
+
+        self.new_mode_registered(writer, identity)
+    }
+
+    /// A fixture that records through `writer` the run after `self`'s, registered after it.
+    fn new_mode_registered(&self, writer: Writer, identity: bool) -> Self {
         Registry {
             runs: vec![
                 RegisteredRun {
@@ -132,7 +152,7 @@ impl Fixture {
                     collector_pid: 0,
                 },
                 RegisteredRun {
-                    identity,
+                    identity: writer.identity().unwrap(),
                     ring_name: writer.name().to_owned(),
                     collector_pid: 0,
                 },
@@ -149,7 +169,7 @@ impl Fixture {
             continuous_step_ns: 0,
             awake_step_ns: 0,
             usage_override: None,
-            identity: false,
+            identity,
             process_capacity: 2,
             owns_root: false,
         };

@@ -158,6 +158,7 @@ fn an_unread_checkpoint_load_does_not_certify_skipped_old_windows() {
         run: fixture.writer.identity().unwrap(),
         publication: 2,
         segment: 0,
+        apps_publication: 2,
     };
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -502,6 +503,7 @@ fn payload_discovery_refuses_an_unknown_checkpoint_run() {
         run,
         publication: 1,
         segment: 0,
+        apps_publication: 1,
     };
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();

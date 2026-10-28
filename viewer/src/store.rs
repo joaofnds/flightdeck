@@ -444,6 +444,9 @@ struct Newest {
     run: RunIdentity,
     publication: u64,
     segment: u64,
+    /// The publication of the newest second of `run` whose Apps the stretches hold, which a
+    /// loader hands over with an older second, so it is never older than `publication`.
+    apps_publication: u64,
 }
 
 impl Newest {
@@ -455,6 +458,16 @@ impl Newest {
         }
 
         second.publication <= self.publication
+    }
+
+    /// Whether a store whose newest second is `self` holds the Apps of `second` of run `run` in
+    /// its stretches already, as a second of the same run no newer than `apps_publication`.
+    fn holds_apps(&self, run: &RunIdentity, second: &MachineSecond) -> bool {
+        if self.run != *run {
+            return false;
+        }
+
+        second.publication <= self.apps_publication
     }
 }
 
@@ -580,6 +593,7 @@ impl Held {
             return false;
         };
         let segment = segment(self.newest.as_ref(), run, second);
+        let apps_publication = apps_publication(self.newest.as_ref(), run, second, &apps);
         if let Some(kept) = kept {
             if let Some(sampled) = &mut self.sampled {
                 let sample = prepared_sample.unwrap_or_else(|| unreachable!("admitted sample"));
@@ -605,6 +619,7 @@ impl Held {
             run: *run,
             publication: second.publication,
             segment,
+            apps_publication,
         });
         self.unpublished = true;
         true
@@ -682,7 +697,7 @@ impl Held {
         });
         assert!(pushed);
         let folded = match &apps {
-            TickApps::Folded(folded) => Some(*folded),
+            TickApps::Folded(folded) => Some(&folded.apps),
             _ => None,
         };
         let previous = self.apps.newest_held().map(Arc::clone);
@@ -832,6 +847,29 @@ fn take_consecutive(previous: Option<&AppsSecond>, second: &AppsSecond) -> bool 
     };
 
     consecutive(&Interval { before, after })
+}
+
+/// The publication of the newest second of run `run` whose Apps the stretches hold once the
+/// store takes `second` of that run in after `newest` with `apps`, what it found of the second's
+/// Apps.
+fn apps_publication(
+    newest: Option<&Newest>,
+    run: &RunIdentity,
+    second: &MachineSecond,
+    apps: &TickApps<'_>,
+) -> u64 {
+    let held = match newest {
+        Some(newest) if newest.run == *run => newest.apps_publication.max(second.publication),
+        _ => second.publication,
+    };
+
+    match apps {
+        TickApps::Folded(folded) => {
+            assert!(folded.publication >= second.publication);
+            held.max(folded.publication)
+        }
+        _ => held,
+    }
 }
 
 /// The segment of `second` of run `run`, taken in after `newest`.

@@ -137,6 +137,15 @@ impl Folding {
     }
 }
 
+/// What a loader added up of the Apps of seconds of one stretch of one run, which it hands to the
+/// oldest of those seconds, so the store holds them once it takes that second in.
+#[derive(Debug)]
+pub(super) struct Folded {
+    pub(super) apps: AppsStretch,
+    /// The publication of the newest of those seconds.
+    pub(super) publication: u64,
+}
+
 /// Each App's readings added up over the seconds of one stretch the store took in, and what the
 /// App rule found of those seconds as a whole.
 #[derive(Debug, Default)]

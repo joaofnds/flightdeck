@@ -2,6 +2,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::apps::TickApps;
+use super::stretch::StretchRow;
 use super::{
     APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Cohorts, Held, Leaders,
     MachineSecond, Mailbox, Missing, Readings, STRETCHES_MAX, View, WallSeconds, recording,
@@ -255,6 +256,39 @@ fn a_catch_up_adds_up_no_second_the_store_holds() {
 }
 
 #[test]
+fn a_load_stopped_at_any_second_then_caught_up_adds_up_each_stretch_whole() {
+    // Goal: a load the store stops partway, as when the window hides, leaves no stretch adding
+    // up fewer seconds once the store catches up. Method: seal a few ticks of run minutes 0, 1
+    // and 21, so the stretch of wall seconds 60 to 69 is older than the seconds whose Apps the
+    // store holds one by one and crosses minutes 0 and 1, which two loaders decode. Stop a load
+    // at each second of that stretch and the one after it, and catch up.
+    let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
+
+    assert_stopped_loads_catch_up(&fixture, 60..71);
+}
+
+#[test]
+fn a_load_stopped_inside_a_stretch_across_a_restart_then_caught_up_adds_up_the_stretch_whole() {
+    // Goal: a stopped load leaves no stretch counting a second twice or not at all where the
+    // collector restarted inside the stretch. Method: seal ticks of run minutes 0 to 2 of one run,
+    // the last at wall seconds 180 to 184, then ticks of the next run from wall second 185 on, so
+    // the stretch of wall seconds 180 to 189 is older than the seconds whose Apps the store holds
+    // one by one and holds both runs. Seven minutes put two on each loader, so one loader decodes
+    // both runs of that stretch. Stop a load at each second of that stretch and the one after it,
+    // and catch up.
+    let first = recording_of(&[(0, 0..5), (1, 55..60), (2, 55..60)]);
+    let mut next = Fixture::new_mode(true, 2, Some(&first));
+    next.start_at_run_tick(180);
+    seal_minutes(
+        &mut next,
+        180,
+        &[(3, 0..5), (4, 0..5), (5, 0..5), (23, 0..5)],
+    );
+
+    assert_stopped_loads_catch_up(&first, 180..191);
+}
+
+#[test]
 fn a_window_chooses_the_apps_its_seconds_choose_one_by_one() {
     // Goal: an App chart of the loaded hour draws on lines of their own the Apps that its
     // seconds, taken one by one, choose, each App's mean taken over the seconds that measured
@@ -443,6 +477,70 @@ fn load_into(held: &mut Held, fixture: &Fixture) {
     assert_eq!(failure, None);
 }
 
+/// Asserts that a store that loads `fixture`'s recording, stops before the second at each of
+/// `stop_seconds`, then catches up, as the store does once the window shows again, holds the
+/// stretches a store that loads the whole recording at once holds.
+fn assert_stopped_loads_catch_up(fixture: &Fixture, stop_seconds: Range<u64>) {
+    let whole = loaded(fixture);
+    let cohort = cohort_of(&whole);
+    assert!(!whole.stretches.is_empty());
+    for expected in &whole.stretches {
+        assert!(expected.holds_apps());
+    }
+
+    for stop_second in stop_seconds {
+        let mut held = Held::new();
+        let failure = recording::load(&fixture.root, |run, second, apps| {
+            if second.wall_ns < stop_second * 1_000_000_000 {
+                assert!(held.take(run, second, apps));
+            }
+        });
+        assert_eq!(failure, None);
+        catch_up(&mut held, fixture);
+        let view = published(&mut held);
+
+        assert_eq!(view.stretches.len(), whole.stretches.len());
+        for (shown, expected) in view.stretches.iter().zip(&whole.stretches) {
+            assert_eq!(shown.stretch, expected.stretch, "stopped at {stop_second}");
+            assert_eq!(
+                shown.elapsed_ns(),
+                expected.elapsed_ns(),
+                "stopped at {stop_second}"
+            );
+            assert_eq!(
+                resident_measured_of(shown),
+                resident_measured_of(expected),
+                "stopped at {stop_second}"
+            );
+            assert_eq!(
+                readings_of(shown, &cohort),
+                readings_of(expected, &cohort),
+                "stopped at {stop_second}"
+            );
+        }
+    }
+}
+
+/// Catches `held` up on `fixture`'s recording after its newest second, as the store does, which
+/// lets go of every second it holds where the load replaces them.
+fn catch_up(held: &mut Held, fixture: &Fixture) {
+    let since = held.newest;
+    let mut first = true;
+    let failure = recording::load_since(
+        &fixture.root,
+        since.as_ref(),
+        &mut recording::LoadBuffers::default(),
+        |continuity, run, second, apps| {
+            if first && continuity == recording::Continuity::Replace {
+                held.reset();
+            }
+            first = false;
+            assert!(held.take(run, second, apps));
+        },
+    );
+    assert_eq!(failure, None);
+}
+
 /// The Apps of the newest second `view` holds.
 fn cohort_of(view: &View) -> Vec<Arc<RankedApp>> {
     let newest = view.apps.last().unwrap();
@@ -472,6 +570,14 @@ fn readings_of(
     .collect();
 
     (rates, stretch.resident(cohort))
+}
+
+/// Each App's resident memory added up over the seconds of `stretch` that measured it, and how
+/// many they are, in key order.
+fn resident_measured_of(stretch: &AppsStretch) -> Vec<Option<(u64, u32)>> {
+    let rows = stretch.apps().unwrap();
+
+    rows.iter().map(StretchRow::resident_measured).collect()
 }
 
 /// What A, C, D and E use at `wall_second`, in key order: the CPU time each uses is also the
