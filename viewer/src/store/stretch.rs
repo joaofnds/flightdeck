@@ -180,7 +180,7 @@ pub(super) struct StretchRow {
     /// Whether the App rule found every member of the App at each second that holds it.
     membership_complete: bool,
     /// What the App used of each of `RATES`, in their order.
-    rates: [Amount; 4],
+    rates: [Amount; RATES.len()],
     /// The App's resident memory added up over the seconds that hold it.
     resident: Amount,
     /// The App's resident memory over the stretch's seconds that hold their Apps, once the
@@ -478,7 +478,7 @@ impl StretchRow {
         Self {
             name,
             membership_complete: true,
-            rates: [Amount::default(); 4],
+            rates: [Amount::default(); RATES.len()],
             resident: Amount::default(),
             resident_bytes: 0,
         }

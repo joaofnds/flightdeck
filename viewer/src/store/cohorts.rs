@@ -120,7 +120,7 @@ pub struct Leaders {
 struct Entry {
     name: Arc<RankedApp>,
     /// What the App used of each of `METRICS` over the seconds that measured it, in their order.
-    means: [Mean; 3],
+    means: [Mean; METRICS.len()],
     /// The App's resident memory added up over the seconds that measured it.
     resident: Gauge,
 }
@@ -389,7 +389,7 @@ fn choose_add_merged<R: PointRow + Rankable>(
             Some(entry) => entry,
             None => Entry {
                 name: row.ranked(),
-                means: [Mean::ZERO; 3],
+                means: [Mean::ZERO; METRICS.len()],
                 resident: Gauge::ZERO,
             },
         };
