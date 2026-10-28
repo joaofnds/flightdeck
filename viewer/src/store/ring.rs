@@ -65,6 +65,11 @@ enum Delta {
     Overrun,
 }
 
+enum EventCapture {
+    Ready,
+    TooMany,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Status {
     pub identity: RunIdentity,
@@ -681,7 +686,17 @@ impl Source {
             self.native_frame = OwnedFrame::adopt(&mut self.previous_frame, budget)?;
         }
         if !self.native_events_ready {
-            self.apps_capture_events().map_err(PrepareError::Source)?;
+            match self.capture_events().map_err(PrepareError::Source)? {
+                EventCapture::Ready => {}
+                EventCapture::TooMany => {
+                    self.events.clear();
+                    self.event_identities.clear();
+                    self.native_pending
+                        .as_mut()
+                        .unwrap_or_else(|| unreachable!("candidate"))
+                        .refuse_events();
+                }
+            }
             self.native_events_ready = true;
         }
         let prepared = self
@@ -833,11 +848,18 @@ impl Source {
     /// Reads the events of the tick just read into `events`, with their identities where the
     /// ring holds them. An event the ring no longer holds is left out.
     fn apps_capture_events(&mut self) -> persistence::Result<()> {
+        match self.capture_events()? {
+            EventCapture::Ready => Ok(()),
+            EventCapture::TooMany => Err(Error::Bound("store tick events")),
+        }
+    }
+
+    fn capture_events(&mut self) -> persistence::Result<EventCapture> {
         self.events.clear();
         self.event_identities.clear();
         let mut losses = self.losses;
         if self.tick.events.is_empty() {
-            return Ok(());
+            return Ok(EventCapture::Ready);
         }
 
         self.reader.seek_event(self.tick.events.start)?;
@@ -845,7 +867,7 @@ impl Source {
         for _ in 0..=EVENTS_PER_TICK_MAX {
             if self.reader.next_event() >= self.tick.events.end {
                 self.losses = losses;
-                return Ok(());
+                return Ok(EventCapture::Ready);
             }
 
             let mut identity = IdentityObservation::EMPTY;
@@ -858,7 +880,7 @@ impl Source {
                 FoundEvent::Nothing => {
                     losses.unknown = true;
                     self.losses = losses;
-                    return Ok(());
+                    return Ok(EventCapture::Ready);
                 }
                 FoundEvent::Missed { first, end } => {
                     losses.events += end.min(self.tick.events.end) - first;
@@ -869,13 +891,18 @@ impl Source {
                     event,
                 } => {
                     if self.events.len() == EVENTS_PER_TICK_MAX {
-                        return Err(Error::Bound("store tick events"));
+                        self.losses = losses;
+                        return Ok(EventCapture::TooMany);
                     }
                     self.events.push((number, tick, event));
                     if identities {
                         self.event_identities.push(identity);
                     }
                 }
+            }
+            if self.reader.next_event() >= self.tick.events.end {
+                self.losses = losses;
+                return Ok(EventCapture::Ready);
             }
         }
 

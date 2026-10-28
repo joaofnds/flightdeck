@@ -131,6 +131,13 @@ impl PartialEq for AppMetadata {
 }
 
 impl Prepared {
+    /// An acquisition bound is a candidate fact, unlike an interrupted or failed source read.
+    pub(super) fn refuse_events(&mut self) {
+        assert!(self.stage == Stage::Frame);
+        self.frame_refused = Some(Unavailable::Input("store tick events"));
+        self.stage = Stage::Sample;
+    }
+
     pub fn new(source: &Publication<'_>) -> Result<Self, PrepareError> {
         let identity = source
             .reader
