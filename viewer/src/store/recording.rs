@@ -560,12 +560,10 @@ fn load_batches(
     held: Option<&super::Newest>,
     buffers: Option<&mut LoadBuffers>,
 ) -> Vec<Batch> {
-    // Every minute decodes its Apps, whether by second or by stretch, at about the same cost.
-    let costs = vec![1; found.len()];
     thread::scope(|scope| {
         let mut loaders = Vec::with_capacity(LOADERS_MAX);
         let mut buffers = buffers.map(|buffers| buffers.apps.iter_mut());
-        for batch in load_batches_split(&costs) {
+        for batch in load_batches_split(found.len()) {
             let apps = buffers.as_mut().map(|buffers| {
                 buffers
                     .next()
@@ -606,27 +604,21 @@ fn load_batches(
     })
 }
 
-/// Splits minutes that cost `costs` to decode, oldest first, into at most `LOADERS_MAX` batches
-/// of neighbouring minutes, each closed once it reaches an even share of the cost, so no batch
-/// costs a minute's cost or more past its share.
-pub(super) fn load_batches_split(costs: &[usize]) -> Vec<Range<usize>> {
-    let share = costs.iter().sum::<usize>().div_ceil(LOADERS_MAX);
+/// Splits `minutes` minutes, oldest first, into at most `LOADERS_MAX` batches of neighbouring
+/// minutes, each an even share of them but the last, which holds those left. Every minute
+/// decodes its Apps, whether by second or by stretch, at about the same cost.
+pub(super) fn load_batches_split(minutes: usize) -> Vec<Range<usize>> {
+    let share = minutes.div_ceil(LOADERS_MAX);
     let mut batches = Vec::with_capacity(LOADERS_MAX);
-    let mut start = 0;
-    let mut cost = 0;
-    for (index, minute_cost) in costs.iter().enumerate() {
-        cost += minute_cost;
-        if cost >= share {
-            batches.push(start..index + 1);
-            start = index + 1;
-            cost = 0;
+    for batch in 0..LOADERS_MAX {
+        let start = batch * share;
+        if start >= minutes {
+            break;
         }
-    }
-    if start < costs.len() {
-        batches.push(start..costs.len());
+        batches.push(start..minutes.min(start + share));
     }
 
-    assert!(batches.len() <= LOADERS_MAX);
+    assert_eq!(batches.last().map_or(0, |batch| batch.end), minutes);
     batches
 }
 
