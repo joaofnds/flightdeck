@@ -24,6 +24,14 @@ const _: () = {
     assert!(size_of::<StretchRow>() <= 184);
 };
 
+/// Where `metric`, a rate, stands among `RATES`.
+fn rate_place(metric: Metric) -> usize {
+    let Some(place) = RATES.iter().position(|rate| *rate == metric) else {
+        unreachable!("resident memory is not a rate");
+    };
+    place
+}
+
 /// The stretches of the seconds the store took in: the closed ones, oldest first, and the open
 /// one, that of the newest second, which later seconds of the same stretch add to.
 pub(super) struct Stretches {
@@ -504,11 +512,7 @@ impl StretchRow {
     /// the intervals they measured it over, added up. An App whose sums overflowed counts none
     /// of the stretch, where its seconds one by one would count those that did not.
     pub(super) fn rate_measured(&self, metric: Metric) -> Option<(u64, u64)> {
-        let Some(place) = RATES.iter().position(|rate| *rate == metric) else {
-            unreachable!("resident memory is not a rate");
-        };
-
-        let rate = &self.rates[place];
+        let rate = &self.rates[rate_place(metric)];
         let known = rate.measured()?;
         assert!(rate.measured_ns > 0);
         Some((known, rate.measured_ns))
@@ -650,11 +654,7 @@ impl Rankable for StretchRow {
         if metric == Metric::Resident {
             return self.resident.measure(self.resident_bytes);
         }
-        let Some(place) = RATES.iter().position(|rate| *rate == metric) else {
-            unreachable!("every resource but resident memory is a rate");
-        };
-
-        let rate = &self.rates[place];
+        let rate = &self.rates[rate_place(metric)];
         rate.measure(rate.known)
     }
 
