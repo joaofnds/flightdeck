@@ -165,6 +165,19 @@ pub struct OverviewAppPoint<'view> {
     pub apps: Option<OverviewApps<'view>>,
 }
 
+impl OverviewAppPoint<'_> {
+    /// Whether the point shows less than the whole of what its Apps used or held, because the
+    /// recording kept none of them there.
+    #[must_use]
+    pub fn retention_limited(&self) -> bool {
+        match self.apps {
+            Some(OverviewApps::Second(apps)) => apps.missing.is_some(),
+            Some(OverviewApps::Stretch(stretch)) => !stretch.holds_apps(),
+            None => true,
+        }
+    }
+}
+
 /// The points of Overview's App charts of a View, and the span they are drawn across.
 pub struct OverviewAppPoints<'view> {
     pub window: crate::chart_axes::TimeWindow,

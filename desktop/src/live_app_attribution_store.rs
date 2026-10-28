@@ -47,7 +47,7 @@ impl History {
             positions: Vec::with_capacity(count),
             window: drawn.window,
             selected_index: 0,
-            retention_limited: drawn.points.iter().any(from_view_retention_limited),
+            retention_limited: drawn.points.iter().any(OverviewAppPoint::retention_limited),
             view_cohort: Some(cohort.to_vec()),
         };
         let kept = from_view_kept(older, metric, cohort);
@@ -58,16 +58,6 @@ impl History {
         history.selected_index = selected_index;
 
         Ok(history)
-    }
-}
-
-/// Whether `point` shows less than the whole of what its Apps used, because the recording kept
-/// none of them there.
-fn from_view_retention_limited(point: &OverviewAppPoint) -> bool {
-    match point.apps {
-        Some(OverviewApps::Second(apps)) => apps.missing.is_some(),
-        Some(OverviewApps::Stretch(stretch)) => !stretch.holds_apps(),
-        None => true,
     }
 }
 
