@@ -7,7 +7,7 @@ use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
 use persistence::{Error, Manifest};
 
-use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_unread};
+use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_predecessor};
 use crate::cancellation::Operation;
 use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 use crate::store::Failure;
@@ -51,7 +51,9 @@ pub(super) fn find(
     found.reverse();
     if window.unread {
         if let Some(since) = window.since {
-            find_unread(found, since);
+            if let Some(predecessor) = find_predecessor(found, since) {
+                found.truncate(predecessor + 1);
+            }
         }
     }
     metadata(recording, &runs, &catalog, first_ns)

@@ -188,12 +188,12 @@ pub(super) fn load_payload_since(
     )
 }
 
-pub(super) fn load_payload_window(
+/// Decodes the loaded hour's sealed minutes again, checking that `since` is of this recording.
+pub(super) fn load_payload_hour(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
     since: Option<&super::Newest>,
-    seconds: u64,
     take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     load_payload_window_using(
@@ -203,7 +203,7 @@ pub(super) fn load_payload_window(
         &persistence::engine::AdmittedTable::from_file_budgeted,
         &LoadWindow {
             since,
-            seconds,
+            seconds: LOADED_SECONDS,
             unread: false,
         },
         take,
@@ -388,31 +388,38 @@ impl Found {
 /// hour than the recording sealed, where it does.
 pub(super) fn load(
     root: &Path,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
-    load_since(root, None, take)
+    load_window_inner(
+        root,
+        &LoadWindow::all(None),
+        None,
+        |_, run, second, apps| {
+            take(run, second, apps);
+        },
+    )
 }
 
-pub(super) fn load_since(
-    root: &Path,
-    since: Option<&super::Newest>,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
-) -> Option<Failure> {
-    load_window_inner(root, &LoadWindow::all(since), None, take)
+/// Whether the ticks a load hands over replace the seconds the store holds or continue them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Continuity {
+    Replace,
+    Extend,
 }
 
-pub(super) fn load_window(
+/// Hands `take` the ticks of every minute the loaded hour holds, oldest first, to replace what
+/// the store holds, once `since`'s run is found to be still one of the recording's runs.
+pub(super) fn load_hour(
     root: &Path,
     since: Option<&super::Newest>,
-    seconds: u64,
     buffers: &mut LoadBuffers,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     load_window_inner(
         root,
         &LoadWindow {
             since,
-            seconds,
+            seconds: LOADED_SECONDS,
             unread: false,
         },
         Some(buffers),
@@ -420,16 +427,30 @@ pub(super) fn load_window(
     )
 }
 
+/// Hands `take` the ticks of the minutes sealed after `since`, oldest first, after those of
+/// the newest minute that holds `since`'s run no further than `since`, which seeds the rates of
+/// the minute after it. Where the loaded hour holds no such minute, `take` gets the whole hour.
+pub(super) fn load_since(
+    root: &Path,
+    since: Option<&super::Newest>,
+    buffers: &mut LoadBuffers,
+    take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
+) -> Option<Failure> {
+    load_window_inner(root, &LoadWindow::all(since), Some(buffers), take)
+}
+
 fn load_window_inner(
     root: &Path,
     window: &LoadWindow<'_>,
     buffers: Option<&mut LoadBuffers>,
-    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
     let mut found = Vec::with_capacity(MINUTES_MAX);
-    if let Err(failure) = find_window(root, &mut found, window) {
-        return Some(failure);
-    }
+    let continuity = match find_window(root, &mut found, window) {
+        Ok(continuity) => continuity,
+        Err(failure) => return Some(failure),
+    };
+
     let apps_from_ns = found
         .first()
         .and_then(|newest| newest.wall_ns_max)
@@ -443,7 +464,7 @@ fn load_window_inner(
                 Ok(apps) => TickApps::Loaded(apps),
                 Err(missing) => TickApps::Missing(missing),
             };
-            take(&loaded.run, &loaded.second, apps);
+            take(continuity, &loaded.run, &loaded.second, apps);
         }
         if let Some(failure) = batch.left_out {
             left_out = Some(failure);
@@ -780,14 +801,14 @@ fn decode_refusal(refused: &Refused) -> String {
 /// the recording registers back.
 #[cfg(test)]
 fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> Result<(), Failure> {
-    find_window(root, found, &LoadWindow::all(since))
+    find_window(root, found, &LoadWindow::all(since)).map(|_| ())
 }
 
 fn find_window(
     root: &Path,
     found: &mut Vec<Found>,
     window: &LoadWindow<'_>,
-) -> Result<(), Failure> {
+) -> Result<Continuity, Failure> {
     assert!(window.seconds > 0);
     assert!(window.seconds <= LOADED_SECONDS);
     let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
@@ -800,21 +821,18 @@ fn find_window(
         runs.push(run.identity);
     }
 
-    let mut first = if let Some(since) = window.since {
+    if let Some(since) = window.since {
         if since.run.recording != recording {
             return Err(Failure::ForeignRecording);
         }
-        runs.iter()
-            .position(|run| *run == since.run)
-            .ok_or(Failure::ChangedIdentity)?
-    } else {
-        0
-    };
-    if !window.unread {
-        first = 0;
+        if !runs.contains(&since.run) {
+            return Err(Failure::ChangedIdentity);
+        }
     }
+    // Every run is searched, since a load that finds no held minute to continue from replaces
+    // the hour, and the hour reaches back into the runs before `since`'s.
     let mut oldest_ns = None;
-    for run in runs[first..].iter().rev() {
+    for run in runs.iter().rev() {
         let finding = FindRun {
             root,
             recording,
@@ -830,25 +848,26 @@ fn find_window(
     }
     if window.unread {
         if let Some(since) = window.since {
-            find_unread(found, since);
+            if let Some(predecessor) = find_predecessor(found, since) {
+                found.truncate(predecessor + 1);
+                return Ok(Continuity::Extend);
+            }
         }
     }
 
-    Ok(())
+    Ok(Continuity::Replace)
 }
 
-/// Keeps new minutes and one already-held minute to seed their predecessor-dependent rates.
-fn find_unread(found: &mut Vec<Found>, since: &super::Newest) {
+/// The index in `found`, newest first, of the newest minute the store holds whole, which seeds
+/// the rates of the new minutes before it, where `found` holds one.
+fn find_predecessor(found: &[Found], since: &super::Newest) -> Option<usize> {
     assert!(found.len() <= MINUTES_MAX);
-    let predecessor = found.iter().position(|minute| {
+    found.iter().position(|minute| {
         if minute.run != since.run {
             return false;
         }
         minute.publication_end.saturating_sub(1) <= since.publication
-    });
-    if let Some(predecessor) = predecessor {
-        found.truncate(predecessor + 1);
-    }
+    })
 }
 
 /// The search for the sealed minutes of one run of the recording.

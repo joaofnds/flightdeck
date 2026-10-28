@@ -105,10 +105,12 @@ flowchart TD
 ```
 
 Once Overview has complete initial histories and follows a Store View, its page
-worker rests. A hover retained in the View reads
-there; a missing detail can request the worker. On another page, or at a pinned
-observation, the unused Store parks. Bootstrap, incomplete histories and unavailable
-Store data retain the page-worker path.
+worker rests. A hover retained in the View reads there; a missing detail can request
+the worker. The Store continues ingesting while another page follows the live Mac,
+keeping its newest View ready for a return to Overview. A hidden window parks the Store,
+and so does a held second, whether from Pause, a range dragged on a chart or a pinned
+observation, and a saved recording shown in a live window. Bootstrap, incomplete
+histories and unavailable Store data retain the page-worker path.
 
 The native timer normally takes completed work every 250 ms. While a restoration
 or another reply is pending, the live window's scheduling also polls promptly for
@@ -138,9 +140,9 @@ flowchart TD
     Pin -->|yes| Keep[Keep snapshot and range; readers stay parked]
     Pin -->|no| Eligible{Live Overview with complete initial histories and Store?}
     Eligible -->|no| Worker[Restore through page worker]
-    Eligible -->|yes| Covered{Cached range sufficient and unread publications retained?}
+    Eligible -->|yes| Covered{Loaded hour held and unread publications retained?}
     Covered -->|yes| Delta[Keep cached history and predecessors; read bounded ring delta]
-    Covered -->|no| Reload[Load selected saved period and reconcile ring]
+    Covered -->|no| Reload[Read minutes sealed since the newest whole held minute and reconcile ring]
     Delta --> Lost{Publication overwritten during read?}
     Lost -->|yes| Reload
     Lost -->|no| Complete[Publish complete replacement View]
@@ -149,15 +151,19 @@ flowchart TD
 ```
 
 Checkpoint reuse requires the same recording and registered ring identity, a
-contiguous unread cursor still inside ring retention, and enough cached coverage
-for the requested range. A larger uncached range or expired checkpoint reloads the
-selected saved period. During restoration the Store withholds partial Views until
+contiguous unread cursor still inside ring retention, and every saved second of the loaded
+hour, the newest 3,600 s of readings, held. The Store holds that hour whatever range is
+selected, so a range switch leaves its readings as they are. An expired checkpoint reads
+the newest sealed minute the Store holds whole, to seed rates, and every minute the
+recording sealed after it. Where the Store holds no whole sealed minute of that run, it
+loads the whole hour again. During restoration the Store withholds partial Views until
 it reaches the current endpoint, or reports a failure. Missing or refused readings
-remain explicit gaps in the replacement.
+remain explicit gaps in the replacement. While the held hour leaves a minute out, each
+expired checkpoint reads the whole hour again, so a minute that becomes readable fills it.
 
 Coverage is checked again through consumption. If the writer overwrites an unread
 publication after checkpoint admission, the Store withholds the incomplete View,
-invalidates coverage and switches to the saved-period reload. Checking coverage
+invalidates coverage and switches to reading the sealed minutes. Checking coverage
 only before reading would silently omit a reading still recoverable from disk.
 
 Overview waits for that replacement instead of submitting a duplicate full-period
@@ -167,11 +173,13 @@ arrives.
 ## Why this reduces work
 
 A covered resume keeps already interpreted history and the raw predecessors used
-to calculate rates. It reads only the unread ring delta. A long gap rebuilds only
-the selected period, rather than exposing every intermediate publication to the UI.
+to calculate rates. It reads only the unread ring delta. A gap beyond ring retention
+reads the minutes sealed during it rather than every intermediate publication. Past
+about half an hour that costs about what reloading the whole hour does, as the
+[measurements](window-resume-performance.md) show.
 The independent page worker stays idle when the Store supplies Overview.
 
-Reloading still needs predecessor data to derive correct first-successor rates.
+Catching up still needs predecessor data to derive correct first-successor rates.
 The terminal decoder validates the saved predecessor minute, including refused
 observations, and retains its terminal raw predecessor without constructing App
 presentation objects. Dropping validation would change which later rates are valid.

@@ -399,7 +399,7 @@ impl Startup {
     pub(in crate::store) fn primary(&mut self, held: &mut Held) -> Result<(), Failure> {
         assert!(self.phase == Phase::Barrier);
         crate::store::coverage::accept_catalog(held, self.checked)?;
-        held.coverage_seconds = crate::session::LOADED_SECONDS;
+        held.covers_hour = true;
         held.startup = crate::store::StartupState::Primary;
         self.phase = Phase::HistoryBoundary;
         Ok(())

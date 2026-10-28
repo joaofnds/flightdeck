@@ -1043,27 +1043,140 @@ fn wait_for_store_activity(cx: &mut gpui::TestAppContext, paused: bool) {
 }
 
 #[gpui::test]
-fn a_live_page_other_than_overview_parks_the_unused_store(cx: &mut gpui::TestAppContext) {
-    // Goal: a page with its own reader cannot also spend CPU refreshing an unused Store View.
-    // Method: tick CPU with an installed live store, then navigate to Overview and tick again.
+fn a_live_page_other_than_overview_keeps_the_store_ingesting(cx: &mut gpui::TestAppContext) {
+    // Goal: the store follows the live Mac while another page shows, so Overview opened again
+    // has no missed minutes to catch up from.
+    // Method: tick CPU over an installed live store that starts parked, and watch it resume.
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    store.set_active(false);
+    cx.update(|cx| super::install_store(store, cx));
+    wait_for_store_activity(cx, true);
+    let page = cx.update(|cx| cx.new(|_| opening_on("cpu")));
+
+    page.update(cx, LiveDashboard::tick);
+
+    wait_for_store_activity(cx, false);
+    assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
+fn overview_opened_again_draws_the_newest_second_the_store_read_on_another_page(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: Overview opened again draws the store's newest second at once, waiting on no
+    // catch-up, no tick and no reader.
+    // Method: leave an Overview drawn from a real store and read by a real reader for CPU,
+    // publish a second while CPU shows and tick CPU past its handover, then open Overview and
+    // read its chart untouched.
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let worker = Worker::start(recording.root.clone()).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "overview".into(), None)));
+    tick_until_settled(cx, &page, 1);
+    page.update(cx, |page, cx| page.navigate("cpu", cx));
+    recording.publish();
+    tick_until_settled(cx, &page, 2);
+    page.update(cx, LiveDashboard::tick);
+
+    page.update(cx, |page, cx| page.navigate("overview", cx));
+
+    let window = cx.update(|cx| drawn(page.read(cx), "live-cpu").window.unwrap());
+    assert_eq!(window.first + window.span - 1, 1001);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
+fn a_live_window_that_opens_a_saved_recording_parks_the_store(cx: &mut gpui::TestAppContext) {
+    // Goal: the live store stops ingesting once the window shows a saved recording, though it
+    // stays installed for the live Mac.
+    // Method: on a live CPU page over an installed live store, open the recording itself as a
+    // saved one through a real reader, and tick until its first reading is accepted.
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
     let store = viewer::store::Store::start(&recording.root).unwrap();
     cx.update(|cx| super::install_store(store, cx));
     let page = cx.update(|cx| cx.new(|_| opening_on("cpu")));
-
     page.update(cx, LiveDashboard::tick);
-
-    wait_for_store_activity(cx, true);
-    assert!(!cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
-    page.update(cx, |page, cx| {
-        page.navigate("overview", cx);
-        page.tick(cx);
-    });
-    wait_for_store_activity(cx, false);
     assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
+    page.update(cx, |page, _| page.begin_recording(recording.root.clone()));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    for _ in 0..2_000 {
+        page.update(cx, LiveDashboard::tick);
+        if cx.update(|cx| page.read(cx).native.source)
+            == crate::live_source_mode::SourceMode::Recorded
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the recording never opened"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    assert!(!cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
+fn overview_opened_with_no_saved_page_draws_the_view_the_store_kept_current(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: an Overview that no page of its own was kept for still draws the store's newest
+    // second at once, waiting on no tick and no reader.
+    // Method: open a real store and reader on CPU, tick until CPU holds the store's View, then
+    // open Overview and read its chart untouched.
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let worker = Worker::start(recording.root.clone()).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "cpu".into(), None)));
+    tick_until_settled(cx, &page, 1);
+
+    page.update(cx, |page, cx| page.navigate("overview", cx));
+
+    let window = cx.update(|cx| drawn(page.read(cx), "live-cpu").window.unwrap());
+    assert_eq!(window.first + window.span - 1, 1000);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+/// Ticks `page` until its reader has answered and it holds the store's View of `publication`,
+/// as each quarter-second tick takes the store's newest View on whichever page shows.
+fn tick_until_settled(
+    cx: &mut gpui::TestAppContext,
+    page: &gpui::Entity<LiveDashboard>,
+    publication: u64,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    for _ in 0..2_000 {
+        page.update(cx, LiveDashboard::tick);
+        let held = cx.update(|cx| {
+            let view = page.read(cx).store_view.clone()?;
+            view.seconds.last().map(|second| second.publication)
+        });
+        if held == Some(publication) {
+            if !cx.update(|cx| page.read(cx).awaiting_reply()) {
+                return;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the page never settled on the store's View"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("the page never settled on the store's View");
 }
 
 #[gpui::test]

@@ -1,4 +1,4 @@
-use super::{LoadBuffers, load_window};
+use super::{LoadBuffers, load_since};
 use crate::live::identity_fixture::Fixture;
 use crate::store::apps::TickApps;
 use crate::store::{AppsSecond, MachineSecond};
@@ -76,13 +76,9 @@ fn a_refused_minute_cannot_leave_decoded_rows_in_reused_storage() {
     .unwrap();
     let mut callbacks = 0;
 
-    let failure = load_window(
-        &fixture.root,
-        None,
-        crate::session::LOADED_SECONDS,
-        &mut buffers,
-        |_, _, _| callbacks += 1,
-    );
+    let failure = load_since(&fixture.root, None, &mut buffers, |_, _, _, _| {
+        callbacks += 1;
+    });
 
     assert_eq!(failure, Some(crate::store::Failure::Refused));
     assert_eq!(callbacks, 0);
@@ -103,18 +99,12 @@ fn capture(
     buffers: &mut LoadBuffers,
 ) -> Vec<(RunIdentity, MachineSecond, AppsSecond)> {
     let mut captured = Vec::new();
-    let failure = load_window(
-        &fixture.root,
-        None,
-        crate::session::LOADED_SECONDS,
-        buffers,
-        |run, second, apps| {
-            let TickApps::Loaded(apps) = apps else {
-                panic!("the fixture's App parts must decode");
-            };
-            captured.push((*run, second.clone(), std::mem::take(apps)));
-        },
-    );
+    let failure = load_since(&fixture.root, None, buffers, |_, run, second, apps| {
+        let TickApps::Loaded(apps) = apps else {
+            panic!("the fixture's App parts must decode");
+        };
+        captured.push((*run, second.clone(), std::mem::take(apps)));
+    });
     assert_eq!(failure, None);
     captured
 }

@@ -33,7 +33,6 @@ fn main() -> ExitCode {
 
 struct Options {
     recording: PathBuf,
-    minutes: u64,
     iterations: u32,
     gated: bool,
 }
@@ -45,38 +44,28 @@ struct Meter {
 
 impl Options {
     fn parse() -> io::Result<Self> {
-        let words: Vec<_> = std::env::args().skip(1).take(8).collect();
-        if !(6..=7).contains(&words.len()) {
-            return Err(io::Error::other(
-                "--recording PATH --minutes N --iterations N",
-            ));
+        let words: Vec<_> = std::env::args().skip(1).take(6).collect();
+        if !(4..=5).contains(&words.len()) {
+            return Err(io::Error::other("--recording PATH --iterations N"));
         }
         if words[0] != "--recording" {
             return Err(io::Error::other("expected --recording"));
         }
-        if words[2] != "--minutes" {
-            return Err(io::Error::other("expected --minutes"));
-        }
-        if words[4] != "--iterations" {
+        if words[2] != "--iterations" {
             return Err(io::Error::other("expected --iterations"));
         }
-        let minutes = words[3].parse().map_err(io::Error::other)?;
-        let iterations = words[5].parse().map_err(io::Error::other)?;
-        let gated = match words.get(6).map(String::as_str) {
+        let iterations = words[3].parse().map_err(io::Error::other)?;
+        let gated = match words.get(4).map(String::as_str) {
             None => false,
             Some("--gated") => true,
             Some(_) => return Err(io::Error::other("expected --gated")),
         };
-        if !(1..=60).contains(&minutes) {
-            return Err(io::Error::other("minutes must be 1..60"));
-        }
         if !(1..=100).contains(&iterations) {
             return Err(io::Error::other("iterations must be 1..100"));
         }
 
         Ok(Self {
             recording: PathBuf::from(&words[1]),
-            minutes,
             iterations,
             gated,
         })
@@ -101,10 +90,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::start(&options.recording)?;
     let mut view = wait_view(&store)?;
     meter.report("startup", 0, started, &before, &view)?;
-    if store.set_window(options.minutes * 60) {
-        drop(view);
-        view = wait_view(&store)?;
-    }
     let first = u32::from(options.gated);
     for iteration in first..=options.iterations {
         store.set_active(false);

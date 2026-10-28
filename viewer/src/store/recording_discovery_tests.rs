@@ -375,12 +375,11 @@ fn a_capacity_stop_reports_incomplete_history_before_decoding() {
     let fixture = short_windows(129);
     let mut accepted = 0;
 
-    let left_out = super::load_window(
+    let left_out = super::load_since(
         &fixture.root,
         None,
-        crate::session::LOADED_SECONDS,
         &mut super::LoadBuffers::default(),
-        |_, _, _| accepted += 1,
+        |_, _, _, _| accepted += 1,
     );
 
     assert_eq!(left_out, Some(Failure::Commits(ErrorKind::InvalidData)));
@@ -428,7 +427,7 @@ fn exactly_full_discovery_succeeds_when_the_next_window_is_outside_the_period() 
         },
     );
 
-    assert_eq!(result, Ok(()));
+    assert_eq!(result, Ok(super::Continuity::Replace));
     assert_eq!(found.len(), 128);
     assert_eq!(found.last().unwrap().publication_end, 3);
 }

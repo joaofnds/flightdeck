@@ -58,18 +58,6 @@ pub(crate) fn set_store_active(active: bool, cx: &App) {
     }
 }
 
-pub(super) fn set_store_window(range: crate::time_range::Range, cx: &App) -> bool {
-    use crate::time_range::{HISTORY_SECONDS, LOADED_SECONDS, Range};
-    let seconds = match range {
-        Range::History => HISTORY_SECONDS,
-        Range::Last(seconds) => seconds.clamp(1, LOADED_SECONDS),
-        Range::Between { .. } => return false,
-    };
-
-    cx.try_global::<LiveStore>()
-        .is_some_and(|store| store.0.set_window(seconds))
-}
-
 pub(super) fn store_pending(cx: &App) -> bool {
     cx.try_global::<LiveStore>()
         .is_some_and(|store| store.0.pending())

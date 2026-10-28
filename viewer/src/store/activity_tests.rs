@@ -67,7 +67,6 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
         catch_up: AtomicBool::new(false),
         catching_up: AtomicBool::new(true),
         paused: AtomicBool::new(false),
-        window_seconds: super::AtomicU64::new(crate::session::LOADED_SECONDS),
         cancellation: Arc::new(crate::cancellation::Cancellation::default()),
     };
 
@@ -226,7 +225,6 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
         catch_up: AtomicBool::new(false),
         catching_up: AtomicBool::new(false),
         paused: AtomicBool::new(false),
-        window_seconds: super::AtomicU64::new(crate::session::LOADED_SECONDS),
         cancellation: Arc::new(crate::cancellation::Cancellation::default()),
     };
 

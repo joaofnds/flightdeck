@@ -1,4 +1,5 @@
-//! Opt-in native visibility-to-fresh-CPU-frame measurements for the automation build.
+//! Opt-in measurements from a window shown or Overview opened to its fresh CPU frame, for the
+//! automation build.
 use std::time::{Duration, Instant};
 
 use collector::clock::Timebase;
@@ -118,7 +119,7 @@ impl ResumeMetrics {
             "worker_requests":dashboard.requests - started.requests,
             "store_version":dashboard.store_version, "second":dashboard.second,
             "route":dashboard.route,
-            "scope":"Native visibility through CPU frame completion bound; excludes GPU display",
+            "scope":"Visibility or navigation through CPU frame completion; excludes GPU display",
         });
         self.started = None;
         Ok(())

@@ -39,7 +39,7 @@ pub(crate) fn observe_visibility(
     cx: &mut gpui::App,
 ) {
     dashboard.update(cx, |dashboard, cx| {
-        store_view::set_store_active(window.is_visible() && dashboard.uses_live_store(), cx);
+        store_view::set_store_active(window.is_visible() && dashboard.follows_live_mac(), cx);
         // macOS reports only changes, so a window it hides from the start would read its page
         // until it first showed and hid again.
         if !window.is_visible() {
@@ -63,7 +63,7 @@ pub(crate) fn observe_visibility(
                     });
             }
             store_view::set_store_active(
-                visibility.is_visible() && dashboard.uses_live_store(),
+                visibility.is_visible() && dashboard.follows_live_mac(),
                 cx,
             );
             if !visibility.is_visible() {
@@ -483,6 +483,13 @@ impl LiveDashboard {
         if self.request.route != "overview" {
             return false;
         }
+
+        self.follows_live_mac()
+    }
+
+    /// Whether the window follows the live Mac's newest second, on whichever page it shows. The
+    /// store ingests while it does, so Overview opened again has no minutes to catch up from.
+    fn follows_live_mac(&self) -> bool {
         if self.worker.mode() != crate::live_source_mode::SourceMode::Live {
             return false;
         }
@@ -629,16 +636,10 @@ impl LiveDashboard {
             self.presence,
             Presence::Shown | Presence::Showing | Presence::Rested
         );
-        if self.uses_live_store() {
-            if visible {
-                if store_view::set_store_window(self.range, cx) {
-                    self.store_view = None;
-                }
-            }
-        } else {
+        if !self.follows_live_mac() {
             self.store_view = None;
         }
-        store_view::set_store_active(visible && self.uses_live_store(), cx);
+        store_view::set_store_active(visible && self.follows_live_mac(), cx);
         if self.presence == Presence::Opening {
             if !self.reply_pending {
                 self.presence = Presence::Hiding;
@@ -1032,6 +1033,13 @@ impl LiveDashboard {
             if let Some(mut kept) = self.visited.remove(route) {
                 kept.request = self.request.clone();
                 self.accept_presentation(kept);
+            } else {
+                // The store kept its View current while another page showed, so an Overview
+                // with no page of its own kept draws that View at once.
+                if self.draw_store_view() {
+                    self.zoom_panels();
+                    self.rebuild();
+                }
             }
         }
     }

@@ -178,16 +178,25 @@ async fn respond(
             window.activate_window();
         })
         .ok()?;
-        for _ in 0..READING_POLLS_MAX {
-            cx.background_executor().timer(READING_POLL).await;
-            let result = cx
-                .update(|_, cx| dashboard.read(cx).resume_metrics.after(before))
-                .ok()?;
-            if let Some(result) = result {
-                return Some(json!({"ok":true, "result":result}).to_string());
-            }
-        }
-        return Some(failure("fresh resume frame did not arrive"));
+        return resume_frame(before, dashboard, cx).await;
+    }
+    if words.first() == Some(&"profile-navigate") {
+        let begun = cx
+            .update(|_, cx| profile_navigate(&words, dashboard, cx))
+            .ok()?;
+        return match begun {
+            Ok(before) => resume_frame(before, dashboard, cx).await,
+            Err(error) => Some(failure(&error)),
+        };
+    }
+    if words.first() == Some(&"profile-range") {
+        let begun = cx
+            .update(|_, cx| profile_range(&words, dashboard, cx))
+            .ok()?;
+        return match begun {
+            Ok(before) => resume_frame(before, dashboard, cx).await,
+            Err(error) => Some(failure(&error)),
+        };
     }
     if words.first() == Some(&"screenshot") {
         let Some(path) = words.get(1).map(|path| (*path).to_owned()) else {
@@ -216,6 +225,76 @@ async fn respond(
         Ok(value) => json!({"ok": true, "result": value}).to_string(),
         Err(error) => failure(&error),
     })
+}
+
+/// Starts a measurement epoch and opens the route, as a click in the sidebar does, and
+/// answers the epoch count before it.
+fn profile_navigate(
+    words: &[&str],
+    dashboard: &Entity<LiveDashboard>,
+    cx: &mut App,
+) -> Result<u64, String> {
+    let route = word(words, 1)?;
+    route_known(route)?;
+
+    Ok(dashboard.update(cx, |dashboard, cx| {
+        let store_version = dashboard.resume_store_version();
+        let before = profile_begin(dashboard, store_version);
+
+        dashboard.navigate(route, cx);
+        before
+    }))
+}
+
+/// Starts a measurement epoch and picks the range, as a click on the range picker does, and
+/// answers the epoch count before it.
+fn profile_range(
+    words: &[&str],
+    dashboard: &Entity<LiveDashboard>,
+    cx: &mut App,
+) -> Result<u64, String> {
+    let range = range_word(words)?;
+
+    Ok(dashboard.update(cx, |dashboard, cx| {
+        // The picked range redraws the View the store already holds, so any version is fresh.
+        let before = profile_begin(dashboard, None);
+
+        dashboard.set_range(range, cx);
+        before
+    }))
+}
+
+/// Starts a measurement epoch whose frame is fresh once the store's View is newer than
+/// `store_version`, and answers the epoch count before it.
+fn profile_begin(dashboard: &mut LiveDashboard, store_version: Option<u64>) -> u64 {
+    let before = dashboard.resume_metrics.count();
+
+    dashboard
+        .resume_metrics
+        .begin(&crate::live_resume_metrics::Checkpoint {
+            generation: dashboard.generation,
+            store_version,
+            requests: dashboard.worker.requests_submitted(),
+        });
+    before
+}
+
+/// The measurement of the epoch after `before`, once its fresh frame is drawn.
+async fn resume_frame(
+    before: u64,
+    dashboard: &Entity<LiveDashboard>,
+    cx: &mut gpui::AsyncWindowContext,
+) -> Option<String> {
+    for _ in 0..READING_POLLS_MAX {
+        cx.background_executor().timer(READING_POLL).await;
+        let result = cx
+            .update(|_, cx| dashboard.read(cx).resume_metrics.after(before))
+            .ok()?;
+        if let Some(result) = result {
+            return Some(json!({"ok":true, "result":result}).to_string());
+        }
+    }
+    Some(failure("fresh resume frame did not arrive"))
 }
 
 enum Settled {
@@ -354,20 +433,27 @@ fn execute_range(
     dashboard: &Entity<LiveDashboard>,
     cx: &mut App,
 ) -> Result<Value, String> {
+    let range = range_word(words)?;
+
+    dashboard.update(cx, |dashboard, cx| dashboard.set_range(range, cx));
+    Ok(Value::Null)
+}
+
+fn range_word(words: &[&str]) -> Result<crate::time_range::Range, String> {
     let minutes: u64 = word(words, 1)?
         .parse()
         .map_err(|error: std::num::ParseIntError| error.to_string())?;
     if !(1..=60).contains(&minutes) {
         return Err("range must be 1..60 minutes".into());
     }
-    dashboard.update(cx, |dashboard, cx| {
-        dashboard.set_range(crate::time_range::Range::minutes(minutes), cx);
-    });
-    Ok(Value::Null)
+
+    Ok(crate::time_range::Range::minutes(minutes))
 }
 
 const HELP: &[&str] = &[
     "profile-cycle",
+    "profile-navigate ROUTE",
+    "profile-range MINUTES",
     "profile-resume",
     "range MINUTES",
     "state",
@@ -482,12 +568,18 @@ fn click(position: gpui::Point<gpui::Pixels>, modifiers: Modifiers) -> [Platform
 }
 
 fn navigate(route: &str, dashboard: &Entity<LiveDashboard>, cx: &mut App) -> Result<Value, String> {
+    route_known(route)?;
+
+    dashboard.update(cx, |dashboard, cx| dashboard.navigate(route, cx));
+    Ok(Value::Null)
+}
+
+fn route_known(route: &str) -> Result<(), String> {
     if !ROUTES.iter().any(|(known, _)| *known == route) {
         return Err(format!("unknown route {route:?}"));
     }
 
-    dashboard.update(cx, |dashboard, cx| dashboard.navigate(route, cx));
-    Ok(Value::Null)
+    Ok(())
 }
 
 /// Performs a screen reader's increment or decrement on the first node whose title starts

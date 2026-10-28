@@ -41,7 +41,7 @@ mod retention_tests;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -213,7 +213,6 @@ struct Shared {
     catch_up: AtomicBool,
     catching_up: AtomicBool,
     paused: AtomicBool,
-    window_seconds: AtomicU64,
     cancellation: Arc<Cancellation>,
 }
 
@@ -244,7 +243,6 @@ impl Store {
             catch_up: AtomicBool::new(false),
             catching_up: AtomicBool::new(true),
             paused: AtomicBool::new(false),
-            window_seconds: AtomicU64::new(crate::session::LOADED_SECONDS),
             cancellation: Arc::new(Cancellation::default()),
         });
         let mut held = match budget {
@@ -312,23 +310,6 @@ impl Store {
         if let Some(thread) = &self.thread {
             thread.thread().unpark();
         }
-    }
-
-    /// Selects the live period loaded on the next reconciliation or range change.
-    #[must_use]
-    pub fn set_window(&self, seconds: u64) -> bool {
-        assert!(seconds > 0);
-        assert!(seconds <= crate::session::LOADED_SECONDS);
-        if self.shared.window_seconds.swap(seconds, Ordering::AcqRel) == seconds {
-            return false;
-        }
-
-        self.shared.catching_up.store(true, Ordering::Release);
-        self.shared.catch_up.store(true, Ordering::Release);
-        if let Some(thread) = &self.thread {
-            thread.thread().unpark();
-        }
-        true
     }
 
     /// Whether the store has finished its in-flight read and parked without polling.
@@ -410,7 +391,8 @@ struct Held {
     checked_catalog: Option<recording::CheckedCatalog>,
     source_generation: u64,
     source_status: Option<ring::Status>,
-    coverage_seconds: u64,
+    /// Whether the store holds every second the recording sealed in the loaded hour.
+    covers_hour: bool,
     ring_complete: bool,
     full_detail_evicted_through_ns: Option<u64>,
     payload_budget: Option<Arc<ByteBudget>>,
@@ -479,7 +461,7 @@ impl Held {
             checked_catalog: None,
             source_generation: 0,
             source_status: None,
-            coverage_seconds: 0,
+            covers_hour: false,
             ring_complete: false,
             full_detail_evicted_through_ns: None,
             payload_budget: None,
@@ -531,7 +513,7 @@ impl Held {
         }
         self.context.clear();
         self.newest = None;
-        self.coverage_seconds = 0;
+        self.covers_hour = false;
         self.ring_complete = false;
         self.full_detail_evicted_through_ns = None;
         self.unpublished = true;
@@ -543,12 +525,8 @@ impl Held {
     /// false and changes nothing where a span has no buffer to write, so the caller takes the
     /// second again at its next step.
     fn take(&mut self, run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>) -> bool {
-        if let Some(newest) = &self.newest {
-            if newest.run == *run {
-                if second.publication <= newest.publication {
-                    return true;
-                }
-            }
+        if self.holds(run, second) {
+            return true;
         }
 
         self.release_views();
@@ -595,6 +573,19 @@ impl Held {
         });
         self.unpublished = true;
         true
+    }
+
+    /// Whether the store took `second` of run `run` in already, as a second of the newest
+    /// second's run no newer than it.
+    fn holds(&self, run: &RunIdentity, second: &MachineSecond) -> bool {
+        let Some(newest) = &self.newest else {
+            return false;
+        };
+        if newest.run != *run {
+            return false;
+        }
+
+        second.publication <= newest.publication
     }
 
     fn take_room(&self, kept: bool) -> bool {
@@ -841,7 +832,7 @@ fn startup(
     } else {
         held.left_out = recording::load(root, take);
         if held.left_out.is_none() {
-            held.coverage_seconds = crate::session::LOADED_SECONDS;
+            held.covers_hour = true;
         }
 
         Ok(())
@@ -859,7 +850,7 @@ fn startup_accept(
     coverage::accept_catalog(held, outcome.checked_catalog)?;
     held.left_out = outcome.left_out;
     if held.left_out.is_none() {
-        held.coverage_seconds = crate::session::LOADED_SECONDS;
+        held.covers_hour = true;
     }
     ring.accept(outcome.terminal);
 
@@ -1143,7 +1134,7 @@ fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
         }
     }
     held.checked_catalog = None;
-    held.coverage_seconds = 0;
+    held.covers_hour = false;
     held.ring_complete = false;
     shared.catch_up.store(true, Ordering::Release);
     true
@@ -1178,7 +1169,8 @@ fn run_ready(held: &mut Held, ring: &mut Ring, shared: &Shared) {
     }
 }
 
-/// Reuses a covered checkpoint or replaces the selected period before publishing its endpoint.
+/// Reuses a covered checkpoint or takes in what the recording sealed since it before publishing
+/// its endpoint.
 fn refresh(
     root: &Path,
     held: &mut Held,
@@ -1189,8 +1181,7 @@ fn refresh(
 ) -> persistence::Result<bool> {
     drop(shared.mailbox.take());
     held.unpublished = true;
-    let seconds = shared.window_seconds.load(Ordering::Acquire);
-    if seconds <= held.coverage_seconds {
+    if held.covers_hour {
         if let Some(checkpoint) = &held.newest {
             match ring.covers(checkpoint) {
                 Ok(true) => return Ok(true),
@@ -1207,6 +1198,11 @@ fn refresh(
     refresh_load(root, held, ring, shared, load_buffers, operation)
 }
 
+/// Takes in what the recording sealed after the newest second the store holds, and follows a
+/// new ring from the newest sealed minute where the recording handed any second over. An hour
+/// that left a sealed minute out reads every minute again, so the refused one is retried, while
+/// losing the place in the ring alone leaves the held minutes as they are. The payload store
+/// reads the whole hour each time, so the Apps its sealed minutes saved replace the live ones.
 fn refresh_load(
     root: &Path,
     held: &mut Held,
@@ -1217,32 +1213,33 @@ fn refresh_load(
 ) -> persistence::Result<bool> {
     let budget = held.payload_budget.clone();
     let since = held.newest;
-    let seconds = shared.window_seconds.load(Ordering::Acquire);
+    let retries_hour = held.left_out.is_some();
     let mut accepted = true;
-    let mut reset = false;
+    let mut loaded = false;
     let mut checked_catalog = None;
     let mut next_ring = make_ring(root, budget.as_ref());
-    let mut take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
+    let mut take = |continuity, run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
         if !shared.active.load(Ordering::Acquire) {
             accepted = false;
         }
         if accepted {
-            if !reset {
-                held.reset();
-                reset = true;
+            if !loaded {
+                if continuity == recording::Continuity::Replace {
+                    held.reset();
+                }
+                loaded = true;
             }
             accepted = held.take(run, second, apps);
         }
     };
     let left_out = if let Some(budget) = &budget {
         let operation = operation.unwrap_or_else(|| unreachable!("payload reads are cancellable"));
-        let outcome = recording::load_payload_window(
+        let outcome = recording::load_payload_hour(
             root,
             budget,
             operation,
             since.as_ref(),
-            seconds,
-            &mut take,
+            |run, second, apps| take(recording::Continuity::Replace, run, second, apps),
         )?;
         if accepted {
             next_ring.accept(outcome.terminal);
@@ -1250,14 +1247,18 @@ fn refresh_load(
         }
         outcome.left_out
     } else {
-        recording::load_window(root, since.as_ref(), seconds, load_buffers, take)
+        if retries_hour {
+            recording::load_hour(root, since.as_ref(), load_buffers, take)
+        } else {
+            recording::load_since(root, since.as_ref(), load_buffers, take)
+        }
     };
     if held.left_out != left_out {
         held.left_out = left_out;
         held.unpublished = true;
     }
     if budget.is_none() {
-        if reset {
+        if loaded {
             let operation =
                 Arc::clone(&shared.cancellation).operation(shared.cancellation.epoch())?;
             next_ring.accept(recording::terminal(root, &operation)?);
@@ -1267,17 +1268,14 @@ fn refresh_load(
         if budget.is_some() {
             coverage::accept_catalog(held, checked_catalog)?;
         }
-        held.coverage_seconds = 0;
-        if left_out.is_none() {
-            held.coverage_seconds = seconds;
-        }
-        refresh_load_finish(held, ring, next_ring, reset);
+        held.covers_hour = left_out.is_none();
+        refresh_load_finish(held, ring, next_ring, loaded);
     }
     Ok(accepted)
 }
 
-fn refresh_load_finish(held: &mut Held, ring: &mut Ring, next: Ring, reset: bool) {
-    if reset {
+fn refresh_load_finish(held: &mut Held, ring: &mut Ring, next: Ring, loaded: bool) {
+    if loaded {
         *ring = next;
     } else {
         if held.left_out.is_some() {

@@ -673,7 +673,7 @@ fn recent_fixture() -> Fixture {
 }
 
 fn startup_shared() -> crate::store::Shared {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::atomic::AtomicBool;
     crate::store::Shared {
         mailbox: crate::store::Mailbox::new(),
         queries: Some(crate::store::query::Queries::new()),
@@ -682,7 +682,6 @@ fn startup_shared() -> crate::store::Shared {
         catch_up: AtomicBool::new(false),
         catching_up: AtomicBool::new(true),
         paused: AtomicBool::new(false),
-        window_seconds: AtomicU64::new(crate::session::LOADED_SECONDS),
         cancellation: Arc::new(crate::Cancellation::default()),
     }
 }
