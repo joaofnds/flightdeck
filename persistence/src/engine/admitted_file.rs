@@ -103,7 +103,12 @@ impl AdmittedFile {
         crate::work::ingestion::record_content(crate::work::ingestion::Kind::ProjectionDecode, 0);
         // Native statistics borrow the footer; all metadata aliases must die inside this scope.
         Buffer::with_slice(self.read_prefix_footer()?, |footer| {
-            let metadata = materialize(footer)?;
+            let mut metadata = materialize(footer)?;
+            // Schema inference copies file values; this eager reader uses only the Arrow override.
+            if let Some(entries) = &mut metadata.key_value_metadata {
+                entries.retain(|entry| entry.key == "ARROW:schema");
+            }
+
             let mut reader = ParquetReader::new(Cursor::new(self.bytes.as_slice()))
                 .set_rechunk(false)
                 .with_slice(slice)

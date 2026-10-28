@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use polars::prelude::{Column, DataFrame};
+use polars::prelude::{Column, CompatLevel, DataFrame, SchemaExt};
 use polars_parquet::parquet::metadata::ThriftFileMetadata;
 use polars_parquet_format::KeyValue;
 use polars_parquet_format::thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol};
@@ -50,6 +50,69 @@ fn a_large_footer_needs_neither_prefetch_nor_a_second_footer_buffer() {
     assert!(!allocations.layouts[..allocations.allocations].contains(&(65_536, 1)));
     assert!(!allocations.layouts[..allocations.allocations].contains(&(footer_bytes, 1)));
     assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn schema_inference_does_not_copy_unused_file_metadata_values() {
+    // Goal: unrelated file metadata cannot create another large schema-inference copy.
+    // Method: count the exact native value layout while retaining the real projected counter.
+    let fixture = Fixture::new();
+    let padding_bytes = 131_073;
+    extend_footer(&fixture, padding_bytes);
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let admitted = AdmittedFile::open_budgeted(&fixture.path, 1024 * 1024, &budget).unwrap();
+    drop(admitted.read(&["counter"]).unwrap());
+
+    let (result, allocations) = observe(&budget, || admitted.read(&["counter"]));
+    let frame = result.unwrap();
+
+    let copies = allocations.layouts[..allocations.allocations]
+        .iter()
+        .filter(|layout| **layout == (padding_bytes, 1))
+        .count();
+    assert_eq!(copies, 1);
+    assert_eq!(frame, expected_counter());
+    drop(admitted);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn schema_filter_preserves_the_last_valued_arrow_override_in_original_order() {
+    // Goal: discarding unrelated file keys cannot change duplicate Arrow-schema precedence.
+    // Method: place an unsigned override after signed storage metadata and before a null entry.
+    let fixture = Fixture::new();
+    let expected = DataFrame::new(1, vec![Column::new("counter".into(), [u64::MAX])]).unwrap();
+    let unsigned = polars_parquet::write::schema_to_metadata_key(
+        &expected.schema().to_arrow(CompatLevel::newest()),
+    );
+    std::fs::remove_file(&fixture.path).unwrap();
+    write_frame(
+        &fixture.path,
+        &mut DataFrame::new(1, vec![Column::new("counter".into(), [-1_i64])]).unwrap(),
+    );
+    rewrite_footer(&fixture, |metadata| {
+        metadata.schema[1].converted_type = None;
+        metadata.schema[1].logical_type = None;
+        let entries = metadata.key_value_metadata.as_mut().unwrap();
+        entries.push(KeyValue {
+            key: "unused_before".into(),
+            value: Some("unrelated".into()),
+        });
+        entries.push(unsigned);
+        entries.push(KeyValue {
+            key: "ARROW:schema".into(),
+            value: None,
+        });
+        entries.push(KeyValue {
+            key: "unused_after".into(),
+            value: Some("unrelated".into()),
+        });
+    });
+    let admitted = AdmittedFile::open(&fixture.path, 1024 * 1024).unwrap();
+
+    let actual = admitted.read(&["counter"]).unwrap();
+
+    assert_eq!(actual, expected);
 }
 
 #[test]
