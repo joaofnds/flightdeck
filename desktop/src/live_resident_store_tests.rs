@@ -197,8 +197,8 @@ fn worker_missing_point(observation: &Value) -> Value {
 }
 
 mod over_the_loaded_hour {
-    use super::ResidentHistory;
-    use crate::live_store_app_fixtures::hour;
+    use super::{ResidentHistory, hovered};
+    use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_until};
 
     #[test]
     fn draws_each_older_stretch_where_the_machine_charts_draw_it_with_its_mean() {
@@ -222,5 +222,23 @@ mod over_the_loaded_hour {
         assert_eq!(panel.positions, machine.positions);
         assert_eq!(panel.segments, machine.segments);
         assert_eq!(drawn.amount(1, Some(0)), Some(250_000_000));
+    }
+
+    #[test]
+    fn draws_after_the_chart_of_an_older_view_the_chart_it_draws_alone() {
+        // Goal: a chart of the hour drawn after the chart of an older View is the chart the
+        // newer View draws alone, though seconds the older chart drew one by one now stand in a
+        // stretch of the older part. Method: the hour's View, and a View twenty seconds newer,
+        // whose older part draws as a stretch at second 9,050 what the older chart drew as that
+        // second, and the chart drawn after the older one's beside the chart drawn alone.
+        let (view, cohorts) = hour();
+        let older = ResidentHistory::from_view(&view, &cohorts);
+        let (newer, cohorts) = hour_until(HOUR_NEWEST + 20);
+
+        let drawn = ResidentHistory::from_view_after(&newer, &cohorts, older);
+
+        let alone = ResidentHistory::from_view(&newer, &cohorts);
+        assert_eq!(drawn.panel(), alone.panel());
+        assert_eq!(hovered(&drawn), hovered(&alone));
     }
 }
