@@ -70,9 +70,11 @@ fn prefix_does_not_decode_a_damaged_later_selected_row_group() {
     let table =
         AdmittedTable::from_file_budgeted(File::open(&fixture.path).unwrap(), &budget).unwrap();
 
+    assert_eq!(table.row_count(), 124);
     let prefix = table.read(&["counter"], Some(62)).unwrap();
     let full = table.read(&["counter"], None);
 
+    assert_eq!(table.row_count(), 124);
     assert_eq!(prefix.height(), 62);
     assert_eq!(
         crate::engine::Row::new(&prefix, 61)

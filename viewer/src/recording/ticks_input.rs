@@ -125,6 +125,10 @@ impl<'input> SealedMinute<'input> {
 }
 
 impl TicksTable<'_> {
+    pub(super) fn row_count(&self) -> Option<u64> {
+        self.admitted.map(|input| input.table.row_count())
+    }
+
     pub(super) fn holds(&self, group: &[&str]) -> Result<bool, Refused> {
         match (&self.legacy, self.admitted) {
             (Some(table), None) => table.holds(group),

@@ -10,6 +10,7 @@ use crate::{Error, Result};
 pub struct AdmittedTable {
     input: AdmittedFile,
     names: ColumnNames,
+    rows: u64,
 }
 
 /// Admission-derived names whose backing cannot escape its reservation.
@@ -42,7 +43,7 @@ impl AdmittedTable {
     /// Moves compressed storage into a shared native source without copying it.
     /// Native bridge wrappers, plans and decoding need separate accounting.
     pub fn into_scan(self) -> Result<(polars::prelude::LazyFrame, AdmittedColumns)> {
-        let Self { input, names } = self;
+        let Self { input, names, .. } = self;
         let plan = super::scan::scan_sources(super::scan::buffer_sources(input))?;
 
         Ok((plan, AdmittedColumns { names }))
@@ -81,6 +82,12 @@ impl AdmittedTable {
         self.names.contains(name)
     }
 
+    /// The captured footer's row count, validated against the sum of all row groups.
+    #[must_use]
+    pub fn row_count(&self) -> u64 {
+        self.rows
+    }
+
     /// Applies a prefix before native decoding; zero offset cannot overflow its slice extent.
     pub fn read(
         &self,
@@ -102,6 +109,8 @@ impl AdmittedTable {
         let bytes = admitted_file::capture_bytes(&mut file, size).map_err(admitted_file::refuse)?;
         let metadata = admission::validate_reader_metadata(&mut Cursor::new(&bytes), size)
             .map_err(admitted_file::refuse)?;
+        let rows = u64::try_from(metadata.num_rows)
+            .map_err(|_| AdmissionRefusal::Bound("parquet file rows"))?;
         let names = ColumnNames::capture(&metadata.schema[1..], budget)?;
         drop(metadata);
 
@@ -111,6 +120,7 @@ impl AdmittedTable {
                 reservation: Some(input),
             },
             names,
+            rows,
         })
     }
 }

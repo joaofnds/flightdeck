@@ -202,35 +202,40 @@ fn original_clocks() -> [Clocks; 2] {
 }
 
 #[test]
-fn endpoint_consumer_keeps_its_prefix_and_refuses_an_overlong_minute() {
-    // Goal: the real endpoint consumer retains its native prefix and over-limit refusal.
-    // Method: replace a fixture's ticks with 124 ordered rows and visit its process samples.
+fn one_endpoint_above_the_admitted_limit_is_refused_before_native_decoding() {
+    // Goal: the first invalid count is refused before native endpoint projection.
+    // Method: trace a real 62-row input and retain the legacy prefix control.
+    assert_admitted_endpoint_count_refused(62);
+}
+
+#[test]
+fn an_overlong_admitted_minute_is_refused_before_native_decoding() {
+    // Goal: a longer invalid minute is refused before native endpoint projection.
+    // Method: trace a real 124-row input and retain the legacy prefix control.
+    assert_admitted_endpoint_count_refused(124);
+}
+
+#[test]
+fn an_empty_admitted_endpoint_table_remains_readable() {
+    // Goal: early count refusal preserves empty endpoint tables.
+    // Method: read the empty projection from a real captured file.
+    assert_admitted_endpoint_count_readable(0);
+}
+
+#[test]
+fn an_admitted_endpoint_table_at_the_limit_remains_readable() {
+    // Goal: early count refusal preserves the maximum accepted endpoint table.
+    // Method: read every publication from a real captured 61-row file.
+    assert_admitted_endpoint_count_readable(61);
+}
+
+fn assert_admitted_endpoint_count_refused(count: u64) {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
+    replace_ticks_count(&fixture, count);
     let marker = marker(&fixture);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
-    let ticks = fixture
-        .root
-        .join(manifest.data_directory)
-        .join("ticks.parquet");
-    let row = persistence::engine::scan(&ticks)
-        .unwrap()
-        .collect()
-        .unwrap();
-    let mut frame = row.clone();
-    for _row in 1..124 {
-        frame.vstack_mut(&row).unwrap();
-    }
-    let publications: Vec<u64> = (1..=124).collect();
-    frame
-        .with_column(polars::prelude::Column::new(
-            "publication".into(),
-            publications,
-        ))
-        .unwrap();
-    std::fs::remove_file(&ticks).unwrap();
-    write_ticks(&ticks, frame);
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = SealedMinute::open_with_ticks(
@@ -244,18 +249,92 @@ fn endpoint_consumer_keeps_its_prefix_and_refuses_an_overlong_minute() {
     .unwrap();
     let mut before = None;
     let mut accepted = 0;
+    let trace = persistence::work::ingestion::Trace::new(manifest.identity.run.recording);
 
-    let endpoints = super::processes::read_processes_endpoints(&minute).unwrap();
+    let observation = trace.enter();
+    let endpoints = minute.endpoints();
+    drop(observation);
     let result = minute.visit_samples_with_operation(&mut before, &operation, |_, _| {
         accepted += 1;
         Ok(())
     });
 
-    assert_eq!(endpoints.len(), 62);
-    assert_eq!(endpoints.last().unwrap().stamp.publication, 62);
+    assert!(matches!(
+        endpoints,
+        Err(super::Refused::Decode(persistence::Error::Bound(
+            "committed App batch endpoints"
+        )))
+    ));
+    assert_eq!(endpoint_decode_entries(&trace), 0);
     assert!(result.is_err());
     assert_eq!(accepted, 0);
     assert!(before.is_none());
+    let legacy = SealedMinute::open(&fixture.root, &marker).unwrap();
+    let endpoints = super::processes::read_processes_endpoints(&legacy).unwrap();
+    assert_eq!(endpoints.len(), 62);
+    assert_eq!(endpoints.last().unwrap().stamp.publication, 62);
+}
+
+fn assert_admitted_endpoint_count_readable(count: u64) {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    replace_ticks_count(&fixture, count);
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let minute = SealedMinute::open_with_ticks(
+        &SealedSource {
+            root: &fixture.root,
+            marker: &marker(&fixture),
+        },
+        &budget,
+        &operation,
+    )
+    .unwrap();
+
+    let endpoints = minute.endpoints().unwrap();
+
+    let publications: Vec<_> = endpoints
+        .iter()
+        .map(|endpoint| endpoint.stamp.publication)
+        .collect();
+    assert_eq!(publications, (1..=count).collect::<Vec<_>>());
+    drop(minute);
+    assert_eq!(budget.used(), 0);
+}
+
+fn endpoint_decode_entries(trace: &persistence::work::ingestion::Trace) -> usize {
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    events
+        .iter()
+        .filter(|event| event.kind == persistence::work::ingestion::Kind::ProjectionDecode)
+        .count()
+}
+
+fn replace_ticks_count(fixture: &Fixture, count: u64) {
+    assert!(count <= 124);
+    let manifest = persistence::read_committed(&fixture.root, &marker(fixture)).unwrap();
+    let ticks = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("ticks.parquet");
+    let row = persistence::engine::scan(&ticks)
+        .unwrap()
+        .collect()
+        .unwrap();
+    let mut frame = row.head(Some(0));
+    for _row in 0..count {
+        frame.vstack_mut(&row).unwrap();
+    }
+    frame
+        .with_column(polars::prelude::Column::new(
+            "publication".into(),
+            (1..=count).collect::<Vec<_>>(),
+        ))
+        .unwrap();
+    std::fs::remove_file(&ticks).unwrap();
+    write_ticks(&ticks, frame);
 }
 
 // This is a forwarding spy on the concrete File capture boundary. It owns no fake input.

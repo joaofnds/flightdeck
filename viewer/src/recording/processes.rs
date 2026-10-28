@@ -386,6 +386,11 @@ pub(super) fn read_processes_endpoints(minute: &SealedMinute) -> Result<Vec<Endp
     let limit =
         u32::try_from(ENDPOINTS_MAX + 1).map_err(|_| persistence::Error::Bound("process ticks"))?;
     let ticks = minute.ticks()?;
+    if let Some(rows) = ticks.row_count() {
+        if rows > collector::u64_from_usize(ENDPOINTS_MAX) {
+            return Err(persistence::Error::Bound("committed App batch endpoints").into());
+        }
+    }
     let frame = ticks.collect(&TICK_COLUMNS, Some(limit))?;
 
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
