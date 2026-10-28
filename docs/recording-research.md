@@ -113,7 +113,7 @@ A count of the malloc family's calls after startup finds 143 a tick, all inside
 `IOReportCreateSamples` and the release of the samples it returns, as Evidence
 describes. The count does not see memory the kernel allocates, such as the array
 `host_processor_info` returns on every read of the cores' CPU ticks, which the collector
-frees with `vm_deallocate`. docs/tiger-style.md names both as a departure, since no call found
+frees with `vm_deallocate`. docs/coding-style.md allows both, since no call found
 gives these readings without root in memory the collector owns. Without root,
 `host_processors`, which would read each processor into the caller's buffer, and
 `host_get_host_priv_port` both return KERN_INVALID_ARGUMENT, and `kern.cp_times` does not
@@ -124,7 +124,7 @@ The GPU's memory comes from the accelerator's `PerformanceStatistics` dictionary
 `IORegistryEntryGetProperty`, which copies a property into the caller's buffer, returned
 kIOReturnBadArgument (0xe00002c2) for that dictionary and the clients' `AppUsage` arrays
 when probed on 2026-10-22 on macOS 27.0.1. The collector reads the memory dictionary with
-`IORegistryEntryCreateCFProperty`, whose native allocations fall under the same departure.
+`IORegistryEntryCreateCFProperty`, whose native allocations docs/coding-style.md allows too.
 Their malloc-family cost has not been measured.
 
 Process GPU attribution is unavailable. The clients' `IOUserClientCreator` property is a
@@ -1040,7 +1040,7 @@ per-process records are kept under `target/polars_migration/` on this Mac
 1. Answered under "What is read, and how often": the collector rescans after every wake
    that carries a fork, and `--rescan-ms` trades missed processes for CPU in bursts.
    Still open is which pace keeps both, rescanning after every fork wake, a cap that
-   does so until rescans pass a rate, or Tiger Style's own pace of at most once an
+   does so until rescans pass a rate, or the collector's own pace of at most once an
    interval. A benchmark that runs on CI decides it by weighing the CPU each costs
    against the processes each misses ("I think we should benchmark this and weigh the
    pros and cons and see what the tradeoffs are", 2026-10-13).
@@ -1160,8 +1160,8 @@ release build of 155ddc6 ran for 65 seconds twice, once on a quiet Mac and once 
 6 ms before it exits, and the collector saw 385 to 462 forks a second in its 10-second
 windows. The count covered the 63 ticks from 1.5 to 64.5 seconds of each run. Both runs
 made 9,009 calls, 143 a tick, 79 inside `IOReportCreateSamples` and 64 releasing the
-samples it returns, all under the collector's IOReport read. docs/tiger-style.md names
-these calls as a departure. The same count
+samples it returns, all under the collector's IOReport read. docs/coding-style.md allows
+these calls. The same count
 of a release build of 719b976, which read IOReport's state names and energy unit on
 every read, found 432 calls a tick, 251 of them under the names and the unit. The output
 is in `~/code/backlog/boards/flightdeck/evidence/TASK-13.4/final-guarded` on this Mac,

@@ -100,8 +100,8 @@ impl Source {
         }
 
         // The owned-buffer getter cannot return the required nested capacity pair.
-        // This OS snapshot allocation uses Tiger's existing OS-call departure; no Rust
-        // collection or serialization allocation occurs after startup.
+        // The macOS call allocates this snapshot itself, which docs/coding-style.md allows.
+        // No Rust collection or serialization allocates after startup.
         let mut dictionary = ptr::null();
         let status = unsafe {
             IORegistryEntryCreateCFProperties(self.0.service.0, &raw mut dictionary, ptr::null(), 0)

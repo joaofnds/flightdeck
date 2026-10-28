@@ -48,7 +48,7 @@ The root Cargo workspace contains the recording core and tools. The desktop has 
 own workspace and lockfile so UI dependencies stay separate. It depends on the core
 through local path dependencies. Viewer presentation code may allocate within its
 bounds; the collector's acquisition loop follows the stricter startup-allocation
-rules in [Tiger Style](tiger-style.md).
+rules in [the coding style](coding-style.md).
 
 ## Collection and persistence boundaries
 

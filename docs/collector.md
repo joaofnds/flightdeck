@@ -302,8 +302,8 @@ CPU, not moving the data).
 process watches means the collector runs only when there is work. Following processes this way
 measured 31 to 139 µs of CPU a fork (Reading the kernel is what costs CPU), and it sees
 processes that live a few milliseconds, which a poll of the process table once a second misses.
-Rescanning on every fork, rather than at the collector's own pace, is a departure that
-[tiger-style.md](tiger-style.md) records, taken because it misses the fewest processes.
+Rescanning on every fork, rather than at the collector's own pace, is an exception that
+[coding-style.md](coding-style.md) records, taken because it misses the fewest processes.
 
 **Absolute deadlines at the default quality of service.** A loop that sleeps a second after
 each pass drifts: a probe built that way drifted 9 seconds over 300. Deadlines counted from the
@@ -369,9 +369,9 @@ a second less user time, while its total CPU varied more between runs of one lan
 between the two, since over 90% of it was system time (Rust against Zig).
 
 **Assertions stay on in production.** The release profile keeps overflow checks and aborts on a
-panic, following Tiger Style. A collector that finds its own state wrong stops instead of
-recording wrong readings, and the persister seals what the ring holds once a collector is
-started again.
+panic, following [coding-style.md](coding-style.md). A collector that finds its own state
+wrong stops instead of recording wrong readings, and the persister seals what the ring holds
+once a collector is started again.
 
 ## Cost and budget
 

@@ -232,11 +232,12 @@ The paths, starting with the one that removes the problem:
   here for the functions and template queries the dashboards use. The 8 `topk_avg` and
   `sort_by_label_numeric` queries would be rewritten in PromQL or implemented as well. A
   query server open to any local process needs limits on each query's range, series and
-  time, as Tiger Style asks of everything. A panel refreshing every 10 seconds over an
-  hour reads 3,600 seconds of every queried series, and a month-wide panel reads a month,
-  which is m-6's TASK-32 and is not built. The query cost the Overhead section estimates
-  moves from VictoriaMetrics to Flightdeck rather than going away. VictoriaMetrics itself
-  goes only if the Claude plan limits and the stack's own metrics go with it.
+  time, as [coding-style.md](coding-style.md) asks of every queue and loop. A panel
+  refreshing every 10 seconds over an hour reads 3,600 seconds of every queried series, and
+  a month-wide panel reads a month, which is m-6's TASK-32 and is not built. The query cost
+  the Overhead section estimates moves from VictoriaMetrics to Flightdeck rather than going
+  away. VictoriaMetrics itself goes only if the Claude plan limits and the stack's own
+  metrics go with it.
 - **A Grafana data source plugin, or SQL over the Parquet files.** Either one means
   rewriting all 131 queries in another language, so the dashboards do not stay as they
   are.
@@ -250,7 +251,7 @@ over.
 - **Inside the collector**, as Netdata, Glances and macmon do. Ruled out: a listening
   socket and request parsing would sit in the process that reads the kernel. A scrape or
   a range query would compete with the tick for that process's time, which breaks the
-  rule that nothing a reader does slows collection. Tiger Style's rule that the
+  rule that nothing a reader does slows collection. The coding style's rule that the
   collector allocates its memory at startup would also have to cover request handling.
 - **A separate process reading the ring**, as the persister does. Off, it costs nothing.
   A crash or a slow client touches only itself, and its read-only mapping cannot damage

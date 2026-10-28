@@ -99,6 +99,7 @@ pedantic = { level = "warn", priority = -1 }
 as_conversions = "warn"
 unwrap_used = "warn"
 expect_used = "warn"
+# Off until the board's TASK-116 collapses the nested `if`s these two lints would flag.
 collapsible_if = "allow"
 collapsible_else_if = "allow"
 missing_errors_doc = "allow"

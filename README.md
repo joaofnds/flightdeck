@@ -175,11 +175,11 @@ cargo build --release
 
 ## Check
 
-New and changed code here follows Tiger Style, as [docs/tiger-style.md](docs/tiger-style.md)
-reads it into Rust. The collector's older code does not follow it yet.
+New and changed code here follows [docs/coding-style.md](docs/coding-style.md). The
+collector's older code does not follow it yet.
 
-GitHub Actions runs the check that page describes on every push to `main` and every pull
-request, under the toolchain `.github/workflows/check.yml` names. Its check job runs
+GitHub Actions runs the check on every push to `main` and every pull request, under the
+toolchain `.github/workflows/check.yml` names. Its check job runs
 `just check-root` and its desktop job `just check-desktop`, the two recipes `just check`
 runs, so a step added to either runs in CI and on your machine alike. `check-root` formats,
 lints and tests the root workspace through `fmt`, `clippy` and `test`. `check-desktop` does

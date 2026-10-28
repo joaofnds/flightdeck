@@ -317,7 +317,8 @@ impl Registry for NativeRegistry {
     type Cursor = Service;
 
     fn cursor(&self) -> Result<Self::Cursor, Error> {
-        // Matching serialization and property snapshots use Tiger's OS-call departure.
+        // Matching serialization and property snapshots allocate inside macOS calls, which
+        // docs/coding-style.md allows.
         // The caller-buffer getter rejects the required Statistics dictionary.
         unsafe { CFRetain(self.matching.0) };
         let mut iterator = 0;

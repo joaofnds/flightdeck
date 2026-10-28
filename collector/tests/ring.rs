@@ -1942,8 +1942,7 @@ mod tests {
 
     #[test]
     fn a_reader_allocates_nothing_to_follow_or_read_a_newer_ring() {
-        // Goal: a reader that follows a restarted writer of the same shape allocates nothing,
-        // as Tiger Style's allocation at startup only asks of library code.
+        // Goal: a reader that follows a restarted writer of the same shape allocates nothing.
         // Method: read a ring, restart the writer and publish, then count the allocator calls
         // this thread makes to follow and read the newer ring.
         let place = TestPlace::new("nalloc");

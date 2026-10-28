@@ -1,6 +1,6 @@
-//! Holds the repository to the rules of `docs/tiger-style.md` and `AGENTS.md` that rustfmt
-//! and clippy cannot check, as `TigerBeetle`'s `test "tidy"` does. It is only a test, run by
-//! `cargo test`.
+//! Checks rules that rustfmt and clippy cannot, from `docs/coding-style.md` and `AGENTS.md`,
+//! and limits of its own on lines, functions and discarded values, as `TigerBeetle`'s
+//! `test "tidy"` does. It is only a test, run by `cargo test`.
 #![cfg(test)]
 
 use std::ffi::OsStr;
@@ -38,7 +38,7 @@ fn repository_is_tidy() {
 
 #[test]
 fn release_profile_traps_overflow_and_aborts_on_a_panic() {
-    // Goal: the release build keeps the checks Tiger Style keeps in production.
+    // Goal: the release build people use traps overflow and aborts on a panic.
     // Method: read the `[profile.release]` table of the workspace manifest.
     let text = read_text(&repository_root().join("Cargo.toml"));
 
@@ -212,7 +212,7 @@ fn file_findings_applies_only_the_column_rule_to_toml() {
 
 #[test]
 fn file_findings_applies_no_text_rule_to_a_document() {
-    // Goal: Markdown may run past the limits, as the Tiger page's departures allow.
+    // Goal: Markdown may run past the limits, since a table row or a link cannot wrap.
     // Method: the Rust source of the test above under a Markdown name.
     let text = file_findings_text();
 

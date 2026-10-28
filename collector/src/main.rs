@@ -1389,7 +1389,7 @@ mod tests {
     #[test]
     fn allocates_nothing_in_a_warm_tick_or_the_reports_it_closes() {
         // Goal: a tick after the warm-up allocates nothing, with the window and minute
-        // reports it writes, as Tiger Style's allocation at startup only asks.
+        // reports it writes, as docs/coding-style.md asks of the `collector` binary.
         // Method: run ticks 20 ms apart until the minute closes, so they write six window
         // reports and a live child's minute cost while another thread starts processes.
         // Count the allocator calls made on this thread after private startup completes.
