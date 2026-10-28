@@ -377,6 +377,28 @@ fn a_window_chooses_its_apps_past_a_stretch_of_more_apps_than_it_holds() {
     assert_eq!(chosen.cpu, ["/A.app"]);
 }
 
+#[test]
+fn leaders_keep_no_app_alive_between_choices() {
+    // Goal: the room a chart's leaders are chosen in keeps no App's name alive once the View
+    // and the chosen Apps are let go of, as the store lets go of a stretch's names with it.
+    // Method: choose the leaders of `window_view` one by one, keep only a weak reference to
+    // the App leading CPU time, and let go of the View and the cohorts.
+    let view = window_view();
+    let mut leaders = Leaders::new();
+    let mut cohorts = Cohorts::with_room();
+    let window = WallSeconds {
+        first: 100,
+        last: 139,
+    };
+    leaders.choose(&window_one_by_one(&view), window, &mut cohorts);
+    let leader = Arc::downgrade(&cohorts.cpu[0]);
+
+    drop(cohorts);
+    drop(view);
+
+    assert!(leader.upgrade().is_none());
+}
+
 /// A recording of the ticks `minutes` names, as `seal_minutes` seals them.
 fn recording_of(minutes: &[(u64, Range<u64>)]) -> Fixture {
     let mut fixture = Fixture::new();

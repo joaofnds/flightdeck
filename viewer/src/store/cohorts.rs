@@ -167,8 +167,8 @@ impl Leaders {
         assert_eq!(readings.seconds.len(), readings.apps.len());
         assert!(window.first <= window.last);
         assert_eq!(*cohorts, Cohorts::default());
+        assert!(self.entries.is_empty());
 
-        self.entries.clear();
         let run = choose_run(readings.seconds, window);
         cohorts.seconds = run.len();
         let Some(newest) = readings.seconds.last() else {
@@ -179,12 +179,14 @@ impl Leaders {
 
         let fits = self.choose_add_stretches(stretches)
             && self.choose_add_seconds(readings, run, stretches);
-        if !fits {
-            self.entries.clear();
+        if fits {
+            self.choose_cohorts(cohorts);
+        } else {
             cohorts.refused = true;
-            return;
         }
-        self.choose_cohorts(cohorts);
+
+        self.entries.clear();
+        self.spare.clear();
     }
 
     /// Adds the Apps of `stretches`, none of a stretch that held too many to add them up, as a
