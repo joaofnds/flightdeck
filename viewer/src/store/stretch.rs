@@ -462,9 +462,10 @@ impl StretchRow {
         self.membership_complete &= app.membership_complete;
     }
 
-    /// What the App used of `metric`, a rate of `RATES`, over the stretch's seconds that measured it, and
-    /// the intervals they measured it over, added up. An App whose sums overflowed counts none
-    /// of the stretch, where its seconds one by one would count those that did not.
+    /// What the App used of `metric`, a rate of `RATES`, over the stretch's seconds that
+    /// measured it, and the intervals they measured it over, added up. An App whose sums
+    /// overflowed counts none of the stretch, where its seconds one by one would count those that
+    /// did not.
     pub(super) fn rate_measured(&self, metric: Metric) -> Option<(u64, u64)> {
         let rate = &self.rates[rate_place(metric)];
         let known = rate.measured()?;
