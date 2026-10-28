@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use collector::ring::RunIdentity;
 
+use super::AppsStretch;
 use super::attribution::Totals;
 use crate::apps::Stamp;
 use crate::live_app_history::CompactMeasure;
@@ -93,6 +94,10 @@ pub(super) enum TickApps<'tick> {
     /// The Apps a loader read from the tick's sealed minute, which the store holds in place of
     /// the buffer it takes them into.
     Loaded(&'tick mut AppsSecond),
+    /// What a loader added up of the Apps of the tick and of the seconds of its stretch the loader
+    /// handed over before it since it last handed over one, which the store adds to the stretch
+    /// and holds none of at the second.
+    Folded(&'tick AppsStretch),
 }
 
 /// One observation's Apps as its sealed minute keeps them.
@@ -162,6 +167,7 @@ impl AppsSecond {
                 }
             }
             TickApps::Refused(error) => self.clear(Missing::Refused(error.to_owned())),
+            TickApps::Folded(_) => self.clear(Missing::Unread),
             TickApps::Loaded(loaded) => {
                 if budget.is_some() {
                     assert_eq!(

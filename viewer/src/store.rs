@@ -448,6 +448,18 @@ struct Newest {
     segment: u64,
 }
 
+impl Newest {
+    /// Whether a store whose newest second is `self` took `second` of run `run` in already, as a
+    /// second of the same run no newer than it.
+    fn holds(&self, run: &RunIdentity, second: &MachineSecond) -> bool {
+        if self.run != *run {
+            return false;
+        }
+
+        second.publication <= self.publication
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StartupState {
     Loading,
@@ -605,17 +617,11 @@ impl Held {
         true
     }
 
-    /// Whether the store took `second` of run `run` in already, as a second of the newest
-    /// second's run no newer than it.
+    /// Whether the store took `second` of run `run` in already.
     fn holds(&self, run: &RunIdentity, second: &MachineSecond) -> bool {
-        let Some(newest) = &self.newest else {
-            return false;
-        };
-        if newest.run != *run {
-            return false;
-        }
-
-        second.publication <= newest.publication
+        self.newest
+            .as_ref()
+            .is_some_and(|newest| newest.holds(run, second))
     }
 
     fn take_room(&self, kept: bool, stretch: u64) -> bool {
@@ -682,6 +688,10 @@ impl Held {
             buffer.segment = segment;
         });
         assert!(pushed);
+        let folded = match &apps {
+            TickApps::Folded(folded) => Some(*folded),
+            _ => None,
+        };
         let previous = self.apps.newest_held().map(Arc::clone);
         let tick = take_observation(run, second);
         let budget = self.payload_budget.as_ref();
@@ -700,6 +710,9 @@ impl Held {
             assert_eq!(observation.stamp.publication, second.publication);
         }
         self.stretches.take(stretch(second), newest);
+        if let Some(folded) = folded {
+            self.stretches.add_folded(folded);
+        }
         if self.startup == StartupState::Complete {
             self.context.follow(&self.span, &self.apps);
         }

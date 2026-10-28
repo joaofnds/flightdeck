@@ -68,6 +68,12 @@ impl Stretches {
         self.open.add_second(stretch, apps, &mut self.spare);
     }
 
+    /// Adds `folded`, what a loader added up of the Apps of seconds of the open stretch that the
+    /// store took in without them.
+    pub(super) fn add_folded(&mut self, folded: &AppsStretch) {
+        self.open.add_stretch(folded, &mut self.spare);
+    }
+
     /// The closed stretches, oldest first.
     pub(super) fn held(&self) -> impl ExactSizeIterator<Item = &Arc<AppsStretch>> {
         self.closed.held()
@@ -90,6 +96,43 @@ impl Stretches {
         }
 
         self.open.stretch != stretch
+    }
+}
+
+/// The stretches a loader adds up from seconds of its batch, oldest first, each holding only
+/// those seconds, which the store adds to the stretch it takes the same seconds into.
+pub(super) struct Folding {
+    open: AppsStretch,
+    spare: Vec<StretchRow>,
+}
+
+impl Folding {
+    pub(super) fn new() -> Self {
+        Self {
+            open: AppsStretch::with_room(),
+            spare: Vec::with_capacity(STRETCH_APPS_MAX),
+        }
+    }
+
+    /// Adds `apps`, the Apps of a second of stretch `stretch`. Returns the stretch it added up
+    /// before, where `apps` belongs to another.
+    pub(super) fn add(&mut self, stretch: u64, apps: &AppsSecond) -> Option<AppsStretch> {
+        assert!(apps.missing.is_none());
+        let finished = if self.open.observation.is_some() && self.open.stretch != stretch {
+            self.finish()
+        } else {
+            None
+        };
+
+        self.open.add_second(stretch, apps, &mut self.spare);
+        finished
+    }
+
+    /// The stretch it is adding up, where it added up any second, which it then holds no more.
+    pub(super) fn finish(&mut self) -> Option<AppsStretch> {
+        self.open.observation?;
+
+        Some(self.open.detach())
     }
 }
 
@@ -166,6 +209,23 @@ impl AppsStretch {
         self.totals = Totals::default();
     }
 
+    /// Moves out what the stretch holds, and holds no second.
+    fn detach(&mut self) -> Self {
+        let detached = Self {
+            stretch: self.stretch,
+            observation: self.observation,
+            seconds: self.seconds,
+            elapsed_ns: self.elapsed_ns,
+            completeness: self.completeness,
+            too_many: self.too_many,
+            rows: self.rows.clone(),
+            totals: self.totals,
+        };
+
+        self.clear();
+        detached
+    }
+
     /// Adds the Apps of `second`, a second of stretch `stretch`, writing the stretch's Apps into
     /// `spare`, which then trades places with them.
     fn add_second(&mut self, stretch: u64, second: &AppsSecond, spare: &mut Vec<StretchRow>) {
@@ -178,24 +238,57 @@ impl AppsStretch {
         if second.missing.is_some() {
             return;
         }
-        let completeness = PointApps::completeness(second);
-        self.completeness = if self.seconds == 0 {
-            completeness
-        } else {
-            add_completeness(self.completeness, completeness)
-        };
+        self.add_completeness(PointApps::completeness(second));
         self.seconds += 1;
         let elapsed_ns = second.elapsed_ns.filter(|elapsed_ns| *elapsed_ns > 0);
         if let Some(elapsed_ns) = elapsed_ns {
             self.elapsed_ns += elapsed_ns;
         }
+        self.add_rows(&second.apps, spare, |row, app| row.add(app, elapsed_ns));
+    }
+
+    /// Adds `other`, the same stretch's Apps over seconds the stretch does not hold, writing the
+    /// stretch's Apps into `spare`, which then trades places with them.
+    fn add_stretch(&mut self, other: &Self, spare: &mut Vec<StretchRow>) {
+        assert!(self.observation.is_some());
+        assert_eq!(self.stretch, other.stretch);
+        assert!(other.seconds > 0);
+
+        self.add_completeness(other.completeness);
+        self.seconds += other.seconds;
+        self.elapsed_ns += other.elapsed_ns;
+        if other.too_many {
+            self.rows.clear();
+            self.too_many = true;
+        }
+        self.add_rows(&other.rows, spare, StretchRow::add_row);
+    }
+
+    /// Adds `completeness`, what the App rule found of seconds the stretch does not hold.
+    fn add_completeness(&mut self, completeness: Completeness) {
+        self.completeness = if self.seconds == 0 {
+            completeness
+        } else {
+            add_completeness(self.completeness, completeness)
+        };
+    }
+
+    /// Adds `incoming`, Apps in key order, to the stretch's with `add`, writing them into
+    /// `spare`, which then trades places with them. Where they come to more than
+    /// `STRETCH_APPS_MAX` Apps, the stretch holds none.
+    fn add_rows<R: PointRow + Rankable>(
+        &mut self,
+        incoming: &[R],
+        spare: &mut Vec<StretchRow>,
+        add: impl Fn(&mut StretchRow, &R),
+    ) {
         if self.too_many {
             return;
         }
 
         let capacity = spare.capacity();
         spare.clear();
-        let fits = add_second_rows(&mut self.rows, &second.apps, elapsed_ns, spare);
+        let fits = add_rows_merged(&mut self.rows, incoming, spare, add);
         mem::swap(&mut self.rows, spare);
         if !fits {
             self.rows.clear();
@@ -248,20 +341,19 @@ fn add_completeness(stretch: Completeness, second: Completeness) -> Completeness
     }
 }
 
-/// Writes into `merged` the Apps of `rows` with the Apps of a second, `second`, added, in key
-/// order, where the second measured them over `elapsed_ns`. Returns false where they come to
-/// more than `STRETCH_APPS_MAX` Apps.
-fn add_second_rows(
+/// Writes into `merged` the Apps of `rows` with those of `incoming` added with `add`, in key
+/// order. Returns false where they come to more than `STRETCH_APPS_MAX` Apps.
+fn add_rows_merged<R: PointRow + Rankable>(
     rows: &mut Vec<StretchRow>,
-    second: &[AppRow],
-    elapsed_ns: Option<u64>,
+    incoming: &[R],
     merged: &mut Vec<StretchRow>,
+    add: impl Fn(&mut StretchRow, &R),
 ) -> bool {
     assert!(merged.is_empty());
 
     let mut held = rows.drain(..).peekable();
-    for app in second {
-        let key = key_of(&app.name);
+    for app in incoming {
+        let key = key_of(app.name());
         while let Some(row) = held.next_if(|row| key_of(&row.name) < key) {
             if merged.len() == STRETCH_APPS_MAX {
                 return false;
@@ -270,10 +362,10 @@ fn add_second_rows(
         }
         let mut row = match held.next_if(|row| key_of(&row.name) == key) {
             Some(row) => row,
-            None => StretchRow::new(Arc::clone(&app.name)),
+            None => StretchRow::new(app.ranked()),
         };
 
-        row.add(app, elapsed_ns);
+        add(&mut row, app);
         if merged.len() == STRETCH_APPS_MAX {
             return false;
         }
@@ -321,6 +413,17 @@ impl StretchRow {
         self.resident.add(&app.measure(Metric::Resident));
         self.membership_complete &= app.membership_complete;
     }
+
+    /// Adds `other`, the same App's readings over seconds of the stretch it does not hold.
+    fn add_row(&mut self, other: &Self) {
+        assert_eq!(key_of(&self.name), key_of(&other.name));
+
+        for (amount, other) in self.rates.iter_mut().zip(&other.rates) {
+            amount.add_amount(other);
+        }
+        self.resident.add_amount(&other.resident);
+        self.membership_complete &= other.membership_complete;
+    }
 }
 
 impl Amount {
@@ -333,6 +436,17 @@ impl Amount {
 
         self.measured_members = self.measured_members.max(measure.measured_members);
         match self.known.checked_add(known) {
+            Some(known) => self.known = known,
+            None => self.overflowed = true,
+        }
+    }
+
+    /// Adds `other`, what the App used of the resource over other seconds.
+    fn add_amount(&mut self, other: &Self) {
+        self.measured_members = self.measured_members.max(other.measured_members);
+        self.unavailable_members = self.unavailable_members.max(other.unavailable_members);
+        self.overflowed |= other.overflowed;
+        match self.known.checked_add(other.known) {
             Some(known) => self.known = known,
             None => self.overflowed = true,
         }

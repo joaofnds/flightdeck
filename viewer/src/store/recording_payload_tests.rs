@@ -378,7 +378,9 @@ fn terminal_only_load_preserves_exact_source_without_deriving_apps() {
         &AdmittedTable::from_file_budgeted,
     );
     assert_eq!(batch.seconds.len(), 2);
-    assert!(batch.seconds.iter().all(|second| second.apps.is_ok()));
+    for second in &batch.seconds {
+        assert!(second.apps.second().is_some());
+    }
     let expected = decoder.terminal().unwrap();
     let trace = Trace::new(identity.recording);
 
@@ -652,7 +654,7 @@ fn terminal_admission_preserves_presentation_refusal_and_recovery() {
                 .last()
                 .unwrap()
                 .apps
-                .as_ref()
+                .second()
                 .unwrap()
                 .missing
                 .is_some(),
@@ -1903,7 +1905,10 @@ fn late_full_decoder_refusal_releases_its_index_and_preserves_an_earlier_reader(
         &AdmittedTable::from_file_budgeted,
     );
     assert_eq!(accepted.left_out, None);
-    let reader = std::mem::take(accepted.seconds[0].apps.as_mut().unwrap());
+    let crate::store::recording::LoadedApps::Second(reader) = &mut accepted.seconds[0].apps else {
+        panic!("the accepted minute holds its Apps at each second");
+    };
+    let reader = std::mem::take(reader);
     let original = reader.processes.as_ref().unwrap().selected;
     let held = budget.used();
     let manifest = persistence::read_committed(&fixture.root, &found[1].marker).unwrap();
@@ -1942,7 +1947,7 @@ fn late_full_decoder_refusal_releases_its_index_and_preserves_an_earlier_reader(
         retry
             .seconds
             .iter()
-            .all(|loaded| loaded.apps.as_ref().unwrap().processes.is_ok())
+            .all(|loaded| loaded.apps.second().unwrap().processes.is_ok())
     );
     assert_retry_matches_original_minute(&fixture, &found[1], &retry);
     drop((retry, refused, accepted, reader, decoder, records, fixture));
@@ -1964,7 +1969,7 @@ fn assert_retry_matches_original_minute(
     let (_, expected) = events_loader_legacy(&source, &budget, &operation);
     assert_eq!(retry.seconds.len(), expected.len());
     for (actual, expected) in retry.seconds.iter().zip(&expected) {
-        assert_eq!(actual.apps.as_ref().unwrap(), expected);
+        assert_eq!(actual.apps.second().unwrap(), expected);
         assert_eq!(
             actual.second.publication,
             expected.observation.unwrap().stamp.publication

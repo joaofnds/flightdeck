@@ -1,11 +1,13 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use super::apps::TickApps;
 use super::{
-    APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, Held, MachineSecond, Mailbox, Missing,
-    STRETCHES_MAX, View,
+    APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Held, MachineSecond, Mailbox,
+    Missing, STRETCHES_MAX, View, recording,
 };
 use crate::AppAttributionMetric;
+use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{App, Key, KeyKind, Measure, RankedApp};
 use collector::ring::{Identity, RunIdentity};
 
@@ -160,6 +162,158 @@ fn a_stretch_of_more_apps_than_it_holds_holds_none() {
     let view = published(&mut held);
     let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[]);
     assert_eq!(shown.other, None);
+}
+
+#[test]
+fn a_load_adds_up_the_apps_of_older_minutes_as_their_seconds_add_up() {
+    // Goal: an App chart draws the older part of the loaded hour as it would were the store to
+    // hold each of its seconds' Apps. Method: seal a few ticks of run minutes 0 to 3 and 21, each
+    // tick five wall seconds past its run tick, so minutes 0 to 2 are older than the seconds whose
+    // Apps the store holds one by one, the stretch of wall seconds 60 to 69 crosses minutes 0 and
+    // 1, and that of 180 to 189 crosses minutes 2 and 3. Compare the stretches of minutes 0 to 3
+    // with those of a recording that seals those minutes alone.
+    let older = [(0, 55..60), (1, 0..5), (2, 55..60), (3, 0..6)];
+    let alone = loaded(&recording_of(&older));
+    let cohort = cohort_of(&alone);
+
+    let mut minutes = older.to_vec();
+    minutes.push((21, 0..5));
+    let view = loaded(&recording_of(&minutes));
+
+    let expected = &alone.stretches[..];
+    let stretches: Vec<_> = expected.iter().map(|stretch| stretch.stretch).collect();
+    assert_eq!(stretches, [6, 18]);
+    for expected in expected {
+        let shown = expected.attribution(AppAttributionMetric::Cpu, &cohort);
+        assert!(cpu_of(&shown) > 0);
+    }
+    let shown = &view.stretches[..expected.len()];
+    for (shown, expected) in shown.iter().zip(expected) {
+        assert_eq!(shown.stretch, expected.stretch);
+        assert_eq!(readings_of(shown, &cohort), readings_of(expected, &cohort));
+    }
+}
+
+#[test]
+fn a_catch_up_adds_up_no_second_the_store_holds() {
+    // Goal: a store that catches up on minutes it missed adds each second's Apps to its stretch
+    // once, though the load hands over again the seconds it holds of the minute it held last.
+    // Method: seal a few ticks of run minutes 0 and 1, and have the store take the seconds up to
+    // wall second 66 alone, as it does when it takes minute 1's first seconds live before the
+    // minute seals. Then seal ticks of minute 21 and catch up, so minutes 0 and 1 are older than
+    // the seconds whose Apps the store holds one by one and the stretch of wall seconds 60 to 69
+    // crosses them. Compare that stretch with the one a store that loads the whole recording at
+    // once holds.
+    let older = [(0, 55..60), (1, 0..5)];
+    let newer = [(21, 0..5)];
+    let mut fixture = recording_of(&older);
+    let mut held = Held::new();
+    let failure = recording::load(&fixture.root, |run, second, apps| {
+        if second.wall_ns < 67 * 1_000_000_000 {
+            assert!(held.take(run, second, apps));
+        }
+    });
+    assert_eq!(failure, None);
+    seal_minutes(&mut fixture, 65, &newer);
+    let whole = loaded(&fixture);
+    let cohort = cohort_of(&whole);
+
+    let since = held.newest;
+    let failure = recording::load_since(
+        &fixture.root,
+        since.as_ref(),
+        &mut recording::LoadBuffers::default(),
+        |continuity, run, second, apps| {
+            assert_eq!(continuity, recording::Continuity::Extend);
+            assert!(held.take(run, second, apps));
+        },
+    );
+
+    assert_eq!(failure, None);
+    let view = published(&mut held);
+    let expected = &whole.stretches[0];
+    assert_eq!(expected.stretch, 6);
+    assert!(cpu_of(&expected.attribution(AppAttributionMetric::Cpu, &cohort)) > 0);
+    assert_eq!(view.stretches[0].stretch, expected.stretch);
+    assert_eq!(
+        readings_of(&view.stretches[0], &cohort),
+        readings_of(expected, &cohort)
+    );
+}
+
+/// A recording of the ticks `minutes` names, as `seal_minutes` seals them.
+fn recording_of(minutes: &[(u64, Range<u64>)]) -> Fixture {
+    let mut fixture = Fixture::new();
+    seal_minutes(&mut fixture, 0, minutes);
+
+    fixture
+}
+
+/// Publishes the ticks `minutes` names in `fixture`, by run minute and the ticks of the minute,
+/// after run tick `run_tick`, and seals each minute with its Apps, each tick five wall seconds
+/// past its run tick. The fixture's ring holds eight ticks, so each minute names at most that
+/// many. Returns the run tick after the last.
+fn seal_minutes(fixture: &mut Fixture, mut run_tick: u64, minutes: &[(u64, Range<u64>)]) -> u64 {
+    for (minute, ticks) in minutes {
+        assert!(ticks.end - ticks.start <= 8);
+        let first = minute * 60 + ticks.start;
+        fixture.skip_run_ticks(first - run_tick);
+        run_tick = first;
+        for _ in ticks.clone() {
+            fixture.publish_with_events(run_tick + 5, &[]);
+            run_tick += 1;
+        }
+        fixture.seal_minute_derived(*minute, &persistence::sealed_apps::SealedApps::default());
+    }
+
+    run_tick
+}
+
+/// The View of a store that loaded `fixture`'s recording.
+fn loaded(fixture: &Fixture) -> Arc<View> {
+    let mut held = Held::new();
+    load_into(&mut held, fixture);
+
+    published(&mut held)
+}
+
+/// Loads `fixture`'s recording into `held`, as the store does as it starts.
+fn load_into(held: &mut Held, fixture: &Fixture) {
+    let failure = recording::load(&fixture.root, |run, second, apps| {
+        assert!(held.take(run, second, apps));
+    });
+    assert_eq!(failure, None);
+}
+
+/// The Apps of the newest second `view` holds.
+fn cohort_of(view: &View) -> Vec<Arc<RankedApp>> {
+    let newest = view.apps.last().unwrap();
+    let cohort: Vec<_> = newest
+        .apps
+        .as_slice()
+        .iter()
+        .map(|app| Arc::clone(&app.name))
+        .collect();
+    assert!(!cohort.is_empty());
+
+    cohort
+}
+
+/// What `stretch` shows on each of Overview's App charts whose own lines draw `cohort`.
+fn readings_of(
+    stretch: &AppsStretch,
+    cohort: &[Arc<RankedApp>],
+) -> (Vec<super::Attribution>, super::Resident) {
+    let rates = [
+        AppAttributionMetric::Cpu,
+        AppAttributionMetric::Power,
+        AppAttributionMetric::Disk,
+    ]
+    .into_iter()
+    .map(|metric| stretch.attribution(metric, cohort))
+    .collect();
+
+    (rates, stretch.resident(cohort))
 }
 
 /// What one App used over one second.

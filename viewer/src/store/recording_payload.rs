@@ -155,11 +155,7 @@ fn load_consume(
     operation.check()?;
     for loaded in &mut completion.seconds {
         operation.check()?;
-        let apps = match &mut loaded.apps {
-            Ok(apps) => TickApps::Loaded(apps),
-            Err(missing) => TickApps::Missing(missing),
-        };
-        take(&loaded.run, &loaded.second, apps);
+        take(&loaded.run, &loaded.second, loaded.apps.tick());
     }
     operation.check()?;
 
@@ -449,7 +445,7 @@ fn project_machine_apps(
     seconds.push(Loaded {
         run,
         second,
-        apps: payload,
+        apps: payload.into(),
     });
 }
 
