@@ -37,9 +37,7 @@ impl History {
         if cohorts.seconds == 0 {
             return Err("App rate history is empty".into());
         }
-        let Some(drawn) = crate::live_projection::overview_app_points(view)? else {
-            unreachable!("the chart's Apps were chosen over seconds the View holds");
-        };
+        let drawn = crate::live_projection::overview_app_points(view)?;
 
         let count = drawn.points.len();
         let mut history = Self {

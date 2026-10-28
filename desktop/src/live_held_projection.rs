@@ -171,12 +171,12 @@ pub struct OverviewAppPoints<'view> {
     pub points: Vec<OverviewAppPoint<'view>>,
 }
 
-/// The points of Overview's App charts of `view`, following its newest second: one wherever its
-/// machine charts draw a point, so an App chart spans the loaded hour as they do. None where the
-/// View holds no second.
-pub fn overview_app_points(view: &View) -> Result<Option<OverviewAppPoints<'_>>, String> {
+/// The points of Overview's App charts of `view`, which holds a second, following its newest
+/// second: one wherever its machine charts draw a point, so an App chart spans the loaded hour as
+/// they do.
+pub fn overview_app_points(view: &View) -> Result<OverviewAppPoints<'_>, String> {
     let Some(newest) = view.seconds.last() else {
-        return Ok(None);
+        unreachable!("the App charts draw a View that holds a second");
     };
 
     let domain = overview_panels_domain(newest)?;
@@ -202,10 +202,10 @@ pub fn overview_app_points(view: &View) -> Result<Option<OverviewAppPoints<'_>>,
             apps,
         })
         .collect();
-    Ok(Some(OverviewAppPoints {
+    Ok(OverviewAppPoints {
         window: coordinates.window,
         points,
-    }))
+    })
 }
 
 /// The Apps each of `seconds`, which `indices` place among the seconds of `view`'s older tail
