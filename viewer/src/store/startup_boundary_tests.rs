@@ -252,7 +252,8 @@ fn assert_no_cancelled_view(stage: &mut GuardStage) {
 
 fn assert_cohorts(held: &mut Held, count: usize) {
     let view = published_view(held);
-    let cohorts = &view.cohorts;
+    assert!(view.apps_loaded);
+    let cohorts = crate::store::tests::charted_cohorts(&view);
     assert_eq!(cohorts.seconds, count);
     assert!(!cohorts.refused);
     assert_eq!(cohorts.resident.len(), 1);

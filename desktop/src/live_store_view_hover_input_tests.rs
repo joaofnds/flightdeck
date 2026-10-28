@@ -11,7 +11,7 @@ use crate::chart_axes::TimeWindow;
 use crate::hardware::Readings;
 use crate::live_rankings::{Rankings, TopApps, from_selected};
 use crate::live_source::Worker;
-use crate::live_store_app_fixtures::{apps_at, ranked};
+use crate::live_store_app_fixtures::apps_at;
 use crate::live_store_fixtures::{reading_at, trend_point, view};
 use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
@@ -387,8 +387,6 @@ fn held_view(version: u64, older: &[MachineSecond], seconds: &[MachineSecond]) -
         .iter()
         .map(|second| Arc::new(held_apps(second)))
         .collect();
-    held.cohorts.seconds = seconds.len();
-    held.cohorts.resident = vec![ranked("A")];
     Arc::new(held)
 }
 

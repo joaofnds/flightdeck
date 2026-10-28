@@ -66,16 +66,6 @@ impl Cohorts {
         }
     }
 
-    /// Holds no Apps, keeping the room for them.
-    pub fn clear(&mut self) {
-        self.seconds = 0;
-        self.cpu.clear();
-        self.power.clear();
-        self.disk.clear();
-        self.resident.clear();
-        self.refused = false;
-    }
-
     /// The cohort of `metric`. Overview draws no App chart of GPU time.
     #[must_use]
     pub fn of(&self, metric: AppAttributionMetric) -> Option<&[Arc<RankedApp>]> {

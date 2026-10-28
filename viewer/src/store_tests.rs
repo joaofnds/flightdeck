@@ -1458,6 +1458,26 @@ mod when_the_recording_holds_sealed_minutes {
     }
 }
 
+/// The Apps each of Overview's App charts draws on a line of its own over the newest
+/// `CHARTED_SECONDS` wall seconds of `view`, the seconds the worker chooses its own over.
+pub(super) fn charted_cohorts(view: &View) -> super::Cohorts {
+    let newest = view.seconds.last().unwrap();
+    let last = newest.wall_ns / 1_000_000_000;
+    let window = super::WallSeconds {
+        first: last.saturating_sub(crate::session::CHARTED_SECONDS - 1),
+        last,
+    };
+    let readings = super::Readings {
+        seconds: &view.seconds,
+        apps: &view.apps,
+        stretches: &view.stretches,
+    };
+    let mut cohorts = super::Cohorts::with_room();
+
+    super::Leaders::new().choose(&readings, window, &mut cohorts);
+    cohorts
+}
+
 mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     use std::sync::Arc;
 
@@ -1468,7 +1488,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         Attribution, AttributionReading, COHORT_MAX, Cohorts, OtherReading, Resident,
         ResidentOther, View,
     };
-    use super::{Fixture, Store, view_where};
+    use super::{Fixture, Store, charted_cohorts, view_where};
     use crate::live::app_process_groups_history_tests::named;
     use crate::live_app_response::{Measure, RankedApp};
     use crate::{AppAttributionMetric, LiveSession};
@@ -1507,14 +1527,14 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     }
 
     #[test]
-    fn the_store_chooses_the_apps_the_worker_chooses_for_each_chart() {
-        // Goal: Overview's App charts drawn from the store draw on lines of their own the Apps
-        // the worker chooses, the eight that used the most of each resource over the seconds
-        // the charts draw, or held the most resident memory on average over them, ties going
-        // to the App first in key order. Method: ten Apps over five seconds, the first using
-        // the most CPU only in its second second, two of them reading the same bytes and two
-        // holding the same memory, followed second by second by the worker and by a store, and
-        // the Apps each chooses for each chart compared.
+    fn the_leaders_of_the_views_charted_seconds_are_the_apps_the_worker_chooses() {
+        // Goal: the leaders chosen over the newest seconds of the store's View the charts draw
+        // are the Apps the worker chooses for each of Overview's App charts, the eight that used
+        // the most of each resource over those seconds, or held the most resident memory on
+        // average over them, ties going to the App first in key order. Method: ten Apps over
+        // five seconds, the first using the most CPU only in its second second, two of them
+        // reading the same bytes and two holding the same memory, followed second by second by
+        // the worker and by a store, and the Apps each chart draws compared.
         let (_fixture, session, view) = followed(rows, 5);
 
         let worker = chosen_by_worker(&session);
@@ -1528,7 +1548,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
                 resident: names_of(["B", "E", "I", "C", "G", "J", "A", "H"]),
             }
         );
-        assert_eq!(chosen_by_store(&view.cohorts), worker);
+        assert_eq!(chosen_by_store(&charted_cohorts(&view)), worker);
     }
 
     #[test]
@@ -1570,9 +1590,10 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         let resident = chosen_by_worker_of_resident(&session);
 
         assert_eq!(cpu, ["/B.app", "/A.app"]);
-        assert_eq!(chosen_by_store_of(&view.cohorts.cpu), cpu);
+        let cohorts = charted_cohorts(&view);
+        assert_eq!(chosen_by_store_of(&cohorts.cpu), cpu);
         assert_eq!(resident, ["/B.app", "/A.app"]);
-        assert_eq!(chosen_by_store_of(&view.cohorts.resident), resident);
+        assert_eq!(chosen_by_store_of(&cohorts.resident), resident);
     }
 
     mod when_a_chart_draws_every_app {
@@ -1614,7 +1635,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
 
     mod when_the_clock_is_set_back {
         use super::super::{Store, held_through, view_where};
-        use super::{burst_rows, chosen_by_store_of, named};
+        use super::{burst_rows, charted_cohorts, chosen_by_store_of, named};
 
         #[test]
         fn the_charts_rank_their_apps_over_the_seconds_since() {
@@ -1642,7 +1663,10 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
             );
 
             let view = view_where(&store, |view| held_through(view, 880));
-            assert_eq!(chosen_by_store_of(&view.cohorts.cpu), ["/B.app", "/A.app"]);
+            assert_eq!(
+                chosen_by_store_of(&charted_cohorts(&view).cpu),
+                ["/B.app", "/A.app"]
+            );
         }
     }
 
@@ -1823,8 +1847,9 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     }
 
     fn shown_by_store_of(view: &View, metric: AppAttributionMetric) -> Vec<Attribution> {
-        let cohort = view.cohorts.of(metric).unwrap();
-        let drawn = &view.apps[view.apps.len() - view.cohorts.seconds..];
+        let cohorts = charted_cohorts(view);
+        let cohort = cohorts.of(metric).unwrap();
+        let drawn = &view.apps[view.apps.len() - cohorts.seconds..];
 
         drawn
             .iter()
@@ -1833,11 +1858,12 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     }
 
     fn shown_by_store_of_resident(view: &View) -> Vec<Resident> {
-        let drawn = &view.apps[view.apps.len() - view.cohorts.seconds..];
+        let cohorts = charted_cohorts(view);
+        let drawn = &view.apps[view.apps.len() - cohorts.seconds..];
 
         drawn
             .iter()
-            .map(|second| second.resident(&view.cohorts.resident))
+            .map(|second| second.resident(&cohorts.resident))
             .collect()
     }
 

@@ -83,7 +83,7 @@ use crate::apps::Stamp;
 use crate::cancellation::{Cancellation, Operation};
 use crate::live::resident_history::{Interval, consecutive};
 use crate::live_app_response::Observation;
-use crate::session::{CHARTED_SECONDS, EARLIER_STRIDE_SECONDS};
+use crate::session::EARLIER_STRIDE_SECONDS;
 
 #[cfg(test)]
 #[path = "store_tests.rs"]
@@ -154,9 +154,6 @@ pub struct View {
     pub stretches: Vec<Arc<AppsStretch>>,
     /// Older hover payloads, populated only by the opt-in complete payload store.
     pub sampled: Vec<Arc<SampledSecond>>,
-    /// The Apps each of Overview's App charts draws on a line of its own, chosen over the newest
-    /// seconds of `seconds` those charts draw.
-    pub cohorts: Cohorts,
     /// Whether the View holds the Apps of every second and stretch it holds, which the store
     /// loads at startup after the readings of the Mac and the Apps of the newest second.
     pub apps_loaded: bool,
@@ -432,8 +429,6 @@ struct Held {
     earlier: Span<MachineSecond>,
     /// Each App's readings added up over each stretch of the seconds of `earlier` and `span`.
     stretches: Stretches,
-    /// Room to choose the Apps of Overview's App charts in at each View.
-    leaders: Leaders,
     /// The run and publication of the newest second taken in.
     newest: Option<Newest>,
     views: Buffers<View>,
@@ -492,7 +487,6 @@ impl Held {
             earlier: Vec::with_capacity(EARLIER_MAX),
             stretches: Vec::with_capacity(STRETCHES_MAX),
             sampled: Vec::new(),
-            cohorts: Cohorts::with_room(),
             apps_loaded: false,
             failure: None,
             left_out: None,
@@ -515,7 +509,6 @@ impl Held {
             apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
             stretches: Stretches::new(STRETCHES_MAX, STRETCHES_HELD_MAX),
-            leaders: Leaders::new(),
             newest: None,
             views,
             version: 0,
@@ -722,7 +715,6 @@ impl Held {
             view.earlier.clear();
             view.stretches.clear();
             view.sampled.clear();
-            view.cohorts.clear();
         });
         if self.payload_budget.is_some() {
             self.apps.release(|apps| {
@@ -757,7 +749,6 @@ impl Held {
         // stretches never add them up, and its Views hold none.
         let stretches = self.payload_budget.is_none().then_some(&self.stretches);
         let sampled = &self.sampled;
-        let leaders = &mut self.leaders;
         let complete = self.startup == StartupState::Complete;
         let failure = self.failure;
         let left_out = self.left_out;
@@ -788,9 +779,6 @@ impl Held {
                 view.sampled.extend(sampled.held().map(Arc::clone));
                 assert_eq!(view.sampled.len(), view.earlier.len());
             }
-            if complete {
-                publish_cohorts(view, leaders);
-            }
             view.apps_loaded = complete;
             view.failure = failure;
             view.left_out = left_out;
@@ -798,7 +786,6 @@ impl Held {
             view.full_detail_evicted_through_ns = full_detail_evicted_through_ns;
 
             assert_eq!(view.apps.len(), view.seconds.len());
-            assert!(view.cohorts.seconds <= view.seconds.len());
             let held = (
                 view.seconds.capacity(),
                 view.apps.capacity(),
@@ -816,26 +803,6 @@ impl Held {
         self.version = version;
         self.unpublished = false;
     }
-}
-
-/// Writes into `view`'s cohorts the Apps each of Overview's App charts draws over the newest
-/// `CHARTED_SECONDS` wall seconds of `view`.
-fn publish_cohorts(view: &mut View, leaders: &mut Leaders) {
-    let Some(newest) = view.seconds.last() else {
-        return;
-    };
-
-    let last = newest.wall_ns / 1_000_000_000;
-    let window = WallSeconds {
-        first: last.saturating_sub(CHARTED_SECONDS - 1),
-        last,
-    };
-    let readings = Readings {
-        seconds: &view.seconds,
-        apps: &view.apps,
-        stretches: &view.stretches,
-    };
-    leaders.choose(&readings, window, &mut view.cohorts);
 }
 
 /// The tick of `second` of run `run`, as the App rule names a tick it samples.

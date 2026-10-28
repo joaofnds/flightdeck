@@ -335,7 +335,7 @@ fn staged_history_and_native_clock_jumps_rebuild_cohorts_before_incremental_upda
     publish_named(&mut fixture, 122, 2000);
     super::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();
     let view = published_view(&mut held);
-    assert_eq!(view.cohorts.seconds, 0);
+    assert!(!view.apps_loaded);
     drop(view);
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -345,9 +345,10 @@ fn staged_history_and_native_clock_jumps_rebuild_cohorts_before_incremental_upda
     drive_complete(&mut startup, &input, &mut held, &mut ring);
 
     let view = published_view(&mut held);
-    assert_eq!(view.cohorts.seconds, 5);
-    let mut names: Vec<_> = view
-        .cohorts
+    assert!(view.apps_loaded);
+    let cohorts = super::tests::charted_cohorts(&view);
+    assert_eq!(cohorts.seconds, 5);
+    let mut names: Vec<_> = cohorts
         .resident
         .iter()
         .map(|app| app.bytes.as_slice())
@@ -359,8 +360,9 @@ fn staged_history_and_native_clock_jumps_rebuild_cohorts_before_incremental_upda
     publish_named(&mut fixture, 123, 1000);
     super::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();
     let view = published_view(&mut held);
-    assert_eq!(view.cohorts.seconds, 1);
-    assert_eq!(view.cohorts.resident[0].bytes.as_slice(), b"N");
+    let cohorts = super::tests::charted_cohorts(&view);
+    assert_eq!(cohorts.seconds, 1);
+    assert_eq!(cohorts.resident[0].bytes.as_slice(), b"N");
 }
 
 pub(super) fn published_view(held: &mut super::Held) -> Arc<super::View> {

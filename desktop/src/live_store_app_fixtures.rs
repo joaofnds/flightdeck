@@ -256,8 +256,7 @@ fn hour_until_used(second: u64) -> [(&'static str, u64); 3] {
 
 /// The View of `hour()`, in whose two stretches before its live span an executable D also uses
 /// 2 s of CPU and holds 2 GB resident at each second, so D leads the charts by App over the hour
-/// and is absent from its newest fifteen minutes. Its cohorts draw on lines of their own on the
-/// CPU chart A, B and C, which led over the newest 960 seconds.
+/// and is absent from its newest fifteen minutes, which hold only A, B and C.
 pub fn hour_led_from_its_older_part() -> View {
     let (mut view, _) = hour();
     for stretch in &mut view.stretches[..2] {
@@ -271,11 +270,6 @@ pub fn hour_led_from_its_older_part() -> View {
             .collect();
         *stretch = Arc::new(AppsStretch::of_seconds(stretch.stretch, &seconds));
     }
-    view.cohorts = Cohorts {
-        seconds: 960,
-        cpu: vec![ranked("A"), ranked("B"), ranked("C")],
-        ..Cohorts::default()
-    };
 
     view
 }

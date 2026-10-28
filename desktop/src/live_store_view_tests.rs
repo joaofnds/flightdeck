@@ -5,7 +5,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use serde_json::json;
 use viewer::apps::Stamp;
 use viewer::live_app_response::{App, Key, KeyKind, Measure, Observation, RankedApp};
-use viewer::store::{AppRow, AppsSecond, MachineSecond, Totals, View};
+use viewer::store::{AppRow, AppsSecond, Cohorts, MachineSecond, Totals, View};
 
 use super::super::LiveDashboard;
 use crate::data::{Line, Panel};
@@ -788,26 +788,36 @@ fn charted_view() -> View {
         .iter()
         .map(|second| Arc::new(apps_of(second, "Brave Browser", 750_000_000)))
         .collect();
+    view
+}
+
+/// The Apps the charts by App of `view`, a `charted_view`, draw on lines of their own: Brave
+/// Browser on each, over every second of `view`.
+fn charted_cohorts(view: &View) -> Cohorts {
     let brave = Arc::new(RankedApp::named(
         KeyKind::Bundle,
         b"Brave Browser".to_vec(),
         "Brave Browser".into(),
     ));
-    view.cohorts.seconds = seconds.len();
-    view.cohorts.cpu = vec![Arc::clone(&brave)];
-    view.cohorts.power = vec![Arc::clone(&brave)];
-    view.cohorts.disk = vec![Arc::clone(&brave)];
-    view.cohorts.resident = vec![brave];
-    view
+
+    Cohorts {
+        seconds: view.seconds.len(),
+        cpu: vec![Arc::clone(&brave)],
+        power: vec![Arc::clone(&brave)],
+        disk: vec![Arc::clone(&brave)],
+        resident: vec![brave],
+        ..Cohorts::default()
+    }
 }
 
 /// An Overview showing the worker's readings of `trends` with the charts by App the worker
 /// drew of them.
 fn drawn_by_app(trends: &[MachineSecond]) -> LiveDashboard {
     let charted = charted_view();
+    let cohorts = charted_cohorts(&charted);
     let history = |metric| {
         Arc::new(crate::live_source::Presentation::Legacy(
-            AppAttributionHistory::from_view(metric, &charted, &charted.cohorts),
+            AppAttributionHistory::from_view(metric, &charted, &cohorts),
         ))
     };
     let mut snapshot = readings(trends);
@@ -818,8 +828,7 @@ fn drawn_by_app(trends: &[MachineSecond]) -> LiveDashboard {
     }));
     snapshot.resident_history = Some(std::sync::Arc::new(
         crate::live_source::Presentation::Shared(Arc::new(ResidentHistory::from_view(
-            &charted,
-            &charted.cohorts,
+            &charted, &cohorts,
         ))),
     ));
 
@@ -854,9 +863,8 @@ fn expected_by_app(view: &View) -> Vec<(String, String, Vec<Line>)> {
         (Metric::Power, "Energy by app"),
         (Metric::Disk, "Disk by app"),
     ];
-    let resident = ResidentHistory::from_view(view, &view.cohorts)
-        .panel()
-        .unwrap();
+    let cohorts = charted_cohorts(view);
+    let resident = ResidentHistory::from_view(view, &cohorts).panel().unwrap();
 
     let mut expected = vec![(
         resident.id.clone(),
@@ -864,7 +872,7 @@ fn expected_by_app(view: &View) -> Vec<(String, String, Vec<Line>)> {
         resident.lines.clone(),
     )];
     expected.extend(titled.into_iter().map(|(metric, title)| {
-        let panel = AppAttributionHistory::from_view(metric, view, &view.cohorts)
+        let panel = AppAttributionHistory::from_view(metric, view, &cohorts)
             .panel()
             .unwrap();
         (panel.id.clone(), title.into(), panel.lines.clone())
