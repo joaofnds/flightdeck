@@ -282,6 +282,7 @@ mod footprint_tests {
             seconds: Vec::new(),
             apps: Vec::new(),
             earlier: Vec::new(),
+            stretches: Vec::new(),
             sampled: Vec::new(),
             cohorts: viewer::store::Cohorts::default(),
             failure: None,

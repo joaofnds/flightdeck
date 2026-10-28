@@ -21,6 +21,7 @@ mod ring;
 mod sampled;
 mod second;
 mod selection;
+mod stretch;
 
 #[cfg(test)]
 #[path = "store/startup_tests.rs"]
@@ -37,6 +38,9 @@ mod reconciliation_tests;
 
 #[cfg(test)]
 mod retention_tests;
+
+#[cfg(test)]
+mod stretch_tests;
 
 use std::io;
 use std::path::Path;
@@ -65,6 +69,7 @@ pub use second::{
     BatterySecond, CompleteMachine, CompleteMachineState, CpuCounter, CpuInterval, CpuPrevious,
     MachineAdmission, MachineCaptureError, MachineSecond, MemorySecond, Reading, Traffic, readings,
 };
+pub use stretch::AppsStretch;
 
 use apps::TickApps;
 use collector::ring::RunIdentity;
@@ -72,6 +77,7 @@ use context::Context;
 use native::NativeRead;
 use native_acceptance::{make_ring, read_native};
 use ring::Ring;
+use stretch::Stretches;
 
 use crate::apps::Stamp;
 use crate::cancellation::{Cancellation, Operation};
@@ -101,6 +107,22 @@ const EARLIER_MAX: usize = 259;
 /// stretches.
 const EARLIER_HELD_MAX: usize = 8;
 
+/// The closed stretches of `EARLIER_STRIDE_SECONDS` the store holds Apps of: the stretches of
+/// the older seconds, and the 108 of the live span's 1,080 seconds, so with the open stretch
+/// they hold at least the hour and its lead-in, 3,660 seconds.
+const STRETCHES_MAX: usize = EARLIER_MAX + SECONDS_MAX / 10;
+
+/// The closed stretches past their span a View the main thread holds may keep. While it holds
+/// one, the store takes in at most `SECONDS_HELD_MAX` seconds, which close at most eight
+/// stretches where they follow one another.
+const STRETCHES_HELD_MAX: usize = EARLIER_HELD_MAX;
+
+const _: () = {
+    assert!(EARLIER_STRIDE_SECONDS == 10);
+    assert!(SECONDS_MAX.is_multiple_of(10));
+    assert!(STRETCHES_MAX * 10 >= 3_660);
+};
+
 /// The Views the store writes: the one in the mailbox, the one the main thread draws, the one
 /// it takes in place of that, and one to write.
 const VIEWS_MAX: usize = 4;
@@ -127,6 +149,9 @@ pub struct View {
     pub apps: Vec<Arc<AppsSecond>>,
     /// The older seconds of the loaded hour, before `seconds`, oldest first.
     pub earlier: Vec<Arc<MachineSecond>>,
+    /// Each App's readings added up over each stretch of `EARLIER_STRIDE_SECONDS` of the loaded
+    /// hour, oldest first, but the stretch of the newest second, which later seconds may add to.
+    pub stretches: Vec<Arc<AppsStretch>>,
     /// Older hover payloads, populated only by the opt-in complete payload store.
     pub sampled: Vec<Arc<SampledSecond>>,
     /// The Apps each of Overview's App charts draws on a line of its own, chosen over the newest
@@ -402,6 +427,8 @@ struct Held {
     /// Each App's totals at each second of `span`, in the same order.
     apps: Span<AppsSecond>,
     earlier: Span<MachineSecond>,
+    /// Each App's readings added up over each stretch of the seconds of `earlier` and `span`.
+    stretches: Stretches,
     /// What each App used over the newest seconds of `apps` that Overview's App charts draw.
     context: Context,
     /// The run and publication of the newest second taken in.
@@ -448,6 +475,7 @@ impl Held {
             seconds: Vec::with_capacity(SECONDS_MAX),
             apps: Vec::with_capacity(SECONDS_MAX),
             earlier: Vec::with_capacity(EARLIER_MAX),
+            stretches: Vec::with_capacity(STRETCHES_MAX),
             sampled: Vec::new(),
             cohorts: Cohorts::with_room(),
             failure: None,
@@ -470,6 +498,7 @@ impl Held {
             span: Span::new(SECONDS_MAX, seconds),
             apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
+            stretches: Stretches::new(STRETCHES_MAX, STRETCHES_HELD_MAX),
             context: Context::new(),
             newest: None,
             views,
@@ -507,6 +536,7 @@ impl Held {
         self.earlier.clear();
         self.earlier
             .release(|second| *second = MachineSecond::default());
+        self.stretches.clear();
         if let Some(sampled) = &mut self.sampled {
             sampled.clear();
             sampled.release(|sample| *sample = SampledSecond::empty());
@@ -535,7 +565,7 @@ impl Held {
         let kept = leaving
             .clone()
             .filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
-        if !self.take_room(kept.is_some()) {
+        if !self.take_room(kept.is_some(), stretch(second)) {
             return false;
         }
         let Ok(prepared_sample) = self.take_sample(kept.as_ref()) else {
@@ -588,12 +618,16 @@ impl Held {
         second.publication <= newest.publication
     }
 
-    fn take_room(&self, kept: bool) -> bool {
+    fn take_room(&self, kept: bool, stretch: u64) -> bool {
         if !self.span.has_room() {
             return false;
         }
 
         if !self.apps.has_room() {
+            return false;
+        }
+
+        if !self.stretches.has_room(stretch) {
             return false;
         }
 
@@ -659,9 +693,13 @@ impl Held {
             buffer.consecutive = take_consecutive(previous.as_deref(), buffer);
         });
         assert!(pushed);
-        if let Some(observation) = self.apps.newest().and_then(|apps| apps.observation) {
+        let Some(newest) = self.apps.newest() else {
+            unreachable!("the span just took the second in");
+        };
+        if let Some(observation) = newest.observation {
             assert_eq!(observation.stamp.publication, second.publication);
         }
+        self.stretches.take(stretch(second), newest);
         if self.startup == StartupState::Complete {
             self.context.follow(&self.span, &self.apps);
         }
@@ -672,6 +710,7 @@ impl Held {
             view.seconds.clear();
             view.apps.clear();
             view.earlier.clear();
+            view.stretches.clear();
             view.sampled.clear();
             view.cohorts.clear();
         });
@@ -690,6 +729,7 @@ impl Held {
             .release(|second| *second = MachineSecond::default());
         self.earlier
             .release(|second| *second = MachineSecond::default());
+        self.stretches.release();
         if let Some(sampled) = &mut self.sampled {
             sampled.release(|second| *second = SampledSecond::empty());
         }
@@ -703,6 +743,7 @@ impl Held {
         let span = &self.span;
         let apps = &self.apps;
         let earlier = &self.earlier;
+        let stretches = &self.stretches;
         let sampled = &self.sampled;
         let context = &mut self.context;
         let failure = self.failure;
@@ -713,11 +754,13 @@ impl Held {
             assert!(view.seconds.is_empty());
             assert!(view.apps.is_empty());
             assert!(view.earlier.is_empty());
+            assert!(view.stretches.is_empty());
             assert!(view.sampled.is_empty());
             let capacity = (
                 view.seconds.capacity(),
                 view.apps.capacity(),
                 view.earlier.capacity(),
+                view.stretches.capacity(),
                 view.sampled.capacity(),
             );
 
@@ -725,6 +768,7 @@ impl Held {
             view.seconds.extend(span.held().map(Arc::clone));
             view.apps.extend(apps.held().map(Arc::clone));
             view.earlier.extend(earlier.held().map(Arc::clone));
+            view.stretches.extend(stretches.held().map(Arc::clone));
             if let Some(sampled) = sampled {
                 view.sampled.extend(sampled.held().map(Arc::clone));
                 assert_eq!(view.sampled.len(), view.earlier.len());
@@ -741,6 +785,7 @@ impl Held {
                 view.seconds.capacity(),
                 view.apps.capacity(),
                 view.earlier.capacity(),
+                view.stretches.capacity(),
                 view.sampled.capacity(),
             );
             assert_eq!(held, capacity);

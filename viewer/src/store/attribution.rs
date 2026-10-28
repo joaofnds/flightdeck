@@ -186,7 +186,7 @@ pub(super) trait PointApps {
 }
 
 /// How completely one chart point's readings found the Mac's processes.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Completeness {
     pub(super) membership_complete: bool,
     pub(super) ungrouped_members: u32,
