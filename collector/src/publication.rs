@@ -2,18 +2,15 @@ use std::io::{self, Write};
 
 use crate::identity_report::IdentityReport;
 
-use collector::collector::Collector;
-use collector::cost::Meter;
-use collector::ring::{
-    Dropped, IOReportReadings, IdentityObservation, IdentityPublication, IdentityUnavailable,
-    ObservationTimes, ProcessIdentity, Readings, SmcReadings, SupplementalReadings,
-    SystemPublication, UsageAvailability, Writer,
+use crate::collector::Collector;
+use crate::cost::Meter;
+use crate::ring::{
+    Dropped, IdentityObservation, IdentityPublication, IdentityUnavailable, ObservationTimes,
+    ProcessIdentity, Readings, SupplementalReadings, SystemPublication, UsageAvailability, Writer,
 };
-use collector::tracker::{
-    EVENTS_PER_TICK_MAX, Event, EventCreation, EventIdentity, WatchDiagnostics,
-};
+use crate::tracker::{EVENTS_PER_TICK_MAX, Event, EventCreation, EventIdentity, WatchDiagnostics};
 
-pub(crate) struct Publication {
+pub struct Publication {
     identity_enabled: bool,
     tails: Tails,
     events: Vec<IdentityObservation>,
@@ -52,7 +49,7 @@ impl Tails {
 }
 
 impl Publication {
-    pub(crate) fn new(ring: &Writer) -> io::Result<Self> {
+    pub fn new(ring: &Writer) -> io::Result<Self> {
         let identity_enabled = ring.dictionary_usage()?.is_some();
 
         Ok(Self {
@@ -64,7 +61,7 @@ impl Publication {
         })
     }
 
-    pub(crate) fn read(
+    pub fn read(
         &mut self,
         collector: &mut Collector,
         meter: &mut Meter,
@@ -100,7 +97,7 @@ impl Publication {
         Ok(())
     }
 
-    pub(crate) fn wait_until(
+    pub fn wait_until(
         &mut self,
         collector: &mut Collector,
         deadline: u64,
@@ -119,7 +116,7 @@ impl Publication {
         Ok(())
     }
 
-    pub(crate) fn publish(
+    pub fn publish(
         &mut self,
         ring: &mut Writer,
         collector: &Collector,
@@ -129,18 +126,8 @@ impl Publication {
         let ioreport = collector
             .ioreport
             .as_ref()
-            .map(|ioreport| IOReportReadings {
-                gpu_energy_nj: ioreport.gpu_energy_nj(),
-                gpu_active_ns: ioreport.gpu().active_ns(),
-                cores: ioreport.cores(),
-            });
-        let smc = collector.smc.as_ref().map(|smc| SmcReadings {
-            power_watts: smc.power_watts(),
-            soc_celsius: smc.soc_celsius(),
-            cpu_celsius: smc.cpu_celsius(),
-            gpu_celsius: smc.gpu_celsius(),
-            fan_rpm: smc.fan_rpm(),
-        });
+            .and_then(crate::ioreport::IOReport::reading);
+        let smc = collector.smc.as_ref().and_then(crate::smc::Smc::reading);
         let counts = collector.counts_tick();
         let readings = Readings {
             run_tick: tick,
@@ -226,7 +213,7 @@ impl Publication {
         }
     }
 
-    pub(crate) fn report(
+    pub fn report(
         &mut self,
         ring: &Writer,
         label: &'static str,
@@ -286,10 +273,10 @@ impl Publication {
                         *pid,
                         match last {
                             Ok(_) => UsageAvailability::Measured,
-                            Err(collector::processes::Unreadable::Refused) => {
+                            Err(crate::processes::Unreadable::Refused) => {
                                 UsageAvailability::Refused
                             }
-                            Err(collector::processes::Unreadable::Gone) => UsageAvailability::Gone,
+                            Err(crate::processes::Unreadable::Gone) => UsageAvailability::Gone,
                         },
                         ProcessIdentity::Unavailable { creation, reason },
                     )

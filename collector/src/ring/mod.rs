@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub use crate::ioreport::IOReportReadings;
+pub use crate::smc::SmcReadings;
 use event::{load_event, store_event};
 pub use identity::{
     DictionaryUsage, IdentityAvailability, IdentityObservation, IdentityPublication,
@@ -47,7 +49,7 @@ use object::{
     ring_name,
 };
 pub use system::{GPU_NS_MAX, SystemPublication, SystemSnapshot};
-pub use tick::{Dropped, IOReportReadings, Readings, SmcReadings, Tick};
+pub use tick::{Dropped, Readings, Tick};
 pub use view::{PublicationTiming, RingReader, TickBuffers};
 
 /// Explicit opt-in dictionary bounds; default writers continue using layout 3.

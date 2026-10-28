@@ -25,6 +25,12 @@ impl Timebase {
         denominator: 1,
     };
 
+    #[cfg(test)]
+    pub(crate) const OVERFLOWING_TICKS: Self = Self {
+        numerator: 3,
+        denominator: 1,
+    };
+
     pub fn read() -> io::Result<Self> {
         let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
         let returned = unsafe { mach_timebase_info(&raw mut info) };
@@ -35,16 +41,23 @@ impl Timebase {
 
     /// Converts `ticks` to nanoseconds, rounded down.
     pub fn nanoseconds(self, ticks: u64) -> io::Result<u64> {
+        self.checked_nanoseconds(ticks).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{ticks} ticks run past the nanoseconds a u64 holds"),
+            )
+        })
+    }
+
+    /// The nonallocating conversion used by sources whose read errors are recoverable.
+    pub(crate) fn checked_nanoseconds(self, ticks: u64) -> Option<u64> {
         assert!(self.numerator > 0);
         assert!(self.denominator > 0);
 
         let nanoseconds =
             u128::from(ticks) * u128::from(self.numerator) / u128::from(self.denominator);
         let Ok(nanoseconds) = u64::try_from(nanoseconds) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{ticks} ticks run past the nanoseconds a u64 holds"),
-            ));
+            return None;
         };
 
         // A tick lasts a nanosecond or more exactly when the numerator is at least the
@@ -54,7 +67,7 @@ impl Timebase {
         } else {
             assert!(nanoseconds <= ticks);
         }
-        Ok(nanoseconds)
+        Some(nanoseconds)
     }
 
     /// Converts `nanoseconds` to ticks, rounded down.
@@ -126,6 +139,26 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn converts_checked_nanoseconds_and_refuses_overflow_without_allocating() {
+        // Goal: recoverable sources can convert time without constructing a terminal io::Error.
+        // Method: count valid, rounded and overflowing conversions with two fixed timebases.
+        let fractional = read_check(MachTimebaseInfo {
+            numer: 125,
+            denom: 3,
+        })
+        .unwrap();
+
+        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+            assert_eq!(Timebase::NANOSECOND_TICKS.checked_nanoseconds(0), Some(0));
+            assert_eq!(fractional.checked_nanoseconds(1), Some(41));
+            assert_eq!(fractional.checked_nanoseconds(3), Some(125));
+            assert_eq!(fractional.checked_nanoseconds(u64::MAX), None);
+        });
+
+        assert_eq!(calls, 0);
+    }
 
     #[test]
     fn measures_an_interval_of_at_least_the_time_slept() {

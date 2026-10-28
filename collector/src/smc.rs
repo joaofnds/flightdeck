@@ -5,6 +5,7 @@ use crate::kernel::{self, KernReturn, MachPort, kern_return_check};
 use crate::push_without_growing;
 
 pub struct Smc {
+    valid: bool,
     controller: Controller,
     power: FloatKey,
     fans: Vec<FloatKey>,
@@ -16,6 +17,52 @@ pub struct Smc {
     soc_celsius: f32,
     cpu_celsius: Option<f32>,
     gpu_celsius: Option<f32>,
+}
+
+pub struct SmcReadings<'a> {
+    pub power_watts: f32,
+    pub soc_celsius: f32,
+    /// The hottest sensor of the CPU's cores, or `None` where the SMC lists none.
+    pub cpu_celsius: Option<f32>,
+    /// The hottest sensor of the GPU, or `None` where the SMC lists none.
+    pub gpu_celsius: Option<f32>,
+    pub fan_rpm: &'a [f32],
+}
+
+/// A returned acquisition failure, kept fixed-size until collection reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadError {
+    Native(i32),
+    AnswerSize(usize),
+    MissingKey { key: u32, command: u8, index: u32 },
+    Controller(u8),
+}
+
+const _: () = assert!(size_of::<ReadError>() <= 24);
+
+impl ReadError {
+    fn kind(self) -> io::ErrorKind {
+        match self {
+            Self::Native(_) | Self::Controller(_) => io::ErrorKind::Other,
+            Self::AnswerSize(_) => io::ErrorKind::InvalidData,
+            Self::MissingKey { .. } => io::ErrorKind::NotFound,
+        }
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "SMC read failed: {self:?}")
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+// Only startup and fixture export convert a read error to an allocating terminal error.
+impl From<ReadError> for io::Error {
+    fn from(error: ReadError) -> Self {
+        Self::new(error.kind(), error)
+    }
 }
 
 /// A key the SMC holds as a float, as its info showed when the key was checked, so a read of
@@ -125,7 +172,7 @@ impl Connection {
         Ok(Self(port))
     }
 
-    fn ask(&self, question: &Message) -> io::Result<Message> {
+    fn ask(&self, question: &Message) -> Result<Message, ReadError> {
         assert_ne!(0, self.0);
 
         let mut answer = Message::default();
@@ -202,7 +249,7 @@ impl Controller {
         Ok(FloatKey(key))
     }
 
-    fn read_float(&self, key: FloatKey) -> io::Result<f32> {
+    fn read_float(&self, key: FloatKey) -> Result<f32, ReadError> {
         const { assert!(FLOAT.size == 4) };
         let [first, second, third, fourth, ..] = self.bytes(key.0, FLOAT)?;
 
@@ -216,7 +263,7 @@ impl Controller {
         assert!(info.size <= VALUE_SIZE_MAX);
 
         self.held_check(key, info)?;
-        self.bytes(key, info)
+        Ok(self.bytes(key, info)?)
     }
 
     /// Checks that the SMC holds `key` as a value of `wanted`.
@@ -239,7 +286,7 @@ impl Controller {
     }
 
     /// The bytes of `key` read as a value of `info`, which the caller checked the SMC holds.
-    fn bytes(&self, key: Key, info: KeyInfo) -> io::Result<[u8; MESSAGE_BYTES_SIZE]> {
+    fn bytes(&self, key: Key, info: KeyInfo) -> Result<[u8; MESSAGE_BYTES_SIZE], ReadError> {
         assert!(info.size > 0);
         assert!(info.size <= VALUE_SIZE_MAX);
 
@@ -252,7 +299,7 @@ impl Controller {
         Ok(answer.bytes)
     }
 
-    fn ask(&self, question: &Message) -> io::Result<Message> {
+    fn ask(&self, question: &Message) -> Result<Message, ReadError> {
         assert!(COMMANDS.contains(&question.command));
         assert_eq!(0, question.padding);
         assert_eq!([0; 3], question.info.padding);
@@ -532,6 +579,7 @@ impl Smc {
         let fan_rpm = Vec::with_capacity(fans.len());
 
         Ok(Self {
+            valid: false,
             controller,
             power,
             fans,
@@ -546,7 +594,8 @@ impl Smc {
         })
     }
 
-    pub fn read(&mut self) -> io::Result<()> {
+    pub fn read(&mut self) -> Result<(), ReadError> {
+        self.valid = false;
         assert!(self.fans.len() <= usize::from(FANS_MAX));
         assert!(self.fans.len() <= self.fan_rpm.capacity());
 
@@ -567,18 +616,31 @@ impl Smc {
             .transpose()?
             .and_then(usable_celsius);
 
+        self.valid = true;
         Ok(())
+    }
+
+    /// A complete reading from the latest attempt, never a partially updated buffer.
+    #[must_use]
+    pub fn reading(&self) -> Option<SmcReadings<'_>> {
+        self.valid.then(|| SmcReadings {
+            power_watts: self.power_watts(),
+            soc_celsius: self.soc_celsius(),
+            cpu_celsius: self.cpu_celsius(),
+            gpu_celsius: self.gpu_celsius(),
+            fan_rpm: self.fan_rpm(),
+        })
     }
 
     /// The power the Mac drew at the last read, in watts.
     #[must_use]
-    pub fn power_watts(&self) -> f32 {
+    fn power_watts(&self) -> f32 {
         self.power_watts
     }
 
     /// The speed of each fan at the last read, in revolutions a minute.
     #[must_use]
-    pub fn fan_rpm(&self) -> &[f32] {
+    fn fan_rpm(&self) -> &[f32] {
         // Empty until the first read, and one speed for each fan after it.
         assert!(self.fan_rpm.len() <= self.fans.len());
         assert!(self.fans.len() <= usize::from(FANS_MAX));
@@ -588,7 +650,7 @@ impl Smc {
 
     /// The temperature at the last read of the chip's sensor open picked, in degrees Celsius.
     #[must_use]
-    pub fn soc_celsius(&self) -> f32 {
+    fn soc_celsius(&self) -> f32 {
         assert!(self.soc_sensor.0.is_soc_temperature());
 
         self.soc_celsius
@@ -597,7 +659,7 @@ impl Smc {
     /// The temperature at the last read of the hottest sensor of the CPU's cores open picked,
     /// in degrees Celsius, or `None` where the SMC lists no such sensor.
     #[must_use]
-    pub fn cpu_celsius(&self) -> Option<f32> {
+    fn cpu_celsius(&self) -> Option<f32> {
         if let Some(sensor) = self.cpu_sensor {
             assert!(sensor.0.is_cpu_temperature());
         }
@@ -608,7 +670,7 @@ impl Smc {
     /// The temperature at the last read of the hottest sensor of the GPU open picked, in
     /// degrees Celsius, or `None` where the SMC lists no such sensor.
     #[must_use]
-    pub fn gpu_celsius(&self) -> Option<f32> {
+    fn gpu_celsius(&self) -> Option<f32> {
         if let Some(sensor) = self.gpu_sensor {
             assert!(sensor.0.is_gpu_temperature());
         }
@@ -692,35 +754,24 @@ fn ask_answered(
     returned: KernReturn,
     answer_size: usize,
     answer: Message,
-) -> io::Result<Message> {
+) -> Result<Message, ReadError> {
     assert!(COMMANDS.contains(&question.command));
 
-    kern_return_check(returned, "calling the SMC")?;
+    if returned != kernel::KERN_SUCCESS {
+        return Err(ReadError::Native(returned));
+    }
     if answer_size != size_of::<Message>() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "the SMC answered with {answer_size} bytes, where a message holds {}",
-                size_of::<Message>()
-            ),
-        ));
+        return Err(ReadError::AnswerSize(answer_size));
     }
     if answer.result == KEY_NOT_FOUND {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "the SMC has no key {:?} for command {} at index {}",
-                Key(question.key),
-                question.command,
-                question.index
-            ),
-        ));
+        return Err(ReadError::MissingKey {
+            key: question.key,
+            command: question.command,
+            index: question.index,
+        });
     }
     if answer.result != SUCCESS {
-        return Err(io::Error::other(format!(
-            "the SMC refused a question with result {}",
-            answer.result
-        )));
+        return Err(ReadError::Controller(answer.result));
     }
 
     Ok(answer)
@@ -792,7 +843,8 @@ fn hottest_soc_sensor_of(
 }
 
 #[cfg(test)]
-mod tests {
+#[path = "smc"]
+pub(crate) mod tests {
     use super::*;
     use crate::usize_from_u32;
 
@@ -1141,6 +1193,7 @@ mod tests {
     pub(super) struct FakeSmc {
         keys: Vec<Key>,
         answers: Vec<Answer>,
+        failure: Option<read_tests::Failure>,
     }
 
     /// The info and the bytes of a key the collector asks about.
@@ -1190,7 +1243,11 @@ mod tests {
                     bytes: answer[16..ANSWER_SIZE].try_into().unwrap(),
                 })
                 .collect();
-            Self { keys, answers }
+            Self {
+                keys,
+                answers,
+                failure: None,
+            }
         }
 
         /// This SMC with `key` holding `value` in its first bytes, as whatever type it holds.
@@ -1200,7 +1257,14 @@ mod tests {
             self
         }
 
-        pub(super) fn ask(&self, question: &Message) -> io::Result<Message> {
+        pub(super) fn ask(&self, question: &Message) -> Result<Message, ReadError> {
+            if question.command == READ_BYTES {
+                if question.key == Key::fan_speed(1).0 {
+                    if let Some(failure) = self.failure {
+                        return failure.answer(question);
+                    }
+                }
+            }
             let answer = self.answer(question);
             ask_answered(question, kernel::KERN_SUCCESS, size_of::<Message>(), answer)
         }
@@ -1242,9 +1306,16 @@ mod tests {
     }
 
     /// The SMC of the M5 Pro that `smc_fixture` recorded, opened.
-    fn m5_pro() -> Smc {
+    pub(crate) fn m5_pro() -> Smc {
         Smc::open_with(Controller::Fake(FakeSmc::m5_pro())).unwrap()
     }
+
+    pub(crate) fn fail_read(smc: &mut Smc) {
+        read_tests::set_read(smc, 1, Some(read_tests::Failure::Native));
+    }
+
+    #[path = "read_tests.rs"]
+    pub(crate) mod read_tests;
 
     #[test]
     fn reads_the_speed_of_every_fan_the_smc_counts() {

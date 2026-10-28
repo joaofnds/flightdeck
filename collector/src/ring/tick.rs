@@ -15,9 +15,12 @@ use super::layout::{
 };
 use crate::coalitions::Coalition;
 use crate::interfaces::{IFNAMSIZ, Interface, Name};
+use crate::ioreport::IOReportReadings;
+#[cfg(test)]
 use crate::ioreport::States;
 use crate::machine::{CPUTicks, Memory, Pressure};
 use crate::processes::{Process, Task, Usage};
+use crate::smc::SmcReadings;
 use crate::tracker::Event;
 use crate::{push_without_growing, u64_from_usize};
 
@@ -48,22 +51,6 @@ pub struct Dropped {
     pub starts: u64,
     pub execs: u64,
     pub exits: u64,
-}
-
-pub struct IOReportReadings<'a> {
-    pub gpu_energy_nj: u64,
-    pub gpu_active_ns: &'a [u64],
-    pub cores: &'a [States],
-}
-
-pub struct SmcReadings<'a> {
-    pub power_watts: f32,
-    pub soc_celsius: f32,
-    /// The hottest sensor of the CPU's cores, or `None` where the SMC lists none.
-    pub cpu_celsius: Option<f32>,
-    /// The hottest sensor of the GPU, or `None` where the SMC lists none.
-    pub gpu_celsius: Option<f32>,
-    pub fan_rpm: &'a [f32],
 }
 
 /// A tick as a reader loads it, in lists with room taken once for all the ring's shape holds.

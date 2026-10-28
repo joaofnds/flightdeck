@@ -1,7 +1,10 @@
-mod identity_report;
 mod owner;
-mod publication;
 mod stop;
+
+#[cfg(test)]
+mod identity_report;
+#[cfg(test)]
+use collector as identity_report_source;
 
 #[cfg(test)]
 mod owner_run_tests;
@@ -24,7 +27,7 @@ use collector::schedule::Schedule;
 use collector::tracker::{Counts, Event, Noticed};
 use collector::u64_from_usize;
 
-use publication::Publication;
+use collector::publication::Publication;
 
 const QOS_CLASS_DEFAULT: u32 = 0x15;
 const TICK_PERIOD_NS: u64 = 1_000_000_000;

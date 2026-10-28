@@ -16,6 +16,10 @@ struct Recording {
 
 impl Recording {
     fn new() -> Self {
+        Self::with_ticks(2, |publication| tick(publication == 2))
+    }
+
+    fn with_ticks(count: u64, reading: impl Fn(u64) -> Tick) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let root =
             std::env::temp_dir().join(format!("flightdeck-scalar-{}-{serial}", std::process::id()));
@@ -40,8 +44,8 @@ impl Recording {
             event_capacity: 8,
         };
         let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
-        for publication in 1..=2 {
-            let tick = tick(publication == 2);
+        for publication in 1..=count {
+            let tick = reading(publication);
             window
                 .push_tick(
                     &persistence::Observation {
@@ -101,7 +105,7 @@ impl Recording {
                 persistence::Manifest {
                     identity,
                     publication_first: 1,
-                    publication_end: 3,
+                    publication_end: self.window.publication_range().end,
                     events_first: 0,
                     events_end: 0,
                     wall_ns: None,
@@ -184,6 +188,95 @@ fn tick(current: bool) -> Tick {
     tick.soc_celsius = 45.0;
     tick.cpu_celsius = current.then_some(61.5);
     tick.gpu_celsius = current.then_some(52.25);
+    tick
+}
+
+#[test]
+fn preserves_optional_source_failure_and_recovery_in_live_and_saved_projection() {
+    // Goal: sealing preserves absence, fresh recovery, and the missing counter predecessor.
+    // Method: encode true/false/true/true availability with distinct gauges and absolute counters.
+    let recording = Recording::with_ticks(4, recovery_tick);
+    let tables = recording.project();
+    let observations: [Observation; 4] = std::array::from_fn(|index| {
+        let publication = u64::try_from(index).unwrap() + 1;
+        Observation {
+            window: 0,
+            publication,
+            run_tick: publication,
+            wall: (999 + publication) * 1_000_000_000,
+            continuous: Some((publication * 2 - 1) * 1_000_000_000),
+        }
+    });
+    recording.seal();
+    let mut session = Session::open(&recording.root).unwrap();
+
+    for (index, observation) in observations.iter().enumerate() {
+        let previous = index.checked_sub(1).map(|index| &observations[index]);
+        let mut live = point(&tables, observation, previous, 1).unwrap();
+        live["run"] = json!(
+            collector::recording::identity_text(recording.window.identity.run.run).to_string()
+        );
+        live["boot"] = json!(
+            collector::recording::identity_text(recording.window.identity.run.boot).to_string()
+        );
+        let saved = session
+            .select(1000 + u64::try_from(index).unwrap(), 0)
+            .unwrap();
+        assert_eq!(saved["summary"], live);
+        assert_eq!(
+            live["power_watts"],
+            [json!(0.0), Value::Null, json!(30.0), json!(0.0)][index]
+        );
+        assert_eq!(
+            live["fan_rpm"],
+            [json!([0.0]), Value::Null, json!([30.0]), json!([0.0])][index]
+        );
+        assert_eq!(
+            live["gpu_watts"],
+            [Value::Null, Value::Null, Value::Null, json!(0.5)][index]
+        );
+        assert_eq!(
+            live["gpu_active_percent"],
+            [Value::Null, Value::Null, Value::Null, json!(10.0)][index]
+        );
+        assert_eq!(live["memory_free_bytes"], 2);
+    }
+    assert_failed_encoding(&tables);
+}
+
+fn assert_failed_encoding(tables: &Tables) {
+    let failed = &tables[&(0, "ticks")][&2];
+    for field in [
+        "gpu_energy_nj",
+        "power_watts",
+        "soc_celsius",
+        "cpu_celsius",
+        "gpu_celsius",
+    ] {
+        let column = failed
+            .columns
+            .iter()
+            .position(|name| name == field)
+            .unwrap();
+        assert_eq!(failed.rows[0][column], None);
+    }
+    assert!(!tables[&(0, "gpu_states")].contains_key(&2));
+    assert!(!tables[&(0, "fans")].contains_key(&2));
+}
+
+fn recovery_tick(publication: u64) -> Tick {
+    let mut tick = tick(publication == 4);
+    tick.run_tick = publication;
+    tick.smc_read = publication != 2;
+    tick.ioreport_read = publication != 2;
+    let gauge = if publication == 3 { 30.0 } else { 0.0 };
+    tick.power_watts = gauge;
+    tick.soc_celsius = 40.0 + gauge;
+    tick.cpu_celsius = (publication != 2).then_some(40.0 + gauge);
+    tick.gpu_celsius = (publication != 2).then_some(40.0 + gauge);
+    tick.fan_rpm = vec![gauge];
+    tick.gpu_energy_nj = publication * 1_000_000_000;
+    tick.gpu_active_ns = vec![publication * 100_000_000; 2];
     tick
 }
 

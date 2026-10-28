@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use collector::battery::{Battery, BatteryReading, BatterySource, Error, READ_INTERVAL_NS};
-use collector::clock::Timebase;
-use collector::processes::{Process, Task, Unreadable, Usage};
-use collector::ring::{
+use crate::battery::{Battery, BatteryReading, BatterySource, Error, READ_INTERVAL_NS};
+use crate::clock::Timebase;
+use crate::processes::{Process, Task, Unreadable, Usage};
+use crate::ring::{
     DictionaryCapacity, Found, FoundEvent, Identity, Place, RingReader, RunIdentity, Shape, Tick,
     TickBuffers,
 };
-use collector::tracker::Noticed;
+use crate::tracker::Noticed;
 
 use super::*;
 
@@ -87,14 +87,14 @@ impl Harness {
         let capacity = collector.capacities();
         let shape = Shape {
             slot_count: 2,
-            cpu_capacity: collector::u64_from_usize(capacity.cpus),
-            interface_capacity: collector::u64_from_usize(capacity.interfaces),
-            core_capacity: collector::u64_from_usize(capacity.cores),
-            state_capacity: collector::u64_from_usize(capacity.states),
-            fan_capacity: collector::u64_from_usize(capacity.fans),
-            process_capacity: collector::u64_from_usize(capacity.processes),
-            coalition_capacity: collector::u64_from_usize(capacity.coalitions),
-            event_capacity: 2 * collector::u64_from_usize(capacity.events),
+            cpu_capacity: crate::u64_from_usize(capacity.cpus),
+            interface_capacity: crate::u64_from_usize(capacity.interfaces),
+            core_capacity: crate::u64_from_usize(capacity.cores),
+            state_capacity: crate::u64_from_usize(capacity.states),
+            fan_capacity: crate::u64_from_usize(capacity.fans),
+            process_capacity: crate::u64_from_usize(capacity.processes),
+            coalition_capacity: crate::u64_from_usize(capacity.coalitions),
+            event_capacity: 2 * crate::u64_from_usize(capacity.events),
         };
         let identity = RunIdentity {
             recording: Identity([1, 2]),
@@ -125,7 +125,7 @@ impl Harness {
 
 impl Drop for Harness {
     fn drop(&mut self) {
-        collector::ring::unlink_generation(self.writer.name()).unwrap();
+        crate::ring::unlink_generation(self.writer.name()).unwrap();
         std::fs::remove_file(&self.lock_path).unwrap();
     }
 }
@@ -178,7 +178,7 @@ fn tick() -> Tick {
 }
 
 fn readings<'data>(
-    memory: &'data collector::machine::Memory,
+    memory: &'data crate::machine::Memory,
     processes: &'data [Process],
     events: &'data [Event],
 ) -> Readings<'data> {
@@ -207,12 +207,12 @@ macro_rules! event_cases {
             let mut harness = Harness::new();
             let mut publication = Publication::new(&harness.writer).unwrap();
             let events = [$event];
-            let memory = collector::machine::Memory::default();
+            let memory = crate::machine::Memory::default();
             let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
 
             publication.publish_readings(&mut harness.writer,
                 &readings(&memory, &[], &events), None, &[],
-                &[collector::tracker::EventObservation::from($event).identity],
+                &[crate::tracker::EventObservation::from($event).identity],
                 &SupplementalReadings::default()).unwrap();
             let mut identity = IdentityObservation::EMPTY;
             let found = reader.read_event_identity(&mut identity).unwrap();
@@ -247,7 +247,7 @@ macro_rules! exit_source_cases {
             let mut publication = Publication::new(&harness.writer).unwrap();
             let event = Event::Exit { pid: 4, last: $last, noticed: Noticed::OnExit };
             let source = EventIdentity { pid: 4, creation: EventCreation::Exit($creation) };
-            let memory = collector::machine::Memory::default();
+            let memory = crate::machine::Memory::default();
             let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
 
             publication.publish_readings(&mut harness.writer,
@@ -264,7 +264,7 @@ macro_rules! exit_source_cases {
     )*};
 }
 
-const EXIT_CREATION: collector::ring::ProcessCreation = collector::ring::ProcessCreation {
+const EXIT_CREATION: crate::ring::ProcessCreation = crate::ring::ProcessCreation {
     unique_id: 93,
     pid_version: 8,
 };
@@ -276,7 +276,7 @@ fn publishes_the_program_captured_at_start_discovery() {
     let mut harness = Harness::new();
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut bytes = None;
-    collector::programs::split_program(b"/A.app/bin/x", &mut bytes).unwrap();
+    crate::programs::split_program(b"/A.app/bin/x", &mut bytes).unwrap();
     let mut program = None;
     harness
         .writer
@@ -293,7 +293,7 @@ fn publishes_the_program_captured_at_start_discovery() {
             program: program.unwrap(),
         }),
     };
-    let memory = collector::machine::Memory::default();
+    let memory = crate::machine::Memory::default();
     let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
 
     publication
@@ -323,7 +323,7 @@ fn publishes_the_program_captured_at_start_discovery() {
     assert_eq!(UsageAvailability::NotApplicable, identity.usage);
     assert_eq!(Some(&EXIT_CREATION), identity.creation());
     assert_eq!(
-        collector::ring::IdentityAvailability::Measured,
+        crate::ring::IdentityAvailability::Measured,
         identity.availability()
     );
     assert_start_program(&reader, &identity);
@@ -336,7 +336,7 @@ fn publishes_the_program_captured_at_exec_notice() {
     let mut harness = Harness::new();
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut bytes = None;
-    collector::programs::split_program(b"/A.app/bin/x", &mut bytes).unwrap();
+    crate::programs::split_program(b"/A.app/bin/x", &mut bytes).unwrap();
     let mut program = None;
     harness
         .writer
@@ -349,7 +349,7 @@ fn publishes_the_program_captured_at_exec_notice() {
             program: program.unwrap(),
         }),
     };
-    let memory = collector::machine::Memory::default();
+    let memory = crate::machine::Memory::default();
     let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
     publication
         .publish_readings(
@@ -375,19 +375,19 @@ fn publishes_the_program_captured_at_exec_notice() {
     assert_eq!(UsageAvailability::NotApplicable, identity.usage);
     assert_eq!(Some(&EXIT_CREATION), identity.creation());
     assert_eq!(
-        collector::ring::IdentityAvailability::Measured,
+        crate::ring::IdentityAvailability::Measured,
         identity.availability()
     );
     assert_start_program(&reader, &identity);
 }
 
 fn assert_start_program(reader: &RingReader, identity: &IdentityObservation) {
-    let mut executable = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
-    let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut executable = [0; crate::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut app = [0; crate::ring::PROGRAM_PATH_BYTES_MAX];
     let (executable_length, app_length) = reader
         .copy_program(
             identity.program().unwrap(),
-            &mut collector::ring::ProgramBuffers {
+            &mut crate::ring::ProgramBuffers {
                 executable_name: &mut executable,
                 app_path: &mut app,
             },
@@ -410,7 +410,7 @@ fn preserves_an_unassociated_exec_without_a_replacement_creation() {
             reason: IdentityUnavailable::Changed,
         }),
     };
-    let memory = collector::machine::Memory::default();
+    let memory = crate::machine::Memory::default();
     let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
     publication
         .publish_readings(
@@ -459,8 +459,8 @@ fn publishes_scheduled_start_identity_from_collection() {
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut child = HeldChild::new();
     let pid = child.0.id().cast_signed();
-    let mut expected = Err(collector::programs::CreationError::NotRead);
-    collector::programs::read_creation(pid, false, &mut expected);
+    let mut expected = Err(crate::programs::CreationError::NotRead);
+    crate::programs::read_creation(pid, false, &mut expected);
     let expected = expected.unwrap();
     let mut program = None;
     publishes_scheduled_start_identity_from_collection_capture(
@@ -491,7 +491,7 @@ fn publishes_scheduled_start_identity_from_collection() {
     assert_eq!(Some(&expected), identity.creation());
     assert_eq!(UsageAvailability::NotApplicable, identity.usage);
     assert_eq!(
-        collector::ring::IdentityAvailability::Measured,
+        crate::ring::IdentityAvailability::Measured,
         identity.availability(),
         "{identity:?}"
     );
@@ -505,12 +505,12 @@ fn publishes_scheduled_start_identity_from_collection() {
 fn publishes_scheduled_start_identity_from_collection_capture(
     pid: i32,
     writer: &mut Writer,
-    program: &mut Option<collector::ring::ProgramReference>,
+    program: &mut Option<crate::ring::ProgramReference>,
 ) {
     let mut scratch = [0; 4096];
-    let length = collector::programs::read_path(pid, &mut scratch).unwrap();
+    let length = crate::programs::read_path(pid, &mut scratch).unwrap();
     let mut bytes = None;
-    collector::programs::split_program(&scratch[..length], &mut bytes).unwrap();
+    crate::programs::split_program(&scratch[..length], &mut bytes).unwrap();
     writer.intern_program(&bytes.unwrap(), program).unwrap();
 }
 
@@ -544,12 +544,12 @@ fn publishes_scheduled_start_identity_from_collection_program(
     reader: &RingReader,
     identity: &IdentityObservation,
 ) {
-    let mut executable = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
-    let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut executable = [0; crate::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut app = [0; crate::ring::PROGRAM_PATH_BYTES_MAX];
     let (executable_length, app_length) = reader
         .copy_program(
             identity.program().unwrap(),
-            &mut collector::ring::ProgramBuffers {
+            &mut crate::ring::ProgramBuffers {
                 executable_name: &mut executable,
                 app_path: &mut app,
             },
@@ -574,7 +574,7 @@ fn reports_wait_capture_diagnostics_before_the_scheduled_sweep_resets_them() {
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut child = HeldChild::new();
     let mut meter = Meter::default();
-    let deadline = collector::clock::now() + timebase.ticks(10_000_000).unwrap();
+    let deadline = crate::clock::now() + timebase.ticks(10_000_000).unwrap();
 
     publication
         .wait_until(&mut collector, deadline, &mut meter, &mut harness.writer)
@@ -641,9 +641,9 @@ fn reports_the_raw_watch_identity_failure_from_bounded_storage() {
     publication.watch_diagnostics = WatchDiagnostics {
         reads: 2,
         unavailable: 1,
-        last_failure: Some(collector::tracker::WatchFailure {
+        last_failure: Some(crate::tracker::WatchFailure {
             pid: 4321,
-            error: collector::programs::CreationError::Syscall(14),
+            error: crate::programs::CreationError::Syscall(14),
         }),
     };
     let mut output = Vec::new();
@@ -657,7 +657,7 @@ fn reports_the_raw_watch_identity_failure_from_bounded_storage() {
     assert!(output.contains("watch identity test last_failure_pid=4321 error=Syscall(14)"));
 }
 
-fn diagnostic_count(diagnostics: &collector::programs::sweep::Diagnostics) -> u64 {
+fn diagnostic_count(diagnostics: &crate::programs::sweep::Diagnostics) -> u64 {
     diagnostics.measured
         + diagnostics.refused
         + diagnostics.gone
@@ -705,7 +705,7 @@ macro_rules! start_source_cases {
             let mut publication = Publication::new(&harness.writer).unwrap();
             let source = EventIdentity { pid: 4, creation: EventCreation::Program(
                 ProcessIdentity::Unavailable { creation: Some(EXIT_CREATION), reason: $reason }) };
-            let memory = collector::machine::Memory::default();
+            let memory = crate::machine::Memory::default();
             let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
 
             publication.publish_readings(&mut harness.writer,
@@ -755,7 +755,7 @@ fn preserves_independent_numeric_values_when_process_identity_is_unavailable() {
     // Method: publish independent literal numeric values and decode the resulting record.
     let mut harness = Harness::new();
     let mut publication = Publication::new(&harness.writer).unwrap();
-    let memory = collector::machine::Memory::default();
+    let memory = crate::machine::Memory::default();
     let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
     let mut tick = tick();
     let mut identities = Vec::with_capacity(1);
@@ -799,7 +799,7 @@ fn returns_publication_validation_errors_without_advancing_the_ring() {
     // Method: offer a measured numeric row without its required identity row.
     let mut harness = Harness::new();
     let mut publication = Publication::new(&harness.writer).unwrap();
-    let memory = collector::machine::Memory::default();
+    let memory = crate::machine::Memory::default();
 
     let error = publication
         .publish_readings(
@@ -946,16 +946,16 @@ fn battery_tick(shape: &Shape) -> Tick {
 fn publishes_each_disk_attempt_at_the_tick_start_and_clears_failed_acquisition() {
     // Goal: the actual producer publishes acquired disk counters and the following failure.
     // Method: inject the source at the OS boundary, collect real ticks, and decode a real tail.
-    use collector::disks::{DiskSnapshot, DiskSource, Disks, ScanState};
+    use crate::disks::{DiskSnapshot, DiskSource, Disks, ScanState};
     struct StubDisks;
     impl DiskSource for StubDisks {
         fn read_into(
             &mut self,
             now_ns: u64,
             snapshot: &mut DiskSnapshot,
-        ) -> Result<(), collector::disks::Error> {
+        ) -> Result<(), crate::disks::Error> {
             if now_ns == 2 {
-                return Err(collector::disks::Error::Native(-71));
+                return Err(crate::disks::Error::Native(-71));
             }
             snapshot.source_continuous_ns = now_ns;
             snapshot.state = ScanState::Complete;
@@ -1005,7 +1005,7 @@ fn publishes_unavailable_process_gpu_without_losing_system_readings_or_allocatin
     // Goal: unsupported process attribution stays unknown alongside independent system facts.
     // Method: poison the output buffer, collect and publish a real tick, then read the ring.
     // The GPU memory value is injected at publication; its availability is not a host claim.
-    use collector::gpu_memory::GpuMemoryReading;
+    use crate::gpu_memory::GpuMemoryReading;
     let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
     collector.smc = None;
     collector.ioreport = None;
@@ -1028,7 +1028,7 @@ fn publishes_unavailable_process_gpu_without_losing_system_readings_or_allocatin
         allocated_bytes: Some(8192),
     };
 
-    let allocations = crate::tests::allocator_calls_in(|| {
+    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
         publication
             .read(&mut collector, &mut meter, &mut harness.writer, None)
             .unwrap();
@@ -1103,3 +1103,6 @@ mod this_mac {
         println!("acquired_machine_gpu_memory={memory:?}");
     }
 }
+
+#[path = "optional_source_tests.rs"]
+mod optional_sources;

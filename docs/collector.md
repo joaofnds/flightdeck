@@ -266,9 +266,15 @@ the persister takes longer than two minutes it is killed.
 
 A source that fails to open at startup, such as an SMC or IOReport a Mac does not have, is left
 out and every other source is recorded. A failed battery or disk read is reported and the tick
-goes on. A failed read of the machine, the interfaces, IOReport, the SMC, the processes or the
-coalitions ends the run, and so does a failed assertion, since the release build aborts on a
-panic. Nothing restarts the collector on its own. The desktop app shows a Retry control when the
+goes on. A returned SMC or IOReport read error is reported through the bounded diagnostic queue
+and charged to that source. Its whole reading is unavailable for that tick, including any
+values acquired before the failure. The collector keeps the connection and buffers for the
+next tick's attempt. A complete successful read restores SMC gauges immediately; IOReport
+rates need two consecutive successful observations and never bridge a failed tick. There is no
+retry within the tick, and a native call that does not return still blocks collection.
+A failed read of the machine, the interfaces, the processes or the coalitions ends the run,
+as does a metering failure or a failed assertion, since the release build aborts on a panic.
+Nothing restarts the collector on its own. The desktop app shows a Retry control when the
 collector it started fails, and running as a launch agent is planned but not built.
 
 ## Why it is built this way

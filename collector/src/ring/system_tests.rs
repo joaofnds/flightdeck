@@ -144,6 +144,42 @@ fn stores_each_cores_state_clocks_from_its_state_count() {
 }
 
 #[test]
+fn clears_core_clocks_when_ioreport_is_unavailable_in_a_reused_record() {
+    // Goal: an unavailable IOReport source leaves no frequencies from the previous sample.
+    // Method: store measured core clocks, then no core states, reusing words and decode storage.
+    let layout = record_layout();
+    let words: Vec<AtomicU64> = (0..layout.record(1).len())
+        .map(|_| AtomicU64::new(0))
+        .collect();
+    let clock = ClockTables::from_tables(vec![vec![500, 900, 1400]]);
+    let (reading, machine) = full();
+    let publication = SystemPublication {
+        reading: &reading,
+        machine: &machine,
+        clock: Some(&clock),
+        process_gpu_ns: &[],
+    };
+    let mut snapshot = None;
+    let mut khz = [0; 6];
+    let mut gpu_ns = Vec::with_capacity(2);
+    let mut target = system::SystemLoad {
+        snapshot: &mut snapshot,
+        core_state_khz: &mut khz,
+        stride: 3,
+        process_gpu_ns: &mut gpu_ns,
+    };
+    system::store(&words, &layout, Some(&publication), [3].into_iter());
+    system::load(&words, &layout, &mut target).unwrap();
+    assert_eq!(target.core_state_khz, [500, 900, 1400, 0, 0, 0]);
+
+    system::store(&words, &layout, Some(&publication), [].into_iter());
+    system::load(&words, &layout, &mut target).unwrap();
+
+    assert_eq!(target.core_state_khz, [0; 6]);
+    assert_eq!(snapshot.unwrap().reading, reading);
+}
+
+#[test]
 fn refuses_a_record_no_writer_of_this_format_stores() {
     // Goal: a record with bits this format never sets is refused rather than misread.
     // Method: set an unknown presence bit, then a GPU word without its presence bit.

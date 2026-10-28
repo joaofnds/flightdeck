@@ -1,10 +1,10 @@
 use std::io::{self, Write};
 
-use collector::programs::{
+use super::identity_report_source::programs::{
     Acquisition,
     sweep::{Diagnostics, Failure},
 };
-use collector::ring::Writer;
+use super::identity_report_source::ring::Writer;
 
 #[derive(Default)]
 pub(crate) struct IdentityReport {

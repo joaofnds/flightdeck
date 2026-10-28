@@ -7,12 +7,14 @@ pub mod cost;
 pub mod diagnostics;
 pub mod disks;
 pub mod gpu_memory;
+mod identity_report;
 pub mod interfaces;
 pub mod ioreport;
 mod kernel;
 pub mod machine;
 pub mod processes;
 pub mod programs;
+pub mod publication;
 pub mod recording;
 mod registry;
 pub mod ring;
@@ -21,7 +23,13 @@ pub mod smc;
 pub mod system;
 pub mod tracker;
 
+#[cfg(test)]
+#[path = "../tests/support/process.rs"]
+mod test_process;
+
 use std::ffi::OsString;
+
+use crate as identity_report_source;
 
 /// The words the program was given after its name, or a usage error naming `program` and the
 /// first word that is not UTF-8, where `std::env::args` would panic on it.
@@ -80,8 +88,33 @@ pub(crate) fn push_without_growing<T>(list: &mut Vec<T>, item: T) {
 #[cfg(test)]
 mod tests {
     use std::os::unix::ffi::OsStringExt;
+    use std::time::Duration;
 
     use super::*;
+
+    pub(crate) fn with_diagnostics(test: &str, work: impl FnOnce()) {
+        const SELECTED: &str = "FLIGHTDECK_OPTIONAL_SOURCE_CHILD";
+        const COMPLETED: i32 = 71;
+        if std::env::var(SELECTED).is_ok_and(|selected| selected == test) {
+            diagnostics::install(diagnostics::Role::Collector);
+            work();
+            diagnostics::exit(COMPLETED);
+        }
+        // Libtest capture grows its own buffer; count production reporting in a separate process.
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", test, "--no-capture"])
+            .env(SELECTED, test);
+        let mut child = test_process::OwnedChild::spawn(&mut command);
+
+        let status = child.wait(Duration::from_secs(10));
+
+        assert_eq!(
+            status.code(),
+            Some(COMPLETED),
+            "diagnostic child failed: {test}: {status}"
+        );
+    }
 
     #[test]
     fn takes_the_words_a_program_was_given() {

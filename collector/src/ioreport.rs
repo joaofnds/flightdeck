@@ -6,8 +6,68 @@ use crate::clock::Timebase;
 use crate::push_without_growing;
 
 pub struct IOReport {
+    valid: bool,
     subscription: Subscription,
     reader: Reader,
+}
+
+pub struct IOReportReadings<'a> {
+    pub gpu_energy_nj: u64,
+    pub gpu_active_ns: &'a [u64],
+    pub cores: &'a [States],
+}
+
+/// Returned sample and decoding failures contain only bounded numeric context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadError {
+    NullSample,
+    MissingChannels,
+    InvalidChannels,
+    ChannelCount(isize),
+    ChannelLimit(isize),
+    CoreLimit(usize),
+    ChannelsChanged {
+        found: [usize; 3],
+        expected: [usize; 3],
+    },
+    StatesChanged {
+        found: i32,
+        expected: i32,
+    },
+    NegativeResidency(i64),
+    NanosecondsOverflow(u64),
+    NegativeEnergy(i64),
+    EnergyOverflow {
+        units: u64,
+        nj_per_unit: u64,
+    },
+}
+
+const _: () = assert!(size_of::<ReadError>() <= 56);
+
+impl ReadError {
+    fn kind(&self) -> io::ErrorKind {
+        match self {
+            Self::NullSample => io::ErrorKind::Other,
+            Self::ChannelLimit(_) | Self::CoreLimit(_) => io::ErrorKind::QuotaExceeded,
+            _ => io::ErrorKind::InvalidData,
+        }
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "IOReport read failed: {self:?}")
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+// Only startup and fixture export convert a read error to an allocating terminal error.
+impl From<ReadError> for io::Error {
+    fn from(error: ReadError) -> Self {
+        Self::new(error.kind(), error)
+    }
 }
 
 /// What open learned of the channels a read takes, and what the last read found in them,
@@ -117,12 +177,12 @@ impl ChannelCounts {
 
     /// Checks that a read found the channels open found, since a channel it missed would keep
     /// the value of the read before.
-    fn read_check(&self, at_open: &ChannelCounts) -> io::Result<()> {
+    fn read_check(&self, at_open: &ChannelCounts) -> Result<(), ReadError> {
         if self != at_open {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("IOReport gave the channels {self:?}, and {at_open:?} at open"),
-            ));
+            return Err(ReadError::ChannelsChanged {
+                found: [self.gpu_energy, self.gpu_states, self.core_states],
+                expected: [at_open.gpu_energy, at_open.gpu_states, at_open.core_states],
+            });
         }
 
         Ok(())
@@ -195,9 +255,13 @@ impl Group {
 }
 
 /// `IOReport`'s subscription to the channels a read takes, and the channels it subscribed to.
-struct Subscription {
-    handle: Owned,
-    channels: Owned,
+enum Subscription {
+    Native {
+        handle: Owned,
+        channels: Owned,
+    },
+    #[cfg(test)]
+    Fixture(tests::read_tests::Samples),
 }
 
 impl Subscription {
@@ -211,19 +275,27 @@ impl Subscription {
         let handle = Owned::new(handle, "subscribing to IOReport's channels");
         let channels = Owned::new(channels, "listing the channels IOReport subscribed to");
 
-        Ok(Self {
+        Ok(Self::Native {
             handle: handle?,
             channels: channels?,
         })
     }
 
     /// Takes a sample of every channel the subscription holds.
-    fn sample(&self) -> io::Result<Owned> {
-        assert!(!self.handle.0.is_null());
-        assert!(!self.channels.0.is_null());
-
-        let samples = unsafe { IOReportCreateSamples(self.handle.0, self.channels.0, ptr::null()) };
-        Owned::new(samples, "sampling IOReport")
+    fn sample(&self) -> Result<Owned, ReadError> {
+        let samples = match self {
+            Self::Native { handle, channels } => {
+                assert!(!handle.0.is_null());
+                assert!(!channels.0.is_null());
+                unsafe { IOReportCreateSamples(handle.0, channels.0, ptr::null()) }
+            }
+            #[cfg(test)]
+            Self::Fixture(samples) => samples.sample(),
+        };
+        if samples.is_null() {
+            return Err(ReadError::NullSample);
+        }
+        Ok(Owned(samples))
     }
 }
 
@@ -235,22 +307,16 @@ impl ChannelsKey {
         Ok(Self(string(c"IOReportChannels")?))
     }
 
-    fn channels_of(&self, dictionary: &Owned) -> io::Result<CFTypeRef> {
+    fn channels_of(&self, dictionary: &Owned) -> Result<CFTypeRef, ReadError> {
         assert!(!self.0.0.is_null());
         assert!(!dictionary.0.is_null());
 
         let channels = unsafe { CFDictionaryGetValue(dictionary.0, self.0.0) };
         if channels.is_null() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "IOReport gave no list of channels",
-            ));
+            return Err(ReadError::MissingChannels);
         }
         if unsafe { CFGetTypeID(channels) } != unsafe { CFArrayGetTypeID() } {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "IOReport gave a list of channels that is not an array",
-            ));
+            return Err(ReadError::InvalidChannels);
         }
 
         Ok(channels)
@@ -384,31 +450,45 @@ impl IOReport {
 
         assert!(reader.counts.core_states > 0);
         Ok(Self {
+            valid: false,
             subscription,
             reader,
         })
     }
 
-    pub fn read(&mut self) -> io::Result<()> {
+    pub fn read(&mut self) -> Result<(), ReadError> {
+        self.valid = false;
         let samples = self.subscription.sample()?;
-        self.reader.read(&samples)
+        self.reader.read(&samples)?;
+        self.valid = true;
+        Ok(())
+    }
+
+    /// A complete reading from the latest attempt, never a partially decoded sample.
+    #[must_use]
+    pub fn reading(&self) -> Option<IOReportReadings<'_>> {
+        self.valid.then(|| IOReportReadings {
+            gpu_energy_nj: self.gpu_energy_nj(),
+            gpu_active_ns: self.gpu().active_ns(),
+            cores: self.cores(),
+        })
     }
 
     /// The energy the GPU had spent at the last read, in nanojoules.
     #[must_use]
-    pub fn gpu_energy_nj(&self) -> u64 {
+    fn gpu_energy_nj(&self) -> u64 {
         self.reader.gpu_energy_nj()
     }
 
     /// The GPU's performance states.
     #[must_use]
-    pub fn gpu(&self) -> &States {
+    fn gpu(&self) -> &States {
         self.reader.gpu()
     }
 
     /// The performance states of each core open found.
     #[must_use]
-    pub fn cores(&self) -> &[States] {
+    fn cores(&self) -> &[States] {
         self.reader.cores()
     }
 }
@@ -465,7 +545,7 @@ impl Reader {
         Ok(())
     }
 
-    fn read(&mut self, samples: &Owned) -> io::Result<()> {
+    fn read(&mut self, samples: &Owned) -> Result<(), ReadError> {
         assert!(self.gpu_nj_per_unit > 0);
         assert_eq!(1, self.counts.gpu_energy);
         assert_eq!(1, self.counts.gpu_states);
@@ -639,7 +719,7 @@ const CHANNELS_MAX: isize = 4096;
 
 /// Each channel in `array`, or an error where its count is not a count within the bound on
 /// walking one.
-fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
+fn each(array: CFTypeRef) -> Result<impl Iterator<Item = CFTypeRef>, ReadError> {
     assert!(!array.is_null());
 
     let channel_count = unsafe { CFArrayGetCount(array) };
@@ -649,18 +729,12 @@ fn each(array: CFTypeRef) -> io::Result<impl Iterator<Item = CFTypeRef>> {
 }
 
 /// Checks that a list's count of channels is a count, and within the bound on walking one.
-fn each_channel_count_check(channel_count: isize) -> io::Result<()> {
+fn each_channel_count_check(channel_count: isize) -> Result<(), ReadError> {
     if channel_count < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("IOReport gave a list of {channel_count} channels"),
-        ));
+        return Err(ReadError::ChannelCount(channel_count));
     }
     if channel_count > CHANNELS_MAX {
-        return Err(io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            format!("IOReport gave a list of {channel_count} channels, past {CHANNELS_MAX}"),
-        ));
+        return Err(ReadError::ChannelLimit(channel_count));
     }
 
     Ok(())
@@ -669,18 +743,13 @@ fn each_channel_count_check(channel_count: isize) -> io::Result<()> {
 /// The core at `index` among `cores`, or an error where `IOReport` reports more cores than
 /// `cores` holds, which is one for each CPU the machine runs at open and the cores open found
 /// at a read.
-fn core_at(cores: &mut [States], index: usize) -> io::Result<&mut States> {
+fn core_at(cores: &mut [States], index: usize) -> Result<&mut States, ReadError> {
     let count = cores.len();
     // Open holds a core for each CPU, and a read the cores open found, one at least.
     assert!(count > 0);
     assert!(index <= count);
 
-    cores.get_mut(index).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::QuotaExceeded,
-            format!("IOReport reported more cores than {count}"),
-        )
-    })
+    cores.get_mut(index).ok_or(ReadError::CoreLimit(count))
 }
 
 /// Learns which of `channel`'s states count as active into `into`, whose room it does not
@@ -756,16 +825,17 @@ fn learn_active_states_count_check(state_count: i32) -> io::Result<()> {
 
 /// Reads the time `channel` spent in each state `into` learned as active. A channel whose
 /// states changed since then is an error, since the learned indices name other states.
-fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States) -> io::Result<()> {
+fn read_active_states(
+    timebase: Timebase,
+    channel: CFTypeRef,
+    into: &mut States,
+) -> Result<(), ReadError> {
     let state_count = unsafe { IOReportStateGetCount(channel) };
     if state_count != into.state_count {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "an IOReport channel reported {state_count} states, and {} at open",
-                into.state_count
-            ),
-        ));
+        return Err(ReadError::StatesChanged {
+            found: state_count,
+            expected: into.state_count,
+        });
     }
 
     // Learning bounded the states and the active ones among them.
@@ -776,7 +846,10 @@ fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States)
         assert!(index < into.state_count);
         let residency = unsafe { IOReportStateGetResidency(channel, index) };
         let ticks = read_active_states_residency(residency)?;
-        push_without_growing(&mut into.active_ns, timebase.nanoseconds(ticks)?);
+        let nanoseconds = timebase
+            .checked_nanoseconds(ticks)
+            .ok_or(ReadError::NanosecondsOverflow(ticks))?;
+        push_without_growing(&mut into.active_ns, nanoseconds);
     }
 
     Ok(())
@@ -784,15 +857,8 @@ fn read_active_states(timebase: Timebase, channel: CFTypeRef, into: &mut States)
 
 /// The ticks of the time in a state `IOReport` gave as `residency`, or an error where it is
 /// negative.
-fn read_active_states_residency(residency: i64) -> io::Result<u64> {
-    let Ok(ticks) = u64::try_from(residency) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("IOReport reported a time of {residency} in a state"),
-        ));
-    };
-
-    Ok(ticks)
+fn read_active_states_residency(residency: i64) -> Result<u64, ReadError> {
+    u64::try_from(residency).map_err(|_| ReadError::NegativeResidency(residency))
 }
 
 /// The units `IOReport` can give an energy in, each with the nanojoules in one of it.
@@ -827,7 +893,7 @@ fn learn_nj_per_unit_of(unit: CFTypeRef) -> io::Result<u64> {
 }
 
 /// Reads the energy `channel` gives in units of `nj_per_unit` nanojoules, which open learned.
-fn read_energy_nj(channel: CFTypeRef, nj_per_unit: u64) -> io::Result<u64> {
+fn read_energy_nj(channel: CFTypeRef, nj_per_unit: u64) -> Result<u64, ReadError> {
     assert!(nj_per_unit > 0);
 
     let value = unsafe { IOReportSimpleGetIntegerValue(channel, 0) };
@@ -839,25 +905,17 @@ fn read_energy_nj(channel: CFTypeRef, nj_per_unit: u64) -> io::Result<u64> {
 
 /// The nanojoules in `value` units of `nj_per_unit` nanojoules each, or an error where the value
 /// is negative or its nanojoules pass what a u64 counts.
-fn read_energy_nj_of(value: i64, nj_per_unit: u64) -> io::Result<u64> {
+fn read_energy_nj_of(value: i64, nj_per_unit: u64) -> Result<u64, ReadError> {
     assert!(
         ENERGY_UNITS
             .iter()
             .any(|&(_, nj_per_unit_listed)| nj_per_unit_listed == nj_per_unit)
     );
 
-    let Ok(units) = u64::try_from(value) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("IOReport gave the GPU's energy as {value} units"),
-        ));
-    };
-    let Some(energy_nj) = units.checked_mul(nj_per_unit) else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("the GPU's energy of {units} units of {nj_per_unit} nJ passes a u64"),
-        ));
-    };
+    let units = u64::try_from(value).map_err(|_| ReadError::NegativeEnergy(value))?;
+    let energy_nj = units
+        .checked_mul(nj_per_unit)
+        .ok_or(ReadError::EnergyOverflow { units, nj_per_unit })?;
 
     Ok(energy_nj)
 }
@@ -890,7 +948,8 @@ fn is(text: CFTypeRef, want: &CStr) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+#[path = "ioreport"]
+pub(crate) mod tests {
     use super::*;
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -941,6 +1000,17 @@ mod tests {
             )
         };
         Owned::new(object, "reading a property list").unwrap()
+    }
+
+    #[path = "read_tests.rs"]
+    pub(crate) mod read_tests;
+
+    pub(crate) fn one_core() -> IOReport {
+        read_tests::fixture(Some(read_tests::Failure::NullSample))
+    }
+
+    pub(crate) fn fail_read(ioreport: &mut IOReport) {
+        read_tests::set_read(ioreport, 1);
     }
 
     /// The channels of the groups a read takes from, 383 of them, as an M5 Pro gave them to
@@ -1669,15 +1739,12 @@ mod tests {
             // those open found.
             let ioreport = open();
 
-            let subscribed = each(
-                ioreport
-                    .reader
-                    .channels_key
-                    .channels_of(&ioreport.subscription.channels)
-                    .unwrap(),
-            )
-            .unwrap()
-            .count();
+            let Subscription::Native { channels, .. } = &ioreport.subscription else {
+                panic!("expected native subscription");
+            };
+            let subscribed = each(ioreport.reader.channels_key.channels_of(channels).unwrap())
+                .unwrap()
+                .count();
 
             let counts = ioreport.reader.counts;
             assert_eq!(

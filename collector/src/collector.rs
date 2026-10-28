@@ -228,12 +228,7 @@ impl Collector {
 
         meter.measure(Source::Machine, || self.machine.read())?;
         meter.measure(Source::Interfaces, || self.interfaces.read())?;
-        if let Some(ioreport) = &mut self.ioreport {
-            meter.measure(Source::IOReport, || ioreport.read())?;
-        }
-        if let Some(smc) = &mut self.smc {
-            meter.measure(Source::Smc, || smc.read())?;
-        }
+        self.read_inner_optional(meter)?;
 
         meter.measure(Source::Processes, || {
             self.read_processes(writer.as_deref_mut())
@@ -275,6 +270,30 @@ impl Collector {
         assert!(self.events.len() <= EVENTS_PER_TICK_MAX);
         assert_eq!(listing_capacity, self.listing.capacity());
         assert_eq!(events_capacity, self.events.capacity());
+        Ok(())
+    }
+
+    fn read_inner_optional(&mut self, meter: &mut Meter) -> io::Result<()> {
+        if let Some(ioreport) = &mut self.ioreport {
+            meter.measure(Source::IOReport, || {
+                if let Err(error) = ioreport.read() {
+                    crate::diagnostics::error(format_args!(
+                        "collector: IOReport read failed: {error:?}"
+                    ));
+                }
+                Ok(())
+            })?;
+        }
+        if let Some(smc) = &mut self.smc {
+            meter.measure(Source::Smc, || {
+                if let Err(error) = smc.read() {
+                    crate::diagnostics::error(format_args!(
+                        "collector: SMC read failed: {error:?}"
+                    ));
+                }
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 

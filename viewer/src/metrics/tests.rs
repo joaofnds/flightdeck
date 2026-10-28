@@ -496,6 +496,86 @@ fn leaves_counter_rates_unavailable_across_wall_gaps() {
 }
 
 #[test]
+fn resumes_gpu_rates_only_after_two_successful_readings_follow_a_source_failure() {
+    // Goal: the first recovered counter is a baseline, even with continuous tick identities.
+    // Method: project four adjacent observations whose optional sources fail only on the second.
+    let fixture = optional_failure_fixture();
+    let observations: [Observation; 4] = std::array::from_fn(|index| {
+        let publication = u64::try_from(index).unwrap() + 1;
+        Observation {
+            window: 0,
+            publication,
+            run_tick: publication,
+            wall: (999 + publication) * 1_000_000_000,
+            continuous: Some((publication * 2 - 1) * 1_000_000_000),
+        }
+    });
+
+    let points: [Value; 4] = std::array::from_fn(|index| {
+        point(
+            &fixture.tables,
+            &observations[index],
+            index.checked_sub(1).map(|index| &observations[index]),
+            1,
+        )
+        .unwrap()
+    });
+
+    assert_eq!(
+        points.each_ref().map(|point| &point["gpu_watts"]),
+        [&Value::Null, &Value::Null, &Value::Null, &json!(1.0)]
+    );
+    assert_eq!(
+        points.each_ref().map(|point| &point["gpu_active_percent"]),
+        [&Value::Null, &Value::Null, &Value::Null, &json!(0.0)]
+    );
+    assert_eq!(
+        points.each_ref().map(|point| &point["power_watts"]),
+        [&json!(0.0), &Value::Null, &json!(0.0), &json!(0.0)]
+    );
+    assert!(points.iter().all(|point| point["memory_free_bytes"] == 2));
+}
+
+fn optional_failure_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    for rows in fixture.tables.values_mut() {
+        for publication in 3..=4 {
+            if let Some(mut current) = rows.get(&2).cloned() {
+                if let Some(column) = current
+                    .columns
+                    .iter()
+                    .position(|name| name == "publication")
+                {
+                    for row in &mut current.rows {
+                        row[column] = Some(publication.to_string());
+                    }
+                }
+                rows.insert(publication, current);
+            }
+        }
+    }
+    set(fixture.row("ticks", 2), 0, "ioreport_read", Some("false"));
+    set(fixture.row("ticks", 2), 0, "smc_read", Some("false"));
+    for field in [
+        "gpu_energy_nj",
+        "power_watts",
+        "soc_celsius",
+        "cpu_celsius",
+        "gpu_celsius",
+    ] {
+        set(fixture.row("ticks", 2), 0, field, None);
+    }
+    fixture.row("gpu_states", 2).rows.clear();
+    set(
+        fixture.row("ticks", 4),
+        0,
+        "gpu_energy_nj",
+        Some("7000000000"),
+    );
+    fixture
+}
+
+#[test]
 fn rejects_gpu_residency_with_a_refused_previous_sample() {
     // Goal: refusal cannot become measured GPU work or power.
     // Method: keep numeric counters but mark the earlier IOReport read unsuccessful.

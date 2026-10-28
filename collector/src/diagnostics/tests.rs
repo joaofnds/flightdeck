@@ -1,7 +1,7 @@
 use super::*;
 
-#[path = "../../tests/support/process.rs"]
-mod process;
+use crate::collector::Collector;
+use crate::test_process as process;
 
 pub(super) const COMPLETED: i32 = 71;
 
@@ -24,6 +24,60 @@ pub(super) fn supervised(test: &str, work: impl FnOnce()) {
         status.code(),
         "selected child failed: {test}"
     );
+}
+
+#[test]
+fn reports_optional_smc_failure_from_collection() {
+    // Goal: continuing after an SMC failure still identifies the source and native status.
+    // Method: fail the real collection path and inspect its admitted event in an isolated child.
+    supervised(
+        "diagnostics::tests::reports_optional_smc_failure_from_collection",
+        || {
+            let mut collector =
+                Collector::new(crate::clock::Timebase::read().unwrap(), Duration::ZERO).unwrap();
+            collector.ioreport = None;
+            collector.smc = Some(crate::smc::tests::m5_pro());
+            crate::smc::tests::fail_read(collector.smc.as_mut().unwrap());
+
+            reports_optional_failure(&mut collector, b"collector: SMC read failed: Native(-71)\n");
+        },
+    );
+}
+
+#[test]
+fn reports_optional_ioreport_failure_from_collection() {
+    // Goal: continuing after an IOReport failure still identifies the source and native result.
+    // Method: fail the real collection path and inspect its admitted event in an isolated child.
+    supervised(
+        "diagnostics::tests::reports_optional_ioreport_failure_from_collection",
+        || {
+            let mut collector =
+                Collector::new(crate::clock::Timebase::read().unwrap(), Duration::ZERO).unwrap();
+            collector.smc = None;
+            collector.ioreport = Some(crate::ioreport::tests::one_core());
+            crate::ioreport::tests::fail_read(collector.ioreport.as_mut().unwrap());
+
+            reports_optional_failure(
+                &mut collector,
+                b"collector: IOReport read failed: NullSample\n",
+            );
+        },
+    );
+}
+
+fn reports_optional_failure(collector: &mut Collector, expected: &[u8]) {
+    let mut scratch = Box::new(Group::empty());
+    let mut meter = crate::cost::Meter::default();
+    // Leave the writer unstarted so queue admission can be observed without a delivery race.
+    REPORTER.prepare();
+    assert!(REPORTER.thread.get().is_none());
+    assert!(!INSTALLED.swap(true, Ordering::AcqRel));
+
+    collector.read(&mut meter).unwrap();
+
+    assert_eq!(Some(Stream::Stderr), REPORTER.take(&mut scratch));
+    assert_eq!(expected, scratch.bytes());
+    assert_eq!(None, REPORTER.take(&mut scratch));
 }
 
 #[test]
