@@ -551,9 +551,9 @@ fn store_view_stretch_observation(
     view: &View,
     second: u64,
 ) -> Option<&viewer::live_app_response::Observation> {
-    // The store's stretches run oldest first, and the division floors, as theirs does. A
-    // stretch found out of order names another second, so it names no tick here.
-    let stretch = second / viewer::EARLIER_STRIDE_SECONDS;
+    // The store's stretches run oldest first. A stretch found out of order names another
+    // second, so it names no tick here.
+    let stretch = viewer::store::stretch_of_wall_second(second);
     let index = view
         .stretches
         .binary_search_by_key(&stretch, |held| held.stretch)

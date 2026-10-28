@@ -897,7 +897,14 @@ fn starts_stretch(newest: Option<&MachineSecond>, second: &MachineSecond) -> boo
 
 /// The stretch of `EARLIER_STRIDE_SECONDS` that holds `second`. Both divisions floor.
 fn stretch(second: &MachineSecond) -> u64 {
-    second.wall_ns / 1_000_000_000 / EARLIER_STRIDE_SECONDS
+    stretch_of_wall_second(second.wall_ns / 1_000_000_000)
+}
+
+/// The stretch of `EARLIER_STRIDE_SECONDS` that holds the wall second `wall_second`, which
+/// `AppsStretch::stretch` names. The division floors.
+#[must_use]
+pub fn stretch_of_wall_second(wall_second: u64) -> u64 {
+    wall_second / EARLIER_STRIDE_SECONDS
 }
 
 /// Loads the sealed prefix before following the ring, keeping legacy startup separate.

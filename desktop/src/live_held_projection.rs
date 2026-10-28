@@ -226,8 +226,7 @@ fn overview_app_points_apps<'view>(
     for (second, index) in seconds.iter().zip(indices) {
         let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
         if wall_second < domain.recent_first {
-            // The division floors, as the store's stretches do.
-            let stretch = wall_second / domain.stride;
+            let stretch = viewer::store::stretch_of_wall_second(wall_second);
             while stretches.next_if(|held| held.stretch < stretch).is_some() {}
             let held = stretches.next_if(|held| held.stretch == stretch);
             apps.push(held.map(|held| OverviewApps::Stretch(held)));
