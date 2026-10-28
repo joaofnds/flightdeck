@@ -11,7 +11,7 @@ use crate::chart_axes::TimeWindow;
 use crate::hardware::Readings;
 use crate::live_rankings::{Rankings, TopApps, from_selected};
 use crate::live_source::Worker;
-use crate::live_store_app_fixtures::apps_at;
+use crate::live_store_app_fixtures::{apps_at, hour};
 use crate::live_store_fixtures::{reading_at, trend_point, view};
 use crate::live_store_page_fixtures::{
     figure_readings, figure_second, readings, summary_selection, texts,
@@ -241,6 +241,85 @@ fn hovering_the_older_tail_shows_the_reading_standing_for_its_stretch(cx: &mut T
     harness.driver.hover_held_second(8_005);
 
     let expected = summary::cards("overview", &summary_selection(&reading_at(8_000, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_the_older_part_of_the_hour_shows_each_apps_mean_over_its_stretch(
+    cx: &mut TestAppContext,
+) {
+    // Goal: at the hour range a hover over the older part of a chart by App shows what each App
+    // used over the ten seconds its point stands for, the mean the chart draws there, rather
+    // than one second of it. Method: the View of the hour, in whose oldest stretch A uses 0.07 s
+    // at 9,000 and 0.27 s at each of the nine seconds after it, 0.25 s a second over the
+    // stretch, and the pointer on 9,005 of the CPU chart by App.
+    let (view, _) = hour();
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_store_view(view);
+    harness.driver.show_range(Range::Last(3_600));
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+
+    harness
+        .driver
+        .hover_held_second_on("live-cpu-apps-plot", 9_005);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-cpu-apps:1:A:25%")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_the_older_part_of_the_hour_shows_each_apps_mean_resident_memory_over_its_stretch(
+    cx: &mut TestAppContext,
+) {
+    // Goal: at the hour range a hover over the older part of the chart of resident memory by
+    // App shows the mean each App held over the ten seconds its point stands for. Method: the
+    // View of the hour, in whose oldest stretch A holds 70 MB at 9,000 and 270 MB at each of
+    // the nine seconds after it, 250 MB or 238 MiB over the stretch, and the pointer on 9,005.
+    let (view, _) = hour();
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_store_view(view);
+    harness.driver.show_range(Range::Last(3_600));
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+
+    harness
+        .driver
+        .hover_held_second_on("live-memory-app-resident-plot", 9_005);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:1:A:238 MiB")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_the_older_part_of_the_hour_shows_the_readouts_of_the_second_standing_for_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a hover over the older part of the hour, which names the tick of the stretch the
+    // charts by App draw there, still shows the readouts of the second the older tail keeps for
+    // that stretch. Method: the View of the hour, whose older tail keeps 9,000 for stretch 900,
+    // and the pointer on 9,005 of the CPU chart.
+    let (view, _) = hour();
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_store_view(view);
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.hover_held_second(9_005);
+
+    let expected = summary::cards("overview", &summary_selection(&reading_at(9_000, 0)));
     assert_eq!(harness.driver.readout_texts(), texts(&expected));
     harness.teardown();
 }
@@ -536,11 +615,16 @@ impl InputDriver {
 
     /// Rests the pointer on `second` of the CPU chart, where the range shows it.
     fn hover_held_second(&mut self, second: u64) {
+        self.hover_held_second_on("live-cpu-plot", second);
+    }
+
+    /// Rests the pointer on `second` of the chart whose plot is `plot`, where the range shows it.
+    fn hover_held_second_on(&mut self, plot: &'static str, second: u64) {
         let window = self
             .view
             .read_with(&self.context, |dashboard, _| dashboard.view_window());
         let fraction = window.unwrap().fraction_of(second).unwrap();
-        let position = self.second_position("live-cpu-plot", fraction);
+        let position = self.second_position(plot, fraction);
 
         self.hover_position(position);
         self.context.run_until_parked();

@@ -52,7 +52,7 @@ impl InputDriver {
 
     /// Shows Overview drawn from the store's `view` over the worker's readings of 9,999 and
     /// 10,000, following the newest second.
-    fn show_store_view(&mut self, view: View) {
+    pub(super) fn show_store_view(&mut self, view: View) {
         let read = [reading_at(9_999, 0), reading_at(10_000, 0)];
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.accept(readings(&read));

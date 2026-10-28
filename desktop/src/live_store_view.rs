@@ -459,9 +459,10 @@ impl LiveDashboard {
     }
 
     /// The hover of `second` on the page drawn from the store's View, naming the tick the View
-    /// holds of it, so the charts by App find that tick as they find any they draw. None where
-    /// the View holds no identity of `second`, as in a gap, and where the page
-    /// draws from the worker's readings.
+    /// holds of it, so the charts by App find that tick as they find any they draw. A second of
+    /// the older tail the View sampled no tick of names the tick of the stretch that starts
+    /// there, which the charts by App draw at it. None where the View holds no identity of
+    /// `second`, as in a gap, and where the page draws from the worker's readings.
     pub(crate) fn store_view_target(&self, second: u64) -> Option<Target> {
         let view = self.followed_store_view()?;
         let at_second = |held: &Arc<MachineSecond>| held.wall_ns / NANOSECONDS_PER_SECOND == second;
@@ -469,13 +470,12 @@ impl LiveDashboard {
         assert_eq!(view.apps.len(), view.seconds.len());
         let observation = match view.seconds.iter().rposition(at_second) {
             Some(index) => view.apps[index].observation.as_ref()?,
-            None => {
-                &view
-                    .sampled
-                    .iter()
-                    .rfind(|sample| sample.machine.wall_ns / NANOSECONDS_PER_SECOND == second)?
-                    .observation
-            }
+            None => view
+                .sampled
+                .iter()
+                .rfind(|sample| sample.machine.wall_ns / NANOSECONDS_PER_SECOND == second)
+                .map(|sample| &sample.observation)
+                .or_else(|| store_view_stretch_observation(view, second))?,
         };
         Some(Target {
             second,
@@ -506,7 +506,13 @@ impl LiveDashboard {
             .iter()
             .enumerate()
             .rposition(|(index, second)| {
-                let observation = view.sampled.get(index).map(|sample| &sample.observation);
+                let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
+                let observation = view
+                    .sampled
+                    .get(index)
+                    .map(|sample| &sample.observation)
+                    .or_else(|| store_view_stretch_observation(view, wall_second));
+
                 store_view_matches(target, second, observation)
             });
         let rankings = earlier.and_then(|index| {
@@ -537,6 +543,25 @@ fn store_view_matches(
         return false;
     };
     crate::live_source::identity_validate(identity, &stamp_identity(&observation.stamp)).is_ok()
+}
+
+/// The tick that places the stretch of `view` that starts at `second` on the charts by App, or
+/// none where the first tick the store took in of no stretch of `view` is at `second`.
+fn store_view_stretch_observation(
+    view: &View,
+    second: u64,
+) -> Option<&viewer::live_app_response::Observation> {
+    // The store's stretches run oldest first, and the division floors, as theirs does. A
+    // stretch found out of order names another second, so it names no tick here.
+    let stretch = second / viewer::EARLIER_STRIDE_SECONDS;
+    let index = view
+        .stretches
+        .binary_search_by_key(&stretch, |held| held.stretch)
+        .ok()?;
+    let observation = view.stretches[index].observation.as_ref()?;
+    let wall_ns = observation.wall_ns?;
+
+    (wall_ns / NANOSECONDS_PER_SECOND == second).then_some(observation)
 }
 
 /// The Apps each of Overview's App charts draws on a line of its own over `window` of `view`,
