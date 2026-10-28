@@ -238,7 +238,17 @@ pub(super) fn drive_primary(
     panic!("bounded startup did not become Primary");
 }
 
-fn query_context(held: &mut super::Held, ring: &mut super::Ring) -> Arc<super::QueryContext> {
+pub(super) fn query_context(
+    held: &mut super::Held,
+    ring: &mut super::Ring,
+) -> Arc<super::QueryContext> {
+    match query_outcome(held, ring) {
+        super::QueryOutcome::Ready(context) => context,
+        outcome => panic!("expected query context: {outcome:?}"),
+    }
+}
+
+pub(super) fn query_outcome(held: &mut super::Held, ring: &mut super::Ring) -> super::QueryOutcome {
     let queries = super::query::Queries::new();
     let handle = queries.handle(std::thread::current());
     handle
@@ -249,10 +259,7 @@ fn query_context(held: &mut super::Held, ring: &mut super::Ring) -> Arc<super::Q
         })
         .unwrap();
     super::run_queries(held, ring, &queries);
-    match handle.take().unwrap().outcome {
-        super::QueryOutcome::Ready(context) => context,
-        outcome => panic!("expected query context: {outcome:?}"),
-    }
+    handle.take().unwrap().outcome
 }
 
 pub(super) fn primary_fixture() -> Fixture {

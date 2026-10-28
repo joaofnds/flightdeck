@@ -305,6 +305,10 @@ pub(crate) struct LiveRecording {
 
 impl LiveRecording {
     pub(crate) fn new() -> Self {
+        Self::with_process_capacity(1)
+    }
+
+    pub(crate) fn with_process_capacity(process_capacity: u64) -> Self {
         let root = unique_root("live");
         let place = Place::for_user(root.file_name().unwrap().to_str().unwrap()).unwrap();
         let shape = Shape {
@@ -314,7 +318,7 @@ impl LiveRecording {
             core_capacity: 1,
             state_capacity: 1,
             fan_capacity: 1,
-            process_capacity: 1,
+            process_capacity,
             coalition_capacity: 1,
             event_capacity: 1,
         };
@@ -393,6 +397,13 @@ impl LiveRecording {
     }
 
     pub(crate) fn publish_resources(&mut self) {
+        self.publish_resources_with_processes(&[]);
+    }
+
+    pub(crate) fn publish_resources_with_processes(
+        &mut self,
+        processes: &[collector::processes::Process],
+    ) {
         let elapsed = self.clock_offset_seconds + self.publication;
         let count = u32::try_from(elapsed).unwrap();
         let cpus = [collector::machine::CPUTicks {
@@ -431,7 +442,7 @@ impl LiveRecording {
                     gpu_celsius: None,
                     fan_rpm: &[1234.0],
                 }),
-                processes: &[],
+                processes,
                 processes_refused: 0,
                 processes_gone: 0,
                 coalitions: &[],

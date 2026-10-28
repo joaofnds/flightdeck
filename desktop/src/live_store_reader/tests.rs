@@ -4,6 +4,9 @@ use std::time::{Duration, Instant};
 use crate::live_dashboard::input_tests::source_mode::LiveRecording;
 use crate::live_source::{Earlier, Request, Snapshot, Update, Worker};
 
+#[path = "lifecycle_tests.rs"]
+mod lifecycle;
+
 #[test]
 fn a_store_worker_presents_primary_then_complete_from_a_queued_sealed_request() {
     // Goal: real budget backpressure preserves a request until Primary, then fills its history.
