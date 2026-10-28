@@ -1,17 +1,20 @@
 //! Typed committed endpoints feed the same owned aggregate as live publications.
 use collector::processes::Usage;
 use persistence::engine::{Cells, Engine};
+use persistence::resources::{ByteBudget, ByteReservation};
 use polars::prelude::{
     BinaryType, DataFrame, DataType, Int32Type, LazyFrame, PolarsPhysicalType, SortMultipleOptions,
     UInt8Type, UInt64Type, col, len, lit,
 };
 
 use super::{
-    Frame, IdentityUnavailable, Member, ProcessCreation, ProgramBytes, ProgramSpan, RunIdentity,
+    Frame, FrameCapacity, IdentityUnavailable, Member, ProcessCreation, ProgramBytes, ProgramSpan,
+    RunIdentity,
 };
 use crate::apps::{self, Stamp, Unavailable};
 use crate::cancellation::Operation;
 use persistence::{Error, Result};
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Endpoint {
@@ -23,6 +26,47 @@ pub(crate) struct Endpoint {
     pub usage_gone: u32,
     pub events_first: u64,
     pub events_end: u64,
+}
+
+pub(crate) struct Placement<'source> {
+    pub endpoints: &'source [Endpoint],
+    pub rows: &'source DataFrame,
+    pub order: &'source [usize],
+    pub first: usize,
+    pub operation: &'source Operation,
+    pub budget: Option<&'source Arc<ByteBudget>>,
+}
+
+#[derive(Debug)]
+pub(crate) enum PlacementError<E> {
+    Source(Error),
+    Budget,
+    Consumer(E),
+}
+
+pub(crate) struct PlacedFrame {
+    frame: Box<Frame>,
+    reservation: Option<ByteReservation>,
+}
+
+impl PlacedFrame {
+    pub(crate) fn get(&self) -> &Frame {
+        if let Some(reservation) = &self.reservation {
+            assert_eq!(self.frame.bytes(), reservation.bytes());
+        }
+
+        &self.frame
+    }
+
+    pub(crate) fn into_parts(self) -> (Box<Frame>, Option<ByteReservation>) {
+        (self.frame, self.reservation)
+    }
+}
+
+impl<E> From<Error> for PlacementError<E> {
+    fn from(error: Error) -> Self {
+        Self::Source(error)
+    }
 }
 
 const PROCESS_COLUMNS: &str = "pid, process_unique_id, pid_version, identity_availability, \
@@ -95,6 +139,16 @@ const _: () = {
 };
 
 impl FrameSize {
+    fn capacity(&self) -> FrameCapacity {
+        FrameCapacity {
+            members: self.members,
+            starts: self.starts,
+            execs: self.execs,
+            exits: self.exits,
+            arena: self.bytes,
+        }
+    }
+
     fn logical_bytes(&self) -> Result<usize> {
         self.count
             .checked_mul(ROW_LOGICAL_BYTES)
@@ -219,29 +273,50 @@ impl Frame {
         operation: &Operation,
         mut consume: impl FnMut(&Endpoint, Box<Self>) -> Result<bool>,
     ) -> Result<()> {
-        assert!(first <= endpoints.len());
-        assert_eq!(rows.width(), BATCH_COLUMNS);
-        assert!(order.len() <= rows.height());
+        match Self::placed(
+            &Placement {
+                endpoints,
+                rows,
+                order,
+                first,
+                operation,
+                budget: None,
+            },
+            |endpoint, frame| consume(endpoint, frame.into_parts().0),
+        ) {
+            Ok(()) => Ok(()),
+            Err(PlacementError::Source(error) | PlacementError::Consumer(error)) => Err(error),
+            Err(PlacementError::Budget) => unreachable!("unbudgeted placement"),
+        }
+    }
 
-        committed_endpoints(endpoints)?;
+    pub(crate) fn placed<E>(
+        input: &Placement<'_>,
+        mut consume: impl FnMut(&Endpoint, PlacedFrame) -> std::result::Result<bool, E>,
+    ) -> std::result::Result<(), PlacementError<E>> {
+        assert!(input.first <= input.endpoints.len());
+        assert_eq!(input.rows.width(), BATCH_COLUMNS);
+        assert!(input.order.len() <= input.rows.height());
+
+        committed_endpoints(input.endpoints)?;
         let mut cursor = BatchCursor {
-            columns: BatchColumns::new(rows)?,
-            rows: order.iter().copied(),
+            columns: BatchColumns::new(input.rows)?,
+            rows: input.order.iter().copied(),
         };
-        let mut sizes = Vec::with_capacity(endpoints.len());
+        let mut sizes = Vec::with_capacity(input.endpoints.len());
         let mut placed = 0;
-        for endpoint in endpoints {
-            operation.check()?;
-            let size = placed_many_size(&cursor.columns, &order[placed..], endpoint)?;
+        for endpoint in input.endpoints {
+            input.operation.check()?;
+            let size = placed_many_size(&cursor.columns, &input.order[placed..], endpoint)?;
             size.validate()?;
             placed += size.count;
             sizes.push(size);
         }
-        assert_eq!(placed, order.len());
+        assert_eq!(placed, input.order.len());
 
-        for (index, (endpoint, size)) in endpoints.iter().zip(&sizes).enumerate() {
-            operation.check()?;
-            if index < first {
+        for (index, (endpoint, size)) in input.endpoints.iter().zip(&sizes).enumerate() {
+            input.operation.check()?;
+            if index < input.first {
                 for _ in 0..size.count {
                     cursor
                         .rows
@@ -250,23 +325,47 @@ impl Frame {
                 }
                 continue;
             }
-            let mut frame = committed_frame(endpoint, size);
-            committed_many_members(&mut cursor, &mut frame, endpoint, size, operation)?;
-            committed_finish(&frame, size)?;
-            operation.check()?;
+            let mut frame = placed_frame(endpoint, size, input.budget)?;
+            committed_many_members(
+                &mut cursor,
+                &mut frame.frame,
+                endpoint,
+                size,
+                input.operation,
+            )?;
+            committed_finish(frame.get(), size)?;
+            input.operation.check()?;
             persistence::work::ingestion::record_publication(
                 endpoint.identity,
                 endpoint.stamp.publication,
                 persistence::work::ingestion::Kind::CommittedFrameCapture,
             );
-            if !consume(endpoint, frame)? {
-                return operation.check();
+            if !consume(endpoint, frame).map_err(PlacementError::Consumer)? {
+                return Ok(input.operation.check()?);
             }
         }
         assert!(cursor.rows.next().is_none());
 
-        operation.check()
+        Ok(input.operation.check()?)
     }
+}
+
+fn placed_frame<E>(
+    endpoint: &Endpoint,
+    size: &FrameSize,
+    budget: Option<&Arc<ByteBudget>>,
+) -> std::result::Result<PlacedFrame, PlacementError<E>> {
+    let bytes = size.capacity().bytes();
+    let reservation = budget
+        .map(|budget| budget.reserve(bytes).ok_or(PlacementError::Budget))
+        .transpose()?;
+    let frame = PlacedFrame {
+        frame: committed_frame(endpoint, size),
+        reservation,
+    };
+    assert_eq!(frame.frame.bytes(), bytes);
+
+    Ok(frame)
 }
 
 /// The size of `endpoint`'s frame, from the rows of `order` before the first of another

@@ -100,30 +100,22 @@ impl Before {
         self.frame.program_count()
     }
 
-    pub(crate) fn from_frame(endpoint: Endpoint, frame: Box<Frame>) -> Self {
+    pub(crate) fn from_placed(
+        endpoint: Endpoint,
+        frame: crate::live_apps::committed::PlacedFrame,
+    ) -> Self {
+        let (frame, reservation) = frame.into_parts();
+
         Self {
             endpoint,
             frame,
-            reservation: None,
+            reservation,
         }
     }
 
     pub(crate) fn is_admitted(&self) -> bool {
         self.reservation.is_some()
     }
-    pub(crate) fn admitted(
-        endpoint: Endpoint,
-        frame: Box<Frame>,
-        budget: &Arc<crate::byte_budget::ByteBudget>,
-    ) -> Option<Self> {
-        let reservation = budget.reserve(frame.bytes())?;
-        Some(Self {
-            endpoint,
-            frame,
-            reservation: Some(reservation),
-        })
-    }
-
     pub(crate) fn previous(&self) -> (&Endpoint, &Frame) {
         (&self.endpoint, &self.frame)
     }

@@ -5,7 +5,7 @@ use super::Decoder;
 use crate::byte_budget::ByteBudget;
 use crate::cancellation::Operation;
 use crate::live_app_response::Sample;
-use crate::live_apps::committed::Endpoint;
+use crate::live_apps::committed::{Endpoint, PlacedFrame, Placement, PlacementError};
 use crate::live_apps::{AggregateError, Frame};
 use crate::recording::processes::ProcessBatch;
 use crate::recording::{Before, Refused, ScopedSealedMinute};
@@ -49,43 +49,41 @@ impl Decoder {
             .ok_or(Refused::Decode(persistence::Error::Bound(
                 "sealed name count",
             )))?;
-        let mut sample = None;
-        let mut failure = None;
-        Frame::placed_many_from(
-            &batch.endpoints,
-            &batch.rows,
-            &batch.order,
-            *input.next,
-            input.operation,
+        let result = Frame::placed(
+            &Placement {
+                endpoints: &batch.endpoints,
+                rows: &batch.rows,
+                order: &batch.order,
+                first: *input.next,
+                operation: input.operation,
+                budget: input.budget,
+            },
             |endpoint, frame| {
-                let result = replay_capture(
+                let mut sample = None;
+                let captured = replay_capture(
                     endpoint,
                     frame,
                     self.predecessor.as_ref(),
                     &mut sample,
                     target.derives(endpoint),
-                    input.budget,
                     names_capacity,
-                )
-                .map_err(T::Error::from)
-                .and_then(|captured| target.consume(captured));
-                match result {
-                    Ok(Progress::Accepted(before)) => {
+                );
+                match target.consume(captured)? {
+                    Progress::Accepted(before) => {
                         self.accept_replay(before, input.next);
                         Ok(true)
                     }
-                    Ok(Progress::Pending) => Ok(false),
-                    Err(error) => {
-                        failure = Some(error);
-                        Ok(false)
-                    }
+                    Progress::Pending => Ok(false),
                 }
             },
-        )
-        .map_err(Refused::from)?;
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(()),
+        );
+        match result {
+            Ok(()) => Ok(()),
+            Err(PlacementError::Source(error)) => Err(T::Error::from(Refused::from(error))),
+            Err(PlacementError::Budget) => Err(T::Error::from(Refused::Input(
+                persistence::engine::AdmissionRefusal::Budget,
+            ))),
+            Err(PlacementError::Consumer(error)) => Err(error),
         }
     }
 
@@ -142,36 +140,31 @@ impl Decoder {
 
 fn replay_capture<'sample>(
     endpoint: &Endpoint,
-    frame: Box<Frame>,
+    frame: PlacedFrame,
     before: Option<&Before>,
     sample: &'sample mut Option<Box<Sample>>,
     derives: bool,
-    budget: Option<&Arc<ByteBudget>>,
     names_capacity: usize,
-) -> Result<Captured<'sample>, Refused> {
+) -> Captured<'sample> {
     let previous = before.and_then(|before| {
         let (endpoint, previous) = before.previous();
         frame
+            .get()
             .observation()
             .can_use_predecessor(&endpoint.observation())
             .then_some(previous)
     });
     let captured = if derives {
-        Sample::capture_typed(&frame, previous, sample)
+        Sample::capture_typed(frame.get(), previous, sample)
     } else {
-        frame.validate_input_typed(previous)
+        frame.get().validate_input_typed(previous)
     };
     let retains = match &captured {
         Ok(()) => true,
         Err(error) => error.retains_input(),
     };
     let before = if retains {
-        Some(match budget {
-            Some(budget) => Before::admitted(*endpoint, frame, budget).ok_or(Refused::Input(
-                persistence::engine::AdmissionRefusal::Budget,
-            ))?,
-            None => Before::from_frame(*endpoint, frame),
-        })
+        Some(Before::from_placed(*endpoint, frame))
     } else {
         None
     };
@@ -180,12 +173,12 @@ fn replay_capture<'sample>(
     } else {
         None
     };
-    Ok(Captured {
+    Captured {
         endpoint: *endpoint,
         names_capacity,
         sample,
         before,
-    })
+    }
 }
 
 struct Visitor<F> {

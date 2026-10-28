@@ -110,6 +110,25 @@ pub struct Frame {
     pub usage_gone: u32,
 }
 
+struct FrameCapacity {
+    members: usize,
+    starts: usize,
+    execs: usize,
+    exits: usize,
+    arena: usize,
+}
+
+impl FrameCapacity {
+    fn bytes(&self) -> usize {
+        size_of::<Frame>()
+            + self.members * size_of::<Member>()
+            + self.starts * size_of::<Start>()
+            + self.execs * size_of::<Exec>()
+            + self.exits * size_of::<Exit>()
+            + self.arena
+    }
+}
+
 #[cfg_attr(test, derive(Debug, PartialEq))]
 struct Member {
     pid: i32,
@@ -382,12 +401,14 @@ impl Frame {
     /// Charges owned vector capacities and the frame itself to the live observation cache.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        size_of::<Self>()
-            + self.members.capacity() * size_of::<Member>()
-            + self.starts.capacity() * size_of::<Start>()
-            + self.execs.capacity() * size_of::<Exec>()
-            + self.exits.capacity() * size_of::<Exit>()
-            + self.arena.capacity()
+        FrameCapacity {
+            members: self.members.capacity(),
+            starts: self.starts.capacity(),
+            execs: self.execs.capacity(),
+            exits: self.exits.capacity(),
+            arena: self.arena.capacity(),
+        }
+        .bytes()
     }
 
     /// Owns Start/Exec program bytes and final usage before event/dictionary buffers are reused.

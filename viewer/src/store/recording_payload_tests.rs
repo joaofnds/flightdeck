@@ -2025,3 +2025,342 @@ fn a_full_minute_shares_captured_names_between_its_exact_observations() {
     drop(second);
     assert_eq!(budget.used(), 0);
 }
+
+#[test]
+fn saved_frame_budget_denial_precedes_construction_and_preserves_retry() {
+    // Goal: deny owned Frame storage before construction while preserving an exact retry.
+    // Method: fill the real shared budget after preparing a saved batch with predecessor 4.
+    let fixture = crate::store::startup_tests::primary_fixture();
+    let root = fixture.root.clone();
+    let identity = fixture.writer.identity().unwrap();
+    let expected = frame_retry_observations(&identity);
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let found = frame_retry_found(&fixture);
+    let mut decoder = frame_retry_seed(&fixture, &found[1], &budget, &operation);
+    assert_frame_retry_before(&decoder, &expected[0]);
+    let retained = budget.used();
+    let (witness, batch) = frame_retry_batch(&fixture, &found[2], &budget, &operation);
+    let mut target = FrameRetryTarget::new(&budget, witness.losses);
+    let mut next = 0;
+    let trace = persistence::work::ingestion::Trace::new(identity.recording);
+    let scope = trace.enter();
+    assert!(size_of::<crate::live_apps::Frame>() > 1);
+    let pressure = budget
+        .reserve(budget.maximum() - budget.used() - 1)
+        .unwrap();
+    assert_eq!(budget.maximum() - budget.used(), 1);
+    let mut input = super::replay::Input {
+        next: &mut next,
+        operation: &operation,
+        budget: Some(&budget),
+    };
+
+    let result = decoder.replay(&batch, &mut input, &mut target);
+
+    assert!(matches!(
+        result,
+        Err(crate::recording::Refused::Input(
+            persistence::engine::AdmissionRefusal::Budget
+        ))
+    ));
+    assert_eq!(*input.next, 0);
+    assert!(target.seconds.is_empty());
+    assert!(target.names.is_none());
+    assert_frame_retry_before(&decoder, &expected[0]);
+    drop(batch);
+    assert_eq!(budget.used(), retained + pressure.bytes());
+    let denied = frame_retry_work(&trace, &expected[1]);
+    eprintln!("denied publication 5 Frame attempts/captures/derivations={denied:?}");
+    assert_eq!(denied, [0, 0, 0]);
+    drop(pressure);
+    let (current, batch) = frame_retry_batch(&fixture, &found[2], &budget, &operation);
+    assert_eq!(current, witness);
+    decoder.replay(&batch, &mut input, &mut target).unwrap();
+    assert_eq!(*input.next, 2);
+    assert_frame_retry_output(&target, &expected);
+    assert_frame_retry_before(&decoder, &expected[2]);
+    assert_eq!(frame_retry_work(&trace, &expected[1]), [1, 1, 1]);
+    assert_eq!(frame_retry_work(&trace, &expected[2]), [1, 1, 1]);
+    let reader = target.seconds.remove(0);
+    drop((batch, decoder, target, found, fixture, scope, trace));
+
+    assert_frame_retry_retained(reader, &root, &budget, &expected);
+}
+
+fn frame_retry_found(fixture: &Fixture) -> Vec<super::super::Found> {
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    assert_eq!(found.len(), 3);
+
+    found
+}
+
+fn assert_frame_retry_retained(
+    reader: AppsSecond,
+    root: &std::path::Path,
+    budget: &Arc<ByteBudget>,
+    expected: &[crate::live_app_response::Observation; 3],
+) {
+    assert!(!root.exists());
+    assert_eq!(
+        budget.used(),
+        crate::store::startup_tests::retained_app_charge(&reader)
+    );
+    assert_frame_retry_second(
+        &reader,
+        &FrameRetryExpected {
+            selected: expected[1],
+            previous: expected[0],
+        },
+    );
+    drop(reader);
+    assert_eq!(budget.used(), 0);
+}
+
+struct FrameRetryTarget<'budget> {
+    budget: &'budget Arc<ByteBudget>,
+    losses: persistence::Losses,
+    names: Option<crate::store::payload::ProcessNames>,
+    seconds: Vec<AppsSecond>,
+}
+
+impl<'budget> FrameRetryTarget<'budget> {
+    fn new(budget: &'budget Arc<ByteBudget>, losses: persistence::Losses) -> Self {
+        Self {
+            budget,
+            losses,
+            names: None,
+            seconds: Vec::new(),
+        }
+    }
+}
+
+impl super::replay::Target for FrameRetryTarget<'_> {
+    type Error = crate::recording::Refused;
+
+    fn derives(&self, _endpoint: &crate::live_apps::committed::Endpoint) -> bool {
+        true
+    }
+
+    fn consume(
+        &mut self,
+        captured: super::replay::Captured<'_>,
+    ) -> Result<super::replay::Progress, Self::Error> {
+        let sample = Ok(captured
+            .sample
+            .unwrap()
+            .map_err(crate::live_apps::AggregateError::legacy)?);
+        let mut second = AppsSecond::default();
+        super::load_minute_rows(&sample, self.seconds.last(), self.budget, &mut second);
+        super::load_minute_payload(
+            &sample,
+            self.budget,
+            captured.names_capacity,
+            &mut self.names,
+            &mut second,
+        );
+        if second.missing == Some(crate::store::Missing::Budget) {
+            return Err(crate::recording::Refused::Input(
+                persistence::engine::AdmissionRefusal::Budget,
+            ));
+        }
+        if matches!(second.processes, Err(crate::store::Missing::Budget)) {
+            return Err(crate::recording::Refused::Input(
+                persistence::engine::AdmissionRefusal::Budget,
+            ));
+        }
+
+        second.observation = Some(captured.endpoint.observation());
+        second.metadata.origin = crate::store::native::Origin::Saved(self.losses);
+        self.seconds.push(second);
+
+        Ok(super::replay::Progress::Accepted(captured.before))
+    }
+}
+
+fn frame_retry_batch(
+    fixture: &Fixture,
+    found: &super::super::Found,
+    budget: &Arc<ByteBudget>,
+    operation: &crate::cancellation::Operation,
+) -> (
+    persistence::Manifest,
+    crate::recording::processes::ProcessBatch,
+) {
+    let sealed = super::open_minute(
+        &fixture.root,
+        found,
+        budget,
+        operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap();
+    let endpoints = sealed.endpoints().unwrap();
+    let batch =
+        crate::recording::processes::read_processes_batch_with_endpoints(&sealed, endpoints)
+            .unwrap();
+    sealed.revalidate_full().unwrap();
+
+    (sealed.into_manifest(), batch)
+}
+
+fn frame_retry_seed(
+    fixture: &Fixture,
+    found: &super::super::Found,
+    budget: &Arc<ByteBudget>,
+    operation: &crate::cancellation::Operation,
+) -> Decoder {
+    let (witness, batch) = frame_retry_batch(fixture, found, budget, operation);
+    let mut decoder = Decoder::default();
+    let mut target = FrameRetryTarget::new(budget, witness.losses);
+    let mut next = 0;
+    decoder
+        .replay(
+            &batch,
+            &mut super::replay::Input {
+                next: &mut next,
+                operation,
+                budget: Some(budget),
+            },
+            &mut target,
+        )
+        .unwrap();
+    assert_eq!(next, 2);
+    assert_eq!(target.seconds.len(), 2);
+    drop((batch, target));
+    assert_eq!(budget.used(), decoder.predecessor.as_ref().unwrap().bytes());
+
+    decoder
+}
+
+fn frame_retry_observations(
+    identity: &collector::ring::RunIdentity,
+) -> [crate::live_app_response::Observation; 3] {
+    [(4, 119, 1119), (5, 120, 1120), (6, 121, 1121)].map(|(publication, run_tick, wall_second)| {
+        crate::live_app_response::Observation {
+            recording: identity.recording.0,
+            stamp: crate::apps::Stamp {
+                boot: identity.boot.0,
+                run: identity.run.0,
+                publication,
+                continuous_ns: Some(run_tick * 1_000_000_000),
+                awake_ns: Some(run_tick * 1_000_000_000),
+            },
+            run_tick,
+            wall_ns: Some(wall_second * 1_000_000_000),
+        }
+    })
+}
+
+fn assert_frame_retry_before(
+    decoder: &Decoder,
+    observation: &crate::live_app_response::Observation,
+) {
+    let before = decoder.predecessor.as_ref().unwrap();
+    assert!(before.is_admitted());
+    assert_eq!(before.previous().0.observation(), *observation);
+    assert_eq!(before.previous().1.observation(), *observation);
+}
+
+fn frame_retry_work(
+    trace: &persistence::work::ingestion::Trace,
+    observation: &crate::live_app_response::Observation,
+) -> [usize; 3] {
+    use persistence::work::ingestion::{Key, Kind};
+    let key = Key::Publication {
+        run: collector::ring::RunIdentity {
+            recording: collector::ring::Identity(observation.recording),
+            boot: collector::ring::Identity(observation.stamp.boot),
+            run: collector::ring::Identity(observation.stamp.run),
+        },
+        publication: observation.stamp.publication,
+    };
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+
+    [
+        Kind::CommittedFrameCaptureAttempt,
+        Kind::CommittedFrameCapture,
+        Kind::AppDerivation,
+    ]
+    .map(|kind| {
+        events
+            .iter()
+            .filter(|event| event.key == key)
+            .filter(|event| event.kind == kind)
+            .count()
+    })
+}
+
+struct FrameRetryExpected {
+    selected: crate::live_app_response::Observation,
+    previous: crate::live_app_response::Observation,
+}
+
+fn assert_frame_retry_output(
+    target: &FrameRetryTarget<'_>,
+    observations: &[crate::live_app_response::Observation; 3],
+) {
+    let selected: Vec<_> = target
+        .seconds
+        .iter()
+        .map(|second| second.observation.unwrap())
+        .collect();
+    assert_eq!(selected, [observations[1], observations[2]]);
+    assert_frame_retry_second(
+        &target.seconds[0],
+        &FrameRetryExpected {
+            selected: observations[1],
+            previous: observations[0],
+        },
+    );
+    assert_frame_retry_second(
+        &target.seconds[1],
+        &FrameRetryExpected {
+            selected: observations[2],
+            previous: observations[1],
+        },
+    );
+}
+
+fn assert_frame_retry_second(apps: &AppsSecond, expected: &FrameRetryExpected) {
+    use crate::apps::Amount;
+    assert_eq!(apps.observation, Some(expected.selected));
+    assert_eq!(apps.missing, None);
+    assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
+    let payload = apps.processes.as_ref().unwrap();
+    assert_eq!(payload.selected, expected.selected);
+    assert_eq!(payload.previous, Some(expected.previous.stamp));
+    assert_eq!(
+        payload.iter().map(|row| row.pid).collect::<Vec<_>>(),
+        [1, 7]
+    );
+    let process = payload.iter().find(|row| row.pid == 7).unwrap();
+    assert_eq!(
+        process.creation,
+        Some(collector::ring::ProcessCreation {
+            unique_id: 7,
+            pid_version: -7
+        })
+    );
+    assert_eq!(process.executable_name().unwrap().bytes, b"current");
+    assert_eq!(process.cpu_ns(), Amount::Known(100_000_000));
+    assert_eq!(process.disk_read_bytes(), Amount::Known(17));
+    assert_eq!(process.disk_written_bytes(), Amount::Known(43));
+    assert_eq!(process.disk_io_bytes(), Amount::Known(60));
+    assert_eq!(process.resident_bytes(), Amount::Known(11));
+    assert_eq!(process.footprint_bytes(), Amount::Known(12));
+    let ranks = apps.ranks().unwrap();
+    assert_eq!(ranks.selected, expected.selected);
+    let disk = ranks
+        .metrics
+        .iter()
+        .find(|ranking| ranking.metric == crate::live_app_response::Metric::Disk)
+        .unwrap();
+    assert_eq!(disk.entries.len(), 1);
+    assert_eq!(disk.entries[0].app.bytes, b"/Apps/Current.app");
+    assert_eq!(disk.entries[0].amount, 60);
+    assert!((disk.entries[0].rate.unwrap() - 60.0).abs() <= f64::EPSILON * 60.0);
+}
