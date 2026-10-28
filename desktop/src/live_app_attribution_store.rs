@@ -8,8 +8,9 @@ use viewer::store::{Attribution, AttributionReading, Cohorts, MachineSecond, Vie
 
 use super::machine_reference::MachineReference;
 use super::{History, Measure, Metric, Other, Point, Reading};
+use crate::live_app_store_points::{self, KeptPoint};
 use crate::live_projection::{OverviewAppPoint, OverviewApps};
-use crate::live_resident_history::{Observation, cohort_labels, same_apps};
+use crate::live_resident_history::{Observation, cohort_labels};
 
 #[cfg(test)]
 #[path = "live_app_attribution_store_tests.rs"]
@@ -39,25 +40,42 @@ impl History {
         }
         let drawn = crate::live_projection::overview_app_points(view)?;
 
-        let count = drawn.points.len();
-        let mut history = Self {
-            metric,
-            points: Vec::with_capacity(count),
-            cohort: from_view_labels(cohort)?,
-            positions: Vec::with_capacity(count),
-            window: drawn.window,
-            selected_index: 0,
-            retention_limited: drawn.points.iter().any(OverviewAppPoint::retention_limited),
-            view_cohort: Some(cohort.to_vec()),
-        };
         let kept = from_view_kept(older, metric, cohort);
-        from_view_points(&mut history, &drawn.points, cohort, kept);
-        let Some(selected_index) = history.points.len().checked_sub(1) else {
+        let (positions, points) = live_app_store_points::points(
+            &drawn.points,
+            kept,
+            |machine, apps, observation, segment| {
+                from_view_point(metric, machine, apps, cohort, observation, segment)
+            },
+        );
+        let Some(selected_index) = points.len().checked_sub(1) else {
             unreachable!("the chart draws the View's newest second");
         };
-        history.selected_index = selected_index;
 
-        Ok(history)
+        Ok(Self {
+            metric,
+            points,
+            cohort: from_view_labels(cohort)?,
+            positions,
+            window: drawn.window,
+            selected_index,
+            retention_limited: drawn.points.iter().any(OverviewAppPoint::retention_limited),
+            view_cohort: Some(cohort.to_vec()),
+        })
+    }
+}
+
+impl KeptPoint for Point {
+    fn observation(&self) -> &Observation {
+        &self.observation
+    }
+
+    fn stretch(&self) -> bool {
+        self.stretch
+    }
+
+    fn in_segment(self, segment: u64) -> Self {
+        Self { segment, ..self }
     }
 }
 
@@ -69,122 +87,8 @@ fn from_view_kept(older: Option<History>, metric: Metric, cohort: &[Arc<RankedAp
         return Vec::new();
     };
     assert_eq!(older.metric, metric);
-    let Some(drawn) = &older.view_cohort else {
-        return Vec::new();
-    };
-    if !same_apps(drawn, cohort) {
-        return Vec::new();
-    }
 
-    older.points
-}
-
-/// Adds to `history` a point for each of `drawn` that shows Apps, as the chart whose own lines
-/// draw `cohort` shows it, breaking the line where the machine charts break theirs, where two
-/// seconds are not consecutive, and where a point shows none. A point that `kept`, the points of
-/// an older chart, holds takes its point from there.
-fn from_view_points(
-    history: &mut History,
-    drawn: &[OverviewAppPoint],
-    cohort: &[Arc<RankedApp>],
-    kept: Vec<Point>,
-) {
-    assert!(history.points.is_empty());
-
-    let mut kept = Kept::of(kept, drawn);
-    let mut segment = 0;
-    let mut previous = None;
-    for point in drawn {
-        let Some(apps) = point.apps else {
-            previous = None;
-            continue;
-        };
-        let (observation, follows) = match apps {
-            OverviewApps::Second(apps) => (apps.observation, apps.consecutive),
-            OverviewApps::Stretch(stretch) => (stretch.observation, true),
-        };
-        let Some(observation) = &observation else {
-            unreachable!("the store names the tick of every second and stretch it takes in");
-        };
-        if !history.points.is_empty() {
-            if previous != Some(point.segment) || !follows {
-                segment += 1;
-            }
-        }
-        previous = Some(point.segment);
-
-        let observation = Observation::of(observation);
-        history.positions.push(point.position);
-        let made = match kept.take(apps, &observation) {
-            Some(made) => Point { segment, ..made },
-            None => from_view_point(
-                history.metric,
-                point.machine,
-                apps,
-                cohort,
-                observation,
-                segment,
-            ),
-        };
-        history.points.push(made);
-    }
-    assert_eq!(history.points.len(), history.positions.len());
-}
-
-/// The points of an older chart that a newer one takes, the stretches' and the seconds' apart,
-/// each from the one at the newer chart's first of its kind on.
-struct Kept {
-    stretches: std::iter::Peekable<std::vec::IntoIter<Point>>,
-    seconds: std::iter::Peekable<std::vec::IntoIter<Point>>,
-}
-
-impl Kept {
-    /// The points of `kept` that the chart of `drawn` takes, since a newer chart starts each
-    /// kind no earlier than the older chart `kept` came from, and none of a kind where `kept`
-    /// does not hold the newer chart's first.
-    fn of(kept: Vec<Point>, drawn: &[OverviewAppPoint]) -> Self {
-        let (stretches, seconds): (Vec<Point>, Vec<Point>) =
-            kept.into_iter().partition(|point| point.stretch);
-        let first = |stretch: bool| {
-            drawn.iter().find_map(|point| match point.apps? {
-                OverviewApps::Second(apps) if !stretch => apps.observation,
-                OverviewApps::Stretch(held) if stretch => held.observation,
-                _ => None,
-            })
-        };
-
-        Self {
-            stretches: Self::of_from(stretches, first(true)).into_iter().peekable(),
-            seconds: Self::of_from(seconds, first(false)).into_iter().peekable(),
-        }
-    }
-
-    /// The points of `kept` from the one at `first` on, or none where `kept` does not hold it.
-    fn of_from(
-        mut kept: Vec<Point>,
-        first: Option<viewer::live_app_response::Observation>,
-    ) -> Vec<Point> {
-        let Some(first) = first else {
-            return Vec::new();
-        };
-        let first = Observation::of(&first);
-        let Some(start) = kept.iter().position(|point| point.observation == first) else {
-            return Vec::new();
-        };
-
-        kept.drain(..start);
-        kept
-    }
-
-    /// The kept point of `apps`, the tick `observation` names, where the older chart drew it.
-    fn take(&mut self, apps: OverviewApps, observation: &Observation) -> Option<Point> {
-        let kept = match apps {
-            OverviewApps::Second(_) => &mut self.seconds,
-            OverviewApps::Stretch(_) => &mut self.stretches,
-        };
-
-        kept.next_if(|point| point.observation == *observation)
-    }
+    live_app_store_points::kept(older.view_cohort.as_deref(), older.points, cohort)
 }
 
 /// The point of `apps`, the Apps of a second or of a stretch whose machine readings `machine`
