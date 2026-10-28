@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use super::attribution::{self, Completeness, PointApps, PointRow, Totals};
 use super::buffers::{Buffers, Span};
+use super::key_order::{self, key_of};
 use super::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Attribution, Resident};
 use crate::EARLIER_STRIDE_SECONDS;
 use crate::app_attribution_history::AppAttributionMetric;
-use crate::apps::AppKey;
 use crate::live_app_response::{Measure, Metric, Observation, Rankable, RankedApp};
 
 /// The Apps a stretch holds at most, as many as a second holds, past which it holds none and
@@ -327,7 +327,7 @@ impl AppsStretch {
 
         let capacity = spare.capacity();
         spare.clear();
-        let fits = add_rows_merged(&mut self.rows, incoming, spare, add);
+        let fits = key_order::add_merged(&mut self.rows, incoming, spare, STRETCH_APPS_MAX, add);
         mem::swap(&mut self.rows, spare);
         if !fits {
             self.rows.clear();
@@ -432,54 +432,6 @@ fn add_completeness(stretch: Completeness, second: Completeness) -> Completeness
         usage_refused: stretch.usage_refused.max(second.usage_refused),
         usage_gone: stretch.usage_gone.max(second.usage_gone),
     }
-}
-
-/// Writes into `merged` the Apps of `rows` with those of `incoming` added with `add`, in key
-/// order. Returns false where they come to more than `STRETCH_APPS_MAX` Apps.
-fn add_rows_merged<R: PointRow + Rankable>(
-    rows: &mut Vec<StretchRow>,
-    incoming: &[R],
-    merged: &mut Vec<StretchRow>,
-    add: impl Fn(&mut StretchRow, &R),
-) -> bool {
-    assert!(merged.is_empty());
-
-    let mut held = rows.drain(..).peekable();
-    for app in incoming {
-        let key = key_of(app.name());
-        while let Some(row) = held.next_if(|row| key_of(&row.name) < key) {
-            if merged.len() == STRETCH_APPS_MAX {
-                return false;
-            }
-            merged.push(row);
-        }
-        // An App out of key order would take a second row of its own.
-        if let Some(last) = merged.last() {
-            assert!(key_of(&last.name) < key);
-        }
-        let mut row = match held.next_if(|row| key_of(&row.name) == key) {
-            Some(row) => row,
-            None => StretchRow::new(app.ranked()),
-        };
-
-        add(&mut row, app);
-        if merged.len() == STRETCH_APPS_MAX {
-            return false;
-        }
-        merged.push(row);
-    }
-    for row in held {
-        if merged.len() == STRETCH_APPS_MAX {
-            return false;
-        }
-        merged.push(row);
-    }
-
-    true
-}
-
-fn key_of(name: &RankedApp) -> AppKey<'_> {
-    name.kind.key(&name.bytes)
 }
 
 impl StretchRow {
@@ -646,6 +598,16 @@ impl PointRow for StretchRow {
 
     fn membership_complete(&self) -> bool {
         self.membership_complete
+    }
+}
+
+impl<R: PointRow> key_order::HeldRow<R> for StretchRow {
+    fn name(&self) -> &RankedApp {
+        &self.name
+    }
+
+    fn starting(row: &R) -> Self {
+        Self::new(row.ranked())
     }
 }
 

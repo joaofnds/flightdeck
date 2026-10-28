@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use super::attribution::PointRow;
 use super::attribution::{COHORT_MAX, METRICS, ranked_metric};
+use super::key_order::{self, key_of};
 use super::stretch::StretchRow;
 use super::{
     AppRow, AppsSecond, AppsStretch, EARLIER_STRIDE_SECONDS, MachineSecond, SECONDS_MAX,
@@ -15,7 +16,6 @@ use super::{
 };
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::app_attribution_history::means::{Comparison, Mean, compare};
-use crate::apps::AppKey;
 use crate::live_app_response::{Metric, Rankable, RankedApp};
 
 /// The Apps a window holds at most, as the worker's App histories hold them, past which it
@@ -123,6 +123,20 @@ struct Entry {
     means: [Mean; METRICS.len()],
     /// The App's resident memory added up over the seconds that measured it.
     resident: Gauge,
+}
+
+impl<R: PointRow> key_order::HeldRow<R> for Entry {
+    fn name(&self) -> &RankedApp {
+        &self.name
+    }
+
+    fn starting(row: &R) -> Self {
+        Self {
+            name: row.ranked(),
+            means: [Mean::ZERO; METRICS.len()],
+            resident: Gauge::ZERO,
+        }
+    }
 }
 
 /// A reading of what an App holds, added up over some seconds, whose mean is per second rather
@@ -240,7 +254,7 @@ impl Leaders {
         add: impl Fn(&mut Entry, &R),
     ) -> bool {
         self.spare.clear();
-        let fits = choose_add_merged(&mut self.entries, rows, &mut self.spare, add);
+        let fits = key_order::add_merged(&mut self.entries, rows, &mut self.spare, APPS_MAX, add);
         std::mem::swap(&mut self.entries, &mut self.spare);
         fits
     }
@@ -362,54 +376,6 @@ fn choose_add_stretch(entry: &mut Entry, row: &StretchRow) {
     }
 }
 
-/// Writes into `merged` the entries of `entries` with `rows` added with `add`, in key order.
-/// Returns false where they come to more than `APPS_MAX` Apps.
-fn choose_add_merged<R: PointRow + Rankable>(
-    entries: &mut Vec<Entry>,
-    rows: &[R],
-    merged: &mut Vec<Entry>,
-    add: impl Fn(&mut Entry, &R),
-) -> bool {
-    assert!(merged.is_empty());
-
-    let mut held = entries.drain(..).peekable();
-    for row in rows {
-        let key = key_of(row.name());
-        while let Some(entry) = held.next_if(|entry| key_of(&entry.name) < key) {
-            if merged.len() == APPS_MAX {
-                return false;
-            }
-            merged.push(entry);
-        }
-        // An App out of key order would take a second entry of its own.
-        if let Some(last) = merged.last() {
-            assert!(key_of(&last.name) < key);
-        }
-        let mut entry = match held.next_if(|entry| key_of(&entry.name) == key) {
-            Some(entry) => entry,
-            None => Entry {
-                name: row.ranked(),
-                means: [Mean::ZERO; METRICS.len()],
-                resident: Gauge::ZERO,
-            },
-        };
-
-        add(&mut entry, row);
-        if merged.len() == APPS_MAX {
-            return false;
-        }
-        merged.push(entry);
-    }
-    for entry in held {
-        if merged.len() == APPS_MAX {
-            return false;
-        }
-        merged.push(entry);
-    }
-
-    true
-}
-
 /// Writes into `chosen` the entries a chart draws, the most first: those with the highest mean,
 /// as `compare` orders the means of two entries, ties going to the App first in key order, and
 /// none whose seconds never measured the resource.
@@ -456,8 +422,4 @@ fn choose_cohort(entries: &[Entry], chosen: &[usize], cohort: &mut Vec<Arc<Ranke
     let capacity = cohort.capacity();
     cohort.extend(chosen.iter().map(|index| Arc::clone(&entries[*index].name)));
     assert_eq!(cohort.capacity(), capacity);
-}
-
-fn key_of(name: &RankedApp) -> AppKey<'_> {
-    name.kind.key(&name.bytes)
 }

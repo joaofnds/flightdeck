@@ -9,6 +9,7 @@ mod cohorts;
 mod context_cpu;
 mod context_response;
 mod coverage;
+mod key_order;
 mod native;
 mod native_acceptance;
 mod payload;
