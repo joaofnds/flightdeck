@@ -170,6 +170,40 @@ are within what reruns showed:
 | 1,800 | 207.1 / 665.5 | 138.9 / 504.9 | 206.0 / 777.6 |
 | 3,500 | 236.1 / 782.7 | 135.4 / 481.7 | 202.7 / 760.7 |
 
+### Charting Apps over the loaded hour
+
+Measured on 2026-10-28 on the same machine, on a fixture of the newest 150 sealed windows
+of the real recording, with one fresh process of each build run one after the other on
+that fixture. The base is `37630ad`, whose Store chose each chart's leading Apps at every
+publish over its newest 960 seconds. This revision has the page choose them over the
+picked range whenever the range changes, and the View holds each App's sums for every ten
+seconds of the loaded hour. The measured executables have these SHA-256 identities:
+
+| Executable | SHA-256 |
+| --- | --- |
+| `flightdeck` | `7fcdf50e4644f8c528ba20f27231c5192b015cc0f43fc1a65a8a0a87278e58f9` |
+| `flightdeck-control` | `1963146e4d1f54f68bf3863e6cd111ec1895695abd6dbaa92f3e9ecc232d49cb` |
+| `resume_bench` | `5d8277fec5fc29f4544a5eb947f31fc7fb96b63be2529805491efbf1dcbd6236` |
+| base `flightdeck` | `6913f92c01b17c23171cf30a308c9e5091bf0efc0541869a945a9d590fe1d8ff` |
+| base `flightdeck-control` | `d9f87594209bf13a9029a38222a309ff36ba8196bda0cf8470f92fd98038b19d` |
+
+At 60 minutes, Overview's CPU, Memory, Disk and Energy charts by App drew their Apps
+across the whole hour, and a hover on the older part of the CPU and Memory charts listed
+each App's mean over its ten seconds.
+
+Ten switches among 5, 15, 30 and 60 minutes drew in 50.7 to 59.2 ms with 20.4 to 26.7 ms
+of process CPU, against 34.2 to 38.4 ms, and once 9.3 ms, with 6.9 to 11.7 ms of process
+CPU for the base. An earlier process of this revision on the same fixture drew its
+switches in 17.4 to 29.9 ms with 15.8 to 23.6 ms of CPU, so the frame bound moves between
+processes by more than the two builds differ, and the process CPU is the steadier
+comparison. No switch submitted a page-reader request or changed the Store's version, and
+measured disk-read bytes were zero. A `sample` of 20 switches between 5 and 15 minutes put
+about 10 ms of each on the main thread, nearly all of it in building the charts by App from
+the View, and about 7 ms of that in attributing the Apps of each second and stretch.
+
+The process footprint read 790 to 818 MB for this revision and 739 to 762 MB for the base.
+Which part of the View holds the difference was not measured.
+
 ## Profiling and reproduction
 
 `sample` on the original active Store found 337 stack samples under
