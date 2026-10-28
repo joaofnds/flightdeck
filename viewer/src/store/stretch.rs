@@ -151,6 +151,9 @@ pub struct AppsStretch {
     /// The intervals those seconds measured their Apps over, added up, leaving out a second
     /// that measured them over none.
     elapsed_ns: u64,
+    /// Whether those intervals added up past what `elapsed_ns` counts, so the stretch states no
+    /// interval its rates were taken over.
+    elapsed_overflowed: bool,
     completeness: Completeness,
     /// Whether the stretch's seconds hold more Apps between them than a stretch holds, so it
     /// holds none.
@@ -209,6 +212,7 @@ impl AppsStretch {
         self.observation = None;
         self.seconds = 0;
         self.elapsed_ns = 0;
+        self.elapsed_overflowed = false;
         self.completeness = Completeness::default();
         self.too_many = false;
         self.rows.clear();
@@ -222,6 +226,7 @@ impl AppsStretch {
             observation: self.observation,
             seconds: self.seconds,
             elapsed_ns: self.elapsed_ns,
+            elapsed_overflowed: self.elapsed_overflowed,
             completeness: self.completeness,
             too_many: self.too_many,
             rows: self.rows.clone(),
@@ -248,7 +253,7 @@ impl AppsStretch {
         self.seconds += 1;
         let elapsed_ns = second.elapsed_ns.filter(|elapsed_ns| *elapsed_ns > 0);
         if let Some(elapsed_ns) = elapsed_ns {
-            self.elapsed_ns += elapsed_ns;
+            self.add_elapsed(elapsed_ns);
         }
         self.add_rows(&second.apps, spare, |row, app| row.add(app, elapsed_ns));
     }
@@ -262,12 +267,21 @@ impl AppsStretch {
 
         self.add_completeness(other.completeness);
         self.seconds += other.seconds;
-        self.elapsed_ns += other.elapsed_ns;
+        self.add_elapsed(other.elapsed_ns);
+        self.elapsed_overflowed |= other.elapsed_overflowed;
         if other.too_many {
             self.rows.clear();
             self.too_many = true;
         }
         self.add_rows(&other.rows, spare, StretchRow::add_row);
+    }
+
+    /// Adds `elapsed_ns` to the intervals the stretch's seconds measured their Apps over.
+    fn add_elapsed(&mut self, elapsed_ns: u64) {
+        match self.elapsed_ns.checked_add(elapsed_ns) {
+            Some(sum) => self.elapsed_ns = sum,
+            None => self.elapsed_overflowed = true,
+        }
     }
 
     /// Adds `completeness`, what the App rule found of seconds the stretch does not hold.
@@ -345,6 +359,10 @@ impl AppsStretch {
     /// where they measured any.
     #[must_use]
     pub fn elapsed_ns(&self) -> Option<u64> {
+        if self.elapsed_overflowed {
+            return None;
+        }
+
         (self.elapsed_ns > 0).then_some(self.elapsed_ns)
     }
 
@@ -512,7 +530,7 @@ impl Amount {
     fn add_rate(&mut self, measure: &Measure, elapsed_ns: u64) {
         assert!(elapsed_ns > 0);
         if measure.measured().is_some() {
-            self.measured_ns += elapsed_ns;
+            self.add_measured_ns(elapsed_ns);
         }
 
         self.add(measure);
@@ -535,13 +553,21 @@ impl Amount {
 
     /// Adds `other`, what the App used of the resource over other seconds.
     fn add_amount(&mut self, other: &Self) {
-        self.measured_ns += other.measured_ns;
+        self.add_measured_ns(other.measured_ns);
         self.measured_seconds += other.measured_seconds;
         self.measured_members = self.measured_members.max(other.measured_members);
         self.unavailable_members = self.unavailable_members.max(other.unavailable_members);
         self.overflowed |= other.overflowed;
         match self.known.checked_add(other.known) {
             Some(known) => self.known = known,
+            None => self.overflowed = true,
+        }
+    }
+
+    /// Adds `measured_ns` to the intervals the App was measured over.
+    fn add_measured_ns(&mut self, measured_ns: u64) {
+        match self.measured_ns.checked_add(measured_ns) {
+            Some(sum) => self.measured_ns = sum,
             None => self.overflowed = true,
         }
     }

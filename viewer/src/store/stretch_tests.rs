@@ -100,6 +100,27 @@ fn a_second_without_its_apps_adds_no_interval() {
 }
 
 #[test]
+fn a_stretch_whose_intervals_add_up_past_a_counter_draws_no_rate() {
+    // Goal: intervals a sealed minute's file reports too long to add up leave a stretch with no
+    // rate rather than stopping the app. Method: A uses a microsecond of CPU at each second of
+    // the stretch of 1,000 to 1,009, each measured over just over half the nanoseconds a u64
+    // counts, so two of them add up past it.
+    let mut held = Held::new();
+    for wall_second in 1_000..=1_010 {
+        let mut apps = second_with(wall_second, &[cpu(b"/A.app", 1_000)]);
+        apps.elapsed_ns = Some(u64::MAX / 2 + 1);
+        let second = second_at(wall_second);
+        assert!(held.take(&RUN, &second, TickApps::Loaded(&mut apps)));
+    }
+
+    let view = published(&mut held);
+
+    let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[name(b"/A.app")]);
+    assert_eq!(view.stretches[0].elapsed_ns(), None);
+    assert_eq!(shown.apps[0].unwrap().rate, None);
+}
+
+#[test]
 fn a_second_measured_over_no_interval_adds_no_use() {
     // Goal: a second that measured its Apps over no interval, as a run's first does, leaves a
     // stretch's rates those of its other seconds. Method: A uses a microsecond of CPU at each
