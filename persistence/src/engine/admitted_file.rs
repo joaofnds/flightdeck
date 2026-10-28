@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use polars::prelude::{DataFrame, ParallelStrategy, ParquetReader, SerReader};
+use polars_buffer::Buffer;
 
 use super::admission;
 use crate::resources::{ByteBudget, ByteReservation};
@@ -86,17 +87,45 @@ impl AdmittedFile {
             .map(|length| (0, length));
         let columns = columns.iter().map(|name| (*name).to_owned()).collect();
         crate::work::ingestion::record_content(crate::work::ingestion::Kind::ProjectionDecode, 0);
-        Ok(ParquetReader::new(Cursor::new(self.bytes.as_slice()))
-            .set_rechunk(false)
-            .with_slice(slice)
-            .with_columns(Some(columns))
-            .with_projection(None)
-            .read_parallel(ParallelStrategy::None)
-            .with_row_index(None)
-            .set_low_memory(true)
-            .with_hive_partition_columns(None)
-            .with_include_file_path(None)
-            .finish()?)
+        // Native statistics borrow the footer; all metadata aliases must die inside this scope.
+        Buffer::with_slice(self.read_prefix_footer()?, |footer| {
+            let metadata = polars_parquet::parquet::read::deserialize_metadata(footer)
+                .map_err(polars::error::PolarsError::from)?;
+            let mut reader = ParquetReader::new(Cursor::new(self.bytes.as_slice()))
+                .set_rechunk(false)
+                .with_slice(slice)
+                .with_columns(Some(columns))
+                .with_projection(None)
+                .read_parallel(ParallelStrategy::None)
+                .with_row_index(None)
+                .set_low_memory(true)
+                .with_hive_partition_columns(None)
+                .with_include_file_path(None);
+            reader.set_metadata(Arc::new(metadata));
+
+            Ok(reader.finish()?)
+        })
+    }
+
+    fn read_prefix_footer(&self) -> Result<&[u8]> {
+        let end = self
+            .bytes
+            .len()
+            .checked_sub(8)
+            .ok_or(Error::Bound("parquet file framing"))?;
+        let length = u32::from_le_bytes(
+            self.bytes[end..end + 4]
+                .try_into()
+                .map_err(|_| Error::Bound("parquet footer length"))?,
+        );
+        let start = end
+            .checked_sub(usize::try_from(length).map_err(|_| Error::Bound("parquet footer bytes"))?)
+            .ok_or(Error::Bound("parquet footer extent"))?;
+        if start < 4 {
+            return Err(Error::Bound("parquet footer extent"));
+        }
+
+        Ok(&self.bytes[start..])
     }
 }
 

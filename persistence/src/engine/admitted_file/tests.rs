@@ -1,4 +1,5 @@
 mod certificate;
+mod footer;
 
 use std::io::{self, Cursor, Read};
 use std::sync::Arc;
