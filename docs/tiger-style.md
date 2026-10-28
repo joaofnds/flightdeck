@@ -53,16 +53,14 @@ snake_case too, which nothing checks.
 - Allocate all memory at startup, and never allocate, or free and allocate again,
   after it. Size every buffer once, to a bound read from the system or chosen above the
   largest need measured. This binds the `collector` binary and the library code it runs.
-  A test, and the code of a binary other than `collector`, the persister or the desktop
-  app, may allocate. The separate persister, and library code and dependencies used only
-  by persistence, may allocate within a fixed working-memory bound for encoding and
-  compressing its windows outside the collection loop. The desktop app, the viewer
-  library, and the code and dependencies they run other than collector code may
-  allocate, Polars and the `persistence` code that reads the recording included. Let
-  their memory grow with what the user is viewing and never with how long the app has
-  run, so that it stays flat over a week of use. Collector code, dependencies it runs,
-  and all library code outside these exceptions stay startup-allocated, whichever
-  binary calls them.
+  A test, and the code of a binary other than `collector`, the persister or the
+  `flightdeck` desktop app, may allocate. The persister, and the code and dependencies it
+  runs other than collector code, may allocate within a fixed working-memory bound for
+  encoding and compressing its windows outside the collection loop. The `flightdeck`
+  desktop app, and the code and dependencies it runs other than collector code, may
+  allocate. Bound its memory by what the user is viewing, never by how long it has run,
+  so that it stays flat over a week of use. Collector code stays startup-allocated in
+  every binary that runs it.
 - Handle every error. Report a failed kernel call, and never replace it with a made-up
   value, so an `unwrap_or` or `.ok()` that hides a failure is a defect. Write no
   `unwrap` and no `expect` outside tests, and no `as` conversion anywhere, tests
