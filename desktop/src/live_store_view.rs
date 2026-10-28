@@ -9,7 +9,7 @@ use std::sync::Arc;
 use gpui::{App, Global};
 use num_traits::ToPrimitive;
 use serde_json::{Value, json};
-use viewer::store::{AppsSecond, Cohorts, MachineSecond, Store, View};
+use viewer::store::{AppsSecond, Cohorts, Leaders, MachineSecond, Store, View, WallSeconds};
 
 use super::LiveDashboard;
 use crate::data::Panel;
@@ -88,6 +88,9 @@ struct OlderAppCharts {
 pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
+    /// The wall seconds of the range the charts by App chose the Apps they draw over, or none
+    /// before the first View.
+    chosen_over: Option<WallSeconds>,
     panels: Vec<Rc<Panel>>,
     /// The wall second of each point of `panels`, in the order of their positions.
     seconds: Vec<u64>,
@@ -132,17 +135,26 @@ impl LiveDashboard {
         let Some(version) = self.drawn_store_view().map(|view| view.version) else {
             return false;
         };
+        let Some(window) = self.view_window() else {
+            unreachable!("the range lies against the newest second of the drawn View");
+        };
+        let chosen_over = WallSeconds {
+            first: window.first,
+            last: window.first + window.span - 1,
+        };
 
-        if self.store_panels.version != Some(version) {
+        let drawn = &self.store_panels;
+        if drawn.version != Some(version) || drawn.chosen_over != Some(chosen_over) {
             // The App charts of the last View give the new ones the points both Views hold.
             let older = OlderAppCharts {
                 histories: self.store_panels.histories.take(),
                 resident: self.store_panels.resident.take(),
             };
-            let Some(view) = self.drawn_store_view() else {
+            let Some(view) = self.store_view.clone() else {
                 unreachable!("taking the App charts leaves the drawn View as it was");
             };
-            match self.draw_store_view_panels(view, older) {
+            let cohorts = draw_store_view_cohorts(&view, chosen_over, &mut self.leaders);
+            match self.draw_store_view_panels(&view, older, &cohorts, chosen_over) {
                 Ok(panels) => self.store_panels = panels,
                 Err(error) => {
                     self.draw_store_view_failed(error);
@@ -153,6 +165,20 @@ impl LiveDashboard {
         draw_store_view_splice(&mut self.panels, &self.store_panels.panels);
         draw_store_view_splice_apps(&mut self.panels, &self.store_panels.apps);
         true
+    }
+
+    /// Draws Overview's charts from the store's View again for a range the reader picked, so the
+    /// charts by App draw the Apps that led over it, but while a hover holds the charts where they
+    /// were, which draws them once it ends.
+    pub(crate) fn store_view_range_picked(&mut self) {
+        if self.store_view_hover_shown() {
+            return;
+        }
+        if !self.draw_store_view() {
+            return;
+        }
+
+        self.refresh_chart_inspector();
     }
 
     /// Draws Overview's machine charts from the store's newest View, which a hover that ended
@@ -177,15 +203,17 @@ impl LiveDashboard {
     }
 
     /// The charts of `view`, as the range zooms them, and the top Apps of its newest second. The
-    /// App charts take the points of the seconds they share with `older`.
+    /// App charts draw on lines of their own the Apps `cohorts` chose for each over the wall
+    /// seconds `chosen_over`, and take the points of the seconds they share with `older`.
     fn draw_store_view_panels(
         &self,
         view: &View,
         older: OlderAppCharts,
+        cohorts: &Cohorts,
+        chosen_over: WallSeconds,
     ) -> Result<StorePanels, String> {
         let levels = draw_store_view_panels_levels(view);
         let mut panels = crate::live_projection::overview_panels(view, levels.as_ref())?;
-        let cohorts = &view.cohorts;
         let histories = draw_store_view_panels_histories(view, cohorts, older.histories);
         let resident = match older.resident {
             Some(older) => ResidentHistory::from_view_after(view, cohorts, older),
@@ -212,6 +240,7 @@ impl LiveDashboard {
         assert_eq!(seconds.last().copied(), last);
         Ok(StorePanels {
             version: Some(view.version),
+            chosen_over: Some(chosen_over),
             panels,
             seconds,
             apps,
@@ -508,6 +537,23 @@ fn store_view_matches(
         return false;
     };
     crate::live_source::identity_validate(identity, &stamp_identity(&observation.stamp)).is_ok()
+}
+
+/// The Apps each of Overview's App charts draws on a line of its own over `window` of `view`,
+/// those that led there, or none while the store is still loading the Apps of `view`.
+fn draw_store_view_cohorts(view: &View, window: WallSeconds, leaders: &mut Leaders) -> Cohorts {
+    let mut cohorts = Cohorts::with_room();
+    if !view.apps_loaded {
+        return cohorts;
+    }
+
+    let readings = viewer::store::Readings {
+        seconds: &view.seconds,
+        apps: &view.apps,
+        stretches: &view.stretches,
+    };
+    leaders.choose(&readings, window, &mut cohorts);
+    cohorts
 }
 
 /// The charts by App of `view`, each drawing on lines of their own the Apps `cohorts` chose for

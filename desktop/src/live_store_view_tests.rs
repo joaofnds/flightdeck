@@ -15,6 +15,7 @@ use crate::live_overview_app_histories::OverviewAppHistories;
 use crate::live_projection::overview_panels;
 use crate::live_resident_history::ResidentHistory;
 use crate::live_source::{Update, Worker};
+use crate::live_store_app_fixtures::apps_at;
 use crate::live_store_fixtures::{
     levels, levels_named, reading_at, store_levels_named, trend_point, view,
 };
@@ -321,12 +322,27 @@ mod when_the_view_cannot_choose_the_apps_its_charts_draw {
 
     #[test]
     fn the_page_draws_no_chart_by_app_and_says_why() {
-        // Goal: where the store could not choose the Apps its charts draw, Overview draws none
+        // Goal: where the page could not choose the Apps its charts draw, Overview draws none
         // of its charts by App, not even the worker's older ones, and their cards say why.
-        // Method: readings with charts by App, then a newer View whose cohorts the store refused.
+        // Method: readings with charts by App, then a newer View of twelve seconds, each of
+        // whose 2,048 Apps no other second holds, 24,576 in all, more than the page adds up.
         let mut dashboard = drawn_by_app(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
-        let mut view = charted_view();
-        view.cohorts.refused = true;
+        let seconds: Vec<_> = (10_001..=10_012)
+            .map(|second| reading_at(second, 0))
+            .collect();
+        let mut view = view(1, &[], &seconds);
+        view.apps_loaded = true;
+        view.apps = seconds
+            .iter()
+            .map(|second| {
+                let wall_second = second.wall_ns / 1_000_000_000;
+                let names: Vec<String> = (0..2_048)
+                    .map(|app| format!("{wall_second}-{app:04}"))
+                    .collect();
+                let used: Vec<(&str, u64)> = names.iter().map(|name| (name.as_str(), 1)).collect();
+                Arc::new(apps_at(second, &used))
+            })
+            .collect();
 
         dashboard.take_view(Arc::new(view));
 
@@ -340,6 +356,31 @@ mod when_the_view_cannot_choose_the_apps_its_charts_draw {
         assert_eq!(
             resident.coverage(None),
             "Resident App history unavailable: Resident App history holds more Apps than it adds up"
+        );
+    }
+}
+
+mod when_the_store_still_loads_the_apps {
+    use super::*;
+
+    #[test]
+    fn the_page_draws_no_chart_by_app() {
+        // Goal: while the store still loads the Apps of the seconds it holds, Overview draws
+        // none of its charts by App, not even the worker's older ones, rather than lines of the
+        // Apps that led over the seconds loaded so far. Method: readings with charts by App,
+        // then the newer View of the chart test, whose every second holds Brave Browser, marked
+        // as still loading its Apps.
+        let mut dashboard = drawn_by_app(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        let mut view = charted_view();
+        view.apps_loaded = false;
+
+        dashboard.take_view(Arc::new(view));
+
+        let cpu = dashboard.attribution_history(Metric::Cpu).unwrap();
+        assert_eq!(by_app(&dashboard.panels), Vec::new());
+        assert_eq!(
+            cpu.coverage(None),
+            "App rate history unavailable: App rate history is empty"
         );
     }
 }
@@ -742,6 +783,7 @@ fn ranked_view() -> Arc<View> {
 fn charted_view() -> View {
     let seconds = newer_seconds();
     let mut view = view(1, &[], &seconds);
+    view.apps_loaded = true;
     view.apps = seconds
         .iter()
         .map(|second| Arc::new(apps_of(second, "Brave Browser", 750_000_000)))

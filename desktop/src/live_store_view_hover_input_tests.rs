@@ -382,6 +382,7 @@ fn newer_seconds() -> Vec<MachineSecond> {
 /// `held_apps`, which the chart of resident memory by App draws.
 fn held_view(version: u64, older: &[MachineSecond], seconds: &[MachineSecond]) -> Arc<View> {
     let mut held = view(version, older, seconds);
+    held.apps_loaded = true;
     held.apps = seconds
         .iter()
         .map(|second| Arc::new(held_apps(second)))

@@ -29,6 +29,7 @@ pub fn seconds() -> [MachineSecond; 4] {
 /// holding no Apps, and the cohorts that draw A and B on lines of their own on the CPU chart.
 pub fn charted(seconds: &[MachineSecond; 4]) -> (View, Cohorts) {
     let mut view = view(1, &[], seconds);
+    view.apps_loaded = true;
     let used = [("A", 500_000_000), ("B", 250_000_000), ("C", 125_000_000)];
     for (index, consecutive) in [(0, false), (1, true), (3, false)] {
         view.apps[index] = Arc::new(AppsSecond {
@@ -56,6 +57,7 @@ pub fn charted(seconds: &[MachineSecond; 4]) -> (View, Cohorts) {
 /// only 102 follows the one before it.
 pub fn sliding(seconds: &[MachineSecond], cohort: &[&str]) -> (View, Cohorts) {
     let mut view = view(1, &[], seconds);
+    view.apps_loaded = true;
     let used = [("A", 500_000_000), ("B", 250_000_000), ("C", 125_000_000)];
     for (apps, second) in view.apps.iter_mut().zip(seconds) {
         *apps = Arc::new(AppsSecond {
@@ -203,17 +205,9 @@ pub fn hour() -> (View, Cohorts) {
 /// memory.
 pub fn hour_until(newest: u64) -> (View, Cohorts) {
     assert_eq!(newest % 10, 0);
-    let used = |second: u64| {
-        let a = match second {
-            9_000 => 70_000_000,
-            9_001..9_010 => 270_000_000,
-            _ => 500_000_000 + second % 10 * 10_000_000,
-        };
-        [("A", a), ("B", 250_000_000), ("C", 125_000_000)]
-    };
     let apps = |seconds: std::ops::Range<u64>| -> Vec<Arc<AppsSecond>> {
         seconds
-            .map(|second| Arc::new(apps_at(&reading_at(second, 0), &used(second))))
+            .map(|second| Arc::new(apps_at(&reading_at(second, 0), &hour_until_used(second))))
             .collect()
     };
 
@@ -226,6 +220,7 @@ pub fn hour_until(newest: u64) -> (View, Cohorts) {
         .map(|second| reading_at(second, 0))
         .collect();
     let mut view = view(1, &earlier, &live);
+    view.apps_loaded = true;
     view.apps = apps(live_first..newest + 1);
     let older = [
         apps(live_first - 20..live_first - 10),
@@ -248,10 +243,50 @@ pub fn hour_until(newest: u64) -> (View, Cohorts) {
     (view, cohorts)
 }
 
+/// What A, B and C use at `second` of `hour_until`'s View.
+fn hour_until_used(second: u64) -> [(&'static str, u64); 3] {
+    let a = match second {
+        9_000 => 70_000_000,
+        9_001..9_010 => 270_000_000,
+        _ => 500_000_000 + second % 10 * 10_000_000,
+    };
+
+    [("A", a), ("B", 250_000_000), ("C", 125_000_000)]
+}
+
+/// The View of `hour()`, in whose two stretches before its live span an executable D also uses
+/// 2 s of CPU and holds 2 GB resident at each second, so D leads the charts by App over the hour
+/// and is absent from its newest fifteen minutes. Its cohorts draw on lines of their own on the
+/// CPU chart A, B and C, which led over the newest 960 seconds.
+pub fn hour_led_from_its_older_part() -> View {
+    let (mut view, _) = hour();
+    for stretch in &mut view.stretches[..2] {
+        let first = stretch.stretch * 10;
+        let seconds: Vec<_> = (first..first + 10)
+            .map(|second| {
+                let [a, b, c] = hour_until_used(second);
+                let used = [a, b, c, ("D", 2_000_000_000)];
+                Arc::new(apps_at(&reading_at(second, 0), &used))
+            })
+            .collect();
+        *stretch = Arc::new(AppsStretch::of_seconds(stretch.stretch, &seconds));
+    }
+    view.cohorts = Cohorts {
+        seconds: 960,
+        cpu: vec![ranked("A"), ranked("B"), ranked("C")],
+        ..Cohorts::default()
+    };
+
+    view
+}
+
 /// `panel` with where it draws each reading given as a wall millisecond rather than as a share
-/// of its span, so charts of the same readings drawn across different spans compare equal.
+/// of its span, and without its help, which says what it chose its leaders over, so charts of
+/// the same readings drawn across different spans, from the store's View and by the worker,
+/// compare equal.
 pub fn on_the_clock(panel: Option<Rc<Panel>>) -> Option<(Panel, Vec<u64>)> {
     let mut panel = Rc::unwrap_or_clone(panel?);
+    panel.help.take()?;
     let window = panel.window.take()?;
     let positions = panel.positions.take()?;
     let first = f64::from(u32::try_from(window.first).unwrap());

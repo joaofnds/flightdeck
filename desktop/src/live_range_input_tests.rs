@@ -1,7 +1,14 @@
-use gpui::{Modifiers, MouseButton, TestAppContext};
+use std::sync::Arc;
 
-use super::{InputDriver, InputHarness};
+use gpui::{Modifiers, MouseButton, TestAppContext};
+use viewer::store::View;
+
+use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
+use crate::live_app_attribution_history::Metric;
+use crate::live_store_app_fixtures::hour_led_from_its_older_part;
+use crate::live_store_fixtures::reading_at;
+use crate::live_store_page_fixtures::readings;
 use crate::time_range::Range;
 
 const PLOT: &str = "live-energy-plot";
@@ -41,6 +48,31 @@ impl InputDriver {
             dashboard.set_range(range, cx);
         });
         self.context.run_until_parked();
+    }
+
+    /// Shows Overview drawn from the store's `view` over the worker's readings of 9,999 and
+    /// 10,000, following the newest second.
+    fn show_store_view(&mut self, view: View) {
+        let read = [reading_at(9_999, 0), reading_at(10_000, 0)];
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.accept(readings(&read));
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            assert!(dashboard.take_view(Arc::new(view)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// The names of the lines Overview's CPU chart by App draws, in order, or none where it
+    /// draws no such chart.
+    fn cpu_by_app_lines(&self) -> Option<Vec<String>> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            let chart = dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == Metric::Cpu.panel_id())?;
+            Some(chart.lines.iter().map(|line| line.name.clone()).collect())
+        })
     }
 
     pub(super) fn view_window(&self) -> Option<TimeWindow> {
@@ -328,4 +360,63 @@ fn a_chart_kept_apart_from_the_page_draws_for_its_own_card(cx: &mut TestAppConte
 
     assert_eq!(drawn, Some(900.0));
     harness.teardown();
+}
+
+#[gpui::test]
+fn choosing_an_hour_draws_the_apps_that_led_over_the_hour(cx: &mut TestAppContext) {
+    // Goal: Overview's charts by App draw on lines of their own the Apps that led over the range
+    // the reader picked, so an App that ran only in the older part of the hour leads the CPU
+    // chart at the hour and has no line of its own over the newest fifteen minutes. Method: a
+    // View of the hour in whose two oldest stretches D used 2 s of CPU a second, and the CPU
+    // chart's lines over the newest fifteen minutes and after choosing the hour.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    let recent = harness.driver.cpu_by_app_lines().unwrap();
+
+    harness.driver.show_range(Range::Last(3_600));
+
+    let hour = harness.driver.cpu_by_app_lines().unwrap();
+    assert_eq!(recent, cpu_by_app_lines_drawing(&["A", "B", "C"]));
+    assert_eq!(hour, cpu_by_app_lines_drawing(&["D", "A", "B", "C"]));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_range_picked_under_a_hover_draws_its_leaders_once_the_hover_ends(cx: &mut TestAppContext) {
+    // Goal: a range picked while the pointer rests on a chart leaves the charts by App as the
+    // hover holds them, and once the hover ends they draw the Apps that led over the range
+    // picked. Method: the View of the hour test at the newest fifteen minutes, the pointer on
+    // the CPU chart while the hour is chosen, and the CPU chart's lines before and after the
+    // pointer leaves it.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    let position = harness.driver.second_position("live-cpu-plot", 0.9);
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+    harness.driver.show_range(Range::Last(3_600));
+    let hovered = harness.driver.cpu_by_app_lines().unwrap();
+
+    harness.driver.leave_plot("live-cpu-plot", PlotExit::Top);
+    harness.driver.context.run_until_parked();
+
+    let left = harness.driver.cpu_by_app_lines().unwrap();
+    assert_eq!(hovered, cpu_by_app_lines_drawing(&["A", "B", "C"]));
+    assert_eq!(left, cpu_by_app_lines_drawing(&["D", "A", "B", "C"]));
+    harness.teardown();
+}
+
+/// The lines of Overview's CPU chart by App where it draws `apps` on lines of their own: the
+/// rest of the Apps together, each of `apps`, and all the CPU time.
+fn cpu_by_app_lines_drawing(apps: &[&str]) -> Vec<String> {
+    let mut lines = vec!["Other".to_string()];
+    lines.extend(apps.iter().map(ToString::to_string));
+    lines.push("All CPU".into());
+
+    lines
 }

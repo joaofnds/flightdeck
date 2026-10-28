@@ -401,7 +401,7 @@ impl History {
             stack: Some(true),
             fill: Some(1.0),
             caption: None,
-            help: Some(self.help().into()),
+            help: Some(self.help()),
             source: Some("Captured process intervals".into()),
             quantities: None,
             states: None,
@@ -418,40 +418,46 @@ impl History {
         }
     }
 
-    fn help(&self) -> &'static str {
+    fn help(&self) -> String {
+        // The store's View draws the leaders of the range the reader picked, and the worker's
+        // reading those of the context it holds.
+        let leaders = match self.view_cohort {
+            Some(_) => "Eight leaders use their mean rate over the range shown.",
+            None => "Eight leaders use the complete context's mean rate.",
+        };
         match self.metric {
-            Metric::Cpu => {
+            Metric::Cpu => format!(
                 "Captured process CPU time per interval. 100% equals one core; \
-                Apps can exceed 100%. Eight leaders use the complete context's mean rate. \
+                Apps can exceed 100%. {leaders} \
                 Other sums remaining captured Apps. Missing intervals remain gaps; known \
                 subtotals exclude unavailable process members. The dashed All CPU reference sums \
                 recorded per-core busy percentages; it is excluded from App totals."
-            }
-            Metric::Power => {
+            ),
+            Metric::Power => format!(
                 "Captured process energy per interval, in watts. This is separate \
-                from system power and GPU power. Eight leaders use the complete context's mean \
-                rate. Other sums remaining captured Apps. Missing intervals remain gaps; \
+                from system power and GPU power. {leaders} \
+                Other sums remaining captured Apps. Missing intervals remain gaps; \
                 known subtotals exclude unavailable process members."
-            }
-            Metric::Disk => {
+            ),
+            Metric::Disk => format!(
                 "Captured process read-plus-write bytes per interval, displayed in MB/s. \
                 Exact interval bytes stay separate from the rate. This is separate from \
-                device-driver throughput. Eight leaders use the complete context's mean rate; \
+                device-driver throughput. {leaders} \
                 Other sums remaining captured Apps. Known subtotals include only members with \
                 both directions measured. Missing Apps and unavailable intervals remain gaps. \
                 The dashed All disk I/O reference sums measured whole-device read and write \
                 rates; incomplete device coverage is unavailable. References stay outside \
                 App totals."
-            }
-            Metric::Gpu => {
+            ),
+            Metric::Gpu => format!(
                 "GPU time each App's processes took per interval, from the GPU driver's own \
-                count, as a share of the interval. Eight leaders use the complete context's mean \
-                rate; Other sums remaining captured Apps. A process the driver lists no GPU \
+                count, as a share of the interval. {leaders} \
+                Other sums remaining captured Apps. A process the driver lists no GPU \
                 client for, and every process of an interval whose GPU read failed, has an \
                 unknown GPU time, so an App with no known GPU time is not drawn. The dashed GPU \
                 busy line is the GPU's own active time, which work from several Apps at once can \
                 sit under. It stays outside App totals."
-            }
+            ),
         }
     }
 }

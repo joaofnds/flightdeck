@@ -307,13 +307,7 @@ impl History {
             stack: Some(true),
             fill: Some(1.0),
             caption: None,
-            help: Some(
-                "Process resident memory counts shared pages for each process. It can \
-                exceed machine memory. Eight leaders use the complete interval's mean; Other \
-                sums remaining captured Apps. Known subtotals exclude unavailable members. \
-                Missing Apps and unavailable observations remain gaps."
-                    .into(),
-            ),
+            help: Some(self.help()),
             source: Some("Captured process resident memory".into()),
             quantities: None,
             states: None,
@@ -328,6 +322,21 @@ impl History {
             sliding: false,
             chart_width: std::cell::Cell::new(None),
         }
+    }
+
+    fn help(&self) -> String {
+        // The store's View draws the leaders of the range the reader picked, and the worker's
+        // reading those of the interval it holds.
+        let leaders = match self.view_cohort {
+            Some(_) => "Eight leaders use their mean over the range shown.",
+            None => "Eight leaders use the complete interval's mean.",
+        };
+        format!(
+            "Process resident memory counts shared pages for each process. It can \
+            exceed machine memory. {leaders} Other sums remaining captured Apps. Known \
+            subtotals exclude unavailable members. Missing Apps and unavailable observations \
+            remain gaps."
+        )
     }
 }
 

@@ -17,9 +17,9 @@ use crate::live_store_fixtures::selection;
 fn draws_each_second_as_the_workers_history_of_those_seconds_draws_it() {
     // Goal: Overview's chart of resident memory by App drawn from the store's View is the chart
     // the worker's history of resident memory of the same seconds draws, but for the span it is
-    // drawn across. Method: a View of four seconds, whose third holds no Apps and whose fourth
-    // does not follow the third, beside the history the worker writes of them, and compare the
-    // two charts on the clock.
+    // drawn across and what its help says it chose its leaders over. Method: a View of four
+    // seconds, whose third holds no Apps and whose fourth does not follow the third, beside the
+    // history the worker writes of them, and compare the two charts on the clock.
     let seconds = seconds();
     let worker = ResidentHistory::prepare(&worker_history(&seconds), &selection(&[], &seconds));
     let (view, cohorts) = charted_resident(&seconds);

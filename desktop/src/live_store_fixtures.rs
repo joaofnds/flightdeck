@@ -64,8 +64,8 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
     }
 }
 
-/// The View of a store that holds `earlier` before the live span `seconds`, whose Apps it has
-/// not read.
+/// The View of a store that holds `earlier` before the live span `seconds`, whose Apps it is
+/// still loading.
 pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) -> View {
     View {
         version,
@@ -78,6 +78,7 @@ pub fn view(version: u64, earlier: &[MachineSecond], seconds: &[MachineSecond]) 
         stretches: Vec::new(),
         sampled: Vec::new(),
         cohorts: Cohorts::default(),
+        apps_loaded: false,
         failure: None,
         left_out: None,
         ring_complete: false,

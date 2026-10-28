@@ -11,9 +11,10 @@ use crate::live_store_fixtures::selection;
 #[test]
 fn draws_each_second_as_the_workers_history_of_those_seconds_draws_it() {
     // Goal: Overview's CPU chart drawn from the store's View is the chart the worker's App
-    // history of the same seconds draws, but for the span it is drawn across. Method: a View of
-    // four seconds, whose third holds no Apps and whose fourth does not follow the third, beside
-    // the history the worker writes of them, and compare the two charts on the clock.
+    // history of the same seconds draws, but for the span it is drawn across and what its help
+    // says it chose its leaders over. Method: a View of four seconds, whose third holds no Apps
+    // and whose fourth does not follow the third, beside the history the worker writes of them,
+    // and compare the two charts on the clock.
     let seconds = seconds();
     let worker = AppAttributionHistory::prepare(
         Metric::Cpu,
@@ -44,6 +45,34 @@ fn describes_each_second_as_the_workers_history_of_those_seconds_describes_it() 
     let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
 
     assert_eq!(hovered(&drawn), hovered(&worker));
+}
+
+#[test]
+fn says_its_leaders_lead_over_the_range_shown() {
+    // Goal: the help of a chart drawn from the store's View says it draws the Apps that led over
+    // the range shown, since the page chooses them over the range the reader picked, where the
+    // worker's chart chooses them over the context it holds. Method: the help of the chart drawn
+    // from the View of the chart test beside the worker's.
+    let seconds = seconds();
+    let worker = AppAttributionHistory::prepare(
+        Metric::Cpu,
+        &worker_history(&seconds),
+        &selection(&[], &seconds),
+    );
+    let (view, cohorts) = charted(&seconds);
+
+    let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts).panel();
+
+    let help = |panel: Option<std::rc::Rc<crate::data::Panel>>| panel.unwrap().help.clone();
+    let help = (help(drawn).unwrap(), help(worker.panel()).unwrap());
+    assert!(
+        help.0
+            .contains("Eight leaders use their mean rate over the range shown.")
+    );
+    assert!(
+        help.1
+            .contains("Eight leaders use the complete context's mean rate.")
+    );
 }
 
 mod after_the_chart_of_an_older_view {

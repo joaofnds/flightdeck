@@ -121,6 +121,9 @@ pub struct LiveDashboard {
     /// The store's newest View the window took, which a hidden window lets go of.
     store_view: Option<std::sync::Arc<viewer::store::View>>,
     store_panels: store_view::StorePanels,
+    /// Room to choose the Apps the charts by App drawn from `store_view` draw on lines of their
+    /// own.
+    leaders: viewer::store::Leaders,
     /// The last live reading of each page the reader has left, shown again at once when the
     /// page is opened while the worker reads a fresh one. At most one for each route.
     visited: std::collections::BTreeMap<String, Box<crate::live_acceptance::Presentation>>,
@@ -371,6 +374,7 @@ impl LiveDashboard {
             store_pending: false,
             store_view: None,
             store_panels: store_view::StorePanels::default(),
+            leaders: viewer::store::Leaders::new(),
             error: None,
             rows: Vec::with_capacity(4096),
             expanded: None,
@@ -1219,6 +1223,7 @@ impl LiveDashboard {
     pub(crate) fn set_range(&mut self, range: crate::time_range::Range, cx: &mut Context<Self>) {
         self.range = range;
         self.drag = None;
+        self.store_view_range_picked();
         self.zoom_panels();
         self.rebuild();
         cx.notify();

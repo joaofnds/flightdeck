@@ -157,6 +157,9 @@ pub struct View {
     /// The Apps each of Overview's App charts draws on a line of its own, chosen over the newest
     /// seconds of `seconds` those charts draw.
     pub cohorts: Cohorts,
+    /// Whether the View holds the Apps of every second and stretch it holds, which the store
+    /// loads at startup after the readings of the Mac and the Apps of the newest second.
+    pub apps_loaded: bool,
     /// Why the store could not read the recording at its last step.
     pub failure: Option<Failure>,
     /// Why the store holds less of the loaded hour than the recording sealed when it started.
@@ -490,6 +493,7 @@ impl Held {
             stretches: Vec::with_capacity(STRETCHES_MAX),
             sampled: Vec::new(),
             cohorts: Cohorts::with_room(),
+            apps_loaded: false,
             failure: None,
             left_out: None,
             ring_complete: false,
@@ -787,6 +791,7 @@ impl Held {
             if complete {
                 publish_cohorts(view, leaders);
             }
+            view.apps_loaded = complete;
             view.failure = failure;
             view.left_out = left_out;
             view.ring_complete = ring_complete;
