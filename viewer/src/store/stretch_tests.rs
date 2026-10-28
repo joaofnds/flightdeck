@@ -52,6 +52,30 @@ fn a_closed_stretch_adds_up_the_apps_of_its_seconds() {
 }
 
 #[test]
+fn a_closed_stretch_adds_up_the_energy_and_the_disk_bytes_of_its_seconds() {
+    // Goal: the Energy and Disk charts by App draw a point of ten seconds from what each App
+    // used of their own resource over those seconds. Method: take in seconds 1,000 to 1,010, A
+    // using 1,000 ns of CPU, 2,000 nJ and 3,000 bytes of disk at each, so 1,010 closes the
+    // stretch of 1,000 to 1,009, and read what A used of energy and disk over the stretch.
+    let mut held = Held::new();
+    for wall_second in 1_000..=1_010 {
+        let used = Used {
+            energy_nj: Some(2_000),
+            disk_io_bytes: Some(3_000),
+            ..cpu(b"/A.app", 1_000)
+        };
+        take(&mut held, wall_second, &[used]);
+    }
+
+    let view = published(&mut held);
+
+    let a = [name(b"/A.app")];
+    let used_of = |metric| cpu_of(&view.stretches[0].attribution(metric, &a));
+    assert_eq!(used_of(AppAttributionMetric::Power), 20_000);
+    assert_eq!(used_of(AppAttributionMetric::Disk), 30_000);
+}
+
+#[test]
 fn an_app_missing_from_a_second_holds_no_memory_there() {
     // Goal: the chart of resident memory stacks a stretch's Apps to what they held on average
     // over its seconds. Method: A holds four kibibytes at each second of the stretch of 1,000 to
@@ -324,6 +348,39 @@ fn a_window_chooses_the_apps_its_seconds_choose_one_by_one() {
     assert_eq!(chosen.cpu, ["/A.app", "/F.app", "/E.app", "/D.app"]);
     assert_eq!(chosen.resident, ["/A.app", "/F.app", "/E.app", "/D.app"]);
     assert_eq!(chosen.seconds, 15);
+}
+
+#[test]
+fn a_window_chooses_the_leaders_of_each_resource_by_what_they_used_of_it() {
+    // Goal: the Energy and Disk charts of the loaded hour lead with the Apps that used the most
+    // of their own resource over its stretches. Method: at every second from 100 to 139, A uses
+    // the most CPU, B the most energy and C the most disk bytes, and the window of 100 to 129
+    // is chosen from the View's stretches and its seconds from 125 on.
+    let mut held = Held::new();
+    for wall_second in 100..=139 {
+        let used = |key, [cpu_ns, energy_nj, disk_io_bytes]: [u64; 3]| Used {
+            energy_nj: Some(energy_nj),
+            disk_io_bytes: Some(disk_io_bytes),
+            ..cpu(key, cpu_ns)
+        };
+        let apps = [
+            used(b"/A.app", [300, 100, 200]),
+            used(b"/B.app", [200, 300, 100]),
+            used(b"/C.app", [100, 200, 300]),
+        ];
+        take(&mut held, wall_second, &apps);
+    }
+    let view = published(&mut held);
+    let window = WallSeconds {
+        first: 100,
+        last: 129,
+    };
+
+    let chosen = chosen_over(&mut Leaders::new(), &window_from_stretches(&view), window);
+
+    assert_eq!(chosen.cpu, ["/A.app", "/B.app", "/C.app"]);
+    assert_eq!(chosen.power, ["/B.app", "/C.app", "/A.app"]);
+    assert_eq!(chosen.disk, ["/C.app", "/A.app", "/B.app"]);
 }
 
 #[test]
@@ -618,6 +675,8 @@ fn window_used(wall_second: u64) -> Vec<Used<'static>> {
         used.push(Used {
             key,
             cpu_ns: amount,
+            energy_nj: None,
+            disk_io_bytes: None,
             resident_bytes: amount,
         });
     };
@@ -641,10 +700,12 @@ fn window_used(wall_second: u64) -> Vec<Used<'static>> {
     used
 }
 
-/// The Apps the App charts of CPU time and resident memory draw on lines of their own over a
-/// window of readings, by name, and the seconds they draw one by one.
+/// The Apps the App charts of CPU time, energy, disk bytes and resident memory draw on lines of
+/// their own over a window of readings, by name, and the seconds they draw one by one.
 struct Chosen {
     cpu: Vec<String>,
+    power: Vec<String>,
+    disk: Vec<String>,
     resident: Vec<String>,
     seconds: usize,
 }
@@ -662,15 +723,20 @@ fn chosen_over(leaders: &mut Leaders, readings: &Readings<'_>, window: WallSecon
 
     Chosen {
         cpu: names(&cohorts.cpu),
+        power: names(&cohorts.power),
+        disk: names(&cohorts.disk),
         resident: names(&cohorts.resident),
         seconds: cohorts.seconds,
     }
 }
 
-/// What one App used over one second.
+/// What one App used over one second, with no energy or disk bytes measured where it names
+/// none.
 struct Used<'key> {
     key: &'key [u8],
     cpu_ns: u64,
+    energy_nj: Option<u64>,
+    disk_io_bytes: Option<u64>,
     resident_bytes: u64,
 }
 
@@ -678,6 +744,8 @@ fn cpu(key: &[u8], cpu_ns: u64) -> Used<'_> {
     Used {
         key,
         cpu_ns,
+        energy_nj: None,
+        disk_io_bytes: None,
         resident_bytes: 0,
     }
 }
@@ -686,6 +754,8 @@ fn resident(key: &[u8], resident_bytes: u64) -> Used<'_> {
     Used {
         key,
         cpu_ns: 0,
+        energy_nj: None,
+        disk_io_bytes: None,
         resident_bytes,
     }
 }
@@ -755,8 +825,8 @@ fn second_with(wall_second: u64, used: &[Used<'_>]) -> AppsSecond {
     apps
 }
 
-/// The App `used` names, one member that measured the CPU time and resident memory it names
-/// and nothing else.
+/// The App `used` names, one member that measured the CPU time, resident memory, energy and disk
+/// bytes it names and nothing else.
 fn app(used: &Used<'_>) -> App {
     let unmeasured = Measure {
         known: 0,
@@ -779,11 +849,11 @@ fn app(used: &Used<'_>) -> App {
         live_members: 1,
         membership_complete: true,
         cpu_ns: measured(used.cpu_ns),
-        energy_nj: unmeasured,
+        energy_nj: used.energy_nj.map_or(unmeasured, measured),
         gpu_ns: unmeasured,
         disk_read_bytes: unmeasured,
         disk_written_bytes: unmeasured,
-        disk_io_bytes: unmeasured,
+        disk_io_bytes: used.disk_io_bytes.map_or(unmeasured, measured),
         resident_bytes: measured(used.resident_bytes),
         footprint_bytes: unmeasured,
     }
