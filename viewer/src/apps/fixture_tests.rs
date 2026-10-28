@@ -323,7 +323,7 @@ impl Fixture {
                 },
                 name: row.get(4).unwrap(),
                 app: row.get(5).unwrap(),
-                usage: *usage,
+                usage,
             });
         }
     }
@@ -422,7 +422,7 @@ fn publish_processes(
         usage.system_ns = 9_007_199_254_740_000;
         processes.push(Process {
             pid,
-            usage: *usage,
+            usage,
             task: Task {
                 threads: 1,
                 faults: 0,

@@ -64,12 +64,11 @@ pub(super) fn interval() -> Box<Interval> {
     })
 }
 
-#[allow(clippy::unnecessary_box_returns)] // Tiger Style heap-allocates large fixture values.
-pub(super) fn program(path: &[u8]) -> Box<ProgramBytes<'_>> {
-    Box::new(ProgramBytes {
+pub(super) fn program(path: &[u8]) -> ProgramBytes<'_> {
+    ProgramBytes {
         executable_name: b"helper",
         app_path: Some(path),
-    })
+    }
 }
 
 pub(super) fn observation<'a>(
@@ -92,9 +91,8 @@ pub(super) fn observation<'a>(
     })
 }
 
-#[allow(clippy::unnecessary_box_returns)] // Tiger Style heap-allocates large fixture values.
-pub(super) fn usage(cpu_ns: u64, energy_nj: u64, resident_bytes: u64) -> Box<Usage> {
-    Box::new(Usage {
+pub(super) fn usage(cpu_ns: u64, energy_nj: u64, resident_bytes: u64) -> Usage {
+    Usage {
         awake_ns_at_start: 10,
         user_ns: cpu_ns,
         system_ns: 0,
@@ -109,10 +107,10 @@ pub(super) fn usage(cpu_ns: u64, energy_nj: u64, resident_bytes: u64) -> Box<Usa
         footprint_bytes: resident_bytes + 1,
         disk_read_bytes: 0,
         disk_written_bytes: 0,
-    })
+    }
 }
 
-#[allow(clippy::unnecessary_box_returns)] // Tiger Style heap-allocates large fixture values.
+#[allow(clippy::unnecessary_box_returns)] // The Box `Aggregate::initialize` builds.
 pub(super) fn aggregate<'a>() -> Box<Aggregate<'a>> {
     let mut output = None;
     Aggregate::initialize(&mut output);

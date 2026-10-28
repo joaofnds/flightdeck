@@ -228,7 +228,7 @@ fn summarize(counters: &[Counters]) -> Box<DiskResult> {
 fn summarize_observations<'a>(
     stamp: &Stamp,
     program: &'a ProgramBytes<'a>,
-    usages: &'a [Box<Usage>],
+    usages: &'a [Usage],
 ) -> Vec<Box<ProcessObservation<'a>>> {
     assert!(usages.len() <= 2);
     usages
