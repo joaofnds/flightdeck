@@ -213,9 +213,15 @@ fn validate_schema(schema: &[SchemaElement]) -> Result<()> {
         return Err(Error::Bound("parquet scalar schema"));
     }
 
-    for field in &schema[1..] {
+    for (index, field) in schema.iter().enumerate().skip(1) {
         if field.name.len() > COLUMN_NAME_BYTES_MAX {
             return Err(Error::Bound("parquet column name"));
+        }
+        if schema[1..index]
+            .iter()
+            .any(|previous| previous.name == field.name)
+        {
+            return Err(Error::Bound("duplicate parquet physical column"));
         }
         if field.num_children.is_some() {
             return Err(Error::Bound("parquet scalar schema"));

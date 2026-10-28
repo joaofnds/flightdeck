@@ -39,7 +39,6 @@ pub(super) fn requested_bytes(metadata: &ThriftFileMetadata, footer_bytes: usize
         requested_bytes_product(256, requested_bytes_vector(columns)?)?,
         40,
         requested_bytes_lookup(columns)?,
-        requested_bytes_product(128, columns)?,
         names,
     ])?;
     let bytes = requested_bytes_sum(&[
@@ -102,8 +101,7 @@ fn requested_bytes_vector(count: usize) -> Result<usize> {
 fn requested_bytes_lookup(count: usize) -> Result<usize> {
     // hashbrown d76a6f8 raw.rs uses <=4*max(n,4) buckets, one control byte per bucket,
     // and <=16 trailing control bytes. PlSmallStr + UnitVec<usize> occupies <=48 bytes.
-    // UnitVec's minimum eight/doubling growth needs <=128 bytes per input column,
-    // summed across all duplicate-name lists, including simultaneous old/new storage.
+    // Admission's unique flat names leave one index per lookup. UnitVec holds it inline.
     if count == 0 {
         Ok(0)
     } else {

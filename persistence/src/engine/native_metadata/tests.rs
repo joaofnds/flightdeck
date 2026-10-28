@@ -45,11 +45,14 @@ fn accounts_for_every_empty_row_group_and_long_leaf_name() {
 }
 
 #[test]
-fn accounts_for_duplicate_name_lookup_storage() {
-    // Goal: duplicate physical names charge the native UnitVec lookup allocations.
-    // Method: admit eight identical long names in twelve empty groups and build metadata.
-    let name = "n".repeat(128);
-    let footer = fixtures::encode(&fixtures::metadata(&[name.as_str(); 8], 12));
+fn accounts_for_unique_name_lookup_storage() {
+    // Goal: each admitted physical name charges its native row-group lookup storage.
+    // Method: admit eight distinct long names in twelve empty groups and build metadata.
+    let names: Vec<_> = (0..8)
+        .map(|index| format!("{index}{}", "n".repeat(127)))
+        .collect();
+    let names: Vec<_> = names.iter().map(String::as_str).collect();
+    let footer = fixtures::encode(&fixtures::metadata(&names, 12));
 
     let observation = observe_metadata(&footer);
 

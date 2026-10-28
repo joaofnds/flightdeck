@@ -106,6 +106,60 @@ fn refuses_a_file_wider_than_admission_allows() {
 }
 
 #[test]
+fn refuses_duplicate_physical_column_names_before_native_schema_conversion() {
+    // Goal: adjacent and separated duplicate names return the same inline refusal.
+    // Method: rename each later scalar column and its path to match the first column.
+    for duplicate in [2, 3] {
+        let directory = Directory::new();
+        let path = directory.file();
+        write_declared_file(
+            &path,
+            &page_header(1),
+            &DeclaredFile {
+                rows: 1,
+                columns: 3,
+                first_offset: 4,
+            },
+        );
+        rewrite_metadata(&path, |metadata| {
+            let name = metadata.schema[1].name.clone();
+            metadata.schema[duplicate].name.clone_from(&name);
+            metadata.row_groups[0].columns[duplicate - 1]
+                .meta_data
+                .as_mut()
+                .unwrap()
+                .path_in_schema[0] = name;
+        });
+
+        let result = validate(&path);
+
+        assert!(
+            matches!(
+                result,
+                Err(Error::Bound("duplicate parquet physical column"))
+            ),
+            "column {duplicate}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn admits_a_physical_column_named_like_the_schema_root() {
+    // Goal: a schema root does not participate in physical column-name uniqueness.
+    // Method: give a native one-column file the same root and physical column name.
+    let directory = Directory::new();
+    let path = directory.file();
+    write_columns(&path, 1);
+    rewrite_metadata(&path, |metadata| {
+        metadata.schema[0].name = metadata.schema[1].name.clone();
+    });
+
+    let result = validate(&path);
+
+    result.unwrap();
+}
+
+#[test]
 fn refuses_an_oversized_expanded_page_before_decoding_its_body() {
     // Goal: a small file cannot ask the decoder to allocate an oversized output page.
     // Method: write a native page header declaring 64 MiB plus one byte beside a tiny body.
@@ -393,4 +447,21 @@ fn column_metadata(name: String, declared: &DeclaredColumn) -> ColumnChunk {
         None,
         None,
     )
+}
+
+fn rewrite_metadata(path: &Path, change: impl FnOnce(&mut FileMetaData)) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let mut reader = Cursor::new(bytes.as_slice());
+    let footer = super::validate_footer(&mut reader, u64::try_from(bytes.len()).unwrap()).unwrap();
+    let mut metadata = super::validate_metadata(&mut reader, &footer).unwrap();
+    change(&mut metadata);
+    bytes.truncate(usize::try_from(footer.start).unwrap());
+    let start = bytes.len();
+    metadata
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut bytes))
+        .unwrap();
+    let length = u32::try_from(bytes.len() - start).unwrap();
+    bytes.extend_from_slice(&length.to_le_bytes());
+    bytes.extend_from_slice(b"PAR1");
+    std::fs::write(path, bytes).unwrap();
 }
