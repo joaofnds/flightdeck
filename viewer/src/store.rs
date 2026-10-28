@@ -5,7 +5,7 @@
 mod apps;
 mod attribution;
 mod buffers;
-mod context;
+mod cohorts;
 mod context_cpu;
 mod context_response;
 mod coverage;
@@ -55,7 +55,7 @@ pub use attribution::{
     Attribution, AttributionReading, COHORT_MAX, OtherReading, Resident, ResidentOther, Totals,
 };
 pub use buffers::{Buffers, Mailbox, Span};
-pub use context::Cohorts;
+pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
 pub use native::AppMetadata;
 pub use payload::{AppDetails, Payload, ProcessName, ProcessRow};
 pub use query::{
@@ -73,7 +73,6 @@ pub use stretch::AppsStretch;
 
 use apps::TickApps;
 use collector::ring::RunIdentity;
-use context::Context;
 use native::NativeRead;
 use native_acceptance::{make_ring, read_native};
 use ring::Ring;
@@ -83,7 +82,7 @@ use crate::apps::Stamp;
 use crate::cancellation::{Cancellation, Operation};
 use crate::live::resident_history::{Interval, consecutive};
 use crate::live_app_response::Observation;
-use crate::session::EARLIER_STRIDE_SECONDS;
+use crate::session::{CHARTED_SECONDS, EARLIER_STRIDE_SECONDS};
 
 #[cfg(test)]
 #[path = "store_tests.rs"]
@@ -429,8 +428,8 @@ struct Held {
     earlier: Span<MachineSecond>,
     /// Each App's readings added up over each stretch of the seconds of `earlier` and `span`.
     stretches: Stretches,
-    /// What each App used over the newest seconds of `apps` that Overview's App charts draw.
-    context: Context,
+    /// Room to choose the Apps of Overview's App charts in at each View.
+    leaders: Leaders,
     /// The run and publication of the newest second taken in.
     newest: Option<Newest>,
     views: Buffers<View>,
@@ -511,7 +510,7 @@ impl Held {
             apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
             stretches: Stretches::new(STRETCHES_MAX, STRETCHES_HELD_MAX),
-            context: Context::new(),
+            leaders: Leaders::new(),
             newest: None,
             views,
             version: 0,
@@ -553,7 +552,6 @@ impl Held {
             sampled.clear();
             sampled.release(|sample| *sample = SampledSecond::empty());
         }
-        self.context.clear();
         self.newest = None;
         self.covers_hour = false;
         self.ring_complete = false;
@@ -584,9 +582,6 @@ impl Held {
             return false;
         };
         let segment = segment(self.newest.as_ref(), run, second);
-        if self.startup == StartupState::Complete {
-            self.context.leave(&self.apps);
-        }
         if let Some(kept) = kept {
             if let Some(sampled) = &mut self.sampled {
                 let sample = prepared_sample.unwrap_or_else(|| unreachable!("admitted sample"));
@@ -713,9 +708,6 @@ impl Held {
         if let Some(folded) = folded {
             self.stretches.add_folded(folded);
         }
-        if self.startup == StartupState::Complete {
-            self.context.follow(&self.span, &self.apps);
-        }
     }
 
     fn release_views(&mut self) {
@@ -756,9 +748,12 @@ impl Held {
         let span = &self.span;
         let apps = &self.apps;
         let earlier = &self.earlier;
-        let stretches = &self.stretches;
+        // The payload store installs a second's Apps after it takes the second in, so its
+        // stretches never add them up, and its Views hold none.
+        let stretches = self.payload_budget.is_none().then_some(&self.stretches);
         let sampled = &self.sampled;
-        let context = &mut self.context;
+        let leaders = &mut self.leaders;
+        let complete = self.startup == StartupState::Complete;
         let failure = self.failure;
         let left_out = self.left_out;
         let ring_complete = self.ring_complete;
@@ -781,12 +776,16 @@ impl Held {
             view.seconds.extend(span.held().map(Arc::clone));
             view.apps.extend(apps.held().map(Arc::clone));
             view.earlier.extend(earlier.held().map(Arc::clone));
-            view.stretches.extend(stretches.held().map(Arc::clone));
+            if let Some(stretches) = stretches {
+                view.stretches.extend(stretches.held().map(Arc::clone));
+            }
             if let Some(sampled) = sampled {
                 view.sampled.extend(sampled.held().map(Arc::clone));
                 assert_eq!(view.sampled.len(), view.earlier.len());
             }
-            context.choose(&mut view.cohorts);
+            if complete {
+                publish_cohorts(view, leaders);
+            }
             view.failure = failure;
             view.left_out = left_out;
             view.ring_complete = ring_complete;
@@ -811,6 +810,26 @@ impl Held {
         self.version = version;
         self.unpublished = false;
     }
+}
+
+/// Writes into `view`'s cohorts the Apps each of Overview's App charts draws over the newest
+/// `CHARTED_SECONDS` wall seconds of `view`.
+fn publish_cohorts(view: &mut View, leaders: &mut Leaders) {
+    let Some(newest) = view.seconds.last() else {
+        return;
+    };
+
+    let last = newest.wall_ns / 1_000_000_000;
+    let window = WallSeconds {
+        first: last.saturating_sub(CHARTED_SECONDS - 1),
+        last,
+    };
+    let readings = Readings {
+        seconds: &view.seconds,
+        apps: &view.apps,
+        stretches: &view.stretches,
+    };
+    leaders.choose(&readings, window, &mut view.cohorts);
 }
 
 /// The tick of `second` of run `run`, as the App rule names a tick it samples.

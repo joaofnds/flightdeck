@@ -418,7 +418,6 @@ impl Startup {
 
         self.revalidate(input)?;
         input.operation.check()?;
-        held.context.rebuild(&held.span, &held.apps);
         held.startup = crate::store::StartupState::Complete;
         self.cursor.decoder.predecessor = None;
         self.phase = Phase::Complete;

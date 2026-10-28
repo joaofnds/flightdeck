@@ -1,7 +1,9 @@
 //! Real-source observations at the staged startup boundaries.
 use super::*;
 use crate::live::identity_fixture::Fixture;
-use crate::store::startup_tests::{drive_primary, query_context, query_outcome, usage};
+use crate::store::startup_tests::{
+    drive_primary, published_view, query_context, query_outcome, usage,
+};
 use crate::store::{QueryOutcome, QueryReadiness, QueryUnavailable, StartupState};
 
 #[test]
@@ -249,8 +251,8 @@ fn assert_no_cancelled_view(stage: &mut GuardStage) {
 }
 
 fn assert_cohorts(held: &mut Held, count: usize) {
-    let mut cohorts = crate::store::Cohorts::with_room();
-    held.context.choose(&mut cohorts);
+    let view = published_view(held);
+    let cohorts = &view.cohorts;
     assert_eq!(cohorts.seconds, count);
     assert!(!cohorts.refused);
     assert_eq!(cohorts.resident.len(), 1);

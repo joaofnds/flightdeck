@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use super::apps::TickApps;
 use super::{
-    APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Held, MachineSecond, Mailbox,
-    Missing, STRETCHES_MAX, View, recording,
+    APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Cohorts, Held, Leaders,
+    MachineSecond, Mailbox, Missing, Readings, STRETCHES_MAX, View, WallSeconds, recording,
 };
 use crate::AppAttributionMetric;
 use crate::live::identity_fixture::Fixture;
@@ -241,6 +241,102 @@ fn a_catch_up_adds_up_no_second_the_store_holds() {
     );
 }
 
+#[test]
+fn a_window_chooses_the_apps_its_seconds_choose_one_by_one() {
+    // Goal: an App chart of the loaded hour draws on lines of their own the Apps that its
+    // seconds, taken one by one, choose, each App's mean taken over the seconds that measured
+    // it. Method: the View holds seconds 125 to 139 one by one and the stretches of 100 to 129,
+    // as `window_view` fills it. C uses 10,000 at 107, which the window of 105 to 139 holds but
+    // whose stretch it cuts, so the window counts from 110. The window is compared with a View
+    // of every second one by one, and with A, F, E and D, which a mean over the stretch's
+    // interval, the cut stretch, or a second of 125 counted twice would put in another order.
+    let view = window_view();
+    let mut leaders = Leaders::new();
+    let from_stretches = window_from_stretches(&view);
+    let one_by_one = window_one_by_one(&view);
+
+    let chosen = chosen_over(
+        &mut leaders,
+        &from_stretches,
+        WallSeconds {
+            first: 105,
+            last: 139,
+        },
+    );
+    let expected = chosen_over(
+        &mut leaders,
+        &one_by_one,
+        WallSeconds {
+            first: 110,
+            last: 139,
+        },
+    );
+
+    assert_eq!(chosen.cpu, expected.cpu);
+    assert_eq!(chosen.resident, expected.resident);
+    assert_eq!(chosen.cpu, ["/A.app", "/F.app", "/E.app", "/D.app"]);
+    assert_eq!(chosen.resident, ["/A.app", "/F.app", "/E.app", "/D.app"]);
+    assert_eq!(chosen.seconds, 15);
+}
+
+#[test]
+fn a_window_that_ends_with_a_stretch_counts_all_of_its_seconds() {
+    // Goal: a window whose last second ends a closed stretch counts the whole stretch, the
+    // seconds of it the View no longer holds one by one too. Method: the View holds seconds
+    // 125 to 139 one by one and the stretches of 100 to 129, as `window_view` fills it, and
+    // the window runs from 110 to 129. F uses 40 at 122, which only the stretch of 120 to 129
+    // holds. The window is compared with a View of every second one by one, which counts the
+    // 20 seconds of the window.
+    let view = window_view();
+    let mut leaders = Leaders::new();
+    let window = WallSeconds {
+        first: 110,
+        last: 129,
+    };
+
+    let chosen = chosen_over(&mut leaders, &window_from_stretches(&view), window);
+    let expected = chosen_over(&mut leaders, &window_one_by_one(&view), window);
+
+    assert_eq!(chosen.cpu, expected.cpu);
+    assert_eq!(chosen.resident, expected.resident);
+    assert_eq!(chosen.cpu, ["/D.app", "/A.app", "/F.app", "/E.app"]);
+    assert_eq!(chosen.seconds, 5);
+    assert_eq!(expected.seconds, 20);
+}
+
+#[test]
+fn a_window_counts_no_stretch_from_before_the_clock_was_set_back() {
+    // Goal: an App chart counts only the seconds after the clock was last set back, in the
+    // stretches closed since as well as one by one. Method: X uses 90 at every second from 100
+    // to 129, then the clock goes back to 105 and Y uses 20 at every second to 119, so the View
+    // holds the stretches of 100 to 129 and then that of 105 to 109. The window of 100 to 119
+    // is compared with the same View's seconds one by one.
+    let mut held = Held::new();
+    for wall_second in 100..=129 {
+        take(&mut held, wall_second, &[cpu(b"/X.app", 90)]);
+    }
+    for (publication, wall_second) in (130..).zip(105..=119) {
+        take_published(&mut held, publication, wall_second, &[cpu(b"/Y.app", 20)]);
+    }
+    let view = published(&mut held);
+    let mut leaders = Leaders::new();
+    let window = WallSeconds {
+        first: 100,
+        last: 119,
+    };
+
+    let chosen = chosen_over(&mut leaders, &window_one_by_one(&view), window);
+    let from_stretches = Readings {
+        stretches: &view.stretches,
+        ..window_one_by_one(&view)
+    };
+    let chosen_from_stretches = chosen_over(&mut leaders, &from_stretches, window);
+
+    assert_eq!(chosen_from_stretches.cpu, chosen.cpu);
+    assert_eq!(chosen.cpu, ["/Y.app"]);
+    assert_eq!(chosen_from_stretches.seconds, 15);
+}
+
 /// A recording of the ticks `minutes` names, as `seal_minutes` seals them.
 fn recording_of(minutes: &[(u64, Range<u64>)]) -> Fixture {
     let mut fixture = Fixture::new();
@@ -316,6 +412,95 @@ fn readings_of(
     (rates, stretch.resident(cohort))
 }
 
+/// What A, C, D and E use at `wall_second`, in key order: the CPU time each uses is also the
+/// resident memory it holds.
+/// A View of seconds 100 to 139, each with the Apps `window_used` names.
+fn window_view() -> Arc<View> {
+    let mut held = Held::new();
+    for wall_second in 100..=139 {
+        take(&mut held, wall_second, &window_used(wall_second));
+    }
+
+    published(&mut held)
+}
+
+/// The readings of `view`, a `window_view`, that hold seconds 125 to 139 one by one and the
+/// stretches of 100 to 129.
+fn window_from_stretches(view: &View) -> Readings<'_> {
+    Readings {
+        seconds: &view.seconds[25..],
+        apps: &view.apps[25..],
+        stretches: &view.stretches,
+    }
+}
+
+/// The readings of `view` that hold each of its seconds one by one and no stretch.
+fn window_one_by_one(view: &View) -> Readings<'_> {
+    Readings {
+        seconds: &view.seconds,
+        apps: &view.apps,
+        stretches: &[],
+    }
+}
+
+/// What each App uses at `wall_second` of `window_view`: A 50 at 112 only, F 40 at 122 only,
+/// C 10,000 at 107 only, D 60 at 125 and none at 130, and E 35 at every second, each in
+/// nanoseconds of CPU time and in bytes of resident memory.
+fn window_used(wall_second: u64) -> Vec<Used<'static>> {
+    let mut used = Vec::new();
+    let mut add = |key, amount| {
+        used.push(Used {
+            key,
+            cpu_ns: amount,
+            resident_bytes: amount,
+        });
+    };
+    if wall_second == 112 {
+        add(b"/A.app".as_slice(), 50);
+    }
+    if wall_second == 107 {
+        add(b"/C.app".as_slice(), 10_000);
+    }
+    if wall_second == 125 {
+        add(b"/D.app".as_slice(), 60);
+    }
+    if wall_second == 130 {
+        add(b"/D.app".as_slice(), 0);
+    }
+    add(b"/E.app".as_slice(), 35);
+    if wall_second == 122 {
+        add(b"/F.app".as_slice(), 40);
+    }
+
+    used
+}
+
+/// The Apps the App charts of CPU time and resident memory draw on lines of their own over a
+/// window of readings, by name, and the seconds they draw one by one.
+struct Chosen {
+    cpu: Vec<String>,
+    resident: Vec<String>,
+    seconds: usize,
+}
+
+fn chosen_over(leaders: &mut Leaders, readings: &Readings<'_>, window: WallSeconds) -> Chosen {
+    let mut cohorts = Cohorts::with_room();
+    leaders.choose(readings, window, &mut cohorts);
+    assert!(!cohorts.refused);
+    let names = |cohort: &[Arc<RankedApp>]| {
+        cohort
+            .iter()
+            .map(|app| String::from_utf8(app.bytes.clone()).unwrap())
+            .collect()
+    };
+
+    Chosen {
+        cpu: names(&cohorts.cpu),
+        resident: names(&cohorts.resident),
+        seconds: cohorts.seconds,
+    }
+}
+
 /// What one App used over one second.
 struct Used<'key> {
     key: &'key [u8],
@@ -341,8 +526,20 @@ fn resident(key: &[u8], resident_bytes: u64) -> Used<'_> {
 
 /// Takes the second at `wall_second` into `held`, with the Apps `used` names, in key order.
 fn take(held: &mut Held, wall_second: u64, used: &[Used<'_>]) {
+    take_published(held, wall_second, wall_second, used);
+}
+
+/// Takes into `held` the second published at `publication` at whole wall second
+/// `wall_second`, with the Apps `used` names, in key order.
+fn take_published(held: &mut Held, publication: u64, wall_second: u64, used: &[Used<'_>]) {
+    let second = MachineSecond {
+        publication,
+        run_tick: publication,
+        ..second_at(wall_second)
+    };
     let mut apps = second_with(wall_second, used);
-    assert!(held.take(&RUN, &second_at(wall_second), TickApps::Loaded(&mut apps)));
+    apps.observation = Some(super::take_observation(&RUN, &second));
+    assert!(held.take(&RUN, &second, TickApps::Loaded(&mut apps)));
 }
 
 /// The CPU time the first App of `shown` used.

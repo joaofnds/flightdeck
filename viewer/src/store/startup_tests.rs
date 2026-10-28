@@ -334,9 +334,9 @@ fn staged_history_and_native_clock_jumps_rebuild_cohorts_before_incremental_upda
 
     publish_named(&mut fixture, 122, 2000);
     super::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();
-    let mut cohorts = super::Cohorts::with_room();
-    held.context.choose(&mut cohorts);
-    assert_eq!(cohorts.seconds, 0);
+    let view = published_view(&mut held);
+    assert_eq!(view.cohorts.seconds, 0);
+    drop(view);
     let input = super::recording::staged::Input {
         root: &fixture.root,
         budget: &budget,
@@ -344,23 +344,29 @@ fn staged_history_and_native_clock_jumps_rebuild_cohorts_before_incremental_upda
     };
     drive_complete(&mut startup, &input, &mut held, &mut ring);
 
-    cohorts.clear();
-    held.context.choose(&mut cohorts);
-    assert_eq!(cohorts.seconds, 5);
-    let mut names: Vec<_> = cohorts
+    let view = published_view(&mut held);
+    assert_eq!(view.cohorts.seconds, 5);
+    let mut names: Vec<_> = view
+        .cohorts
         .resident
         .iter()
         .map(|app| app.bytes.as_slice())
         .collect();
     names.sort_unstable();
     assert_eq!(names, [b"/Apps/Current.app".as_slice(), b"N".as_slice()]);
+    drop(view);
     assert_eq!(primary.selected().observation.stamp.publication, 6);
     publish_named(&mut fixture, 123, 1000);
     super::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();
-    cohorts.clear();
-    held.context.choose(&mut cohorts);
-    assert_eq!(cohorts.seconds, 1);
-    assert_eq!(cohorts.resident[0].bytes.as_slice(), b"N");
+    let view = published_view(&mut held);
+    assert_eq!(view.cohorts.seconds, 1);
+    assert_eq!(view.cohorts.resident[0].bytes.as_slice(), b"N");
+}
+
+pub(super) fn published_view(held: &mut super::Held) -> Arc<super::View> {
+    let mailbox = super::Mailbox::new();
+    held.publish(&mailbox);
+    mailbox.take().unwrap()
 }
 
 pub(super) fn drive_complete(

@@ -20,7 +20,7 @@ const STRETCH_APPS_MAX: usize = APPS_PER_SECOND_MAX;
 const RATES: [Metric; 4] = [Metric::Cpu, Metric::Power, Metric::Disk, Metric::Gpu];
 
 const _: () = {
-    assert!(size_of::<StretchRow>() <= 144);
+    assert!(size_of::<StretchRow>() <= 184);
 };
 
 /// The stretches of the seconds the store took in: the closed ones, oldest first, and the open
@@ -180,6 +180,11 @@ pub(super) struct StretchRow {
 struct Amount {
     /// What the App used over the seconds that measured it, added up.
     known: u64,
+    /// The intervals the seconds that measured a rate measured it over, added up, which a
+    /// chart's leaders take the App's mean rate over.
+    measured_ns: u64,
+    /// The seconds that measured it, which a chart's leaders take the App's mean memory over.
+    measured_seconds: u32,
     /// The most members that measured the resource at any one of those seconds.
     measured_members: u32,
     /// The most members that did not measure it at any one second that holds the App.
@@ -309,6 +314,16 @@ impl AppsStretch {
         self.totals = Totals::of_rows(&self.rows);
     }
 
+    /// Every App of the stretch's seconds, once each, in key order, or `None` where they held
+    /// more Apps between them than a stretch holds.
+    pub(super) fn apps(&self) -> Option<&[StretchRow]> {
+        if self.too_many {
+            return None;
+        }
+
+        Some(&self.rows)
+    }
+
     /// What the stretch shows on the App chart of `metric` whose own lines draw `cohort`.
     #[must_use]
     pub fn attribution(
@@ -360,6 +375,10 @@ fn add_rows_merged<R: PointRow + Rankable>(
             }
             merged.push(row);
         }
+        // An App out of key order would take a second row of its own.
+        if let Some(last) = merged.last() {
+            assert!(key_of(&last.name) < key);
+        }
         let mut row = match held.next_if(|row| key_of(&row.name) == key) {
             Some(row) => row,
             None => StretchRow::new(app.ranked()),
@@ -404,14 +423,35 @@ impl StretchRow {
 
         for (amount, metric) in self.rates.iter_mut().zip(RATES) {
             let measure = app.measure(metric);
-            if elapsed_ns.is_some() {
-                amount.add(&measure);
-            } else {
-                amount.add_members(&measure);
+            match elapsed_ns {
+                Some(elapsed_ns) => amount.add_rate(&measure, elapsed_ns),
+                None => amount.add_members(&measure),
             }
         }
         self.resident.add(&app.measure(Metric::Resident));
         self.membership_complete &= app.membership_complete;
+    }
+
+    /// What the App used of `metric`, a rate, over the stretch's seconds that measured it, and
+    /// the intervals they measured it over, added up. An App whose sums overflowed counts none
+    /// of the stretch, where its seconds one by one would count those that did not.
+    pub(super) fn rate_measured(&self, metric: Metric) -> Option<(u64, u64)> {
+        let Some(place) = RATES.iter().position(|rate| *rate == metric) else {
+            unreachable!("resident memory is not a rate");
+        };
+
+        let rate = &self.rates[place];
+        let known = rate.measured()?;
+        assert!(rate.measured_ns > 0);
+        Some((known, rate.measured_ns))
+    }
+
+    /// The App's resident memory added up over the stretch's seconds that measured it, and how
+    /// many they are.
+    pub(super) fn resident_measured(&self) -> Option<(u64, u32)> {
+        let known = self.resident.measured()?;
+
+        Some((known, self.resident.measured_seconds))
     }
 
     /// Adds `other`, the same App's readings over seconds of the stretch it does not hold.
@@ -427,6 +467,16 @@ impl StretchRow {
 }
 
 impl Amount {
+    /// Adds `measure`, a second's measure of a rate over `elapsed_ns`.
+    fn add_rate(&mut self, measure: &Measure, elapsed_ns: u64) {
+        assert!(elapsed_ns > 0);
+        if measure.measured().is_some() {
+            self.measured_ns += elapsed_ns;
+        }
+
+        self.add(measure);
+    }
+
     /// Adds `measure`, a second's.
     fn add(&mut self, measure: &Measure) {
         self.add_members(measure);
@@ -435,6 +485,7 @@ impl Amount {
         };
 
         self.measured_members = self.measured_members.max(measure.measured_members);
+        self.measured_seconds += 1;
         match self.known.checked_add(known) {
             Some(known) => self.known = known,
             None => self.overflowed = true,
@@ -443,6 +494,8 @@ impl Amount {
 
     /// Adds `other`, what the App used of the resource over other seconds.
     fn add_amount(&mut self, other: &Self) {
+        self.measured_ns += other.measured_ns;
+        self.measured_seconds += other.measured_seconds;
         self.measured_members = self.measured_members.max(other.measured_members);
         self.unavailable_members = self.unavailable_members.max(other.unavailable_members);
         self.overflowed |= other.overflowed;
@@ -457,6 +510,16 @@ impl Amount {
     fn add_members(&mut self, measure: &Measure) {
         self.unavailable_members = self.unavailable_members.max(measure.unavailable_members);
         self.overflowed |= measure.overflowed;
+    }
+
+    /// What the App used over the seconds that measured it, where any did and the sums did not
+    /// overflow, as a second's measure counts only where it measured the resource.
+    fn measured(&self) -> Option<u64> {
+        if self.measured_seconds == 0 {
+            return None;
+        }
+
+        self.measure(self.known).measured()
     }
 
     /// The measure of the resource whose known part is `known`.
