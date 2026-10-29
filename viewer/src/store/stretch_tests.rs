@@ -40,7 +40,7 @@ fn a_closed_stretch_adds_up_the_apps_of_its_seconds() {
 
     let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[name(b"/A.app")]);
     assert_eq!(view.stretches.len(), 1);
-    assert_eq!(cpu_of(&shown), 10_045_000);
+    assert_eq!(first_app_amount(&shown), 10_045_000);
     assert_eq!(
         shown.apps[0].unwrap().rate,
         AppAttributionMetric::Cpu.rate(10_045_000, Some(10 * NANOSECONDS_PER_SECOND))
@@ -66,7 +66,7 @@ fn a_closed_stretch_adds_up_the_energy_and_the_disk_bytes_of_its_seconds() {
     let view = published(&mut held);
 
     let a = [name(b"/A.app")];
-    let used_of = |metric| cpu_of(&view.stretches[0].attribution(metric, &a));
+    let used_of = |metric| first_app_amount(&view.stretches[0].attribution(metric, &a));
     assert_eq!(used_of(AppAttributionMetric::Power), 20_000);
     assert_eq!(used_of(AppAttributionMetric::Disk), 30_000);
 }
@@ -89,7 +89,7 @@ fn a_closed_stretch_adds_up_the_gpu_time_of_its_seconds() {
     let view = published(&mut held);
 
     let shown = view.stretches[0].attribution(AppAttributionMetric::Gpu, &[name(b"/A.app")]);
-    assert_eq!(cpu_of(&shown), 40_000);
+    assert_eq!(first_app_amount(&shown), 40_000);
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn a_second_without_its_apps_adds_no_interval() {
     let view = published(&mut held);
 
     let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[name(b"/A.app")]);
-    assert_eq!(cpu_of(&shown), 9_000);
+    assert_eq!(first_app_amount(&shown), 9_000);
     assert_eq!(
         shown.apps[0].unwrap().rate,
         AppAttributionMetric::Cpu.rate(1_000, Some(NANOSECONDS_PER_SECOND))
@@ -181,7 +181,7 @@ fn a_second_measured_over_no_interval_adds_no_use() {
     let view = published(&mut held);
 
     let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[name(b"/A.app")]);
-    assert_eq!(cpu_of(&shown), 9_000);
+    assert_eq!(first_app_amount(&shown), 9_000);
     assert_eq!(
         shown.apps[0].unwrap().rate,
         AppAttributionMetric::Cpu.rate(1_000, Some(NANOSECONDS_PER_SECOND))
@@ -320,7 +320,7 @@ fn a_load_adds_up_the_apps_of_older_minutes_as_their_seconds_add_up() {
     assert_eq!(stretches, [6, 18]);
     for expected in expected {
         let shown = expected.attribution(AppAttributionMetric::Cpu, &cohort);
-        assert!(cpu_of(&shown) > 0);
+        assert!(first_app_amount(&shown) > 0);
     }
     let shown = &view.stretches[..expected.len()];
     for (shown, expected) in shown.iter().zip(expected) {
@@ -373,7 +373,7 @@ fn a_catch_up_adds_up_no_second_the_store_holds() {
     let view = published(&mut held);
     let expected = &whole.stretches[0];
     assert_eq!(expected.stretch, 6);
-    assert!(cpu_of(&expected.attribution(AppAttributionMetric::Cpu, &cohort)) > 0);
+    assert!(first_app_amount(&expected.attribution(AppAttributionMetric::Cpu, &cohort)) > 0);
     assert_eq!(view.stretches[0].stretch, expected.stretch);
     assert_eq!(
         readings_of(&view.stretches[0], &cohort),
@@ -1225,8 +1225,8 @@ fn take_published(held: &mut Held, publication: u64, wall_second: u64, used: &[U
     assert!(held.take(&RUN, &second, TickApps::Loaded(&mut apps)));
 }
 
-/// The CPU time the first App of `shown` used.
-fn cpu_of(shown: &super::Attribution) -> u64 {
+/// The amount the first App of `shown` used, in the unit of the metric `shown` charts.
+fn first_app_amount(shown: &super::Attribution) -> u64 {
     shown.apps[0].unwrap().measure.unwrap().known
 }
 
