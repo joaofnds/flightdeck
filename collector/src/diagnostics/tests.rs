@@ -200,6 +200,44 @@ fn keeps_a_group_submitted_while_the_writer_copies_an_earlier_one() {
 }
 
 #[test]
+fn delivers_groups_in_submission_order_across_laps_of_the_queue() {
+    // Goal: the slots hand groups to the writer in the order producers submitted them.
+    // Method: keep the queue nearly full while more groups than three laps hold pass through.
+    let reporter = Reporter::new();
+    let submit = |number: usize| {
+        let mut group = Box::new(Group::empty());
+        writeln!(group, "{number}").unwrap();
+        reporter.admit(Stream::Stdout, &group);
+    };
+    let take = || {
+        let mut scratch = Box::new(Group::empty());
+        assert_eq!(
+            Some(Stream::Stdout),
+            reporter.take(|group| scratch.copy_from(group))
+        );
+        scratch.bytes().to_vec()
+    };
+    let mut delivered = Vec::with_capacity(3 * QUEUE_SLOTS);
+
+    for number in 0..QUEUE_SLOTS - 1 {
+        submit(number);
+    }
+    for number in QUEUE_SLOTS - 1..3 * QUEUE_SLOTS {
+        submit(number);
+        delivered.push(take());
+    }
+    for _number in 0..QUEUE_SLOTS - 1 {
+        delivered.push(take());
+    }
+
+    let submitted: Vec<_> = (0..3 * QUEUE_SLOTS)
+        .map(|number| format!("{number}\n").into_bytes())
+        .collect();
+    assert_eq!(submitted, delivered);
+    assert_eq!(0, reporter.loss[0].queue_full.load(Ordering::Relaxed));
+}
+
+#[test]
 fn rejects_a_nested_diagnostic_without_damaging_the_outer_event() {
     // Goal: nested errors remain nonwaiting while the outer formatter owns staging.
     // Method: report again inside Display and read the surviving complete outer event.
