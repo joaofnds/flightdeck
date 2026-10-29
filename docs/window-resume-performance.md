@@ -173,11 +173,13 @@ are within what reruns showed:
 ### Charting Apps over the loaded hour
 
 Measured on 2026-10-28 on the same machine, on a fixture of the newest 150 sealed windows
-of the real recording, with one fresh process of each build run one after the other on
-that fixture. The base is `37630ad`, whose Store chose each chart's leading Apps at every
-publish over its newest 960 seconds. This revision has the page choose them over the
-picked range whenever the range changes, and the View holds each App's sums for every ten
-seconds of the loaded hour. The measured executables have these SHA-256 identities:
+of the real recording, with fresh processes run one after the other on that fixture: one
+of this revision, one of the base, then a second of this revision. The base is `37630ad`,
+whose Store chose each chart's leading Apps at every publish over its newest 960 seconds.
+This revision has the page choose them over the picked range each time it draws a View,
+so at every publish as well as at every range switch, and the View holds each App's sums
+for every ten seconds of the loaded hour. The measured executables have these SHA-256
+identities:
 
 | Executable | SHA-256 |
 | --- | --- |
@@ -201,12 +203,22 @@ measured disk-read bytes were zero. A `sample` of 20 switches between 5 and 15 m
 about 10 ms of each on the main thread, nearly all of it in building the charts by App from
 the View, and about 7 ms of that in attributing the Apps of each second and stretch.
 
+Between switches the page draws each View the Store publishes. On the live recording at 60
+minutes, about one View a second, a `sample` of 61 Views found the main thread busy about
+13 ms per View. About 4.8 ms of each went to drawing the charts by App from the View: about
+3.8 ms choosing their leaders over the hour and about 0.7 ms attributing their Apps. The
+process used 1.76 s of CPU over the 62 seconds, while another process on the machine held
+about 660% CPU and the load average stood at 9.76.
+
 The process footprint read 790 to 818 MB for this revision and 739 to 762 MB for the base.
 
 The Store's startup was measured alone, with `resume_bench` built from each revision with
-one addition: after its startup record it takes Views until one holds the Apps of every
-loaded minute and reports that View. These probe builds ran five times each, alternating
-between builds, on a fresh fixture of the same 150 windows. Their SHA-256 identities are
+one addition: after its startup record it takes Views until one holds every App the
+revision loads, and reports that View. For this revision that is a View whose
+`apps_loaded` is set. The base holds no Apps of the older minutes, so its probe waits for a
+View whose cohorts cover a second. These probe builds ran five times each, alternating
+between builds, on a fixture frozen later from the newest 150 windows, whose newest second
+stood 261 seconds after the first fixture's. Their SHA-256 identities are
 `8fe612867acd362a2e1cd25802867c6dda23b0a27376a85796f0a6c2dadee52a` for this revision and
 `feca0529ffbb8224ac372f1d5bac5b7cd0a109e715977b2d465c81f028b6a8b2` for the base.
 
@@ -216,14 +228,45 @@ between builds, on a fresh fixture of the same 150 windows. Their SHA-256 identi
 | Process CPU | 1,382 to 1,611 ms, median 1,535 | 815 to 879 ms, median 826 |
 | Process footprint | 343.7 to 352.8 MiB, median 348.8 | 236.0 to 251.7 MiB, median 243.0 |
 
-Both read 516,553 App rows and no bytes from disk. In an earlier run of each that recorded
-both Views, the startup record's View already held every App, so the Store published no
-View before it held the whole hour's Apps, and its first View comes that much later.
-`vmmap -summary` of one process of each, once it held every App, put 43 MB more in live
-malloc regions for this revision and 59 MB more in freed regions that stay dirty, and an
-earlier pair put the freed difference at 88 MB. The live difference is above the 19 MB
-the stretches were estimated at when they were chosen, and below the 135 MB that holding
-every App at every second of the hour would take.
+Both Views held 516,553 App rows at their 1,080 seconds, and neither process read bytes
+from disk. The rows decoded differ: the base decodes the Apps of the minutes those seconds
+span, and this revision decodes the Apps of every loaded minute to add them up by stretch.
+A Time Profiler run of one startup of each put 555 ms of the loader threads in reading App
+rows for this revision against 147 ms for the base. In an earlier run of each that recorded
+both Views, the startup record's View already held every App: until `d9391c3` the Store
+published no View before it held the whole hour's Apps.
+
+The Store now hands over its first View once it holds every minute's machine seconds and
+the live span's Apps, which the default 15-minute range draws, and adds the older minutes'
+Apps to its stretches once the window has taken that View. Launches were measured on
+2026-10-29 with the native app, eight of each build interleaved on a frozen copy of the
+real recording, each with its own collector, while the load average stood at 2.5 to 4.7.
+The time is from spawning the app to the first card reading its control socket reports.
+
+| Native launch, eight runs | `d9391c3` | Without the wait for the first View | Base |
+| --- | --- | --- | --- |
+| First readings, median | 325.4 ms | 357.8 ms | 335.8 ms |
+| Median difference from the base in the same round | -11.4 ms | +20.4 ms | |
+| Rounds later than the base | 4 of 8 | 8 of 8 | |
+
+Without the wait, the pass's loaders take the cores the window's first frame needs. A
+probe build of the change without the wait, launched three times, found the first View held
+the live span's 1,080 seconds and 8 Apps in each chart by App, 20 ms before the first
+readings, and the View with the older minutes' Apps followed about 230 to 250 ms later. The
+wait changes only when that second View comes. The launched `flightdeck`
+executables have the SHA-256 identities
+`7fd29af824e30bc5d0302cf2790e8239706ecf4965589607a4db66f93d45a098` for `d9391c3` and
+`120c25f4b488562edee23c6fa8a4acc27643d51aab4def7394fa48aac2583cad` for the base.
+
+The Store reserves the stretches when it starts: 375 buffers of 2,048 rows of 152 bytes,
+116.7 MB (111.3 MiB) whatever the hour holds, which a page holds in RAM only once a stretch
+writes to it. `vmmap -summary` of one process of each, once it held every App, counted
+327.7 MiB allocated in malloc zones for this revision against 198.0 MiB for the base. Of the
+difference, 43 MiB more sat in malloc regions holding live data and 59 MiB more in freed
+regions that stay dirty, and an earlier pair put the freed difference at 88 MiB. The live
+difference is above the 19 MB the stretches were estimated at when they were chosen. The
+reservation is close to the 135 MB that holding every App at every second of the hour
+would take, and the stretches reach it only if each holds 2,048 Apps.
 
 ## Profiling and reproduction
 
