@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Modifiers, TestAppContext};
+use gpui::{Modifiers, MouseButton, TestAppContext};
 
 use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
@@ -146,6 +146,59 @@ fn a_page_opened_while_a_second_is_held_reads_the_context_the_charts_were_drawn_
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_rank_link_while_a_second_is_held_holds_the_second_it_names(cx: &mut TestAppContext) {
+    // Goal: a rank link of a second the page shows over a held one opens the App's page holding
+    // the second the link names, in the window the charts were drawn in, rather than marking
+    // that second over the held second's readings. Method: click 800 seconds before the newest
+    // on the CPU page's chart by App, step a second left on that chart, whose top Apps the
+    // store's View holds, click the App the CPU ranking leads with, then the second the page's
+    // readings show and the page's window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Top);
+    harness.driver.step_left_on_cpu_apps();
+
+    harness.driver.click_ranked_app("ranking:CPU:A:59.0%");
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(HELD - 1));
+    assert_eq!(harness.driver.requested_second(), Some(HELD - 1));
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn an_executable_pick_while_a_second_is_held_holds_the_second_shown_and_keeps_the_charts(
+    cx: &mut TestAppContext,
+) {
+    // Goal: an executable picked while the page shows a second over a held one holds the shown
+    // second in the held one's place and keeps the page's readings and charts, rather than
+    // clearing the page to read it again. Method: click 800 seconds before the newest on
+    // Overview's CPU chart by App, step a second left on that chart and note its value there,
+    // pick an executable as the executables table does, then the second the page's readings
+    // show, the value the chart reads and the page's window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Top);
+    harness.driver.step_left_on_cpu_apps();
+    let stepped = harness.driver.cpu_apps_value();
+
+    harness.driver.pick_executable("hex:61");
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(HELD - 1));
+    assert_eq!(harness.driver.cpu_apps_value(), stepped);
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    harness.teardown();
+}
+
 impl InputDriver {
     /// Shows the page over the View of the hour and the worker's reply to its request, the
     /// readings of the hour's newest two seconds, following the newest second at the newest
@@ -204,6 +257,35 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+    }
+
+    /// Focuses the CPU page's chart by App with a right press, which selects no second, and
+    /// steps it a second left.
+    fn step_left_on_cpu_apps(&mut self) {
+        let bounds = self.context.debug_bounds("live-cpu-apps-plot").unwrap();
+        self.context
+            .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.context
+            .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
+        self.press("left");
+        self.context.run_until_parked();
+    }
+
+    /// Picks the executable `key` as a click on its row of the executables table does.
+    fn pick_executable(&mut self, key: &str) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.select_executable(Some(key.into()));
+            dashboard.rebuild();
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// The second the page's readings show.
+    fn shown_reading_second(&self) -> Option<u64> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.reading_target().map(|target| target.second)
+        })
     }
 
     /// The value the CPU page's chart by App reads at the second it shows, without the clock

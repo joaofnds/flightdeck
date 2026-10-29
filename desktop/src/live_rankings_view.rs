@@ -295,8 +295,7 @@ impl LiveDashboard {
     }
 
     fn open_ranked_app(&mut self, key: &AppKey, target: &Target, cx: &mut Context<Self>) {
-        self.request.second = Some(target.second);
-        self.request.identity.clone_from(&target.identity);
+        self.link_target(target);
         self.request.app = Some(key.clone());
         self.request.apps_offset = 0;
         self.request.members_offset = 0;

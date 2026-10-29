@@ -405,10 +405,14 @@ impl LiveDashboard {
     pub(crate) fn select_executable(&mut self, executable: Option<String>) {
         self.request.executable = executable;
         if let Some(preview) = &self.preview {
-            self.request.second = Some(preview.target.second);
-            self.request.identity = preview.target.identity.clone();
-            self.submit();
-            return;
+            let target = preview.target.clone();
+            self.link_target(&target);
+            // While a second is held, the page keeps its readings and charts and reads the
+            // executable's processes as a pick with no hover shown does.
+            if self.hold.is_none() {
+                self.submit();
+                return;
+            }
         }
 
         if let Some(snapshot) = &mut self.snapshot {

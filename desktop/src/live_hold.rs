@@ -192,6 +192,35 @@ impl LiveDashboard {
         self.rebuild();
     }
 
+    /// Makes `target` the request's reading, as a link that names it does. While a second is
+    /// held, the page holds `target` in its place over the readings and the charts it shows,
+    /// from the hover of it where one is shown, and the page's next read brings what that reading
+    /// lacks.
+    pub(crate) fn link_target(&mut self, target: &Target) {
+        self.request.second = Some(target.second);
+        self.request.identity.clone_from(&target.identity);
+        let Some(hold) = &self.hold else {
+            return;
+        };
+        if hold.reading.target == *target {
+            return;
+        }
+
+        assert!(target.second <= hold.last);
+        let in_view = self.store_view_held(target);
+        let fresh = self.hold_resident(target.clone(), in_view);
+        let reading = match self.preview.take() {
+            Some(hovered) => {
+                self.hover_ended(&hovered);
+                hold_adopt(hovered, fresh, &self.request).0
+            }
+            None => fresh,
+        };
+        if let Some(hold) = &mut self.hold {
+            hold.reading = reading;
+        }
+    }
+
     /// The request that reads the page: while a second is held, the page whose context ends at
     /// the hold's last second, naming no reading, so no read of the page lays the window around
     /// the held second or past where the charts were drawn.
