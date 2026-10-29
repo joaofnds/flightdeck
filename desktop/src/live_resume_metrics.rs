@@ -56,6 +56,10 @@ impl ResumeMetrics {
         true
     }
 
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     fn begin(&mut self, checkpoint: &Checkpoint) {
         if !self.enabled {
             return;

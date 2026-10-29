@@ -41,6 +41,9 @@ const ROWS_MAX: usize = 4096;
 /// The accessibility nodes the `accessibility` command searches, which bounds its walk of a
 /// window's tree.
 const ACCESSIBILITY_NODES_MAX: usize = 65_536;
+/// The answer to a measured command sent before `profile-resume`, whose epoch would never
+/// begin.
+const MEASUREMENTS_OFF: &str = "resume measurements are off; send profile-resume first";
 
 pub struct Command {
     line: String,
@@ -164,12 +167,13 @@ async fn respond(
 ) -> Option<String> {
     let words: Vec<&str> = line.split_whitespace().take(WORDS_MAX).collect();
     if words.first() == Some(&"profile-cycle") {
-        let before = cx
-            .update(|window, cx| {
-                window.minimize_window();
-                dashboard.read(cx).resume_metrics.count()
-            })
+        let begun = cx
+            .update(|window, cx| profile_cycle(dashboard, window, cx))
             .ok()?;
+        let before = match begun {
+            Ok(before) => before,
+            Err(error) => return Some(failure(&error)),
+        };
         if !settle(dashboard, cx, Settled::Hidden).await? {
             return Some(failure("ingestion did not park while hidden"));
         }
@@ -227,6 +231,19 @@ async fn respond(
     })
 }
 
+/// Minimizes the window, whose next show starts a measurement epoch, and answers the epoch
+/// count before it.
+fn profile_cycle(
+    dashboard: &Entity<LiveDashboard>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<u64, String> {
+    profile_enabled(dashboard.read(cx))?;
+
+    window.minimize_window();
+    Ok(dashboard.read(cx).resume_metrics.count())
+}
+
 /// Starts a measurement epoch and opens the route, as a click in the sidebar does, and
 /// answers the epoch count before it.
 fn profile_navigate(
@@ -236,6 +253,7 @@ fn profile_navigate(
 ) -> Result<u64, String> {
     let route = word(words, 1)?;
     route_known(route)?;
+    profile_enabled(dashboard.read(cx))?;
 
     Ok(dashboard.update(cx, |dashboard, cx| {
         let before = dashboard.resume_begin_reading();
@@ -253,6 +271,7 @@ fn profile_range(
     cx: &mut App,
 ) -> Result<u64, String> {
     let range = range_word(words)?;
+    profile_enabled(dashboard.read(cx))?;
 
     Ok(dashboard.update(cx, |dashboard, cx| {
         let before = dashboard.resume_begin_switch();
@@ -260,6 +279,15 @@ fn profile_range(
         dashboard.set_range(range, cx);
         before
     }))
+}
+
+/// Refuses a measured command while measurements are off, since its epoch would never begin
+/// and its wait for the epoch's frame would end in a timeout.
+fn profile_enabled(dashboard: &LiveDashboard) -> Result<(), String> {
+    if dashboard.resume_metrics.enabled() {
+        return Ok(());
+    }
+    Err(MEASUREMENTS_OFF.to_owned())
 }
 
 /// The measurement of the epoch after `before`, once its fresh frame is drawn.
@@ -277,7 +305,10 @@ async fn resume_frame(
             return Some(json!({"ok":true, "result":result}).to_string());
         }
     }
-    Some(failure("fresh resume frame did not arrive"))
+    Some(failure(&format!(
+        "fresh resume frame did not arrive in {:?}, and a hidden window draws no frames",
+        READING_POLL * READING_POLLS_MAX
+    )))
 }
 
 enum Settled {
@@ -747,3 +778,7 @@ fn number(words: &[&str], index: usize) -> Result<f32, String> {
     }
     Ok(value)
 }
+
+#[cfg(test)]
+#[path = "control_tests.rs"]
+mod tests;
