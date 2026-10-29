@@ -23,6 +23,9 @@ const HELD: u64 = HOUR_NEWEST - 800;
 /// A second of the older tail of the View `show_held_view_after` shows, which holds no Apps
 /// there.
 const TAIL: u64 = 9_500;
+/// The newest second of the View `show_view_over_tail` shows, the last of `held_seconds`, which
+/// the worker's readings lack.
+const TAIL_VIEW_NEWEST: u64 = 10_005;
 /// The window of the newest fifteen minutes the page draws before the click.
 const DRAWN: TimeWindow = TimeWindow {
     first: HOUR_NEWEST - 899,
@@ -353,7 +356,7 @@ fn a_click_over_a_rested_reader_on_a_second_the_view_lacks_reads_the_page_first(
 
     assert_eq!(
         harness.driver.reader_asked_second(),
-        Some(harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS)
+        Some(TAIL_VIEW_NEWEST - viewer::CONTEXT_AFTER_SECONDS)
     );
     harness.teardown();
 }
@@ -399,7 +402,7 @@ fn a_click_while_the_app_histories_are_pending_reads_the_page_up_to_the_held_win
 
     assert_eq!(
         harness.driver.reader_asked_second(),
-        Some(harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS)
+        Some(HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS)
     );
     harness.teardown();
 }
@@ -444,7 +447,7 @@ fn pause_on_overview_before_the_first_reading_reads_the_page_up_to_the_held_wind
 
     assert_eq!(
         harness.driver.reader_asked_second(),
-        Some(harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS)
+        Some(HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS)
     );
     harness.teardown();
 }
@@ -1301,7 +1304,7 @@ fn closing_and_opening_the_window_over_a_hold_still_reading_asks_for_the_page_it
     harness.driver.hover_second_on("live-cpu-plot", TAIL);
     harness.driver.tick_hover();
     harness.driver.click_second_on("live-cpu-plot", TAIL);
-    let page = harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS;
+    let page = TAIL_VIEW_NEWEST - viewer::CONTEXT_AFTER_SECONDS;
 
     harness.driver.close_and_open_window();
 
@@ -1715,13 +1718,6 @@ impl InputDriver {
     fn reader_commands(&self) -> u64 {
         self.view.read_with(&self.context, |dashboard, _| {
             dashboard.worker.commands_sent()
-        })
-    }
-
-    /// The last second of the window the held second was held in.
-    fn held_last(&self) -> u64 {
-        self.view.read_with(&self.context, |dashboard, _| {
-            dashboard.hold.as_ref().unwrap().last
         })
     }
 
