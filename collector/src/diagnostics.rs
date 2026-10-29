@@ -3,7 +3,7 @@ mod writer;
 
 use std::fmt;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Barrier, Mutex, OnceLock};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
@@ -53,7 +53,12 @@ impl Stream {
 }
 
 struct Reporter {
-    queue: Mutex<Queue>,
+    // Only producers take admission and store admitted, and only the writer stores taken,
+    // so the writer copying a group out of its slot never holds anything a producer needs.
+    admission: Mutex<()>,
+    slots: [Mutex<Slot>; QUEUE_SLOTS],
+    admitted: AtomicUsize,
+    taken: AtomicUsize,
     staging: Mutex<Group>,
     loss: [Loss; 2],
     enabled: [AtomicBool; 2],
@@ -64,11 +69,9 @@ struct Reporter {
     stopped: AtomicBool,
 }
 
-struct Queue {
-    groups: [Group; QUEUE_SLOTS],
-    streams: [Stream; QUEUE_SLOTS],
-    first: usize,
-    count: usize,
+struct Slot {
+    group: Group,
+    stream: Stream,
 }
 
 struct Loss {
@@ -151,12 +154,15 @@ impl Reporter {
     )]
     const fn new() -> Self {
         Self {
-            queue: Mutex::new(Queue {
-                groups: [const { Group::empty() }; QUEUE_SLOTS],
-                streams: [Stream::Stdout; QUEUE_SLOTS],
-                first: 0,
-                count: 0,
-            }),
+            admission: Mutex::new(()),
+            slots: [const {
+                Mutex::new(Slot {
+                    group: Group::empty(),
+                    stream: Stream::Stdout,
+                })
+            }; QUEUE_SLOTS],
+            admitted: AtomicUsize::new(0),
+            taken: AtomicUsize::new(0),
             staging: Mutex::new(Group::empty()),
             loss: [const { Loss::new() }; 2],
             enabled: [const { AtomicBool::new(true) }; 2],
@@ -169,10 +175,16 @@ impl Reporter {
     }
 
     fn prepare(&self) {
-        drop(match self.queue.lock() {
-            Ok(queue) => queue,
-            Err(error) => unreachable!("diagnostic queue poisoned: {error}"),
+        drop(match self.admission.lock() {
+            Ok(admission) => admission,
+            Err(error) => unreachable!("diagnostic admission poisoned: {error}"),
         });
+        for slot in &self.slots {
+            drop(match slot.lock() {
+                Ok(slot) => slot,
+                Err(error) => unreachable!("diagnostic slot poisoned: {error}"),
+            });
+        }
         drop(match self.staging.lock() {
             Ok(staging) => staging,
             Err(error) => unreachable!("diagnostic staging poisoned: {error}"),
@@ -215,38 +227,50 @@ impl Reporter {
         if group.length == 0 {
             return;
         }
-        let Ok(mut queue) = self.queue.try_lock() else {
+        let Ok(admission) = self.admission.try_lock() else {
             self.reject(loss, &loss.queue_contention);
             return;
         };
-        assert!(queue.count <= QUEUE_SLOTS);
-        if queue.count == QUEUE_SLOTS {
+        let admitted = self.admitted.load(Ordering::Relaxed);
+        let taken = self.taken.load(Ordering::Acquire);
+        assert!(taken <= admitted);
+        assert!(admitted - taken <= QUEUE_SLOTS);
+        if admitted - taken == QUEUE_SLOTS {
             self.reject(loss, &loss.queue_full);
             return;
         }
-        let index = (queue.first + queue.count) % QUEUE_SLOTS;
-        queue.groups[index].copy_from(group);
-        queue.streams[index] = stream;
-        queue.count += 1;
-        drop(queue);
+        let index = admitted % QUEUE_SLOTS;
+        let mut slot = match self.slots[index].try_lock() {
+            Ok(slot) => slot,
+            Err(error) => unreachable!("diagnostic slot {index} held past its take: {error}"),
+        };
+        slot.group.copy_from(group);
+        slot.stream = stream;
+        drop(slot);
+        self.admitted.store(admitted + 1, Ordering::Release);
+        drop(admission);
 
         self.notify();
     }
 
     fn take(&self, copy: impl FnOnce(&Group)) -> Option<Stream> {
-        let mut queue = match self.queue.lock() {
-            Ok(queue) => queue,
-            Err(error) => unreachable!("diagnostic queue poisoned: {error}"),
-        };
-        assert!(queue.count <= QUEUE_SLOTS);
-        if queue.count == 0 {
+        let taken = self.taken.load(Ordering::Relaxed);
+        let admitted = self.admitted.load(Ordering::Acquire);
+        assert!(taken <= admitted);
+        assert!(admitted - taken <= QUEUE_SLOTS);
+        if admitted == taken {
             return None;
         }
-        let first = queue.first;
-        copy(&queue.groups[first]);
-        let stream = queue.streams[first];
-        queue.first = (first + 1) % QUEUE_SLOTS;
-        queue.count -= 1;
+        let index = taken % QUEUE_SLOTS;
+        let slot = match self.slots[index].try_lock() {
+            Ok(slot) => slot,
+            Err(error) => unreachable!("diagnostic slot {index} held past its admission: {error}"),
+        };
+        copy(&slot.group);
+        let stream = slot.stream;
+        drop(slot);
+        let previous = self.taken.fetch_add(1, Ordering::Release);
+        assert_eq!(taken, previous, "only the writer takes diagnostic groups");
 
         Some(stream)
     }

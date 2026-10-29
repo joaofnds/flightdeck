@@ -146,14 +146,14 @@ fn rejects_contention_and_disabled_output_before_formatting() {
 #[test]
 fn drops_complete_groups_when_the_queue_is_occupied_or_full() {
     // Goal: sink backlog and queue ownership cannot wait on a producer.
-    // Method: hold queue state, then fill all slots with distinguishable whole groups.
+    // Method: hold admission as another producer would, then fill all slots with whole groups.
     supervised(
         "diagnostics::tests::drops_complete_groups_when_the_queue_is_occupied_or_full",
         || {
             let reporter = Reporter::new();
             let mut group = Box::new(Group::empty());
             group.write_all(b"complete\n").unwrap();
-            let occupied = reporter.queue.lock().unwrap();
+            let occupied = reporter.admission.lock().unwrap();
 
             reporter.admit(Stream::Stdout, &group);
             drop(occupied);
@@ -174,6 +174,29 @@ fn drops_complete_groups_when_the_queue_is_occupied_or_full() {
             assert_eq!(1, reporter.loss[0].queue_full.load(Ordering::Relaxed));
         },
     );
+}
+
+#[test]
+fn keeps_a_group_submitted_while_the_writer_copies_an_earlier_one() {
+    // Goal: the writer's copy of a queued group never costs a producer its admission.
+    // Method: submit the second group from inside the copy of the first, then take it.
+    let reporter = Reporter::new();
+    let mut first = Box::new(Group::empty());
+    first.write_all(b"first\n").unwrap();
+    let mut second = Box::new(Group::empty());
+    second.write_all(b"second\n").unwrap();
+    let mut scratch = Box::new(Group::empty());
+    reporter.admit(Stream::Stdout, &first);
+
+    reporter.take(|group| {
+        scratch.copy_from(group);
+        reporter.admit(Stream::Stdout, &second);
+    });
+    let stream = reporter.take(|group| scratch.copy_from(group));
+
+    assert_eq!(Some(Stream::Stdout), stream);
+    assert_eq!(b"second\n", scratch.bytes());
+    assert_eq!(0, reporter.loss[0].queue_contention.load(Ordering::Relaxed));
 }
 
 #[test]

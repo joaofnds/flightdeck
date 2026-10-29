@@ -44,10 +44,6 @@ pub(super) fn start(reporter: &'static Reporter) {
         .stack_size(WRITER_STACK_BYTES)
         .spawn(move || {
             std::thread::park_timeout(std::time::Duration::ZERO);
-            drop(match reporter.queue.lock() {
-                Ok(queue) => queue,
-                Err(error) => unreachable!("diagnostic queue poisoned: {error}"),
-            });
             reporter.ready.wait();
             run(reporter, streams, scratch);
         });
