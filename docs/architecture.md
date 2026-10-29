@@ -106,11 +106,17 @@ flowchart TD
 
 Once Overview has complete initial histories and follows a Store View, its page
 worker rests. A hover retained in the View reads there; a missing detail can request
-the worker. The Store continues ingesting while another page follows the live Mac,
-keeping its newest View ready for a return to Overview. A hidden window parks the Store,
-and so does a held second, whether from Pause, a range dragged on a chart or a pinned
-observation, and a saved recording shown in a live window. Bootstrap, incomplete
-histories and unavailable Store data retain the page-worker path.
+the worker. The Store continues ingesting while another page follows the live Mac.
+That page draws its chart by App from the newest View and its other charts from the
+worker, since the worker's App histories stop 960 s back and the View holds every App's
+ten-second sums for the loaded hour. A hidden window parks the Store, and so does a
+saved recording shown in a live window. A held second, whether from a click on a chart,
+Pause or a range dragged on a chart, parks it too and keeps the View the charts were
+drawn from, so the charts keep their window and a range picked while held redraws from
+that View without reading the recording. Letting go drops that View, since a kept View
+stops the Store writing over its buffers, and the page shows what it drew from it until
+the Store's next View. Bootstrap, incomplete histories and unavailable Store data retain
+the page-worker path.
 
 The native timer normally takes completed work every 250 ms. While a restoration
 or another reply is pending, the live window's scheduling also polls promptly for
@@ -123,7 +129,9 @@ Visibility and the selected time are independent. A live selection means “foll
 the latest reading with this range.” A pin means “keep this exact observation and
 this range.” Hiding the window preserves that choice and parks its readers.
 Closing the normal live window retains the request, chart range, pin, snapshot and
-handed-over worker for reopening while the app keeps running in the background.
+handed-over worker for reopening while the app keeps running in the background. A held
+second keeps its View through a hide and a close, so the window drawn again shows the
+window the click kept.
 
 | State before hiding or closing | Restore behavior |
 | --- | --- |
