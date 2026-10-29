@@ -11,7 +11,7 @@ use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
 use crate::live_hover::Preview;
 use crate::live_source::Update;
-use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_led_from_its_older_part};
+use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_led_from_its_older_part, hour_until};
 use crate::live_store_fixtures::{reading_at, trend_point};
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
 use crate::live_views::summary;
@@ -420,6 +420,322 @@ fn the_range_s_reset_lets_go_of_the_view_a_hold_kept(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn letting_go_on_overview_shows_the_newest_second_the_view_drew(cx: &mut TestAppContext) {
+    // Goal: letting go of a second held on Overview keeps showing what the page drew from the
+    // View the hold kept, rather than the older readings of a rested reader, until the store's
+    // next View. Method: Overview over the View of the hour, whose reader read only up to 1,000
+    // seconds before its newest, at the last 60 minutes, Pause and a tick of the page, which hold
+    // the newest second, Pause again, which lets go, then the page's window, the text of each
+    // summary readout against those of the View's newest second, and the lines the CPU chart by
+    // App draws.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_view_ahead_of_the_reader(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+
+    harness.driver.pause();
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: HOUR_NEWEST - 3_599,
+            span: 3_600
+        })
+    );
+    let expected = summary::cards("overview", &summary_selection(&reading_at(HOUR_NEWEST, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["D", "A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_reader_s_answer_after_letting_go_on_overview_keeps_the_charts_by_app_the_view_drew(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the reader's answer to the live page, which letting go asks for, leaves Overview's
+    // charts by App as the View the hold kept drew them until the store's next View, since the
+    // reader draws them over fifteen minutes at most. Method: Overview over the View of an hour
+    // in whose two oldest stretches D led, at the last 60 minutes, Pause and a tick of the page,
+    // Pause again, the reader's answer with the readings of the 50 seconds since, then the lines
+    // the CPU chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+
+    harness.driver.answer_newest_command_up_to(HOUR_NEWEST + 50);
+
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["D", "A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_store_s_next_view_after_letting_go_draws_overview_from_it(cx: &mut TestAppContext) {
+    // Goal: the store's next View after letting go takes the place of what the page kept of the
+    // View the hold kept, so the charts follow the live Mac again. Method: Overview over the View
+    // of an hour in whose two oldest stretches D led, at the last 60 minutes, Pause and a tick of
+    // the page, Pause again and the reader's answer with the readings of the 50 seconds since,
+    // then the View of the hour to that second, in which D does not lead, and the page's window
+    // and the lines the CPU chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+    harness.driver.answer_newest_command_up_to(HOUR_NEWEST + 50);
+    let (mut next, _) = hour_until(HOUR_NEWEST + 50);
+    next.version = 2;
+
+    harness.driver.take_next_view(next);
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: HOUR_NEWEST + 50 - 3_599,
+            span: 3_600
+        })
+    );
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_reader_s_answer_after_letting_go_on_the_cpu_page_keeps_its_chart_by_app(
+    cx: &mut TestAppContext,
+) {
+    // Goal: on a page other than Overview, the reader's answer to the live page that letting go
+    // asks for leaves the chart by App the View the hold kept drew until the store's next View,
+    // since the reader draws none at the last 60 minutes. Method: the CPU page over the View of
+    // the hour at the last 60 minutes, Pause and a tick of the page, Pause again, the reader's
+    // answer with the readings of the 50 seconds since, then the lines the chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+
+    harness.driver.answer_newest_command_up_to(HOUR_NEWEST + 50);
+
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_time_typed_after_letting_go_lays_the_window_from_the_reader(cx: &mut TestAppContext) {
+    // Goal: a time typed after letting go of a held second, before the store's next View, lays
+    // the window around the typed second from the reader's readings, as it does over a View,
+    // rather than at the newest second of the View the hold kept. Method: Overview over the View
+    // of the hour, whose reader read only up to 1,000 seconds before its newest, at the last 60
+    // minutes, Pause, a tick of the page, Pause again, a time typed 1,000 seconds before the
+    // newest, then the page's window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_view_ahead_of_the_reader(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+
+    harness.driver.inspect_typed_second(HOUR_NEWEST - 1_000);
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: HOUR_NEWEST - 1_000 - 3_599,
+            span: 3_600
+        })
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_window_hidden_after_letting_go_keeps_nothing_the_hold_s_view_drew(cx: &mut TestAppContext) {
+    // Goal: a window macOS hides after letting go of a held second, before the store's next
+    // View, keeps nothing the page drew from the View the hold kept, as a window hidden while it
+    // follows the newest second keeps no View. Method: Overview over the View of the hour, whose
+    // reader read only up to 1,000 seconds before its newest, at the last 60 minutes, Pause, a
+    // tick of the page, Pause again, the page's step for a window macOS hid, then the page's
+    // window, which the reader's readings lay out.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_view_ahead_of_the_reader(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+
+    harness.driver.hide_window();
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: HOUR_NEWEST - 1_000 - 3_599,
+            span: 3_600
+        })
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_page_opened_after_letting_go_on_overview_draws_its_chart_by_app_from_the_reader(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page other than Overview opened after letting go of a second held on Overview,
+    // before the store's next View, draws its chart by App from the reader, since Overview's
+    // charts carry Overview's machine charts and titles. Method: Overview over the View of an
+    // hour in whose two oldest stretches D led, at the last 60 minutes, Pause, a tick of the page,
+    // Pause again, the CPU page and the reader's answer to it with the readings of the 50 seconds
+    // since, which hold no history of the Apps, then the lines of the CPU page's chart by App,
+    // of which the reader draws none.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+
+    harness.driver.navigate("cpu");
+    harness.driver.answer_newest_command_up_to(HOUR_NEWEST + 50);
+
+    assert_eq!(harness.driver.cpu_by_app_lines(), None);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_after_letting_go_on_overview_keeps_the_window_the_view_drew(cx: &mut TestAppContext) {
+    // Goal: a hover after letting go of a second held on Overview, before the store's next View,
+    // keeps the window the View the hold kept laid out, so the charts stay still under the
+    // pointer although the reader read only older seconds. Method: Overview over the View of the
+    // hour, whose reader read only up to 1,000 seconds before its newest, at the last 60 minutes,
+    // Pause, a tick of the page, Pause again, a hover 1,000 seconds before the newest on the CPU
+    // chart, then the page's window and the second the hover shows.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_view_ahead_of_the_reader(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+
+    harness
+        .driver
+        .hover_second_on("live-cpu-plot", HOUR_NEWEST - 1_000);
+
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: HOUR_NEWEST - 3_599,
+            span: 3_600
+        })
+    );
+    assert_eq!(
+        harness.driver.shown_reading_second(),
+        Some(HOUR_NEWEST - 1_000)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_after_letting_go_on_overview_leaves_the_readouts_to_the_reader(cx: &mut TestAppContext) {
+    // Goal: a hover after letting go of a second held on Overview, before the store's next View,
+    // shows the reader's readings of the hovered second on the readouts rather than those of the
+    // newest second of the View the hold kept, which is all the page kept of its seconds.
+    // Method: Overview over the View of the hour, whose reader read only up to 1,000 seconds
+    // before its newest and names none of its seconds, at the last 60 minutes, Pause, a tick of
+    // the page, Pause again, a hover 1,000 seconds before the newest on the CPU chart, then the
+    // text of each summary readout against those of a second the reader has not read.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_view_ahead_of_the_reader(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+
+    harness
+        .driver
+        .hover_second_on("live-cpu-plot", HOUR_NEWEST - 1_000);
+
+    let expected = summary::cards("overview", &serde_json::Value::Null);
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_view_behind_the_reader_after_letting_go_draws_overview_from_the_reader(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the store's next View after letting go of a second held on Overview takes the place
+    // of what the page kept of the View the hold kept even where it falls behind the reader, so
+    // the page draws the reader's readings, as it does over any View behind them. Method:
+    // Overview over the View of an hour in whose two oldest stretches D led, at the last 60
+    // minutes, Pause, a tick of the page, Pause again, the reader's answer with the readings of
+    // the 50 seconds since, then the View of the hour to 40 seconds since, which the page does not
+    // draw from, and the page's window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    harness.driver.pause();
+    harness.driver.answer_newest_command_up_to(HOUR_NEWEST + 50);
+    let (mut next, _) = hour_until(HOUR_NEWEST + 40);
+    next.version = 2;
+
+    let drawn = harness.driver.offer_next_view(next);
+
+    assert!(!drawn);
+    assert_eq!(
+        harness.driver.view_window(),
+        Some(TimeWindow {
+            first: HOUR_NEWEST + 50 - 3_599,
+            span: 3_600
+        })
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_drag_on_the_cpu_page_at_the_hour_reads_once_and_keeps_the_chart_by_app(
     cx: &mut TestAppContext,
 ) {
@@ -470,6 +786,22 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
+    /// Shows the page over `view` and the worker's reply to its request, the readings of the two
+    /// seconds 1,000 seconds before the hour's newest, as a reader that rested reads them.
+    fn show_view_ahead_of_the_reader(&mut self, view: viewer::store::View) {
+        let read = [
+            reading_at(HOUR_NEWEST - 1_001, 0),
+            reading_at(HOUR_NEWEST - 1_000, 0),
+        ];
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.accept(readings(&read));
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            assert!(dashboard.take_view(Arc::new(view)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     /// Shows Overview over a View whose older tail holds `TAIL` without its Apps, and the worker's
     /// reply to the page's request, which reads `TAIL` in its older tail too.
     fn show_view_over_tail(&mut self) {
@@ -515,6 +847,54 @@ impl InputDriver {
     fn answer_newest_command(&mut self) {
         let generation = self.reader_commands();
         self.reply_to_page_reading(generation, HOUR_NEWEST);
+    }
+
+    /// Hands the page the reader's answer to its newest command, the live readings of the two
+    /// seconds up to `newest`, which the page takes.
+    fn answer_newest_command_up_to(&mut self, newest: u64) {
+        let mut reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
+        reply.generation = self.reader_commands();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_update(Update::Ready(reply)));
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Selects `second` as a time typed into the time field does.
+    fn inspect_typed_second(&mut self, second: u64) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.inspect(second, cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Runs the page's step for a window macOS hid, which rests the reader.
+    fn hide_window(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.presence = crate::live_dashboard::Presence::Hiding;
+            dashboard.tick_presence(cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Hands the page `view`, the store's next View, as a tick of the page takes it, which the
+    /// page draws from.
+    fn take_next_view(&mut self, view: viewer::store::View) {
+        assert!(self.offer_next_view(view));
+    }
+
+    /// Hands the page `view`, the store's next View, as a tick of the page takes it, and answers
+    /// whether the page drew from it.
+    fn offer_next_view(&mut self, view: viewer::store::View) -> bool {
+        let drawn = self.view.update(&mut self.context, |dashboard, cx| {
+            let drawn = dashboard.take_view(Arc::new(view));
+            cx.notify();
+            drawn
+        });
+        self.context.run_until_parked();
+        drawn
     }
 
     /// Runs the hold's step, which reads the held second where its reading lacks what the page

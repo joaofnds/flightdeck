@@ -68,7 +68,7 @@ pub(crate) fn observe_visibility(
                 cx,
             );
             if !visibility.is_visible() {
-                dashboard.store_view = None;
+                dashboard.store_view_drop();
             }
             dashboard.presence = dashboard.presence.reported(visibility.is_visible());
             cx.notify();
@@ -650,7 +650,7 @@ impl LiveDashboard {
             Presence::Shown | Presence::Showing | Presence::Rested
         );
         if !self.follows_live_mac() && self.hold.is_none() {
-            self.store_view = None;
+            self.store_view_drop();
         }
         store_view::set_store_active(visible && self.follows_live_mac(), cx);
         if self.presence == Presence::Opening {
@@ -676,7 +676,7 @@ impl LiveDashboard {
     /// a recording opened read-only reads nothing once its page is read, so it is left alone.
     /// The live reader leaves its session unchanged until the window asks for a page again.
     fn tick_hidden(&mut self) {
-        self.store_view = None;
+        self.store_view_drop();
 
         match self.worker.hand_over() {
             Ok(Some(resting)) => {

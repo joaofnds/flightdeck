@@ -113,6 +113,16 @@ pub(super) struct StorePanels {
     rankings: Option<Rankings>,
     /// Why the last View the page took could not be drawn, reported once.
     failure: Option<String>,
+    /// What the page kept of the View they were drawn from when it let go of it, or none while
+    /// it holds a View.
+    let_go: Option<LetGo>,
+}
+
+/// The newest second of a View the page let go of, which the page shows, with the charts it
+/// drew from that View, until the store's next View.
+struct LetGo {
+    last: u64,
+    newest: MachineSecond,
 }
 
 impl LiveDashboard {
@@ -121,6 +131,7 @@ impl LiveDashboard {
     pub(crate) fn take_view(&mut self, view: Arc<View>) -> bool {
         take_view_report(self.store_view.as_deref(), &view);
         self.store_view = Some(view);
+        self.store_panels.let_go = None;
         // The hover holds the charts where they were until it ends.
         if self.store_view_hover_shown() {
             return false;
@@ -143,7 +154,7 @@ impl LiveDashboard {
             return self.draw_store_view_apps();
         }
         let Some(version) = self.drawn_store_view().map(|view| view.version) else {
-            return false;
+            return self.draw_store_view_let_go();
         };
         let Some(window) = self.view_window() else {
             unreachable!("the range lies against the newest second of the drawn View");
@@ -185,7 +196,7 @@ impl LiveDashboard {
     /// while no hover holds the page still. Answers whether it put the chart in place.
     fn draw_store_view_apps(&mut self) -> bool {
         let Some(version) = self.apps_followed_store_view().map(|view| view.version) else {
-            return false;
+            return self.draw_store_view_let_go();
         };
         let Some(window) = self.view_window() else {
             unreachable!("a page other than Overview draws from the View once the worker read it");
@@ -238,6 +249,19 @@ impl LiveDashboard {
         true
     }
 
+    /// Puts the charts the page drew from the View it let go of in place of the worker's, where
+    /// it draws from them until the store's next View. Answers whether it put them in place.
+    fn draw_store_view_let_go(&mut self) -> bool {
+        if self.apps_drawn_let_go().is_none() {
+            return false;
+        }
+
+        draw_store_view_splice(&mut self.panels, &self.store_panels.panels);
+        let route = self.request.route.clone();
+        draw_store_view_splice_apps(&route, &mut self.panels, &self.store_panels.apps);
+        true
+    }
+
     /// Draws Overview's charts from the store's View again for a range the reader picked, so the
     /// charts by App draw the Apps that led over it, but while a hover holds the charts where they
     /// were, which draws them once it ends.
@@ -264,9 +288,26 @@ impl LiveDashboard {
     }
 
     /// Lets go of the View a hold kept, before the store wakes to catch up, since the catch-up
-    /// writes the buffers a View the page holds keeps.
+    /// writes the buffers a View the page holds keeps. The page keeps the charts it drew from
+    /// the View and the readings of its newest second, and shows them until the store's next
+    /// View, since the worker's readings may be older and draw the charts by App over fifteen
+    /// minutes at most.
     pub(super) fn store_view_let_go(&mut self) {
+        let Some(view) = self.store_view.take() else {
+            return;
+        };
+
+        self.store_panels.let_go = view.seconds.last().map(|newest| LetGo {
+            last: newest.wall_ns / NANOSECONDS_PER_SECOND,
+            newest: MachineSecond::clone(newest),
+        });
+    }
+
+    /// Lets go of the store's View and of what the page kept of one it let go of, so the page
+    /// draws nothing from the store until it takes another View.
+    pub(super) fn store_view_drop(&mut self) {
         self.store_view = None;
+        self.store_panels.let_go = None;
     }
 
     /// Lets go of the View the page could not draw, so the page shows the worker's readings
@@ -320,15 +361,45 @@ impl LiveDashboard {
     /// one `followed_store_view` names, while no hover the worker's readings show is shown.
     fn drawn_store_view(&self) -> Option<&View> {
         // A hover the worker's readings show holds the page still, as it holds those readings.
-        if self
-            .preview
-            .as_ref()
-            .is_some_and(|preview| preview.held.is_none())
-        {
+        if self.worker_hover_shown() {
             return None;
         }
 
         self.followed_store_view()
+    }
+
+    /// Whether a hover the worker's readings show is shown.
+    fn worker_hover_shown(&self) -> bool {
+        self.preview
+            .as_ref()
+            .is_some_and(|preview| preview.held.is_none())
+    }
+
+    /// What the page kept of the View it let go of, while it draws Overview's machine charts from
+    /// that in place of a View, and its readouts and hardware figure while no hover is shown.
+    fn drawn_let_go(&self) -> Option<&LetGo> {
+        if self.request.route != "overview" {
+            return None;
+        }
+
+        self.apps_drawn_let_go()
+    }
+
+    /// What the page kept of the View it let go of, while it draws its charts by App from that
+    /// in place of a View: where the page draws them from the store, on the kind of page the
+    /// charts were drawn for, whatever hover is shown, since a hover holds the charts still.
+    fn apps_drawn_let_go(&self) -> Option<&LetGo> {
+        let let_go = self.store_panels.let_go.as_ref()?;
+        assert!(self.store_view.is_none());
+        if !self.store_view_follows() {
+            return None;
+        }
+        let overview = self.request.route == "overview";
+        if self.store_panels.overview != overview {
+            return None;
+        }
+
+        Some(let_go)
     }
 
     /// The store's newest View, while the page shows the live Mac's Overview following the
@@ -357,19 +428,7 @@ impl LiveDashboard {
     /// by App from it. A page other than Overview draws from it once the worker read the page,
     /// since its other charts are the worker's.
     fn apps_followed_store_view(&self) -> Option<&View> {
-        if !store_view_draws_apps(&self.request.route) {
-            return None;
-        }
-        if self.request.route != "overview" {
-            self.snapshot.as_ref()?;
-        }
-        // The store follows the live Mac, so a window that opened a saved recording draws only
-        // what its worker reads of it.
-        if self.native.source != SourceMode::Live {
-            return None;
-        }
-        // A held second keeps the View the page drew its charts from when it was held.
-        if self.request.second.is_some() && self.hold.is_none() {
+        if !self.store_view_follows() {
             return None;
         }
 
@@ -396,6 +455,26 @@ impl LiveDashboard {
         Some(view)
     }
 
+    /// Whether the page draws charts by App from the store: a page that draws one, once the
+    /// worker read it where it is not Overview, on the live Mac, following the newest second or
+    /// holding one.
+    fn store_view_follows(&self) -> bool {
+        if !store_view_draws_apps(&self.request.route) {
+            return false;
+        }
+        if self.request.route != "overview" && self.snapshot.is_none() {
+            return false;
+        }
+        // The store follows the live Mac, so a window that opened a saved recording draws only
+        // what its worker reads of it.
+        if self.native.source != SourceMode::Live {
+            return false;
+        }
+
+        // A held second keeps the View the page drew its charts from when it was held.
+        self.request.second.is_none() || self.hold.is_some()
+    }
+
     /// Whether a hover is shown on the page drawn from the store's View, which holds the charts
     /// drawn from it where they were, so the hovered second stays under the pointer as the
     /// worker's readings hold the page still under a hover.
@@ -411,12 +490,12 @@ impl LiveDashboard {
     pub(crate) fn store_view_draws(&self, panel: &Panel) -> bool {
         let drawn = &self.store_panels;
         if store_view_draws_app_chart(&self.request.route, &panel.id) {
-            if self.apps_drawn_store_view().is_none() {
+            if self.apps_drawn_store_view().is_none() && self.apps_drawn_let_go().is_none() {
                 return false;
             }
             return drawn.apps.iter().any(|drawn| drawn.id == panel.id);
         }
-        if self.drawn_store_view().is_none() {
+        if self.drawn_store_view().is_none() && self.drawn_let_go().is_none() {
             return false;
         }
 
@@ -443,7 +522,7 @@ impl LiveDashboard {
     /// The history of `metric` the page reads: the one the page drew from the store's View,
     /// where it draws one, and otherwise the one the worker read.
     pub(crate) fn attribution_history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
-        if self.apps_drawn_store_view().is_some() {
+        if self.apps_drawn_store_view().is_some() || self.apps_drawn_let_go().is_some() {
             if let Some(histories) = &self.store_panels.histories {
                 return match metric {
                     Metric::Gpu => self.store_panels.gpu.as_ref(),
@@ -458,7 +537,7 @@ impl LiveDashboard {
     /// The history of resident memory by App the page reads: the one the page drew from the
     /// store's View, where it draws one, and otherwise the one the worker read.
     pub(crate) fn resident_history(&self) -> Option<&ResidentHistory> {
-        if self.apps_drawn_store_view().is_some() {
+        if self.apps_drawn_store_view().is_some() || self.apps_drawn_let_go().is_some() {
             if let Some(resident) = &self.store_panels.resident {
                 return Some(resident);
             }
@@ -490,7 +569,9 @@ impl LiveDashboard {
     /// at since the worker's readings may not hold it yet. Under a hover, the newest second of
     /// the View the charts were drawn from.
     pub(crate) fn store_view_last_second(&self) -> Option<u64> {
-        let view = self.drawn_store_view()?;
+        let Some(view) = self.drawn_store_view() else {
+            return self.drawn_let_go().map(|let_go| let_go.last);
+        };
         if self.store_view_hover_shown() {
             return self.store_panels.seconds.last().copied();
         }
@@ -532,7 +613,14 @@ impl LiveDashboard {
     /// second, or its newest while neither is shown. None in a gap, and where the page draws from
     /// the worker's readings.
     fn store_view_shown(&self) -> Option<&MachineSecond> {
-        let view = self.drawn_store_view()?;
+        let Some(view) = self.drawn_store_view() else {
+            // The page kept only the newest second of the View it let go of, so a hover shows the
+            // reader's readings of its second over the charts drawn from that View.
+            if self.shown_preview().is_some() {
+                return None;
+            }
+            return self.drawn_let_go().map(|let_go| &let_go.newest);
+        };
         let shown = self
             .shown_preview()
             .and_then(|preview| preview.held.as_ref());
