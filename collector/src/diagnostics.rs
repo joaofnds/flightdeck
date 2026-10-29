@@ -233,7 +233,7 @@ impl Reporter {
         self.notify();
     }
 
-    fn take(&self, scratch: &mut Group) -> Option<Stream> {
+    fn take(&self, copy: impl FnOnce(&Group)) -> Option<Stream> {
         let mut queue = match self.queue.lock() {
             Ok(queue) => queue,
             Err(error) => unreachable!("diagnostic queue poisoned: {error}"),
@@ -243,7 +243,7 @@ impl Reporter {
             return None;
         }
         let first = queue.first;
-        scratch.copy_from(&queue.groups[first]);
+        copy(&queue.groups[first]);
         let stream = queue.streams[first];
         queue.first = (first + 1) % QUEUE_SLOTS;
         queue.count -= 1;

@@ -75,9 +75,12 @@ fn reports_optional_failure(collector: &mut Collector, expected: &[u8]) {
 
     collector.read(&mut meter).unwrap();
 
-    assert_eq!(Some(Stream::Stderr), REPORTER.take(&mut scratch));
+    assert_eq!(
+        Some(Stream::Stderr),
+        REPORTER.take(|group| scratch.copy_from(group))
+    );
     assert_eq!(expected, scratch.bytes());
-    assert_eq!(None, REPORTER.take(&mut scratch));
+    assert_eq!(None, REPORTER.take(|group| scratch.copy_from(group)));
 }
 
 #[test]
@@ -159,11 +162,14 @@ fn drops_complete_groups_when_the_queue_is_occupied_or_full() {
             }
             let mut scratch = Box::new(Group::empty());
             for _index in 0..QUEUE_SLOTS {
-                assert_eq!(Some(Stream::Stdout), reporter.take(&mut scratch));
+                assert_eq!(
+                    Some(Stream::Stdout),
+                    reporter.take(|group| scratch.copy_from(group))
+                );
                 assert_eq!(b"complete\n", scratch.bytes());
             }
 
-            assert_eq!(None, reporter.take(&mut scratch));
+            assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
             assert_eq!(1, reporter.loss[0].queue_contention.load(Ordering::Relaxed));
             assert_eq!(1, reporter.loss[0].queue_full.load(Ordering::Relaxed));
         },
@@ -189,9 +195,12 @@ fn rejects_a_nested_diagnostic_without_damaging_the_outer_event() {
 
             reporter.diagnostic(format_args!("{}", Nested(&reporter)));
 
-            assert_eq!(Some(Stream::Stderr), reporter.take(&mut scratch));
+            assert_eq!(
+                Some(Stream::Stderr),
+                reporter.take(|group| scratch.copy_from(group))
+            );
             assert_eq!(b"outer\n", scratch.bytes());
-            assert_eq!(None, reporter.take(&mut scratch));
+            assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
             assert_eq!(
                 1,
                 reporter.loss[1].staging_contention.load(Ordering::Relaxed)
@@ -217,9 +226,12 @@ fn rejects_a_failed_formatter_without_delivering_its_prefix() {
     reporter.diagnostic(format_args!("{Failed}"));
     reporter.diagnostic(format_args!("complete"));
 
-    assert_eq!(Some(Stream::Stderr), reporter.take(&mut scratch));
+    assert_eq!(
+        Some(Stream::Stderr),
+        reporter.take(|group| scratch.copy_from(group))
+    );
     assert_eq!(b"complete\n", scratch.bytes());
-    assert_eq!(None, reporter.take(&mut scratch));
+    assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
     assert_eq!(1, reporter.loss[1].failed_delivery.load(Ordering::Relaxed));
 }
 
@@ -236,7 +248,10 @@ fn allocates_nothing_during_repeated_formatting_admission_and_rejection() {
             let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
                 for index in 0..1_000 {
                     reporter.diagnostic(format_args!("counter={index}"));
-                    assert_eq!(Some(Stream::Stderr), reporter.take(&mut scratch));
+                    assert_eq!(
+                        Some(Stream::Stderr),
+                        reporter.take(|group| scratch.copy_from(group))
+                    );
                     let occupied = reporter.staging.lock().unwrap();
                     reporter.diagnostic(format_args!("discarded={index}"));
                     drop(occupied);
@@ -272,10 +287,10 @@ fn discards_an_oversized_group_without_admitting_its_prefix() {
     group.write_all(b"complete\n").unwrap();
     reporter.admit(Stream::Stdout, &group);
     let mut scratch = Box::new(Group::empty());
-    let stream = reporter.take(&mut scratch);
+    let stream = reporter.take(|group| scratch.copy_from(group));
 
     assert_eq!(Some(Stream::Stdout), stream);
     assert_eq!(b"complete\n", scratch.bytes());
     assert_eq!(1, reporter.loss[0].oversize.load(Ordering::Relaxed));
-    assert_eq!(None, reporter.take(&mut scratch));
+    assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
 }

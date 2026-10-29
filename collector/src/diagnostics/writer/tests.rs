@@ -106,7 +106,7 @@ fn disables_reporting_when_the_writer_thread_cannot_start() {
                 assert_eq!(loss.failed_delivery, 1);
             }
             let mut scratch = Group::empty();
-            assert_eq!(REPORTER.take(&mut scratch), None);
+            assert_eq!(REPORTER.take(|group| scratch.copy_from(group)), None);
             drop(group);
 
             exit(super::super::tests::COMPLETED);

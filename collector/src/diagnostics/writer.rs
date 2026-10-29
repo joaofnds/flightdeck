@@ -97,7 +97,7 @@ fn run(reporter: &Reporter, mut streams: [Option<File>; 2], mut scratch: Box<Gro
     let mut delivered = [LossSnapshot::default(); 2];
 
     for _step in 0..u64::MAX {
-        if let Some(stream) = reporter.take(&mut scratch) {
+        if let Some(stream) = reporter.take(|group| scratch.copy_from(group)) {
             if reporter.enabled[stream.index()].load(Ordering::Relaxed) {
                 summaries(reporter, &mut streams, stream, &mut delivered);
                 deliver(reporter, &mut streams, stream, scratch.bytes());
