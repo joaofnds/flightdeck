@@ -240,7 +240,11 @@ impl CollectorSession {
             .stdin(Stdio::null())
             .stdout(Stdio::from(standard.writer()?))
             .stderr(Stdio::from(diagnostic.writer()?))
-            .spawn()?;
+            .spawn()
+            .map_err(|error| {
+                let binary = self.0.configuration.binary.display();
+                io::Error::new(error.kind(), format!("cannot start {binary}: {error}"))
+            })?;
         self.0.policy.launched(child.id(), self.0.started.elapsed());
         eprintln!(
             "Started owned collector {} parent={}",

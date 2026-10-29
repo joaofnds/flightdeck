@@ -358,6 +358,28 @@ fn the_collector_starts_with_the_library_thread_defaults() {
     assert_eq!(environment, expected);
 }
 
+#[test]
+fn a_collector_that_cannot_start_is_named_in_the_failure() {
+    // Goal: the failure the window shows names the collector binary the app could not start,
+    // so a build that lacks its collector reads as that and not as a missing recording.
+    // Method: start a session whose binary does not exist on a recording not yet made, and
+    // read its failure.
+    let token = identity_text(random_identity().unwrap());
+    let root = std::env::temp_dir().join(format!("flightdeck-lifecycle-{token}"));
+    let binary = root.join("collector");
+    let mut session = CollectorSession::new(Configuration {
+        root,
+        binary: binary.clone(),
+        isolated: true,
+        mode: Mode::Explicit,
+    });
+
+    session.tick();
+
+    let failure = session.failure().unwrap();
+    assert!(failure.contains(binary.to_str().unwrap()));
+}
+
 struct Recording {
     root: PathBuf,
     ring: String,
