@@ -1201,14 +1201,19 @@ impl InputHarness {
 
 impl Drop for InputHarness {
     fn drop(&mut self) {
-        self.driver.context.update(|window, cx| {
-            self.driver
-                .view
-                .update(cx, |dashboard, _| dashboard.worker.stop());
-            window.remove_window();
-        });
-        self.driver.context.run_until_parked();
+        close_dashboard_window(&mut self.driver.context, &self.driver.view);
     }
+}
+
+pub(crate) fn close_dashboard_window(
+    context: &mut VisualTestContext,
+    view: &Entity<LiveDashboard>,
+) {
+    context.update(|window, cx| {
+        view.update(cx, |dashboard, _| dashboard.worker.stop());
+        window.remove_window();
+    });
+    context.run_until_parked();
 }
 
 struct InputDriver {

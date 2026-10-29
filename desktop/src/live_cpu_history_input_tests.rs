@@ -170,13 +170,10 @@ impl CPUHistoryHarness {
 
 impl Drop for CPUHistoryHarness {
     fn drop(&mut self) {
-        self.driver.context.update(|window, cx| {
-            self.driver
-                .view
-                .update(cx, |dashboard, _| dashboard.worker.stop());
-            window.remove_window();
-        });
-        self.driver.context.run_until_parked();
+        crate::live_dashboard::input_tests::close_dashboard_window(
+            &mut self.driver.context,
+            &self.driver.view,
+        );
     }
 }
 
