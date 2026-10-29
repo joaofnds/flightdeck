@@ -1221,6 +1221,36 @@ fn a_live_page_other_than_overview_keeps_the_store_ingesting(cx: &mut gpui::Test
 }
 
 #[gpui::test]
+fn a_second_held_on_overview_keeps_the_view_and_parks_the_store(cx: &mut gpui::TestAppContext) {
+    // Goal: while a second is held on Overview the page keeps the View its charts were drawn
+    // from and the store stops ingesting, though the live Mac runs on, so nothing but letting go
+    // moves the charts. Method: Overview drawn from a real store and read by a real reader, a
+    // pin of the newest second the page draws, a second published, ticks of the page, then the
+    // View the page holds and the store's activity.
+    use gpui::AppContext;
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let worker = Worker::start(recording.root.clone()).unwrap();
+    cx.update(|cx| super::install_store(store, cx));
+    let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "overview".into(), None)));
+    tick_until_settled(cx, &page, 1);
+    let drawn = cx.update(|cx| page.read(cx).store_view.clone().unwrap());
+    let second = cx.update(|cx| page.read(cx).store_view_last_second().unwrap());
+    page.update(cx, |page, cx| page.pin_second(second, cx));
+    recording.publish();
+
+    for _ in 0..3 {
+        page.update(cx, LiveDashboard::tick);
+    }
+
+    let kept = cx.update(|cx| page.read(cx).store_view.clone().unwrap());
+    assert!(Arc::ptr_eq(&kept, &drawn));
+    wait_for_store_activity(cx, true);
+    cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+#[gpui::test]
 fn overview_opened_again_draws_the_newest_second_the_store_read_on_another_page(
     cx: &mut gpui::TestAppContext,
 ) {
