@@ -39,6 +39,9 @@ pub struct History {
     cohort: Vec<String>,
     positions: Vec<f32>,
     window: crate::chart_axes::TimeWindow,
+    /// The first second of the full-detail points, before which they stand a stretch apart,
+    /// where the chart is drawn from a View.
+    detail_first: Option<u64>,
     selected_index: usize,
     retention_limited: bool,
     /// The Apps of the store's View that the chart draws on lines of their own, where it is drawn
@@ -411,7 +414,7 @@ impl History {
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
             window: Some(self.window),
-            detail_first: None,
+            detail_first: self.detail_first,
             reading_seconds: crate::charts::TICK_SECONDS,
             sliding: false,
             chart_width: std::cell::Cell::new(None),

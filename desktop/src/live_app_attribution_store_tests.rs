@@ -241,6 +241,25 @@ mod over_the_loaded_hour {
     }
 
     #[test]
+    fn sizes_its_buckets_for_the_older_parts_ten_seconds_as_the_machine_charts_do() {
+        // Goal: the chart's older points, ten seconds apart, fill the buckets the chart draws
+        // them in, so its line does not break into dots between them on a wide chart. Method: a
+        // View of the hour, and where the chart's full-detail seconds start beside where the
+        // machine CPU chart's do, which the chart sizes its buckets by.
+        let (view, cohorts) = hour();
+
+        let drawn = AppAttributionHistory::from_view(Metric::Cpu, &view, &cohorts);
+
+        let machine = crate::live_projection::overview_panels(&view, None)
+            .unwrap()
+            .into_iter()
+            .find(|panel| panel.id == "live-cpu")
+            .unwrap();
+        assert!(machine.detail_first.is_some());
+        assert_eq!(drawn.panel().unwrap().detail_first, machine.detail_first);
+    }
+
+    #[test]
     fn breaks_its_line_in_the_older_part_where_the_machine_charts_break_theirs() {
         // Goal: the chart breaks its line between two stretches of the older part where the
         // machine charts break theirs, though a stretch always follows the one before it.

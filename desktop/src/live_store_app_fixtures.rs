@@ -275,12 +275,14 @@ pub fn hour_led_from_its_older_part() -> View {
 }
 
 /// `panel` with where it draws each reading given as a wall millisecond rather than as a share
-/// of its span, and without its help, which says what it chose its leaders over, so charts of
-/// the same readings drawn across different spans, from the store's View and by the worker,
+/// of its span, without its help, which says what it chose its leaders over, and without the
+/// first second of its full-detail readings, which the span it is drawn across sets, so charts
+/// of the same readings drawn across different spans, from the store's View and by the worker,
 /// compare equal.
 pub fn on_the_clock(panel: Option<Rc<Panel>>) -> Option<(Panel, Vec<u64>)> {
     let mut panel = Rc::unwrap_or_clone(panel?);
     panel.help.take()?;
+    panel.detail_first = None;
     let window = panel.window.take()?;
     let positions = panel.positions.take()?;
     let first = f64::from(u32::try_from(window.first).unwrap());

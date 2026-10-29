@@ -178,9 +178,11 @@ impl OverviewAppPoint<'_> {
     }
 }
 
-/// The points of Overview's App charts of a View, and the span they are drawn across.
+/// The points of Overview's App charts of a View, the span they are drawn across, and the first
+/// second of its full-detail points, before which they stand a stretch apart.
 pub struct OverviewAppPoints<'view> {
     pub window: crate::chart_axes::TimeWindow,
+    pub detail_first: u64,
     pub points: Vec<OverviewAppPoint<'view>>,
 }
 
@@ -217,6 +219,7 @@ pub fn overview_app_points(view: &View) -> Result<OverviewAppPoints<'_>, String>
         .collect();
     Ok(OverviewAppPoints {
         window: coordinates.window,
+        detail_first: coordinates.detail_first,
         points,
     })
 }

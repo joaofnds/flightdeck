@@ -56,6 +56,7 @@ impl History {
             cohort: from_view_labels(cohort)?,
             positions,
             window: drawn.window,
+            detail_first: Some(drawn.detail_first),
             selected_index,
             retention_limited: drawn.points.iter().any(OverviewAppPoint::retention_limited),
             view_cohort: Some(cohort.to_vec()),
