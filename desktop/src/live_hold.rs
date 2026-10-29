@@ -299,8 +299,10 @@ impl LiveDashboard {
 }
 
 /// The held second's reading: the hover's of it, where the hover reads what a read of the held
-/// second reads, and otherwise `fresh`. Answers whether the hover asked the reader for it, which
-/// stopped the reader following the live Mac.
+/// second reads, and otherwise `fresh`. It keeps `fresh`'s record of the second in the View the
+/// page draws, since a View that landed while the pointer stayed still leaves the hover's out of
+/// date. Answers whether the hover asked the reader for it, which stopped the reader following
+/// the live Mac.
 fn hold_adopt(hovered: Preview, fresh: Preview, request: &Request) -> (Preview, bool) {
     if hovered.target != fresh.target {
         return (fresh, false);
@@ -313,6 +315,7 @@ fn hold_adopt(hovered: Preview, fresh: Preview, request: &Request) -> (Preview, 
     let reading = Preview {
         source: fresh.source,
         origin: fresh.origin,
+        held: fresh.held,
         base_request: request.clone(),
         layout: None,
         header_height: None,

@@ -270,6 +270,28 @@ fn leaving_overviews_chart_after_a_click_shows_the_held_second_on_the_readouts(
 }
 
 #[gpui::test]
+fn a_click_after_the_view_lands_under_a_still_pointer_holds_the_views_second(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click holds the second under the pointer as the View the page draws records it,
+    // even where that View landed after the hover began over the worker's readings, rather
+    // than keeping the hover's record from before the View. Method: Overview over the worker's
+    // readings of its two newest seconds, a hover 800 seconds before the newest on the CPU
+    // chart, the store's View of the hour under the still pointer, which the hover keeps from
+    // the charts, a click there, then the second the CPU chart reads.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    let newest = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+    harness.driver.show_reply_at_fifteen_minutes(newest);
+    harness.driver.hover_second_on("live-cpu-plot", HELD);
+    assert!(!harness.driver.offer_next_view(hour().0));
+
+    harness.driver.click_second_on("live-cpu-plot", HELD);
+
+    assert_eq!(harness.driver.cpu_shown_second(), Some(HELD));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_click_on_overview_over_a_rested_reader_holds_the_second_without_reading(
     cx: &mut TestAppContext,
 ) {
