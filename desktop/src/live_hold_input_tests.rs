@@ -453,6 +453,60 @@ fn pause_after_letting_go_before_the_first_reading_holds_the_newest_second_over_
 }
 
 #[gpui::test]
+fn a_click_after_letting_go_before_the_first_reading_shows_the_held_second_once_the_reader_answers(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a second clicked on Overview after letting go of a hold made before the worker's
+    // first reading, where the page draws only what it kept of the View it let go of, shows
+    // its readings once the reader answers the page's read, rather than reading unavailable.
+    // Method: Overview over the View of the hour at the newest fifteen minutes, which the worker
+    // has not answered, a click 800 seconds before the newest on its CPU chart, Pause, which
+    // lets go, a click there again, the reader's answer to the page's read, which holds that
+    // second, then the text of each summary readout against those of its readings.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_before_the_first_reading();
+    harness.driver.hover_second_on("live-cpu-plot", HELD);
+    harness.driver.click_second_on("live-cpu-plot", HELD);
+    harness.driver.pause();
+    harness.driver.hover_second_on("live-cpu-plot", HELD);
+    harness.driver.click_second_on("live-cpu-plot", HELD);
+
+    harness.driver.reply_to_page_reading_holding(HELD);
+
+    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_after_letting_go_before_the_first_reading_inside_an_older_stretch_marks_its_reading(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a second clicked inside an older stretch after letting go of a hold made before the
+    // worker's first reading is marked, once the reader answers, at the second the stretch's
+    // reading was made, as a click over readings marks it, since every second of the stretch
+    // shows that one reading. Method: Overview over the View of the hour at the last 60
+    // minutes, which the worker has not answered, a click five seconds into the hour's oldest
+    // stretch on its CPU chart, Pause, which lets go, a click there again, the reader's answer
+    // to the page's read, which holds that stretch in its older tail, then the marked second.
+    let stretch = HOUR_NEWEST - 1_000;
+    let clicked = stretch + 5;
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_before_the_first_reading();
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.hover_second_on("live-cpu-plot", clicked);
+    harness.driver.click_second_on("live-cpu-plot", clicked);
+    harness.driver.pause();
+    harness.driver.hover_second_on("live-cpu-plot", clicked);
+    harness.driver.click_second_on("live-cpu-plot", clicked);
+
+    harness.driver.reply_to_page_reading_over_older(stretch);
+
+    assert_eq!(harness.driver.pinned_second(), Some(stretch));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_click_on_a_saved_recording_selects_the_second_and_reads_the_window_around_it(
     cx: &mut TestAppContext,
 ) {
@@ -1512,6 +1566,35 @@ impl InputDriver {
     fn reader_asked_second(&self) -> Option<u64> {
         self.view
             .read_with(&self.context, |dashboard, _| dashboard.worker.sent_second())
+    }
+
+    /// Hands the page the reader's answer to its last request, the live readings of `held` and
+    /// of the hour's newest two seconds.
+    fn reply_to_page_reading_holding(&mut self, held: u64) {
+        self.reply_to_last_request(readings(&[
+            reading_at(held, 0),
+            reading_at(HOUR_NEWEST - 1, 0),
+            reading_at(HOUR_NEWEST, 0),
+        ]));
+    }
+
+    /// Hands the page the reader's answer to its last request, the live readings of the hour's
+    /// newest two seconds with the reading of the stretch from `older` in their older tail.
+    fn reply_to_page_reading_over_older(&mut self, older: u64) {
+        let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+        reply.selection.legacy_mut().unwrap()["earlier_trends"] =
+            vec![trend_point(&reading_at(older, 0))].into();
+        self.reply_to_last_request(reply);
+    }
+
+    /// Hands the page `reply` as the reader's answer to its last request.
+    fn reply_to_last_request(&mut self, mut reply: Box<Snapshot>) {
+        reply.generation = self.reader_commands();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_update(Update::Ready(reply)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
     }
 
     /// Hands the page the reply to its request of `generation`, the live readings up to

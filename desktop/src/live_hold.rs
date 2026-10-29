@@ -197,13 +197,21 @@ impl LiveDashboard {
     }
 
     /// Shows the held second again from the page's new readings, which replaced those it was
-    /// held over. A read of it follows where they lack what the page shows of it.
+    /// held over, and names its reading from them where a hold made before the page had
+    /// readings names none, since a reading of no name matches none they hold. A read of it
+    /// follows where they lack what the page shows of it.
     pub(super) fn hold_resolve(&mut self) {
         let Some(hold) = &self.hold else {
             return;
         };
 
-        let target = hold.reading.target.clone();
+        let mut target = hold.reading.target.clone();
+        if target.identity.is_none() {
+            target = self.inspection_target(target.second);
+            assert!(target.second <= hold.last);
+            self.request.second = Some(target.second);
+            self.request.identity.clone_from(&target.identity);
+        }
         let in_view = self.store_view_held(&target);
         let reading = self.hold_resident(target, in_view);
         if let Some(hold) = &mut self.hold {
