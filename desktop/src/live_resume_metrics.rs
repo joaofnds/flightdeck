@@ -31,16 +31,16 @@ struct Started {
     render_ms: Option<f64>,
 }
 
-pub(crate) struct Checkpoint {
-    pub(crate) generation: u64,
-    pub(crate) store_version: Option<u64>,
-    pub(crate) requests: u64,
-    pub(crate) fresh: Fresh,
+struct Checkpoint {
+    generation: u64,
+    store_version: Option<u64>,
+    requests: u64,
+    fresh: Fresh,
 }
 
 /// What makes the first frame of an epoch fresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Fresh {
+enum Fresh {
     /// Readings newer than the checkpoint's, as after a show or a page opened.
     Reading,
     /// The switch itself, which redraws the readings the page holds, as a picked range does.
@@ -56,7 +56,7 @@ impl ResumeMetrics {
         true
     }
 
-    pub(crate) fn begin(&mut self, checkpoint: &Checkpoint) {
+    fn begin(&mut self, checkpoint: &Checkpoint) {
         if !self.enabled {
             return;
         }
@@ -147,6 +147,31 @@ struct Frame {
 }
 
 impl LiveDashboard {
+    /// Starts a measurement epoch whose frame is fresh once the page holds readings newer than
+    /// it does now, as after a show or a page opened, and answers the epoch count before it.
+    pub(crate) fn resume_begin_reading(&mut self) -> u64 {
+        let store_version = self.resume_store_version();
+        self.resume_begin(store_version, Fresh::Reading)
+    }
+
+    /// Starts a measurement epoch for a picked range, whose next frame is fresh since it redraws
+    /// the readings the page already holds, and answers the epoch count before it.
+    pub(crate) fn resume_begin_switch(&mut self) -> u64 {
+        self.resume_begin(None, Fresh::Switch)
+    }
+
+    fn resume_begin(&mut self, store_version: Option<u64>, fresh: Fresh) -> u64 {
+        let before = self.resume_metrics.count();
+
+        self.resume_metrics.begin(&Checkpoint {
+            generation: self.generation,
+            store_version,
+            requests: self.worker.requests_submitted(),
+            fresh,
+        });
+        before
+    }
+
     pub(crate) fn measure_resume_frame(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.resume_metrics.started.is_none() {
             return;
@@ -300,18 +325,27 @@ mod tests {
     fn a_range_switch_on_a_page_the_worker_draws_is_fresh_at_the_next_frame() {
         // Goal: profile-range measures a switch on every page, which redraws the readings the
         // page holds and asks the worker for nothing. Method: the CPU page following the newest
-        // second, a range epoch begun, then the readiness of the next frame.
+        // second, the epoch profile-range begins, then the readiness of the next frame.
         let mut dashboard = page("cpu");
         assert!(dashboard.resume_metrics.enable());
 
-        dashboard.resume_metrics.begin(&Checkpoint {
-            generation: dashboard.generation,
-            store_version: None,
-            requests: dashboard.worker.requests_submitted(),
-            fresh: Fresh::Switch,
-        });
+        dashboard.resume_begin_switch();
 
         assert!(dashboard.resume_frame_ready());
+    }
+
+    #[test]
+    fn a_page_opened_on_a_page_the_worker_draws_waits_for_newer_readings() {
+        // Goal: an epoch begun as a page opens or the window shows has its fresh frame only once
+        // the worker answers with newer readings, unlike a range switch on the same page.
+        // Method: the CPU page following the newest second, the epoch profile-navigate begins,
+        // then the readiness of the next frame.
+        let mut dashboard = page("cpu");
+        assert!(dashboard.resume_metrics.enable());
+
+        dashboard.resume_begin_reading();
+
+        assert!(!dashboard.resume_frame_ready());
     }
 
     /// The page `route` showing the worker's readings, following the newest second.

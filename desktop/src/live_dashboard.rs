@@ -64,14 +64,7 @@ impl LiveDashboard {
     pub(crate) fn observe_visibility_callback(&mut self, visible: bool, cx: &mut Context<Self>) {
         #[cfg(feature = "automation")]
         if visible {
-            let version = self.resume_store_version();
-            self.resume_metrics
-                .begin(&crate::live_resume_metrics::Checkpoint {
-                    generation: self.generation,
-                    store_version: version,
-                    requests: self.worker.requests_submitted(),
-                    fresh: crate::live_resume_metrics::Fresh::Reading,
-                });
+            self.resume_begin_reading();
         }
         store_view::set_store_active(visible && self.follows_live_mac(), cx);
         if !visible {

@@ -238,9 +238,7 @@ fn profile_navigate(
     route_known(route)?;
 
     Ok(dashboard.update(cx, |dashboard, cx| {
-        let store_version = dashboard.resume_store_version();
-        let fresh = crate::live_resume_metrics::Fresh::Reading;
-        let before = profile_begin(dashboard, store_version, fresh);
+        let before = dashboard.resume_begin_reading();
 
         dashboard.navigate(route, cx);
         before
@@ -257,33 +255,11 @@ fn profile_range(
     let range = range_word(words)?;
 
     Ok(dashboard.update(cx, |dashboard, cx| {
-        // The picked range redraws the readings the page already holds, so its next frame is fresh.
-        let fresh = crate::live_resume_metrics::Fresh::Switch;
-        let before = profile_begin(dashboard, None, fresh);
+        let before = dashboard.resume_begin_switch();
 
         dashboard.set_range(range, cx);
         before
     }))
-}
-
-/// Starts a measurement epoch whose frame is fresh as `fresh` says, once the store's View is
-/// newer than `store_version` where it waits for readings, and answers the epoch count before it.
-fn profile_begin(
-    dashboard: &mut LiveDashboard,
-    store_version: Option<u64>,
-    fresh: crate::live_resume_metrics::Fresh,
-) -> u64 {
-    let before = dashboard.resume_metrics.count();
-
-    dashboard
-        .resume_metrics
-        .begin(&crate::live_resume_metrics::Checkpoint {
-            generation: dashboard.generation,
-            store_version,
-            requests: dashboard.worker.requests_submitted(),
-            fresh,
-        });
-    before
 }
 
 /// The measurement of the epoch after `before`, once its fresh frame is drawn.
