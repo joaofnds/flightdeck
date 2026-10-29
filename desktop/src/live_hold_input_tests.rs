@@ -448,6 +448,33 @@ fn a_click_while_the_app_histories_are_pending_reads_the_page_up_to_the_held_win
 }
 
 #[gpui::test]
+fn the_held_seconds_read_waits_for_a_page_reply_still_reading_the_app_histories(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the page's reply to the read a click sent while the App histories were pending,
+    // when it still lacks them, holds back the held second's own read, which would cancel the
+    // reader's read of the histories. Method: the CPU page over the View of the hour at the
+    // newest fifteen minutes, its reply without the App histories, a hover and a click 800
+    // seconds before the newest on its chart by App, a reply to the page's read still without
+    // them, the hold's step, then the second the reader was last asked for.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness
+        .driver
+        .show_hour_at_fifteen_minutes_before_app_histories();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.reply_to_page_reading_before_app_histories();
+
+    harness.driver.tick_hold();
+
+    assert_eq!(
+        harness.driver.reader_asked_second(),
+        Some(HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_click_on_overview_before_the_first_reading_holds_the_second_over_the_view(
     cx: &mut TestAppContext,
 ) {
@@ -1785,6 +1812,14 @@ impl InputDriver {
         let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
         reply.selection.legacy_mut().unwrap()["earlier_trends"] =
             vec![trend_point(&reading_at(older, 0))].into();
+        self.reply_to_last_request(reply);
+    }
+
+    /// Hands the page the reader's answer to its last request, the live readings of the hour's
+    /// newest two seconds, whose App histories the reader still reads.
+    fn reply_to_page_reading_before_app_histories(&mut self) {
+        let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+        reply.histories_pending = true;
         self.reply_to_last_request(reply);
     }
 
