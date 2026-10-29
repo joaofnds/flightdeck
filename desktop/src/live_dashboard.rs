@@ -1231,6 +1231,9 @@ impl LiveDashboard {
         }
         if self.snapshot.is_none() {
             self.submit();
+            // A page with no readings yet draws what it kept of the View it let go of until the
+            // store's next View, as a page switch draws it.
+            self.draw_store_view();
             cx.notify();
             return;
         }

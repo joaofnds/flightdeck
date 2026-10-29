@@ -428,6 +428,31 @@ fn pause_on_overview_before_the_first_reading_reads_the_page_up_to_the_held_wind
 }
 
 #[gpui::test]
+fn letting_go_before_the_first_reading_keeps_the_charts_by_app_drawn_from_the_view(
+    cx: &mut TestAppContext,
+) {
+    // Goal: letting go of a hold made before the worker's first reading keeps the charts the
+    // page drew from the View it lets go of, its charts by App with them, until the store's next
+    // View, rather than leaving Overview's charts empty. Method: Overview over the View of the
+    // hour at the newest fifteen minutes, which the worker has not answered, a click 800 seconds
+    // before the newest on its CPU chart, Pause, which lets go, then whether the CPU chart by App
+    // is on screen and the lines it draws.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_before_the_first_reading();
+    harness.driver.hover_second_on("live-cpu-plot", HELD);
+    harness.driver.click_second_on("live-cpu-plot", HELD);
+
+    harness.driver.pause();
+
+    assert!(harness.driver.reading_is_visible("live-cpu-apps-plot"));
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn pause_after_letting_go_before_the_first_reading_holds_the_newest_second_over_the_kept_charts(
     cx: &mut TestAppContext,
 ) {
