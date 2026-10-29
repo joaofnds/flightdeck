@@ -363,6 +363,24 @@ fn a_click_over_a_rested_reader_on_a_second_the_view_lacks_reads_the_page_first(
 }
 
 #[gpui::test]
+fn pause_over_a_rested_reader_asks_it_for_nothing_the_view_holds(cx: &mut TestAppContext) {
+    // Goal: Pause on Overview over a rested reader holds the View's newest second, whose
+    // readings and top Apps the View holds, and asks the reader for nothing, since a rested
+    // reader follows nothing and the page shows nothing of that second the View lacks. Method:
+    // Overview over a View five seconds ahead of the reader's readings, the reader rested,
+    // Pause, then the commands the reader was sent.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_view_over_tail();
+    harness.driver.rest_reader();
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.pause();
+
+    assert_eq!(harness.driver.reader_commands(), commands);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_second_held_over_a_rested_reader_is_read_once_the_page_answers(cx: &mut TestAppContext) {
     // Goal: the held second's own read follows the page's reply that a click over a rested
     // reader asked for first, so the held second's top Apps arrive. Method: Overview over a View
