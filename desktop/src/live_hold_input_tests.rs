@@ -112,6 +112,27 @@ fn the_end_of_a_hover_while_a_second_is_held_shows_the_held_second_without_readi
 }
 
 #[gpui::test]
+fn a_hover_while_the_held_second_is_read_sends_no_read_of_its_own(cx: &mut TestAppContext) {
+    // Goal: a hover of another second while the reader still reads the held second waits for
+    // that read rather than sending its own, which would cancel it. Method: hover and click 800
+    // seconds before the newest on the CPU page's chart by App before the hover reads, so the
+    // hold reads its second, hover 700 seconds before the newest and run the hover's step, then
+    // the reads the hovers sent.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness
+        .driver
+        .hover_second_on("live-cpu-apps-plot", HELD + 100);
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_page_takes_no_reply_to_the_request_out_at_the_click(cx: &mut TestAppContext) {
     // Goal: the page takes no reply to a request it sent before the click, as the reader
     // publishes the live Mac's newer seconds under it, whose readings would replace the held
