@@ -93,7 +93,8 @@ fn run(reporter: &Reporter, mut streams: [Option<File>; 2], mut scratch: Box<Gro
     let mut delivered = [LossSnapshot::default(); 2];
 
     for _step in 0..u64::MAX {
-        // Read before the take, so a group admitted before exit set stopping is still taken.
+        // Read before the take, so a group admitted before exit stores stopping, as the exiting
+        // thread's own groups are, is taken before the writer stops.
         let stopping = reporter.stopping.load(Ordering::Acquire);
         if let Some(stream) = reporter.take(|group| scratch.copy_from(group)) {
             if reporter.enabled[stream.index()].load(Ordering::Relaxed) {

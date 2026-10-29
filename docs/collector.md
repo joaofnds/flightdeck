@@ -227,10 +227,10 @@ The collector and persister install separate process-local diagnostic services a
 If a writer cannot start, reporting is disabled without preventing recording.
 Each producer formats into fixed storage and attempts to submit a complete group using
 nonwaiting locks. Four queue slots each hold up to 8 KiB. A full queue, two producers
-submitting at once, or an oversized group drops that diagnostic group and increments a
-reason-specific counter; it does not wait or end collection. The writer parks when there
-is no work and owns the potentially blocking writes to duplicated stdout and stderr
-descriptors.
+submitting at once, a diagnostic reported before an earlier one is submitted, or an
+oversized group drops that diagnostic group and increments a reason-specific counter; it
+does not wait or end collection. The writer parks when there is no work and owns the
+potentially blocking writes to duplicated stdout and stderr descriptors.
 
 A failed destination is disabled. Loss summaries go to an available destination when
 delivery can proceed, and the desktop reports those gaps rather than treating a missing
