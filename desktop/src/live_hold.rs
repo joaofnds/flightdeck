@@ -11,8 +11,12 @@ use crate::live_source::{Request, Update};
 /// The held second's reading, and where the charts were drawn when it was held.
 pub(crate) struct Hold {
     /// The last second of the window the charts were drawn in when the second was held, which
-    /// the window ends at while the hold lasts.
+    /// no window passes while the hold lasts.
     pub(crate) last: u64,
+    /// The second the range is laid against while the hold lasts: the held second when the
+    /// hold began or a range was picked, which a later click or step inside the window leaves
+    /// as it was, so neither moves the window.
+    pub(crate) anchor_second: u64,
     /// The held second's readings, which the page shows wherever no hover shows another's.
     pub(crate) reading: Preview,
 }
@@ -20,9 +24,14 @@ pub(crate) struct Hold {
 impl LiveDashboard {
     /// Holds `target` over the readings and the charts the page shows, whose window ends at
     /// `last`. The page forgets the request it had out, whose reply would move the charts, and
-    /// takes the readings of `target` from the hover of it, or from what it holds.
+    /// takes the readings of `target` from the hover of it, or from what it holds. A second held
+    /// while another is keeps the window that one showed.
     pub(super) fn hold_target(&mut self, target: Target, last: u64, cx: &mut Context<Self>) {
         assert!(target.second <= last);
+        let anchor_second = self
+            .hold
+            .as_ref()
+            .map_or(target.second, |hold| hold.anchor_second);
         // The page stops following the store's View once its request names the second.
         let held = self.store_view_held(&target);
         self.inspect_target_request(target.clone());
@@ -38,7 +47,11 @@ impl LiveDashboard {
             None => (fresh, false),
         };
 
-        self.hold = Some(Hold { last, reading });
+        self.hold = Some(Hold {
+            last,
+            anchor_second,
+            reading,
+        });
         if !read {
             self.hold_first_read();
         }

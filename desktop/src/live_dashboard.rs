@@ -1278,11 +1278,12 @@ impl LiveDashboard {
         Some(self.range.window(anchor))
     }
 
-    /// What the range is laid against: the selected second, and the last second the charts hold.
+    /// What the range is laid against: the selected second, or the hold's anchor second while
+    /// one is held, and the last second the charts hold.
     pub(crate) fn range_anchor(&self) -> Option<crate::time_range::Anchor> {
         if let Some(hold) = &self.hold {
             return Some(crate::time_range::Anchor {
-                selected: hold.reading.target.second,
+                selected: hold.anchor_second,
                 context_last: hold.last,
             });
         }
@@ -1327,6 +1328,10 @@ impl LiveDashboard {
     pub(crate) fn set_range(&mut self, range: crate::time_range::Range, cx: &mut Context<Self>) {
         self.range = range;
         self.drag = None;
+        if let Some(hold) = &mut self.hold {
+            // A range picked while a second is held is laid against that second.
+            hold.anchor_second = hold.reading.target.second;
+        }
         self.store_view_range_picked();
         self.zoom_panels();
         self.rebuild();

@@ -639,6 +639,68 @@ fn a_step_past_the_last_second_of_a_held_window_on_the_cpu_page_reads_nothing(
 }
 
 #[gpui::test]
+fn a_click_inside_a_window_laid_around_the_held_second_keeps_that_window(cx: &mut TestAppContext) {
+    // Goal: a click while a second is held keeps the window the charts show, also where a range
+    // picked while held laid the window around the held second, since the window ending where
+    // the charts were drawn left it out. Method: Overview over the View of the hour at the last
+    // 60 minutes, a click 1,800 seconds before the newest on its CPU chart, the last 5 minutes,
+    // a click 100 seconds later inside the window that range shows, then the page's window.
+    let held = HOUR_NEWEST - 1_800;
+    let clicked = held + 100;
+    let laid = TimeWindow {
+        first: held - 149,
+        span: 300,
+    };
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.hover_second_on("live-cpu-plot", held);
+    harness.driver.click_second_on("live-cpu-plot", held);
+    harness.driver.show_range(Range::Last(300));
+    assert_eq!(harness.driver.view_window(), Some(laid));
+    harness.driver.hover_second_on("live-cpu-plot", clicked);
+
+    harness.driver.click_second_on("live-cpu-plot", clicked);
+
+    assert_eq!(harness.driver.view_window(), Some(laid));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_range_picked_after_a_second_click_is_laid_against_the_second_held_last(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a range picked while a second is held shows the second held last, rather than the
+    // second the window was laid against before it. Method: Overview over the View of the hour
+    // at the last 60 minutes, a click 1,800 seconds before the newest on its CPU chart, a click
+    // 100 seconds before the newest, the last 5 minutes, then the page's window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.show_range(Range::Last(3_600));
+    harness
+        .driver
+        .hover_second_on("live-cpu-plot", HOUR_NEWEST - 1_800);
+    harness
+        .driver
+        .click_second_on("live-cpu-plot", HOUR_NEWEST - 1_800);
+    harness
+        .driver
+        .hover_second_on("live-cpu-plot", HOUR_NEWEST - 100);
+    harness
+        .driver
+        .click_second_on("live-cpu-plot", HOUR_NEWEST - 100);
+
+    harness.driver.show_range(Range::Last(300));
+
+    let newest = TimeWindow {
+        first: HOUR_NEWEST - 299,
+        span: 300,
+    };
+    assert_eq!(harness.driver.view_window(), Some(newest));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_rank_link_while_a_second_is_held_holds_the_second_it_names(cx: &mut TestAppContext) {
     // Goal: a rank link of a second the page shows over a held one opens the App's page holding
     // the second the link names, in the window the charts were drawn in, rather than marking
