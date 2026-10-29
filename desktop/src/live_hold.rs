@@ -46,6 +46,17 @@ impl LiveDashboard {
         cx.notify();
     }
 
+    /// The last second of the window the charts are drawn in, which a hold keeps, where the page
+    /// shows readings of the live Mac.
+    pub(super) fn hold_last(&self) -> Option<u64> {
+        if self.worker.mode() != crate::live_source_mode::SourceMode::Live {
+            return None;
+        }
+        self.snapshot.as_ref()?;
+
+        Some(self.range_anchor()?.context_last)
+    }
+
     /// Stops the reader following the live Mac with the hold's first read: the page at the
     /// hold's last second where the page's App histories are pending or the held second names
     /// no reading, since that read brings them, or where the reader rests, which reads a

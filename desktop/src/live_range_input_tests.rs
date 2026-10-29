@@ -65,7 +65,7 @@ impl InputDriver {
 
     /// The names of the lines Overview's CPU chart by App draws, in order, or none where it
     /// draws no such chart.
-    fn cpu_by_app_lines(&self) -> Option<Vec<String>> {
+    pub(super) fn cpu_by_app_lines(&self) -> Option<Vec<String>> {
         self.view.read_with(&self.context, |dashboard, _| {
             let chart = dashboard
                 .panels
@@ -434,7 +434,7 @@ fn a_range_picked_under_a_hover_draws_its_leaders_once_the_hover_ends(cx: &mut T
 
 /// The lines of Overview's CPU chart by App where it draws `apps` on lines of their own: the
 /// rest of the Apps together, each of `apps`, and all the CPU time.
-fn cpu_by_app_lines_drawing(apps: &[&str]) -> Vec<String> {
+pub(super) fn cpu_by_app_lines_drawing(apps: &[&str]) -> Vec<String> {
     let mut lines = vec!["Other".to_string()];
     lines.extend(apps.iter().map(ToString::to_string));
     lines.push("All CPU".into());

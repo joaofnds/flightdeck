@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use gpui::{Modifiers, MouseButton, TestAppContext};
 
+use super::range::cpu_by_app_lines_drawing;
 use super::store_view_hover::held_seconds;
 use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
 use crate::live_hover::Preview;
 use crate::live_source::Update;
-use crate::live_store_app_fixtures::{HOUR_NEWEST, hour};
+use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_led_from_its_older_part};
 use crate::live_store_fixtures::{reading_at, trend_point};
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
 use crate::live_views::summary;
@@ -318,6 +319,30 @@ fn an_executable_pick_while_a_second_is_held_holds_the_second_shown_and_keeps_th
     harness.teardown();
 }
 
+#[gpui::test]
+fn pause_on_overview_at_the_hour_keeps_the_apps_that_led_over_it(cx: &mut TestAppContext) {
+    // Goal: Pause on the live Mac's Overview at the last 60 minutes holds the newest second over
+    // the View its charts by App were drawn from, so they keep drawing the Apps that led over the
+    // hour, which the worker's fifteen minutes of readings cannot. Method: the View of an hour in
+    // whose two oldest stretches D led, the last 60 minutes, Pause, a tick of the page, then the
+    // lines the CPU chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.pause();
+    harness.driver.tick_page();
+
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["D", "A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
 impl InputDriver {
     /// Shows the page over the View of the hour and the worker's reply to its request, the
     /// readings of the hour's newest two seconds, following the newest second at the newest
@@ -357,6 +382,15 @@ impl InputDriver {
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
         });
+        self.context.run_until_parked();
+    }
+
+    /// Runs one of the page's quarter-second ticks.
+    fn tick_page(&mut self) {
+        self.view.update(
+            &mut self.context,
+            crate::live_dashboard::LiveDashboard::tick,
+        );
         self.context.run_until_parked();
     }
 

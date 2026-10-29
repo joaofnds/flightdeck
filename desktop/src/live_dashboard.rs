@@ -1077,8 +1077,16 @@ impl LiveDashboard {
     pub fn pause(&mut self, cx: &mut Context<Self>) {
         let (second, identity) = self.pause_target();
         // Pause holds the newest second without pinning it, and the latest reading lets go of
-        // a pin.
+        // a pin. On the live Mac it holds the second as a click does, over the charts as they
+        // were drawn.
         self.pinning = Pinning::Unpinned;
+        if let Some(second) = second {
+            if let Some(last) = self.hold_last() {
+                let target = crate::live_hover::Target { second, identity };
+                self.hold_target(target, last, cx);
+                return;
+            }
+        }
         self.request.second = second;
         self.request.identity = identity;
         self.request.offset = 0;
@@ -1161,13 +1169,9 @@ impl LiveDashboard {
     /// recording's page selects it, which lays the window around it.
     pub(crate) fn pin_target(&mut self, target: crate::live_hover::Target, cx: &mut Context<Self>) {
         self.pinning = Pinning::Pinned;
-        if self.worker.mode() == crate::live_source_mode::SourceMode::Live
-            && self.snapshot.is_some()
-        {
-            if let Some(anchor) = self.range_anchor() {
-                self.hold_target(target, anchor.context_last, cx);
-                return;
-            }
+        if let Some(last) = self.hold_last() {
+            self.hold_target(target, last, cx);
+            return;
         }
         self.inspect_target(target, cx);
     }
