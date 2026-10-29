@@ -47,21 +47,22 @@ impl LiveDashboard {
     }
 
     /// The last second of the window the charts are drawn in, which a hold keeps, where the page
-    /// shows readings of the live Mac.
+    /// shows readings of the live Mac, its own or, before the worker's first reading, the store's
+    /// View's.
     pub(super) fn hold_last(&self) -> Option<u64> {
         if self.worker.mode() != crate::live_source_mode::SourceMode::Live {
             return None;
         }
-        self.snapshot.as_ref()?;
 
         Some(self.range_anchor()?.context_last)
     }
 
     /// Stops the reader following the live Mac with the hold's first read: the page at the
-    /// hold's last second where the page's App histories are pending or the held second names
-    /// no reading, since that read brings them, or where the reader rests, which reads a
-    /// second's own read as a newly opened page, and otherwise the held second's own. A rested
-    /// reader follows nothing, so a hold the View completes sends it nothing.
+    /// hold's last second where the page has no readings yet, its App histories are pending or
+    /// the held second names no reading, since that read brings them, or where the reader
+    /// rests, which reads a second's own read as a newly opened page, and otherwise the held
+    /// second's own. A rested reader follows nothing, so a hold the View completes sends it
+    /// nothing.
     fn hold_first_read(&mut self) {
         let Some(hold) = &self.hold else {
             unreachable!("the hold's first read follows the hold");
@@ -69,7 +70,7 @@ impl LiveDashboard {
         let pending = self
             .snapshot
             .as_ref()
-            .is_some_and(|snapshot| snapshot.histories_pending);
+            .is_none_or(|snapshot| snapshot.histories_pending);
         let rested = self.reader_rested();
 
         if rested && hold.reading.complete {
@@ -104,9 +105,11 @@ impl LiveDashboard {
         target: Target,
         held: Option<crate::live_hover::HeldSecond>,
     ) -> Preview {
-        let Some(snapshot) = self.snapshot.as_deref() else {
-            unreachable!("the page holds a second over the readings it shows");
-        };
+        // Before the worker's first reading the page draws only the store's View, or what it kept
+        // of one it let go of, so the held second's reading holds only the View's record of it
+        // until that reading lands.
+        let unread = hold_resident_unread();
+        let snapshot = self.snapshot.as_deref().unwrap_or(&unread);
 
         let mut reading = Preview::resident(snapshot, &self.request, target);
         reading.source = crate::live_chart_view::SELECTION_SOURCE.into();
@@ -310,4 +313,28 @@ fn hold_adopt(hovered: Preview, fresh: Preview, request: &Request) -> (Preview, 
         ..hovered
     };
     (reading, read)
+}
+
+/// The page's readings before the worker's first reading, which hold none.
+fn hold_resident_unread() -> crate::live_source::Snapshot {
+    crate::live_source::Snapshot {
+        generation: 0,
+        catalog: serde_json::Value::Null,
+        selection: crate::live_source::Presentation::Legacy(serde_json::Value::Null),
+        pages: std::collections::BTreeMap::new(),
+        apps: None,
+        detail: None,
+        history: None,
+        cpu_detail: None,
+        cpu_history: None,
+        resident_history: None,
+        app_attribution_history: None,
+        overview_app_histories: None,
+        process_history: None,
+        rankings: None,
+        app_ranks: None,
+        app_parts: None,
+        histories_pending: false,
+        read_ms: 0.0,
+    }
 }

@@ -10,7 +10,7 @@ use super::store_view_hover::held_seconds;
 use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
 use crate::live_hover::Preview;
-use crate::live_source::Update;
+use crate::live_source::{Snapshot, Update};
 use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_led_from_its_older_part, hour_until};
 use crate::live_store_fixtures::{reading_at, trend_point};
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
@@ -354,6 +354,101 @@ fn a_second_held_over_a_rested_reader_is_read_once_the_page_answers(cx: &mut Tes
     harness.driver.tick_hold();
 
     assert_eq!(harness.driver.reader_asked_second(), Some(TAIL));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_while_the_app_histories_are_pending_reads_the_page_up_to_the_held_window(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click while the page's App histories are still being read asks the reader for the
+    // page whose context ends at the held window's last second, whose reply brings them, since a
+    // read of the held second alone would cancel that read and leave the charts by App unread.
+    // Method: the CPU page over the View of the hour at the newest fifteen minutes, its reply
+    // without the App histories, a hover and a click 800 seconds before the newest on its chart
+    // by App, then the second the reader was last asked for.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness
+        .driver
+        .show_hour_at_fifteen_minutes_before_app_histories();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    assert_eq!(
+        harness.driver.reader_asked_second(),
+        Some(harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_on_overview_before_the_first_reading_holds_the_second_over_the_view(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click on Overview in the seconds after launch, which it draws from the store's
+    // View before the worker's first reading, holds the second in the window the charts were
+    // drawn in and shows its readings from the View, rather than clearing the page to read a
+    // window around the second. Method: Overview over the View of the hour at the newest fifteen
+    // minutes, which the worker has not answered, a click 800 seconds before the newest on its
+    // CPU chart by App, then the page's window and the text of each summary readout against
+    // those of the held second's readings.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_before_the_first_reading();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn pause_on_overview_before_the_first_reading_reads_the_page_up_to_the_held_window(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Pause on Overview before the worker's first reading, which holds the View's newest
+    // second, asks the reader for the page whose context ends at the held window's last second,
+    // since the page has no readings of its own yet and a read of the held second alone would
+    // leave them loading while the hold lasts. Method: Overview over the View of the hour at the
+    // newest fifteen minutes, which the worker has not answered, Pause, then the second the
+    // reader was last asked for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_before_the_first_reading();
+
+    harness.driver.pause();
+
+    assert_eq!(
+        harness.driver.reader_asked_second(),
+        Some(harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn pause_after_letting_go_before_the_first_reading_holds_the_newest_second_over_the_kept_charts(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Pause on Overview after letting go of a hold made before the worker's first reading,
+    // where the page draws only what it kept of the View it let go of, holds the newest second
+    // it shows over those charts and reads the page up to them, rather than clearing the page.
+    // Method: Overview over the View of the hour at the newest fifteen minutes, which the worker
+    // has not answered, Pause, which holds the newest second, Pause again, which lets go, Pause
+    // a third time, then the page's window and the second the reader was last asked for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_before_the_first_reading();
+    harness.driver.pause();
+    harness.driver.pause();
+
+    harness.driver.pause();
+
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    assert_eq!(
+        harness.driver.reader_asked_second(),
+        Some(HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS)
+    );
     harness.teardown();
 }
 
@@ -1043,13 +1138,41 @@ impl InputDriver {
     /// readings of the two seconds up to `newest`, following that second at the newest fifteen
     /// minutes.
     fn show_hour_at_fifteen_minutes_up_to(&mut self, newest: u64) {
+        let reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
+        self.show_hour_at_fifteen_minutes_answered(reply);
+    }
+
+    /// Shows the page over the View of the hour and the worker's first reply to its request, the
+    /// readings of the hour's newest two seconds without the App histories it reads next.
+    fn show_hour_at_fifteen_minutes_before_app_histories(&mut self) {
+        let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+        reply.histories_pending = true;
+        self.show_hour_at_fifteen_minutes_answered(reply);
+    }
+
+    /// Shows the page over the View of the hour and `reply`, the worker's reply to its request,
+    /// following the newest second of `reply` at the newest fifteen minutes.
+    fn show_hour_at_fifteen_minutes_answered(&mut self, mut reply: Box<Snapshot>) {
         let (view, _) = hour();
         self.show_range(Range::History);
         self.view.update(&mut self.context, |dashboard, cx| {
-            let mut reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
             reply.generation = dashboard.generation;
             assert!(dashboard.take_update(Update::Ready(reply)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            assert!(dashboard.take_view(Arc::new(view)));
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+        self.context.run_until_parked();
+    }
+
+    /// Shows the page over the View of the hour at the newest fifteen minutes, as a window opened
+    /// at launch draws it before the worker's first reading.
+    fn show_hour_before_the_first_reading(&mut self) {
+        let (view, _) = hour();
+        self.show_range(Range::History);
+        self.view.update(&mut self.context, |dashboard, cx| {
             assert!(dashboard.take_view(Arc::new(view)));
             cx.notify();
         });
