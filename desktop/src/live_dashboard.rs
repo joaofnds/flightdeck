@@ -1296,7 +1296,7 @@ impl LiveDashboard {
     /// Shows a stretch the reader selected, and holds the view at the newest second so the
     /// stretch stays where it was drawn.
     pub(crate) fn select_range(&mut self, range: crate::time_range::Range, cx: &mut Context<Self>) {
-        self.hold_second();
+        self.hold_second(cx);
         self.set_range(range, cx);
     }
 
@@ -1314,18 +1314,24 @@ impl LiveDashboard {
         }
     }
 
-    /// Asks for the second now shown, as Pause does, so the view stops following without
-    /// blanking.
-    fn hold_second(&mut self) {
+    /// Holds the second now shown, as Pause does, so the view stops following without
+    /// blanking. On the live Mac it holds the second as a click does, over the charts as they
+    /// were drawn, and elsewhere it asks for the second.
+    fn hold_second(&mut self, cx: &mut Context<Self>) {
         if self.request.second.is_some() {
             return;
         }
         let (second, identity) = self.pause_target();
-        if second.is_none() {
+        let Some(second) = second else {
+            return;
+        };
+
+        if let Some(last) = self.hold_last() {
+            let target = crate::live_hover::Target { second, identity };
+            self.hold_target(target, last, cx);
             return;
         }
-
-        self.request.second = second;
+        self.request.second = Some(second);
         self.request.identity = identity;
         self.request_reading();
     }

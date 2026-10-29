@@ -343,6 +343,37 @@ fn pause_on_overview_at_the_hour_keeps_the_apps_that_led_over_it(cx: &mut TestAp
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_drag_on_the_cpu_page_at_the_hour_reads_once_and_keeps_the_chart_by_app(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a stretch dragged out on a chart of the live Mac holds the newest second, so the
+    // reader gets the one read that stops it following the live Mac, and neither the wait for
+    // that read nor its answer takes the chart by App off the View it was drawn from. Method: the
+    // CPU page over the View of the hour at the last 60 minutes, a drag across the middle of its
+    // chart by App, the pointer moved off it, the page's step that drops a View it no longer
+    // follows, the reader's answer to its newest command, then the commands the reader was sent
+    // and the lines the chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.show_range(Range::Last(3_600));
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.drag_across("live-cpu-apps-plot", 0.25, 0.75);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Top);
+    harness.driver.tick_presence();
+    harness.driver.answer_newest_command();
+
+    assert_eq!(harness.driver.reader_commands(), commands + 1);
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
 impl InputDriver {
     /// Shows the page over the View of the hour and the worker's reply to its request, the
     /// readings of the hour's newest two seconds, following the newest second at the newest
@@ -392,6 +423,22 @@ impl InputDriver {
             crate::live_dashboard::LiveDashboard::tick,
         );
         self.context.run_until_parked();
+    }
+
+    /// Runs the page's step that keeps the View only while the page follows the live Mac or
+    /// holds a second.
+    fn tick_presence(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.tick_presence(cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Hands the page the reader's answer to its newest command, the readings of the hour's
+    /// newest two seconds.
+    fn answer_newest_command(&mut self) {
+        let generation = self.reader_commands();
+        self.reply_to_page_reading(generation, HOUR_NEWEST);
     }
 
     /// Runs the hold's step, which reads the held second where its reading lacks what the page
