@@ -137,8 +137,9 @@ impl LiveDashboard {
         };
 
         self.hover_ended(&preview);
-        // The page holds the reply to its request unless the hover kept that reply from it.
-        if preview.page_reply_kept {
+        // The page holds the reply to its request unless the hover kept that reply from it. A
+        // page that holds a second reads nothing, and shows the held second again.
+        if preview.page_reply_kept && self.hold.is_none() {
             self.request_reading();
         }
         // The page's readings still show the second it showed before it selected another.
@@ -433,7 +434,10 @@ fn hover_unfinished(timings: &mut HoverTimings, preview: &Preview) {
     });
 }
 
-fn preview_accept(preview: &mut Preview, mut snapshot: Box<Snapshot>) -> Result<(), String> {
+pub(crate) fn preview_accept(
+    preview: &mut Preview,
+    mut snapshot: Box<Snapshot>,
+) -> Result<(), String> {
     if snapshot.selection["second"].as_u64() != Some(preview.target.second) {
         return Err("Hover response has a different timestamp".into());
     }

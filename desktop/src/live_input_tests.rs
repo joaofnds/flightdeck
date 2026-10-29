@@ -30,6 +30,8 @@ mod cpu_layout;
 mod disk_attribution;
 #[path = "live_hardware_input_tests.rs"]
 mod hardware;
+#[path = "live_hold_input_tests.rs"]
+mod hold;
 #[path = "live_layout_input_tests.rs"]
 mod layout;
 #[path = "live_loading_input_tests.rs"]
@@ -957,11 +959,12 @@ fn a_hover_ending_during_a_selections_read_shows_the_selected_second(cx: &mut Te
 }
 
 #[gpui::test]
-fn the_reply_to_a_selection_shows_the_selected_second(cx: &mut TestAppContext) {
-    // Goal: the reader's answer to Enter becomes the page's readings, so the page shows the
-    // selected second from its own reading and no longer from the step.
-    // Method: step left to 999, press Enter, hand the page the reply for 999, then read the
-    // accepted second and the second the chart shows.
+fn the_reply_to_enter_completes_the_held_seconds_reading(cx: &mut TestAppContext) {
+    // Goal: the reader's answer to Enter becomes the held second's reading, so the page shows
+    // the selected second from that reading and no longer from the step, and keeps the
+    // readings it drew. Method: step left to 999, press Enter, hand the page the reply for 999,
+    // then read the second the chart shows, whether the held reading is complete, and the
+    // second of the page's own readings.
     let mut harness = InputHarness::setup(cx);
     harness.driver.focus_chart();
     harness.driver.press("left");
@@ -969,9 +972,10 @@ fn the_reply_to_a_selection_shows_the_selected_second(cx: &mut TestAppContext) {
 
     harness.driver.reply_with_second(999);
 
-    assert_eq!(harness.driver.accepted_second(), Some(999));
     assert_eq!(harness.driver.shown_second(), Some(999));
+    assert!(harness.driver.held_reading_complete());
     assert!(!harness.driver.shows_a_step());
+    assert_eq!(harness.driver.accepted_second(), Some(1000));
     harness.teardown();
 }
 
@@ -1630,7 +1634,8 @@ impl InputDriver {
         })
     }
 
-    /// Hands the page the reader's answer to its request for `second`, the way a tick does.
+    /// Hands the page the reader's answer to its newest command, a read of `second`, the way a
+    /// tick does.
     fn reply_with_second(&mut self, second: u64) {
         self.reply_with_context(second, 1000);
     }
@@ -1639,7 +1644,7 @@ impl InputDriver {
     /// `context_last`.
     fn reply_with_context(&mut self, second: u64, context_last: u64) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            let mut snapshot = accepted_snapshot(dashboard.generation);
+            let mut snapshot = accepted_snapshot(dashboard.worker.commands_sent());
             let identity = snapshot.selection["trends"][0].clone();
             snapshot.selection.legacy_mut().unwrap()["second"] = json!(second);
             snapshot.selection.legacy_mut().unwrap()["context_last_second"] = json!(context_last);
@@ -1659,6 +1664,16 @@ impl InputDriver {
 
     fn accepted_second(&self) -> Option<u64> {
         self.accepted_selection()?["second"].as_u64()
+    }
+
+    /// Whether the page holds a second whose reading the reader has answered.
+    fn held_reading_complete(&self) -> bool {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard
+                .hold
+                .as_ref()
+                .is_some_and(|hold| hold.reading.complete)
+        })
     }
 
     /// Whether the page shows a second an arrow step reached rather than its own selection.

@@ -171,7 +171,7 @@ impl LiveDashboard {
             .reading_snapshot()
             .ok_or(self.absent_reading("App totals unavailable while reading the selection"))?;
 
-        if let Some(preview) = &self.preview {
+        if let Some(preview) = self.shown_preview() {
             if let Some(error) = &preview.failure {
                 return Err(format!("App totals unavailable: {error}"));
             }

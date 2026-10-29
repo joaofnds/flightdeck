@@ -158,6 +158,9 @@ struct Mailbox {
     taken_payloads: BTreeMap<&'static str, Value>,
     #[cfg(test)]
     output_complete: bool,
+    /// The last request the window sent, which a test reads after the worker took it.
+    #[cfg(test)]
+    sent: Option<Request>,
     generation: u64,
     request: Option<Command>,
     output: Option<Update>,
@@ -252,6 +255,18 @@ impl Worker {
     #[cfg(feature = "automation")]
     pub(crate) fn requests_submitted(&self) -> u64 {
         self.shared.requests.load(Ordering::Relaxed)
+    }
+
+    /// How many commands the window has sent the reader, the generation of the last one.
+    #[cfg(test)]
+    pub(crate) fn commands_sent(&self) -> u64 {
+        self.mailbox().unwrap().generation
+    }
+
+    /// The second the window's last command asked the reader for.
+    #[cfg(test)]
+    pub(crate) fn sent_second(&self) -> Option<u64> {
+        self.mailbox().unwrap().sent.as_ref()?.second
     }
 
     pub fn start(root: PathBuf) -> std::io::Result<Self> {
@@ -366,6 +381,10 @@ impl Worker {
         }
         mailbox.generation = generation;
         mailbox.output = None;
+        #[cfg(test)]
+        {
+            mailbox.sent = Some(request.clone());
+        }
         mailbox.request = Some(Command {
             generation,
             epoch: self.shared.cancellation.epoch(),
@@ -505,6 +524,8 @@ impl Shared {
                 taken_payloads: BTreeMap::new(),
                 #[cfg(test)]
                 output_complete: false,
+                #[cfg(test)]
+                sent: None,
                 generation: 0,
                 request: None,
                 output: None,

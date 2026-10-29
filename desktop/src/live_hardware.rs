@@ -81,7 +81,7 @@ impl LiveDashboard {
     }
 
     fn reading_fan_speeds(&self) -> Result<[Option<f32>; 2], String> {
-        if self.preview.is_none() {
+        if self.shown_preview().is_none() {
             return fan_speeds(self.snapshot.as_deref());
         }
 

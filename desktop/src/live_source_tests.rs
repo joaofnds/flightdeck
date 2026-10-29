@@ -769,6 +769,7 @@ impl SnapshotReader {
                     frozen_payloads: std::collections::BTreeMap::new(),
                     taken_payloads: std::collections::BTreeMap::new(),
                     output_complete: false,
+                    sent: None,
                     generation: 1,
                     request: None,
                     output: None,

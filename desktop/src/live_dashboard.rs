@@ -194,6 +194,9 @@ pub struct LiveDashboard {
     pub(crate) drag: Option<Drag>,
     /// Whether the selected second is pinned, which the end of a hover then shows again.
     pub(crate) pinning: Pinning,
+    /// The second of the live Mac the page holds over the readings and the charts it showed
+    /// when it was held, while it holds one.
+    pub(crate) hold: Option<hold::Hold>,
 }
 
 pub(crate) struct WindowState {
@@ -422,6 +425,7 @@ impl LiveDashboard {
             range: crate::time_range::Range::default(),
             drag: None,
             pinning: Pinning::Unpinned,
+            hold: None,
         };
         if dashboard.request.route == "computer" {
             dashboard.inventory = crate::live_inventory::rows(None);
@@ -571,9 +575,13 @@ impl LiveDashboard {
             self.store_pending = false;
         } else {
             self.preview_tick(cx);
-            if let Some(view) = store_view::take_store_view(cx) {
-                if self.take_view(view) {
-                    cx.notify();
+            self.hold_tick();
+            // A held second keeps the View its charts were drawn from.
+            if self.hold.is_none() {
+                if let Some(view) = store_view::take_store_view(cx) {
+                    if self.take_view(view) {
+                        cx.notify();
+                    }
                 }
             }
             self.tick_rest();
@@ -641,7 +649,7 @@ impl LiveDashboard {
             self.presence,
             Presence::Shown | Presence::Showing | Presence::Rested
         );
-        if !self.follows_live_mac() {
+        if !self.follows_live_mac() && self.hold.is_none() {
             self.store_view = None;
         }
         store_view::set_store_active(visible && self.follows_live_mac(), cx);
@@ -760,7 +768,7 @@ impl LiveDashboard {
             return;
         }
 
-        match self.worker.restore(self.request.clone()) {
+        match self.worker.restore(self.page_request()) {
             Ok(generation) => {
                 self.generation = generation;
                 self.reply_pending = true;
@@ -771,6 +779,9 @@ impl LiveDashboard {
 
     /// Takes the worker's answer to the page or to a hover, and answers whether the page changed.
     pub(crate) fn take_update(&mut self, update: Update) -> bool {
+        if self.hold_answered(&update) {
+            return self.hold_receive(update);
+        }
         if self.preview.is_some() {
             return self.preview_receive(update);
         }
@@ -779,6 +790,12 @@ impl LiveDashboard {
     }
 
     pub(crate) fn receive(&mut self, update: Update) -> bool {
+        // The worker numbers its commands from 1, so a generation of 0 says the page has no
+        // request out whose reply it would take.
+        if self.generation == 0 {
+            return false;
+        }
+
         match update {
             Update::Ready(snapshot) => {
                 if snapshot.generation != self.generation {
@@ -787,6 +804,7 @@ impl LiveDashboard {
 
                 self.reply_pending = false;
                 self.accept(snapshot);
+                self.hold_resolve();
             }
             Update::Failed {
                 generation,
@@ -904,6 +922,9 @@ impl LiveDashboard {
     /// Whether the worker still reads the second the page selected, whose reply the page waits
     /// on with the readings it shows. A read of any other second would cancel it.
     pub(crate) fn selection_reading(&self) -> bool {
+        if self.hold_reading() {
+            return true;
+        }
         if !self.reply_pending {
             return false;
         }
@@ -1090,36 +1111,60 @@ impl LiveDashboard {
     }
 
     pub fn inspect(&mut self, second: u64, cx: &mut Context<Self>) {
+        let target = self.inspection_target(second);
+        self.inspect_target(target, cx);
+    }
+
+    /// The reading of `second` the page's readings name, or the second alone where they name
+    /// none of it.
+    fn inspection_target(&self, second: u64) -> crate::live_hover::Target {
         let second = self.context_snapshot().map_or(second, |snapshot| {
             crate::live_projection::inspection_second(&snapshot.selection, second)
         });
         let identity = self.context_snapshot().and_then(|snapshot| {
             crate::live_projection::inspection_identity(&snapshot.selection, second)
         });
-        self.inspect_target(crate::live_hover::Target { second, identity }, cx);
+
+        crate::live_hover::Target { second, identity }
     }
 
     /// Selects the reading of `target`, from the first row of each of the page's tables.
     fn inspect_target(&mut self, target: crate::live_hover::Target, cx: &mut Context<Self>) {
+        self.inspect_target_request(target);
+        self.select(cx);
+    }
+
+    /// Makes `target` the request's reading, from the first row of each of the page's tables.
+    fn inspect_target_request(&mut self, target: crate::live_hover::Target) {
         self.request.second = Some(target.second);
         self.request.identity = target.identity;
         self.request.offset = 0;
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
-        self.select(cx);
     }
 
     /// Selects `second` and holds every page to it, so the end of a hover shows its readings
     /// again until the latest reading or the range's reset lets it go.
     pub(crate) fn pin_second(&mut self, second: u64, cx: &mut Context<Self>) {
-        self.pinning = Pinning::Pinned;
-        self.inspect(second, cx);
+        let target = self.inspection_target(second);
+        self.pin_target(target, cx);
     }
 
-    /// Selects the reading of `target` and holds every page to it, as `pin_second` does.
+    /// Selects the reading of `target` and holds every page to it, as `pin_second` does. On the
+    /// live Mac the page holds it over the readings and the charts it shows, which keep the
+    /// window they were drawn in, and asks the reader for no window around it. A saved
+    /// recording's page selects it, which lays the window around it.
     pub(crate) fn pin_target(&mut self, target: crate::live_hover::Target, cx: &mut Context<Self>) {
         self.pinning = Pinning::Pinned;
+        if self.worker.mode() == crate::live_source_mode::SourceMode::Live
+            && self.snapshot.is_some()
+        {
+            if let Some(anchor) = self.range_anchor() {
+                self.hold_target(target, anchor.context_last, cx);
+                return;
+            }
+        }
         self.inspect_target(target, cx);
     }
 
@@ -1138,6 +1183,7 @@ impl LiveDashboard {
     /// shows it from them at once, as an arrow step does. A page with nothing shown asks as any
     /// other request does.
     pub(crate) fn select(&mut self, cx: &mut Context<Self>) {
+        self.hold = None;
         if self.snapshot.is_none() {
             self.submit();
             cx.notify();
@@ -1177,12 +1223,21 @@ impl LiveDashboard {
     /// The seconds the charts show, which is the whole history unless a range narrows it.
     pub(crate) fn view_window(&self) -> Option<crate::chart_axes::TimeWindow> {
         let anchor = self.range_anchor()?;
+        if self.hold.is_some() {
+            return Some(self.range.held_window(anchor));
+        }
 
         Some(self.range.window(anchor))
     }
 
     /// What the range is laid against: the selected second, and the last second the charts hold.
     pub(crate) fn range_anchor(&self) -> Option<crate::time_range::Anchor> {
+        if let Some(hold) = &self.hold {
+            return Some(crate::time_range::Anchor {
+                selected: hold.reading.target.second,
+                context_last: hold.last,
+            });
+        }
         if let Some(last) = self.store_view_last_second() {
             return Some(crate::time_range::Anchor {
                 selected: last,
@@ -1239,6 +1294,7 @@ impl LiveDashboard {
 
     /// Goes back to the whole history, following the newest second.
     pub(crate) fn reset_range(&mut self, cx: &mut Context<Self>) {
+        self.hold = None;
         let held = self.request.second.take().is_some();
         if held {
             self.request.identity = None;
@@ -1271,7 +1327,7 @@ impl LiveDashboard {
         if let Some(preview) = &mut self.preview {
             preview.page_reply_kept = false;
         }
-        match self.worker.request(self.request.clone()) {
+        match self.worker.request(self.page_request()) {
             Ok(generation) => {
                 self.generation = generation;
                 self.reply_pending = true;
@@ -1424,6 +1480,8 @@ impl LiveDashboard {
     }
 }
 
+#[path = "live_hold.rs"]
+mod hold;
 #[path = "live_store_view.rs"]
 mod store_view;
 

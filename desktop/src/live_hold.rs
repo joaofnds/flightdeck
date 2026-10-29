@@ -1,0 +1,252 @@
+//! A second of the live Mac the page holds. The page keeps the readings and the charts it showed
+//! when the second was held, which keep the window they were drawn in, and shows the held second
+//! over them from a reading of its own until the user lets go.
+
+use gpui::Context;
+
+use super::LiveDashboard;
+use crate::live_hover::{Origin, Preview, Target};
+use crate::live_source::{Request, Update};
+
+/// The held second's reading, and where the charts were drawn when it was held.
+pub(crate) struct Hold {
+    /// The last second of the window the charts were drawn in when the second was held, which
+    /// the window ends at while the hold lasts.
+    pub(crate) last: u64,
+    /// The held second's readings, which the page shows wherever no hover shows another's.
+    pub(crate) reading: Preview,
+}
+
+impl LiveDashboard {
+    /// Holds `target` over the readings and the charts the page shows, whose window ends at
+    /// `last`. The page forgets the request it had out, whose reply would move the charts, and
+    /// takes the readings of `target` from the hover of it, or from what it holds.
+    pub(super) fn hold_target(&mut self, target: Target, last: u64, cx: &mut Context<Self>) {
+        assert!(target.second <= last);
+        // The page stops following the store's View once its request names the second.
+        let held = self.store_view_held(&target);
+        self.inspect_target_request(target.clone());
+        self.generation = 0;
+        self.reply_pending = false;
+        let hovered = self.preview.take();
+        let fresh = self.hold_resident(target, held);
+        let (reading, read) = match hovered {
+            Some(hovered) => {
+                self.hover_ended(&hovered);
+                hold_adopt(hovered, fresh, &self.request)
+            }
+            None => (fresh, false),
+        };
+
+        self.hold = Some(Hold { last, reading });
+        if !read {
+            self.hold_first_read();
+        }
+        self.rebuild();
+        cx.notify();
+    }
+
+    /// Stops the reader following the live Mac with the hold's first read: the page at the
+    /// hold's last second where the page's App histories are pending or the held second names
+    /// no reading, since that read brings them, and otherwise the held second's own.
+    fn hold_first_read(&mut self) {
+        let Some(hold) = &self.hold else {
+            unreachable!("the hold's first read follows the hold");
+        };
+        let pending = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.histories_pending);
+
+        if pending || hold.reading.target.identity.is_none() {
+            self.request_reading();
+        } else {
+            self.hold_read();
+        }
+    }
+
+    /// Asks the reader for the held second's readings.
+    fn hold_read(&mut self) {
+        let Some(hold) = &mut self.hold else {
+            unreachable!("only a hold reads its second");
+        };
+
+        match self.worker.inspect(hold.reading.request.clone()) {
+            Ok(generation) => hold.reading.generation = Some(generation),
+            Err(error) => {
+                hold.reading.failure = Some(error);
+                hold.reading.complete = true;
+            }
+        }
+    }
+
+    /// The held second's reading as the page's readings hold it, and as `held`, the store's
+    /// View, holds it.
+    fn hold_resident(
+        &self,
+        target: Target,
+        held: Option<crate::live_hover::HeldSecond>,
+    ) -> Preview {
+        let Some(snapshot) = self.snapshot.as_deref() else {
+            unreachable!("the page holds a second over the readings it shows");
+        };
+
+        let mut reading = Preview::resident(snapshot, &self.request, target);
+        reading.source = crate::live_chart_view::SELECTION_SOURCE.into();
+        reading.origin = Origin::Keyboard;
+        reading.held = held;
+        // The View holds the held second's readings and top Apps, which is all the page shows
+        // of it, so the hold reads nothing.
+        if let Some(held) = &reading.held {
+            if held.rankings.is_some() {
+                reading.complete = true;
+            }
+        }
+        if self.picker == Some(crate::live_dashboard::Picker::App) {
+            reading.list_apps(snapshot);
+        }
+        reading
+    }
+
+    /// Reads the held second where its reading lacks what the page shows and no read of the
+    /// page or of a hover's second is out, either of which a read of its own would cancel.
+    pub(super) fn hold_tick(&mut self) {
+        if self.preview.is_some() {
+            return;
+        }
+        if self.reply_pending {
+            return;
+        }
+        let Some(hold) = &mut self.hold else {
+            return;
+        };
+        if hold.reading.complete {
+            return;
+        }
+        if hold.reading.generation.is_some() {
+            return;
+        }
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.histories_pending)
+        {
+            return;
+        }
+
+        if hold.reading.target.identity.is_none() {
+            hold.reading.complete = true;
+            return;
+        }
+        self.hold_read();
+    }
+
+    /// Whether `update` answers the hold's read of its second.
+    pub(super) fn hold_answered(&self, update: &Update) -> bool {
+        let generation = match update {
+            Update::Ready(snapshot) => snapshot.generation,
+            Update::Failed { generation, .. } => *generation,
+        };
+
+        self.hold
+            .as_ref()
+            .is_some_and(|hold| hold.reading.generation == Some(generation))
+    }
+
+    /// Takes the reader's answer to the hold's read of its second, and answers that the page
+    /// changed.
+    pub(super) fn hold_receive(&mut self, update: Update) -> bool {
+        let Some(hold) = &mut self.hold else {
+            unreachable!("only a hold takes the reply to its read");
+        };
+
+        match update {
+            Update::Ready(snapshot) => {
+                if let Err(error) =
+                    crate::live_hover::controller::preview_accept(&mut hold.reading, snapshot)
+                {
+                    hold.reading.failure = Some(error);
+                }
+            }
+            Update::Failed { message, .. } => hold.reading.failure = Some(message),
+        }
+        hold.reading.complete = true;
+        self.rebuild();
+
+        true
+    }
+
+    /// Shows the held second again from the page's new readings, which replaced those it was
+    /// held over. A read of it follows where they lack what the page shows of it.
+    pub(super) fn hold_resolve(&mut self) {
+        let Some(hold) = &self.hold else {
+            return;
+        };
+
+        let target = hold.reading.target.clone();
+        let in_view = self.store_view_held(&target);
+        let reading = self.hold_resident(target, in_view);
+        if let Some(hold) = &mut self.hold {
+            hold.reading = reading;
+        }
+        self.rebuild();
+    }
+
+    /// The request that reads the page: while a second is held, the page whose context ends at
+    /// the hold's last second, naming no reading, so no read of the page lays the window around
+    /// the held second or past where the charts were drawn.
+    pub(super) fn page_request(&self) -> Request {
+        let Some(hold) = &self.hold else {
+            return self.request.clone();
+        };
+
+        // The reader ends a selected second's context this far past it, or at the newest second
+        // where that comes first, which stays past the hold's last second as the Mac runs on.
+        let second = hold.last.saturating_sub(viewer::CONTEXT_AFTER_SECONDS);
+        Request {
+            second: Some(second),
+            identity: None,
+            ..self.request.clone()
+        }
+    }
+
+    /// The reading the page shows of a second its readings do not show: a hover's, or else the
+    /// held second's.
+    pub(crate) fn shown_preview(&self) -> Option<&Preview> {
+        self.preview
+            .as_ref()
+            .or(self.hold.as_ref().map(|hold| &hold.reading))
+    }
+
+    /// Whether the reader still reads the held second, which a read of any other would cancel.
+    pub(crate) fn hold_reading(&self) -> bool {
+        self.hold
+            .as_ref()
+            .is_some_and(|hold| hold.reading.generation.is_some() && !hold.reading.complete)
+    }
+}
+
+/// The held second's reading: the hover's of it, where the hover reads what a read of the held
+/// second reads, and otherwise `fresh`. Answers whether the hover asked the reader for it, which
+/// stopped the reader following the live Mac.
+fn hold_adopt(hovered: Preview, fresh: Preview, request: &Request) -> (Preview, bool) {
+    if hovered.target != fresh.target {
+        return (fresh, false);
+    }
+    if hovered.request != fresh.request {
+        return (fresh, false);
+    }
+
+    let read = hovered.generation.is_some();
+    let reading = Preview {
+        source: fresh.source,
+        origin: fresh.origin,
+        base_request: request.clone(),
+        layout: None,
+        header_height: None,
+        page_reply_kept: false,
+        hovered_at: None,
+        ..hovered
+    };
+    (reading, read)
+}

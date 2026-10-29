@@ -991,7 +991,7 @@ impl InputDriver {
 
     pub(super) fn complete_ranked_selection(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            let mut snapshot = accepted_snapshot(dashboard.generation);
+            let mut snapshot = accepted_snapshot(dashboard.worker.commands_sent());
             snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
             snapshot.selection.legacy_mut().unwrap()["selected"] =
                 dashboard.request.identity.clone().unwrap();
@@ -1174,7 +1174,7 @@ fn route_ranked_payload(
 impl InputDriver {
     fn complete_route_ranked_selection(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            let mut snapshot = route_ranked_snapshot(dashboard.generation);
+            let mut snapshot = route_ranked_snapshot(dashboard.worker.commands_sent());
             snapshot.selection.legacy_mut().unwrap()["second"] = json!(999);
             snapshot.selection.legacy_mut().unwrap()["selected"] =
                 dashboard.request.identity.clone().unwrap();

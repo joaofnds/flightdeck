@@ -362,7 +362,8 @@ impl LiveDashboard {
         if self.native.source != SourceMode::Live {
             return None;
         }
-        if self.request.second.is_some() {
+        // A held second keeps the View the page drew its charts from when it was held.
+        if self.request.second.is_some() && self.hold.is_none() {
             return None;
         }
 

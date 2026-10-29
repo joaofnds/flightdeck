@@ -174,7 +174,7 @@ impl Preview {
 
 impl LiveDashboard {
     pub(crate) fn reading_snapshot(&self) -> Option<&Snapshot> {
-        if let Some(preview) = &self.preview {
+        if let Some(preview) = self.shown_preview() {
             let accepted = self.snapshot.as_deref()?;
             if preview.target.matches(&accepted.selection["selected"]) {
                 return Some(accepted);
@@ -187,25 +187,24 @@ impl LiveDashboard {
     }
 
     pub(crate) fn reading_target(&self) -> Option<&Target> {
-        self.preview.as_ref().map(|preview| &preview.target)
+        self.shown_preview().map(|preview| &preview.target)
     }
 
     pub(crate) fn reading_target_source(&self) -> Option<&gpui::SharedString> {
-        self.preview.as_ref().map(|preview| &preview.source)
+        self.shown_preview().map(|preview| &preview.source)
     }
 
     pub(crate) fn reading_origin(&self) -> Option<Origin> {
-        self.preview.as_ref().map(|preview| preview.origin)
+        self.shown_preview().map(|preview| preview.origin)
     }
 
     pub(crate) fn reading_request(&self) -> &crate::live_source::Request {
-        self.preview
-            .as_ref()
+        self.shown_preview()
             .map_or(&self.request, |preview| &preview.request)
     }
 
     pub(crate) fn reading_executables(&self) -> &[crate::live_executables::Executable] {
-        if let Some(preview) = &self.preview {
+        if let Some(preview) = self.shown_preview() {
             if !preview.target.matches(
                 self.snapshot
                     .as_ref()

@@ -719,7 +719,7 @@ impl InputDriver {
     }
 
     /// The second the CPU chart shows, as macOS's accessibility reads it.
-    fn cpu_shown_second(&self) -> Option<u64> {
+    pub(super) fn cpu_shown_second(&self) -> Option<u64> {
         self.chart_accessibility_reading("live-cpu").0
     }
 

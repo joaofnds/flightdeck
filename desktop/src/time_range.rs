@@ -117,6 +117,24 @@ impl Range {
     }
 }
 
+impl Range {
+    /// The seconds the range covers while the page holds the selected second over charts drawn
+    /// up to `anchor.context_last`: those that end there where they hold the selected second, so
+    /// the charts stay as they were drawn, and otherwise those around it, as `window` lays them.
+    #[must_use]
+    pub fn held_window(self, anchor: Anchor) -> TimeWindow {
+        let drawn = self.window(Anchor {
+            selected: anchor.context_last,
+            context_last: anchor.context_last,
+        });
+        if drawn.first <= anchor.selected {
+            return drawn;
+        }
+
+        self.window(anchor)
+    }
+}
+
 /// The `seconds` around the selected second, which end at it while it is the newest the page
 /// holds, and hold it at their middle once the page holds half as many after it, so a step past
 /// the selected second stays in view.
