@@ -385,6 +385,27 @@ fn choosing_an_hour_draws_the_apps_that_led_over_the_hour(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn choosing_an_hour_on_the_cpu_page_draws_the_apps_that_led_over_the_hour(cx: &mut TestAppContext) {
+    // Goal: the CPU page's chart by App, drawn from the store's View, draws on lines of their
+    // own the Apps that led over the range picked, as Overview's does. Method: the View of the
+    // hour test on the CPU page, and its chart by App's lines over the newest fifteen minutes and
+    // after choosing the hour.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    let recent = harness.driver.cpu_by_app_lines().unwrap();
+
+    harness.driver.show_range(Range::Last(3_600));
+
+    let hour = harness.driver.cpu_by_app_lines().unwrap();
+    assert_eq!(recent, cpu_by_app_lines_drawing(&["A", "B", "C"]));
+    assert_eq!(hour, cpu_by_app_lines_drawing(&["D", "A", "B", "C"]));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_range_picked_under_a_hover_draws_its_leaders_once_the_hover_ends(cx: &mut TestAppContext) {
     // Goal: a range picked while the pointer rests on a chart leaves the charts by App as the
     // hover holds them, and once the hover ends they draw the Apps that led over the range

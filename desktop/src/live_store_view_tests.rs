@@ -538,15 +538,87 @@ mod when_the_page_is_another_page {
 
     #[test]
     fn the_worker_s_readings_draw_the_charts() {
-        // Goal: only Overview draws from the View yet, so every other page keeps the charts of
-        // its own readings. Method: the CPU page, then a newer View.
-        let mut dashboard = dashboard_on("cpu", &[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        // Goal: a page with no chart by App the View draws keeps the charts of its own
+        // readings. Method: the Network page, then a newer View.
+        let mut dashboard = dashboard_on("network", &[reading_at(9_999, 0), reading_at(10_000, 0)]);
         let before = dashboard.panels.clone();
 
         let changed = dashboard.take_view(newer_view());
 
         assert!(!changed);
         assert_same_panels(&dashboard.panels, &before);
+    }
+}
+
+mod when_the_page_has_a_chart_by_app {
+    use super::*;
+
+    #[test]
+    fn the_cpu_page_draws_its_chart_by_app_from_the_view() {
+        // Goal: the CPU page draws its chart by App from the store's View, as Overview does.
+        // Method: the page showing the worker's readings, which draw no chart by App, then a
+        // View that holds an App in each second.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_on_page("cpu", &view);
+
+        assert_eq!(drawn, expected_on_page(&view, Metric::Cpu.panel_id()));
+    }
+
+    #[test]
+    fn the_energy_page_draws_its_chart_by_app_from_the_view() {
+        // Goal: the Energy page draws its chart by App from the store's View. Method: as for
+        // the CPU page.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_on_page("energy", &view);
+
+        assert_eq!(drawn, expected_on_page(&view, Metric::Power.panel_id()));
+    }
+
+    #[test]
+    fn the_storage_page_draws_its_chart_by_app_from_the_view() {
+        // Goal: the Storage page draws its chart by App from the store's View. Method: as for
+        // the CPU page.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_on_page("storage", &view);
+
+        assert_eq!(drawn, expected_on_page(&view, Metric::Disk.panel_id()));
+    }
+
+    #[test]
+    fn the_memory_page_draws_its_chart_by_app_from_the_view() {
+        // Goal: the Memory page draws its chart of resident memory by App from the store's
+        // View. Method: as for the CPU page.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_on_page("memory", &view);
+
+        let expected = expected_on_page(&view, crate::live_resident_history::PANEL_ID);
+        assert_eq!(drawn, expected);
+    }
+
+    /// The charts by App the page `route` draws once it takes `view`, after the worker's
+    /// readings of the seconds before it.
+    fn drawn_on_page(route: &str, view: &Arc<View>) -> Vec<(String, String, Vec<Line>)> {
+        let mut dashboard = dashboard_on(route, &[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        assert!(by_app(&dashboard.panels).is_empty());
+
+        assert!(dashboard.take_view(Arc::clone(view)));
+        by_app(&dashboard.panels)
+    }
+
+    /// The one chart by App, of id `id`, that a page draws from `view`, a `charted_view`.
+    fn expected_on_page(view: &View, id: &str) -> Vec<(String, String, Vec<Line>)> {
+        let cohorts = charted_cohorts(view);
+        let panel = match Metric::from_panel(id) {
+            Some(metric) => AppAttributionHistory::from_view(metric, view, &cohorts).panel(),
+            None => ResidentHistory::from_view(view, &cohorts).panel(),
+        };
+        let panel = panel.unwrap();
+
+        vec![(panel.id.clone(), panel.title.clone(), panel.lines.clone())]
     }
 }
 

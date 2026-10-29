@@ -1,7 +1,8 @@
 //! The page drawn from the store's newest View, which the window takes each tick. Overview draws
 //! its machine charts, its CPU, memory, energy and disk charts by App, its readouts and its
-//! hardware figure from it while it follows the newest second, and a chosen second, a hover's
-//! reading and every other page draw from the worker's readings as before.
+//! hardware figure from it while it follows the newest second. The Memory, CPU, Energy and
+//! Storage pages draw their chart by App from it while they follow the newest second, and a
+//! chosen second, a hover's reading and every other chart draw from the worker's readings.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -88,6 +89,9 @@ struct OlderAppCharts {
 pub(super) struct StorePanels {
     /// The version of the View they were drawn from, or none before the first.
     version: Option<u64>,
+    /// Whether they are Overview's, its machine charts among them and its titles on the charts
+    /// by App, rather than the charts by App another page draws.
+    overview: bool,
     /// The wall seconds of the range the charts by App chose the Apps they draw over, or none
     /// before the first View.
     chosen_over: Option<WallSeconds>,
@@ -132,6 +136,9 @@ impl LiveDashboard {
     /// where the page draws them from it, drawing them once for each View. Answers whether it
     /// put them in place.
     pub(super) fn draw_store_view(&mut self) -> bool {
+        if self.request.route != "overview" {
+            return self.draw_store_view_apps();
+        }
         let Some(version) = self.drawn_store_view().map(|view| view.version) else {
             return false;
         };
@@ -144,7 +151,10 @@ impl LiveDashboard {
         };
 
         let drawn = &self.store_panels;
-        if drawn.version != Some(version) || drawn.chosen_over != Some(chosen_over) {
+        if drawn.version != Some(version)
+            || drawn.chosen_over != Some(chosen_over)
+            || !drawn.overview
+        {
             // The App charts of the last View give the new ones the points both Views hold.
             let older = OlderAppCharts {
                 histories: self.store_panels.histories.take(),
@@ -163,7 +173,52 @@ impl LiveDashboard {
             }
         }
         draw_store_view_splice(&mut self.panels, &self.store_panels.panels);
-        draw_store_view_splice_apps(&mut self.panels, &self.store_panels.apps);
+        draw_store_view_splice_apps("overview", &mut self.panels, &self.store_panels.apps);
+        true
+    }
+
+    /// Puts the page's chart by App drawn from the store's View in place of the worker's, on a
+    /// page other than Overview that draws one from it, drawing the charts once for each View,
+    /// while no hover holds the page still. Answers whether it put the chart in place.
+    fn draw_store_view_apps(&mut self) -> bool {
+        // A hover holds the charts where the pointer found them until it ends.
+        if self.preview.is_some() {
+            return false;
+        }
+        let Some(version) = self.apps_followed_store_view().map(|view| view.version) else {
+            return false;
+        };
+        let Some(window) = self.view_window() else {
+            unreachable!("a page other than Overview draws from the View once the worker read it");
+        };
+        let chosen_over = WallSeconds {
+            first: window.first,
+            last: window.first + window.span - 1,
+        };
+
+        let drawn = &self.store_panels;
+        if drawn.version != Some(version)
+            || drawn.chosen_over != Some(chosen_over)
+            || drawn.overview
+        {
+            // The App charts of the last View give the new ones the points both Views hold.
+            let older = OlderAppCharts {
+                histories: self.store_panels.histories.take(),
+                resident: self.store_panels.resident.take(),
+            };
+            let Some(view) = self.store_view.clone() else {
+                unreachable!("taking the App charts leaves the drawn View as it was");
+            };
+            let cohorts = draw_store_view_cohorts(&view, chosen_over, &mut self.leaders);
+            let mut panels = draw_store_view_panels_apps(&view, older, &cohorts, chosen_over);
+            let sliding = self.panels_slide();
+            for panel in &mut panels.apps {
+                super::zoom_panel(panel, window, sliding);
+            }
+            self.store_panels = panels;
+        }
+        let route = self.request.route.clone();
+        draw_store_view_splice_apps(&route, &mut self.panels, &self.store_panels.apps);
         true
     }
 
@@ -214,20 +269,12 @@ impl LiveDashboard {
     ) -> Result<StorePanels, String> {
         let levels = draw_store_view_panels_levels(view);
         let mut panels = crate::live_projection::overview_panels(view, levels.as_ref())?;
-        let histories = draw_store_view_panels_histories(view, cohorts, older.histories);
-        let resident = match older.resident {
-            Some(older) => ResidentHistory::from_view_after(view, cohorts, older),
-            None => ResidentHistory::from_view(view, cohorts),
-        };
-        let rates = APP_METRICS
-            .iter()
-            .filter_map(|metric| histories.history(*metric)?.panel());
-        let mut apps: Vec<Rc<Panel>> = resident.panel().into_iter().chain(rates).collect();
-        crate::live_acceptance::prepare_overview_titles(&mut apps)?;
+        let mut drawn = draw_store_view_panels_apps(view, older, cohorts, chosen_over);
+        crate::live_acceptance::prepare_overview_titles(&mut drawn.apps)?;
 
         if let Some(window) = self.view_window() {
             let sliding = self.panels_slide();
-            for panel in panels.iter_mut().chain(&mut apps) {
+            for panel in panels.iter_mut().chain(&mut drawn.apps) {
                 super::zoom_panel(panel, window, sliding);
             }
         }
@@ -239,15 +286,11 @@ impl LiveDashboard {
             .map(|second| second.wall_ns / NANOSECONDS_PER_SECOND);
         assert_eq!(seconds.last().copied(), last);
         Ok(StorePanels {
-            version: Some(view.version),
-            chosen_over: Some(chosen_over),
+            overview: true,
             panels,
             seconds,
-            apps,
-            histories: Some(histories),
-            resident: Some(resident),
             rankings: Some(draw_store_view_rankings(view)),
-            failure: None,
+            ..drawn
         })
     }
 
@@ -272,6 +315,31 @@ impl LiveDashboard {
     pub(super) fn followed_store_view(&self) -> Option<&View> {
         if self.request.route != "overview" {
             return None;
+        }
+
+        self.apps_followed_store_view()
+    }
+
+    /// The View the page's charts by App were drawn from: on Overview the one `drawn_store_view`
+    /// names, and on another page that draws one from the View the one it follows, whose charts
+    /// a hover holds still.
+    fn apps_drawn_store_view(&self) -> Option<&View> {
+        if self.request.route == "overview" {
+            return self.drawn_store_view();
+        }
+
+        self.apps_followed_store_view()
+    }
+
+    /// The store's newest View, as `followed_store_view` gives it, on any page that draws a chart
+    /// by App from it. A page other than Overview draws from it once the worker read the page,
+    /// since its other charts are the worker's.
+    fn apps_followed_store_view(&self) -> Option<&View> {
+        if !store_view_draws_apps(&self.request.route) {
+            return None;
+        }
+        if self.request.route != "overview" {
+            self.snapshot.as_ref()?;
         }
         // The store follows the live Mac, so a window that opened a saved recording draws only
         // what its worker reads of it.
@@ -318,13 +386,18 @@ impl LiveDashboard {
 
     /// Whether `panel` is a chart the page drew from the store's View.
     pub(crate) fn store_view_draws(&self, panel: &Panel) -> bool {
+        let drawn = &self.store_panels;
+        if store_view_draws_app_chart(&self.request.route, &panel.id) {
+            if self.apps_drawn_store_view().is_none() {
+                return false;
+            }
+            return drawn.apps.iter().any(|drawn| drawn.id == panel.id);
+        }
         if self.drawn_store_view().is_none() {
             return false;
         }
 
-        let drawn = &self.store_panels;
-        let mut panels = drawn.panels.iter().chain(&drawn.apps);
-        panels.any(|drawn| drawn.id == panel.id)
+        drawn.panels.iter().any(|drawn| drawn.id == panel.id)
     }
 
     /// The index of the point the page's chart `panel`, drawn from the View, shows: the hovered
@@ -347,7 +420,7 @@ impl LiveDashboard {
     /// The history of `metric` the page reads: the one the page drew from the store's View,
     /// where it draws one, and otherwise the one the worker read.
     pub(crate) fn attribution_history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
-        if self.drawn_store_view().is_some() {
+        if self.apps_drawn_store_view().is_some() {
             if let Some(histories) = &self.store_panels.histories {
                 return histories.history(metric);
             }
@@ -359,7 +432,7 @@ impl LiveDashboard {
     /// The history of resident memory by App the page reads: the one the page drew from the
     /// store's View, where it draws one, and otherwise the one the worker read.
     pub(crate) fn resident_history(&self) -> Option<&ResidentHistory> {
-        if self.drawn_store_view().is_some() {
+        if self.apps_drawn_store_view().is_some() {
             if let Some(resident) = &self.store_panels.resident {
                 return Some(resident);
             }
@@ -751,19 +824,70 @@ fn draw_store_view_splice(panels: &mut [Rc<Panel>], drawn: &[Rc<Panel>]) {
     }
 }
 
-/// Puts `apps`, the charts by App the View draws, in place of the page's charts of resident
-/// memory and of `APP_METRICS`, so a chart the View leaves out is left out and its card says why.
-fn draw_store_view_splice_apps(panels: &mut Vec<Rc<Panel>>, apps: &[Rc<Panel>]) {
-    let drawn_by_app = |panel: &Rc<Panel>| {
-        if panel.id == crate::live_resident_history::PANEL_ID {
-            return true;
-        }
-        let metric = Metric::from_panel(&panel.id);
-        metric.is_some_and(|metric| APP_METRICS.contains(&metric))
-    };
+/// Puts those of `apps`, the charts by App the View draws, that the page `route` shows in place of
+/// the page's own, so a chart the View leaves out is left out and its card says why.
+fn draw_store_view_splice_apps(route: &str, panels: &mut Vec<Rc<Panel>>, apps: &[Rc<Panel>]) {
+    let shown = |panel: &&Rc<Panel>| store_view_draws_app_chart(route, &panel.id);
 
-    panels.retain(|panel| !drawn_by_app(panel));
-    panels.extend(apps.iter().map(Rc::clone));
+    panels.retain(|panel| !shown(&panel));
+    panels.extend(apps.iter().filter(shown).map(Rc::clone));
+}
+
+/// Whether the page `route` draws its chart `id` by App from the store's View: Overview its
+/// charts by App of resident memory and of `APP_METRICS`, and the Memory, CPU, Energy and Storage
+/// pages the one of them each shows.
+fn store_view_draws_app_chart(route: &str, id: &str) -> bool {
+    if id == crate::live_resident_history::PANEL_ID {
+        return matches!(route, "overview" | "memory");
+    }
+    let Some(metric) = Metric::from_panel(id) else {
+        return false;
+    };
+    if !APP_METRICS.contains(&metric) {
+        return false;
+    }
+    if route == "overview" {
+        return true;
+    }
+
+    Metric::from_route(route) == Some(metric)
+}
+
+/// Whether the page `route` draws any chart by App from the store's View.
+fn store_view_draws_apps(route: &str) -> bool {
+    let rates = APP_METRICS.iter().map(|metric| metric.panel_id());
+    let mut ids = rates.chain([crate::live_resident_history::PANEL_ID]);
+
+    ids.any(|id| store_view_draws_app_chart(route, id))
+}
+
+/// The charts by App of `view`, which draw on lines of their own the Apps `cohorts` chose for
+/// each over the wall seconds `chosen_over` and take the points of the seconds they share with
+/// `older`, under the titles a page other than Overview gives them.
+fn draw_store_view_panels_apps(
+    view: &View,
+    older: OlderAppCharts,
+    cohorts: &Cohorts,
+    chosen_over: WallSeconds,
+) -> StorePanels {
+    let histories = draw_store_view_panels_histories(view, cohorts, older.histories);
+    let resident = match older.resident {
+        Some(older) => ResidentHistory::from_view_after(view, cohorts, older),
+        None => ResidentHistory::from_view(view, cohorts),
+    };
+    let rates = APP_METRICS
+        .iter()
+        .filter_map(|metric| histories.history(*metric)?.panel());
+    let apps = resident.panel().into_iter().chain(rates).collect();
+
+    StorePanels {
+        version: Some(view.version),
+        chosen_over: Some(chosen_over),
+        apps,
+        histories: Some(histories),
+        resident: Some(resident),
+        ..StorePanels::default()
+    }
 }
 
 /// Reports why the store reads less than it should, once each time the reason changes.
