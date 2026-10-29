@@ -559,7 +559,7 @@ impl AppHoverDriver {
     /// next page of Apps.
     fn answer_held_read_with_more_apps(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            let generation = dashboard.hold.as_ref().unwrap().reading.generation.unwrap();
+            let generation = dashboard.held_read_generation().unwrap();
             let mut snapshot = AppEpoch::Historical.snapshot(generation);
             let apps = snapshot.apps.as_mut().unwrap().legacy_mut().unwrap();
             apps["page"]["total"] = json!(513);

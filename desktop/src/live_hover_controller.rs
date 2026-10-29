@@ -139,7 +139,7 @@ impl LiveDashboard {
         self.hover_ended(&preview);
         // The page holds the reply to its request unless the hover kept that reply from it. A
         // page that holds a second reads nothing, and shows the held second again.
-        if preview.page_reply_kept && self.hold.is_none() {
+        if preview.page_reply_kept && !self.holds_second() {
             self.request_reading();
         }
         // The page's readings still show the second it showed before it selected another.

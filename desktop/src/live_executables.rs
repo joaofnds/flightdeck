@@ -409,7 +409,7 @@ impl LiveDashboard {
             self.link_target(&target);
             // While a second is held, the page keeps its readings and charts and reads the
             // executable's processes as a pick with no hover shown does.
-            if self.hold.is_none() {
+            if !self.holds_second() {
                 self.submit();
                 return;
             }

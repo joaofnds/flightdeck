@@ -661,7 +661,7 @@ impl LiveDashboard {
         }
         // A held second keeps the window the charts were drawn in, so a step stops at its edges
         // rather than showing a second off the charts.
-        if self.hold.is_some() {
+        if self.holds_second() {
             let window = self.view_window();
             if window.and_then(|window| window.fraction_of(next)).is_none() {
                 return;

@@ -196,8 +196,9 @@ pub struct LiveDashboard {
     /// Whether the selected second is pinned, which the end of a hover then shows again.
     pub(crate) pinning: Pinning,
     /// The second of the live Mac the page holds over the readings and the charts it showed
-    /// when it was held, while it holds one.
-    pub(crate) hold: Option<hold::Hold>,
+    /// when it was held, while it holds one. It stays private to the page, which lets go of it
+    /// only together with the store's View the hold keeps parked.
+    hold: Option<hold::Hold>,
 }
 
 pub(crate) struct WindowState {
@@ -1223,9 +1224,7 @@ impl LiveDashboard {
     /// shows it from them at once, as an arrow step does. A page with nothing shown asks as any
     /// other request does.
     pub(crate) fn select(&mut self, cx: &mut Context<Self>) {
-        if self.hold.take().is_some() {
-            self.store_view_let_go();
-        }
+        self.hold_let_go();
         if self.snapshot.is_none() {
             self.submit();
             // A page with no readings yet draws what it kept of the View it let go of until the
@@ -1344,9 +1343,7 @@ impl LiveDashboard {
 
     /// Goes back to the whole history, following the newest second.
     pub(crate) fn reset_range(&mut self, cx: &mut Context<Self>) {
-        if self.hold.take().is_some() {
-            self.store_view_let_go();
-        }
+        self.hold_let_go();
         let held = self.request.second.take().is_some();
         if held {
             self.request.identity = None;

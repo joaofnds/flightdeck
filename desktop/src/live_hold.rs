@@ -303,6 +303,36 @@ impl LiveDashboard {
             .or(self.hold.as_ref().map(|hold| &hold.reading))
     }
 
+    /// Whether the page holds a second of the live Mac.
+    pub(crate) fn holds_second(&self) -> bool {
+        self.hold.is_some()
+    }
+
+    /// Lets go of the held second and of the store's View the hold kept parked, keeping a record
+    /// of that View's newest second for the page to draw from until the store's next View. Every
+    /// way out of a hold that stays on the live Mac lets go here, since a View the page keeps
+    /// pins the buffers the Store needs to catch up.
+    pub(super) fn hold_let_go(&mut self) {
+        if self.hold.take().is_none() {
+            return;
+        }
+
+        self.store_view_let_go();
+    }
+
+    /// Lets go of the held second and of every View the page kept, as opening a recording does,
+    /// since that page draws nothing from the store.
+    pub(crate) fn hold_drop(&mut self) {
+        self.hold = None;
+        self.store_view_drop();
+    }
+
+    /// The generation of the hold's read of its second, while one is out or was answered.
+    #[cfg(test)]
+    pub(crate) fn held_read_generation(&self) -> Option<u64> {
+        self.hold.as_ref()?.reading.generation
+    }
+
     /// Whether the reader still reads the held second, which a read of any other would cancel.
     pub(crate) fn hold_reading(&self) -> bool {
         self.hold
