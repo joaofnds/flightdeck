@@ -85,12 +85,6 @@ impl Range {
         }
     }
 
-    /// The minutes the range covers, counting a part minute as a whole one.
-    #[must_use]
-    pub fn whole_minutes(self, anchor: Anchor) -> u64 {
-        self.window(anchor).span.div_ceil(60)
-    }
-
     /// The seconds the range covers, clipped to what the page holds.
     #[must_use]
     pub fn window(self, anchor: Anchor) -> TimeWindow {
@@ -149,6 +143,12 @@ impl Range {
             span: last - first + 1,
         }
     }
+}
+
+/// The minutes `window` covers, counting a part minute as a whole one.
+#[must_use]
+pub fn whole_minutes(window: TimeWindow) -> u64 {
+    window.span.div_ceil(60)
 }
 
 /// The `seconds` around the selected second, which end at it while it is the newest the page
@@ -745,14 +745,14 @@ mod tests {
     fn the_minutes_shown_round_up_to_a_whole_minute() {
         // Goal: the custom stepper starts from the minutes the charts now show.
         // Method: read the minutes of each kind of range.
-        assert_eq!(Range::History.whole_minutes(newest(2000)), 15);
-        assert_eq!(Range::Last(300).whole_minutes(newest(2000)), 5);
-        assert_eq!(Range::Last(90).whole_minutes(newest(2000)), 2);
-        assert_eq!(Range::Last(3600).whole_minutes(newest(5000)), 60);
+        assert_eq!(whole_minutes(Range::History.window(newest(2000))), 15);
+        assert_eq!(whole_minutes(Range::Last(300).window(newest(2000))), 5);
+        assert_eq!(whole_minutes(Range::Last(90).window(newest(2000))), 2);
+        assert_eq!(whole_minutes(Range::Last(3600).window(newest(5000))), 60);
         let stretch = Range::Between {
             first: 1800,
             last: 1859,
         };
-        assert_eq!(stretch.whole_minutes(newest(2000)), 1);
+        assert_eq!(whole_minutes(stretch.window(newest(2000))), 1);
     }
 }

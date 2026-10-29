@@ -87,7 +87,7 @@ impl LiveDashboard {
     }
 
     fn custom_range(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let minutes = self.range.whole_minutes(self.picker_anchor());
+        let minutes = crate::time_range::whole_minutes(self.picker_window());
         div()
             .flex()
             .items_center()
@@ -138,6 +138,13 @@ impl LiveDashboard {
                 this.set_range(Range::minutes(minutes.max(1)), cx);
             }))
             .child(glyph)
+    }
+
+    /// The seconds the picker reads, the charts' own, or the range laid against second 0 until
+    /// the page has a reading.
+    fn picker_window(&self) -> crate::chart_axes::TimeWindow {
+        self.view_window()
+            .unwrap_or_else(|| self.range.window(self.picker_anchor()))
     }
 
     /// What the picker lays the range against, which is second 0 until the page has a reading.

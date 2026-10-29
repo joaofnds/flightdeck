@@ -111,7 +111,7 @@ impl InputDriver {
         })
     }
 
-    fn click_control(&mut self, selector: &'static str) {
+    pub(super) fn click_control(&mut self, selector: &'static str) {
         let bounds = super::menu_control_bounds(&mut self.context, selector);
         self.context
             .simulate_click(bounds.center(), Modifiers::none());

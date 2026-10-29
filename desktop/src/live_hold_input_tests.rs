@@ -701,6 +701,34 @@ fn a_range_picked_after_a_second_click_is_laid_against_the_second_held_last(
 }
 
 #[gpui::test]
+fn the_custom_stepper_while_a_second_is_held_steps_from_the_minutes_the_charts_show(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the range menu's Custom minutes step from the window the charts show while a second
+    // is held, which a window laid around the held second would cut at the loaded hour's oldest
+    // second. Method: Overview over the View of the hour at the last 60 minutes, a click 3,500
+    // seconds before the newest on its CPU chart, Custom's minus, then the page's window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.show_range(Range::Last(3_600));
+    harness
+        .driver
+        .hover_second_on("live-cpu-plot", HOUR_NEWEST - 3_500);
+    harness
+        .driver
+        .click_second_on("live-cpu-plot", HOUR_NEWEST - 3_500);
+
+    harness.driver.click_control("time-custom-less");
+
+    let fifty_nine_minutes = TimeWindow {
+        first: HOUR_NEWEST - 3_539,
+        span: 3_540,
+    };
+    assert_eq!(harness.driver.view_window(), Some(fifty_nine_minutes));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_rank_link_while_a_second_is_held_holds_the_second_it_names(cx: &mut TestAppContext) {
     // Goal: a rank link of a second the page shows over a held one opens the App's page holding
     // the second the link names, in the window the charts were drawn in, rather than marking
