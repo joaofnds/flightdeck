@@ -1540,19 +1540,20 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    /// Runs the page's step for a window macOS hid, which rests the reader.
+    /// Reports the window hidden as macOS does, then runs the page's step for it, which rests
+    /// the reader.
     fn hide_window(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.presence = crate::live_dashboard::Presence::Hiding;
+            dashboard.observe_visibility_callback(false, cx);
             dashboard.tick_presence(cx);
         });
         self.context.run_until_parked();
     }
 
-    /// Runs the page's step for a window macOS shows again.
+    /// Reports the window shown again as macOS does, then runs the page's step for it.
     fn show_window(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.presence = crate::live_dashboard::Presence::Showing;
+            dashboard.observe_visibility_callback(true, cx);
             dashboard.tick_presence(cx);
         });
         self.context.run_until_parked();

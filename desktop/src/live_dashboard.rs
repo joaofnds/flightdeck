@@ -52,30 +52,34 @@ pub(crate) fn observe_visibility(
         }
 
         cx.observe_window_visibility(window, |dashboard, visibility, _, cx| {
-            #[cfg(feature = "automation")]
-            if visibility.is_visible() {
-                let version = dashboard.resume_store_version();
-                dashboard
-                    .resume_metrics
-                    .begin(&crate::live_resume_metrics::Checkpoint {
-                        generation: dashboard.generation,
-                        store_version: version,
-                        requests: dashboard.worker.requests_submitted(),
-                        fresh: crate::live_resume_metrics::Fresh::Reading,
-                    });
-            }
-            store_view::set_store_active(
-                visibility.is_visible() && dashboard.follows_live_mac(),
-                cx,
-            );
-            if !visibility.is_visible() {
-                dashboard.store_view_hide();
-            }
-            dashboard.presence = dashboard.presence.reported(visibility.is_visible());
-            cx.notify();
+            dashboard.observe_visibility_callback(visibility.is_visible(), cx);
         })
         .detach();
     });
+}
+
+impl LiveDashboard {
+    /// Takes macOS's report that the window was shown, where `visible`, or hidden, which the
+    /// page's next tick acts on.
+    pub(crate) fn observe_visibility_callback(&mut self, visible: bool, cx: &mut Context<Self>) {
+        #[cfg(feature = "automation")]
+        if visible {
+            let version = self.resume_store_version();
+            self.resume_metrics
+                .begin(&crate::live_resume_metrics::Checkpoint {
+                    generation: self.generation,
+                    store_version: version,
+                    requests: self.worker.requests_submitted(),
+                    fresh: crate::live_resume_metrics::Fresh::Reading,
+                });
+        }
+        store_view::set_store_active(visible && self.follows_live_mac(), cx);
+        if !visible {
+            self.store_view_hide();
+        }
+        self.presence = self.presence.reported(visible);
+        cx.notify();
+    }
 }
 
 /// A picker on the Apps page whose choices show below it. One shows at a time.
