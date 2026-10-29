@@ -465,12 +465,12 @@ impl LiveDashboard {
             .map(|value| &**value)
     }
 
-    /// The second the page's readings show: the hovered one, or the newest, of the View the page
-    /// draws, where it draws one, and otherwise the second the worker's reading, or a hover's,
-    /// selected.
+    /// The second the page's readings show: the hovered or held one, or the newest, of the View
+    /// the page draws, where it draws one, and otherwise the second the worker's reading, or a
+    /// hover's, selected.
     pub(crate) fn shown_second(&self) -> Option<u64> {
         if let Some(second) = self.store_view_last_second() {
-            if let Some(preview) = &self.preview {
+            if let Some(preview) = self.shown_preview() {
                 return Some(preview.target.second);
             }
             return Some(second);
@@ -493,11 +493,12 @@ impl LiveDashboard {
     }
 
     /// The top Apps of the second the View the page draws shows, and that second: the one it
-    /// held for the shown hover, or its newest while no hover is shown. None where the View holds
-    /// no Apps of the hovered second, and where the page draws from the worker's readings.
+    /// held for the shown hover or the held second, or its newest while neither is shown. None
+    /// where the View holds no Apps of the second shown, and where the page draws from the
+    /// worker's readings.
     pub(crate) fn store_view_rankings(&self) -> Option<(&Rankings, u64)> {
         let second = self.store_view_last_second()?;
-        if let Some(preview) = &self.preview {
+        if let Some(preview) = self.shown_preview() {
             let held = preview.held.as_ref()?;
             return Some((held.rankings.as_ref()?, preview.target.second));
         }
@@ -521,17 +522,16 @@ impl LiveDashboard {
         Some(store_view_utilization_of(self.store_view_shown()?))
     }
 
-    /// The second the View the page draws shows: the one it held for the shown hover, or its
-    /// newest while no hover is shown. None in a gap, and where the page draws from the
-    /// worker's readings.
+    /// The second the View the page draws shows: the one it held for the shown hover or the held
+    /// second, or its newest while neither is shown. None in a gap, and where the page draws from
+    /// the worker's readings.
     fn store_view_shown(&self) -> Option<&MachineSecond> {
         let view = self.drawn_store_view()?;
-        let hovered = self
-            .preview
-            .as_ref()
+        let shown = self
+            .shown_preview()
             .and_then(|preview| preview.held.as_ref());
 
-        match hovered {
+        match shown {
             Some(held) => held.second.as_deref(),
             None => view.seconds.last().map(AsRef::as_ref),
         }

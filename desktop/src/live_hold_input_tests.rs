@@ -12,7 +12,8 @@ use crate::live_hover::Preview;
 use crate::live_source::Update;
 use crate::live_store_app_fixtures::{HOUR_NEWEST, hour};
 use crate::live_store_fixtures::{reading_at, trend_point};
-use crate::live_store_page_fixtures::readings;
+use crate::live_store_page_fixtures::{readings, summary_selection, texts};
+use crate::live_views::summary;
 use crate::time_range::Range;
 
 /// The second the tests hold, 800 seconds before the newest, inside the newest fifteen minutes
@@ -147,6 +148,32 @@ fn a_page_opened_while_a_second_is_held_reads_the_context_the_charts_were_drawn_
         harness.driver.reader_asked_second(),
         Some(HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS)
     );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn leaving_overviews_chart_after_a_click_shows_the_held_second_on_the_readouts(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Overview's readouts, which the store's View draws, show the held second once the
+    // pointer leaves the chart, rather than the View's newest second. Method: click 800 seconds
+    // before the newest on Overview's CPU chart by App, move the pointer off it, then the text of
+    // each summary readout against those of the held second's readings, the second the top Apps
+    // read, and the second the CPU chart reads.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Top);
+    harness.driver.context.run_until_parked();
+
+    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    assert_eq!(harness.driver.ranked_second(), HELD);
+    assert_eq!(harness.driver.cpu_shown_second(), Some(HELD));
     harness.teardown();
 }
 
@@ -429,6 +456,13 @@ impl InputDriver {
         let (_, reading) = self.chart_accessibility_reading("live-cpu-apps");
 
         reading.splitn(3, "; ").nth(2).unwrap().to_owned()
+    }
+
+    /// The second the page's top Apps read.
+    fn ranked_second(&self) -> u64 {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.ranking_reading().unwrap().1.second
+        })
     }
 
     /// How many commands the window has sent the reader.

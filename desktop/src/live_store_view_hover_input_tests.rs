@@ -783,7 +783,7 @@ impl InputDriver {
     }
 
     /// The label, reading, note and colour of each of the readouts the page shows.
-    fn readout_texts(&self) -> Vec<(String, String, String, u32)> {
+    pub(super) fn readout_texts(&self) -> Vec<(String, String, String, u32)> {
         self.view.read_with(&self.context, |dashboard, _| {
             texts(&dashboard.summary_cards())
         })
