@@ -10,7 +10,7 @@ use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
 use crate::hardware::Readings;
 use crate::live_rankings::{Rankings, TopApps, from_selected};
-use crate::live_source::Worker;
+use crate::live_source::{Update, Worker};
 use crate::live_store_app_fixtures::{apps_at, hour};
 use crate::live_store_fixtures::{reading_at, trend_point, view};
 use crate::live_store_page_fixtures::{
@@ -276,6 +276,77 @@ fn hovering_the_older_part_of_the_hour_shows_each_apps_mean_over_its_stretch(
 }
 
 #[gpui::test]
+fn hovering_the_older_part_of_the_hour_on_the_cpu_page_shows_each_apps_mean_over_its_stretch(
+    cx: &mut TestAppContext,
+) {
+    // Goal: on a page other than Overview, a hover over the older part of its chart by App shows
+    // what each App used over the ten seconds its point stands for, as on Overview. Method: as
+    // for Overview, on the CPU page, whose other charts are the worker's.
+    let (view, _) = hour();
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_store_view(view);
+    harness.driver.show_range(Range::Last(3_600));
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+
+    harness
+        .driver
+        .hover_held_second_on("live-cpu-apps-plot", 9_005);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-cpu-apps:1:A:25%")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_a_recent_second_on_the_cpu_page_reads_the_workers_chart_there(cx: &mut TestAppContext) {
+    // Goal: on a page that draws only its charts by App from the View, a hover names the second
+    // as the View holds it and the worker's charts still find their reading of it. Method: the
+    // CPU page over the View of the hour, a minute's range, and the pointer on 9,999 of the
+    // worker's CPU chart, which the worker and the View both read, 99.5% busy.
+    let (view, _) = hour();
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_store_view(view);
+    harness.driver.show_range(Range::Last(60));
+
+    harness.driver.hover_held_second(9_999);
+
+    assert!(harness.driver.cpu_reading().ends_with("; 99.5%"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_page_reply_during_a_hover_on_the_cpu_page_keeps_its_chart_by_app_from_the_view(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the page's own reply, which a hover takes while the page waits on its App histories,
+    // leaves the chart by App drawn from the View under the pointer. Method: the CPU page waits
+    // on its histories, a hover rests on the older part of the hour, then the worker's reply
+    // brings the histories.
+    let (view, _) = hour();
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_store_view_waiting_on_histories(view);
+    harness.driver.show_range(Range::Last(3_600));
+    harness
+        .driver
+        .hover_held_second_on("live-cpu-apps-plot", 9_005);
+
+    harness.driver.deliver_page_histories();
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-cpu-apps:1:A:25%")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn hovering_the_older_part_of_the_hour_shows_each_apps_mean_resident_memory_over_its_stretch(
     cx: &mut TestAppContext,
 ) {
@@ -285,6 +356,34 @@ fn hovering_the_older_part_of_the_hour_shows_each_apps_mean_resident_memory_over
     // the nine seconds after it, 250 MB or 238 MiB over the stretch, and the pointer on 9,005.
     let (view, _) = hour();
     let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_store_view(view);
+    harness.driver.show_range(Range::Last(3_600));
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+
+    harness
+        .driver
+        .hover_held_second_on("live-memory-app-resident-plot", 9_005);
+
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("chart-tooltip-row:live-memory-app-resident:1:A:238 MiB")
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn hovering_the_older_part_of_the_hour_on_the_memory_page_shows_each_apps_mean_resident_memory(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the Memory page's chart of resident memory by App shows, at a hover over its older
+    // part, the mean each App held over the ten seconds its point stands for, as Overview's does.
+    // Method: as for Overview, on the Memory page.
+    let (view, _) = hour();
+    let mut harness = InputHarness::open_route(cx, "memory");
     harness.driver.show_store_view(view);
     harness.driver.show_range(Range::Last(3_600));
     harness
@@ -572,6 +671,33 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
+    /// Shows the page drawn from `view` over the worker's readings of 9,999 and 10,000, which
+    /// wait on their App histories.
+    fn show_store_view_waiting_on_histories(&mut self, view: View) {
+        let mut snapshot = readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        snapshot.histories_pending = true;
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.accept(snapshot);
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            assert!(dashboard.take_view(Arc::new(view)));
+            cx.notify();
+        });
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
+        self.context.run_until_parked();
+    }
+
+    /// Delivers the worker's reply to the page's request, which brings its App histories.
+    fn deliver_page_histories(&mut self) {
+        let mut snapshot = readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+        self.view.update(&mut self.context, |dashboard, cx| {
+            snapshot.generation = dashboard.generation;
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     /// Hands the page the store's View of `newer_seconds`, as the store does each tick.
     fn take_newer_view(&mut self) {
         let seconds = newer_seconds();
@@ -595,6 +721,11 @@ impl InputDriver {
     /// The second the CPU chart shows, as macOS's accessibility reads it.
     fn cpu_shown_second(&self) -> Option<u64> {
         self.chart_accessibility_reading("live-cpu").0
+    }
+
+    /// What the CPU chart reads at the second it shows.
+    fn cpu_reading(&self) -> String {
+        self.chart_accessibility_reading("live-cpu").1
     }
 
     /// Moves the pointer off the CPU chart, which ends its hover.

@@ -181,13 +181,9 @@ impl LiveDashboard {
     }
 
     /// Puts the page's chart by App drawn from the store's View in place of the worker's, on a
-    /// page other than Overview that draws one from it, drawing the charts once for each View,
+    /// page other than Overview that draws one from it, drawing the charts once for each View
     /// while no hover holds the page still. Answers whether it put the chart in place.
     fn draw_store_view_apps(&mut self) -> bool {
-        // A hover holds the charts where the pointer found them until it ends.
-        if self.preview.is_some() {
-            return false;
-        }
         let Some(version) = self.apps_followed_store_view().map(|view| view.version) else {
             return false;
         };
@@ -200,7 +196,13 @@ impl LiveDashboard {
         };
 
         let drawn = &self.store_panels;
-        if drawn.version != Some(version)
+        if self.preview.is_some() {
+            // A hover holds the charts where the pointer found them until it ends, so a reply
+            // of the page's own that it takes gets back the charts drawn before it.
+            if drawn.overview || drawn.version.is_none() {
+                return false;
+            }
+        } else if drawn.version != Some(version)
             || drawn.chosen_over != Some(chosen_over)
             || drawn.overview
         {
@@ -535,9 +537,9 @@ impl LiveDashboard {
     }
 
     /// The second whose point the charts of the store's View draw for a hover of `second`, or
-    /// none where they draw no point for it or the page draws from the worker's readings.
+    /// none where they draw no point for it or the page draws no chart from the View.
     pub(crate) fn store_view_point_second(&self, second: u64) -> Option<u64> {
-        let view = self.followed_store_view()?;
+        let view = self.apps_followed_store_view()?;
 
         match crate::live_projection::overview_point_second(view, second) {
             Ok(shown) => shown,
@@ -548,13 +550,13 @@ impl LiveDashboard {
         }
     }
 
-    /// The hover of `second` on the page drawn from the store's View, naming the tick the View
-    /// holds of it, so the charts by App find that tick as they find any they draw. A second of
-    /// the older tail the View sampled no tick of names the tick of the stretch that starts
-    /// there, which the charts by App draw at it. None where the View holds no identity of
-    /// `second`, as in a gap, and where the page draws from the worker's readings.
+    /// The hover of `second` on a page that draws charts from the store's View, naming the tick
+    /// the View holds of it, so the charts by App find that tick as they find any they draw. A
+    /// second of the older tail the View sampled no tick of names the tick of the stretch that
+    /// starts there, which the charts by App draw at it. None where the View holds no identity
+    /// of `second`, as in a gap, and where the page draws no chart from the View.
     pub(crate) fn store_view_target(&self, second: u64) -> Option<Target> {
-        let view = self.followed_store_view()?;
+        let view = self.apps_followed_store_view()?;
         let at_second = |held: &Arc<MachineSecond>| held.wall_ns / NANOSECONDS_PER_SECOND == second;
 
         assert_eq!(view.apps.len(), view.seconds.len());
