@@ -1,3 +1,6 @@
+use std::io::{BufRead, BufReader, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
+
 use super::super::{INSTALLED, REPORTER, error, exit, stdout_group};
 use super::*;
 
@@ -6,6 +9,10 @@ struct ShortWriter {
     interruptions: u8,
     calls: u32,
 }
+
+const F_GETFL: i32 = 3;
+const F_SETFL: i32 = 4;
+const O_NONBLOCK: i32 = 4;
 
 #[test]
 fn completes_partial_writes_after_a_bounded_number_of_interruptions() {
@@ -112,6 +119,67 @@ fn disables_reporting_when_the_writer_thread_cannot_start() {
             exit(super::super::tests::COMPLETED);
         },
     );
+}
+
+#[test]
+fn delivers_a_group_admitted_after_an_empty_take_before_exit() {
+    // Goal: a group admitted before exit is written even when the writer last found no group.
+    // Method: hold the writer on a full stderr after its empty take, then admit, stop and release.
+    super::super::tests::supervised(
+        "diagnostics::writer::tests::delivers_a_group_admitted_after_an_empty_take_before_exit",
+        || {
+            let reporter = Reporter::new();
+            let (stdout, stdout_writer) = io::pipe().unwrap();
+            let mut stdout = BufReader::new(stdout);
+            let (mut stderr, stderr_writer) = full_pipe();
+            reporter.loss[0].queue_full.store(1, Ordering::Relaxed);
+            reporter.loss[1].queue_full.store(1, Ordering::Relaxed);
+            let mut group = Box::new(Group::empty());
+            group.write_all(b"closing report\n").unwrap();
+            let mut summary = String::new();
+            let mut drained = Vec::new();
+            let mut delivered = String::new();
+
+            std::thread::scope(|scope| {
+                let streams = [
+                    Some(File::from(OwnedFd::from(stdout_writer))),
+                    Some(stderr_writer),
+                ];
+                let writer = scope.spawn(|| run(&reporter, streams, Box::new(Group::empty())));
+                assert!(reporter.thread.set(writer.thread().clone()).is_ok());
+                // The stdout summary comes from the idle branch, so the take before it was empty.
+                stdout.read_line(&mut summary).unwrap();
+                reporter.admit(Stream::Stdout, &group);
+                reporter.stopping.store(true, Ordering::Release);
+                reporter.notify();
+                stderr.read_to_end(&mut drained).unwrap();
+            });
+            stdout.read_to_string(&mut delivered).unwrap();
+
+            assert_eq!("closing report\n", delivered);
+        },
+    );
+}
+
+fn full_pipe() -> (io::PipeReader, File) {
+    let (reader, writer) = io::pipe().unwrap();
+    let mut writer = File::from(OwnedFd::from(writer));
+    let descriptor = writer.as_raw_fd();
+    let flags = unsafe { fcntl(descriptor, F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(0, unsafe { fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) });
+
+    let refused = (0..1_024)
+        .map(|_write| writer.write(&[b'f'; 4_096]))
+        .find(io::Result::is_err);
+
+    assert_eq!(
+        Some(io::ErrorKind::WouldBlock),
+        refused.map(|result| result.unwrap_err().kind())
+    );
+    assert_eq!(0, unsafe { fcntl(descriptor, F_SETFL, flags) });
+
+    (reader, writer)
 }
 
 impl Write for ShortWriter {
