@@ -258,15 +258,17 @@ executables have the SHA-256 identities
 `7fd29af824e30bc5d0302cf2790e8239706ecf4965589607a4db66f93d45a098` for `d9391c3` and
 `120c25f4b488562edee23c6fa8a4acc27643d51aab4def7394fa48aac2583cad` for the base.
 
-The Store reserves the stretches when it starts: 375 buffers of 2,048 rows of 152 bytes,
-116.7 MB (111.3 MiB) whatever the hour holds, which a page holds in RAM only once a stretch
-writes to it. `vmmap -summary` of one process of each, once it held every App, counted
+The Store reserves the stretches when it starts: 375 buffers of 2,048 rows, whatever the hour
+holds, which a page holds in RAM only once a stretch writes to it. A row took 152 bytes when
+this was measured, 116.7 MB (111.3 MiB) in all. Since each row adds up GPU time too it takes
+184 bytes, so the reservation is 141.3 MB (134.8 MiB), which this pair did not measure.
+`vmmap -summary` of one process of each, once it held every App, counted
 327.7 MiB allocated in malloc zones for this revision against 198.0 MiB for the base. Of the
 difference, 43 MiB more sat in malloc regions holding live data and 59 MiB more in freed
 regions that stay dirty, and an earlier pair put the freed difference at 88 MiB. The live
 difference is above the 19 MB the stretches were estimated at when they were chosen. The
-reservation is close to the 135 MB that holding every App at every second of the hour
-would take, and the stretches reach it only if each holds 2,048 Apps.
+reservation is above the 135 MB that holding every App at every second of the hour would take
+at 461 Apps a second, and the stretches fill it only if each holds 2,048 Apps.
 
 ## Profiling and reproduction
 

@@ -18,18 +18,18 @@ use collector::ring::RunIdentity;
 /// says so.
 const STRETCH_APPS_MAX: usize = APPS_PER_SECOND_MAX;
 
-/// The resources an App uses at a rate that Overview draws an App chart of, in the order a
+/// The resources an App uses at a rate that the pages draw an App chart of, in the order a
 /// stretch adds them up.
-const RATES: [Metric; 3] = [Metric::Cpu, Metric::Power, Metric::Disk];
+const RATES: [Metric; 4] = [Metric::Cpu, Metric::Power, Metric::Disk, Metric::Gpu];
 
 const _: () = {
-    assert!(size_of::<StretchRow>() <= 152);
+    assert!(size_of::<StretchRow>() <= 184);
 };
 
 /// Where `metric`, a rate a stretch adds up, stands among `RATES`.
 fn rate_place(metric: Metric) -> usize {
     let Some(place) = RATES.iter().position(|rate| *rate == metric) else {
-        unreachable!("a stretch adds up no GPU time, and resident memory is not a rate");
+        unreachable!("resident memory is not a rate");
     };
     place
 }
@@ -672,7 +672,7 @@ impl<R: PointRow> key_order::HeldRow<R> for StretchRow {
 }
 
 impl Rankable for StretchRow {
-    /// What the App used of `metric`, a resource Overview draws an App chart of, over the
+    /// What the App used of `metric`, a resource a page draws an App chart of, over the
     /// stretch, which a chart takes over the stretch's interval, and its resident memory over the
     /// stretch's seconds.
     fn measure(&self, metric: Metric) -> Measure {

@@ -1,4 +1,4 @@
-//! What each second shows on Overview's App charts: the reading of each App a chart draws on a
+//! What each second shows on the App charts drawn from a View: the reading of each App a chart draws on a
 //! line of its own, and the other Apps added up as Other, as the worker's App histories show
 //! them.
 
@@ -9,11 +9,12 @@ use crate::app_attribution_history::AppAttributionMetric;
 use crate::live::resident_history::has_resident;
 use crate::live_app_response::{Measure, Metric, Rankable, RankedApp};
 
-/// The resources Overview draws an App chart of, in the order the store adds them up.
-pub(super) const METRICS: [AppAttributionMetric; 3] = [
+/// The resources the pages draw an App chart of at a rate, in the order the store adds them up.
+pub(super) const METRICS: [AppAttributionMetric; 4] = [
     AppAttributionMetric::Cpu,
     AppAttributionMetric::Power,
     AppAttributionMetric::Disk,
+    AppAttributionMetric::Gpu,
 ];
 
 /// The Apps a chart draws on lines of their own, as the worker's App histories choose them.
@@ -24,7 +25,7 @@ pub const COHORT_MAX: usize = 8;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Totals {
     /// Each of `METRICS` added up over the second's Apps, in their order.
-    sums: [Sum; 3],
+    sums: [Sum; METRICS.len()],
     /// The Apps whose members the App rule did not all find.
     incomplete: u32,
     /// The resident memory of the Apps that hold a reading of it, added up.
@@ -44,7 +45,7 @@ struct Sum {
     overflowed: u32,
 }
 
-/// What one second shows on one of Overview's App charts.
+/// What one second shows on one of the App charts drawn from a View.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Attribution {
     /// The reading of each App the chart draws on a line of its own, in the cohort's order,
@@ -73,7 +74,7 @@ pub struct OtherReading {
     pub reading: AttributionReading,
 }
 
-/// What one second shows on Overview's chart of resident memory by App.
+/// What one second shows on the chart of resident memory by App drawn from a View.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Resident {
     /// The resident memory of each App the chart draws on a line of its own, in the cohort's
@@ -270,7 +271,7 @@ pub(super) fn attribution<P: PointApps>(
 ) -> Attribution {
     assert!(cohort.len() <= COHORT_MAX);
     let Some(place) = METRICS.iter().position(|each| *each == metric) else {
-        unreachable!("Overview draws no App chart of GPU time");
+        unreachable!("the store adds up every resource an App chart draws at a rate");
     };
 
     let mut attribution = Attribution {

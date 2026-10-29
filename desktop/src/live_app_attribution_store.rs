@@ -30,9 +30,7 @@ impl History {
         if cohorts.refused {
             return Err("App rate history holds more Apps than it adds up".into());
         }
-        let Some(cohort) = cohorts.of(metric.source()) else {
-            unreachable!("Overview draws no App chart of GPU time");
-        };
+        let cohort = cohorts.of(metric.source());
         assert_eq!(view.apps.len(), view.seconds.len());
         assert!(cohorts.seconds <= view.seconds.len());
         if cohorts.seconds == 0 {

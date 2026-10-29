@@ -1,4 +1,4 @@
-//! The Apps each of Overview's App charts draws on a line of its own over a window of wall
+//! The Apps each App chart drawn from a View draws on a line of its own over a window of wall
 //! seconds, chosen from what a View holds: each stretch that lies wholly in the window, and each
 //! other second of the window one by one.
 
@@ -31,7 +31,7 @@ const _: () = {
     assert!(SECONDS_MAX + STRETCHES_MAX * 10 < 4_294_967_295);
 };
 
-/// The Apps each of Overview's App charts draws on a line of its own, chosen over the seconds
+/// The Apps each App chart drawn from a View draws on a line of its own, chosen over the seconds
 /// the charts draw, as the worker's App histories choose their cohorts.
 #[derive(Debug, Default, PartialEq)]
 pub struct Cohorts {
@@ -45,6 +45,8 @@ pub struct Cohorts {
     /// The Apps that read and wrote the most bytes over those seconds, at most eight, the most
     /// first.
     pub disk: Vec<Arc<RankedApp>>,
+    /// The Apps that used the most GPU time over those seconds, at most eight, the most first.
+    pub gpu: Vec<Arc<RankedApp>>,
     /// The Apps that held the most resident memory over the seconds that measured it, on
     /// average, at most eight, the most first.
     pub resident: Vec<Arc<RankedApp>>,
@@ -61,19 +63,20 @@ impl Cohorts {
             cpu: Vec::with_capacity(COHORT_MAX),
             power: Vec::with_capacity(COHORT_MAX),
             disk: Vec::with_capacity(COHORT_MAX),
+            gpu: Vec::with_capacity(COHORT_MAX),
             resident: Vec::with_capacity(COHORT_MAX),
             refused: false,
         }
     }
 
-    /// The cohort of `metric`. Overview draws no App chart of GPU time.
+    /// The cohort of `metric`.
     #[must_use]
-    pub fn of(&self, metric: AppAttributionMetric) -> Option<&[Arc<RankedApp>]> {
+    pub fn of(&self, metric: AppAttributionMetric) -> &[Arc<RankedApp>] {
         match metric {
-            AppAttributionMetric::Cpu => Some(&self.cpu),
-            AppAttributionMetric::Power => Some(&self.power),
-            AppAttributionMetric::Disk => Some(&self.disk),
-            AppAttributionMetric::Gpu => None,
+            AppAttributionMetric::Cpu => &self.cpu,
+            AppAttributionMetric::Power => &self.power,
+            AppAttributionMetric::Disk => &self.disk,
+            AppAttributionMetric::Gpu => &self.gpu,
         }
     }
 
@@ -82,7 +85,7 @@ impl Cohorts {
             AppAttributionMetric::Cpu => &mut self.cpu,
             AppAttributionMetric::Power => &mut self.power,
             AppAttributionMetric::Disk => &mut self.disk,
-            AppAttributionMetric::Gpu => unreachable!("Overview draws no App chart of GPU time"),
+            AppAttributionMetric::Gpu => &mut self.gpu,
         }
     }
 }
@@ -105,7 +108,7 @@ pub struct Readings<'view> {
     pub stretches: &'view [Arc<AppsStretch>],
 }
 
-/// Room to choose the Apps of Overview's App charts in, which holds nothing between choices.
+/// Room to choose the Apps of the App charts in, which holds nothing between choices.
 pub struct Leaders {
     /// Every App of the window, in key order.
     entries: Vec<Entry>,
@@ -185,6 +188,7 @@ impl Leaders {
             &cohorts.cpu,
             &cohorts.power,
             &cohorts.disk,
+            &cohorts.gpu,
             &cohorts.resident,
         ] {
             assert!(cohort.capacity() >= COHORT_MAX);

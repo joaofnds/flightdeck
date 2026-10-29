@@ -1850,7 +1850,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
 
     fn shown_by_store_of(view: &View, metric: AppAttributionMetric) -> Vec<Attribution> {
         let cohorts = charted_cohorts(view);
-        let cohort = cohorts.of(metric).unwrap();
+        let cohort = cohorts.of(metric);
         let drawn = &view.apps[view.apps.len() - cohorts.seconds..];
 
         drawn
