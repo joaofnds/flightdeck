@@ -9,7 +9,7 @@ use super::range::cpu_by_app_lines_drawing;
 use super::store_view_hover::held_seconds;
 use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
-use crate::live_hover::Preview;
+use crate::live_hover::{Preview, Target};
 use crate::live_source::{Snapshot, Update};
 use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_led_from_its_older_part, hour_until};
 use crate::live_store_fixtures::{reading_at, trend_point};
@@ -1774,14 +1774,19 @@ impl InputDriver {
         self.second_position(plot, window.fraction_of(second).unwrap())
     }
 
-    /// Hands the page the reader's answer to its read of the held second.
+    /// Hands the page the reader's answer to its last command, the read of a second, with that
+    /// second's readings as the page's readings hold them.
     fn answer_held_read(&mut self) {
+        let generation = self.reader_commands();
         self.view.update(&mut self.context, |dashboard, cx| {
-            let hold = dashboard.hold.as_ref().unwrap();
+            let request = dashboard.worker.sent_request().unwrap();
+            let target = Target {
+                second: request.second.unwrap(),
+                identity: request.identity.clone(),
+            };
             let snapshot = dashboard.snapshot.as_deref().unwrap();
-            let target = hold.reading.target.clone();
-            let mut reply = Preview::resident(snapshot, &dashboard.request, target).reading;
-            reply.generation = hold.reading.generation.unwrap();
+            let mut reply = Preview::resident(snapshot, &request, target).reading;
+            reply.generation = generation;
             assert!(dashboard.take_update(Update::Ready(reply)));
             cx.notify();
         });
