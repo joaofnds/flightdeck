@@ -1081,17 +1081,24 @@ impl LiveDashboard {
         }
         self.rebuild();
         self.submit();
-        if self.request.second.is_none() {
-            if let Some(mut kept) = self.visited.remove(route) {
-                kept.request = self.request.clone();
-                self.accept_presentation(kept);
-            } else {
-                // The store kept its View current while another page showed, so an Overview
-                // with no page of its own kept draws that View at once.
-                if self.draw_store_view() {
-                    self.zoom_panels();
-                    self.rebuild();
-                }
+        self.switch_route_hold();
+        // A page kept while the page followed the live Mac ends where it was left, so the page of
+        // a selected or held second is read again.
+        let kept = if self.request.second.is_none() {
+            self.visited.remove(route)
+        } else {
+            None
+        };
+        if let Some(mut kept) = kept {
+            kept.request = self.request.clone();
+            self.accept_presentation(kept);
+        } else {
+            // The store kept its View current while another page showed, and a held second
+            // keeps the View drawn at the click, so an Overview with no page of its own kept
+            // draws that View at once.
+            if self.draw_store_view() {
+                self.zoom_panels();
+                self.rebuild();
             }
         }
     }

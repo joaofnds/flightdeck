@@ -153,6 +153,97 @@ fn a_page_opened_while_a_second_is_held_reads_the_context_the_charts_were_drawn_
 }
 
 #[gpui::test]
+fn a_page_opened_while_a_second_is_held_shows_the_held_second_s_readings_from_its_context(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page opened while a second is held shows the held second's readings once the
+    // reader answers with the context the charts were drawn in, rather than the newest second
+    // that context reads. Method: click 800 seconds before the newest on the CPU page's chart by
+    // App, move the pointer to the sidebar and open Memory, hand the page the reader's answer,
+    // whose context holds the held second, then the second the page's readings show and the
+    // text of each summary readout against those of the held second's readings.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Sidebar);
+    harness.driver.navigate("memory");
+
+    harness.driver.answer_page_read_holding(HELD);
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(HELD));
+    let expected = summary::cards("memory", &summary_selection(&reading_at(HELD, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_page_visited_before_a_second_is_held_shows_nothing_it_kept_until_the_reader_answers(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a page the page kept from the live Mac before a second was held is read again in
+    // the context the charts were drawn in, and shows nothing of what it kept meanwhile, whose
+    // charts end where it was left. Method: open Memory over readings that end 1,000 seconds
+    // before the hour's newest, open the CPU page over the View of the hour, click 800 seconds
+    // before the newest on its chart by App, move the pointer to the sidebar and open Memory
+    // again, then the second the reader was asked for and the text of each summary readout
+    // against those of a page still reading.
+    let mut harness = InputHarness::open_route(cx, "memory");
+    harness
+        .driver
+        .answer_newest_command_up_to(HOUR_NEWEST - 1_000);
+    harness.driver.navigate("cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Sidebar);
+
+    harness.driver.navigate("memory");
+
+    assert_eq!(
+        harness.driver.reader_asked_second(),
+        Some(HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS)
+    );
+    let expected = summary::loading_cards("memory");
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn overview_opened_while_a_second_is_held_draws_the_held_second_from_the_kept_view_at_once(
+    cx: &mut TestAppContext,
+) {
+    // Goal: Overview opened while a second is held draws its charts and the held second's
+    // readings from the store's View the page kept at the click, before the reader answers, so
+    // the page shows no loading state. Method: click 800 seconds before the newest on the CPU
+    // page's chart by App over the View of the hour, move the pointer to the sidebar and open
+    // Overview, then the page's window, the text of each summary readout against those of the
+    // held second's readings, and the lines the CPU chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Sidebar);
+
+    harness.driver.navigate("overview");
+
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn leaving_overviews_chart_after_a_click_shows_the_held_second_on_the_readouts(
     cx: &mut TestAppContext,
 ) {
@@ -925,6 +1016,24 @@ impl InputDriver {
             vec![trend_point(&reading_at(TAIL, 0))].into();
         self.view.update(&mut self.context, |dashboard, cx| {
             reply.generation = dashboard.generation;
+            assert!(dashboard.take_update(Update::Ready(reply)));
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Hands the page the reader's answer to its newest command, the readings of the hour's
+    /// newest two seconds with `second` among the older seconds of their context.
+    fn answer_page_read_holding(&mut self, second: u64) {
+        let older = reading_at(second, 0);
+        let mut reply = readings(&[
+            older,
+            reading_at(HOUR_NEWEST - 1, 0),
+            reading_at(HOUR_NEWEST, 0),
+        ]);
+        reply.generation = self.reader_commands();
+        self.view.update(&mut self.context, |dashboard, cx| {
             assert!(dashboard.take_update(Update::Ready(reply)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();

@@ -209,6 +209,21 @@ impl LiveDashboard {
         self.rebuild();
     }
 
+    /// Finds the held second again in the store's View as the page just opened draws it, since a
+    /// second held on a page that draws nothing from the View holds no record of it, and
+    /// Overview shows that record at once while the page's own readings are read. The reply to
+    /// that read builds the rest of the hold's reading again.
+    pub(super) fn switch_route_hold(&mut self) {
+        let Some(hold) = &self.hold else {
+            return;
+        };
+
+        let in_view = self.store_view_held(&hold.reading.target);
+        if let Some(hold) = &mut self.hold {
+            hold.reading.held = in_view;
+        }
+    }
+
     /// Makes `target` the request's reading, as a link that names it does. While a second is
     /// held, the page holds `target` in its place over the readings and the charts it shows,
     /// from the hover of it where one is shown, and the page's next read brings what that reading

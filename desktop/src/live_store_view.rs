@@ -631,14 +631,16 @@ impl LiveDashboard {
             }
             return self.drawn_let_go().map(|let_go| &let_go.newest);
         };
-        let shown = self
-            .shown_preview()
-            .and_then(|preview| preview.held.as_ref());
+        let Some(preview) = self.shown_preview() else {
+            return view.seconds.last().map(AsRef::as_ref);
+        };
+        let Some(held) = &preview.held else {
+            unreachable!(
+                "a second shown over the View the page draws holds the View's record of it"
+            );
+        };
 
-        match shown {
-            Some(held) => held.second.as_deref(),
-            None => view.seconds.last().map(AsRef::as_ref),
-        }
+        held.second.as_deref()
     }
 
     /// The second whose point the charts of the store's View draw for a hover of `second`, or
