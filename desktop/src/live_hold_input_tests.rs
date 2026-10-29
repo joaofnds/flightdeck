@@ -48,12 +48,17 @@ fn a_click_on_the_cpu_page_holds_the_second_without_reading_the_page_again(
 
 #[gpui::test]
 fn leaving_the_chart_after_a_click_shows_the_held_second(cx: &mut TestAppContext) {
-    // Goal: the page shows the held second once the pointer leaves the chart, rather than the
-    // newest second it showed before the click. Method: click 800 seconds before the newest on
-    // the CPU page's chart by App, move the pointer off it, then the second the CPU chart reads.
+    // Goal: the page shows the held second once the pointer leaves the chart, with the value
+    // the chart read under the pointer, rather than the newest second it showed before the
+    // click. Method: click 800 seconds before the newest on the CPU page's chart by App, whose
+    // value there differs from its newest, move the pointer off it, then the second the CPU
+    // chart reads and what the chart by App reads.
     let mut harness = InputHarness::open_route(cx, "cpu");
     harness.driver.show_hour_at_fifteen_minutes();
+    let newest = harness.driver.cpu_apps_value();
     harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    let hovered = harness.driver.cpu_apps_value();
+    assert_ne!(hovered, newest);
     harness.driver.click_second_on("live-cpu-apps-plot", HELD);
 
     harness
@@ -62,6 +67,7 @@ fn leaving_the_chart_after_a_click_shows_the_held_second(cx: &mut TestAppContext
     harness.driver.context.run_until_parked();
 
     assert_eq!(harness.driver.cpu_shown_second(), Some(HELD));
+    assert_eq!(harness.driver.cpu_apps_value(), hovered);
     harness.teardown();
 }
 
@@ -198,6 +204,14 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+    }
+
+    /// The value the CPU page's chart by App reads at the second it shows, without the clock
+    /// and the Unix second its reading starts with.
+    fn cpu_apps_value(&self) -> String {
+        let (_, reading) = self.chart_accessibility_reading("live-cpu-apps");
+
+        reading.splitn(3, "; ").nth(2).unwrap().to_owned()
     }
 
     /// How many commands the window has sent the reader.
