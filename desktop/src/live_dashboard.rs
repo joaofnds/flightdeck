@@ -815,14 +815,11 @@ impl LiveDashboard {
     }
 
     pub(crate) fn receive(&mut self, update: Update) -> bool {
-        // The worker numbers its commands from 1, so a generation of 0 says the page has no
-        // request out whose reply it would take.
-        if self.generation == 0 {
-            return false;
-        }
-
+        // The worker numbers its commands from 1, so the page's generation of 0, which says it
+        // has no request out, matches no reply.
         match update {
             Update::Ready(snapshot) => {
+                assert!(snapshot.generation > 0);
                 if snapshot.generation != self.generation {
                     return false;
                 }
@@ -835,6 +832,7 @@ impl LiveDashboard {
                 generation,
                 message,
             } => {
+                assert!(generation > 0);
                 if generation != self.generation {
                     return false;
                 }
