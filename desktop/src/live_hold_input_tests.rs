@@ -358,6 +358,72 @@ fn a_second_held_over_a_rested_reader_is_read_once_the_page_answers(cx: &mut Tes
 }
 
 #[gpui::test]
+fn a_step_past_the_first_second_of_a_held_window_on_overview_stays_at_that_second(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a keyboard step while a second is held stops at the first second of the window the
+    // charts were drawn in, since the page holds no readings of the seconds before it that the
+    // charts show. Method: click the second after the first of Overview's window on its CPU
+    // chart by App, step a second left on that chart and then another, then the second the
+    // page's readings show and the page's window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness
+        .driver
+        .hover_second_on("live-cpu-apps-plot", DRAWN.first + 1);
+    harness
+        .driver
+        .click_second_on("live-cpu-apps-plot", DRAWN.first + 1);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Top);
+    harness.driver.step_left_on_cpu_apps();
+
+    harness.driver.press("left");
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(DRAWN.first));
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_step_past_the_last_second_of_a_held_window_on_the_cpu_page_reads_nothing(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a keyboard step while a second is held stops at the last second of the window the
+    // charts were drawn in, rather than selecting a later second the recording holds, which
+    // would read it and lay the window around it. Method: the CPU page over readings that end
+    // 100 seconds before the recording's newest, a click a second before their last on its chart
+    // by App, a step a second right on that chart and then another, then the second the page's
+    // readings show, the commands the reader was sent, and the page's window.
+    let last = HOUR_NEWEST - 100;
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes_up_to(last);
+    harness
+        .driver
+        .hover_second_on("live-cpu-apps-plot", last - 1);
+    harness
+        .driver
+        .click_second_on("live-cpu-apps-plot", last - 1);
+    harness
+        .driver
+        .leave_plot("live-cpu-apps-plot", PlotExit::Top);
+    harness.driver.step_right_on_cpu_apps();
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.press("right");
+
+    assert_eq!(harness.driver.shown_reading_second(), Some(last));
+    assert_eq!(harness.driver.reader_commands(), commands);
+    let drawn = TimeWindow {
+        first: last - 899,
+        span: 900,
+    };
+    assert_eq!(harness.driver.view_window(), Some(drawn));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_rank_link_while_a_second_is_held_holds_the_second_it_names(cx: &mut TestAppContext) {
     // Goal: a rank link of a second the page shows over a held one opens the App's page holding
     // the second the link names, in the window the charts were drawn in, rather than marking
@@ -970,10 +1036,17 @@ impl InputDriver {
     /// readings of the hour's newest two seconds, following the newest second at the newest
     /// fifteen minutes.
     fn show_hour_at_fifteen_minutes(&mut self) {
+        self.show_hour_at_fifteen_minutes_up_to(HOUR_NEWEST);
+    }
+
+    /// Shows the page over the View of the hour and the worker's reply to its request, the
+    /// readings of the two seconds up to `newest`, following that second at the newest fifteen
+    /// minutes.
+    fn show_hour_at_fifteen_minutes_up_to(&mut self, newest: u64) {
         let (view, _) = hour();
         self.show_range(Range::History);
         self.view.update(&mut self.context, |dashboard, cx| {
-            let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+            let mut reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
             reply.generation = dashboard.generation;
             assert!(dashboard.take_update(Update::Ready(reply)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
@@ -1201,12 +1274,24 @@ impl InputDriver {
     /// Focuses the CPU page's chart by App with a right press, which selects no second, and
     /// steps it a second left.
     fn step_left_on_cpu_apps(&mut self) {
+        self.step_on_cpu_apps("left");
+    }
+
+    /// Focuses the CPU page's chart by App with a right press, which selects no second, and
+    /// steps it a second right.
+    fn step_right_on_cpu_apps(&mut self) {
+        self.step_on_cpu_apps("right");
+    }
+
+    /// Focuses the CPU page's chart by App with a right press, which selects no second, and
+    /// presses the arrow `key` on it.
+    fn step_on_cpu_apps(&mut self, key: &str) {
         let bounds = self.context.debug_bounds("live-cpu-apps-plot").unwrap();
         self.context
             .simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
         self.context
             .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
-        self.press("left");
+        self.press(key);
         self.context.run_until_parked();
     }
 

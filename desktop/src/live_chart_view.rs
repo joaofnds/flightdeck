@@ -659,6 +659,14 @@ impl LiveDashboard {
         if Some(next) == selection.stepped.or(selection.accepted) {
             return;
         }
+        // A held second keeps the window the charts were drawn in, so a step stops at its edges
+        // rather than showing a second off the charts.
+        if self.hold.is_some() {
+            let window = self.view_window();
+            if window.and_then(|window| window.fraction_of(next)).is_none() {
+                return;
+            }
+        }
 
         // The page drawn from the store's View shows a step as it shows the pointer's hover.
         let target = match newest {
