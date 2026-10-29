@@ -703,6 +703,10 @@ impl LiveDashboard {
         if self.preview.is_some() {
             return;
         }
+        // Resting would drop the read of a held second whose top Apps the View lacks.
+        if self.hold_reading() {
+            return;
+        }
         // The App histories the page's first readings left pending come in the reader's next
         // read, which a resting reader drops.
         if let Some(snapshot) = &self.snapshot {

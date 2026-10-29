@@ -529,7 +529,7 @@ const RESIDENT: &str = crate::live_resident_history::PANEL_ID;
 
 /// The seconds 9,999, 10,000, 10,003 and 10,005, which the View holds and of which the worker
 /// has read the first two.
-fn held_seconds() -> [MachineSecond; 4] {
+pub(super) fn held_seconds() -> [MachineSecond; 4] {
     [
         reading_at(9_999, 0),
         reading_at(10_000, 0),
@@ -634,7 +634,11 @@ impl InputDriver {
 
     /// Shows Overview as `show_held_view` does, with `older` the older tail of both the View and
     /// the worker's readings.
-    fn show_held_view_after(&mut self, older: &[MachineSecond], seconds: &[MachineSecond]) {
+    pub(super) fn show_held_view_after(
+        &mut self,
+        older: &[MachineSecond],
+        seconds: &[MachineSecond],
+    ) {
         self.show_held_view_reading_older(older, older, seconds);
     }
 

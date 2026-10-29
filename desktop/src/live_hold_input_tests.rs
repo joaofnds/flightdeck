@@ -5,18 +5,22 @@ use std::sync::Arc;
 
 use gpui::{Modifiers, MouseButton, TestAppContext};
 
+use super::store_view_hover::held_seconds;
 use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
 use crate::live_hover::Preview;
 use crate::live_source::Update;
 use crate::live_store_app_fixtures::{HOUR_NEWEST, hour};
-use crate::live_store_fixtures::reading_at;
+use crate::live_store_fixtures::{reading_at, trend_point};
 use crate::live_store_page_fixtures::readings;
 use crate::time_range::Range;
 
 /// The second the tests hold, 800 seconds before the newest, inside the newest fifteen minutes
 /// but outside the newest seven and a half, so a window centred on it would move.
 const HELD: u64 = HOUR_NEWEST - 800;
+/// A second of the older tail of the View `show_held_view_after` shows, which holds no Apps
+/// there.
+const TAIL: u64 = 9_500;
 /// The window of the newest fifteen minutes the page draws before the click.
 const DRAWN: TimeWindow = TimeWindow {
     first: HOUR_NEWEST - 899,
@@ -147,6 +151,94 @@ fn a_page_opened_while_a_second_is_held_reads_the_context_the_charts_were_drawn_
 }
 
 #[gpui::test]
+fn a_click_on_overview_over_a_rested_reader_holds_the_second_without_reading(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click on Overview, whose charts and readings the store's View draws while the
+    // reader rests, holds the second and sends the reader nothing, since the View holds the
+    // held second's readings and top Apps and the rest already stopped the reader following the
+    // live Mac. Method: Overview over the View of the hour at the newest fifteen minutes, the
+    // reader rested, a hover and a click 800 seconds before the newest on the CPU chart by App,
+    // then the commands the reader was sent and the second the page's readings show.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.rest_reader();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    assert_eq!(harness.driver.reader_commands(), commands);
+    assert_eq!(harness.driver.shown_reading_second(), Some(HELD));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_reader_keeps_reading_a_second_held_on_overview_until_it_answers(cx: &mut TestAppContext) {
+    // Goal: the page leaves the reader reading a held second whose top Apps the store's View
+    // lacks until the read answers, rather than resting it as it does while it draws Overview
+    // from the View, which would drop the read. Method: Overview over a View whose older tail
+    // holds 9,500 without its Apps, a hover there that reads its second, a click there, the
+    // page's step that rests the reader before the read answers, then whether the reader rests.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_view_over_tail();
+    harness.driver.hover_second_on("live-cpu-plot", TAIL);
+    harness.driver.tick_hover();
+    harness.driver.click_second_on("live-cpu-plot", TAIL);
+
+    let rested = harness.driver.offer_rest();
+
+    assert!(!rested);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_over_a_rested_reader_on_a_second_the_view_lacks_reads_the_page_first(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click on Overview over a rested reader, on a second whose top Apps the store's
+    // View lacks, asks the reader for the page before the held second, since a rested reader
+    // reads a second's own read as a newly opened page. Method: Overview over a View whose older
+    // tail holds 9,500 without its Apps, the reader rested, a hover and a click there, then the
+    // second the reader was last asked for, which the page's read names 450 seconds before the
+    // held window's last second.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_view_over_tail();
+    harness.driver.rest_reader();
+    harness.driver.hover_second_on("live-cpu-plot", TAIL);
+    harness.driver.tick_hover();
+
+    harness.driver.click_second_on("live-cpu-plot", TAIL);
+
+    assert_eq!(
+        harness.driver.reader_asked_second(),
+        Some(harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS)
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_second_held_over_a_rested_reader_is_read_once_the_page_answers(cx: &mut TestAppContext) {
+    // Goal: the held second's own read follows the page's reply that a click over a rested
+    // reader asked for first, so the held second's top Apps arrive. Method: Overview over a View
+    // whose older tail holds 9,500 without its Apps, the reader rested, a hover and a click
+    // there, the reply to the page's read, the hold's step, then the second the reader was last
+    // asked for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_view_over_tail();
+    harness.driver.rest_reader();
+    harness.driver.hover_second_on("live-cpu-plot", TAIL);
+    harness.driver.tick_hover();
+    harness.driver.click_second_on("live-cpu-plot", TAIL);
+    harness.driver.answer_page_read_over_tail();
+
+    harness.driver.tick_hold();
+
+    assert_eq!(harness.driver.reader_asked_second(), Some(TAIL));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_rank_link_while_a_second_is_held_holds_the_second_it_names(cx: &mut TestAppContext) {
     // Goal: a rank link of a second the page shows over a held one opens the App's page holding
     // the second the link names, in the window the charts were drawn in, rather than marking
@@ -217,6 +309,49 @@ impl InputDriver {
         self.context
             .simulate_resize(gpui::size(gpui::px(1536.0), gpui::px(2600.0)));
         self.context.run_until_parked();
+    }
+
+    /// Shows Overview over a View whose older tail holds `TAIL` without its Apps, and the worker's
+    /// reply to the page's request, which reads `TAIL` in its older tail too.
+    fn show_view_over_tail(&mut self) {
+        self.show_held_view_after(&[reading_at(TAIL, 0)], &held_seconds());
+        self.answer_page_read_over_tail();
+    }
+
+    /// Hands the page the worker's reply to its request, the readings of the hour's newest two
+    /// seconds with `TAIL` in their older tail.
+    fn answer_page_read_over_tail(&mut self) {
+        let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+        reply.selection.legacy_mut().unwrap()["earlier_trends"] =
+            vec![trend_point(&reading_at(TAIL, 0))].into();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            reply.generation = dashboard.generation;
+            assert!(dashboard.take_update(Update::Ready(reply)));
+            assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Runs the hold's step, which reads the held second where its reading lacks what the page
+    /// shows.
+    fn tick_hold(&mut self) {
+        self.view
+            .update(&mut self.context, |dashboard, _| dashboard.hold_tick());
+    }
+
+    /// Runs the page's step that rests the reader while it draws Overview from the store's
+    /// View, and answers whether the reader rests.
+    fn offer_rest(&mut self) -> bool {
+        self.view.update(&mut self.context, |dashboard, _| {
+            dashboard.tick_rest();
+            dashboard.reader_rested()
+        })
+    }
+
+    /// Rests the reader, as the page does while it draws Overview from the store's View.
+    fn rest_reader(&mut self) {
+        assert!(self.offer_rest());
     }
 
     /// Rests the pointer on `second` of the chart whose plot is `plot`.
@@ -300,6 +435,13 @@ impl InputDriver {
     fn reader_commands(&self) -> u64 {
         self.view.read_with(&self.context, |dashboard, _| {
             dashboard.worker.commands_sent()
+        })
+    }
+
+    /// The last second of the window the held second was held in.
+    fn held_last(&self) -> u64 {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.hold.as_ref().unwrap().last
         })
     }
 

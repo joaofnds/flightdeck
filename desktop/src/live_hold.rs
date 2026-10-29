@@ -48,7 +48,9 @@ impl LiveDashboard {
 
     /// Stops the reader following the live Mac with the hold's first read: the page at the
     /// hold's last second where the page's App histories are pending or the held second names
-    /// no reading, since that read brings them, and otherwise the held second's own.
+    /// no reading, since that read brings them, or where the reader rests, which reads a
+    /// second's own read as a newly opened page, and otherwise the held second's own. A rested
+    /// reader follows nothing, so a hold the View completes sends it nothing.
     fn hold_first_read(&mut self) {
         let Some(hold) = &self.hold else {
             unreachable!("the hold's first read follows the hold");
@@ -57,8 +59,12 @@ impl LiveDashboard {
             .snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.histories_pending);
+        let rested = self.reader_rested();
 
-        if pending || hold.reading.target.identity.is_none() {
+        if rested && hold.reading.complete {
+            return;
+        }
+        if pending || rested || hold.reading.target.identity.is_none() {
             self.request_reading();
         } else {
             self.hold_read();
