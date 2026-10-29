@@ -1,6 +1,6 @@
-//! What each second shows on the App charts drawn from a View: the reading of each App a chart draws on a
-//! line of its own, and the other Apps added up as Other, as the worker's App histories show
-//! them.
+//! What each second shows on the App charts drawn from a View: the reading of each App a chart
+//! draws on a line of its own, and the other Apps added up as Other, as the worker's App
+//! histories show them.
 
 use std::sync::Arc;
 
