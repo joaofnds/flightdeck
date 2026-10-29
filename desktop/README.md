@@ -189,16 +189,20 @@ awaits a restoration or another reply.
 Live Overview, while it follows the newest second, draws from the Store instead. The app
 starts the Store before its window opens and keeps it for its life. Its ingestion thread
 uses bounded buffers and publishes immutable Views. Ingestion parks while the window is
-hidden, another page is selected, or the selection is pinned. Restoring live Overview keeps
-the selected range and reconciles to the newest endpoint before publishing a complete
-replacement. A covered checkpoint reuses cached history and reads the retained ring delta;
-an expired checkpoint or wider uncached range reloads the selected saved period. An overwrite
-during the delta read forces that reload before publication. Overview waits for the Store
-instead of starting a duplicate page query.
+hidden, a second is selected or held, or a saved recording is shown. Restoring live
+Overview keeps the selected range and reconciles to the newest endpoint before publishing
+a complete replacement. A covered checkpoint reuses cached history and reads the retained
+ring delta; an expired checkpoint reads the minutes sealed since the newest whole minute
+the Store holds, and loads the hour again where it holds no whole minute of that run. An
+overwrite during the delta read forces that reload before publication. Overview waits for
+the Store instead of starting a duplicate page query.
 While Overview draws from a View the worker rests, and a hover over a second the View holds
-reads it there. A chosen second, a saved recording and every other page read through the
-worker. Complete pins retain their exact observation and range on reopen without a live
-read. Incomplete pins restore that observation through a running worker; if the reader
+reads it there. The Memory, CPU, Energy, Storage and GPU pages draw their chart by App from
+the Store's View too. A typed second, a saved recording and every other reading of the other
+pages read through the worker. A held second keeps the charts' window and the View it
+took, and reads only the page ending at that window and the held second's own reading.
+Complete pins retain their exact observation and range on reopen without a live read.
+Incomplete pins restore that observation through a running worker; if the reader
 stopped, a retained pinned snapshot stays available without restarting its canceled
 histories. Initial bootstrap and incomplete histories otherwise retain the worker path.
 A View older than the worker's readings is not drawn.

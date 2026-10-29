@@ -84,14 +84,15 @@ boundaries, recovery, diagnostic delivery and remaining resource limits in detai
 
 ## Two reading paths inside the desktop
 
-Live Overview uses `viewer::store::Store` to retain machine and App readings and
-publish immutable `View`s. The Store owns its ingestion thread and bounded buffers.
-The UI projects a View into charts and readouts without querying the recording on
-the UI thread.
+`viewer::store::Store` retains the live Mac's machine and App readings and publishes
+immutable `View`s. The Store owns its ingestion thread and bounded buffers. Live
+Overview projects a View into its charts and readouts, and the Memory, CPU, Energy,
+Storage and GPU pages draw their chart by App from one, without querying the recording
+on the UI thread.
 
 The page worker wraps `viewer::LiveSession`. It handles initial snapshots, exact
-inspection, saved recordings, other resource pages and details not retained in a
-View. Its request and result mailboxes each have capacity one. Cancellation
+inspection, saved recordings, every other reading of the pages other than live Overview,
+and details not retained in a View. Its request and result mailboxes each have capacity one. Cancellation
 generations prevent an old answer replacing a newer selection.
 
 ```mermaid
@@ -100,23 +101,31 @@ flowchart TD
     Sources --> Worker[Page query worker]
     Store --> View[Immutable View]
     View --> Overview[Live Overview]
-    Worker --> Pages[Bootstrap, inspection and other pages]
+    View --> AppCharts[Charts by App of the Memory, CPU, Energy, Storage and GPU pages]
+    Worker --> Pages[Bootstrap, inspection and the other readings of other pages]
     Overview -->|detail absent from View| Worker
 ```
 
 Once Overview has complete initial histories and follows a Store View, its page
 worker rests. A hover retained in the View reads there; a missing detail can request
-the worker. The Store continues ingesting while another page follows the live Mac.
-That page draws its chart by App from the newest View and its other charts from the
-worker, since the worker's App histories stop 960 s back and the View holds every App's
-ten-second sums for the loaded hour. A hidden window parks the Store, and so does a
-saved recording shown in a live window. A held second, whether from a click on a chart,
-Pause or a range dragged on a chart, parks it too and keeps the View the charts were
-drawn from, so the charts keep their window and a range picked while held redraws from
-that View without reading the recording. Letting go drops that View, since a kept View
-stops the Store writing over its buffers, and the page shows what it drew from it until
-the Store's next View. Bootstrap, incomplete histories and unavailable Store data retain
-the page-worker path.
+the worker. The Store continues ingesting while another page follows the live Mac. Once
+the worker has answered them, the Memory, CPU, Energy, Storage and GPU pages draw their
+chart by App from the newest View no older than the worker's readings, since the worker's
+App histories stop 960 s back and the View holds every App's ten-second sums for the
+loaded hour. Their other charts, and every chart of the other pages, come from the
+worker. A hidden window parks the Store, and so do a selected second and a saved
+recording shown in a live window. Bootstrap, incomplete histories and unavailable Store
+data retain the page-worker path.
+
+A held second is a second of the live Mac that the page holds after a click on a chart,
+Return on a second reached with the arrow keys, Enter on the CPU heatmap, Pause, or a
+range dragged on a chart. The page keeps the last second of the window it showed then, so
+the charts keep their window, and the newest View it took, so a range picked while held
+redraws the charts by App from that View without reading the recording. Each read it asks
+of the worker meanwhile is the page whose context ends at that last second, or the held
+second's own reading. Letting go drops the View, since the Store stops taking seconds once
+a View it handed out holds its spare buffers, and the page shows what it drew from the View
+until the Store's next View.
 
 The native timer normally takes completed work every 250 ms. While a restoration
 or another reply is pending, the live window's scheduling also polls promptly for
@@ -127,16 +136,19 @@ updates to animate the chart forward.
 
 Visibility and the selected time are independent. A live selection means “follow
 the latest reading with this range.” A pin means “keep this exact observation and
-this range.” Hiding the window preserves that choice and parks its readers.
-Closing the normal live window retains the request, chart range, pin, snapshot and
-handed-over worker for reopening while the app keeps running in the background. A held
-second keeps its View through a hide and a close, so the window drawn again shows the
-window the click kept.
+this range.” A held second means “keep this second and the seconds the charts showed
+when it was held.” Hiding the window preserves that choice and parks its readers.
+Closing the normal live window retains the request, chart range, pin or held second,
+snapshot and handed-over worker for reopening while the app keeps running in the
+background. A held second also keeps its View through a hide and a close, so the charts
+drawn again show the seconds they showed when it was held.
 
 | State before hiding or closing | Restore behavior |
 | --- | --- |
 | Live Overview, five minutes selected | Keep five minutes selected, reconcile to the newest endpoint and continue live |
 | Live Overview, another range selected | Preserve that range and follow the newest endpoint |
+| Held second whose reading is complete over the page's readings | Keep the held second, its window and its View without a read |
+| Held second whose reading is still being read, or whose page has no readings yet | Read the page whose context ends at the held window's last second, then the held second's own reading |
 | Complete pinned snapshot | Keep the exact observation and range without a live read |
 | Pin with incomplete histories and a running reader, or with no retained snapshot | Restore that selected observation through the page worker without ingesting new live arrivals |
 | Pin with a retained snapshot whose reader stopped | Keep the snapshot and range without a new request; canceled histories are no longer pending |
@@ -144,7 +156,10 @@ window the click kept.
 
 ```mermaid
 flowchart TD
-    Show[Window becomes visible] --> Pin{Complete pin?}
+    Show[Window becomes visible] --> Held{Held second?}
+    Held -->|complete over the page's readings| Keep
+    Held -->|still being read| HeldRead[Read the page ending at the held window's last second, then the held second]
+    Held -->|no| Pin{Complete pin?}
     Pin -->|yes| Keep[Keep snapshot and range; readers stay parked]
     Pin -->|no| Eligible{Live Overview with complete initial histories and Store?}
     Eligible -->|no| Worker[Restore through page worker]
@@ -204,7 +219,8 @@ cold-storage performance or a percentile latency target.
 | Who starts, attaches to or stops collection? | [`live_launch.rs`](../desktop/src/live_launch.rs), [`live_launch_tests.rs`](../desktop/src/live_launch_tests.rs) |
 | What survives closing the window? | [`live_background.rs`](../desktop/src/live_background.rs), [`live_background_tests.rs`](../desktop/src/live_background_tests.rs) |
 | When do readers park, resume or hand over? | [`live_dashboard.rs`](../desktop/src/live_dashboard.rs), [`live_source_visibility_tests.rs`](../desktop/src/live_source_visibility_tests.rs) |
-| Which View can Overview accept and inspect? | [`live_store_view.rs`](../desktop/src/live_store_view.rs), [`live_store_view_tests.rs`](../desktop/src/live_store_view_tests.rs) |
+| Which View can a page accept, draw and inspect? | [`live_store_view.rs`](../desktop/src/live_store_view.rs), [`live_store_view_tests.rs`](../desktop/src/live_store_view_tests.rs) |
+| What does a held second keep, and what lets it go? | [`live_hold.rs`](../desktop/src/live_hold.rs), [`live_hold_input_tests.rs`](../desktop/src/live_hold_input_tests.rs) |
 | When can a checkpoint be reused or reloaded? | [`store.rs`](../viewer/src/store.rs), [`store/ring.rs`](../viewer/src/store/ring.rs), [`store/resume_tests.rs`](../viewer/src/store/resume_tests.rs) |
 | How do saved ticks seed valid rates? | [`store/recording.rs`](../viewer/src/store/recording.rs), [`recording/processes.rs`](../viewer/src/recording/processes.rs), [`store/recording_payload_tests.rs`](../viewer/src/store/recording_payload_tests.rs) |
 | How are requests cancelled and exact identities preserved? | [`live_source.rs`](../desktop/src/live_source.rs), [`live_source_tests.rs`](../desktop/src/live_source_tests.rs) |

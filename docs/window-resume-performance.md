@@ -18,11 +18,12 @@ reading the sealed minutes. A completed pinned window keeps its selection and le
 ingestion parked.
 
 Overview waits for the Store instead of asking the legacy page reader to load the
-same period. Initial bootstrap, incomplete histories, other pages and unavailable
-Store data retain the page-reader path. The Store continues ingesting while other
-pages follow the live Mac, so returning to Overview finds its newest View ready. A
-hidden window parks it, and so does a held second, whether from Pause, a range dragged on
-a chart or a pinned observation, and a saved recording shown in a live window. A cold
+same period. Initial bootstrap, incomplete histories and unavailable Store data retain
+the page-reader path, and so does every reading of the other pages but the chart by App
+the Memory, CPU, Energy, Storage and GPU pages draw from the View. The Store continues
+ingesting while other pages follow the live Mac, so returning to Overview finds its newest
+View ready. A hidden window parks it, and so do a selected or held second and a saved
+recording shown in a live window. A cold
 restore validates the complete saved predecessor minute, including refused samples, but
 constructs no discarded presentation objects for its ticks.
 
