@@ -356,11 +356,10 @@ frames to time.
 `profile-navigate ROUTE` opens the route as a sidebar click does and returns the first
 CPU frame after it that draws the Store's View on live Overview, or that follows the page
 reader's next reply on any other page. `profile-range MINUTES` picks the range as the
-range picker does and, on live Overview, returns the first frame after it. Use it there
-only: with a second held it returns the next frame whatever that frame draws, and on any
-other live page it waits for a page-reader reply that a range switch never requests. A
-sample whose `worker_requests` is zero and whose `store_version` equals the previous
-sample's read nothing for that switch.
+range picker does and returns the first frame after it, on every page and with a second
+held, since the switch redraws the readings the page holds and asks the page reader for
+nothing. A sample whose `worker_requests` is zero and whose `store_version` equals the
+previous sample's read nothing for that switch.
 
 For stack profiling, attach `/usr/bin/sample PID 3 1 -mayDie -file OUTPUT` while a
 separate control client runs repeated cycles. Use those samples for attribution, not

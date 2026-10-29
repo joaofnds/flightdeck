@@ -27,6 +27,7 @@ struct Started {
     generation: u64,
     store_version: Option<u64>,
     requests: u64,
+    fresh: Fresh,
     render_ms: Option<f64>,
 }
 
@@ -34,6 +35,16 @@ pub(crate) struct Checkpoint {
     pub(crate) generation: u64,
     pub(crate) store_version: Option<u64>,
     pub(crate) requests: u64,
+    pub(crate) fresh: Fresh,
+}
+
+/// What makes the first frame of an epoch fresh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fresh {
+    /// Readings newer than the checkpoint's, as after a show or a page opened.
+    Reading,
+    /// The switch itself, which redraws the readings the page holds, as a picked range does.
+    Switch,
 }
 
 impl ResumeMetrics {
@@ -75,6 +86,7 @@ impl ResumeMetrics {
             generation: checkpoint.generation,
             store_version: checkpoint.store_version,
             requests: checkpoint.requests,
+            fresh: checkpoint.fresh,
             render_ms: None,
         })
     }
@@ -173,6 +185,12 @@ impl LiveDashboard {
     }
 
     fn resume_frame_ready(&self) -> bool {
+        let Some(started) = &self.resume_metrics.started else {
+            return false;
+        };
+        if started.fresh == Fresh::Switch {
+            return true;
+        }
         if self.request.second.is_none() {
             if self.request.route == "overview" {
                 let Some(version) = self.resume_store_version() else {
@@ -206,7 +224,11 @@ impl LiveDashboard {
 
 #[cfg(test)]
 mod tests {
-    use super::{Checkpoint, Frame, ResumeMetrics};
+    use super::{Checkpoint, Frame, Fresh, ResumeMetrics};
+    use crate::live_dashboard::LiveDashboard;
+    use crate::live_source::Worker;
+    use crate::live_store_fixtures::reading_at;
+    use crate::live_store_page_fixtures::readings;
 
     #[test]
     fn refused_native_counters_do_not_complete_a_successful_measurement() {
@@ -227,6 +249,7 @@ mod tests {
             generation: 1,
             store_version: None,
             requests: 1,
+            fresh: Fresh::Reading,
         });
         metrics.started.as_mut().unwrap().pid = pid;
 
@@ -252,6 +275,7 @@ mod tests {
             generation: 1,
             store_version: None,
             requests: 1,
+            fresh: Fresh::Reading,
         };
         metrics.begin(&checkpoint);
         let first = metrics.count();
@@ -270,5 +294,35 @@ mod tests {
 
         assert!(metrics.started.is_some());
         assert!(metrics.after(first).is_none());
+    }
+
+    #[test]
+    fn a_range_switch_on_a_page_the_worker_draws_is_fresh_at_the_next_frame() {
+        // Goal: profile-range measures a switch on every page, which redraws the readings the
+        // page holds and asks the worker for nothing. Method: the CPU page following the newest
+        // second, a range epoch begun, then the readiness of the next frame.
+        let mut dashboard = page("cpu");
+        assert!(dashboard.resume_metrics.enable());
+
+        dashboard.resume_metrics.begin(&Checkpoint {
+            generation: dashboard.generation,
+            store_version: None,
+            requests: dashboard.worker.requests_submitted(),
+            fresh: Fresh::Switch,
+        });
+
+        assert!(dashboard.resume_frame_ready());
+    }
+
+    /// The page `route` showing the worker's readings, following the newest second.
+    fn page(route: &str) -> LiveDashboard {
+        let root = std::env::temp_dir().join(format!(
+            "flightdeck-missing-resume-metrics-{}",
+            std::process::id()
+        ));
+        let mut dashboard = LiveDashboard::new(Worker::start(root).unwrap(), route.into(), None);
+        dashboard.accept(readings(&[reading_at(9_999, 0), reading_at(10_000, 0)]));
+        assert!(dashboard.error.is_none());
+        dashboard
     }
 }

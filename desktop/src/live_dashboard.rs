@@ -60,6 +60,7 @@ pub(crate) fn observe_visibility(
                         generation: dashboard.generation,
                         store_version: version,
                         requests: dashboard.worker.requests_submitted(),
+                        fresh: crate::live_resume_metrics::Fresh::Reading,
                     });
             }
             store_view::set_store_active(
