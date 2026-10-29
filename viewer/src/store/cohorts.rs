@@ -181,6 +181,14 @@ impl Leaders {
         assert_eq!(readings.seconds.len(), readings.apps.len());
         assert!(window.first <= window.last);
         assert_eq!(*cohorts, Cohorts::default());
+        for cohort in [
+            &cohorts.cpu,
+            &cohorts.power,
+            &cohorts.disk,
+            &cohorts.resident,
+        ] {
+            assert!(cohort.capacity() >= COHORT_MAX);
+        }
         assert!(self.entries.is_empty());
 
         let run = choose_run(readings.seconds, window);

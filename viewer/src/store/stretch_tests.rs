@@ -785,6 +785,22 @@ fn a_window_counts_no_stretch_from_before_the_clock_was_set_back() {
 }
 
 #[test]
+#[should_panic(expected = "cohort.capacity() >= COHORT_MAX")]
+fn a_window_chooses_into_no_cohorts_without_room_for_their_apps() {
+    // Goal: leaders chosen into cohorts with no room for them stop at the choice, so the panic
+    // names its cause and not the first chosen App that needs room. Method: choose over a window
+    // of no seconds, which chooses no App, into cohorts built by `Default`.
+    let readings = Readings {
+        seconds: &[],
+        apps: &[],
+        stretches: &[],
+    };
+    let mut cohorts = Cohorts::default();
+
+    Leaders::new().choose(&readings, WallSeconds { first: 0, last: 0 }, &mut cohorts);
+}
+
+#[test]
 fn a_window_chooses_its_apps_past_a_stretch_of_more_apps_than_it_holds() {
     // Goal: a stretch that holds no Apps, since its seconds came to more than it holds, adds
     // none to an App chart's leaders, as a second of more Apps than it holds adds none, and
