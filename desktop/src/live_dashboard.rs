@@ -3,6 +3,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::charts::TEXT;
 use crate::data::Panel;
+use crate::hardware_motion::{HardwareState, reduce_motion};
 use crate::live_hover::Origin;
 use crate::live_source::{Request, Snapshot, Update, Worker};
 use gpui::{
@@ -390,9 +391,7 @@ impl LiveDashboard {
             inventory: Vec::with_capacity(16),
             hidden: Vec::with_capacity(64),
             sections: crate::live_sections::Sections::default(),
-            hardware_state: Rc::new(crate::hardware_motion::HardwareState::new(
-                crate::hardware_motion::reduce_motion,
-            )),
+            hardware_state: Rc::new(HardwareState::new(reduce_motion)),
             settings: crate::live_settings::Settings::default(),
             started: Instant::now(),
             seconds,
