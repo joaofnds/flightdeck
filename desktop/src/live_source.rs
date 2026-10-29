@@ -131,6 +131,16 @@ pub enum Update {
     Failed { generation: u64, message: String },
 }
 
+impl Update {
+    /// The generation of the command this answers.
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Ready(snapshot) => snapshot.generation,
+            Self::Failed { generation, .. } => *generation,
+        }
+    }
+}
+
 struct Shared {
     #[cfg(test)]
     measurement_staged: AtomicBool,

@@ -5,7 +5,7 @@
 use gpui::Context;
 
 use super::LiveDashboard;
-use crate::live_hover::{Origin, Preview, Target};
+use crate::live_hover::{HeldSecond, Origin, Preview, Target};
 use crate::live_source::{Request, Update};
 
 /// The held second's reading, and where the charts were drawn when it was held.
@@ -33,12 +33,12 @@ impl LiveDashboard {
             .as_ref()
             .map_or(target.second, |hold| hold.anchor_second);
         // The page stops following the store's View once its request names the second.
-        let held = self.store_view_held(&target);
+        let in_view = self.store_view_held(&target);
         self.inspect_target_request(target.clone());
         self.generation = 0;
         self.reply_pending = false;
         let hovered = self.preview.take();
-        let fresh = self.hold_resident(target, held);
+        let fresh = self.hold_resident(target, in_view);
         let (reading, read) = match hovered {
             Some(hovered) => {
                 self.hover_ended(&hovered);
@@ -111,33 +111,18 @@ impl LiveDashboard {
         }
     }
 
-    /// The held second's reading as the page's readings hold it, and as `held`, the store's
+    /// The held second's reading as the page's readings hold it, and as `in_view`, the store's
     /// View, holds it.
-    fn hold_resident(
-        &self,
-        target: Target,
-        held: Option<crate::live_hover::HeldSecond>,
-    ) -> Preview {
+    fn hold_resident(&self, target: Target, in_view: Option<HeldSecond>) -> Preview {
         // Before the worker's first reading the page draws only the store's View, or what it kept
         // of one it let go of, so the held second's reading holds only the View's record of it
         // until that reading lands.
         let unread = hold_resident_unread();
         let snapshot = self.snapshot.as_deref().unwrap_or(&unread);
 
-        let mut reading = Preview::resident(snapshot, &self.request, target);
+        let mut reading = self.resident_preview(snapshot, target, in_view);
         reading.source = crate::live_chart_view::SELECTION_SOURCE.into();
         reading.origin = Origin::Keyboard;
-        reading.held = held;
-        // The View holds the held second's readings and top Apps, which is all the page shows
-        // of it, so the hold reads nothing.
-        if let Some(held) = &reading.held {
-            if held.rankings.is_some() {
-                reading.complete = true;
-            }
-        }
-        if self.picker == Some(crate::live_dashboard::Picker::App) {
-            reading.list_apps(snapshot);
-        }
         reading
     }
 
@@ -176,14 +161,9 @@ impl LiveDashboard {
 
     /// Whether `update` answers the hold's read of its second.
     pub(super) fn hold_answered(&self, update: &Update) -> bool {
-        let generation = match update {
-            Update::Ready(snapshot) => snapshot.generation,
-            Update::Failed { generation, .. } => *generation,
-        };
-
         self.hold
             .as_ref()
-            .is_some_and(|hold| hold.reading.generation == Some(generation))
+            .is_some_and(|hold| hold.reading.generation == Some(update.generation()))
     }
 
     /// Takes the reader's answer to the hold's read of its second, and answers that the page
@@ -193,17 +173,7 @@ impl LiveDashboard {
             unreachable!("only a hold takes the reply to its read");
         };
 
-        match update {
-            Update::Ready(snapshot) => {
-                if let Err(error) =
-                    crate::live_hover::controller::preview_accept(&mut hold.reading, snapshot)
-                {
-                    hold.reading.failure = Some(error);
-                }
-            }
-            Update::Failed { message, .. } => hold.reading.failure = Some(message),
-        }
-        hold.reading.complete = true;
+        crate::live_hover::controller::preview_take_reply(&mut hold.reading, update);
         self.rebuild();
 
         true

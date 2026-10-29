@@ -3,7 +3,7 @@ use std::time::Instant;
 use gpui::{Context, SharedString};
 
 use super::timings::{HoverTiming, HoverTimings};
-use super::{Origin, Preview, Target};
+use super::{HeldSecond, Origin, Preview, Target};
 use crate::live_dashboard::{ChartHover, LiveDashboard, Picker};
 use crate::live_source::{Snapshot, Update};
 
@@ -263,10 +263,7 @@ impl LiveDashboard {
             return false;
         };
 
-        let generation = match &update {
-            Update::Ready(snapshot) => snapshot.generation,
-            Update::Failed { generation, .. } => *generation,
-        };
+        let generation = update.generation();
         if preview.base_request != self.request {
             if generation == self.generation {
                 preview.page_reply_kept = true;
@@ -287,14 +284,7 @@ impl LiveDashboard {
             return false;
         }
 
-        match update {
-            Update::Ready(snapshot) => match preview_accept(preview, snapshot) {
-                Ok(()) => {}
-                Err(error) => preview.failure = Some(error),
-            },
-            Update::Failed { message, .. } => preview.failure = Some(message),
-        }
-        preview.complete = true;
+        preview_take_reply(preview, update);
         self.rebuild();
         self.hover_timed();
 
@@ -401,22 +391,36 @@ impl LiveDashboard {
             .preview
             .as_ref()
             .is_some_and(|preview| preview.page_reply_kept);
+        let in_view = self.store_view_held(&target);
+        let mut preview = self.resident_preview(snapshot, target, in_view);
+        preview.page_reply_kept = page_reply_kept;
+        preview.layout = layout;
+        preview.header_height = header_height;
+        self.preview = Some(preview);
+    }
+
+    /// The reading of `target` as `snapshot`, the page's readings, holds it, and as `in_view`,
+    /// the store's View, holds it, which a hover and a hold both show.
+    pub(crate) fn resident_preview(
+        &self,
+        snapshot: &Snapshot,
+        target: Target,
+        in_view: Option<HeldSecond>,
+    ) -> Preview {
         let mut preview = Preview::resident(snapshot, &self.request, target);
-        preview.held = self.store_view_held(&preview.target);
-        // The View holds the hovered second's readings and top Apps, which is all the page shows
-        // of it, so the hover reads nothing.
+        preview.held = in_view;
+        // The View holds the second's readings and top Apps, which is all the page shows of it,
+        // so the page reads nothing of it.
         if let Some(held) = &preview.held {
             if held.rankings.is_some() {
                 preview.complete = true;
             }
         }
-        preview.page_reply_kept = page_reply_kept;
         if self.picker == Some(Picker::App) {
             preview.list_apps(snapshot);
         }
-        preview.layout = layout;
-        preview.header_height = header_height;
-        self.preview = Some(preview);
+
+        preview
     }
 }
 
@@ -434,10 +438,21 @@ fn hover_unfinished(timings: &mut HoverTimings, preview: &Preview) {
     });
 }
 
-pub(crate) fn preview_accept(
-    preview: &mut Preview,
-    mut snapshot: Box<Snapshot>,
-) -> Result<(), String> {
+/// Takes the reader's answer to the read of `preview`'s second, which completes it, failed or
+/// not.
+pub(crate) fn preview_take_reply(preview: &mut Preview, update: Update) {
+    match update {
+        Update::Ready(snapshot) => {
+            if let Err(error) = preview_accept(preview, snapshot) {
+                preview.failure = Some(error);
+            }
+        }
+        Update::Failed { message, .. } => preview.failure = Some(message),
+    }
+    preview.complete = true;
+}
+
+fn preview_accept(preview: &mut Preview, mut snapshot: Box<Snapshot>) -> Result<(), String> {
     if snapshot.selection["second"].as_u64() != Some(preview.target.second) {
         return Err("Hover response has a different timestamp".into());
     }
