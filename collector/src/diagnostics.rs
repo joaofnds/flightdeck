@@ -234,9 +234,7 @@ impl Reporter {
         };
         let admitted_count = self.admitted_count.load(Ordering::Relaxed);
         let taken_count = self.taken_count.load(Ordering::Acquire);
-        assert!(taken_count <= admitted_count);
-        assert!(admitted_count - taken_count <= QUEUE_SLOTS);
-        if admitted_count - taken_count == QUEUE_SLOTS {
+        if queued_count(admitted_count, taken_count) == QUEUE_SLOTS {
             self.reject(loss, &loss.queue_full);
             return;
         }
@@ -258,9 +256,7 @@ impl Reporter {
     fn take(&self, copy: impl FnOnce(&Group)) -> Option<Stream> {
         let taken_count = self.taken_count.load(Ordering::Relaxed);
         let admitted_count = self.admitted_count.load(Ordering::Acquire);
-        assert!(taken_count <= admitted_count);
-        assert!(admitted_count - taken_count <= QUEUE_SLOTS);
-        if admitted_count == taken_count {
+        if queued_count(admitted_count, taken_count) == 0 {
             return None;
         }
         let index = taken_count % QUEUE_SLOTS;
@@ -304,6 +300,14 @@ fn increment(counter: &AtomicU64, counts_inexact: &AtomicBool) {
     if result.is_err() {
         counts_inexact.store(true, Ordering::Relaxed);
     }
+}
+
+fn queued_count(admitted_count: usize, taken_count: usize) -> usize {
+    assert!(taken_count <= admitted_count);
+    let queued_count = admitted_count - taken_count;
+    assert!(queued_count <= QUEUE_SLOTS);
+
+    queued_count
 }
 
 #[cfg(test)]
