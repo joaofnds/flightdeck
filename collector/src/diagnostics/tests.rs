@@ -237,6 +237,64 @@ fn delivers_groups_in_submission_order_across_laps_of_the_queue() {
     assert_eq!(0, reporter.loss[0].queue_full.load(Ordering::Relaxed));
 }
 
+const CONCURRENT_GROUPS: usize = 20_000;
+
+#[test]
+fn hands_a_concurrent_writer_in_order_every_group_the_queue_had_room_for() {
+    // Goal: a producer and the writer working at once never meet on a slot and lose a group
+    // only to a full queue.
+    // Method: submit numbered 4 KiB groups from another thread while this one takes them.
+    supervised(
+        "diagnostics::tests::hands_a_concurrent_writer_in_order_every_group_the_queue_had_room_for",
+        || {
+            let reporter = Reporter::new();
+            assert!(reporter.thread.set(std::thread::current()).is_ok());
+
+            let delivered = std::thread::scope(|scope| {
+                scope.spawn(|| submit_numbered_groups(&reporter));
+                take_numbered_groups(&reporter)
+            });
+
+            let full =
+                usize::try_from(reporter.loss[0].queue_full.load(Ordering::Relaxed)).unwrap();
+            assert!(delivered.is_sorted_by(|earlier, later| earlier < later));
+            assert_eq!(CONCURRENT_GROUPS, delivered.len() + full);
+            assert_eq!(0, reporter.loss[0].queue_contention.load(Ordering::Relaxed));
+        },
+    );
+}
+
+fn submit_numbered_groups(reporter: &Reporter) {
+    let mut group = Box::new(Group::empty());
+    for number in 0..CONCURRENT_GROUPS {
+        group.begin();
+        group.write_all(&number.to_le_bytes()).unwrap();
+        group.write_all(&[0; 4_096]).unwrap();
+        reporter.admit(Stream::Stdout, &group);
+    }
+    reporter.stopping.store(true, Ordering::Release);
+    reporter.notify();
+}
+
+fn take_numbered_groups(reporter: &Reporter) -> Vec<usize> {
+    let mut scratch = Box::new(Group::empty());
+    let mut numbers = Vec::with_capacity(CONCURRENT_GROUPS);
+    // Each step takes a group or parks until the next of the producer's notifications.
+    for _step in 0..4 * CONCURRENT_GROUPS {
+        let stopping = reporter.stopping.load(Ordering::Acquire);
+        if reporter.take(|group| scratch.copy_from(group)).is_some() {
+            numbers.push(usize::from_le_bytes(
+                scratch.bytes()[..size_of::<usize>()].try_into().unwrap(),
+            ));
+        } else if stopping {
+            return numbers;
+        } else {
+            std::thread::park();
+        }
+    }
+    unreachable!("the writer took more steps than the producer notified");
+}
+
 #[test]
 fn rejects_a_nested_diagnostic_without_damaging_the_outer_event() {
     // Goal: nested errors remain nonwaiting while the outer formatter owns staging.
