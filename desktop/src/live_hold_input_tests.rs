@@ -406,6 +406,26 @@ fn the_reader_keeps_reading_a_second_held_on_overview_until_it_answers(cx: &mut 
 }
 
 #[gpui::test]
+fn the_reader_rests_once_the_read_of_a_second_held_on_overview_answers(cx: &mut TestAppContext) {
+    // Goal: once the read of a held second whose top Apps the store's View lacks answers, the
+    // page rests the reader, as it does while it draws Overview from the View, since the hold
+    // needs nothing more from it. Method: Overview over a View whose older tail holds 9,500
+    // without its Apps, a hover there that reads its second, a click there, the answer to that
+    // read, the page's step that rests the reader, then whether the reader rests.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_view_over_tail();
+    harness.driver.hover_second_on("live-cpu-plot", TAIL);
+    harness.driver.tick_hover();
+    harness.driver.click_second_on("live-cpu-plot", TAIL);
+    harness.driver.answer_held_read();
+
+    let rested = harness.driver.offer_rest();
+
+    assert!(rested);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_click_over_a_rested_reader_on_a_second_the_view_lacks_reads_the_page_first(
     cx: &mut TestAppContext,
 ) {
