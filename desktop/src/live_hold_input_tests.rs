@@ -109,23 +109,23 @@ fn the_end_of_a_hover_while_a_second_is_held_shows_the_held_second_without_readi
 }
 
 #[gpui::test]
-fn a_reply_to_the_request_out_at_the_click_leaves_the_held_page_as_it_was(cx: &mut TestAppContext) {
+fn the_page_takes_no_reply_to_the_request_out_at_the_click(cx: &mut TestAppContext) {
     // Goal: the page takes no reply to a request it sent before the click, as the reader
-    // publishes the live Mac's newer seconds under it, whose readings would move the window
-    // the click held. Method: click 800 seconds before the newest on the CPU page's chart by
-    // App, hand the page a reply to the request it followed the live Mac with, reading ten
-    // seconds past the newest, then the page's window.
+    // publishes the live Mac's newer seconds under it, whose readings would replace the held
+    // page's. Method: click 800 seconds before the newest on the CPU page's chart by App, then
+    // hand the page a reply to the request it followed the live Mac with, reading ten seconds
+    // past the newest.
     let mut harness = InputHarness::open_route(cx, "cpu");
     harness.driver.show_hour_at_fifteen_minutes();
     let generation = harness.driver.request_generation();
     harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
     harness.driver.click_second_on("live-cpu-apps-plot", HELD);
 
-    harness
+    let taken = harness
         .driver
         .reply_to_page_reading(generation, HOUR_NEWEST + 10);
 
-    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    assert!(!taken);
     harness.teardown();
 }
 
@@ -1761,14 +1761,17 @@ impl InputDriver {
     }
 
     /// Hands the page the reply to its request of `generation`, the live readings up to
-    /// `newest`.
-    fn reply_to_page_reading(&mut self, generation: u64, newest: u64) {
+    /// `newest`. Answers whether the page took it.
+    fn reply_to_page_reading(&mut self, generation: u64, newest: u64) -> bool {
         let mut reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
         reply.generation = generation;
-        self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.take_update(Update::Ready(reply));
+        let taken = self.view.update(&mut self.context, |dashboard, cx| {
+            let taken = dashboard.take_update(Update::Ready(reply));
             cx.notify();
+            taken
         });
+
         self.context.run_until_parked();
+        taken
     }
 }
