@@ -401,7 +401,7 @@ impl LiveDashboard {
     fn apps_drawn_let_go(&self) -> Option<&LetGo> {
         let let_go = self.store_panels.let_go.as_ref()?;
         assert!(self.store_view.is_none());
-        if !self.store_view_follows() {
+        if !self.apps_from_store_view() {
             return None;
         }
         let overview = self.request.route == "overview";
@@ -423,22 +423,32 @@ impl LiveDashboard {
         self.apps_followed_store_view()
     }
 
-    /// The View the page's charts by App were drawn from: on Overview the one `drawn_store_view`
-    /// names, and on another page that draws one from the View the one it follows, whose charts
-    /// a hover holds still.
-    fn apps_drawn_store_view(&self) -> Option<&View> {
-        if self.request.route == "overview" {
-            return self.drawn_store_view();
+    /// Whether the page shows the charts by App it drew from the store, which `store_panels`
+    /// holds: from the View `drawn_store_view` names on Overview, from the View it follows on
+    /// another page, whose charts a hover holds still, or from what it kept of a View it let go
+    /// of.
+    fn store_panels_apps_shown(&self) -> bool {
+        // A page keeps the charts drawn for the other kind of page until it draws its own, which
+        // a hover holds back.
+        let overview = self.request.route == "overview";
+        if self.store_panels.overview != overview {
+            return false;
+        }
+        if self.apps_drawn_let_go().is_some() {
+            return true;
+        }
+        if overview {
+            return self.drawn_store_view().is_some();
         }
 
-        self.apps_followed_store_view()
+        self.apps_followed_store_view().is_some()
     }
 
     /// The store's newest View, as `followed_store_view` gives it, on any page that draws a chart
     /// by App from it. A page other than Overview draws from it once the worker read the page,
     /// since its other charts are the worker's.
     fn apps_followed_store_view(&self) -> Option<&View> {
-        if !self.store_view_follows() {
+        if !self.apps_from_store_view() {
             return None;
         }
 
@@ -468,7 +478,7 @@ impl LiveDashboard {
     /// Whether the page draws charts by App from the store: a page that draws one, once the
     /// worker read it where it is not Overview, on the live Mac, following the newest second or
     /// holding one.
-    fn store_view_follows(&self) -> bool {
+    fn apps_from_store_view(&self) -> bool {
         if !store_view_draws_apps(&self.request.route) {
             return false;
         }
@@ -500,7 +510,7 @@ impl LiveDashboard {
     pub(crate) fn store_view_draws(&self, panel: &Panel) -> bool {
         let drawn = &self.store_panels;
         if store_view_draws_app_chart(&self.request.route, &panel.id) {
-            if self.apps_drawn_store_view().is_none() && self.apps_drawn_let_go().is_none() {
+            if !self.store_panels_apps_shown() {
                 return false;
             }
             return drawn.apps.iter().any(|drawn| drawn.id == panel.id);
@@ -532,7 +542,7 @@ impl LiveDashboard {
     /// The history of `metric` the page reads: the one the page drew from the store's View,
     /// where it draws one, and otherwise the one the worker read.
     pub(crate) fn attribution_history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
-        if self.apps_drawn_store_view().is_some() || self.apps_drawn_let_go().is_some() {
+        if self.store_panels_apps_shown() {
             if let Some(histories) = &self.store_panels.histories {
                 return match metric {
                     Metric::Gpu => self.store_panels.gpu.as_ref(),
@@ -547,7 +557,7 @@ impl LiveDashboard {
     /// The history of resident memory by App the page reads: the one the page drew from the
     /// store's View, where it draws one, and otherwise the one the worker read.
     pub(crate) fn resident_history(&self) -> Option<&ResidentHistory> {
-        if self.apps_drawn_store_view().is_some() || self.apps_drawn_let_go().is_some() {
+        if self.store_panels_apps_shown() {
             if let Some(resident) = &self.store_panels.resident {
                 return Some(resident);
             }

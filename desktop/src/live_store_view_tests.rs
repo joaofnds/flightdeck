@@ -627,6 +627,24 @@ mod when_the_page_has_a_chart_by_app {
         assert_eq!(by_app(&dashboard.panels), expected);
     }
 
+    #[test]
+    fn a_page_the_worker_answers_under_a_hover_reads_none_of_overviews_charts_by_app() {
+        // Goal: a page opened from Overview that the worker answers under a hover, which holds
+        // the page's charts still, reads its charts by App from the worker and never the ones
+        // Overview drew from the View. Method: Overview takes a View, the CPU page opens, a
+        // hover of the worker's readings begins, and the worker answers with readings that draw
+        // no chart by App.
+        let trends = [reading_at(9_999, 0), reading_at(10_000, 0)];
+        let mut dashboard = dashboard_on("overview", &trends);
+        assert!(dashboard.take_view(Arc::new(charted_view())));
+        dashboard.switch_route("cpu");
+        dashboard.preview = Some(preview(&dashboard));
+
+        dashboard.accept(readings(&trends));
+
+        assert!(dashboard.attribution_history(Metric::Cpu).is_none());
+    }
+
     /// The charts by App the page `route` draws once it takes `view`, after the worker's
     /// readings of the seconds before it.
     fn drawn_on_page(route: &str, view: &Arc<View>) -> Vec<(String, String, Vec<Line>)> {
