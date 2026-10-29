@@ -222,14 +222,15 @@ fn ordinary_discovery_does_not_borrow_an_anchor_before_an_unbounded_newest_minut
     let mut actual = Vec::new();
     let mut first_has_apps = false;
 
-    let left_out = super::load(&fixture.root, |_, second, apps| {
+    let left_out = super::load_launch(&fixture.root, |_, second, apps| {
         actual.push(second.publication);
         if second.publication == 1 {
             if let crate::store::apps::TickApps::Loaded(apps) = apps {
                 first_has_apps = !apps.apps.is_empty();
             }
         }
-    });
+    })
+    .left_out;
 
     assert_eq!(left_out, None);
     assert_eq!(actual, [1, 2, 4]);
@@ -267,9 +268,10 @@ fn ordinary_discovery_keeps_known_readings_when_the_minute_has_no_wall_bounds() 
     let fixture = mixed_wall_minute();
     let mut actual = Vec::new();
 
-    let left_out = super::load(&fixture.root, |_, second, _| {
+    let left_out = super::load_launch(&fixture.root, |_, second, _| {
         actual.push(second.publication);
-    });
+    })
+    .left_out;
 
     assert_eq!(left_out, None);
     assert_eq!(actual, [2]);
@@ -282,7 +284,7 @@ fn ordinary_discovery_keeps_the_apps_of_a_known_reading_in_an_unbounded_minute()
     let fixture = mixed_wall_minute_using(&persistence::sealed_apps::SealedApps::default());
     let mut actual = None;
 
-    let left_out = super::load(&fixture.root, |_, second, apps| {
+    let left_out = super::load_launch(&fixture.root, |_, second, apps| {
         let crate::store::apps::TickApps::Loaded(apps) = apps else {
             panic!("the ordinary loader returns the known tick's Apps");
         };
@@ -291,7 +293,8 @@ fn ordinary_discovery_keeps_the_apps_of_a_known_reading_in_an_unbounded_minute()
             apps.missing.clone(),
             apps.apps.is_empty(),
         ));
-    });
+    })
+    .left_out;
 
     assert_eq!(left_out, None);
     assert_eq!(actual, Some((2, None, false)));

@@ -430,6 +430,9 @@ struct Held {
     earlier: Span<MachineSecond>,
     /// Each App's readings added up over each stretch of the seconds of `earlier` and `span`.
     stretches: Stretches,
+    /// The minutes whose Apps a launch left out of `stretches`, which no View holds until the
+    /// store adds those Apps up.
+    owed: Option<recording::Owed>,
     /// The run and publication of the newest second taken in.
     newest: Option<Newest>,
     views: Buffers<View>,
@@ -451,6 +454,22 @@ struct Newest {
 }
 
 impl Newest {
+    /// The newest second of a store whose newest second was `newest` once it takes `second` of
+    /// run `run` in, with what it found of the second's Apps, `apps`.
+    fn after(
+        newest: Option<&Self>,
+        run: &RunIdentity,
+        second: &MachineSecond,
+        apps: &TickApps<'_>,
+    ) -> Self {
+        Self {
+            run: *run,
+            publication: second.publication,
+            segment: segment(newest, run, second),
+            apps_publication: apps_publication(newest, run, second, apps),
+        }
+    }
+
     /// Whether a store whose newest second is `self` took `second` of run `run` in already, as a
     /// second of the same run no newer than it.
     fn holds(&self, run: &RunIdentity, second: &MachineSecond) -> bool {
@@ -523,6 +542,7 @@ impl Held {
             apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
             stretches: Stretches::new(STRETCHES_MAX, STRETCHES_HELD_MAX),
+            owed: None,
             newest: None,
             views,
             version: 0,
@@ -560,6 +580,7 @@ impl Held {
         self.earlier
             .release(|second| *second = MachineSecond::default());
         self.stretches.clear();
+        self.owed = None;
         if let Some(sampled) = &mut self.sampled {
             sampled.clear();
             sampled.release(|sample| *sample = SampledSecond::empty());
@@ -593,8 +614,7 @@ impl Held {
         let Ok(prepared_sample) = self.take_sample(kept.as_ref()) else {
             return false;
         };
-        let segment = segment(self.newest.as_ref(), run, second);
-        let apps_publication = apps_publication(self.newest.as_ref(), run, second, &apps);
+        let newest = Newest::after(self.newest.as_ref(), run, second, &apps);
         if let Some(kept) = kept {
             if let Some(sampled) = &mut self.sampled {
                 let sample = prepared_sample.unwrap_or_else(|| unreachable!("admitted sample"));
@@ -604,7 +624,7 @@ impl Held {
             let pushed = self.earlier.push(|buffer| *buffer = kept);
             assert!(pushed);
         }
-        self.take_current(run, second, apps, segment);
+        self.take_current(run, second, apps, newest.segment);
         persistence::work::ingestion::record_publication(
             *run,
             second.publication,
@@ -616,12 +636,7 @@ impl Held {
                     .map_or(leaving.wall_ns, |previous| previous.max(leaving.wall_ns)),
             );
         }
-        self.newest = Some(Newest {
-            run: *run,
-            publication: second.publication,
-            segment,
-            apps_publication,
-        });
+        self.newest = Some(newest);
         self.unpublished = true;
         true
     }
@@ -762,8 +777,11 @@ impl Held {
         let apps = &self.apps;
         let earlier = &self.earlier;
         // The payload store installs a second's Apps after it takes the second in, so its
-        // stretches never add them up, and its Views hold none.
-        let stretches = self.payload_budget.is_none().then_some(&self.stretches);
+        // stretches never add them up, and its Views hold none. A store that owes its stretches
+        // the Apps of older minutes writes each stretch again as it adds them, which a View
+        // holding the stretch would leave no buffer for, so it hands over none until then.
+        let stretches =
+            (self.payload_budget.is_none() && self.owed.is_none()).then_some(&self.stretches);
         let sampled = &self.sampled;
         let complete = self.startup == StartupState::Complete;
         let failure = self.failure;
@@ -916,22 +934,134 @@ fn startup(
     operation: &Operation,
 ) -> persistence::Result<()> {
     let budget = held.payload_budget.clone();
-    let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
-        // No View is out during startup, so every buffer is free.
-        assert!(held.take(run, second, apps));
-    };
 
     if let Some(budget) = &budget {
+        let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
+            // No View is out during startup, so every buffer is free.
+            assert!(held.take(run, second, apps));
+        };
         let outcome = recording::load_payload(root, budget, operation, take);
 
         startup_accept(outcome, held, ring, operation)
     } else {
-        held.left_out = recording::load(root, take);
-        if held.left_out.is_none() {
-            held.covers_hour = true;
-        }
+        startup_launch(root, held);
 
         Ok(())
+    }
+}
+
+/// Loads the sealed hour with the Apps of the live span's minutes, and notes the older minutes,
+/// whose Apps the store adds to its stretches once it hands over its first View.
+fn startup_launch(root: &Path, held: &mut Held) {
+    let launch = recording::load_launch(root, |run, second, apps| {
+        // No View is out during startup, so every buffer is free.
+        assert!(held.take(run, second, apps));
+    });
+
+    held.left_out = launch.left_out;
+    if held.left_out.is_none() {
+        held.covers_hour = true;
+    }
+    held.owed = launch.owed;
+}
+
+/// Adds up the Apps a launch owes the store's stretches once the main thread has taken the
+/// store's first View, and hands over a View that holds them.
+fn run_owed(
+    root: &Path,
+    held: &mut Held,
+    mailbox: &Mailbox<View>,
+    load_buffers: &mut recording::LoadBuffers,
+) {
+    // A launch hands over its first View before it adds up the Apps it owes its stretches, and
+    // waits for the main thread to take it, since the pass's loaders would take the cores the
+    // window's first frame needs.
+    if held.version == 0 {
+        return;
+    }
+    if mailbox.pending() {
+        return;
+    }
+    let Some(owed) = held.owed.take() else {
+        return;
+    };
+
+    run_owed_add(root, held, &owed, load_buffers);
+    held.publish(mailbox);
+}
+
+/// Adds the Apps of the minutes `owed` holds that are older than the live span to the stretches
+/// that hold those minutes' seconds, as a load of the whole hour adds them up.
+fn run_owed_add(
+    root: &Path,
+    held: &mut Held,
+    owed: &recording::Owed,
+    load_buffers: &mut recording::LoadBuffers,
+) {
+    let mut walk = OwedWalk::default();
+    let stretches = &mut held.stretches;
+    let left_out = recording::load_owed(root, owed, load_buffers, |run, second, apps| {
+        let Some(start) = walk.step(run, second) else {
+            return;
+        };
+        if let TickApps::Folded(folded) = apps {
+            stretches.add_owed(&start.run, start.publication, &folded.apps);
+        }
+    });
+
+    if left_out.is_some() {
+        held.left_out = left_out;
+        held.covers_hour = false;
+    }
+    held.unpublished = true;
+}
+
+/// Where a walk through the seconds a launch handed over stands, as the store took them in.
+#[derive(Default)]
+struct OwedWalk {
+    /// The newest second the store took in, as it stood once it took that second in.
+    newest: Option<Newest>,
+    /// The first second of the stretch the store took that second into.
+    start: Option<StretchStart>,
+}
+
+/// The first second the store took into a stretch, by its run and its publication.
+#[derive(Clone, Copy)]
+struct StretchStart {
+    stretch: u64,
+    run: RunIdentity,
+    publication: u64,
+}
+
+impl OwedWalk {
+    /// The first second of the stretch the store took `second` of run `run` into, or `None`
+    /// where it held the second already and took it in no second time.
+    fn step(&mut self, run: &RunIdentity, second: &MachineSecond) -> Option<StretchStart> {
+        if self
+            .newest
+            .as_ref()
+            .is_some_and(|newest| newest.holds(run, second))
+        {
+            return None;
+        }
+
+        // The launch handed over no Apps added up over a stretch, so its newest second moves as
+        // it moves for a second without Apps.
+        let apps = TickApps::Missing(&Missing::Unread);
+        self.newest = Some(Newest::after(self.newest.as_ref(), run, second, &apps));
+        let stretch = stretch(second);
+        if let Some(start) = self.start {
+            if start.stretch == stretch {
+                return Some(start);
+            }
+        }
+        let start = StretchStart {
+            stretch,
+            run: *run,
+            publication: second.publication,
+        };
+        self.start = Some(start);
+        Some(start)
     }
 }
 
@@ -1196,6 +1326,7 @@ fn run(
             continue;
         }
         run_ready(held, ring, shared);
+        run_owed(root, held, &shared.mailbox, load_buffers);
         waited = if held.failure.is_some() {
             // A ring that failed may fail again at once, so the thread sleeps instead.
             thread::sleep(WAIT);

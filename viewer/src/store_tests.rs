@@ -746,6 +746,21 @@ fn publish_unavailable_processes(fixture: &mut Fixture, tick: u64) {
         .unwrap();
 }
 
+/// Empties the ticks table of the fixture's sealed minute `minute`.
+pub(super) fn empty_ticks_file(fixture: &Fixture, minute: u64) {
+    let store = persistence::Store::open(&fixture.root).unwrap();
+    let marker = store.marker_path(&persistence::WindowIdentity {
+        run: fixture.writer.identity().unwrap(),
+        window: minute,
+    });
+    let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
+    let ticks = fixture
+        .root
+        .join(&manifest.data_directory)
+        .join("ticks.parquet");
+    std::fs::write(ticks, []).unwrap();
+}
+
 /// The first View the store hands over that `holds` accepts, failing after ten seconds.
 pub(super) fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<View> {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1253,7 +1268,9 @@ fn wall_seconds_of(seconds: &[Arc<super::MachineSecond>]) -> Vec<u64> {
 mod when_the_recording_holds_sealed_minutes {
     use std::sync::Arc;
 
-    use super::{Failure, Fixture, Store, View, held_through, view_where, wall_seconds_of};
+    use super::{
+        Failure, Fixture, Store, View, empty_ticks_file, held_through, view_where, wall_seconds_of,
+    };
     use crate::store::{MachineSecond, Missing};
 
     #[test]
@@ -1419,15 +1436,19 @@ mod when_the_recording_holds_sealed_minutes {
 
     #[test]
     fn each_loader_decodes_about_an_even_share_of_the_hour() {
-        // Goal: the hour's minutes do not fall on one loader, since the hour is held once the
-        // slowest loader is done. Method: split the loaded hour's 62 minutes, and compare each
-        // batch with an even share of 11 minutes.
-        let batches = crate::store::recording::load_batches_split(62);
+        // Goal: the minutes whose Apps a load reads, such as the newest at launch, do not fall
+        // on one loader, since the load ends once the slowest loader is done. Method: split the
+        // loaded hour's 44 older minutes, costing one each, and the live span's 18, costing
+        // three, and compare each batch's cost with an even share of 17.
+        let mut costs = vec![1; 44];
+        costs.extend([3; 18]);
+
+        let batches = crate::store::recording::load_batches_split(&costs);
 
         let minutes: Vec<usize> = batches.iter().flat_map(Clone::clone).collect();
         assert_eq!(minutes, (0..62).collect::<Vec<_>>());
         for batch in batches {
-            assert!(batch.len() <= 11);
+            assert!(costs[batch].iter().sum::<usize>() < 17 + 3);
         }
     }
 
@@ -1436,21 +1457,6 @@ mod when_the_recording_holds_sealed_minutes {
             .iter()
             .map(|second| (**second).clone())
             .collect()
-    }
-
-    /// Empties the ticks table of the fixture's sealed minute `minute`.
-    fn empty_ticks_file(fixture: &Fixture, minute: u64) {
-        let store = persistence::Store::open(&fixture.root).unwrap();
-        let marker = store.marker_path(&persistence::WindowIdentity {
-            run: fixture.writer.identity().unwrap(),
-            window: minute,
-        });
-        let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
-        let ticks = fixture
-            .root
-            .join(&manifest.data_directory)
-            .join("ticks.parquet");
-        std::fs::write(ticks, []).unwrap();
     }
 }
 

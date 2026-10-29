@@ -12,6 +12,7 @@ use super::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Attribution, Resident};
 use crate::EARLIER_STRIDE_SECONDS;
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::live_app_response::{Measure, Metric, Observation, Rankable, RankedApp};
+use collector::ring::RunIdentity;
 
 /// The Apps a stretch holds at most, as many as a second holds, past which it holds none and
 /// says so.
@@ -82,6 +83,35 @@ impl Stretches {
     /// store took in without them.
     pub(super) fn add_folded(&mut self, folded: &AppsStretch) {
         self.open.add_stretch(folded, &mut self.spare);
+    }
+
+    /// Adds `folded`, what a loader added up of the Apps of seconds the store took in without
+    /// them, to the stretch whose first second is the tick of publication `publication` of run
+    /// `run`, where the store still holds that stretch.
+    pub(super) fn add_owed(&mut self, run: &RunIdentity, publication: u64, folded: &AppsStretch) {
+        if self.open.starts_at(run, publication) {
+            self.open.add_stretch(folded, &mut self.spare);
+            return;
+        }
+
+        let Some((index, held)) = self
+            .closed
+            .held()
+            .enumerate()
+            .find(|(_, stretch)| stretch.starts_at(run, publication))
+        else {
+            // The store let go of the stretch since it took the seconds in.
+            return;
+        };
+        let held = Arc::clone(held);
+        let spare = &mut self.spare;
+        let replaced = self.closed.replace(index, |buffer| {
+            buffer.copy_from(&held);
+            buffer.add_stretch(folded, spare);
+            buffer.close();
+        });
+        // A store that owes its stretches Apps hands over no View that holds one.
+        assert!(replaced);
     }
 
     /// The closed stretches, oldest first.
@@ -240,20 +270,49 @@ impl AppsStretch {
     /// Copies out what the stretch holds, and holds no second. Its rows are copied rather than
     /// moved, which keeps the room it holds for its Apps for the next stretch.
     fn detach(&mut self) -> Self {
-        let detached = Self {
-            stretch: self.stretch,
-            observation: self.observation,
-            seconds: self.seconds,
-            elapsed_ns: self.elapsed_ns,
-            elapsed_overflowed: self.elapsed_overflowed,
-            completeness: self.completeness,
-            too_many: self.too_many,
-            rows: self.rows.clone(),
-            totals: self.totals,
-        };
+        let mut detached = Self::default();
+        detached.copy_from(self);
 
         self.clear();
         detached
+    }
+
+    /// Holds what `other` holds, writing its Apps into the room the stretch holds for them.
+    fn copy_from(&mut self, other: &Self) {
+        let Self {
+            stretch,
+            observation,
+            seconds,
+            elapsed_ns,
+            elapsed_overflowed,
+            completeness,
+            too_many,
+            rows,
+            totals,
+        } = other;
+        self.stretch = *stretch;
+        self.observation = *observation;
+        self.seconds = *seconds;
+        self.elapsed_ns = *elapsed_ns;
+        self.elapsed_overflowed = *elapsed_overflowed;
+        self.completeness = *completeness;
+        self.too_many = *too_many;
+        self.rows.clone_from(rows);
+        self.totals = *totals;
+    }
+
+    /// Whether the stretch's first second is the tick of publication `publication` of run `run`.
+    /// The loader and the store read a tick's clocks from different records, so the run and the
+    /// publication name it.
+    fn starts_at(&self, run: &RunIdentity, publication: u64) -> bool {
+        let Some(observation) = &self.observation else {
+            return false;
+        };
+
+        observation.recording == run.recording.0
+            && observation.stamp.boot == run.boot.0
+            && observation.stamp.run == run.run.0
+            && observation.stamp.publication == publication
     }
 
     /// Adds the Apps of `second`, a second of stretch `stretch`, writing the stretch's Apps into

@@ -387,23 +387,81 @@ impl Found {
     }
 }
 
+/// What a launch loaded of the hour.
+pub(super) struct Launch {
+    pub(super) left_out: Option<Failure>,
+    /// The minutes whose Apps the launch left for `load_owed` to add up over each stretch, where
+    /// it left any.
+    pub(super) owed: Option<Owed>,
+}
+
+/// The loaded hour's minutes as a launch found them, newest last, the older of which hold Apps
+/// the store's stretches lack.
+pub(super) struct Owed {
+    found: Vec<Found>,
+    apps_from_ns: u64,
+}
+
 /// Hands `take` the run, the second and the Apps of each tick the loaded hour's sealed minutes
-/// hold, oldest first. The hour ends at the newest second the recording sealed, and only the
-/// minutes of the live span before it give their Apps at each second. Those of older minutes
-/// come added up over each stretch. Returns why the store holds less of the hour than the
-/// recording sealed, where it does.
-pub(super) fn load(
+/// hold, oldest first, as `load_hour` does, but with the Apps of the live span's minutes alone, so
+/// the store hands over its first View before it reads those of the older minutes. Returns why
+/// the store holds less of the hour than the recording sealed, where it does, and the minutes
+/// whose Apps the store still owes its stretches.
+pub(super) fn load_launch(
     root: &Path,
-    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> Launch {
+    let mut found = Vec::with_capacity(MINUTES_MAX);
+    let continuity = match find_window(root, &mut found, &LoadWindow::all(None)) {
+        Ok(continuity) => continuity,
+        Err(failure) => {
+            return Launch {
+                left_out: Some(failure),
+                owed: None,
+            };
+        }
+    };
+    // A load since no second the store holds replaces what it holds.
+    assert_eq!(continuity, Continuity::Replace);
+
+    let apps_from_ns = apps_from_ns(&found);
+    found.reverse();
+    let apps = AppsLoad {
+        from_ns: apps_from_ns,
+        read: AppsRead::BySecond,
+        held: None,
+    };
+    let left_out = load_found(root, &found, apps, None, take);
+
+    let owes = found
+        .iter()
+        .any(|minute| !minute.apps_by_second(apps_from_ns));
+    Launch {
+        left_out,
+        owed: owes.then_some(Owed {
+            found,
+            apps_from_ns,
+        }),
+    }
+}
+
+/// Hands `take` the run, the second and the Apps of each tick of the minutes `owed` holds, oldest
+/// first, as `load_launch` handed them over, with what a loader adds up over each stretch of the
+/// Apps of the minutes older than the live span. Returns why it handed over fewer than the
+/// minutes sealed, where it did.
+pub(super) fn load_owed(
+    root: &Path,
+    owed: &Owed,
+    buffers: &mut LoadBuffers,
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> Option<Failure> {
-    load_window_inner(
-        root,
-        &LoadWindow::all(None),
-        None,
-        |_, run, second, apps| {
-            take(run, second, apps);
-        },
-    )
+    let apps = AppsLoad {
+        from_ns: owed.apps_from_ns,
+        read: AppsRead::Folded,
+        held: None,
+    };
+
+    load_found(root, &owed.found, apps, Some(buffers), take)
 }
 
 /// Whether the ticks a load hands over replace the seconds the store holds or continue them.
@@ -469,7 +527,11 @@ fn load_window_inner(
     load_found(
         root,
         &found,
-        AppsLoad { from_ns, held },
+        AppsLoad {
+            from_ns,
+            read: AppsRead::All,
+            held,
+        },
         buffers,
         |run, second, apps| take(continuity, run, second, apps),
     )
@@ -515,6 +577,11 @@ const LOADERS_MAX: usize = 6;
 pub(super) struct LoadBuffers {
     apps: [AppMinute; LOADERS_MAX],
 }
+
+/// What decoding a sealed minute with its Apps costs, counted in minutes decoded without them.
+/// The newest 18 minutes of a recording of about 460 Apps a second took 3.6 ms each for their
+/// readings and 7.1 ms more for their Apps on 2026-10-23.
+const APPS_COST: usize = 3;
 
 /// The ticks a sealed minute holds where none was missed.
 const TICKS_PER_MINUTE: usize = 60;
@@ -579,9 +646,32 @@ struct AppsLoad<'since> {
     /// The oldest wall time of the seconds whose Apps the store holds one by one. The Apps of a
     /// minute whose ticks do not reach it are added up over each stretch.
     from_ns: u64,
+    read: AppsRead,
     /// The newest second the store holds already. The loader adds up none of the seconds whose
     /// Apps the store holds.
     held: Option<&'since super::Newest>,
+}
+
+/// Which of the loaded hour's minutes a load reads the Apps of.
+#[derive(Clone, Copy)]
+enum AppsRead {
+    All,
+    /// Those of the minutes whose Apps the store holds at each second.
+    BySecond,
+    /// Those of the minutes whose Apps the store holds added up over each stretch.
+    Folded,
+}
+
+impl AppsRead {
+    /// Whether a load reads the Apps of `minute`, where the store holds those of the minutes
+    /// whose ticks reach `apps_from_ns` at each second.
+    fn reads(self, minute: &Found, apps_from_ns: u64) -> bool {
+        match self {
+            Self::All => true,
+            Self::BySecond => minute.apps_by_second(apps_from_ns),
+            Self::Folded => !minute.apps_by_second(apps_from_ns),
+        }
+    }
 }
 
 /// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
@@ -593,10 +683,20 @@ fn load_batches(
     apps: AppsLoad<'_>,
     buffers: Option<&mut LoadBuffers>,
 ) -> Vec<Batch> {
+    let costs: Vec<usize> = found
+        .iter()
+        .map(|minute| {
+            if apps.read.reads(minute, apps.from_ns) {
+                APPS_COST
+            } else {
+                1
+            }
+        })
+        .collect();
     thread::scope(|scope| {
         let mut loaders = Vec::with_capacity(LOADERS_MAX);
         let mut buffers = buffers.map(|buffers| buffers.apps.iter_mut());
-        for batch in load_batches_split(found.len()) {
+        for batch in load_batches_split(&costs) {
             let buffer = buffers.as_mut().map(|buffers| {
                 buffers
                     .next()
@@ -637,21 +737,27 @@ fn load_batches(
     })
 }
 
-/// Splits `minutes` minutes, oldest first, into at most `LOADERS_MAX` batches of neighbouring
-/// minutes, each an even share of them but the last, which holds those left. Every minute
-/// decodes its Apps, whether by second or by stretch, at about the same cost.
-pub(super) fn load_batches_split(minutes: usize) -> Vec<Range<usize>> {
-    let share = minutes.div_ceil(LOADERS_MAX);
+/// Splits minutes that cost `costs` to decode, oldest first, into at most `LOADERS_MAX` batches
+/// of neighbouring minutes, each closed once it reaches an even share of the cost, so no batch
+/// costs a minute's cost or more past its share.
+pub(super) fn load_batches_split(costs: &[usize]) -> Vec<Range<usize>> {
+    let share = costs.iter().sum::<usize>().div_ceil(LOADERS_MAX);
     let mut batches = Vec::with_capacity(LOADERS_MAX);
-    for batch in 0..LOADERS_MAX {
-        let start = batch * share;
-        if start >= minutes {
-            break;
+    let mut start = 0;
+    let mut cost = 0;
+    for (index, minute_cost) in costs.iter().enumerate() {
+        cost += minute_cost;
+        if cost >= share {
+            batches.push(start..index + 1);
+            start = index + 1;
+            cost = 0;
         }
-        batches.push(start..minutes.min(start + share));
+    }
+    if start < costs.len() {
+        batches.push(start..costs.len());
     }
 
-    assert_eq!(batches.last().map_or(0, |batch| batch.end), minutes);
+    assert!(batches.len() <= LOADERS_MAX);
     batches
 }
 
@@ -702,7 +808,13 @@ fn load_batch(
     }
 
     for minute in minutes {
-        let Ok(missing) = decode(root, &minute.marker, &mut current, Some(&mut *apps)) else {
+        let read = fold.apps.read.reads(minute, fold.apps.from_ns);
+        let Ok(missing) = decode(
+            root,
+            &minute.marker,
+            &mut current,
+            read.then_some(&mut *apps),
+        ) else {
             batch.left_out = Some(Failure::Refused);
             previous_run = None;
             continue;
