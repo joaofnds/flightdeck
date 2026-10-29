@@ -112,6 +112,29 @@ fn the_end_of_a_hover_while_a_second_is_held_shows_the_held_second_without_readi
 }
 
 #[gpui::test]
+fn a_click_after_a_hover_read_on_another_table_page_reads_the_held_second_again(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click after a hover that read its second on another page of the process table
+    // reads the held second again, at the table's first page that holding it shows, rather than
+    // keep the hover's read of the other page. Method: the CPU page over the View of the hour at
+    // the newest fifteen minutes, its table at its second page of 512 rows, a hover 800 seconds
+    // before the newest on its chart by App that reads its second, a click there, then the
+    // commands the reader was sent.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.page_process_table(512);
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.tick_hover();
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    assert_eq!(harness.driver.reader_commands(), commands + 1);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_hover_while_the_held_second_is_read_sends_no_read_of_its_own(cx: &mut TestAppContext) {
     // Goal: a hover of another second while the reader still reads the held second waits for
     // that read rather than sending its own, which would cancel it. Method: hover and click 800
@@ -1821,6 +1844,13 @@ impl InputDriver {
         let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
         reply.histories_pending = true;
         self.reply_to_last_request(reply);
+    }
+
+    /// Shows the page's process table from row `offset`, as its paging does.
+    fn page_process_table(&mut self, offset: u64) {
+        self.view.update(&mut self.context, |dashboard, _| {
+            dashboard.request.offset = offset;
+        });
     }
 
     /// Hands the page `reply` as the reader's answer to its last request.
