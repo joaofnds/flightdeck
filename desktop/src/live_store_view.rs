@@ -1,7 +1,7 @@
 //! The page drawn from the store's newest View, which the window takes each tick. Overview draws
 //! its machine charts, its CPU, memory, energy and disk charts by App, its readouts and its
-//! hardware figure from it while it follows the newest second. The Memory, CPU, Energy and
-//! Storage pages draw their chart by App from it while they follow the newest second, and a
+//! hardware figure from it while it follows the newest second. The Memory, CPU, Energy, Storage
+//! and GPU pages draw their chart by App from it while they follow the newest second, and a
 //! chosen second, a hover's reading and every other chart draw from the worker's readings.
 
 use std::rc::Rc;
@@ -32,8 +32,8 @@ use crate::live_views::utilization::{Shares, UtilizationReadings, utilizations};
 mod tests;
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
-/// The charts by App of a rate Overview draws from the store's View.
-const APP_METRICS: [Metric; 3] = [Metric::Cpu, Metric::Power, Metric::Disk];
+/// The charts by App of a rate the pages draw from the store's View.
+const APP_METRICS: [Metric; 4] = [Metric::Cpu, Metric::Power, Metric::Disk, Metric::Gpu];
 
 /// The live buffers kept across window hides; ingestion parks until the window shows again.
 struct LiveStore(Store);
@@ -101,9 +101,12 @@ pub(super) struct StorePanels {
     /// The charts by App the View draws, of resident memory and of `APP_METRICS`, leaving out
     /// each it holds too little for.
     apps: Vec<Rc<Panel>>,
-    /// The histories of `APP_METRICS` that `apps` draw, which say why a chart is left out, or
-    /// none before the first View.
+    /// The histories of CPU time, power and disk bytes that `apps` draw, which say why a chart
+    /// is left out, or none before the first View.
     histories: Option<OverviewAppHistories>,
+    /// The history of GPU time that `apps` draw on a page other than Overview, or none on
+    /// Overview and before the first View.
+    gpu: Option<AppAttributionHistory>,
     /// The history of resident memory `apps` draw, or none before the first View.
     resident: Option<ResidentHistory>,
     /// The top Apps of the View's newest second, or none before the first View.
@@ -206,11 +209,22 @@ impl LiveDashboard {
                 histories: self.store_panels.histories.take(),
                 resident: self.store_panels.resident.take(),
             };
+            let older_gpu = self.store_panels.gpu.take();
             let Some(view) = self.store_view.clone() else {
                 unreachable!("taking the App charts leaves the drawn View as it was");
             };
             let cohorts = draw_store_view_cohorts(&view, chosen_over, &mut self.leaders);
             let mut panels = draw_store_view_panels_apps(&view, older, &cohorts, chosen_over);
+            // Every page other than Overview draws the GPU chart, so a page opened from another
+            // finds its chart among those drawn from the same View.
+            let gpu = match older_gpu {
+                Some(older) => {
+                    AppAttributionHistory::from_view_after(Metric::Gpu, &view, &cohorts, older)
+                }
+                None => AppAttributionHistory::from_view(Metric::Gpu, &view, &cohorts),
+            };
+            panels.apps.extend(gpu.panel());
+            panels.gpu = Some(gpu);
             let sliding = self.panels_slide();
             for panel in &mut panels.apps {
                 super::zoom_panel(panel, window, sliding);
@@ -422,7 +436,10 @@ impl LiveDashboard {
     pub(crate) fn attribution_history(&self, metric: Metric) -> Option<&AppAttributionHistory> {
         if self.apps_drawn_store_view().is_some() {
             if let Some(histories) = &self.store_panels.histories {
-                return histories.history(metric);
+                return match metric {
+                    Metric::Gpu => self.store_panels.gpu.as_ref(),
+                    Metric::Cpu | Metric::Power | Metric::Disk => histories.history(metric),
+                };
             }
         }
 
@@ -834,8 +851,8 @@ fn draw_store_view_splice_apps(route: &str, panels: &mut Vec<Rc<Panel>>, apps: &
 }
 
 /// Whether the page `route` draws its chart `id` by App from the store's View: Overview its
-/// charts by App of resident memory and of `APP_METRICS`, and the Memory, CPU, Energy and Storage
-/// pages the one of them each shows.
+/// charts by App of resident memory and of `APP_METRICS` but GPU time, and the Memory, CPU,
+/// Energy, Storage and GPU pages the one of them each shows.
 fn store_view_draws_app_chart(route: &str, id: &str) -> bool {
     if id == crate::live_resident_history::PANEL_ID {
         return matches!(route, "overview" | "memory");
@@ -847,7 +864,8 @@ fn store_view_draws_app_chart(route: &str, id: &str) -> bool {
         return false;
     }
     if route == "overview" {
-        return true;
+        // Overview's GPU slot names the GPU page, which draws the chart.
+        return metric != Metric::Gpu;
     }
 
     Metric::from_route(route) == Some(metric)

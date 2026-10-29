@@ -588,6 +588,17 @@ mod when_the_page_has_a_chart_by_app {
     }
 
     #[test]
+    fn the_gpu_page_draws_its_chart_by_app_from_the_view() {
+        // Goal: the GPU page draws its chart by App from the store's View, which adds up GPU
+        // time in its stretches too. Method: as for the CPU page.
+        let view = Arc::new(charted_view());
+
+        let drawn = drawn_on_page("gpu", &view);
+
+        assert_eq!(drawn, expected_on_page(&view, Metric::Gpu.panel_id()));
+    }
+
+    #[test]
     fn the_memory_page_draws_its_chart_by_app_from_the_view() {
         // Goal: the Memory page draws its chart of resident memory by App from the store's
         // View. Method: as for the CPU page.
@@ -597,6 +608,23 @@ mod when_the_page_has_a_chart_by_app {
 
         let expected = expected_on_page(&view, crate::live_resident_history::PANEL_ID);
         assert_eq!(drawn, expected);
+    }
+
+    #[test]
+    fn a_page_opened_from_another_draws_its_chart_by_app_from_the_same_view() {
+        // Goal: a page opened from another page draws its chart by App from the View that page
+        // drew, before the store hands over a newer one. Method: the CPU page takes a View,
+        // then the GPU page opens and the worker reads it.
+        let view = Arc::new(charted_view());
+        let trends = [reading_at(9_999, 0), reading_at(10_000, 0)];
+        let mut dashboard = dashboard_on("cpu", &trends);
+        assert!(dashboard.take_view(Arc::clone(&view)));
+
+        dashboard.switch_route("gpu");
+        dashboard.accept(readings(&trends));
+
+        let expected = expected_on_page(&view, Metric::Gpu.panel_id());
+        assert_eq!(by_app(&dashboard.panels), expected);
     }
 
     /// The charts by App the page `route` draws once it takes `view`, after the worker's
@@ -877,6 +905,7 @@ fn charted_cohorts(view: &View) -> Cohorts {
         cpu: vec![Arc::clone(&brave)],
         power: vec![Arc::clone(&brave)],
         disk: vec![Arc::clone(&brave)],
+        gpu: vec![Arc::clone(&brave)],
         resident: vec![brave],
         ..Cohorts::default()
     }
@@ -919,6 +948,7 @@ fn by_app(panels: &[Rc<Panel>]) -> Vec<(String, String, Vec<Line>)> {
         Metric::Cpu.panel_id(),
         Metric::Power.panel_id(),
         Metric::Disk.panel_id(),
+        Metric::Gpu.panel_id(),
     ];
 
     panels
