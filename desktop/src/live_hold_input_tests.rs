@@ -453,6 +453,25 @@ fn pause_after_letting_go_before_the_first_reading_holds_the_newest_second_over_
 }
 
 #[gpui::test]
+fn a_click_on_a_saved_recording_selects_the_second_and_reads_the_window_around_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a click on a chart of a saved recording selects the second under the pointer and
+    // asks the reader for the window around it, rather than holding it in the window the charts
+    // were drawn in, since a saved recording has no Store and its window moves with the selected
+    // second. Method: the CPU page of a saved recording whose reader answered its newest two
+    // seconds at the newest fifteen minutes, a click 800 seconds before the newest on its CPU
+    // chart, then the second the reader was last asked for.
+    let mut harness = InputHarness::open_recorded_route(cx, "cpu");
+    harness.driver.show_recording_at_fifteen_minutes();
+
+    harness.driver.click_second_on("live-cpu-plot", HELD);
+
+    assert_eq!(harness.driver.reader_asked_second(), Some(HELD));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_step_past_the_first_second_of_a_held_window_on_overview_stays_at_that_second(
     cx: &mut TestAppContext,
 ) {
@@ -1152,14 +1171,32 @@ impl InputDriver {
 
     /// Shows the page over the View of the hour and `reply`, the worker's reply to its request,
     /// following the newest second of `reply` at the newest fifteen minutes.
-    fn show_hour_at_fifteen_minutes_answered(&mut self, mut reply: Box<Snapshot>) {
+    fn show_hour_at_fifteen_minutes_answered(&mut self, reply: Box<Snapshot>) {
         let (view, _) = hour();
+        self.show_reply_at_fifteen_minutes(reply);
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_view(Arc::new(view)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Shows the page of a saved recording over the worker's reply to its request, the readings
+    /// of the recording's newest two seconds, following the newest second at the newest fifteen
+    /// minutes.
+    fn show_recording_at_fifteen_minutes(&mut self) {
+        let reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+        self.show_reply_at_fifteen_minutes(reply);
+    }
+
+    /// Shows the page over `reply`, the worker's reply to its request, following the newest
+    /// second of `reply` at the newest fifteen minutes.
+    fn show_reply_at_fifteen_minutes(&mut self, mut reply: Box<Snapshot>) {
         self.show_range(Range::History);
         self.view.update(&mut self.context, |dashboard, cx| {
             reply.generation = dashboard.generation;
             assert!(dashboard.take_update(Update::Ready(reply)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
-            assert!(dashboard.take_view(Arc::new(view)));
             cx.notify();
         });
         self.context

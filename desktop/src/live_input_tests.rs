@@ -1164,7 +1164,19 @@ impl InputHarness {
     fn open_route(cx: &mut TestAppContext, route: &str) -> Self {
         let root =
             std::env::temp_dir().join(format!("flightdeck-input-contract-{}", std::process::id()));
-        let worker = Worker::start(root).unwrap();
+        Self::open_route_through(cx, route, Worker::start(root).unwrap())
+    }
+
+    /// Opens the window on `route` of a saved recording with the page's first reading still to
+    /// come.
+    fn open_recorded_route(cx: &mut TestAppContext, route: &str) -> Self {
+        let root =
+            std::env::temp_dir().join(format!("flightdeck-input-contract-{}", std::process::id()));
+        Self::open_route_through(cx, route, Worker::start_recorded(root).unwrap())
+    }
+
+    /// Opens the window on `route`, reading through `worker`.
+    fn open_route_through(cx: &mut TestAppContext, route: &str, worker: Worker) -> Self {
         let window = cx.update(|cx| {
             cx.open_window(WindowOptions::default(), |_, cx| {
                 crate::native_workflows::create_dashboard(worker, route.into(), None, cx)
