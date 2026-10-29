@@ -1209,6 +1209,11 @@ pub(crate) fn close_dashboard_window(
     context: &mut VisualTestContext,
     view: &Entity<LiveDashboard>,
 ) {
+    // A test that failed inside an update leaves its window taken, so updating it here would
+    // panic again during the unwind, which aborts every test still to run.
+    if std::thread::panicking() {
+        return;
+    }
     context.update(|window, cx| {
         view.update(cx, |dashboard, _| dashboard.worker.stop());
         window.remove_window();
