@@ -373,6 +373,53 @@ fn a_range_picked_while_held_redraws_the_apps_from_the_kept_view_without_reading
 }
 
 #[gpui::test]
+fn letting_go_of_a_hold_keeps_no_part_of_the_view_it_held(cx: &mut TestAppContext) {
+    // Goal: letting go of a second held on Overview leaves the page holding nothing of the View
+    // the hold kept, so the store, which wakes to catch up, can write over every buffer of it.
+    // Method: Overview over the View of the hour at the last 60 minutes, Pause and a tick of the
+    // page, which hold the newest second, Pause again, which lets go, then how many owners the
+    // View and its newest second have besides the test.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    let view = harness.driver.kept_view();
+
+    harness.driver.pause();
+
+    assert_eq!(Arc::strong_count(&view), 1);
+    assert_eq!(Arc::strong_count(view.seconds.last().unwrap()), 1);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_range_s_reset_lets_go_of_the_view_a_hold_kept(cx: &mut TestAppContext) {
+    // Goal: the range's reset, which lets go of a held second as Pause does, leaves the page
+    // holding nothing of the View the hold kept. Method: Overview over the View of the hour at
+    // the last 60 minutes, Pause and a tick of the page, then the range's reset, and how many
+    // owners the View and its newest second have besides the test.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    let view = harness.driver.kept_view();
+
+    harness.driver.follow_latest();
+
+    assert_eq!(Arc::strong_count(&view), 1);
+    assert_eq!(Arc::strong_count(view.seconds.last().unwrap()), 1);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_drag_on_the_cpu_page_at_the_hour_reads_once_and_keeps_the_chart_by_app(
     cx: &mut TestAppContext,
 ) {
@@ -572,6 +619,13 @@ impl InputDriver {
     fn ranked_second(&self) -> u64 {
         self.view.read_with(&self.context, |dashboard, _| {
             dashboard.ranking_reading().unwrap().1.second
+        })
+    }
+
+    /// The store's View the page keeps.
+    fn kept_view(&self) -> Arc<viewer::store::View> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            Arc::clone(dashboard.store_view.as_ref().unwrap())
         })
     }
 

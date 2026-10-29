@@ -263,6 +263,12 @@ impl LiveDashboard {
         self.refresh_chart_inspector();
     }
 
+    /// Lets go of the View a hold kept, before the store wakes to catch up, since the catch-up
+    /// writes the buffers a View the page holds keeps.
+    pub(super) fn store_view_let_go(&mut self) {
+        self.store_view = None;
+    }
+
     /// Lets go of the View the page could not draw, so the page shows the worker's readings
     /// whole and its error stays the worker's, and reports `error` once each time it changes.
     fn draw_store_view_failed(&mut self, error: String) {

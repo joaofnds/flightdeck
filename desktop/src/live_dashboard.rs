@@ -1191,7 +1191,9 @@ impl LiveDashboard {
     /// shows it from them at once, as an arrow step does. A page with nothing shown asks as any
     /// other request does.
     pub(crate) fn select(&mut self, cx: &mut Context<Self>) {
-        self.hold = None;
+        if self.hold.take().is_some() {
+            self.store_view_let_go();
+        }
         if self.snapshot.is_none() {
             self.submit();
             cx.notify();
@@ -1302,7 +1304,9 @@ impl LiveDashboard {
 
     /// Goes back to the whole history, following the newest second.
     pub(crate) fn reset_range(&mut self, cx: &mut Context<Self>) {
-        self.hold = None;
+        if self.hold.take().is_some() {
+            self.store_view_let_go();
+        }
         let held = self.request.second.take().is_some();
         if held {
             self.request.identity = None;
