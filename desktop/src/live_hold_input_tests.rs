@@ -343,9 +343,9 @@ fn a_click_over_a_rested_reader_on_a_second_the_view_lacks_reads_the_page_first(
     // Goal: a click on Overview over a rested reader, on a second whose top Apps the store's
     // View lacks, asks the reader for the page before the held second, since a rested reader
     // reads a second's own read as a newly opened page. Method: Overview over a View whose older
-    // tail holds 9,500 without its Apps, the reader rested, a hover and a click there, then the
-    // second the reader was last asked for, which the page's read names 450 seconds before the
-    // held window's last second.
+    // tail holds 9,500 without its Apps, the reader rested, a hover and a click there, the
+    // hold's step, which leaves the page's read out, then the second the reader was last asked
+    // for, which the page's read names 450 seconds before the held window's last second.
     let mut harness = InputHarness::open_route(cx, "overview");
     harness.driver.show_view_over_tail();
     harness.driver.rest_reader();
@@ -353,6 +353,7 @@ fn a_click_over_a_rested_reader_on_a_second_the_view_lacks_reads_the_page_first(
     harness.driver.tick_hover();
 
     harness.driver.click_second_on("live-cpu-plot", TAIL);
+    harness.driver.tick_hold();
 
     assert_eq!(
         harness.driver.reader_asked_second(),
