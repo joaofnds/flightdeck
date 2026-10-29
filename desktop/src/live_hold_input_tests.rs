@@ -135,6 +135,31 @@ fn a_click_after_a_hover_read_on_another_table_page_reads_the_held_second_again(
 }
 
 #[gpui::test]
+fn a_hover_after_a_click_while_the_page_was_read_reads_its_second(cx: &mut TestAppContext) {
+    // Goal: a click while the reader still reads the page forgets that read, so a later hover
+    // of another second reads its second rather than wait on a page read that never answers.
+    // Method: the CPU page over the View of the hour at the newest fifteen minutes, opened again
+    // from the Memory page, which asks the reader for it, a hover and a click 800 seconds before
+    // the newest on its chart by App, the answer to the hold's read, a hover 700 seconds before
+    // the newest and the hover's step, then the reads the hovers sent.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.navigate("memory");
+    harness.driver.navigate("cpu");
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.answer_held_read();
+    harness
+        .driver
+        .hover_second_on("live-cpu-apps-plot", HELD + 100);
+
+    harness.driver.tick_hover();
+
+    assert_eq!(harness.driver.hover_reads(), 1);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_hover_while_the_held_second_is_read_sends_no_read_of_its_own(cx: &mut TestAppContext) {
     // Goal: a hover of another second while the reader still reads the held second waits for
     // that read rather than sending its own, which would cancel it. Method: hover and click 800
