@@ -344,6 +344,35 @@ fn pause_on_overview_at_the_hour_keeps_the_apps_that_led_over_it(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn a_range_picked_while_held_redraws_the_apps_from_the_kept_view_without_reading(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a range picked while a second is held reads nothing, and the charts by App choose
+    // the Apps that led over the new range from the View the page keeps. Method: Overview over
+    // the View of an hour in whose two oldest stretches D led, the last 60 minutes, Pause, then
+    // the default 15 minutes, which D is absent from, and the commands the reader was sent and the
+    // lines the CPU chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_range(Range::History);
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.pause();
+    harness.driver.tick_page();
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.show_range(Range::History);
+
+    assert_eq!(harness.driver.reader_commands(), commands);
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_drag_on_the_cpu_page_at_the_hour_reads_once_and_keeps_the_chart_by_app(
     cx: &mut TestAppContext,
 ) {

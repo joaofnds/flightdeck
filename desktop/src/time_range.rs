@@ -120,9 +120,11 @@ impl Range {
 impl Range {
     /// The seconds the range covers while the page holds the selected second over charts drawn
     /// up to `anchor.context_last`: those that end there where they hold the selected second, so
-    /// the charts stay as they were drawn, and otherwise those around it, as `window` lays them.
+    /// the charts stay as they were drawn, and otherwise those around it, moved later where they
+    /// would start before the loaded hour, so the range keeps its length.
     #[must_use]
     pub fn held_window(self, anchor: Anchor) -> TimeWindow {
+        assert!(anchor.selected <= anchor.context_last);
         let drawn = self.window(Anchor {
             selected: anchor.context_last,
             context_last: anchor.context_last,
@@ -130,8 +132,22 @@ impl Range {
         if drawn.first <= anchor.selected {
             return drawn;
         }
+        let seconds = match self {
+            Self::History => HISTORY_SECONDS,
+            Self::Last(seconds) => seconds,
+            Self::Between { .. } => return self.window(anchor),
+        };
 
-        self.window(anchor)
+        let loaded_first = anchor.context_last.saturating_sub(LOADED_SECONDS - 1);
+        let first = window_around(anchor, seconds).first.max(loaded_first);
+        let last = first
+            .saturating_add(seconds.saturating_sub(1))
+            .min(anchor.context_last);
+
+        TimeWindow {
+            first,
+            span: last - first + 1,
+        }
     }
 }
 
@@ -488,6 +504,90 @@ mod tests {
             TimeWindow {
                 first: 951,
                 span: 60
+            }
+        );
+    }
+
+    #[test]
+    fn a_range_picked_while_held_ends_where_the_charts_were_drawn() {
+        // Goal: while a second is held, a range that still holds it ends at the last second the
+        // charts were drawn to, so the charts keep their place instead of centring the second.
+        // Method: hold second 4701, the oldest of the last 5 minutes of charts drawn to 5000, and
+        // resolve the last 5 minutes.
+        assert_eq!(
+            Range::Last(300).held_window(Anchor {
+                selected: 4701,
+                context_last: 5000
+            }),
+            TimeWindow {
+                first: 4701,
+                span: 300
+            }
+        );
+    }
+
+    #[test]
+    fn a_range_picked_while_held_centres_a_second_it_would_leave_out() {
+        // Goal: while a second is held, a range too short to hold it where the charts end puts
+        // it at its middle. Method: hold second 3000 over charts drawn to 5000 and resolve the
+        // last 5 minutes and the default 15.
+        assert_eq!(
+            Range::Last(300).held_window(Anchor {
+                selected: 3000,
+                context_last: 5000
+            }),
+            TimeWindow {
+                first: 2851,
+                span: 300
+            }
+        );
+        assert_eq!(
+            Range::History.held_window(Anchor {
+                selected: 3000,
+                context_last: 5000
+            }),
+            TimeWindow {
+                first: 2551,
+                span: 900
+            }
+        );
+    }
+
+    #[test]
+    fn a_range_picked_while_held_keeps_its_length_near_the_oldest_loaded_second() {
+        // Goal: a range centred on a held second near the oldest second of the loaded hour moves
+        // later so it stays whole, rather than losing the seconds before the hour. Method: hold
+        // second 1500 over charts drawn to 5000, whose hour starts at 1401, and resolve the last
+        // 30 minutes.
+        assert_eq!(
+            Range::Last(1800).held_window(Anchor {
+                selected: 1500,
+                context_last: 5000
+            }),
+            TimeWindow {
+                first: 1401,
+                span: 1800
+            }
+        );
+    }
+
+    #[test]
+    fn a_dragged_range_keeps_its_seconds_while_held() {
+        // Goal: a stretch dragged out on a chart stays where it was drawn while a second outside
+        // it is held. Method: hold second 3000 over charts drawn to 5000 and resolve a stretch
+        // from 4000 to 4100.
+        assert_eq!(
+            Range::Between {
+                first: 4000,
+                last: 4100
+            }
+            .held_window(Anchor {
+                selected: 3000,
+                context_last: 5000
+            }),
+            TimeWindow {
+                first: 4000,
+                span: 101
             }
         );
     }
