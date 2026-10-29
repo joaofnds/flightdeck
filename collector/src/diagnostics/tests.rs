@@ -26,6 +26,10 @@ pub(super) fn supervised(test: &str, work: impl FnOnce()) {
     );
 }
 
+pub(super) fn take_into(reporter: &Reporter, scratch: &mut Group) -> Option<Stream> {
+    reporter.take(|group| scratch.copy_from(group))
+}
+
 #[test]
 fn reports_optional_smc_failure_from_collection() {
     // Goal: continuing after an SMC failure still identifies the source and native status.
@@ -75,12 +79,9 @@ fn reports_optional_failure(collector: &mut Collector, expected: &[u8]) {
 
     collector.read(&mut meter).unwrap();
 
-    assert_eq!(
-        Some(Stream::Stderr),
-        REPORTER.take(|group| scratch.copy_from(group))
-    );
+    assert_eq!(Some(Stream::Stderr), take_into(&REPORTER, &mut scratch));
     assert_eq!(expected, scratch.bytes());
-    assert_eq!(None, REPORTER.take(|group| scratch.copy_from(group)));
+    assert_eq!(None, take_into(&REPORTER, &mut scratch));
 }
 
 #[test]
@@ -162,14 +163,11 @@ fn drops_complete_groups_when_the_queue_is_occupied_or_full() {
             }
             let mut scratch = Box::new(Group::empty());
             for _index in 0..QUEUE_SLOTS {
-                assert_eq!(
-                    Some(Stream::Stdout),
-                    reporter.take(|group| scratch.copy_from(group))
-                );
+                assert_eq!(Some(Stream::Stdout), take_into(&reporter, &mut scratch));
                 assert_eq!(b"complete\n", scratch.bytes());
             }
 
-            assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
+            assert_eq!(None, take_into(&reporter, &mut scratch));
             assert_eq!(1, reporter.loss[0].queue_contention.load(Ordering::Relaxed));
             assert_eq!(1, reporter.loss[0].queue_full.load(Ordering::Relaxed));
         },
@@ -192,7 +190,7 @@ fn keeps_a_group_submitted_while_the_writer_copies_an_earlier_one() {
         scratch.copy_from(group);
         reporter.admit(Stream::Stdout, &second);
     });
-    let stream = reporter.take(|group| scratch.copy_from(group));
+    let stream = take_into(&reporter, &mut scratch);
 
     assert_eq!(Some(Stream::Stdout), stream);
     assert_eq!(b"second\n", scratch.bytes());
@@ -202,7 +200,7 @@ fn keeps_a_group_submitted_while_the_writer_copies_an_earlier_one() {
 #[test]
 fn delivers_groups_in_submission_order_across_laps_of_the_queue() {
     // Goal: the slots hand groups to the writer in the order producers submitted them.
-    // Method: keep the queue nearly full while more groups than three laps hold pass through.
+    // Method: keep the queue nearly full while three laps of the slots pass through.
     let reporter = Reporter::new();
     let submit = |number: usize| {
         let mut group = Box::new(Group::empty());
@@ -211,10 +209,7 @@ fn delivers_groups_in_submission_order_across_laps_of_the_queue() {
     };
     let take = || {
         let mut scratch = Box::new(Group::empty());
-        assert_eq!(
-            Some(Stream::Stdout),
-            reporter.take(|group| scratch.copy_from(group))
-        );
+        assert_eq!(Some(Stream::Stdout), take_into(&reporter, &mut scratch));
         scratch.bytes().to_vec()
     };
     let mut delivered = Vec::with_capacity(3 * QUEUE_SLOTS);
@@ -240,31 +235,33 @@ fn delivers_groups_in_submission_order_across_laps_of_the_queue() {
 const CONCURRENT_GROUPS: usize = 20_000;
 
 #[test]
-fn hands_a_concurrent_writer_in_order_every_group_the_queue_had_room_for() {
+fn hands_a_concurrent_writer_every_admitted_group_in_order() {
     // Goal: a producer and the writer working at once never meet on a slot and lose a group
     // only to a full queue.
     // Method: submit numbered 4 KiB groups from another thread while this one takes them.
     supervised(
-        "diagnostics::tests::hands_a_concurrent_writer_in_order_every_group_the_queue_had_room_for",
+        "diagnostics::tests::hands_a_concurrent_writer_every_admitted_group_in_order",
         || {
             let reporter = Reporter::new();
             assert!(reporter.thread.set(std::thread::current()).is_ok());
 
             let delivered = std::thread::scope(|scope| {
-                scope.spawn(|| submit_numbered_groups(&reporter));
-                take_numbered_groups(&reporter)
+                scope.spawn(|| {
+                    hands_a_concurrent_writer_every_admitted_group_in_order_submit(&reporter);
+                });
+                hands_a_concurrent_writer_every_admitted_group_in_order_take(&reporter)
             });
 
-            let full =
+            let queue_full_count =
                 usize::try_from(reporter.loss[0].queue_full.load(Ordering::Relaxed)).unwrap();
             assert!(delivered.is_sorted_by(|earlier, later| earlier < later));
-            assert_eq!(CONCURRENT_GROUPS, delivered.len() + full);
+            assert_eq!(CONCURRENT_GROUPS, delivered.len() + queue_full_count);
             assert_eq!(0, reporter.loss[0].queue_contention.load(Ordering::Relaxed));
         },
     );
 }
 
-fn submit_numbered_groups(reporter: &Reporter) {
+fn hands_a_concurrent_writer_every_admitted_group_in_order_submit(reporter: &Reporter) {
     let mut group = Box::new(Group::empty());
     for number in 0..CONCURRENT_GROUPS {
         group.begin();
@@ -276,13 +273,13 @@ fn submit_numbered_groups(reporter: &Reporter) {
     reporter.notify();
 }
 
-fn take_numbered_groups(reporter: &Reporter) -> Vec<usize> {
+fn hands_a_concurrent_writer_every_admitted_group_in_order_take(reporter: &Reporter) -> Vec<usize> {
     let mut scratch = Box::new(Group::empty());
     let mut numbers = Vec::with_capacity(CONCURRENT_GROUPS);
     // Each step takes a group or parks until the next of the producer's notifications.
     for _step in 0..4 * CONCURRENT_GROUPS {
         let stopping = reporter.stopping.load(Ordering::Acquire);
-        if reporter.take(|group| scratch.copy_from(group)).is_some() {
+        if take_into(reporter, &mut scratch).is_some() {
             numbers.push(usize::from_le_bytes(
                 scratch.bytes()[..size_of::<usize>()].try_into().unwrap(),
             ));
@@ -314,12 +311,9 @@ fn rejects_a_nested_diagnostic_without_damaging_the_outer_event() {
 
             reporter.diagnostic(format_args!("{}", Nested(&reporter)));
 
-            assert_eq!(
-                Some(Stream::Stderr),
-                reporter.take(|group| scratch.copy_from(group))
-            );
+            assert_eq!(Some(Stream::Stderr), take_into(&reporter, &mut scratch));
             assert_eq!(b"outer\n", scratch.bytes());
-            assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
+            assert_eq!(None, take_into(&reporter, &mut scratch));
             assert_eq!(
                 1,
                 reporter.loss[1].staging_contention.load(Ordering::Relaxed)
@@ -345,12 +339,9 @@ fn rejects_a_failed_formatter_without_delivering_its_prefix() {
     reporter.diagnostic(format_args!("{Failed}"));
     reporter.diagnostic(format_args!("complete"));
 
-    assert_eq!(
-        Some(Stream::Stderr),
-        reporter.take(|group| scratch.copy_from(group))
-    );
+    assert_eq!(Some(Stream::Stderr), take_into(&reporter, &mut scratch));
     assert_eq!(b"complete\n", scratch.bytes());
-    assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
+    assert_eq!(None, take_into(&reporter, &mut scratch));
     assert_eq!(1, reporter.loss[1].failed_delivery.load(Ordering::Relaxed));
 }
 
@@ -367,10 +358,7 @@ fn allocates_nothing_during_repeated_formatting_admission_and_rejection() {
             let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
                 for index in 0..1_000 {
                     reporter.diagnostic(format_args!("counter={index}"));
-                    assert_eq!(
-                        Some(Stream::Stderr),
-                        reporter.take(|group| scratch.copy_from(group))
-                    );
+                    assert_eq!(Some(Stream::Stderr), take_into(&reporter, &mut scratch));
                     let occupied = reporter.staging.lock().unwrap();
                     reporter.diagnostic(format_args!("discarded={index}"));
                     drop(occupied);
@@ -406,10 +394,10 @@ fn discards_an_oversized_group_without_admitting_its_prefix() {
     group.write_all(b"complete\n").unwrap();
     reporter.admit(Stream::Stdout, &group);
     let mut scratch = Box::new(Group::empty());
-    let stream = reporter.take(|group| scratch.copy_from(group));
+    let stream = take_into(&reporter, &mut scratch);
 
     assert_eq!(Some(Stream::Stdout), stream);
     assert_eq!(b"complete\n", scratch.bytes());
     assert_eq!(1, reporter.loss[0].oversize.load(Ordering::Relaxed));
-    assert_eq!(None, reporter.take(|group| scratch.copy_from(group)));
+    assert_eq!(None, take_into(&reporter, &mut scratch));
 }

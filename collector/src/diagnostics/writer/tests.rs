@@ -113,7 +113,10 @@ fn disables_reporting_when_the_writer_thread_cannot_start() {
                 assert_eq!(loss.failed_delivery, 1);
             }
             let mut scratch = Group::empty();
-            assert_eq!(REPORTER.take(|group| scratch.copy_from(group)), None);
+            assert_eq!(
+                super::super::tests::take_into(&REPORTER, &mut scratch),
+                None
+            );
             drop(group);
 
             exit(super::super::tests::COMPLETED);
@@ -131,7 +134,8 @@ fn delivers_a_group_admitted_after_an_empty_take_before_exit() {
             let reporter = Reporter::new();
             let (stdout, stdout_writer) = io::pipe().unwrap();
             let mut stdout = BufReader::new(stdout);
-            let (mut stderr, stderr_writer) = full_pipe();
+            let (mut stderr, stderr_writer) =
+                delivers_a_group_admitted_after_an_empty_take_before_exit_full_pipe();
             reporter.loss[0].queue_full.store(1, Ordering::Relaxed);
             reporter.loss[1].queue_full.store(1, Ordering::Relaxed);
             let mut group = Box::new(Group::empty());
@@ -147,7 +151,8 @@ fn delivers_a_group_admitted_after_an_empty_take_before_exit() {
                 ];
                 let writer = scope.spawn(|| run(&reporter, streams, Box::new(Group::empty())));
                 assert!(reporter.thread.set(writer.thread().clone()).is_ok());
-                // The stdout summary comes from the idle branch, so the take before it was empty.
+                // The idle branch writes stdout's summary and then blocks on the full stderr, so
+                // this read returns after the writer's empty take and before it parks.
                 stdout.read_line(&mut summary).unwrap();
                 reporter.admit(Stream::Stdout, &group);
                 reporter.stopping.store(true, Ordering::Release);
@@ -161,7 +166,7 @@ fn delivers_a_group_admitted_after_an_empty_take_before_exit() {
     );
 }
 
-fn full_pipe() -> (io::PipeReader, File) {
+fn delivers_a_group_admitted_after_an_empty_take_before_exit_full_pipe() -> (io::PipeReader, File) {
     let (reader, writer) = io::pipe().unwrap();
     let mut writer = File::from(OwnedFd::from(writer));
     let descriptor = writer.as_raw_fd();
@@ -169,14 +174,15 @@ fn full_pipe() -> (io::PipeReader, File) {
     assert!(flags >= 0);
     assert_eq!(0, unsafe { fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) });
 
-    let refused = (0..1_024)
-        .map(|_write| writer.write(&[b'f'; 4_096]))
-        .find(io::Result::is_err);
+    let mut refused = None;
+    for _write in 0..1_024 {
+        if let Err(error) = writer.write(&[b'f'; 4_096]) {
+            refused = Some(error.kind());
+            break;
+        }
+    }
 
-    assert_eq!(
-        Some(io::ErrorKind::WouldBlock),
-        refused.map(|result| result.unwrap_err().kind())
-    );
+    assert_eq!(Some(io::ErrorKind::WouldBlock), refused);
     assert_eq!(0, unsafe { fcntl(descriptor, F_SETFL, flags) });
 
     (reader, writer)
