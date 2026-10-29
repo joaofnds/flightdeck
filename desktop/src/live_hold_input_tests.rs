@@ -736,6 +736,114 @@ fn a_view_behind_the_reader_after_letting_go_draws_overview_from_the_reader(
 }
 
 #[gpui::test]
+fn hiding_and_showing_the_window_over_a_complete_hold_keeps_the_held_page_and_reads_nothing(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a window macOS hides and shows again while a second is held, whose reading the
+    // store's View completes, keeps the held second over the charts and readings drawn at the
+    // click and sends the reader nothing, since the page shows all it holds. Method: Overview
+    // over the View of the hour at the newest fifteen minutes, the reader rested, a hover and a
+    // click 800 seconds before the newest on the CPU chart by App, the page's steps for a window
+    // macOS hid and showed again, then the second the reader was asked for since it rested, the
+    // page's window, and the text of each summary readout against those of the held second's
+    // readings.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.rest_reader();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    harness.driver.hide_window();
+    harness.driver.show_window();
+
+    assert_eq!(harness.driver.reader_asked_second(), None);
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn closing_and_opening_the_window_over_a_complete_hold_keeps_the_held_page_and_reads_nothing(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a window closed and opened again while a second is held, whose reading the store's
+    // View completes, keeps the held second over the charts and readings drawn at the click and
+    // sends the reader nothing, as a window macOS hid and showed again does. Method: Overview
+    // over the View of the hour at the newest fifteen minutes, the reader rested, a hover and a
+    // click 800 seconds before the newest on the CPU chart by App, the window closed and opened
+    // from what the app keeps of it, then the second the reader was asked for since it rested,
+    // the page's window, the text of each summary readout against those of the held second's
+    // readings, and the lines the CPU chart by App draws.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.rest_reader();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    harness.driver.close_and_open_window();
+
+    assert_eq!(harness.driver.reader_asked_second(), None);
+    assert_eq!(harness.driver.view_window(), Some(DRAWN));
+    let expected = summary::cards("overview", &summary_selection(&reading_at(HELD, 0)));
+    assert_eq!(harness.driver.readout_texts(), texts(&expected));
+    assert_eq!(
+        harness.driver.cpu_by_app_lines(),
+        Some(cpu_by_app_lines_drawing(&["A", "B", "C"]))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn closing_and_opening_the_window_over_a_hold_still_reading_asks_for_the_page_it_was_held_in(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a window closed and opened again while the reader still reads the held second asks
+    // for the page whose context ends where the charts were drawn, which the held second's own
+    // read follows, rather than for the held second, whose context would move the window.
+    // Method: Overview over a View whose older tail holds 9,500 without its Apps, a hover there
+    // on the CPU chart and its read, a click, which keeps that read, the window closed and opened
+    // from what the app keeps of it, then the second the reader was last asked for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_view_over_tail();
+    harness.driver.hover_second_on("live-cpu-plot", TAIL);
+    harness.driver.tick_hover();
+    harness.driver.click_second_on("live-cpu-plot", TAIL);
+    let page = harness.driver.held_last() - viewer::CONTEXT_AFTER_SECONDS;
+
+    harness.driver.close_and_open_window();
+
+    assert_eq!(harness.driver.reader_asked_second(), Some(page));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn closing_and_opening_the_window_while_it_follows_the_live_mac_keeps_no_part_of_its_view(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a window closed while it follows the live Mac keeps nothing of the store's View its
+    // charts were drawn from, so the store can write over every buffer of it while the window
+    // stays closed and as it catches up once the window opens again. Method: Overview over the
+    // View of the hour, the window closed and opened from what the app keeps of it, then how
+    // many owners the View and its newest second have besides the test.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_store_view(hour_led_from_its_older_part());
+    let view = harness.driver.kept_view();
+
+    harness.driver.close_and_open_window();
+
+    assert_eq!(Arc::strong_count(&view), 1);
+    assert_eq!(Arc::strong_count(view.seconds.last().unwrap()), 1);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_drag_on_the_cpu_page_at_the_hour_reads_once_and_keeps_the_chart_by_app(
     cx: &mut TestAppContext,
 ) {
@@ -875,6 +983,29 @@ impl InputDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.presence = crate::live_dashboard::Presence::Hiding;
             dashboard.tick_presence(cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Runs the page's step for a window macOS shows again.
+    fn show_window(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.presence = crate::live_dashboard::Presence::Showing;
+            dashboard.tick_presence(cx);
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Closes the window and opens it again from what the app keeps of a closed window, its
+    /// state and its resting reader.
+    fn close_and_open_window(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let state = dashboard.window_state();
+            let worker = dashboard.worker.hand_over().unwrap().unwrap();
+            let native = std::mem::take(&mut dashboard.native);
+            *dashboard = crate::live_dashboard::LiveDashboard::restore(worker, state, cx);
+            dashboard.native = native;
+            cx.notify();
         });
         self.context.run_until_parked();
     }

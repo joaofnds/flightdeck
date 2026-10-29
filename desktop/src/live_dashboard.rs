@@ -68,7 +68,7 @@ pub(crate) fn observe_visibility(
                 cx,
             );
             if !visibility.is_visible() {
-                dashboard.store_view_drop();
+                dashboard.store_view_hide();
             }
             dashboard.presence = dashboard.presence.reported(visibility.is_visible());
             cx.notify();
@@ -205,6 +205,10 @@ pub(crate) struct WindowState {
     range: crate::time_range::Range,
     pinning: Pinning,
     hidden: Vec<String>,
+    /// The second the page held, and the store's View its charts were drawn from, which the
+    /// window opened again shows as the closed one did.
+    hold: Option<hold::Hold>,
+    store_view: Option<std::sync::Arc<viewer::store::View>>,
 }
 
 impl WindowState {
@@ -435,12 +439,19 @@ impl LiveDashboard {
     }
 
     pub(crate) fn window_state(&mut self) -> WindowState {
+        let hold = self.hold.take();
+        // A held second keeps the View its charts were drawn from, and a window that follows
+        // the live Mac takes the store's newest View once it opens again.
+        let store_view = hold.as_ref().and_then(|_| self.store_view.take());
+
         WindowState {
             request: self.request.clone(),
             snapshot: self.snapshot.take(),
             range: self.range,
             pinning: self.pinning,
             hidden: self.hidden.clone(),
+            hold,
+            store_view,
         }
     }
 
@@ -449,6 +460,9 @@ impl LiveDashboard {
         dashboard.range = state.range;
         dashboard.pinning = state.pinning;
         dashboard.hidden = state.hidden;
+        // The page draws its charts from the held View as it takes the readings it held over.
+        dashboard.hold = state.hold;
+        dashboard.store_view = state.store_view;
         if let Some(snapshot) = state.snapshot {
             dashboard.generation = snapshot.generation;
             dashboard.accept(snapshot);
@@ -465,6 +479,10 @@ impl LiveDashboard {
     }
 
     fn pinned_reading_complete(&self) -> bool {
+        // A held second's reading is its own, whatever second the page's readings show.
+        if let Some(hold) = &self.hold {
+            return hold.reading.complete;
+        }
         let Some(second) = self.request.second else {
             return false;
         };
@@ -576,14 +594,7 @@ impl LiveDashboard {
         } else {
             self.preview_tick(cx);
             self.hold_tick();
-            // A held second keeps the View its charts were drawn from.
-            if self.hold.is_none() {
-                if let Some(view) = store_view::take_store_view(cx) {
-                    if self.take_view(view) {
-                        cx.notify();
-                    }
-                }
-            }
+            self.tick_store_view(cx);
             self.tick_rest();
             self.tick_store_pending(cx);
         }
@@ -593,6 +604,21 @@ impl LiveDashboard {
             cx.notify();
         }
         self.tick_deadline(cx);
+    }
+
+    /// Takes the store's newest View, but none while a second is held, which keeps the View its
+    /// charts were drawn from. Parking the store does not stop a step of it already past its
+    /// check of whether the window asks for the live Mac, which can still hand over a View.
+    fn tick_store_view(&mut self, cx: &mut Context<Self>) {
+        if self.hold.is_some() {
+            return;
+        }
+
+        if let Some(view) = store_view::take_store_view(cx) {
+            if self.take_view(view) {
+                cx.notify();
+            }
+        }
     }
 
     fn tick_store_pending(&mut self, cx: &Context<Self>) {
@@ -676,7 +702,7 @@ impl LiveDashboard {
     /// a recording opened read-only reads nothing once its page is read, so it is left alone.
     /// The live reader leaves its session unchanged until the window asks for a page again.
     fn tick_hidden(&mut self) {
-        self.store_view_drop();
+        self.store_view_hide();
 
         match self.worker.hand_over() {
             Ok(Some(resting)) => {
@@ -737,11 +763,7 @@ impl LiveDashboard {
     /// and rests the reader while the View brings each second the page shows. Otherwise asks the
     /// rested reader for the page again, which it reads as newly opened, readings first.
     fn tick_shown(&mut self, cx: &mut Context<Self>) {
-        if let Some(view) = store_view::take_store_view(cx) {
-            if self.take_view(view) {
-                cx.notify();
-            }
-        }
+        self.tick_store_view(cx);
         self.tick_rest();
         if self.presence == Presence::Rested {
             return;

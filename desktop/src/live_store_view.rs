@@ -310,6 +310,16 @@ impl LiveDashboard {
         self.store_panels.let_go = None;
     }
 
+    /// Lets go of the store's View as the window hides, but of none a hold keeps, since the store
+    /// stays parked while a second is held and the window shown again shows the held page.
+    pub(super) fn store_view_hide(&mut self) {
+        if self.hold.is_some() {
+            return;
+        }
+
+        self.store_view_drop();
+    }
+
     /// Lets go of the View the page could not draw, so the page shows the worker's readings
     /// whole and its error stays the worker's, and reports `error` once each time it changes.
     fn draw_store_view_failed(&mut self, error: String) {
