@@ -326,6 +326,33 @@ fn leaving_app_history_restores_the_real_end_of_the_recording_view(cx: &mut Test
     harness.teardown();
 }
 
+#[gpui::test]
+fn a_page_of_apps_while_a_second_is_held_keeps_the_charts_and_reads_the_page_up_to_the_hold(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the next page of the Apps table while a second is held keeps the charts drawn at the
+    // click until the reply, and asks the reader for the page whose context ends where the
+    // charts were drawn, which carries the App and the table, rather than emptying the page.
+    // Method: the Apps page over two seconds, a click on the earlier second of the App's CPU
+    // chart, the reader's answer to the read of that second with a second page of Apps, the
+    // pointer off the chart, Next Apps, then whether the CPU chart is drawn, the second the page
+    // shows, and the second the reader was asked for.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.hold_previous_second();
+    harness.driver.answer_held_read_with_more_apps();
+    harness.driver.leave_history();
+
+    harness.driver.next_apps();
+
+    assert!(harness.driver.cpu_chart_is_drawn());
+    assert_eq!(harness.driver.shown_reading_second(), Some(999));
+    assert_eq!(
+        harness.driver.reader_asked_second(),
+        Some(1000 - viewer::CONTEXT_AFTER_SECONDS)
+    );
+    harness.teardown();
+}
+
 impl AppHoverHarness {
     fn setup(cx: &mut TestAppContext) -> Self {
         Self::setup_history(cx, AppEpoch::Historical)
@@ -507,13 +534,68 @@ impl AppHoverDriver {
     }
 
     fn hover_previous_second(&mut self) {
-        let plot = crate::charts::plot_bounds(self.chart_bounds());
-        let position = gpui::point(
-            plot.left() + plot.size.width * (898.5 / 900.0),
-            plot.center().y,
-        );
+        let position = self.previous_second_position();
         self.context
             .simulate_mouse_move(position, None, Modifiers::none());
+    }
+
+    /// Clicks the second before the newest on the App's CPU chart, as a person holds a second.
+    fn hold_previous_second(&mut self) {
+        self.hover_previous_second();
+        let position = self.previous_second_position();
+        self.context.simulate_click(position, Modifiers::none());
+        self.context.run_until_parked();
+    }
+
+    /// Where the second before the newest lies on the App's CPU chart.
+    fn previous_second_position(&mut self) -> gpui::Point<gpui::Pixels> {
+        let plot = crate::charts::plot_bounds(self.chart_bounds());
+
+        gpui::point(
+            plot.left() + plot.size.width * (898.5 / 900.0),
+            plot.center().y,
+        )
+    }
+
+    /// Hands the page the reader's answer to its read of the held second, whose Apps table has a
+    /// next page of Apps.
+    fn answer_held_read_with_more_apps(&mut self) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let generation = dashboard.hold.as_ref().unwrap().reading.generation.unwrap();
+            let mut snapshot = AppEpoch::Historical.snapshot(generation);
+            let apps = snapshot.apps.as_mut().unwrap().legacy_mut().unwrap();
+            apps["page"]["total"] = json!(513);
+            apps["page"]["next_offset"] = json!(512);
+            assert!(dashboard.take_update(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Clicks the control that shows the next page of the Apps table.
+    fn next_apps(&mut self) {
+        let bounds = self.context.debug_bounds("Next Apps").unwrap();
+        self.context
+            .simulate_click(bounds.center(), Modifiers::none());
+        self.context.run_until_parked();
+    }
+
+    /// Whether the App's CPU chart is drawn.
+    fn cpu_chart_is_drawn(&mut self) -> bool {
+        self.context.debug_bounds("live-app-cpu-plot").is_some()
+    }
+
+    /// The second the page's readings show.
+    fn shown_reading_second(&self) -> Option<u64> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.reading_target().map(|target| target.second)
+        })
+    }
+
+    /// The second the window's last command asked the reader for.
+    fn reader_asked_second(&self) -> Option<u64> {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.worker.sent_second())
     }
 
     fn keep_app_parts(&mut self, app: &str, parts: Arc<crate::live_source::PartsWindow>) {

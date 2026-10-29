@@ -796,6 +796,7 @@ fn flush(pending: &mut Vec<Rc<Panel>>, rows: &mut Vec<Row>) {
 pub fn control(label: &str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(label.to_owned()))
+        .debug_selector(|| label.to_owned())
         .role(gpui::Role::Button)
         .aria_label(label.to_owned())
         .px(px(9.0))

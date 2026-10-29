@@ -910,6 +910,12 @@ impl LiveDashboard {
 
     pub fn submit(&mut self) {
         self.native.alternative_page = 0;
+        // A held second keeps the page as it was drawn at the click, its charts with it, until
+        // the reply to the page's read replaces it.
+        if self.hold.is_some() && self.snapshot.is_some() {
+            self.submit_request();
+            return;
+        }
         // A page whose readings are shown keeps its rows' room until the reply replaces them.
         let placeholders = if self.snapshot.is_some() {
             self.placeholder_rows()
