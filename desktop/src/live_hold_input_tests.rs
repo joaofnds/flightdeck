@@ -1563,8 +1563,9 @@ impl InputDriver {
     /// state and its resting reader.
     fn close_and_open_window(&mut self) {
         self.view.update(&mut self.context, |dashboard, cx| {
-            let state = dashboard.window_state();
+            // The app hands the reader over before it records the window's state.
             let worker = dashboard.worker.hand_over().unwrap().unwrap();
+            let state = dashboard.window_state();
             let native = std::mem::take(&mut dashboard.native);
             *dashboard = crate::live_dashboard::LiveDashboard::restore(worker, state, cx);
             dashboard.native = native;
