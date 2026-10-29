@@ -336,7 +336,7 @@ fn a_page_of_apps_while_a_second_is_held_keeps_the_charts_and_reads_the_page_up_
     // Method: the Apps page over two seconds, a click on the earlier second of the App's CPU
     // chart, the reader's answer to the read of that second with a second page of Apps, the
     // pointer off the chart, Next Apps, then whether the CPU chart is drawn, the second the page
-    // shows, and the second the reader was asked for.
+    // shows, and the second, reading, App and page of Apps the reader was asked for.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.hold_previous_second();
     harness.driver.answer_held_read_with_more_apps();
@@ -346,10 +346,11 @@ fn a_page_of_apps_while_a_second_is_held_keeps_the_charts_and_reads_the_page_up_
 
     assert!(harness.driver.cpu_chart_is_drawn());
     assert_eq!(harness.driver.shown_reading_second(), Some(999));
-    assert_eq!(
-        harness.driver.reader_asked_second(),
-        Some(1000 - viewer::CONTEXT_AFTER_SECONDS)
-    );
+    let asked = harness.driver.reader_asked().unwrap();
+    assert_eq!(asked.second, Some(1000 - viewer::CONTEXT_AFTER_SECONDS));
+    assert_eq!(asked.identity, None);
+    assert_eq!(asked.app, Some(open_app()));
+    assert_eq!(asked.apps_offset, 512);
     harness.teardown();
 }
 
@@ -516,10 +517,7 @@ impl AppHoverDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             dashboard.request.second = Some(1000);
             dashboard.request.identity = Some(identity(2));
-            dashboard.request.app = Some(AppKey {
-                kind: "bundle".into(),
-                bytes_hex: "41".into(),
-            });
+            dashboard.request.app = Some(open_app());
             dashboard.picker = Some(crate::live_dashboard::Picker::App);
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
             snapshot.history.as_mut().unwrap().legacy_mut().unwrap()["points"][0] =
@@ -592,10 +590,11 @@ impl AppHoverDriver {
         })
     }
 
-    /// The second the window's last command asked the reader for.
-    fn reader_asked_second(&self) -> Option<u64> {
-        self.view
-            .read_with(&self.context, |dashboard, _| dashboard.worker.sent_second())
+    /// The request of the window's last command to the reader.
+    fn reader_asked(&self) -> Option<crate::live_source::Request> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.worker.sent_request()
+        })
     }
 
     fn keep_app_parts(&mut self, app: &str, parts: Arc<crate::live_source::PartsWindow>) {
@@ -808,6 +807,14 @@ impl AppEpoch {
                 process("Historical renderer", "65", 24)
             ]),
         }
+    }
+}
+
+/// The App the page has open, the bundle whose key is the byte `A`.
+fn open_app() -> AppKey {
+    AppKey {
+        kind: "bundle".into(),
+        bytes_hex: "41".into(),
     }
 }
 

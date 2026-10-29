@@ -266,7 +266,13 @@ impl Worker {
     /// The second the window's last command asked the reader for.
     #[cfg(test)]
     pub(crate) fn sent_second(&self) -> Option<u64> {
-        self.mailbox().unwrap().sent.as_ref()?.second
+        self.sent_request()?.second
+    }
+
+    /// The request of the window's last command.
+    #[cfg(test)]
+    pub(crate) fn sent_request(&self) -> Option<Request> {
+        self.mailbox().unwrap().sent.clone()
     }
 
     pub fn start(root: PathBuf) -> std::io::Result<Self> {

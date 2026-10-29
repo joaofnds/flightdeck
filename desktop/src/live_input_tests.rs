@@ -961,19 +961,23 @@ fn a_hover_ending_during_a_selections_read_shows_the_selected_second(cx: &mut Te
 #[gpui::test]
 fn the_reply_to_enter_completes_the_held_seconds_reading(cx: &mut TestAppContext) {
     // Goal: the reader's answer to Enter becomes the held second's reading, so the page shows
-    // the selected second from that reading and no longer from the step, and keeps the
-    // readings it drew. Method: step left to 999, press Enter, hand the page the reply for 999,
-    // then read the second the chart shows, whether the held reading is complete, and the
-    // second of the page's own readings.
+    // the selected second's summary from that reading and no longer from the step, and keeps
+    // the readings it drew. Method: step left to 999, press Enter, hand the page a reply for
+    // 999 whose summary reads 30 W, then read the second the chart shows, the System power
+    // card, and the second of the page's own readings.
     let mut harness = InputHarness::setup(cx);
     harness.driver.focus_chart();
     harness.driver.press("left");
     harness.driver.press("enter");
 
-    harness.driver.reply_with_second(999);
+    harness.driver.reply_with_power(999, 30);
 
     assert_eq!(harness.driver.shown_second(), Some(999));
-    assert!(harness.driver.held_reading_complete());
+    assert!(
+        harness
+            .driver
+            .reading_is_visible("summary-card:System power:30 W")
+    );
     assert!(!harness.driver.shows_a_step());
     assert_eq!(harness.driver.accepted_second(), Some(1000));
     harness.teardown();
@@ -1652,9 +1656,29 @@ impl InputDriver {
         self.reply_with_context(second, 1000);
     }
 
+    /// Hands the page the reader's answer to its newest command, a read of `second` whose
+    /// summary reads `power_watts`, the way a tick does.
+    fn reply_with_power(&mut self, second: u64, power_watts: u64) {
+        self.reply_with_selection(second, 1000, |selection| {
+            selection["trends"][0]["power_watts"] = json!(power_watts);
+            selection["summary"] = selection["trends"][0].clone();
+        });
+    }
+
     /// Hands the page the reader's answer for `second` with a context that ends at
     /// `context_last`.
     fn reply_with_context(&mut self, second: u64, context_last: u64) {
+        self.reply_with_selection(second, context_last, |_| {});
+    }
+
+    /// Hands the page the reader's answer for `second` with a context that ends at
+    /// `context_last`, its selection changed by `edit`.
+    fn reply_with_selection(
+        &mut self,
+        second: u64,
+        context_last: u64,
+        edit: impl FnOnce(&mut Value),
+    ) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = accepted_snapshot(dashboard.worker.commands_sent());
             let identity = snapshot.selection["trends"][0].clone();
@@ -1663,6 +1687,7 @@ impl InputDriver {
             snapshot.selection.legacy_mut().unwrap()["selected"] = json!({"run":identity["run"],
                 "boot":identity["boot"],"publication":identity["publication"]});
             snapshot.selection.legacy_mut().unwrap()["trends"] = json!([identity]);
+            edit(snapshot.selection.legacy_mut().unwrap());
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             cx.notify();
         });
@@ -1676,16 +1701,6 @@ impl InputDriver {
 
     fn accepted_second(&self) -> Option<u64> {
         self.accepted_selection()?["second"].as_u64()
-    }
-
-    /// Whether the page holds a second whose reading the reader has answered.
-    fn held_reading_complete(&self) -> bool {
-        self.view.read_with(&self.context, |dashboard, _| {
-            dashboard
-                .hold
-                .as_ref()
-                .is_some_and(|hold| hold.reading.complete)
-        })
     }
 
     /// Whether the page shows a second an arrow step reached rather than its own selection.
