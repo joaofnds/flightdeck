@@ -297,6 +297,17 @@ impl LiveDashboard {
         self.store_view_drop();
     }
 
+    /// Asserts that the request names the held second, since the paused status reads the
+    /// second from the request while the charts mark the hold's.
+    pub(super) fn hold_assert_in_step(&self) {
+        let Some(hold) = &self.hold else {
+            return;
+        };
+
+        assert_eq!(self.request.second, Some(hold.reading.target.second));
+        assert_eq!(self.request.identity, hold.reading.target.identity);
+    }
+
     /// The generation of the hold's read of its second, while one is out or was answered.
     #[cfg(test)]
     pub(crate) fn held_read_generation(&self) -> Option<u64> {

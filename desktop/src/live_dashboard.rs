@@ -1493,6 +1493,7 @@ impl LiveDashboard {
     }
 
     pub fn rebuild(&mut self) {
+        self.hold_assert_in_step();
         let layout = self
             .preview
             .as_ref()
