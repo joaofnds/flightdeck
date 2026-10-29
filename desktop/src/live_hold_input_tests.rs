@@ -1230,6 +1230,32 @@ fn hiding_and_showing_the_window_over_a_complete_hold_keeps_the_held_page_and_re
 }
 
 #[gpui::test]
+fn hiding_and_showing_the_window_over_a_hold_made_before_the_first_reading_reads_the_page_again(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a window macOS hides and shows again while the page still waits for the readings a
+    // hold made before the worker's first reading asked for asks for them again, since hiding
+    // forgets the request out and the page has no readings of its own to show. Method: Overview
+    // over the View of the hour at the newest fifteen minutes, which the worker has not
+    // answered, a hover and a click 800 seconds before the newest on the CPU chart by App, the
+    // page's steps for a window macOS hid and showed again, then the commands the reader was
+    // sent since the window was hidden and the second it was last asked for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness.driver.show_hour_before_the_first_reading();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.hide_window();
+    let commands = harness.driver.reader_commands();
+
+    harness.driver.show_window();
+
+    assert_eq!(harness.driver.reader_commands(), commands + 1);
+    let page = HOUR_NEWEST - viewer::CONTEXT_AFTER_SECONDS;
+    assert_eq!(harness.driver.reader_asked_second(), Some(page));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn closing_and_opening_the_window_over_a_complete_hold_keeps_the_held_page_and_reads_nothing(
     cx: &mut TestAppContext,
 ) {

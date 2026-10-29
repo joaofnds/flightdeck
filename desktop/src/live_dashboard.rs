@@ -479,6 +479,12 @@ impl LiveDashboard {
     }
 
     fn pinned_reading_complete(&self) -> bool {
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+        if snapshot.histories_pending {
+            return false;
+        }
         // A held second's reading is its own, whatever second the page's readings show.
         if let Some(hold) = &self.hold {
             return hold.reading.complete;
@@ -486,12 +492,6 @@ impl LiveDashboard {
         let Some(second) = self.request.second else {
             return false;
         };
-        let Some(snapshot) = &self.snapshot else {
-            return false;
-        };
-        if snapshot.histories_pending {
-            return false;
-        }
         if snapshot.selection["second"].as_u64() != Some(second) {
             return false;
         }
