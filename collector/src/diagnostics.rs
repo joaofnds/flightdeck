@@ -53,12 +53,13 @@ impl Stream {
 }
 
 struct Reporter {
-    // Only producers take admission and store admitted, and only the writer stores taken,
-    // so the writer copying a group out of its slot never holds anything a producer needs.
+    // Only producers take admission and store admitted_count, and only the writer stores
+    // taken_count, so the writer copying a group out of its slot never holds anything a
+    // producer needs.
     admission: Mutex<()>,
     slots: [Mutex<Slot>; QUEUE_SLOTS],
-    admitted: AtomicUsize,
-    taken: AtomicUsize,
+    admitted_count: AtomicUsize,
+    taken_count: AtomicUsize,
     staging: Mutex<Group>,
     loss: [Loss; 2],
     enabled: [AtomicBool; 2],
@@ -161,8 +162,8 @@ impl Reporter {
                     stream: Stream::Stdout,
                 })
             }; QUEUE_SLOTS],
-            admitted: AtomicUsize::new(0),
-            taken: AtomicUsize::new(0),
+            admitted_count: AtomicUsize::new(0),
+            taken_count: AtomicUsize::new(0),
             staging: Mutex::new(Group::empty()),
             loss: [const { Loss::new() }; 2],
             enabled: [const { AtomicBool::new(true) }; 2],
@@ -231,15 +232,15 @@ impl Reporter {
             self.reject(loss, &loss.queue_contention);
             return;
         };
-        let admitted = self.admitted.load(Ordering::Relaxed);
-        let taken = self.taken.load(Ordering::Acquire);
-        assert!(taken <= admitted);
-        assert!(admitted - taken <= QUEUE_SLOTS);
-        if admitted - taken == QUEUE_SLOTS {
+        let admitted_count = self.admitted_count.load(Ordering::Relaxed);
+        let taken_count = self.taken_count.load(Ordering::Acquire);
+        assert!(taken_count <= admitted_count);
+        assert!(admitted_count - taken_count <= QUEUE_SLOTS);
+        if admitted_count - taken_count == QUEUE_SLOTS {
             self.reject(loss, &loss.queue_full);
             return;
         }
-        let index = admitted % QUEUE_SLOTS;
+        let index = admitted_count % QUEUE_SLOTS;
         let mut slot = match self.slots[index].try_lock() {
             Ok(slot) => slot,
             Err(error) => unreachable!("diagnostic slot {index} held past its take: {error}"),
@@ -247,21 +248,22 @@ impl Reporter {
         slot.group.copy_from(group);
         slot.stream = stream;
         drop(slot);
-        self.admitted.store(admitted + 1, Ordering::Release);
+        self.admitted_count
+            .store(admitted_count + 1, Ordering::Release);
         drop(admission);
 
         self.notify();
     }
 
     fn take(&self, copy: impl FnOnce(&Group)) -> Option<Stream> {
-        let taken = self.taken.load(Ordering::Relaxed);
-        let admitted = self.admitted.load(Ordering::Acquire);
-        assert!(taken <= admitted);
-        assert!(admitted - taken <= QUEUE_SLOTS);
-        if admitted == taken {
+        let taken_count = self.taken_count.load(Ordering::Relaxed);
+        let admitted_count = self.admitted_count.load(Ordering::Acquire);
+        assert!(taken_count <= admitted_count);
+        assert!(admitted_count - taken_count <= QUEUE_SLOTS);
+        if admitted_count == taken_count {
             return None;
         }
-        let index = taken % QUEUE_SLOTS;
+        let index = taken_count % QUEUE_SLOTS;
         let slot = match self.slots[index].try_lock() {
             Ok(slot) => slot,
             Err(error) => unreachable!("diagnostic slot {index} held past its admission: {error}"),
@@ -269,8 +271,11 @@ impl Reporter {
         copy(&slot.group);
         let stream = slot.stream;
         drop(slot);
-        let previous = self.taken.fetch_add(1, Ordering::Release);
-        assert_eq!(taken, previous, "only the writer takes diagnostic groups");
+        let taken_count_before = self.taken_count.fetch_add(1, Ordering::Release);
+        assert_eq!(
+            taken_count, taken_count_before,
+            "only the writer takes diagnostic groups"
+        );
 
         Some(stream)
     }
