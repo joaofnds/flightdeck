@@ -727,7 +727,7 @@ impl LiveDashboard {
             return;
         }
         // Resting would drop the read of a held second whose top Apps the View lacks.
-        if self.hold_reading() {
+        if self.hold_read_pending() {
             return;
         }
         // The App histories the page's first readings left pending come in the reader's next
@@ -949,7 +949,7 @@ impl LiveDashboard {
     /// Whether the worker still reads the second the page selected, whose reply the page waits
     /// on with the readings it shows. A read of any other second would cancel it.
     pub(crate) fn selection_reading(&self) -> bool {
-        if self.hold_reading() {
+        if self.hold_read_pending() {
             return true;
         }
         if !self.reply_pending {
@@ -1111,7 +1111,7 @@ impl LiveDashboard {
         // were drawn.
         self.pinning = Pinning::Unpinned;
         if let Some(second) = second {
-            if let Some(last) = self.hold_last() {
+            if let Some(last) = self.live_window_last() {
                 let target = crate::live_hover::Target { second, identity };
                 self.hold_target(target, last, cx);
                 return;
@@ -1199,7 +1199,7 @@ impl LiveDashboard {
     /// recording's page selects it, which lays the window around it.
     pub(crate) fn pin_target(&mut self, target: crate::live_hover::Target, cx: &mut Context<Self>) {
         self.pinning = Pinning::Pinned;
-        if let Some(last) = self.hold_last() {
+        if let Some(last) = self.live_window_last() {
             self.hold_target(target, last, cx);
             return;
         }
@@ -1364,7 +1364,7 @@ impl LiveDashboard {
             return;
         };
 
-        if let Some(last) = self.hold_last() {
+        if let Some(last) = self.live_window_last() {
             let target = crate::live_hover::Target { second, identity };
             self.hold_target(target, last, cx);
             return;

@@ -27,7 +27,7 @@ struct Started {
     generation: u64,
     store_version: Option<u64>,
     requests: u64,
-    fresh: Fresh,
+    fresh_cause: FreshCause,
     render_ms: Option<f64>,
 }
 
@@ -35,12 +35,12 @@ struct Checkpoint {
     generation: u64,
     store_version: Option<u64>,
     requests: u64,
-    fresh: Fresh,
+    fresh_cause: FreshCause,
 }
 
 /// What makes the first frame of an epoch fresh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fresh {
+enum FreshCause {
     /// Readings newer than the checkpoint's, as after a show or a page opened.
     Reading,
     /// The switch itself, which redraws the readings the page holds, as a picked range does.
@@ -90,7 +90,7 @@ impl ResumeMetrics {
             generation: checkpoint.generation,
             store_version: checkpoint.store_version,
             requests: checkpoint.requests,
-            fresh: checkpoint.fresh,
+            fresh_cause: checkpoint.fresh_cause,
             render_ms: None,
         })
     }
@@ -155,23 +155,23 @@ impl LiveDashboard {
     /// it does now, as after a show or a page opened, and answers the epoch count before it.
     pub(crate) fn resume_begin_reading(&mut self) -> u64 {
         let store_version = self.resume_store_version();
-        self.resume_begin(store_version, Fresh::Reading)
+        self.resume_begin(store_version, FreshCause::Reading)
     }
 
     /// Starts a measurement epoch for a picked range, whose next frame is fresh since it redraws
     /// the readings the page already holds, and answers the epoch count before it.
     pub(crate) fn resume_begin_switch(&mut self) -> u64 {
-        self.resume_begin(None, Fresh::Switch)
+        self.resume_begin(None, FreshCause::Switch)
     }
 
-    fn resume_begin(&mut self, store_version: Option<u64>, fresh: Fresh) -> u64 {
+    fn resume_begin(&mut self, store_version: Option<u64>, fresh_cause: FreshCause) -> u64 {
         let before = self.resume_metrics.count();
 
         self.resume_metrics.begin(&Checkpoint {
             generation: self.generation,
             store_version,
             requests: self.worker.requests_submitted(),
-            fresh,
+            fresh_cause,
         });
         before
     }
@@ -217,7 +217,7 @@ impl LiveDashboard {
         let Some(started) = &self.resume_metrics.started else {
             return false;
         };
-        if started.fresh == Fresh::Switch {
+        if started.fresh_cause == FreshCause::Switch {
             return true;
         }
         if self.request.second.is_none() {
@@ -253,7 +253,7 @@ impl LiveDashboard {
 
 #[cfg(test)]
 mod tests {
-    use super::{Checkpoint, Frame, Fresh, ResumeMetrics};
+    use super::{Checkpoint, Frame, FreshCause, ResumeMetrics};
     use crate::live_dashboard::LiveDashboard;
     use crate::live_source::Worker;
     use crate::live_store_fixtures::reading_at;
@@ -278,7 +278,7 @@ mod tests {
             generation: 1,
             store_version: None,
             requests: 1,
-            fresh: Fresh::Reading,
+            fresh_cause: FreshCause::Reading,
         });
         metrics.started.as_mut().unwrap().pid = pid;
 
@@ -304,7 +304,7 @@ mod tests {
             generation: 1,
             store_version: None,
             requests: 1,
-            fresh: Fresh::Reading,
+            fresh_cause: FreshCause::Reading,
         };
         metrics.begin(&checkpoint);
         let first = metrics.count();
