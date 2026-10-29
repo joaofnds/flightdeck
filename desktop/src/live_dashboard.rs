@@ -803,7 +803,8 @@ impl LiveDashboard {
     /// Takes the worker's answer to the page or to a hover, and answers whether the page changed.
     pub(crate) fn take_update(&mut self, update: Update) -> bool {
         if self.hold_answered(&update) {
-            return self.hold_receive(update);
+            self.hold_receive(update);
+            return true;
         }
         if self.preview.is_some() {
             return self.preview_receive(update);

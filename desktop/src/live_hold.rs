@@ -166,17 +166,14 @@ impl LiveDashboard {
             .is_some_and(|hold| hold.reading.generation == Some(update.generation()))
     }
 
-    /// Takes the reader's answer to the hold's read of its second, and answers that the page
-    /// changed.
-    pub(super) fn hold_receive(&mut self, update: Update) -> bool {
+    /// Takes the reader's answer to the hold's read of its second, which changes the page.
+    pub(super) fn hold_receive(&mut self, update: Update) {
         let Some(hold) = &mut self.hold else {
             unreachable!("only a hold takes the reply to its read");
         };
 
         crate::live_hover::controller::preview_take_reply(&mut hold.reading, update);
         self.rebuild();
-
-        true
     }
 
     /// Shows the held second again from the page's new readings, which replaced those it was
