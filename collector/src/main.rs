@@ -39,13 +39,20 @@ const DEFAULT_RESCAN_INTERVAL: Duration = Duration::ZERO;
 const DEFAULT_RING: &str = "flightdeck";
 /// The ticks the ring holds, two minutes of them, so a reader that stops for less loses none.
 const RING_SLOTS: u64 = 120;
+/// The most events 121 ticks in a row held across the user's recording, measured on 2026-10-30
+/// over 34,462,946 events in 152 runs.
+const EVENTS_IN_121_TICKS_MAX: usize = 584_210;
 /// The process events the ring's log holds. The log holds the events of the ticks in the ring
-/// while the writer logs the next tick's, and the most that 121 ticks in a row held across the
-/// user's recording, measured on 2026-10-30 over 34,462,946 events in 152 runs, was 584,210. A
-/// burst past the log's room drops its events at admission and counts them by kind.
+/// while the writer logs the next tick's. A burst past the log's room drops its events at
+/// admission and counts them by kind.
 const RING_EVENTS: usize = 655_360;
+// The log holds the events of the 120 ticks in the ring and the tick the writer logs, as many
+// as any 121 ticks in a row held.
+const _: () = assert!(RING_EVENTS >= EVENTS_IN_121_TICKS_MAX);
 // A new ring has room for the most events one tick admits.
 const _: () = assert!(RING_EVENTS >= EVENTS_PER_TICK_MAX);
+// A persister of 0.2.6 refuses a ring whose log holds more than 1,966,080 events.
+const _: () = assert!(RING_EVENTS <= 1_966_080);
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: c_int) -> c_int;
@@ -225,7 +232,8 @@ fn run_finish(
     run.finish(tick, &markers, out)
 }
 
-/// The shape of a ring with room for every tick the collector of `capacities` reads.
+/// The shape of a ring with room for the readings of every tick the collector of `capacities`
+/// reads, and a log of `RING_EVENTS` events.
 fn start_ring_shape(capacities: Capacities) -> Shape {
     Shape {
         slot_count: RING_SLOTS,
