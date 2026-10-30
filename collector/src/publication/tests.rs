@@ -605,6 +605,53 @@ fn drops_the_events_past_the_ring_s_room_at_admission_and_publishes_the_tick() {
 }
 
 #[test]
+fn drops_the_events_past_the_ring_s_room_without_allocating() {
+    // Goal: a tick that drops events past the ring's room allocates nothing, as
+    // docs/coding-style.md asks of the `collector` binary after startup.
+    // Method: in a ring with a log of four events, publish a first tick, start five owned
+    // children, then count the allocator calls of the next tick's wait, read and publication.
+    let timebase = Timebase::read().unwrap();
+    let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = None;
+    let mut harness = Harness::sources_with_event_capacity(&collector, Tails::Battery, 4);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut meter = Meter::default();
+    let deadline = crate::clock::now() + timebase.ticks(10_000_000).unwrap();
+    publication
+        .wait_until(&mut collector, deadline, &mut meter, &mut harness.writer)
+        .unwrap();
+    publication
+        .read(&mut collector, &mut meter, &mut harness.writer, None)
+        .unwrap();
+    publication
+        .publish(&mut harness.writer, &collector, 1, None)
+        .unwrap();
+    let mut children: Vec<HeldChild> = (0..5).map(|_| HeldChild::new()).collect();
+    let deadline = crate::clock::now() + timebase.ticks(10_000_000).unwrap();
+
+    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        publication
+            .wait_until(&mut collector, deadline, &mut meter, &mut harness.writer)
+            .unwrap();
+        publication
+            .read(&mut collector, &mut meter, &mut harness.writer, None)
+            .unwrap();
+        publication
+            .publish(&mut harness.writer, &collector, 2, None)
+            .unwrap();
+    });
+    for child in &mut children {
+        child.release();
+    }
+
+    assert_eq!(0, allocations);
+    assert!(collector.counts_tick().dropped_starts >= 1);
+}
+
+#[test]
 fn reports_wait_capture_diagnostics_before_the_scheduled_sweep_resets_them() {
     // Goal: a scheduled read never erases diagnostics from identity acquisition during waiting.
     // Method: discover an owned child through Publication, read a tick, and check report counts.
