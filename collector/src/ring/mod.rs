@@ -744,18 +744,7 @@ impl Writer {
 
         let words = self.mapping.words();
         let events_first = self.event + 1;
-        for (index, event) in readings.events.iter().enumerate() {
-            let number = self.event + 1;
-            let record = &words[self.layout.event(number)];
-            record[EVENT_SEQUENCE].store(2 * number - 1, Ordering::Relaxed);
-            fence(Ordering::Release);
-            store_event(&record[..layout::EVENT_WORDS], readings.run_tick, event);
-            if let Some(identities) = identities {
-                identity::store_event_identity(record, &identities.events[index]);
-            }
-            record[EVENT_SEQUENCE].store(2 * number, Ordering::Release);
-            self.event = number;
-        }
+        self.event = publish_inner_events(words, &self.layout, self.event, readings, identities);
         words[HEADER_EVENT_NEWEST].store(self.event, Ordering::Release);
 
         let publication = self.publication + 1;
@@ -822,6 +811,30 @@ impl Writer {
     pub fn finish(&mut self) {
         self.mapping.words()[layout::HEADER_COMPLETED].store(1, Ordering::Release);
     }
+}
+
+/// Writes the events of `readings` to the log as the events after `newest`, and returns the
+/// number of the last one, or `newest` when there are none.
+fn publish_inner_events(
+    words: &[AtomicU64],
+    layout: &Layout,
+    newest: u64,
+    readings: &Readings,
+    identities: Option<&IdentityPublication>,
+) -> u64 {
+    let mut number = newest;
+    for (index, event) in readings.events.iter().enumerate() {
+        number += 1;
+        let record = &words[layout.event(number)];
+        record[EVENT_SEQUENCE].store(2 * number - 1, Ordering::Relaxed);
+        fence(Ordering::Release);
+        store_event(&record[..layout::EVENT_WORDS], readings.run_tick, event);
+        if let Some(identities) = identities {
+            identity::store_event_identity(record, &identities.events[index]);
+        }
+        record[EVENT_SEQUENCE].store(2 * number, Ordering::Release);
+    }
+    number
 }
 
 fn store_origin(words: &[AtomicU64], origin: &WriterOrigin) {
