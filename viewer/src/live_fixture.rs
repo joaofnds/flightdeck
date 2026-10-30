@@ -57,9 +57,13 @@ impl Fixture {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdv{}x{serial}", std::process::id()),
         };
+        let slot_count = if process_capacity == 2 { 8 } else { 64 };
         let shape = Shape {
-            slot_count: if process_capacity == 2 { 8 } else { 64 },
+            slot_count,
             process_capacity,
+            // Room for the one event `publish` gives each tick the ring holds and the tick the
+            // writer logs.
+            event_capacity: SHAPE.event_capacity.max(slot_count + 1),
             ..SHAPE
         };
         let (mut writer, registered) = Registration::start(&root, &place, shape, 0)
