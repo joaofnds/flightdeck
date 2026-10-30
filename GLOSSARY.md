@@ -6,6 +6,11 @@ continues across collector restarts.
 **Retention period**: how long the recording keeps each reading, which the user sets in
 minutes, hours or days. A reading older than the retention period is deleted.
 
+**Hold**: the user's pause on one second of the recording, made by clicking a chart, so that
+every page shows that second's readings rather than the live Mac's until the user lets go. The
+charts keep the window they showed when the hold began, and the recording goes on collecting.
+The held second is the second a hold names.
+
 **Tick**: one scheduled collection of the Mac's readings. A missed tick has no readings.
 
 **Sealed minute**: the saved, immutable readings of a window of 60 elapsed seconds of a
