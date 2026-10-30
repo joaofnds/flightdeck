@@ -115,6 +115,72 @@ fn preserves_exit_diagnostics_when_a_later_exit_is_rejected() {
     assert_eq!(2, tracker.drain_observations().count());
 }
 
+#[test]
+fn admits_no_more_events_than_the_ring_s_room_below_the_tick_s_capacity() {
+    // Goal: a tick admits no more events than the ring's room although its list has room for
+    // more, and counts the rest as dropped by kind.
+    // Method: give a tracker with capacity for two a room of one, and observe an unreaped
+    // owned child, whose start and exit the list could both hold.
+    let mut tracker = tests::tracker_with_event_capacity(2);
+    let mut child = tests::ExitChild(processes::child_that_has_exited());
+    let pid = child.0.id().cast_signed();
+    let before = tracker.counts();
+
+    tracker.set_event_room(1);
+    tracker.observe(&[pid], &mut Meter::default()).unwrap();
+    let added = tracker.counts().since(&before);
+    let retained: Vec<_> = tracker.drain_observations().collect();
+    child.0.wait().unwrap();
+
+    assert_eq!(1, retained.len());
+    assert!(matches!(retained[0].event, Event::Start { pid: found, .. } if found == pid));
+    assert_eq!(1, added.dropped_exits);
+}
+
+#[test]
+fn admits_no_more_events_than_the_tick_s_capacity_below_the_ring_s_room() {
+    // Goal: a ring's room larger than the tick's capacity leaves the capacity as the bound.
+    // Method: give a tracker with capacity for one a room of a million, and observe an
+    // unreaped owned child, whose start fills the tick.
+    let mut tracker = tests::tracker_with_event_capacity(1);
+    let mut child = tests::ExitChild(processes::child_that_has_exited());
+    let pid = child.0.id().cast_signed();
+    let before = tracker.counts();
+
+    tracker.set_event_room(1_000_000);
+    tracker.observe(&[pid], &mut Meter::default()).unwrap();
+    let added = tracker.counts().since(&before);
+    let retained: Vec<_> = tracker.drain_observations().collect();
+    child.0.wait().unwrap();
+
+    assert_eq!(1, retained.len());
+    assert!(matches!(retained[0].event, Event::Start { pid: found, .. } if found == pid));
+    assert_eq!(1, added.dropped_exits);
+}
+
+#[test]
+fn drops_the_newest_events_past_a_room_given_after_they_were_admitted() {
+    // Goal: events admitted before the ring gave its room, as the tracker's start admits the
+    // exit of a process that ends before its watch, stay within that room, and the rest count
+    // as dropped by kind.
+    // Method: let a tracker with capacity for two admit an unreaped owned child's start and
+    // exit, then give it a room of one.
+    let mut tracker = tests::tracker_with_event_capacity(2);
+    let mut child = tests::ExitChild(processes::child_that_has_exited());
+    let pid = child.0.id().cast_signed();
+    tracker.observe(&[pid], &mut Meter::default()).unwrap();
+    let before = tracker.counts();
+
+    tracker.set_event_room(1);
+    let added = tracker.counts().since(&before);
+    let retained: Vec<_> = tracker.drain_observations().collect();
+    child.0.wait().unwrap();
+
+    assert_eq!(1, retained.len());
+    assert!(matches!(retained[0].event, Event::Start { pid: found, .. } if found == pid));
+    assert_eq!(1, added.dropped_exits);
+}
+
 fn follow_until_exited(tracker: &mut Tracker, pid: i32) {
     let index = usize::try_from(pid).unwrap();
     for _attempt in 0..tests::STEPS_MAX {
@@ -135,9 +201,11 @@ fn counts_a_rejected_acquisition_without_invoking_it() {
     let mut scratch = EventObservation::EMPTY;
     let mut counts = Counts::default();
     let mut acquisitions = 0;
+    let room = events.capacity();
 
     let recorded = record(
         &mut events,
+        room,
         &mut counts,
         &mut scratch,
         EventKind::Start,
@@ -167,9 +235,11 @@ fn keeps_a_partial_failed_acquisition_out_of_retained_observations() {
     events.push(Event::Exec { pid: 1 }.into());
     let mut scratch = EventObservation::EMPTY;
     let mut counts = Counts::default();
+    let room = events.capacity();
 
     let recorded = record(
         &mut events,
+        room,
         &mut counts,
         &mut scratch,
         EventKind::Start,
@@ -210,6 +280,7 @@ fn retains_the_observation_prefix_and_counts_each_rejected_kind_once() {
         let wake = follow_until_handle(
             &notices,
             &mut tracker.events,
+            tracker.event_room,
             &mut tracker.event_scratch,
             &mut tracker.counts,
             &mut tracker.exits,

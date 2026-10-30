@@ -56,6 +56,16 @@ enum EventKind {
     Exit,
 }
 
+impl EventKind {
+    fn of(event: &Event) -> Self {
+        match event {
+            Event::Start { .. } => Self::Start,
+            Event::Exec { .. } => Self::Exec,
+            Event::Exit { .. } => Self::Exit,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventIdentity {
     pub pid: i32,
@@ -205,6 +215,9 @@ pub struct Tracker {
     starts: Vec<i32>,
     exits: Vec<(i32, Noticed)>,
     events: Vec<EventObservation>,
+    /// The most events the tick admits, at most the capacity of `events`, so that a tick's
+    /// events overwrite no event of a tick the ring holds.
+    event_room: usize,
     event_scratch: EventObservation,
     exit_diagnostics: ExitDiagnostics,
     counts: Counts,
@@ -427,6 +440,7 @@ impl Tracker {
             starts: Vec::with_capacity(capacity),
             exits: Vec::with_capacity(capacity),
             events: Vec::with_capacity(limits.events_per_tick_max),
+            event_room: limits.events_per_tick_max,
             event_scratch: EventObservation::EMPTY,
             exit_diagnostics: ExitDiagnostics::default(),
             counts: Counts::default(),
@@ -481,6 +495,7 @@ impl Tracker {
                 let woke = follow_until_handle(
                     &self.eventlist[..count],
                     &mut self.events,
+                    self.event_room,
                     &mut self.event_scratch,
                     &mut self.counts,
                     &mut self.exits,
@@ -568,6 +583,20 @@ impl Tracker {
             meter,
             Some(&mut ProgramCapture { identities, writer }),
         )
+    }
+
+    /// Admits at most `room` events in the tick, the most the ring can log without overwriting an
+    /// event of a tick it holds, and never more than the tick's capacity. The tracker's start
+    /// admits the exit of a process that ends before its watch, before the ring gives any room,
+    /// so the newest events past the room are dropped and counted by kind.
+    pub fn set_event_room(&mut self, room: u64) {
+        let capacity = self.events.capacity();
+        self.event_room = usize::try_from(room).map_or(capacity, |room| room.min(capacity));
+
+        let kept = self.events.len().min(self.event_room);
+        for dropped in self.events.drain(kept..) {
+            count_dropped(&mut self.counts, EventKind::of(&dropped.event));
+        }
     }
 
     pub fn drain_observations(&mut self) -> std::vec::Drain<'_, EventObservation> {
@@ -735,6 +764,7 @@ impl Tracker {
                 assert!(pid >= 0);
                 record(
                     &mut self.events,
+                    self.event_room,
                     &mut self.counts,
                     &mut self.event_scratch,
                     EventKind::Start,
@@ -771,6 +801,7 @@ impl Tracker {
                 self.known[index].watch.active = false;
                 record(
                     &mut self.events,
+                    self.event_room,
                     &mut self.counts,
                     &mut self.event_scratch,
                     EventKind::Exit,
@@ -946,11 +977,12 @@ fn exec_identity(watched: Option<u64>, identity: &mut ProcessIdentity) {
 }
 
 /// Handles the events one wait returned in its `eventlist`: records each exec among the tick's
-/// `events`, queues each exit among the `exits` to read, counts each fork, and returns what the
-/// wait woke for. An event that reports an error is that error.
+/// `events`, up to `room` of them, queues each exit among the `exits` to read, counts each
+/// fork, and returns what the wait woke for. An event that reports an error is that error.
 fn follow_until_handle(
     eventlist: &[Kevent],
     events: &mut Vec<EventObservation>,
+    room: usize,
     scratch: &mut EventObservation,
     counts: &mut Counts,
     exits: &mut Vec<(i32, Noticed)>,
@@ -979,12 +1011,19 @@ fn follow_until_handle(
 
             let pid = pid_of(event.ident)?;
             if event.fflags & NOTE_EXEC != 0 {
-                record(events, counts, scratch, EventKind::Exec, |observation| {
-                    observation.event = Event::Exec { pid };
-                    observation.identity.pid = pid;
-                    observation.identity.creation = EventCreation::NotApplicable;
-                    Ok(())
-                })?;
+                record(
+                    events,
+                    room,
+                    counts,
+                    scratch,
+                    EventKind::Exec,
+                    |observation| {
+                        observation.event = Event::Exec { pid };
+                        observation.identity.pid = pid;
+                        observation.identity.creation = EventCreation::NotApplicable;
+                        Ok(())
+                    },
+                )?;
             }
             if event.fflags & NOTE_EXIT != 0 {
                 push_without_growing(exits, (pid, Noticed::OnExit));
@@ -1031,26 +1070,22 @@ fn submit_watches_receipts(
     Ok(())
 }
 
-/// Acquires only observations the tick can retain. Scratch never enters the retained list
-/// until acquisition succeeds, so an error cannot expose a partial observation.
+/// Acquires only observations the tick can retain, at most `room` of them. Scratch never
+/// enters the retained list until acquisition succeeds, so an error cannot expose a partial
+/// observation.
 fn record(
     events: &mut Vec<EventObservation>,
+    room: usize,
     counts: &mut Counts,
     scratch: &mut EventObservation,
     kind: EventKind,
     acquire: impl FnOnce(&mut EventObservation) -> io::Result<()>,
 ) -> io::Result<()> {
-    let capacity = events.capacity();
-    assert!(capacity > 0);
-    assert!(events.len() <= capacity);
+    assert!(room <= events.capacity());
+    assert!(events.len() <= room);
 
-    if events.len() == capacity {
-        match kind {
-            EventKind::Start => counts.dropped_starts += 1,
-            EventKind::Exec => counts.dropped_execs += 1,
-            EventKind::Exit => counts.dropped_exits += 1,
-        }
-
+    if events.len() == room {
+        count_dropped(counts, kind);
         return Ok(());
     }
 
@@ -1065,6 +1100,15 @@ fn record(
     events.push(std::mem::replace(scratch, EventObservation::EMPTY));
 
     Ok(())
+}
+
+/// Counts an event of `kind` that the tick had no room for.
+fn count_dropped(counts: &mut Counts, kind: EventKind) {
+    match kind {
+        EventKind::Start => counts.dropped_starts += 1,
+        EventKind::Exec => counts.dropped_execs += 1,
+        EventKind::Exit => counts.dropped_exits += 1,
+    }
 }
 
 fn record_assert_alignment(observation: &EventObservation) {
@@ -1362,6 +1406,17 @@ mod tests {
         counts: &mut Counts,
         event: impl Into<EventObservation>,
     ) {
+        let room = events.capacity();
+        record_event_within(events, room, counts, event);
+    }
+
+    /// Records `event` into `events` as a tick that admits at most `room` events does.
+    fn record_event_within(
+        events: &mut Vec<EventObservation>,
+        room: usize,
+        counts: &mut Counts,
+        event: impl Into<EventObservation>,
+    ) {
         let observation = event.into();
         let kind = match observation.event {
             Event::Start { .. } => EventKind::Start,
@@ -1369,7 +1424,7 @@ mod tests {
             Event::Exit { .. } => EventKind::Exit,
         };
         let mut scratch = EventObservation::EMPTY;
-        record(events, counts, &mut scratch, kind, |scratch| {
+        record(events, room, counts, &mut scratch, kind, |scratch| {
             *scratch = observation;
             Ok(())
         })
@@ -1463,6 +1518,26 @@ mod tests {
         assert_eq!(EventCreation::NotApplicable, events[0].identity.creation);
         let dropped = Counts {
             dropped_exits: 1,
+            ..Counts::default()
+        };
+        assert_eq!(dropped, counts);
+    }
+
+    #[test]
+    fn drops_an_event_past_the_room_although_the_list_has_capacity_for_it() {
+        // Goal: a tick admits no more events than the room the ring gives it, though its list
+        // could hold more, and counts the rest as dropped by kind.
+        // Method: into a list with capacity for two and room for one, record two execs.
+        let mut events = Vec::with_capacity(2);
+        let mut counts = Counts::default();
+
+        record_event_within(&mut events, 1, &mut counts, Event::Exec { pid: 1 });
+        record_event_within(&mut events, 1, &mut counts, Event::Exec { pid: 2 });
+
+        assert_eq!(1, events.len());
+        assert_eq!(Event::Exec { pid: 1 }, events[0].event);
+        let dropped = Counts {
+            dropped_execs: 1,
             ..Counts::default()
         };
         assert_eq!(dropped, counts);
@@ -1599,6 +1674,7 @@ mod tests {
         let wake = follow_until_handle(
             eventlist,
             &mut events,
+            EVENTS_PER_WAIT_MAX,
             &mut scratch,
             &mut counts,
             &mut exits,

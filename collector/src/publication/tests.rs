@@ -75,6 +75,15 @@ impl Harness {
     }
 
     fn sources(collector: &Collector, tails: Tails) -> Self {
+        let events = 2 * crate::u64_from_usize(collector.capacities().events);
+        Self::sources_with_event_capacity(collector, tails, events)
+    }
+
+    fn sources_with_event_capacity(
+        collector: &Collector,
+        tails: Tails,
+        event_capacity: u64,
+    ) -> Self {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let lock_path = std::env::temp_dir().join(format!(
             "fd-battery-publication-{}-{number}.lock",
@@ -94,7 +103,7 @@ impl Harness {
             fan_capacity: crate::u64_from_usize(capacity.fans),
             process_capacity: crate::u64_from_usize(capacity.processes),
             coalition_capacity: crate::u64_from_usize(capacity.coalitions),
-            event_capacity: 2 * crate::u64_from_usize(capacity.events),
+            event_capacity,
         };
         let identity = RunIdentity {
             recording: Identity([1, 2]),
@@ -558,6 +567,41 @@ fn publishes_scheduled_start_identity_from_collection_program(
 
     assert_eq!(b"cat", &executable[..executable_length]);
     assert_eq!(b"", &app[..app_length]);
+}
+
+#[test]
+fn drops_the_events_past_the_ring_s_room_at_admission_and_publishes_the_tick() {
+    // Goal: a tick admits no more events than the ring can log without overwriting an event of
+    // a tick it holds, so the tick publishes and counts what it dropped.
+    // Method: in a ring with a log of four events, start five owned children after the
+    // collector listed the Mac's processes, then wait, read and publish a tick.
+    let timebase = Timebase::read().unwrap();
+    let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = None;
+    let mut harness = Harness::sources_with_event_capacity(&collector, Tails::Battery, 4);
+    let mut publication = Publication::new(&harness.writer).unwrap();
+    let mut children: Vec<HeldChild> = (0..5).map(|_| HeldChild::new()).collect();
+    let mut meter = Meter::default();
+    let deadline = crate::clock::now() + timebase.ticks(10_000_000).unwrap();
+
+    publication
+        .wait_until(&mut collector, deadline, &mut meter, &mut harness.writer)
+        .unwrap();
+    publication
+        .read(&mut collector, &mut meter, &mut harness.writer, None)
+        .unwrap();
+    publication
+        .publish(&mut harness.writer, &collector, 7, None)
+        .unwrap();
+    for child in &mut children {
+        child.release();
+    }
+
+    assert_eq!(4, collector.events().len());
+    assert!(collector.counts_tick().dropped_starts >= 1);
 }
 
 #[test]
