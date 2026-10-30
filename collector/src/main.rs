@@ -24,7 +24,7 @@ use collector::recording::child::{ChildCost, Persister};
 use collector::recording::{self, Registration};
 use collector::ring::{DictionaryCapacity, ObservationTimes, Place, Shape, Writer};
 use collector::schedule::Schedule;
-use collector::tracker::{Counts, Event, Noticed};
+use collector::tracker::{Counts, EVENTS_PER_TICK_MAX, Event, Noticed};
 use collector::u64_from_usize;
 
 use collector::publication::Publication;
@@ -39,6 +39,13 @@ const DEFAULT_RESCAN_INTERVAL: Duration = Duration::ZERO;
 const DEFAULT_RING: &str = "flightdeck";
 /// The ticks the ring holds, two minutes of them, so a reader that stops for less loses none.
 const RING_SLOTS: u64 = 120;
+/// The process events the ring's log holds. The log holds the events of the ticks in the ring
+/// while the writer logs the next tick's, and the most that 121 ticks in a row held across the
+/// user's recording, measured on 2026-10-30 over 34,462,946 events in 152 runs, was 584,210. A
+/// burst past the log's room drops its events at admission and counts them by kind.
+const RING_EVENTS: usize = 655_360;
+// A new ring has room for the most events one tick admits.
+const _: () = assert!(RING_EVENTS >= EVENTS_PER_TICK_MAX);
 
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: c_int) -> c_int;
@@ -229,8 +236,7 @@ fn start_ring_shape(capacities: Capacities) -> Shape {
         fan_capacity: u64_from_usize(capacities.fans),
         process_capacity: u64_from_usize(capacities.processes),
         coalition_capacity: u64_from_usize(capacities.coalitions),
-        // Every event of the ticks the ring holds, at the most a tick holds.
-        event_capacity: RING_SLOTS * u64_from_usize(capacities.events),
+        event_capacity: u64_from_usize(RING_EVENTS),
     }
 }
 

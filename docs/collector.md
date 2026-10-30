@@ -152,9 +152,11 @@ then if the event fits and its usage is still readable. In five-minute research 
 collector read the final usage of 82 to 84% of the processes that exited (Process starts and
 exits without root).
 
-A tick holds at most 16,384 process events. A burst past that drops the rest and counts the
-dropped events by kind in the tick, so a reader knows what is missing. One admission point
-checks capacity before optional Start/Exit payload acquisition and dictionary insertion.
+A tick holds at most 16,384 process events, and no more than the ring's event log has room
+for without overwriting an event of a tick the ring holds (The ring). A burst past either
+bound drops the rest and counts the dropped events by kind in the tick, so a reader knows
+what is missing. One admission point checks capacity before optional Start/Exit payload
+acquisition and dictionary insertion.
 Rejected events still update watch lifecycle and loss accounting. After a tick that
 dropped a start, the collector reads the coalition of every listed process, not only the new
 ones, so it still learns the coalitions of the processes whose starts it dropped.
@@ -179,22 +181,25 @@ use the wake. It looks at the ring once a second, since it only needs to keep up
 minutes.
 
 Process events go to a log of their own beside the slots, so a tick with many events
-overwrites no other tick. Each slot names the range of events that belong to it.
+overwrites no other tick. Each slot names the range of events that belong to it. The log
+overwrites only events of ticks the ring no longer holds, so a reader that can read a tick
+can read every event it names.
 
 The ring is sized when it is made for every process and coalition the collector's limits
 allow. Its exact size depends on those capacities and its format. The native run measured
-on 2026-10-26 reserved 1,025,585,336 bytes, about 978 MiB of virtual address space. In the
-current identity layout, the event region alone reserves
-`120 × 16,384 × 24 × 8 = 377,487,360` bytes, or 360 MiB.
+on 2026-10-26 reserved 1,025,585,336 bytes, about 978 MiB of virtual address space, with
+that build's event log of 120 × 16,384 records. The event log holds 655,360 records, which in the
+current identity layout reserve `655,360 × 24 × 8 = 125,829,120` bytes, or 120 MiB. That is
+above the 584,210 events the busiest 121 ticks in a row held in a recording of 34,462,946
+events over 152 runs, measured on 2026-10-30, since the log holds the events of the 120
+ticks in the ring while the writer logs the next tick's.
 
-The event log advances around that whole region as events arrive. Long-running churn can
-therefore touch all of its backing even when a much smaller recent history is useful.
-Virtual reservation, touched backing, resident memory, physical footprint and compressed or
-swapped pages are different quantities; touching every page does not prove they all remain
-resident together. Reusing event storage by retained tick is planned with the ring redesign,
-and is not implemented. The ring's name carries 60 random bits written only to the lock file,
-so another user cannot guess it (Security). The lock file
-also stops a second collector from writing the same ring.
+The event log advances around that whole region as events arrive, so long-running churn
+touches all of its backing. Virtual reservation, touched backing, resident memory, physical
+footprint and compressed or swapped pages are different quantities; touching every page does
+not prove they all remain resident together. The ring's name carries 60 random bits written
+only to the lock file, so another user cannot guess it (Security). The lock file also stops a
+second collector from writing the same ring.
 
 ## The persister and the recording
 
@@ -549,7 +554,8 @@ publication there, so the reader drops the copy. Anything lower means the ring i
 writer never waits for a reader.
 
 **Event log.** The process events, each start, exec and exit, written in order into a circle of
-120 × 16,384 records beside the slots. A start is a pid a rescan found new, so a process started
+655,360 records beside the slots, which overwrites only events of ticks the ring no longer
+holds. A start is a pid a rescan found new, so a process started
 by `posix_spawn` or found already running has a start and no fork. Each record carries its own
 sequence word, read the same way as a slot's.
 

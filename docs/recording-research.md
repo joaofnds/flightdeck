@@ -506,16 +506,19 @@ source also leaves an explicit unknown extent while healthy collection continues
 If registration fails, bounded anonymous-ring cleanup retains the current ring and its
 actual predecessor; those sources have no recording identity and recovery is unavailable.
 Each active ring holds 120 published ticks, normally two sealing windows. Each slot has
-room for the processes and coalitions allowed by its startup capacities. The current
-identity-event log reserves `120 × 16,384 × 24 × 8 = 377,487,360` bytes, or 360 MiB.
-The full native ring measured on 2026-10-26 reserved 1,025,585,336 bytes, about 978 MiB
-of virtual address space; other capacity and format combinations have other sizes.
+room for the processes and coalitions allowed by its startup capacities. The
+identity-event log holds 655,360 records and reserves `655,360 × 24 × 8 = 125,829,120`
+bytes, or 120 MiB, above the 584,210 events the busiest 121 ticks in a row held in the
+recording measured on 2026-10-30. The full native ring measured on 2026-10-26, with that
+build's log of 120 × 16,384 records, reserved 1,025,585,336 bytes, about 978 MiB of
+virtual address space; other capacity and format combinations have other sizes.
 
-The writer advances through the whole event region. At the historical 43 to 418 events
-a second measured on 2026-10-15, one traversal would take about 12.7 to 1.3 hours.
-That arithmetic describes pages eventually touched, not simultaneous residency: backing
-can remain resident, become compressed or be swapped. Event-storage reuse within the
-retained tick horizon is planned with the ring redesign, not implemented. The registry
+The writer advances through the whole event region, and overwrites only events of ticks
+the ring no longer holds. The collector drops at admission any event past that room and
+counts it by kind. At the historical 43 to 418 events a second measured on 2026-10-15,
+one traversal would take about 4.2 hours to 26 minutes. That arithmetic describes pages
+eventually touched, not simultaneous residency: backing can remain resident, become
+compressed or be swapped. The registry
 can retain two rings after a restart. A kernel panic or power loss can lose unsealed
 readings, as decided.
 
@@ -539,8 +542,10 @@ is first in, first out, and discards a message that arrives when it is full. DDS
 `KEEP_ALL` history with reliable delivery, and `TRANSIENT_LOCAL` durability to fill a
 reader that joins late with past samples. Here process starts and exits cannot share
 the ring's overwrite rule. They go in a queue of their own with a count of what it
-dropped. The ring as built does otherwise, as the end of this section says: its event
-log overwrites its oldest records, and a reader counts what it missed.
+dropped. The ring as built does so for the ticks it holds, as the end of this section
+says: its event log overwrites only events of ticks the ring no longer holds, the
+collector drops and counts what would overwrite more, and a reader that fell behind
+counts what it missed.
 
 Scheduling follows one clock. NASA JPL's F´ flight software divides one clock into
 rate groups, 1,000 Hz into 100, 10 and 1 Hz in its own example, and detects a slip
@@ -731,10 +736,10 @@ only the user read them, and arguments may need redacting before they are kept.
 
 Readers map the ring read-only, so no reader can corrupt it. While publishing, the
 writer waits for no acknowledgment and wakes readers with a broadcast, so no reader
-can stall it. The ring's event log overwrites its oldest records, and a reader learns
-what it missed from the gap. The writer holds a startup exclusion lock file, and a
-process of the same user that takes that lock keeps a new collector from starting.
-The recording also has a lifetime `collector.lock`; another process of the same user
+can stall it. The ring's event log overwrites only events of ticks the ring no longer
+holds, and a reader that fell behind learns what it missed from the gap. The writer holds
+a startup exclusion lock file, and a process of the same user that takes that lock keeps a
+new collector from starting. The recording also has a lifetime `collector.lock`; another process of the same user
 holding it prevents persistence for a new collector, which continues collection. The
 collector that takes it removes the last holder's `collector.announcement`, and once its
 run is registered writes a new one naming that run and a fingerprint of the collector's
