@@ -176,20 +176,11 @@ impl Reporter {
     }
 
     fn prepare(&self) {
-        drop(match self.admission.lock() {
-            Ok(admission) => admission,
-            Err(error) => unreachable!("diagnostic admission poisoned: {error}"),
-        });
+        prepare_lock(&self.admission, "admission");
         for slot in &self.slots {
-            drop(match slot.lock() {
-                Ok(slot) => slot,
-                Err(error) => unreachable!("diagnostic slot poisoned: {error}"),
-            });
+            prepare_lock(slot, "slot");
         }
-        drop(match self.staging.lock() {
-            Ok(staging) => staging,
-            Err(error) => unreachable!("diagnostic staging poisoned: {error}"),
-        });
+        prepare_lock(&self.staging, "staging");
     }
 
     fn diagnostic(&self, arguments: fmt::Arguments<'_>) {
@@ -300,6 +291,13 @@ fn increment(counter: &AtomicU64, counts_inexact: &AtomicBool) {
     if result.is_err() {
         counts_inexact.store(true, Ordering::Relaxed);
     }
+}
+
+fn prepare_lock<T>(mutex: &Mutex<T>, name: &str) {
+    drop(match mutex.lock() {
+        Ok(guard) => guard,
+        Err(error) => unreachable!("diagnostic {name} poisoned: {error}"),
+    });
 }
 
 fn queued_count(admitted_count: usize, taken_count: usize) -> usize {
