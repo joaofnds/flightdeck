@@ -104,16 +104,13 @@ impl Publication {
         meter: &mut Meter,
         ring: &mut Writer,
     ) -> io::Result<()> {
-        // The tick, from this wait to its publication, admits no more events than the ring can
-        // log without overwriting an event of a tick it holds.
-        collector.tracker.set_event_room(ring.event_room());
-
+        let event_room = ring.event_room();
         if self.identity_enabled {
-            collector.wait_until_with_identity(deadline, meter, ring)?;
+            collector.wait_until_with_identity(deadline, event_room, meter, ring)?;
 
             self.report.add(collector.identities.diagnostics());
         } else {
-            collector.wait_until(deadline, meter)?;
+            collector.wait_until(deadline, event_room, meter)?;
         }
         self.remember_watch_diagnostics(collector.tracker.watch_diagnostics());
 

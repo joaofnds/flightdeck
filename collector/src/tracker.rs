@@ -49,7 +49,7 @@ impl EventObservation {
     };
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum EventKind {
     Start,
     Exec,
@@ -587,11 +587,11 @@ impl Tracker {
 
     /// Admits at most `room` events in the tick, the most the ring can log without overwriting an
     /// event of a tick it holds, and never more than the tick's capacity. The tracker's start
-    /// admits the exit of a process that ends before its watch, before the ring gives any room,
-    /// so the newest events past the room are dropped and counted by kind.
-    pub fn set_event_room(&mut self, room: u64) {
-        let capacity = self.events.capacity();
-        self.event_room = usize::try_from(room).map_or(capacity, |room| room.min(capacity));
+    /// admits the exit of a process that ends before its watch before any room is given, so a
+    /// room below the events already admitted, which only a log smaller than the tick's capacity
+    /// gives, drops the newest of them and counts them by kind.
+    pub fn set_event_room(&mut self, room: usize) {
+        self.event_room = room.min(self.events.capacity());
 
         let kept = self.events.len().min(self.event_room);
         for dropped in self.events.drain(kept..) {
@@ -1091,12 +1091,7 @@ fn record(
 
     acquire(scratch)?;
     record_assert_alignment(scratch);
-    assert!(matches!(
-        (kind, &scratch.event),
-        (EventKind::Start, Event::Start { .. })
-            | (EventKind::Exec, Event::Exec { .. })
-            | (EventKind::Exit, Event::Exit { .. })
-    ));
+    assert!(EventKind::of(&scratch.event) == kind);
     events.push(std::mem::replace(scratch, EventObservation::EMPTY));
 
     Ok(())
@@ -1407,22 +1402,8 @@ mod tests {
         event: impl Into<EventObservation>,
     ) {
         let room = events.capacity();
-        record_event_within(events, room, counts, event);
-    }
-
-    /// Records `event` into `events` as a tick that admits at most `room` events does.
-    fn record_event_within(
-        events: &mut Vec<EventObservation>,
-        room: usize,
-        counts: &mut Counts,
-        event: impl Into<EventObservation>,
-    ) {
         let observation = event.into();
-        let kind = match observation.event {
-            Event::Start { .. } => EventKind::Start,
-            Event::Exec { .. } => EventKind::Exec,
-            Event::Exit { .. } => EventKind::Exit,
-        };
+        let kind = EventKind::of(&observation.event);
         let mut scratch = EventObservation::EMPTY;
         record(events, room, counts, &mut scratch, kind, |scratch| {
             *scratch = observation;
@@ -1518,26 +1499,6 @@ mod tests {
         assert_eq!(EventCreation::NotApplicable, events[0].identity.creation);
         let dropped = Counts {
             dropped_exits: 1,
-            ..Counts::default()
-        };
-        assert_eq!(dropped, counts);
-    }
-
-    #[test]
-    fn drops_an_event_past_the_room_although_the_list_has_capacity_for_it() {
-        // Goal: a tick admits no more events than the room the ring gives it, though its list
-        // could hold more, and counts the rest as dropped by kind.
-        // Method: into a list with capacity for two and room for one, record two execs.
-        let mut events = Vec::with_capacity(2);
-        let mut counts = Counts::default();
-
-        record_event_within(&mut events, 1, &mut counts, Event::Exec { pid: 1 });
-        record_event_within(&mut events, 1, &mut counts, Event::Exec { pid: 2 });
-
-        assert_eq!(1, events.len());
-        assert_eq!(Event::Exec { pid: 1 }, events[0].event);
-        let dropped = Counts {
-            dropped_execs: 1,
             ..Counts::default()
         };
         assert_eq!(dropped, counts);

@@ -183,7 +183,7 @@ pub struct Writer {
     /// The first event of the tick in each slot, by slot index, or the ring's first event in
     /// a slot no tick has filled yet. Kept apart from the mapping, which another process can
     /// write, so the writer's assertions on it check only the writer's own work.
-    events_first: Vec<u64>,
+    slot_events_first: Vec<u64>,
     name: String,
     previous_generation: u64,
     dictionary: Option<identity::DictionaryIndex>,
@@ -677,7 +677,7 @@ impl Writer {
             create_unlink_older(&names, previous.generation);
         }
 
-        let events_first = vec![header.event_first; usize_from(layout.shape.slot_count)];
+        let slot_events_first = vec![header.event_first; usize_from(layout.shape.slot_count)];
 
         Ok(Self {
             _lock: lock,
@@ -686,7 +686,7 @@ impl Writer {
             layout,
             publication: previous.publication_newest,
             event: previous.event_newest,
-            events_first,
+            slot_events_first,
             name: created.name,
             previous_generation: previous.generation,
             dictionary,
@@ -702,16 +702,16 @@ impl Writer {
     /// How many events the next publication can write before one would overwrite an event of
     /// a tick the ring holds.
     #[must_use]
-    pub fn event_room(&self) -> u64 {
+    pub fn event_room(&self) -> usize {
         let capacity = self.layout.shape.event_capacity;
         // The slot the next publication replaces holds the oldest tick the ring holds, which it
         // still holds while that publication writes its events, or no tick yet.
-        let oldest_first = self.events_first[self.layout.slot_index(self.publication + 1)];
+        let oldest_first = self.slot_events_first[self.layout.slot_index(self.publication + 1)];
         assert!(oldest_first <= self.event + 1);
         // The log holds every event of the ticks the ring holds.
         assert!(self.event < oldest_first + capacity);
 
-        oldest_first + capacity - 1 - self.event
+        usize_from(oldest_first + capacity - 1 - self.event)
     }
 
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
@@ -740,9 +740,9 @@ impl Writer {
         supplemental: &SupplementalReadings,
     ) {
         assert_eq!(identities.is_some(), self.dictionary.is_some());
-        // A tick's events overwrite no event of a tick the ring holds, so a reader can read
-        // every event of every tick it can read.
-        assert!(u64_from_usize(readings.events.len()) <= self.event_room());
+        // A tick's events overwrite no event of a tick the ring holds, so a tick's events stay
+        // in the log for as long as the ring holds the tick.
+        assert!(readings.events.len() <= self.event_room());
 
         let words = self.mapping.words();
         let events_first = self.event + 1;
@@ -760,7 +760,7 @@ impl Writer {
             events_first..self.event + 1,
             times,
         );
-        self.events_first[self.layout.slot_index(publication)] = events_first;
+        self.slot_events_first[self.layout.slot_index(publication)] = events_first;
         if let Some(identities) = identities {
             identity::store_processes(slot, &self.layout, identities.processes);
         }

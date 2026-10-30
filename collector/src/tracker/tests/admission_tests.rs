@@ -159,6 +159,34 @@ fn admits_no_more_events_than_the_tick_s_capacity_below_the_ring_s_room() {
 }
 
 #[test]
+fn admits_up_to_the_larger_room_a_later_tick_gives() {
+    // Goal: each tick admits up to the room the ring gives for it, so a room a burst left small
+    // grows back once the ring frees the burst's events.
+    // Method: give a tracker with capacity for two a room of one for a tick that observes an
+    // unreaped owned child, then a room of two for a tick that observes another, each of whose
+    // start and exit the list could hold.
+    let mut tracker = tests::tracker_with_event_capacity(2);
+    let mut first = tests::ExitChild(processes::child_that_has_exited());
+    let mut second = tests::ExitChild(processes::child_that_has_exited());
+
+    tracker.set_event_room(1);
+    tracker
+        .observe(&[first.0.id().cast_signed()], &mut Meter::default())
+        .unwrap();
+    let first_retained = tracker.drain_observations().count();
+    tracker.set_event_room(2);
+    tracker
+        .observe(&[second.0.id().cast_signed()], &mut Meter::default())
+        .unwrap();
+    let second_retained = tracker.drain_observations().count();
+    first.0.wait().unwrap();
+    second.0.wait().unwrap();
+
+    assert_eq!(1, first_retained);
+    assert_eq!(2, second_retained);
+}
+
+#[test]
 fn drops_the_newest_events_past_a_room_given_after_they_were_admitted() {
     // Goal: events admitted before the ring gave its room, as the tracker's start admits the
     // exit of a process that ends before its watch, stay within that room, and the rest count

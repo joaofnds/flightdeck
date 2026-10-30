@@ -58,7 +58,6 @@ pub struct Capacities {
     pub fans: usize,
     pub processes: usize,
     pub coalitions: usize,
-    pub events: usize,
 }
 
 impl Collector {
@@ -138,21 +137,31 @@ impl Collector {
             fans: usize::from(FANS_MAX),
             processes: self.process_limit,
             coalitions: self.coalition_limit,
-            events: EVENTS_PER_TICK_MAX,
         }
     }
 
-    pub fn wait_until(&mut self, deadline: u64, meter: &mut Meter) -> io::Result<()> {
+    /// Admits at most `event_room` events in the tick, from this wait to its publication, the
+    /// most the ring can log without overwriting an event of a tick it holds.
+    pub fn wait_until(
+        &mut self,
+        deadline: u64,
+        event_room: usize,
+        meter: &mut Meter,
+    ) -> io::Result<()> {
+        self.tracker.set_event_room(event_room);
         self.tracker.follow_until(deadline, meter)
     }
 
-    /// Uses the publishing writer at discovery; no later PID lookup can recover this path.
+    /// Admits at most `event_room` events in the tick as `wait_until` does, and uses the
+    /// publishing writer at discovery; no later PID lookup can recover this path.
     pub fn wait_until_with_identity(
         &mut self,
         deadline: u64,
+        event_room: usize,
         meter: &mut Meter,
         writer: &mut Writer,
     ) -> io::Result<()> {
+        self.tracker.set_event_room(event_room);
         self.identities.clear();
         self.tracker
             .follow_until_with_identity(deadline, meter, &mut self.identities, writer)

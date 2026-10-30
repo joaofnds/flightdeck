@@ -75,7 +75,7 @@ impl Harness {
     }
 
     fn sources(collector: &Collector, tails: Tails) -> Self {
-        let events = 2 * crate::u64_from_usize(collector.capacities().events);
+        let events = 2 * crate::u64_from_usize(EVENTS_PER_TICK_MAX);
         Self::sources_with_event_capacity(collector, tails, events)
     }
 

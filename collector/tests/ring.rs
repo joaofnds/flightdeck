@@ -1585,7 +1585,10 @@ mod tests {
         let place = TestPlace::new("evroomnew");
         let writer = Writer::create(&place.place, SHAPE).unwrap();
 
-        assert_eq!(SHAPE.event_capacity, writer.event_room());
+        assert_eq!(
+            usize::try_from(SHAPE.event_capacity).unwrap(),
+            writer.event_room()
+        );
     }
 
     /// A ring of three slots with a log of six events.
@@ -1662,7 +1665,10 @@ mod tests {
         let restarted = Writer::create(&place.place, SHAPE_THREE_SLOTS).unwrap();
         drop(spawns);
 
-        assert_eq!(SHAPE_THREE_SLOTS.event_capacity, restarted.event_room());
+        assert_eq!(
+            usize::try_from(SHAPE_THREE_SLOTS.event_capacity).unwrap(),
+            restarted.event_room()
+        );
     }
 
     #[test]
