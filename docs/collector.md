@@ -153,10 +153,11 @@ collector read the final usage of 82 to 84% of the processes that exited (Proces
 exits without root).
 
 A tick holds at most 16,384 process events, and no more than the ring's event log has room
-for without overwriting an event of a tick the ring holds (The ring). A burst past either
-bound drops the rest and counts the dropped events by kind in the tick, so a reader knows
-what is missing. One admission point checks capacity before optional Start/Exit payload
-acquisition and dictionary insertion.
+for without overwriting an event of a tick the ring holds (The ring). The ticks the ring
+holds share that room, so after a burst that fills the log, later ticks drop events too
+until the burst's ticks leave the ring, up to two minutes later. A tick drops the events past
+either bound and counts them by kind, so a reader knows what is missing. One admission point
+checks capacity before optional Start/Exit payload acquisition and dictionary insertion.
 Rejected events still update watch lifecycle and loss accounting. After a tick that
 dropped a start, the collector reads the coalition of every listed process, not only the new
 ones, so it still learns the coalitions of the processes whose starts it dropped.
@@ -182,17 +183,19 @@ minutes.
 
 Process events go to a log of their own beside the slots, so a tick with many events
 overwrites no other tick. Each slot names the range of events that belong to it. The log
-overwrites only events of ticks the ring no longer holds, so a reader that can read a tick
-can read every event it names.
+overwrites only events of ticks the ring no longer holds, so a tick's events stay in the log
+for as long as the ring holds the tick. A reader that reads a tick's events after the ring
+replaced the tick learns which of them it missed.
 
 The ring is sized when it is made for every process and coalition the collector's limits
-allow. Its exact size depends on those capacities and its format. The native run measured
-on 2026-10-26 reserved 1,025,585,336 bytes, about 978 MiB of virtual address space, with
-that build's event log of 120 × 16,384 records. The event log holds 655,360 records, which in the
-current identity layout reserve `655,360 × 24 × 8 = 125,829,120` bytes, or 120 MiB. That is
-above the 584,210 events the busiest 121 ticks in a row held in a recording of 34,462,946
-events over 152 runs, measured on 2026-10-30, since the log holds the events of the 120
-ticks in the ring while the writer logs the next tick's.
+allow. Its exact size depends on those capacities and its format. On this M5 Pro on
+2026-10-30 a full ring measured 773,931,008 bytes of shared memory, about 738 MiB of virtual
+address space, against 1,025,589,248 bytes for a ring of 0.2.6, whose event log held
+120 × 16,384 records. The event log holds 655,360 records, which in the current identity
+layout reserve `655,360 × 24 × 8 = 125,829,120` bytes, or 120 MiB. That is above the 584,210
+events the busiest 121 ticks in a row held in this Mac's recording of 34,462,946 events over
+152 runs, measured on 2026-10-30, since the log holds the events of the 120 ticks in the ring
+while the writer logs the next tick's.
 
 The event log advances around that whole region as events arrive, so long-running churn
 touches all of its backing. Virtual reservation, touched backing, resident memory, physical

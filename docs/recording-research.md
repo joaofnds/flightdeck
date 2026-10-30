@@ -508,19 +508,21 @@ actual predecessor; those sources have no recording identity and recovery is una
 Each active ring holds 120 published ticks, normally two sealing windows. Each slot has
 room for the processes and coalitions allowed by its startup capacities. The
 identity-event log holds 655,360 records and reserves `655,360 × 24 × 8 = 125,829,120`
-bytes, or 120 MiB, above the 584,210 events the busiest 121 ticks in a row held in the
-recording measured on 2026-10-30. The full native ring measured on 2026-10-26, with that
-build's log of 120 × 16,384 records, reserved 1,025,585,336 bytes, about 978 MiB of
-virtual address space; other capacity and format combinations have other sizes.
+bytes, or 120 MiB. That is above the 584,210 events the busiest 121 ticks in a row held in
+this M5 Pro's recording, measured on 2026-10-30 (`backlog/evidence/TASK-102/README.md`),
+since the log holds the events of the 120 ticks in the ring while the writer logs the next
+tick's. A full native ring measured 773,931,008 bytes of shared memory on 2026-10-30, about
+738 MiB of virtual address space, and 1,025,589,248 bytes with 0.2.6's log of
+120 × 16,384 records; other capacity and format combinations have other sizes.
 
 The writer advances through the whole event region, and overwrites only events of ticks
-the ring no longer holds. The collector drops at admission any event past that room and
-counts it by kind. At the historical 43 to 418 events a second measured on 2026-10-15,
-one traversal would take about 4.2 hours to 26 minutes. That arithmetic describes pages
-eventually touched, not simultaneous residency: backing can remain resident, become
-compressed or be swapped. The registry
-can retain two rings after a restart. A kernel panic or power loss can lose unsealed
-readings, as decided.
+the ring no longer holds. A tick logs no more events than the log has room for without
+overwriting an event of a tick the ring holds, and the collector drops at admission any
+event past that room and counts it by kind. At the historical 43 to 418 events a second
+measured on 2026-10-15, one traversal would take about 4.2 hours to 26 minutes. That
+arithmetic describes pages eventually touched, not simultaneous residency: backing can
+remain resident, become compressed or be swapped. The registry can retain two rings after a
+restart. A kernel panic or power loss can lose unsealed readings, as decided.
 
 ## What aerospace, automotive and robotics systems do
 
@@ -739,12 +741,12 @@ writer waits for no acknowledgment and wakes readers with a broadcast, so no rea
 can stall it. The ring's event log overwrites only events of ticks the ring no longer
 holds, and a reader that fell behind learns what it missed from the gap. The writer holds
 a startup exclusion lock file, and a process of the same user that takes that lock keeps a
-new collector from starting. The recording also has a lifetime `collector.lock`; another process of the same user
-holding it prevents persistence for a new collector, which continues collection. The
-collector that takes it removes the last holder's `collector.announcement`, and once its
-run is registered writes a new one naming that run and a fingerprint of the collector's
-source, so a reader asks the kernel whether the lock is held, without taking it, and
-reads which run and which build hold it.
+new collector from starting. The recording also has a lifetime `collector.lock`; another
+process of the same user holding it prevents persistence for a new collector, which
+continues collection. The collector that takes it removes the last holder's
+`collector.announcement`, and once its run is registered writes a new one naming that run
+and a fingerprint of the collector's source, so a reader asks the kernel whether the lock is
+held, without taking it, and reads which run and which build hold it.
 
 Every user shares the names of shared-memory objects, so each ring's name carries 60
 random bits that the collector writes nowhere but its lock file. The lock file is
