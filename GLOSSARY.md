@@ -37,6 +37,10 @@ cores are the faster cluster. macOS names them in `sysctl hw.perflevel0.name` an
 processes count once for each of them, so the resident memory of all processes adds up
 to more than the machine uses.
 
+**Memory footprint**: the memory macOS charges a process for, which Activity Monitor shows as
+the process's memory. Unlike resident memory, it counts what macOS compressed or moved to swap,
+and it leaves out memory the process gave back for macOS to reclaim.
+
 **App memory**: the memory apps asked for themselves, not counting what macOS may discard
 when memory runs short. Activity Monitor shows the same quantity under that name.
 
