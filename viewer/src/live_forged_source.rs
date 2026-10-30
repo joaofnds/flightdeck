@@ -16,8 +16,17 @@ pub struct ForgedSource {
     original: *mut c_void,
     address: *mut c_void,
     bytes: usize,
-    name: String,
+    name: ForgedName,
     event_newest: Option<u64>,
+}
+
+/// The name of the copy, which unlinks the copy when dropped, so a failed step leaves no copy.
+struct ForgedName(String);
+
+impl Drop for ForgedName {
+    fn drop(&mut self) {
+        collector::ring::unlink_generation(&self.0).unwrap();
+    }
 }
 
 // The header word of the newest event, shared by every admitted ring layout.
@@ -53,6 +62,7 @@ impl ForgedSource {
         let name = format!("{}.99", source.rsplit_once('.').unwrap().0);
         let original = forged_source_open(source, O_RDONLY);
         let copy = forged_source_open(&name, O_RDWR | O_CREAT | O_EXCL);
+        let name = ForgedName(name);
         copy.set_len(u64::try_from(bytes).unwrap()).unwrap();
         let forged = Self {
             original: forged_source_map(&original, bytes, PROT_READ),
@@ -69,7 +79,7 @@ impl ForgedSource {
             .iter_mut()
             .find(|run| run.ring_name == source)
             .unwrap();
-        run.ring_name.clone_from(&forged.name);
+        run.ring_name.clone_from(&forged.name.0);
         registry.write(root).unwrap();
         forged
     }
@@ -106,7 +116,6 @@ impl Drop for ForgedSource {
     fn drop(&mut self) {
         assert_eq!(unsafe { munmap(self.address, self.bytes) }, 0);
         assert_eq!(unsafe { munmap(self.original, self.bytes) }, 0);
-        collector::ring::unlink_generation(&self.name).unwrap();
     }
 }
 

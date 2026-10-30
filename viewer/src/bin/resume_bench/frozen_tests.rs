@@ -596,6 +596,8 @@ impl ForgedRing {
             .mapped_size_bytes();
         let original = ForgedMapping::open(source.writer.name(), bytes);
         let copy = ForgedMapping::create(&name, bytes);
+        // Owns the copy from here, so a failed check below unlinks it.
+        let ring = Self { name };
         let slot = HEADER_WORDS + usize::try_from((publication - 1) % 120).unwrap() * SLOT_WORDS;
         for (target, word) in copy.words().iter().zip(original.words()) {
             target.store(word.load(Ordering::Acquire), Ordering::Release);
@@ -612,9 +614,9 @@ impl ForgedRing {
         forged[SLOT_EVENTS_FIRST].store(events_first, Ordering::Release);
 
         let mut registry = Registry::read(&source.root).unwrap();
-        registry.runs[0].ring_name.clone_from(&name);
+        registry.runs[0].ring_name.clone_from(&ring.name);
         registry.write(&source.root).unwrap();
-        Self { name }
+        ring
     }
 }
 
