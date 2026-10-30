@@ -6,10 +6,10 @@ continues across collector restarts.
 **Retention period**: how long the recording keeps each reading, which the user sets in
 minutes, hours or days. A reading older than the retention period is deleted.
 
-**Hold**: the user's pause on one second of the recording, made by clicking a chart, so that
-every page shows that second's readings rather than the live Mac's until the user lets go. The
-charts keep the window they showed when the hold began, and the recording goes on collecting.
-The held second is the second a hold names.
+**Hold**: the user's pause on one second of the recording, made by picking a second or a range
+on a chart or by pausing, so that every page shows that second's readings rather than the live
+Mac's until the user lets go. The charts keep the window they showed when the hold began, and
+the recording goes on collecting. The held second is the second a hold names.
 
 **Tick**: one scheduled collection of the Mac's readings. A missed tick has no readings.
 
@@ -39,7 +39,9 @@ to more than the machine uses.
 
 **Memory footprint**: the memory macOS charges a process for, which Activity Monitor shows as
 the process's memory. Unlike resident memory, it counts what macOS compressed or moved to swap,
-and it leaves out memory the process gave back for macOS to reclaim.
+and it leaves out memory the process gave back for macOS to reclaim. Shared memory counts in
+the footprint of every process that touched it, so footprints, like resident memory, add up
+to more than the machine uses.
 
 **App memory**: the memory apps asked for themselves, not counting what macOS may discard
 when memory runs short. Activity Monitor shows the same quantity under that name.
