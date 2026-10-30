@@ -405,9 +405,7 @@ impl Layout {
 
     /// The words of the slot that holds `publication`, from the ring's start.
     pub(super) fn slot(&self, publication: u64) -> Range<usize> {
-        assert!(publication > 0);
-
-        let index = usize_from((publication - 1) % self.shape.slot_count);
+        let index = self.slot_index(publication);
         let header_words = if self.version == LAYOUT_VERSION_IDENTITY {
             HEADER_WORDS_IDENTITY
         } else {
@@ -415,6 +413,13 @@ impl Layout {
         };
         let start = header_words + index * self.slot_words;
         start..start + self.slot_words
+    }
+
+    /// The index of the slot that holds `publication`, counting slots from 0.
+    pub(super) fn slot_index(&self, publication: u64) -> usize {
+        assert!(publication > 0);
+
+        usize_from((publication - 1) % self.shape.slot_count)
     }
 }
 
@@ -501,7 +506,7 @@ impl SlotPlan {
 }
 
 /// `value`, which every shape field and index here holds within `SHAPE_FIELD_MAX`.
-fn usize_from(value: u64) -> usize {
+pub(super) fn usize_from(value: u64) -> usize {
     assert!(value <= SHAPE_FIELD_MAX);
 
     match usize::try_from(value) {

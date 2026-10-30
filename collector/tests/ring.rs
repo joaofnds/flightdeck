@@ -1571,6 +1571,93 @@ mod tests {
     }
 
     #[test]
+    fn a_new_ring_gives_its_whole_event_log_as_room() {
+        // Goal: a ring that holds no tick yet lets the next publication fill its whole log.
+        // Method: create a writer and read its room before it publishes.
+        let place = TestPlace::new("evroomnew");
+        let writer = Writer::create(&place.place, SHAPE).unwrap();
+
+        assert_eq!(SHAPE.event_capacity, writer.event_room());
+    }
+
+    /// A ring of three slots with a log of six events.
+    const SHAPE_THREE_SLOTS: Shape = Shape {
+        slot_count: 3,
+        event_capacity: 6,
+        ..SHAPE
+    };
+
+    /// Publishes ticks from run tick 1 on, each of as many execs as `counts` gives it, with the
+    /// event's number as its pid.
+    fn publish_exec_ticks(writer: &mut Writer, counts: &[usize]) {
+        let execs: Vec<Event> = (1..=6).map(|pid| Event::Exec { pid }).collect();
+        let mut first = 0;
+        for (index, &count) in counts.iter().enumerate() {
+            let tick = u64::try_from(index).unwrap() + 1;
+            publish_events(writer, tick, &execs[first..first + count]);
+            first += count;
+        }
+    }
+
+    #[test]
+    fn a_ring_gives_as_room_the_events_before_one_of_its_oldest_tick() {
+        // Goal: the room ends just before the first event of the oldest tick the ring holds,
+        // so the next publication overwrites no event of a tick a reader can still read.
+        // Method: on three slots and a log of six, publish ticks of two, two and one events,
+        // which leaves one record before the oldest tick's first event, and read the room.
+        let place = TestPlace::new("evroomold");
+        let mut writer = Writer::create(&place.place, SHAPE_THREE_SLOTS).unwrap();
+
+        publish_exec_ticks(&mut writer, &[2, 2, 1]);
+
+        assert_eq!(1, writer.event_room());
+    }
+
+    #[test]
+    fn a_ring_gives_back_the_room_of_a_tick_it_replaced() {
+        // Goal: once a publication replaces the oldest tick, that tick's events are room.
+        // Method: on three slots and a log of six, publish ticks of two, two, one and one
+        // events, so the oldest tick held is the second, starting at event 3, and read the room.
+        let place = TestPlace::new("evroomgone");
+        let mut writer = Writer::create(&place.place, SHAPE_THREE_SLOTS).unwrap();
+
+        publish_exec_ticks(&mut writer, &[2, 2, 1, 1]);
+
+        assert_eq!(2, writer.event_room());
+    }
+
+    #[test]
+    fn a_ring_counts_the_room_of_an_empty_tick_from_where_its_events_would_start() {
+        // Goal: an oldest tick with no events bounds the room at the event after the ones
+        // before it, so its emptiness never lets the room reach a held event.
+        // Method: on three slots and a log of six, publish ticks of two, none, one and one
+        // events, so the oldest tick held is empty and would have started at event 3.
+        let place = TestPlace::new("evroomnone");
+        let mut writer = Writer::create(&place.place, SHAPE_THREE_SLOTS).unwrap();
+
+        publish_exec_ticks(&mut writer, &[2, 0, 1, 1]);
+
+        assert_eq!(4, writer.event_room());
+    }
+
+    #[test]
+    fn a_restarted_writer_gives_its_new_ring_s_whole_event_log_as_room() {
+        // Goal: a restarted writer's new ring holds none of the old ring's ticks, so its whole
+        // log is room although its event numbers continue the old ring's.
+        // Method: fill the old ring's log to its room, restart the writer and read its room.
+        let place = TestPlace::new("evroomrestart");
+        let mut writer = Writer::create(&place.place, SHAPE_THREE_SLOTS).unwrap();
+        publish_exec_ticks(&mut writer, &[2, 2, 2]);
+        let spawns = spawns();
+        drop(writer);
+
+        let restarted = Writer::create(&place.place, SHAPE_THREE_SLOTS).unwrap();
+        drop(spawns);
+
+        assert_eq!(SHAPE_THREE_SLOTS.event_capacity, restarted.event_room());
+    }
+
+    #[test]
     fn a_restarted_writer_continues_the_events_of_the_previous_ring() {
         // Goal: event numbers rise across a restart, as publication numbers do.
         // Method: publish two events, drop the writer, make another in the same place, publish
