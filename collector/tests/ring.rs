@@ -1498,36 +1498,44 @@ mod tests {
     #[test]
     fn a_reader_behind_the_event_log_learns_which_events_it_missed() {
         // Goal: events the log overwrote before a reader read them are missed and counted,
-        // never read as later events, and the ticks keep every slot.
-        // Method: open a reader, then publish six events into a log of four, two a tick, and
-        // read the events, with the number the reader reads next before and after, and then
-        // the ticks.
+        // never read as later events, and they belong to ticks the ring no longer holds.
+        // Method: open a reader, then publish into four slots and a log of four a tick of two
+        // events, three ticks of none and two ticks of two, so the last overwrites the first
+        // tick's events once that tick left the ring, and read the events, with the number the
+        // reader reads next before and after, and then the ticks.
         let place = TestPlace::new("evbehind");
         let mut writer = Writer::create(&place.place, SHAPE).unwrap();
         let mut reader = Reader::open(place.lock_path()).unwrap();
 
-        for tick in 1..=3 {
-            let pid = i32::try_from(tick).unwrap();
-            publish_events(&mut writer, tick, &[Event::Exec { pid }, exit(pid)]);
+        publish_events(&mut writer, 1, &[Event::Exec { pid: 1 }, exit(1)]);
+        for tick in 2..=4 {
+            publish_events(&mut writer, tick, &[]);
         }
+        publish_events(&mut writer, 5, &[Event::Exec { pid: 5 }, exit(5)]);
+        publish_events(&mut writer, 6, &[Event::Exec { pid: 6 }, exit(6)]);
         let next_before = reader.next_event();
         let events: Vec<FoundEvent> = (0..6).map(|_| reader.read_event().unwrap()).collect();
         let next_after = reader.next_event();
-        let ticks: Vec<Found> = (0..4).map(|_| reader.read().unwrap()).collect();
+        let ticks: Vec<Found> = (0..6).map(|_| reader.read().unwrap()).collect();
 
         assert_eq!(
             vec![
-                Found::Publication {
-                    publication: 1,
-                    tick: 1
-                },
-                Found::Publication {
-                    publication: 2,
-                    tick: 2
-                },
+                Found::Missed { first: 1, end: 3 },
                 Found::Publication {
                     publication: 3,
                     tick: 3
+                },
+                Found::Publication {
+                    publication: 4,
+                    tick: 4
+                },
+                Found::Publication {
+                    publication: 5,
+                    tick: 5
+                },
+                Found::Publication {
+                    publication: 6,
+                    tick: 6
                 },
                 Found::Nothing,
             ],
@@ -1536,10 +1544,10 @@ mod tests {
         assert_eq!(
             vec![
                 FoundEvent::Missed { first: 1, end: 3 },
-                found(3, 2, Event::Exec { pid: 2 }),
-                found(4, 2, exit(2)),
-                found(5, 3, Event::Exec { pid: 3 }),
-                found(6, 3, exit(3)),
+                found(3, 5, Event::Exec { pid: 5 }),
+                found(4, 5, exit(5)),
+                found(5, 6, Event::Exec { pid: 6 }),
+                found(6, 6, exit(6)),
                 FoundEvent::Nothing,
             ],
             events
@@ -1655,6 +1663,24 @@ mod tests {
         drop(spawns);
 
         assert_eq!(SHAPE_THREE_SLOTS.event_capacity, restarted.event_room());
+    }
+
+    #[test]
+    #[should_panic(expected = "<= self.event_room()")]
+    fn a_writer_stops_at_a_tick_of_more_events_than_its_room() {
+        // Goal: no publication overwrites an event of a tick the ring holds, so a reader never
+        // misses an event of a tick it can still read.
+        // Method: on three slots and a log of six, publish ticks of two, two and one events,
+        // which leaves room for one, then publish a tick of two.
+        let place = TestPlace::new("evroomover");
+        let mut writer = Writer::create(&place.place, SHAPE_THREE_SLOTS).unwrap();
+        publish_exec_ticks(&mut writer, &[2, 2, 1]);
+
+        publish_events(
+            &mut writer,
+            4,
+            &[Event::Exec { pid: 6 }, Event::Exec { pid: 7 }],
+        );
     }
 
     #[test]
@@ -1843,14 +1869,21 @@ mod tests {
         );
     }
 
+    /// A ring of four slots with a log of five events, which leaves room for a tick of one
+    /// event however many such ticks it holds.
+    const SHAPE_FIVE_EVENTS: Shape = Shape {
+        event_capacity: 5,
+        ..SHAPE
+    };
+
     #[test]
     fn a_reader_that_follows_a_restarted_writer_learns_what_it_missed_in_between() {
         // Goal: a reader that moves to the newer ring learns the publications and events the
         // new writer overwrote before the reader got there, rather than skipping them.
         // Method: read the one publication and event of a ring, restart the writer and publish
-        // six ticks of one event each into its four slots, follow it, and read.
+        // six ticks of one event each into its four slots and log of five, follow it, and read.
         let place = TestPlace::new("follow");
-        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        let mut first = Writer::create(&place.place, SHAPE_FIVE_EVENTS).unwrap();
         publish_events(&mut first, 1, &[exit(1)]);
         let mut reader = Reader::open(place.lock_path()).unwrap();
         reader.read().unwrap();
@@ -1858,7 +1891,7 @@ mod tests {
 
         let spawns = spawns();
         drop(first);
-        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        let mut second = Writer::create(&place.place, SHAPE_FIVE_EVENTS).unwrap();
         drop(spawns);
         for run_tick in 1..=6 {
             publish_events(&mut second, run_tick, &[exit(2)]);
@@ -1874,7 +1907,7 @@ mod tests {
             reader.read().unwrap()
         );
         assert_eq!(
-            FoundEvent::Missed { first: 2, end: 4 },
+            FoundEvent::Missed { first: 2, end: 3 },
             reader.read_event().unwrap()
         );
     }
@@ -2134,9 +2167,10 @@ mod tests {
         // Goal: a reader that moves to a ring whose numbering started again learns the
         // publications the new writer overwrote before the reader got there.
         // Method: read the three publications of a ring, spoil the lock file so the next
-        // writer numbers from 1, publish six ticks into its four slots, follow it, and read.
+        // writer numbers from 1, publish six ticks of one event each into its four slots and log
+        // of five, follow it, and read.
         let place = TestPlace::new("renum");
-        let mut first = Writer::create(&place.place, SHAPE).unwrap();
+        let mut first = Writer::create(&place.place, SHAPE_FIVE_EVENTS).unwrap();
         for run_tick in 1..=3 {
             publish_events(&mut first, run_tick, &[exit(1)]);
         }
@@ -2149,7 +2183,7 @@ mod tests {
         let spawns = spawns();
         drop(first);
         place.spoil(&[b'a'; 64]);
-        let mut second = Writer::create(&place.place, SHAPE).unwrap();
+        let mut second = Writer::create(&place.place, SHAPE_FIVE_EVENTS).unwrap();
         drop(spawns);
         for run_tick in 1..=6 {
             publish_events(&mut second, run_tick, &[exit(2)]);
@@ -2165,7 +2199,7 @@ mod tests {
             reader.read().unwrap()
         );
         assert_eq!(
-            FoundEvent::Missed { first: 1, end: 3 },
+            FoundEvent::Missed { first: 1, end: 2 },
             reader.read_event().unwrap()
         );
     }

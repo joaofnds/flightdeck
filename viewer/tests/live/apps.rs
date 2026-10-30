@@ -6,6 +6,7 @@ use collector::ring::{
 };
 use viewer::LiveSession;
 
+use super::forged_source::ForgedSource;
 use super::identity_fixture::Fixture;
 
 #[test]
@@ -270,29 +271,29 @@ fn retains_known_exit_subtotals_beside_dropped_event_coverage() {
 #[test]
 fn retains_a_verified_exit_after_unrelated_event_ring_overwrite() {
     // Goal: loss of an unrelated retained event leaves known exit counters usable.
-    // Method: overwrite the first Exec of a full 32-event ring after the matching final exit.
+    // Method: fill a 32-event ring with 31 Execs and the matching final exit, then open a copy
+    // whose log names one event more, so the first Exec reads as overwritten, as a writer that
+    // overwrote the events of ticks its ring held left it.
     let mut fixture = Fixture::new();
     publish(&mut fixture, 1);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
     ExitScenario {
         prefix_execs: 31,
         ..ExitScenario::default()
     }
     .publish(&mut fixture);
-    ExitScenario {
-        sample: 3,
-        creation: None,
-        ..ExitScenario::default()
-    }
-    .publish(&mut fixture);
+    let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
+    forged.claim_event_newest(33);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
     session.poll().unwrap();
     session.select(1002, 0).unwrap();
 
     let page = session.apps_page(0).unwrap();
 
+    assert_eq!(session.catalog()["reader_losses"][0]["losses"]["events"], 1);
     assert_eq!(page["process_count"], 2);
     assert_eq!(page["apps"][0]["cpu_percent_one_core"], 50.0);
     assert_eq!(page["membership_complete"], false);
+    drop(forged);
 }
 
 #[test]

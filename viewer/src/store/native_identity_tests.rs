@@ -1,16 +1,20 @@
 use std::sync::Arc;
 
 use crate::cancellation::Cancellation;
+use crate::live::forged_source::ForgedSource;
 use crate::live::identity_fixture::Fixture;
 use crate::store::{AppsSecond, ByteBudget};
 
 #[test]
 fn an_event_count_refusal_accepts_machine_facts_and_allows_the_next_publication() {
     // Goal: an intrinsic event bound finishes one refused candidate without blocking its successor.
-    // Method: retain 16,385 real Exec events, deny acceptance, overwrite them, then retry B and C.
+    // Method: retain 16,385 real Exec events, deny acceptance, overwrite them in a copy of the
+    // ring whose log claims a whole log past them, as a writer before the event room guard
+    // could leave it, then retry B and C.
     let mut fixture = oversized_events_fixture();
     publish_events(&mut fixture, 0, collector::tracker::EVENTS_PER_TICK_MAX + 1);
     publish_events(&mut fixture, 1, 0);
+    let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
@@ -26,7 +30,9 @@ fn an_event_count_refusal_accepts_machine_facts_and_allows_the_next_publication(
         .unwrap();
     assert_eq!(read, super::NativeRead::Blocked);
     assert_eq!(denied, 1);
-    publish_events(&mut fixture, 2, collector::tracker::EVENTS_PER_TICK_MAX + 1);
+    forged.claim_event_newest(
+        2 * u64::try_from(collector::tracker::EVENTS_PER_TICK_MAX + 1).unwrap(),
+    );
     let mut accepted = Vec::new();
     ring.read_prepared(&budget, &operation, None, |_, prepared| {
         assert_eq!(prepared.observation.stamp.publication, 1);
@@ -48,7 +54,7 @@ fn an_event_count_refusal_accepts_machine_facts_and_allows_the_next_publication(
     .unwrap();
 
     assert_eq!(accepted, [1, 2]);
-    drop((ring, fixture));
+    drop((ring, forged, fixture));
     assert_eq!(budget.used(), 0);
 }
 

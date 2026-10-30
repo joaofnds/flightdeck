@@ -7,6 +7,9 @@ mod compare;
 #[cfg(test)]
 #[path = "encoder_fixture/mod.rs"]
 pub mod fixture;
+#[cfg(test)]
+#[path = "../src/worker/tests/forged_source.rs"]
+mod forged_source;
 #[path = "../src/bin/recording_check/identity_reference.rs"]
 mod identity_reference;
 #[cfg(test)]
@@ -15,6 +18,7 @@ mod rows;
 
 #[cfg(test)]
 mod tests {
+    use super::forged_source::{ForgedWord, HEADER_EVENT_NEWEST, WritableSource};
     use super::{capture, compare, fixture, rows};
     use std::fs;
     use std::io::Write;
@@ -153,7 +157,9 @@ mod tests {
     #[test]
     fn refuses_independent_event_loss_while_both_publications_remain() {
         // Goal: retained publications cannot hide loss from the independent event log.
-        // Method: put two tick events into a one-event v4 log retaining both publication slots.
+        // Method: give two retained v4 ticks an event each in a log of two, then capture from a
+        // copy whose header names a third event, as a writer before the event room guard left it
+        // once that event overwrote the first tick's while the ring still held the tick.
         let recording = Recording::new();
         let store = Store::open(&recording.0).unwrap();
         let identity = RunIdentity {
@@ -167,7 +173,7 @@ mod tests {
         };
         let shape = Shape {
             slot_count: 2,
-            event_capacity: 1,
+            event_capacity: 2,
             ..fixture::profile(false)
         };
         let mut writer = Writer::create_with_identity(
@@ -181,13 +187,29 @@ mod tests {
             0,
         )
         .unwrap();
-        publish_event_loss(&mut writer);
+        publish_exec_ticks(&mut writer);
         writer.finish();
-        assert_event_loss(&place, &shape);
+        let bytes = RingReader::open_generation(writer.name())
+            .unwrap()
+            .mapped_size_bytes();
+        let forged = WritableSource::new(
+            writer.name(),
+            bytes,
+            ForgedWord {
+                watched: HEADER_EVENT_NEWEST,
+                expected: 2,
+                index: HEADER_EVENT_NEWEST,
+                value: 3,
+            },
+        );
+        let lock_path = recording.0.join("forged.lock");
+        fs::write(&lock_path, &forged.name).unwrap();
+        assert_event_loss(&lock_path, &shape);
         let reference = recording.0.join("source.reference");
 
-        let result = capture::run(&place.lock_path, &reference, 10);
+        let result = capture::run(&lock_path, &reference, 10);
         let name = writer.name().to_owned();
+        drop(forged);
         drop(writer);
         collector::ring::unlink_generation(&name).unwrap();
 
@@ -200,7 +222,7 @@ mod tests {
         assert!(!source.contains("complete "));
     }
 
-    fn publish_event_loss(writer: &mut Writer) {
+    fn publish_exec_ticks(writer: &mut Writer) {
         for index in 0..2 {
             writer
                 .publish_with_identity(
@@ -232,8 +254,8 @@ mod tests {
         }
     }
 
-    fn assert_event_loss(place: &Place, shape: &Shape) {
-        let mut reader = RingReader::open(&place.lock_path).unwrap();
+    fn assert_event_loss(lock_path: &std::path::Path, shape: &Shape) {
+        let mut reader = RingReader::open(lock_path).unwrap();
         assert_eq!(4, reader.source_layout_version());
         let mut tick = persistence::tick_buffer(shape).unwrap();
         assert!(matches!(

@@ -733,6 +733,7 @@ mod tests {
     use super::*;
     use collector::ring::{Identity, Shape};
 
+    mod forged_source;
     mod staging_tests;
     mod timing_tests;
 

@@ -1,3 +1,4 @@
+use super::forged_source::{ForgedWord, HEADER_EVENT_NEWEST, WritableSource};
 use super::*;
 
 #[test]
@@ -274,20 +275,35 @@ fn advances_a_wholly_lost_selection_without_returning_an_empty_window() {
 #[test]
 fn carries_event_loss_only_with_the_minute_that_copied_its_reading() {
     // Goal: lost event records stay with their saved tick and are not counted twice.
-    // Method: overwrite the first tick's event, then seal both sides of a minute boundary.
+    // Method: give the first tick an event, forge a copy of the finished ring whose header names
+    // a later event in the one-event log, as a writer before the event room guard left it while
+    // the ring still held that tick, then seal both sides of a minute boundary from the copy.
     let root = Directory::new();
     let store = Store::open(&root.0).unwrap();
     let mut registered = registered(store.recording());
     let mut ring = Ring::new(&root, &registered.identity, 3);
-    registered.ring_name = ring.0.name().to_owned();
-    let event = Event::Start {
-        pid: 41,
-        coalition: None,
-    };
-    ring.publish_events(0, std::slice::from_ref(&event));
-    ring.publish_events(1, std::slice::from_ref(&event));
+    ring.publish_events(
+        0,
+        &[Event::Start {
+            pid: 41,
+            coalition: None,
+        }],
+    );
+    ring.publish(1);
     ring.publish(60);
     ring.0.finish();
+    let reader = RingReader::open_generation(ring.0.name()).unwrap();
+    let forged = WritableSource::new(
+        ring.0.name(),
+        reader.mapped_size_bytes(),
+        ForgedWord {
+            watched: HEADER_EVENT_NEWEST,
+            expected: 1,
+            index: HEADER_EVENT_NEWEST,
+            value: 2,
+        },
+    );
+    registered.ring_name.clone_from(&forged.name);
     let writers = Writers {
         encoder: Encoder,
         derive: &Underived,

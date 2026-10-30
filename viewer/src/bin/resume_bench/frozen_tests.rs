@@ -1,6 +1,9 @@
-use std::fs;
+use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::fs::{self, File};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use collector::machine::Memory;
 use collector::processes::{Process, Task, Usage};
@@ -25,6 +28,8 @@ struct Fixture {
     wall_ns: Option<u64>,
 }
 
+/// A ring of 120 slots with a log of one event more, so a tick of one event fits beside the
+/// ticks the ring holds.
 const SHAPE: Shape = Shape {
     slot_count: 120,
     cpu_capacity: 1,
@@ -34,7 +39,7 @@ const SHAPE: Shape = Shape {
     fan_capacity: 1,
     process_capacity: 1,
     coalition_capacity: 1,
-    event_capacity: 120,
+    event_capacity: 121,
 };
 
 #[test]
@@ -312,19 +317,26 @@ fn assert_exported_events(manifest: &serde_json::Value) {
 #[test]
 fn refuses_replay_when_retained_slots_reference_overwritten_events() {
     // Goal: an incomplete native sequence is refused rather than replayed with missing events.
-    // Method: give each of 120 slots two events in a 120-event ring and attempt capture.
+    // Method: publish one event a tick, register a copy of the ring whose oldest retained slot
+    // names an event the log no longer holds, as a writer that overwrote the events of ticks
+    // its ring held left it, and attempt capture.
     let mut source = Fixture::new();
-    source.events = 2;
+    source.events = 1;
     for publication in 1..=1900 {
         source.publish(publication);
     }
+    let forged = ForgedRing::new(&source, 1781, 1779);
 
     let result = FrozenRecording::capture(&super::Directories {
         source: &source.root,
         target: &source.target,
     });
 
-    assert!(result.is_err());
+    assert_eq!(
+        result.err().map(|error| error.to_string()),
+        Some("native event overwritten or incomplete".to_owned())
+    );
+    drop(forged);
 }
 
 #[test]
@@ -563,6 +575,128 @@ impl Fixture {
             )
             .unwrap();
     }
+}
+
+/// A copy of a fixture's ring, registered in its place, whose slot of one publication names an
+/// earlier first event than the writer gave it.
+struct ForgedRing {
+    name: String,
+}
+
+impl ForgedRing {
+    fn new(source: &Fixture, publication: u64, events_first: u64) -> Self {
+        // A version 4 header, then slots of one record of every kind with its identity.
+        const HEADER_WORDS: usize = 40;
+        const SLOT_WORDS: usize = 43 + 2 + 10 + 1 + 2 + 1 + 18 + 10 + 6;
+        const SLOT_SEQUENCE: usize = 0;
+        const SLOT_EVENTS_FIRST: usize = 15;
+        let name = format!("{}.99", source.writer.name().rsplit_once('.').unwrap().0);
+        let bytes = RingReader::open_generation(source.writer.name())
+            .unwrap()
+            .mapped_size_bytes();
+        let original = ForgedMapping::open(source.writer.name(), bytes);
+        let copy = ForgedMapping::create(&name, bytes);
+        let slot = HEADER_WORDS + usize::try_from((publication - 1) % 120).unwrap() * SLOT_WORDS;
+        for (target, word) in copy.words().iter().zip(original.words()) {
+            target.store(word.load(Ordering::Acquire), Ordering::Release);
+        }
+        let forged = &copy.words()[slot..slot + SLOT_WORDS];
+        assert_eq!(
+            forged[SLOT_SEQUENCE].load(Ordering::Acquire),
+            2 * publication
+        );
+        assert_eq!(
+            forged[SLOT_EVENTS_FIRST].load(Ordering::Acquire),
+            publication
+        );
+        forged[SLOT_EVENTS_FIRST].store(events_first, Ordering::Release);
+
+        let mut registry = Registry::read(&source.root).unwrap();
+        registry.runs[0].ring_name.clone_from(&name);
+        registry.write(&source.root).unwrap();
+        Self { name }
+    }
+}
+
+impl Drop for ForgedRing {
+    fn drop(&mut self) {
+        collector::ring::unlink_generation(&self.name).unwrap();
+    }
+}
+
+struct ForgedMapping {
+    address: *mut c_void,
+    bytes: usize,
+}
+
+impl ForgedMapping {
+    fn open(name: &str, bytes: usize) -> Self {
+        let name = CString::new(name).unwrap();
+        let descriptor = unsafe { shm_open(name.as_ptr(), O_RDONLY) };
+        assert!(descriptor >= 0);
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        Self::map(&file, bytes, PROT_READ)
+    }
+
+    fn create(name: &str, bytes: usize) -> Self {
+        let name = CString::new(name).unwrap();
+        let descriptor = unsafe { shm_open(name.as_ptr(), O_RDWR | O_CREAT | O_EXCL, RING_MODE) };
+        assert!(descriptor >= 0);
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        assert_eq!(
+            unsafe { ftruncate(descriptor, i64::try_from(bytes).unwrap()) },
+            0
+        );
+        Self::map(&file, bytes, PROT_READ | PROT_WRITE)
+    }
+
+    fn map(file: &File, bytes: usize, protection: c_int) -> Self {
+        let address = unsafe {
+            mmap(
+                std::ptr::null_mut(),
+                bytes,
+                protection,
+                MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(address.addr(), usize::MAX);
+        Self { address, bytes }
+    }
+
+    fn words(&self) -> &[AtomicU64] {
+        unsafe { std::slice::from_raw_parts(self.address.cast::<AtomicU64>(), self.bytes / 8) }
+    }
+}
+
+impl Drop for ForgedMapping {
+    fn drop(&mut self) {
+        assert_eq!(unsafe { munmap(self.address, self.bytes) }, 0);
+    }
+}
+
+const O_RDONLY: c_int = 0x0000;
+const O_RDWR: c_int = 0x0002;
+const O_CREAT: c_int = 0x0200;
+const O_EXCL: c_int = 0x0800;
+const PROT_READ: c_int = 0x01;
+const PROT_WRITE: c_int = 0x02;
+const MAP_SHARED: c_int = 0x0001;
+const RING_MODE: c_uint = 0o400;
+
+unsafe extern "C" {
+    fn shm_open(name: *const c_char, flags: c_int, ...) -> c_int;
+    fn ftruncate(descriptor: c_int, length: i64) -> c_int;
+    fn mmap(
+        address: *mut c_void,
+        length: usize,
+        protection: c_int,
+        flags: c_int,
+        descriptor: c_int,
+        offset: i64,
+    ) -> *mut c_void;
+    fn munmap(address: *mut c_void, length: usize) -> c_int;
 }
 
 impl Drop for Fixture {

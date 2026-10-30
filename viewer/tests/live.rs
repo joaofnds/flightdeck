@@ -5,6 +5,9 @@ mod app_checks;
 #[path = "live/committed_apps.rs"]
 mod committed_app_checks;
 #[cfg(test)]
+#[path = "../src/live_forged_source.rs"]
+mod forged_source;
+#[cfg(test)]
 #[path = "../src/live_fixture.rs"]
 mod identity_fixture;
 #[cfg(test)]
@@ -904,7 +907,8 @@ mod tests {
     #[test]
     fn follows_exact_latest_rows_after_real_raw_cache_byte_pressure() {
         // Goal: following survives byte eviction without changing reader progress or losses.
-        // Method: publish 12,000 process observations per tick beyond the 128 MiB cache bound.
+        // Method: publish 12,000 process observations per tick beyond the 128 MiB cache bound,
+        // the last tick without an event, since the log holds the 32 before it.
         let mut fixture = super::identity_fixture::Fixture::new_mode(true, 12_000, None);
         fixture.publish(1000);
         let mut session = LiveSession::open(&fixture.root).unwrap();
@@ -936,7 +940,7 @@ mod tests {
         );
         assert!(before["tail_cache_bytes"].as_u64().unwrap() <= 128 * 1024 * 1024);
         assert!(!session.poll().unwrap());
-        fixture.publish(1032);
+        fixture.publish_with_events(1032, &[]);
         assert!(session.poll().unwrap());
         let advanced = session.follow_latest().unwrap();
         assert_eq!(advanced["selected"]["publication"], 33);
@@ -1660,7 +1664,8 @@ mod tests {
     #[test]
     fn rehydrates_captured_identity_after_real_eviction_without_disturbing_polling() {
         // Goal: inspecting evicted v4 rows preserves metadata and subsequent polling.
-        // Method: exceed the raw cache while all publications remain in a 64-slot ring.
+        // Method: exceed the raw cache while all publications remain in a 64-slot ring, the
+        // last without an event, since the log holds the 32 before it.
         let mut fixture = super::identity_fixture::Fixture::new_mode(true, 12_000, None);
         fixture.publish(1000);
         let control = std::sync::Arc::new(viewer::Cancellation::default());
@@ -1706,7 +1711,7 @@ mod tests {
         );
         assert_eq!(session.catalog()["reader_losses"], catalog["reader_losses"]);
         assert!(!session.poll().unwrap());
-        fixture.publish(1032);
+        fixture.publish_with_events(1032, &[]);
         assert!(session.poll().unwrap());
         assert_eq!(session.catalog()["latest_observation"]["publication"], 33);
         assert_eq!(session.catalog()["reader_losses"], catalog["reader_losses"]);

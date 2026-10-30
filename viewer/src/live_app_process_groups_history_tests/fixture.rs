@@ -75,7 +75,8 @@ fn dense_with(create: CreateWriter) -> Fixture {
             fan_capacity: 1,
             process_capacity: 600,
             coalition_capacity: 1,
-            event_capacity: 1,
+            // An exit a tick for each tick the ring holds and the one it publishes.
+            event_capacity: 3,
         },
         collector::ring::DictionaryCapacity {
             entries: 601,

@@ -9,23 +9,31 @@ use collector::ring::{
 
 use crate::apps::Amount;
 use crate::cancellation::Cancellation;
+use crate::live::forged_source::ForgedSource;
 use crate::live::identity_fixture::Fixture;
 use crate::store::{ByteBudget, CompleteMachineState, startup_tests::usage};
 
 #[test]
 fn prepared_retries_keep_exact_cumulative_reader_losses() {
     // Goal: repeated admission callbacks and cancellation cannot count an event loss twice.
-    // Method: overwrite two unread ticks and early events, then retry the same prepared tick.
+    // Method: overwrite two unread ticks of ten, the first four of five events each, and the
+    // early events of the next two in a ring copy whose log claims fifty events, as a writer
+    // before the event room guard could, then retry the same prepared tick.
     let mut fixture = Fixture::new();
+    let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
-    for step in 1..=10 {
-        let events = std::array::from_fn::<_, 5, _>(|_| collector::tracker::Event::Exec { pid: 7 });
+    let events = std::array::from_fn::<_, 5, _>(|_| collector::tracker::Event::Exec { pid: 7 });
+    for step in 1..=4 {
         fixture.publish_with_events(100 + step, &events);
     }
+    for step in 5..=10 {
+        fixture.publish_with_events(100 + step, &[]);
+    }
+    forged.claim_event_newest(10 * 5);
     let losses = persistence::Losses {
         publications: 2,
         events: 5,

@@ -2369,11 +2369,16 @@ fn follow_merge_point(merge: PointMerge<'_>) -> Result<()> {
 pub(crate) mod identity_fixture;
 
 #[cfg(test)]
+#[path = "live_forged_source.rs"]
+pub(crate) mod forged_source;
+
+#[cfg(test)]
 #[path = "live_app_process_history_tests.rs"]
 mod app_process_history_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::forged_source::ForgedSource;
     use super::*;
     use collector::recording::{Registration, private};
     use collector::ring::{Dropped, ObservationTimes, Place, Readings, Shape, Writer};
@@ -2450,7 +2455,9 @@ mod tests {
                 fan_capacity: 1,
                 process_capacity: 1,
                 coalition_capacity: 1,
-                event_capacity: 8,
+                // The eight events of `publish` for each tick the ring holds and the one it
+                // publishes, which the writer writes before it replaces the oldest.
+                event_capacity: 3 * 8,
             })
         }
 
@@ -3376,13 +3383,17 @@ mod tests {
     #[test]
     fn retries_a_canceled_projection_without_losing_the_tick_or_counting_losses_twice() {
         // Goal: supersession retries an advanced cursor and preserves genuine source loss.
-        // Method: cancel at the cursor/projection barrier after overwriting ticks and events.
+        // Method: cancel at the cursor/projection barrier after overwriting ticks, and the
+        // events of the third tick in a copy of the ring whose log claims sixteen events past
+        // the fourth, as a writer before the event room guard could leave it.
         let mut fixture = RingFixture::new();
+        let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
         let control = Arc::new(Cancellation::default());
         let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
         for tick in 1..=4 {
             fixture.publish(tick);
         }
+        forged.claim_event_newest(4 * 8 + 16);
         let cancel = control.clone();
         session.before_projection = Some(Box::new(move || cancel.cancel().unwrap()));
 
@@ -3402,13 +3413,17 @@ mod tests {
     #[test]
     fn rehydration_keeps_poll_cursors_and_source_losses_separate() {
         // Goal: inspecting an evicted tick cannot advance the source or charge source losses.
-        // Method: expire its events, evict its raw rows, and re-read its still-retained tick.
+        // Method: expire its events in a copy of the ring whose log claims a whole log past
+        // them, as a writer before the event room guard could leave it, evict its raw rows,
+        // and re-read its still-retained tick.
         let mut fixture = RingFixture::new();
         fixture.publish(1);
+        let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
         let mut session = LiveSession::open(&fixture.root).unwrap();
         session.observations.clear();
         session.cache_bytes = 0;
         fixture.publish(2);
+        forged.claim_event_newest(8 + 3 * 8);
         assert!(session.poll().unwrap());
         let cursor = session.sources[0].reader.next_publication();
         let before_losses = session.catalog()["reader_losses"].clone();

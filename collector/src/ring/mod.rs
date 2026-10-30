@@ -715,8 +715,9 @@ impl Writer {
     }
 
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
-    /// slot holds one, and its events in the log, overwriting the oldest events once every
-    /// record holds one. An identity writer uses `publish_with_identity` instead.
+    /// slot holds one, and its events in the log, overwriting only events of ticks the ring no
+    /// longer holds, so `readings` carries at most `event_room` events. An identity writer
+    /// uses `publish_with_identity` instead.
     pub fn publish(&mut self, readings: &Readings) {
         self.publish_inner(readings, None, None, &SupplementalReadings::default());
     }
@@ -739,8 +740,9 @@ impl Writer {
         supplemental: &SupplementalReadings,
     ) {
         assert_eq!(identities.is_some(), self.dictionary.is_some());
-        // A tick's events fit in the log, so a reader can read every one of them.
-        assert!(u64_from_usize(readings.events.len()) <= self.layout.shape.event_capacity);
+        // A tick's events overwrite no event of a tick the ring holds, so a reader can read
+        // every event of every tick it can read.
+        assert!(u64_from_usize(readings.events.len()) <= self.event_room());
 
         let words = self.mapping.words();
         let events_first = self.event + 1;

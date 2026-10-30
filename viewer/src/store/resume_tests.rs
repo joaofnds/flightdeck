@@ -545,6 +545,8 @@ fn pressure_recording() -> Fixture {
     let reader = RingReader::open_generation(fixture.writer.name()).unwrap();
     let shape = Shape {
         slot_count: 120,
+        // The one event of each tick the ring holds and of the one it publishes.
+        event_capacity: 121,
         ..reader.shape()
     };
     let identity = fixture.writer.identity().unwrap();
