@@ -139,6 +139,16 @@ impl Drop for Harness {
     }
 }
 
+/// A collector of this Mac's processes that reads no SMC, `IOReport`, battery or disks.
+fn collector_without_optional_sources(timebase: Timebase) -> Collector {
+    let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
+    collector.smc = None;
+    collector.ioreport = None;
+    collector.battery = None;
+    collector.disks = None;
+    collector
+}
+
 fn usage() -> Usage {
     Usage {
         awake_ns_at_start: 11,
@@ -459,11 +469,7 @@ fn preserves_an_unassociated_exec_without_a_replacement_creation() {
 fn publishes_scheduled_start_identity_from_collection() {
     // Goal: scheduled discovery publishes the owned process's captured creation and program.
     // Method: create the child after Collector, read without waiting, publish, reap, and decode.
-    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
-    collector.smc = None;
-    collector.ioreport = None;
-    collector.battery = None;
-    collector.disks = None;
+    let mut collector = collector_without_optional_sources(Timebase::read().unwrap());
     let mut harness = Harness::battery(&collector);
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut child = HeldChild::new();
@@ -576,11 +582,7 @@ fn drops_the_events_past_the_ring_s_room_at_admission_and_publishes_the_tick() {
     // Method: in a ring with a log of four events, start five owned children after the
     // collector listed the Mac's processes, then wait, read and publish a tick.
     let timebase = Timebase::read().unwrap();
-    let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
-    collector.smc = None;
-    collector.ioreport = None;
-    collector.battery = None;
-    collector.disks = None;
+    let mut collector = collector_without_optional_sources(timebase);
     let mut harness = Harness::sources_with_event_capacity(&collector, Tails::Battery, 4);
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut children: Vec<HeldChild> = (0..5).map(|_| HeldChild::new()).collect();
@@ -611,11 +613,7 @@ fn drops_the_events_past_the_ring_s_room_without_allocating() {
     // Method: in a ring with a log of four events, publish a first tick, start five owned
     // children, then count the allocator calls of the next tick's wait, read and publication.
     let timebase = Timebase::read().unwrap();
-    let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
-    collector.smc = None;
-    collector.ioreport = None;
-    collector.battery = None;
-    collector.disks = None;
+    let mut collector = collector_without_optional_sources(timebase);
     let mut harness = Harness::sources_with_event_capacity(&collector, Tails::Battery, 4);
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut meter = Meter::default();
@@ -656,11 +654,7 @@ fn reports_wait_capture_diagnostics_before_the_scheduled_sweep_resets_them() {
     // Goal: a scheduled read never erases diagnostics from identity acquisition during waiting.
     // Method: discover an owned child through Publication, read a tick, and check report counts.
     let timebase = Timebase::read().unwrap();
-    let mut collector = Collector::new(timebase, Duration::ZERO).unwrap();
-    collector.smc = None;
-    collector.ioreport = None;
-    collector.battery = None;
-    collector.disks = None;
+    let mut collector = collector_without_optional_sources(timebase);
     let mut harness = Harness::battery(&collector);
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut child = HeldChild::new();
@@ -694,11 +688,7 @@ fn reports_wait_capture_diagnostics_before_the_scheduled_sweep_resets_them() {
 fn reports_watch_reads_from_the_actual_scheduled_collector_path() {
     // Goal: scheduled producer reporting consumes the tracker's actual watch diagnostics.
     // Method: read once through Publication and require its cumulative native read counts.
-    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
-    collector.smc = None;
-    collector.ioreport = None;
-    collector.battery = None;
-    collector.disks = None;
+    let mut collector = collector_without_optional_sources(Timebase::read().unwrap());
     let mut harness = Harness::battery(&collector);
     let mut publication = Publication::new(&harness.writer).unwrap();
 
@@ -1097,11 +1087,7 @@ fn publishes_unavailable_process_gpu_without_losing_system_readings_or_allocatin
     // Method: poison the output buffer, collect and publish a real tick, then read the ring.
     // The GPU memory value is injected at publication; its availability is not a host claim.
     use crate::gpu_memory::GpuMemoryReading;
-    let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
-    collector.smc = None;
-    collector.ioreport = None;
-    collector.battery = None;
-    collector.disks = None;
+    let mut collector = collector_without_optional_sources(Timebase::read().unwrap());
     let mut harness = Harness::system(&collector);
     let mut publication = Publication::new(&harness.writer).unwrap();
     let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
@@ -1170,11 +1156,7 @@ mod this_mac {
     fn publishes_the_gpu_memory_acquired_from_this_mac() {
         // Goal: system acquisition remains connected to actual collector publication.
         // Method: collect without supplying GPU memory, then decode the acquired reading.
-        let mut collector = Collector::new(Timebase::read().unwrap(), Duration::ZERO).unwrap();
-        collector.smc = None;
-        collector.ioreport = None;
-        collector.battery = None;
-        collector.disks = None;
+        let mut collector = collector_without_optional_sources(Timebase::read().unwrap());
         let mut harness = Harness::system(&collector);
         let mut publication = Publication::new(&harness.writer).unwrap();
         let mut reader = RingReader::open_generation(harness.writer.name()).unwrap();
