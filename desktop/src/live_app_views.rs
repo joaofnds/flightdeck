@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
 use num_traits::ToPrimitive;
 use serde_json::Value;
@@ -180,28 +182,28 @@ impl LiveDashboard {
             .apps
             .as_ref()
             .and_then(|page| page["apps"].as_array());
-        let mut choices = Vec::with_capacity(APPS_MAX + 1);
+        let mut choices: Vec<&Value> = Vec::with_capacity(APPS_MAX + 1);
         if let Some(apps) = apps {
-            for (index, app) in apps.iter().take(APPS_MAX).enumerate() {
-                choices.push((text(&app["display_name"]).to_lowercase(), index));
-            }
+            choices.extend(apps.iter().take(APPS_MAX));
         }
+        let listed = choices.len();
         if let Some(app) = self.current_app() {
-            let listed = apps.is_some_and(|apps| {
-                apps.iter()
-                    .take(APPS_MAX)
-                    .any(|listed| listed["key"] == app["key"])
-            });
-            if !listed {
-                choices.push((
-                    text(&app["display_name"]).to_lowercase(),
-                    SELECTED_APP_INDEX,
-                ));
+            if !choices.iter().any(|choice| choice["key"] == app["key"]) {
+                choices.push(app);
             }
         }
-        choices.sort_by(|first, second| first.0.cmp(&second.0).then(first.1.cmp(&second.1)));
         assert!(choices.len() <= APPS_MAX + 1);
-        choices.into_iter().map(|(_, index)| index).collect()
+
+        app_order(&choices, self.app_order, "")
+            .into_iter()
+            .map(|position| {
+                if position < listed {
+                    position
+                } else {
+                    SELECTED_APP_INDEX
+                }
+            })
+            .collect()
     }
 
     pub fn app_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -262,6 +264,61 @@ impl LiveDashboard {
     pub(crate) fn current_app(&self) -> Option<&Value> {
         let snapshot = self.reading_snapshot()?;
         Some(&selected_detail(snapshot.detail.as_deref(), self.request.app.as_ref())?["app"])
+    }
+
+    /// The App picker's headings. The heading of each column the Apps can sort by is a button
+    /// that sorts them by it, and the heading of the column they are sorted by carries an arrow.
+    pub fn app_list_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = app_cells_row(APP_HEADINGS.len() - 2);
+        for (index, (heading, column)) in APP_HEADINGS.into_iter().enumerate() {
+            let selector = format!("app-column:apps:{heading}");
+            let cell = app_cells_cell(index).debug_selector(move || selector.clone());
+            row = match column {
+                Some(column) => row.child(self.app_list_columns_button(cell, heading, column, cx)),
+                None => row.child(cell.child(heading)),
+            };
+        }
+
+        div()
+            .id("app-columns-apps")
+            .min_w_0()
+            .max_w_full()
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&self.app_table_scroll)
+            .child(row)
+            .bg(rgb(0x1a_22_2f))
+            .text_color(rgb(MUTED))
+    }
+
+    fn app_list_columns_button(
+        &self,
+        cell: gpui::Div,
+        heading: &'static str,
+        column: AppColumn,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let label = if self.app_order.column != column {
+            heading.to_owned()
+        } else if self.app_order.descending {
+            format!("{heading} \u{2193}")
+        } else {
+            format!("{heading} \u{2191}")
+        };
+
+        cell.id(SharedString::from(format!("app-heading-{heading}")))
+            .role(gpui::Role::Button)
+            .aria_label(format!("Sort the Apps by {heading}"))
+            .focusable()
+            .tab_stop(true)
+            .focus(crate::charts::focus_ring)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.app_order = this.app_order.clicked(column);
+                this.rebuild();
+                cx.notify();
+            }))
+            .child(label)
     }
 
     fn app_at(&self, index: usize) -> Option<&Value> {
@@ -346,60 +403,6 @@ pub(crate) fn app_cards(app: Option<&Value>) -> Vec<summary::Card> {
     ]
 }
 
-pub fn app_table_columns(kind: &str, scroll: &gpui::ScrollHandle) -> impl IntoElement {
-    div()
-        .id(SharedString::from(format!("app-columns-{kind}")))
-        .min_w_0()
-        .max_w_full()
-        .overflow_x_scroll()
-        .restrict_scroll_to_axis()
-        .track_scroll(scroll)
-        .child(app_table_headings(kind))
-        .bg(rgb(0x1a_22_2f))
-        .text_color(rgb(MUTED))
-}
-
-fn app_table_headings(kind: &str) -> gpui::Div {
-    let selector = move |_: usize, text: &str| format!("app-column:{kind}:{text}");
-    match kind {
-        "apps" => app_cells(
-            "App".into(),
-            "Members".into(),
-            [
-                "CPU %".into(),
-                "Resident".into(),
-                "Footprint".into(),
-                "Power".into(),
-                "Energy".into(),
-                "Disk I/O".into(),
-            ],
-            selector,
-        ),
-        "executables" => app_cells(
-            "Process group".into(),
-            "Instances".into(),
-            crate::live_executables::COLUMNS.map(String::from),
-            selector,
-        ),
-        _ => app_cells(
-            "Executable".into(),
-            "PID".into(),
-            [
-                "CPU %".into(),
-                "Resident".into(),
-                "Footprint".into(),
-                "Power".into(),
-                "Energy".into(),
-                "Disk I/O".into(),
-                "Idle wakeups/s".into(),
-                "Page-ins/s".into(),
-                "Threads".into(),
-            ],
-            selector,
-        ),
-    }
-}
-
 /// A table row's cells: the name, the count and the metrics, each found by the selector
 /// `selector` gives its column index and text, the name being column 0.
 pub fn app_cells<const METRICS: usize>(
@@ -410,11 +413,25 @@ pub fn app_cells<const METRICS: usize>(
 ) -> gpui::Div {
     assert!(METRICS <= METRICS_MAX);
 
-    let count_metrics = u16::try_from(METRICS).unwrap_or_else(|_| unreachable!());
+    let mut row = app_cells_row(METRICS);
+    for (index, cell) in [name, count].into_iter().chain(metrics).enumerate() {
+        let cell_selector = selector(index, &cell);
+        row = row.child(
+            app_cells_cell(index)
+                .debug_selector(move || cell_selector.clone())
+                .child(cell),
+        );
+    }
+    row
+}
+
+/// The row that holds a table row's cells, wide enough for the name, the count and `metrics`.
+fn app_cells_row(metrics: usize) -> gpui::Div {
+    assert!(metrics <= METRICS_MAX);
+
+    let count_metrics = u16::try_from(metrics).unwrap_or_else(|_| unreachable!());
     let width_metrics = f32::from(count_metrics);
-    let name_selector = selector(0, &name);
-    let count_selector = selector(1, &count);
-    let mut row = div()
+    div()
         .min_w(px(NAME_WIDTH
             + COUNT_WIDTH
             + width_metrics * METRIC_WIDTH
@@ -426,36 +443,23 @@ pub fn app_cells<const METRICS: usize>(
         .items_center()
         .gap(px(8.0))
         .text_size(px(11.0))
-        .child(
-            div()
-                .debug_selector(move || name_selector.clone())
-                .flex_1()
-                .min_w(px(NAME_WIDTH))
-                .truncate()
-                .child(name),
-        )
-        .child(
-            div()
-                .debug_selector(move || count_selector.clone())
-                .w(px(COUNT_WIDTH))
-                .flex_shrink_0()
-                .text_right()
-                .truncate()
-                .child(count),
-        );
-    for (index, metric) in metrics.into_iter().enumerate() {
-        let metric_selector = selector(index + 2, &metric);
-        row = row.child(
-            div()
-                .debug_selector(move || metric_selector.clone())
-                .w(px(METRIC_WIDTH))
-                .flex_shrink_0()
-                .text_right()
-                .truncate()
-                .child(metric),
-        );
+}
+
+/// The cell of a table row's column `index`: the name is column 0 and the count column 1.
+fn app_cells_cell(index: usize) -> gpui::Div {
+    match index {
+        0 => div().flex_1().min_w(px(NAME_WIDTH)).truncate(),
+        1 => div()
+            .w(px(COUNT_WIDTH))
+            .flex_shrink_0()
+            .text_right()
+            .truncate(),
+        _ => div()
+            .w(px(METRIC_WIDTH))
+            .flex_shrink_0()
+            .text_right()
+            .truncate(),
     }
-    row
 }
 
 /// The selector of a reading's cell: its own text, the count's prefixed so a PID reads apart
@@ -476,6 +480,10 @@ pub fn reading_selector(disk_index: usize, disk: &str) -> impl Fn(usize, &str) -
 #[cfg(test)]
 #[path = "live_app_hover_input_tests.rs"]
 mod hover_input_tests;
+
+#[cfg(test)]
+#[path = "live_app_order_tests.rs"]
+mod order_tests;
 
 pub fn memory(value: Option<u64>) -> String {
     let Some(value) = value else {
@@ -581,6 +589,113 @@ fn app_metrics(app: &Value) -> [String; 6] {
         value_rate(&app["energy_joules"], "J"),
         measure_disk_rate(app),
     ]
+}
+
+/// A column of the Apps list, by which the list can be sorted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppColumn {
+    #[default]
+    Name,
+    Cpu,
+}
+
+/// The App picker's headings, in the order of its cells, with the column each sorts the Apps by.
+const APP_HEADINGS: [(&str, Option<AppColumn>); 8] = [
+    ("App", Some(AppColumn::Name)),
+    ("Members", None),
+    ("CPU %", Some(AppColumn::Cpu)),
+    ("Resident", None),
+    ("Footprint", None),
+    ("Power", None),
+    ("Energy", None),
+    ("Disk I/O", None),
+];
+
+/// The order the Apps list shows its Apps in: by a column, the least or the most first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AppOrder {
+    pub column: AppColumn,
+    pub descending: bool,
+}
+
+impl AppOrder {
+    /// The order after a click on `column`'s heading. The column sorted by turns around, and
+    /// another column starts with names from A and readings from the most, which is what a
+    /// person looking for the busiest App wants first.
+    pub fn clicked(self, column: AppColumn) -> Self {
+        if column == self.column {
+            return Self {
+                column,
+                descending: !self.descending,
+            };
+        }
+        Self {
+            column,
+            descending: column != AppColumn::Name,
+        }
+    }
+}
+
+/// The positions in `apps` of the Apps whose name contains `search`, in `order`. Names compare
+/// in lowercase. An App with no reading in the column sorts last either way, and Apps that
+/// tie sort by name, then by position.
+pub fn app_order(apps: &[&Value], order: AppOrder, search: &str) -> Vec<usize> {
+    assert!(apps.len() <= APPS_MAX + 1);
+
+    let search = search.to_lowercase();
+    let mut keys = Vec::with_capacity(apps.len());
+    for (position, app) in apps.iter().enumerate() {
+        let name = text(&app["display_name"]).to_lowercase();
+        if name.contains(&search) {
+            keys.push(AppOrderKey {
+                reading: app_order_reading(app, order.column),
+                name,
+                position,
+            });
+        }
+    }
+    keys.sort_by(|first, second| app_order_compare(first, second, order));
+
+    keys.into_iter().map(|key| key.position).collect()
+}
+
+struct AppOrderKey {
+    reading: Option<f64>,
+    name: String,
+    position: usize,
+}
+
+fn app_order_reading(app: &Value, column: AppColumn) -> Option<f64> {
+    match column {
+        AppColumn::Name => None,
+        AppColumn::Cpu => app["cpu_percent_one_core"].as_f64(),
+    }
+}
+
+fn app_order_compare(first: &AppOrderKey, second: &AppOrderKey, order: AppOrder) -> Ordering {
+    let by_reading = match (first.reading, second.reading) {
+        (Some(first), Some(second)) => app_order_directed(first.total_cmp(&second), order),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    };
+    let by_name = if order.column == AppColumn::Name {
+        app_order_directed(first.name.cmp(&second.name), order)
+    } else {
+        first.name.cmp(&second.name)
+    };
+
+    by_reading
+        .then(by_name)
+        .then(first.position.cmp(&second.position))
+}
+
+fn app_order_directed(ordering: Ordering, order: AppOrder) -> Ordering {
+    if order.descending {
+        ordering.reverse()
+    } else {
+        ordering
+    }
 }
 
 fn measure_memory(value: &Value) -> String {

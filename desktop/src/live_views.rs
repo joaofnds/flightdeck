@@ -182,10 +182,7 @@ impl LiveDashboard {
             Row::AppColumns("executables") => {
                 crate::live_executables::table_header(&self.app_table_scroll).into_any_element()
             }
-            Row::AppColumns(kind) => {
-                crate::live_app_views::app_table_columns(kind, &self.app_table_scroll)
-                    .into_any_element()
-            }
+            Row::AppColumns(_) => self.app_list_columns(cx).into_any_element(),
             Row::Charts { panels, columns } | Row::ContextCharts { panels, columns } => {
                 self.row_content_charts(panels, *columns, cx)
             }

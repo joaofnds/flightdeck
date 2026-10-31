@@ -10,6 +10,8 @@ use crate::live_source::{AppKey, Snapshot, Update, Worker};
 
 #[path = "live_app_disk_input_tests.rs"]
 mod disk;
+#[path = "live_app_list_input_tests.rs"]
+mod list;
 #[path = "live_process_history_input_tests.rs"]
 mod process_history;
 

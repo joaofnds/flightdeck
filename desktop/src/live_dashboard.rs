@@ -172,6 +172,8 @@ pub struct LiveDashboard {
     pub(crate) viewport_size: gpui::Size<gpui::Pixels>,
     /// The Apps page's picker whose choices are open, if any.
     pub picker: Option<Picker>,
+    /// The order the App picker lists its Apps in, which a click on a heading sets.
+    pub(crate) app_order: crate::live_app_views::AppOrder,
     pub(crate) app_table_scroll: gpui::ScrollHandle,
     pub cpu_inspection: Option<crate::live_cpu_history::CPUInspection>,
     pub cpu_history_focus: Option<gpui::FocusHandle>,
@@ -411,6 +413,7 @@ impl LiveDashboard {
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
             viewport_size: gpui::size(px(0.0), px(0.0)),
             picker: None,
+            app_order: crate::live_app_views::AppOrder::default(),
             app_table_scroll: gpui::ScrollHandle::new(),
             cpu_inspection: None,
             cpu_history_focus: None,
