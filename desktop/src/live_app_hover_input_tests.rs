@@ -352,7 +352,7 @@ fn a_page_of_apps_while_a_second_is_held_keeps_the_charts_and_reads_the_page_up_
     assert_eq!(asked.second, Some(1000 - viewer::CONTEXT_AFTER_SECONDS));
     assert_eq!(asked.identity, None);
     assert_eq!(asked.app, Some(open_app()));
-    assert_eq!(asked.apps_offset, 512);
+    assert_eq!(asked.apps_offset, 2048);
     harness.teardown();
 }
 
@@ -561,8 +561,8 @@ impl AppHoverDriver {
             let generation = dashboard.held_read_generation().unwrap();
             let mut snapshot = AppEpoch::Historical.snapshot(generation);
             let apps = snapshot.apps.as_mut().unwrap().legacy_mut().unwrap();
-            apps["page"]["total"] = json!(513);
-            apps["page"]["next_offset"] = json!(512);
+            apps["page"]["total"] = json!(2049);
+            apps["page"]["next_offset"] = json!(2048);
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             cx.notify();
         });
