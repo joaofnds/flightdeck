@@ -252,6 +252,8 @@ const WORKER_STEPS_MAX: u64 = 7 * 24 * 60 * 60 * 4;
 // Bounds the windows one reader serves, each of which gets WORKER_STEPS_MAX steps.
 const WORKER_LEASES_MAX: u64 = 1 << 20;
 const ALTERNATIVES_MAX: usize = 4096;
+/// The most Apps a page of Apps lists, every App one second of the recording holds.
+pub(crate) const APPS_MAX: usize = viewer::store::APPS_PER_SECOND_MAX;
 // Match the recording format's maximum captured program path length.
 const APP_KEY_BYTES_MAX: usize = 4095;
 const _: () = {
@@ -1781,7 +1783,7 @@ fn app_first_key(apps: &Value) -> Result<Option<AppKey>, String> {
     let apps = apps["apps"]
         .as_array()
         .ok_or_else(|| "Missing live App rows".to_owned())?;
-    if apps.len() > 512 {
+    if apps.len() > APPS_MAX {
         return Err("Live App page exceeds the row bound".to_owned());
     }
     let Some(app) = apps.first() else {

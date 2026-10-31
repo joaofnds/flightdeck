@@ -136,7 +136,7 @@ pub(super) struct AppMembers<'a> {
 
 pub(super) fn apps_page(sample: &Sample, page: Page) -> Result<Value> {
     let mut result = apps_paging(&Header::of(sample), page)?;
-    let range = page_range(page, sample.apps.len())?;
+    let range = page_range(page, sample.apps.len(), super::APPS_PAGE_ROWS_MAX)?;
     let values: Vec<_> = sample.apps[range.clone()]
         .iter()
         .enumerate()
@@ -149,7 +149,7 @@ pub(super) fn apps_page(sample: &Sample, page: Page) -> Result<Value> {
 
 /// An Apps page without the Apps it lists, the same whether its sample or a part gives it.
 pub(crate) fn apps_paging(header: &Header, page: Page) -> Result<Value> {
-    let range = page_range(page, header.app_count)?;
+    let range = page_range(page, header.app_count, super::APPS_PAGE_ROWS_MAX)?;
     let mut result = header_json(header);
     result["page"] = page_json(page, range.end, header.app_count);
 
@@ -217,7 +217,7 @@ pub(crate) fn processes_page<'row>(
     count: usize,
     page: Page,
 ) -> Result<Value> {
-    let range = page_range(page, count)?;
+    let range = page_range(page, count, super::PAGE_ROWS_MAX)?;
     let values: Vec<_> = processes
         .skip(range.start)
         .take(range.len())
@@ -428,11 +428,16 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
-pub(crate) fn page_range(page: Page, count: usize) -> Result<std::ops::Range<usize>> {
+/// The rows of `count` that `page` lists, where a page lists at most `rows_max` rows.
+pub(crate) fn page_range(
+    page: Page,
+    count: usize,
+    rows_max: u32,
+) -> Result<std::ops::Range<usize>> {
     if page.limit == 0 {
         return Err(Error::Bound("live App page limit"));
     }
-    if page.limit > super::PAGE_ROWS_MAX {
+    if page.limit > rows_max {
         return Err(Error::Bound("live App page limit"));
     }
     let offset = usize::try_from(page.offset).map_err(|_| Error::Bound("live App page offset"))?;

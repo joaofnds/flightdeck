@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use viewer::live_app_response::Page;
 use viewer::store::MachineSecond;
 
 use crate::live_dashboard::LiveDashboard;
@@ -294,16 +295,19 @@ fn resident_app(
         return Ok(Vec::new());
     };
 
-    let page = |offset| viewer::live_app_response::Page {
-        offset,
-        limit: viewer::live_app_response::PAGE_ROWS_MAX,
-    };
     let apps = crate::live_source::clamped_presentation_page(request.apps_offset, |offset| {
-        part.apps_paging(page(offset))
-            .map_err(|error| error.to_string())
+        part.apps_paging(Page {
+            offset,
+            limit: viewer::live_app_response::APPS_PAGE_ROWS_MAX,
+        })
+        .map_err(|error| error.to_string())
     })?;
     let detail = crate::live_source::clamped_presentation_page(request.members_offset, |offset| {
-        part.detail(page(offset)).map_err(|error| error.to_string())
+        part.detail(Page {
+            offset,
+            limit: viewer::live_app_response::PAGE_ROWS_MAX,
+        })
+        .map_err(|error| error.to_string())
     })?;
     let executables = crate::live_executables::groups(Some(&detail))?;
 

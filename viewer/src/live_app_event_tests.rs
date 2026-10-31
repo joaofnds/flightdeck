@@ -329,11 +329,14 @@ fn gap_exit_histories(saved: &Session, selection: &Value, expected: &Value) {
 }
 
 fn gap_exit_sample(sample: &Sample) -> Result<Value> {
+    let apps = sample.apps_page(Page {
+        offset: 0,
+        limit: crate::live_app_response::APPS_PAGE_ROWS_MAX,
+    })?;
     let page = Page {
         offset: 0,
         limit: 512,
     };
-    let apps = sample.apps_page(page)?;
     let detail = if sample.apps().is_empty() {
         Value::Null
     } else {
@@ -476,7 +479,7 @@ fn restores_rates_from_the_first_consecutive_successor_after_a_gap() {
         .with_app_sample(&selected, |sample| {
             sample.apps_page(Page {
                 offset: 0,
-                limit: 512,
+                limit: crate::live_app_response::APPS_PAGE_ROWS_MAX,
             })
         })
         .unwrap();
@@ -485,7 +488,7 @@ fn restores_rates_from_the_first_consecutive_successor_after_a_gap() {
         .with_app_sample(&selected, |sample| {
             sample.apps_page(Page {
                 offset: 0,
-                limit: 512,
+                limit: crate::live_app_response::APPS_PAGE_ROWS_MAX,
             })
         })
         .unwrap();

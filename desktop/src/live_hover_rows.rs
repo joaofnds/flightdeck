@@ -456,7 +456,7 @@ impl LiveDashboard {
     }
 
     fn reading_rows_apps(&self) -> Vec<Row> {
-        let mut rows = Vec::with_capacity(2048);
+        let mut rows = Vec::with_capacity(4096);
         rows.push(Row::Summary);
         rows.push(Row::AppSelector);
         let Some(snapshot) = self.reading_snapshot() else {
@@ -494,7 +494,7 @@ impl LiveDashboard {
         if self.sections.expanded(Section::AppTotals) {
             self.reading_rows_app_totals(&mut rows);
         }
-        assert!(rows.len() <= 2048);
+        assert!(rows.len() <= 4096);
 
         rows
     }

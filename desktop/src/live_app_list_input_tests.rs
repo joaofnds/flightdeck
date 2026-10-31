@@ -72,6 +72,28 @@ fn typing_in_the_app_search_lists_only_the_apps_whose_name_contains_it(
     harness.teardown();
 }
 
+#[gpui::test]
+fn the_app_search_finds_an_app_listed_after_the_first_512(cx: &mut gpui::TestAppContext) {
+    // Goal: the picker holds every App of a second, not only the first 512 the page once held.
+    // Method: list 600 Apps, search for the last one's name, and look for it on the screen.
+    let mut harness = AppHoverHarness::setup(cx);
+    let names: Vec<String> = (0..600).map(|index| format!("Echo {index:03}")).collect();
+    let keys: Vec<String> = (0..600)
+        .map(|index| format!("{:04x}", 0x1000 + index))
+        .collect();
+    let apps: Vec<_> = names
+        .iter()
+        .zip(&keys)
+        .map(|(name, key)| (name.as_str(), key.as_str(), None))
+        .collect();
+    harness.driver.seed_apps(&apps);
+
+    harness.driver.search_apps("Echo 599");
+
+    assert!(harness.driver.context.debug_bounds("Echo 599").is_some());
+    harness.teardown();
+}
+
 impl AppHoverDriver {
     fn seed_apps(&mut self, apps: &[(&str, &str, Option<f64>)]) {
         self.view.update(&mut self.context, |dashboard, cx| {

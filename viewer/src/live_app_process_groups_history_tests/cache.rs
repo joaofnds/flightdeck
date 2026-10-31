@@ -532,7 +532,7 @@ fn commit(fixture: &Fixture, publication: u64, window: u64) {
     let mut reader = collector::ring::RingReader::open_generation(fixture.writer.name()).unwrap();
     let shape = reader.shape();
     let mut tick = persistence::tick_buffer(&shape).unwrap();
-    let mut identities = Vec::with_capacity(600);
+    let mut identities = Vec::with_capacity(usize::try_from(shape.process_capacity).unwrap());
     for _attempt in 0..8 {
         let collector::ring::Found::Publication {
             publication: found, ..

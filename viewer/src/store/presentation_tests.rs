@@ -271,7 +271,12 @@ macro_rules! rejected_page {
 }
 
 rejected_page!(rejects_zero_page_limit, 0, 0, "live App page limit");
-rejected_page!(rejects_more_than_512_rows, 0, 513, "live App page limit");
+rejected_page!(
+    rejects_more_apps_than_one_second_holds,
+    0,
+    2049,
+    "live App page limit"
+);
 rejected_page!(
     rejects_offset_after_last_app,
     3,

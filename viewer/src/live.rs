@@ -928,7 +928,7 @@ impl LiveSession {
             self.with_selected_apps(|sample| {
                 sample.apps_page(Page {
                     offset,
-                    limit: crate::live_app_response::PAGE_ROWS_MAX,
+                    limit: crate::live_app_response::APPS_PAGE_ROWS_MAX,
                 })
             })
         })

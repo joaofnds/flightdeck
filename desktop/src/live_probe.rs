@@ -276,8 +276,8 @@ fn probe_apps(snapshot: &Snapshot) -> Result<(), String> {
     let rows = apps["apps"]
         .as_array()
         .ok_or_else(|| "Missing live App rows".to_owned())?;
-    if rows.len() > 512 {
-        return Err("Live App page exceeds 512 rows".to_owned());
+    if rows.len() > crate::live_source::APPS_MAX {
+        return Err("Live App page exceeds 2048 rows".to_owned());
     }
     if !rows.is_empty() {
         let detail = snapshot

@@ -8,10 +8,8 @@ use crate::live_views::chrome::select;
 use crate::live_views::text;
 
 const COLUMNS_MAX: usize = 32;
-const PAGE_ROWS: u64 = 512;
 const _: () = {
     assert!(COLUMNS_MAX >= 4);
-    assert!(PAGE_ROWS == 512);
 };
 
 impl LiveDashboard {
@@ -203,10 +201,16 @@ impl LiveDashboard {
             return unavailable(&format!("{label} page unavailable"));
         };
 
-        let offset = if members {
-            self.reading_request().members_offset
+        let (offset, rows_max) = if members {
+            (
+                self.reading_request().members_offset,
+                viewer::live_app_response::PAGE_ROWS_MAX,
+            )
         } else {
-            self.reading_request().apps_offset
+            (
+                self.reading_request().apps_offset,
+                viewer::live_app_response::APPS_PAGE_ROWS_MAX,
+            )
         };
         let next = match page["page"]["next_offset"].as_u64() {
             Some(offset) => match u32::try_from(offset) {
@@ -221,10 +225,10 @@ impl LiveDashboard {
             .items_center()
             .gap(px(6.0))
             .child(format!("{label} · offset {offset} of {total}"));
-        if offset >= 512 {
+        if offset >= rows_max {
             controls = controls.child(control(&format!("Previous {label}")).on_click(cx.listener(
                 move |this, _, _, cx| {
-                    this.app_change_offset(offset.saturating_sub(512), members, cx);
+                    this.app_change_offset(offset.saturating_sub(rows_max), members, cx);
                 },
             )));
         }

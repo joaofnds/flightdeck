@@ -130,7 +130,10 @@ fn apps(
         context
             .apps_page_for(
                 observation,
-                paging(offset),
+                Page {
+                    offset,
+                    limit: viewer::live_app_response::APPS_PAGE_ROWS_MAX,
+                },
                 &shared.cancellation,
                 command.epoch,
             )
@@ -146,7 +149,10 @@ fn apps(
                     observation,
                     kind,
                     &bytes,
-                    paging(offset),
+                    Page {
+                        offset,
+                        limit: viewer::live_app_response::PAGE_ROWS_MAX,
+                    },
                     &shared.cancellation,
                     command.epoch,
                 )
@@ -295,11 +301,4 @@ fn page(
     drop(first);
 
     read(u32::try_from(offset).map_err(|error| error.to_string())?)
-}
-
-fn paging(offset: u32) -> Page {
-    Page {
-        offset,
-        limit: viewer::live_app_response::PAGE_ROWS_MAX,
-    }
 }

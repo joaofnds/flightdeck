@@ -66,7 +66,11 @@ impl QueryContext {
     fn response_apps_page(&self, second: &QuerySecond, page: Page) -> Result<Response<Value>> {
         second.apps().presentation()?;
         let apps = &second.apps().apps;
-        let range = json::page_range(page, apps.len())?;
+        let range = json::page_range(
+            page,
+            apps.len(),
+            crate::live_app_response::APPS_PAGE_ROWS_MAX,
+        )?;
         let bytes = HEADER_BYTES + apps[range].iter().map(response_app_bytes).sum::<usize>();
         let reservation = self.reserve_response(bytes)?;
 
@@ -126,7 +130,11 @@ fn response_members_bytes(payload: &Payload, app_index: Option<u32>, page: Page)
     let processes = payload
         .iter()
         .filter(|process| process.app_index == app_index);
-    let range = json::page_range(page, processes.clone().count())?;
+    let range = json::page_range(
+        page,
+        processes.clone().count(),
+        crate::live_app_response::PAGE_ROWS_MAX,
+    )?;
 
     Ok(HEADER_BYTES
         + processes

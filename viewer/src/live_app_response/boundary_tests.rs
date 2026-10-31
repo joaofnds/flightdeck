@@ -1,5 +1,5 @@
 use super::tests::fixture;
-use super::{Detail, Error, Page, SAMPLE_BYTES_MAX, Sample, Value};
+use super::{APPS_PAGE_ROWS_MAX, Detail, Error, Page, SAMPLE_BYTES_MAX, Sample, Value};
 
 #[test]
 fn pages_members_without_losing_the_selected_observation() {
@@ -59,13 +59,54 @@ macro_rules! invalid_page {
     };
 }
 invalid_page!(rejects_a_zero_page_limit, 0, 0, "live App page limit");
-invalid_page!(rejects_more_than_512_rows, 0, 513, "live App page limit");
+invalid_page!(
+    rejects_more_apps_than_one_second_holds,
+    0,
+    2049,
+    "live App page limit"
+);
 invalid_page!(
     rejects_a_page_start_after_the_last_app,
     2,
     512,
     "live App page offset"
 );
+
+#[test]
+fn admits_a_page_of_every_app_one_second_holds() {
+    // Goal: one page can list every App of a second, so the App picker sorts and searches them
+    // all rather than one page of them.
+    // Method: request a page as long as a second's most Apps from a one-App sample.
+    let sample = fixture::sample(fixture::Scenario::Ordinary);
+
+    let page = sample
+        .apps_page(Page {
+            offset: 0,
+            limit: APPS_PAGE_ROWS_MAX,
+        })
+        .unwrap();
+
+    assert_eq!(page["apps"].as_array().unwrap().len(), 1);
+    assert_eq!(page["page"]["next_offset"], Value::Null);
+}
+
+#[test]
+fn rejects_a_page_of_more_than_512_members() {
+    // Goal: a page of an App's processes keeps its own bound of 512 rows.
+    // Method: request 513 of the one App's processes.
+    let sample = fixture::sample(fixture::Scenario::Ordinary);
+
+    let result = sample.app_detail(&Detail {
+        selected: &sample.selected,
+        app_index: 0,
+        page: Page {
+            offset: 0,
+            limit: 513,
+        },
+    });
+
+    assert!(matches!(result, Err(Error::Bound("live App page limit"))));
+}
 
 #[test]
 fn permits_an_empty_page_at_the_exact_end() {

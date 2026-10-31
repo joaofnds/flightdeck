@@ -116,10 +116,10 @@ fn includes_all_513_members_outside_a_loaded_member_page() {
 }
 
 #[test]
-fn retains_an_app_outside_the_first_512_apps() {
+fn retains_an_app_outside_the_first_page_of_apps() {
     // The exact selected App key is independent of whichever Apps page was loaded.
     let mut fixture = named::dense();
-    let paths: Vec<_> = (0..513)
+    let paths: Vec<_> = (0..2049)
         .map(|index| format!("/Apps/{index:04}.app"))
         .collect();
     let rows: Vec<_> = paths
@@ -142,11 +142,11 @@ fn retains_an_app_outside_the_first_512_apps() {
     let first = session.apps_page(0).unwrap();
 
     let cohort = session
-        .app_process_groups_history(KeyKind::Bundle, b"/Apps/0512.app")
+        .app_process_groups_history(KeyKind::Bundle, b"/Apps/2048.app")
         .unwrap();
 
-    assert_eq!(first["apps"].as_array().unwrap().len(), 512);
-    assert_eq!(cohort.app_bytes.as_ref(), b"/Apps/0512.app");
+    assert_eq!(first["apps"].as_array().unwrap().len(), 2048);
+    assert_eq!(cohort.app_bytes.as_ref(), b"/Apps/2048.app");
     assert_eq!(cohort.points[1].readings[0].measures[5].known, 1000);
 }
 

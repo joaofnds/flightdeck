@@ -77,7 +77,11 @@ impl AppsSecond {
     pub fn apps_page(&self, page: Page) -> Result<Value> {
         let (header, payload) = self.presentation()?;
         let mut result = json::apps_paging(&header, page)?;
-        let range = json::page_range(page, self.apps.len())?;
+        let range = json::page_range(
+            page,
+            self.apps.len(),
+            crate::live_app_response::APPS_PAGE_ROWS_MAX,
+        )?;
         let values = range
             .map(|index| {
                 json::app(

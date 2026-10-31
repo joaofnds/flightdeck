@@ -73,13 +73,14 @@ fn dense_with(create: CreateWriter) -> Fixture {
             core_capacity: 1,
             state_capacity: 1,
             fan_capacity: 1,
-            process_capacity: 600,
+            // One App more than a page of Apps lists, each a process of its own.
+            process_capacity: 2_049,
             coalition_capacity: 1,
             // An exit a tick for each tick the ring holds and the one it publishes.
             event_capacity: 3,
         },
         collector::ring::DictionaryCapacity {
-            entries: 601,
+            entries: 2_050,
             arena_bytes: 2 * 1024 * 1024,
         },
         &identity,

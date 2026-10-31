@@ -6,13 +6,12 @@ use serde_json::Value;
 
 use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PURPLE, YELLOW};
 use crate::live_dashboard::{LiveDashboard, Picker, toggle};
-use crate::live_source::AppKey;
+use crate::live_source::{APPS_MAX, AppKey};
 use crate::live_views::chrome::select;
 use crate::live_views::{summary, text};
 
 /// The prototype's network cyan.
 const CYAN: u32 = 0x00_ff_ff;
-const APPS_MAX: usize = 512;
 const SELECTED_APP_INDEX: usize = APPS_MAX;
 const JSON_BYTES_MAX: usize = 32 * 1024;
 /// The most metric columns a table row has, the process group table's eleven.
@@ -24,7 +23,6 @@ const METRIC_WIDTH: f32 = 76.0;
 const _: () = {
     assert!(crate::live_executables::COLUMNS.len() <= METRICS_MAX);
     assert!(JSON_BYTES_MAX > 2 * 4095);
-    assert!(APPS_MAX == 512);
 };
 
 impl LiveDashboard {
