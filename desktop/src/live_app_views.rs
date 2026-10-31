@@ -89,9 +89,7 @@ impl LiveDashboard {
                                 // takes their keystrokes at once.
                                 if this.picker == Some(Picker::App) {
                                     let Some(search) = &this.app_list.search else {
-                                        unreachable!(
-                                            "create_dashboard_with gives every dashboard its App search"
-                                        );
+                                        unreachable!("create_dashboard_with sets the App search");
                                     };
                                     window.focus(&search.focus_handle(cx), cx);
                                 }
