@@ -163,6 +163,29 @@ fn the_last_app_the_picker_lists_closes_its_panel(cx: &mut gpui::TestAppContext)
 }
 
 #[gpui::test]
+fn a_search_no_app_name_contains_closes_the_picker_panel_under_its_heading(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: when no App's name contains the search, the App picker's panel closes under its
+    // heading, the only row left in it.
+    // Method: list three Apps, search for letters none of the names contains, and look for the
+    // panel's bottom edge on the heading.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+
+    harness.driver.search_apps("zzz");
+
+    assert!(
+        harness
+            .driver
+            .context
+            .debug_bounds("panel-bottom:app-columns-apps")
+            .is_some()
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_last_process_group_closes_the_inside_app_panel(cx: &mut gpui::TestAppContext) {
     // Goal: the panel of the process groups inside the App closes under the last group it lists,
     // and under no group above.

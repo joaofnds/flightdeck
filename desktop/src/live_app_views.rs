@@ -291,8 +291,9 @@ impl LiveDashboard {
     }
 
     /// The App picker's search field over its headings, each heading a button that sorts the
-    /// Apps by its column, the heading of the column they are sorted by carrying an arrow.
-    pub fn app_list_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Apps by its column, the heading of the column they are sorted by carrying an arrow. The
+    /// headings close the table's panel when `last`.
+    pub fn app_list_columns(&self, last: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = crate::live_panel_table::cells_row(&APP_TABLE_WIDTHS);
         let columns = [AppColumn::Name, AppColumn::Members]
             .into_iter()
@@ -316,7 +317,7 @@ impl LiveDashboard {
                     .children(self.app_list.search.clone()),
             )
             .child(
-                crate::live_panel_table::header("app-columns-apps", &self.app_list.scroll)
+                crate::live_panel_table::header("app-columns-apps", last, &self.app_list.scroll)
                     .child(row),
             )
     }

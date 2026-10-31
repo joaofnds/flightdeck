@@ -180,9 +180,14 @@ impl LiveDashboard {
             Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
             Row::ProcessGroupingAbout => self.process_grouping_about().into_any_element(),
             Row::ExecutableColumns => {
-                crate::live_executables::table_header(&self.app_table_scroll).into_any_element()
+                let last = !matches!(self.rows.get(index + 1), Some(Row::Executable(_)));
+                crate::live_executables::table_header(last, &self.app_table_scroll)
+                    .into_any_element()
             }
-            Row::AppColumns => self.app_list_columns(cx).into_any_element(),
+            Row::AppColumns => {
+                let last = !matches!(self.rows.get(index + 1), Some(Row::App(_)));
+                self.app_list_columns(last, cx).into_any_element()
+            }
             Row::Charts { panels, columns } | Row::ContextCharts { panels, columns } => {
                 self.row_content_charts(panels, *columns, cx)
             }

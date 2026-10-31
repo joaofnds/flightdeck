@@ -237,8 +237,9 @@ const TABLE_WIDTHS: [f32; COLUMNS.len() + 2] = [
     70.8,
 ];
 
-/// The heading of the process group table, the top of the prototype's bordered panel.
-pub fn table_header(scroll: &gpui::ScrollHandle) -> impl IntoElement {
+/// The heading of the process group table, the top of the prototype's bordered panel, which it
+/// closes too when `last`.
+pub fn table_header(last: bool, scroll: &gpui::ScrollHandle) -> impl IntoElement {
     let headings = ["Process group", "Instances"]
         .into_iter()
         .chain(COLUMNS)
@@ -248,7 +249,7 @@ pub fn table_header(scroll: &gpui::ScrollHandle) -> impl IntoElement {
         unreachable!("The table has one heading for each column");
     };
 
-    crate::live_panel_table::header("app-columns-executables", scroll).child(
+    crate::live_panel_table::header("app-columns-executables", last, scroll).child(
         crate::live_panel_table::cells(
             headings,
             &TABLE_WIDTHS,

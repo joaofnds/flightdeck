@@ -14,15 +14,29 @@ const RADIUS: f32 = 7.0;
 const HEADER_HEIGHT: f32 = 38.0;
 const ROW_HEIGHT: f32 = 65.0;
 
-/// The heading of a table, the top of the prototype's bordered panel, which `cells` fills.
-pub fn header(id: &'static str, scroll: &gpui::ScrollHandle) -> gpui::Stateful<gpui::Div> {
+/// The heading of a table, the top of the prototype's bordered panel, which `cells` fills. When
+/// `last`, no row follows it, so it closes the panel too, and tests then find it by the selector
+/// `panel-bottom:` and its id.
+pub fn header(
+    id: &'static str,
+    last: bool,
+    scroll: &gpui::ScrollHandle,
+) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
         .h(px(HEADER_HEIGHT))
         .border_1()
-        .border_b_0()
         .border_color(crate::charts::alpha(TEXT, 0.12))
         .rounded_t(px(RADIUS))
+        .when_else(
+            last,
+            |header| {
+                header
+                    .rounded_b(px(RADIUS))
+                    .debug_selector(move || format!("panel-bottom:{id}"))
+            },
+            gpui::Styled::border_b_0,
+        )
         .bg(rgb(0x2c_2f_35))
         .overflow_x_scroll()
         .restrict_scroll_to_axis()
