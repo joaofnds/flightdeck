@@ -17,10 +17,10 @@ const SELECTED_APP_INDEX: usize = PAGE_APPS_MAX;
 /// list stays short enough to read at a glance.
 pub const APP_CHOICES_MAX: usize = 10;
 const JSON_BYTES_MAX: usize = 32 * 1024;
-/// The App picker's column widths, in points: the App's name as wide as the process group
-/// table's, then its member count and `AppColumn::READINGS`, each wide enough for its heading
-/// and the arrow that shows the Apps are sorted by it.
-const APP_TABLE_WIDTHS: [f32; AppColumn::READINGS.len() + 2] = [
+/// The width of each of `AppColumn::ALL`, in points: the App's name as wide as the process
+/// group table's, then the rest, each wide enough for its heading and the arrow that shows the
+/// Apps are sorted by it.
+const APP_TABLE_WIDTHS: [f32; AppColumn::ALL.len()] = [
     crate::live_panel_table::NAME_WIDTH,
     92.0,
     80.0,
@@ -30,12 +30,13 @@ const APP_TABLE_WIDTHS: [f32; AppColumn::READINGS.len() + 2] = [
     86.0,
     92.0,
 ];
-/// The Disk I/O column's position among an App's reading columns.
+/// The Disk I/O column's position among an App's reading columns, those after its name and
+/// its member count, as `reading_selector` counts them.
 const DISK_READING_INDEX: usize = 5;
 const _: () = {
     assert!(JSON_BYTES_MAX > 2 * 4095);
     assert!(matches!(
-        AppColumn::READINGS[DISK_READING_INDEX],
+        AppColumn::ALL[DISK_READING_INDEX + 2],
         AppColumn::Disk
     ));
 };
@@ -241,12 +242,13 @@ impl LiveDashboard {
             Err(error) => return unavailable(&error),
         };
         let selected = self.request.app.as_ref() == Some(&key);
-        let metrics = AppColumn::READINGS.map(|column| column.cell(app));
+        let texts = AppColumn::ALL.map(|column| column.cell(app));
         let disk_selector = format!(
             "app-disk:{}:{}:{}",
-            key.kind, key.bytes_hex, metrics[DISK_READING_INDEX]
+            key.kind,
+            key.bytes_hex,
+            texts[DISK_READING_INDEX + 2]
         );
-        let [cpu, resident, footprint, power, energy, disk] = metrics;
 
         crate::live_panel_table::row(format!("app-choice-{index}"), last, &self.app_list.scroll)
             .accessibility_id(format!("flightdeck.app.{}.{}", key.kind, key.bytes_hex))
@@ -269,16 +271,7 @@ impl LiveDashboard {
                 cx.notify();
             }))
             .child(crate::live_panel_table::cells(
-                [
-                    AppColumn::Name.cell(app),
-                    AppColumn::Members.cell(app),
-                    cpu,
-                    resident,
-                    footprint,
-                    power,
-                    energy,
-                    disk,
-                ],
+                texts,
                 &APP_TABLE_WIDTHS,
                 reading_selector(DISK_READING_INDEX, &disk_selector),
                 crate::live_panel_table::NameCell::Button { pressed: selected },
@@ -296,10 +289,8 @@ impl LiveDashboard {
     /// headings close the table's panel when `last`.
     pub fn app_list_columns(&self, last: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = crate::live_panel_table::cells_row(&APP_TABLE_WIDTHS);
-        let columns = [AppColumn::Name, AppColumn::Members]
-            .into_iter()
-            .chain(AppColumn::READINGS);
-        for (index, (column, width)) in columns.zip(APP_TABLE_WIDTHS).enumerate() {
+        for (index, (column, width)) in AppColumn::ALL.into_iter().zip(APP_TABLE_WIDTHS).enumerate()
+        {
             let selector = format!("app-column:apps:{}", column.heading());
             let cell = crate::live_panel_table::column(index, width)
                 .debug_selector(move || selector.clone());
@@ -585,9 +576,10 @@ pub enum AppColumn {
 }
 
 impl AppColumn {
-    /// The columns of an App's readings, in the order of their cells after its name and its
-    /// member count.
-    const READINGS: [Self; 6] = [
+    /// The App table's columns, in the order of their cells.
+    const ALL: [Self; 8] = [
+        Self::Name,
+        Self::Members,
         Self::Cpu,
         Self::Resident,
         Self::Footprint,
