@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, IntoElement, div, prelude::*, rgb};
 use num_traits::ToPrimitive;
 use serde_json::{Value, json};
 
-use crate::charts::{BLUE, MUTED, PANEL, TEXT};
+use crate::charts::MUTED;
 use crate::live_dashboard::LiveDashboard;
 
 #[derive(Debug, PartialEq)]
@@ -224,51 +224,6 @@ impl Executable {
 const TABLE_WIDTHS: [f32; COLUMNS.len() + 2] = [
     230.3, 79.7, 57.8, 77.4, 77.4, 74.4, 82.0, 78.3, 69.2, 86.0, 71.8, 82.3, 70.8,
 ];
-const TABLE_WIDTH: f32 = 1137.4;
-const TABLE_RADIUS: f32 = 7.0;
-/// The heading's height with the panel's top border above it.
-const TABLE_HEADER_HEIGHT: f32 = 38.0;
-const TABLE_ROW_HEIGHT: f32 = 65.0;
-
-/// The cells of one row of the table, each as wide as its column. The name's cell holds the
-/// prototype's button, which `pressed` marks as the group selected for the histories.
-fn table_cells(
-    cells: [String; COLUMNS.len() + 2],
-    selector: impl Fn(usize, &str) -> String,
-    pressed: Option<bool>,
-) -> gpui::Div {
-    let mut row = div().flex().items_center().min_w(px(TABLE_WIDTH)).h_full();
-    for (index, cell) in cells.into_iter().enumerate() {
-        let cell_selector = selector(index, &cell);
-        let mut column = div()
-            .debug_selector(move || cell_selector.clone())
-            .w(px(TABLE_WIDTHS[index]))
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .px(px(14.0));
-        column = match (index, pressed) {
-            (0, Some(pressed)) => column.child(
-                div()
-                    .h(px(44.0))
-                    .px(px(8.0))
-                    .rounded(px(5.0))
-                    .flex()
-                    .items_center()
-                    .when(pressed, |button| {
-                        button
-                            .bg(crate::charts::alpha(BLUE, 0.15))
-                            .text_color(rgb(BLUE))
-                    })
-                    .child(cell),
-            ),
-            (0, None) => column.child(cell),
-            _ => column.justify_end().child(cell),
-        };
-        row = row.child(column);
-    }
-    row
-}
 
 /// The heading of the process group table, the top of the prototype's bordered panel.
 pub fn table_header(scroll: &gpui::ScrollHandle) -> impl IntoElement {
@@ -281,53 +236,14 @@ pub fn table_header(scroll: &gpui::ScrollHandle) -> impl IntoElement {
         unreachable!("The table has one heading for each column");
     };
 
-    div()
-        .id("app-columns-executables")
-        .h(px(TABLE_HEADER_HEIGHT))
-        .border_1()
-        .border_b_0()
-        .border_color(crate::charts::alpha(TEXT, 0.12))
-        .rounded_t(px(TABLE_RADIUS))
-        .bg(rgb(0x2c_2f_35))
-        .overflow_x_scroll()
-        .restrict_scroll_to_axis()
-        .track_scroll(scroll)
-        .text_size(px(11.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(rgb(MUTED))
-        .child(table_cells(
+    crate::live_panel_table::header("app-columns-executables", scroll).child(
+        crate::live_panel_table::cells(
             headings,
+            &TABLE_WIDTHS,
             |_, text| format!("app-column:executables:{text}"),
             None,
-        ))
-}
-
-/// A row of the table with the panel's sides, and its bottom and corners when it is the last.
-fn table_row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(id))
-        .h(px(if last {
-            TABLE_ROW_HEIGHT + 0.5
-        } else {
-            TABLE_ROW_HEIGHT
-        }))
-        .min_w_0()
-        .max_w_full()
-        .overflow_x_scroll()
-        .restrict_scroll_to_axis()
-        .track_scroll(scroll)
-        .border_l_1()
-        .border_r_1()
-        .border_b_1()
-        .border_color(crate::charts::alpha(TEXT, 0.12))
-        .bg(rgb(PANEL))
-        .text_size(px(12.0))
-        .text_color(rgb(TEXT))
-        .when(last, |row| row.rounded_b(px(TABLE_RADIUS)))
-        .cursor_pointer()
-        .focusable()
-        .tab_stop(true)
-        .focus(crate::charts::focus_ring)
+        ),
+    )
 }
 
 impl LiveDashboard {
@@ -365,7 +281,7 @@ impl LiveDashboard {
             sockets,
         ] = metrics;
 
-        table_row(format!("executable-{index}"), last, &self.app_table_scroll)
+        crate::live_panel_table::row(format!("executable-{index}"), last, &self.app_table_scroll)
             .accessibility_id(format!("flightdeck.executable.{}", group.key))
             .role(gpui::Role::Button)
             .aria_label(format!(
@@ -378,7 +294,7 @@ impl LiveDashboard {
                 this.rebuild();
                 cx.notify();
             }))
-            .child(table_cells(
+            .child(crate::live_panel_table::cells(
                 [
                     group.name.clone(),
                     group.instances.to_string(),
@@ -394,6 +310,7 @@ impl LiveDashboard {
                     files,
                     sockets,
                 ],
+                &TABLE_WIDTHS,
                 crate::live_app_views::reading_selector(DISK_COLUMN, &disk_selector),
                 Some(selected),
             ))
