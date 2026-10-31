@@ -64,7 +64,7 @@ fn create_dashboard_with(
         let mut dashboard = build(cx);
         dashboard.settings.animate_fans = crate::live_launch::animate_fans(cx);
         dashboard.native.source = source;
-        dashboard.native.input = Some(input);
+        dashboard.native.time_input = Some(input);
         cx.observe(&search, |dashboard, search, cx| {
             dashboard.app_search_changed(&search, cx);
         })
@@ -141,7 +141,7 @@ type PromptPoll = Box<dyn FnMut() -> Poll<Result<Option<Vec<PathBuf>>, String>>>
 
 #[derive(Default)]
 pub struct NativeControls {
-    pub input: Option<Entity<TextInput>>,
+    pub time_input: Option<Entity<TextInput>>,
     pub alternative_page: u16,
     prompt: Option<PromptPoll>,
     candidate: Option<Candidate>,
@@ -347,7 +347,7 @@ impl LiveDashboard {
         self.native_candidate_tick(cx);
         let submitted = self
             .native
-            .input
+            .time_input
             .as_ref()
             .and_then(|input| input.update(cx, |input, _| input.submission.take()));
         if let Some(text) = submitted {

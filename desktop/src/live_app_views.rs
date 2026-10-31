@@ -182,6 +182,7 @@ impl LiveDashboard {
         let Some(snapshot) = self.reading_snapshot() else {
             return Vec::new();
         };
+
         let apps = snapshot
             .apps
             .as_ref()
@@ -190,7 +191,7 @@ impl LiveDashboard {
         if let Some(apps) = apps {
             choices.extend(apps.iter().take(PAGE_APPS_MAX));
         }
-        let listed = choices.len();
+        let listed_count = choices.len();
         if let Some(app) = self.current_app() {
             if !choices.iter().any(|choice| choice["key"] == app["key"]) {
                 choices.push(app);
@@ -201,7 +202,7 @@ impl LiveDashboard {
         app_order(&choices, self.app_list.order, &self.app_list.search_text)
             .into_iter()
             .map(|position| {
-                if position < listed {
+                if position < listed_count {
                     position
                 } else {
                     SELECTED_APP_INDEX
@@ -276,13 +277,13 @@ impl LiveDashboard {
     /// The App picker's search field over its headings, each heading a button that sorts the
     /// Apps by its column, the heading of the column they are sorted by carrying an arrow.
     pub fn app_list_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = app_cells_row(AppColumn::READINGS.len());
+        let mut row = app_table_row(AppColumn::READINGS.len());
         let columns = [AppColumn::Name, AppColumn::Members]
             .into_iter()
             .chain(AppColumn::READINGS);
         for (index, column) in columns.enumerate() {
             let selector = format!("app-column:apps:{}", column.heading());
-            let cell = app_cells_cell(index).debug_selector(move || selector.clone());
+            let cell = app_table_cell(index).debug_selector(move || selector.clone());
             row = row.child(self.app_list_columns_button(cell, column, cx));
         }
 
@@ -451,24 +452,26 @@ pub fn app_cells<const METRICS: usize>(
 ) -> gpui::Div {
     assert!(METRICS <= METRICS_MAX);
 
-    let mut row = app_cells_row(METRICS);
+    let mut row = app_table_row(METRICS);
     for (index, cell) in [name, count].into_iter().chain(metrics).enumerate() {
         let cell_selector = selector(index, &cell);
         row = row.child(
-            app_cells_cell(index)
+            app_table_cell(index)
                 .debug_selector(move || cell_selector.clone())
                 .child(cell),
         );
     }
+
     row
 }
 
 /// The row that holds a table row's cells, wide enough for the name, the count and `metrics`.
-fn app_cells_row(metrics: usize) -> gpui::Div {
+fn app_table_row(metrics: usize) -> gpui::Div {
     assert!(metrics <= METRICS_MAX);
 
     let count_metrics = u16::try_from(metrics).unwrap_or_else(|_| unreachable!());
     let width_metrics = f32::from(count_metrics);
+
     div()
         .min_w(px(NAME_WIDTH
             + COUNT_WIDTH
@@ -484,7 +487,7 @@ fn app_cells_row(metrics: usize) -> gpui::Div {
 }
 
 /// The cell of a table row's column `index`: the name is column 0 and the count column 1.
-fn app_cells_cell(index: usize) -> gpui::Div {
+fn app_table_cell(index: usize) -> gpui::Div {
     match index {
         0 => div().flex_1().min_w(px(NAME_WIDTH)).truncate(),
         1 => div()
@@ -729,6 +732,7 @@ impl AppOrder {
                 descending: !self.descending,
             };
         }
+
         Self {
             column,
             descending: column != AppColumn::Name,
