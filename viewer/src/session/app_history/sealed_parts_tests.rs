@@ -7,7 +7,7 @@ use super::super::sealed::fixture::{range, rewrite};
 use super::*;
 use crate::live::app_process_groups_history_tests::{named, usage};
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_response::{PAGE_ROWS_MAX, Page, Sample};
+use crate::live_app_response::{PROCESSES_PAGE_ROWS_MAX, Page, Sample};
 use crate::recording::apps::read_app_rows;
 use crate::recording::{AppMinute, AppParts};
 use persistence::app_tables::{program_code, state_code, unavailable_code};
@@ -436,7 +436,7 @@ impl Shown {
     fn of(part: &AppPart) -> Self {
         let page = Page {
             offset: 0,
-            limit: PAGE_ROWS_MAX,
+            limit: PROCESSES_PAGE_ROWS_MAX,
         };
 
         Self {

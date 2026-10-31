@@ -3,7 +3,7 @@ use serde_json::Value;
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live::window::fixture::{observation_key, saved_only, saved_with_apps};
-use crate::live_app_response::{Key, KeyKind, PAGE_ROWS_MAX, Page};
+use crate::live_app_response::{Key, KeyKind, PROCESSES_PAGE_ROWS_MAX, Page};
 
 #[test]
 fn part_window_gives_each_saved_second_the_detail_its_sample_gives() {
@@ -218,6 +218,6 @@ fn selected_app(session: &LiveSession) -> Key {
 fn first_page() -> Page {
     Page {
         offset: 0,
-        limit: PAGE_ROWS_MAX,
+        limit: PROCESSES_PAGE_ROWS_MAX,
     }
 }

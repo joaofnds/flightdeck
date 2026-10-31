@@ -305,7 +305,7 @@ fn resident_app(
     let detail = crate::live_source::clamped_presentation_page(request.members_offset, |offset| {
         part.detail(Page {
             offset,
-            limit: viewer::live_app_response::PAGE_ROWS_MAX,
+            limit: viewer::live_app_response::PROCESSES_PAGE_ROWS_MAX,
         })
         .map_err(|error| error.to_string())
     })?;

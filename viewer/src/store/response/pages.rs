@@ -133,7 +133,7 @@ fn response_members_bytes(payload: &Payload, app_index: Option<u32>, page: Page)
     let range = json::page_range(
         page,
         processes.clone().count(),
-        crate::live_app_response::PAGE_ROWS_MAX,
+        crate::live_app_response::PROCESSES_PAGE_ROWS_MAX,
     )?;
 
     Ok(HEADER_BYTES

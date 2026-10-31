@@ -16,7 +16,7 @@ pub(crate) use ranks::{METRICS, Rankable, Ranked, rank_apps};
 
 pub const SAMPLE_BYTES_MAX: usize = 8 * 1024 * 1024;
 pub const RESPONSE_BYTES_MAX: usize = 8 * 1024 * 1024;
-pub const PAGE_ROWS_MAX: u32 = 512;
+pub const PROCESSES_PAGE_ROWS_MAX: u32 = 512;
 /// The most Apps one page lists, every App a second of the Store holds, so a person sorting or
 /// searching the Apps sees them all on one page.
 pub const APPS_PAGE_ROWS_MAX: u32 = 2_048;
@@ -277,11 +277,11 @@ impl Measure {
 }
 
 const _: () = {
-    assert!(PAGE_ROWS_MAX > 0);
+    assert!(PROCESSES_PAGE_ROWS_MAX > 0);
     // Every App one second holds fits on one page.
     assert!(APPS_PAGE_ROWS_MAX == 2_048);
     assert!(crate::store::APPS_PER_SECOND_MAX == 2_048);
-    assert!(APPS_PAGE_ROWS_MAX >= PAGE_ROWS_MAX);
+    assert!(APPS_PAGE_ROWS_MAX >= PROCESSES_PAGE_ROWS_MAX);
     assert!(SAMPLE_BYTES_MAX < apps::PROGRAM_BYTES_MAX);
     assert!(APPS_MAX == MEMBERS_MAX);
     assert!(size_of::<Measure>() <= 24);

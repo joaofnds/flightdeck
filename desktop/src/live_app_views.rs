@@ -6,13 +6,13 @@ use serde_json::Value;
 
 use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PURPLE, YELLOW};
 use crate::live_dashboard::{LiveDashboard, Picker, toggle};
-use crate::live_source::{APPS_MAX, AppKey};
+use crate::live_source::{AppKey, PAGE_APPS_MAX};
 use crate::live_views::chrome::select;
 use crate::live_views::{summary, text};
 
 /// The prototype's network cyan.
 const CYAN: u32 = 0x00_ff_ff;
-const SELECTED_APP_INDEX: usize = APPS_MAX;
+const SELECTED_APP_INDEX: usize = PAGE_APPS_MAX;
 const JSON_BYTES_MAX: usize = 32 * 1024;
 /// The most metric columns a table row has, the process group table's eleven.
 const METRICS_MAX: usize = 11;
@@ -180,9 +180,9 @@ impl LiveDashboard {
             .apps
             .as_ref()
             .and_then(|page| page["apps"].as_array());
-        let mut choices: Vec<&Value> = Vec::with_capacity(APPS_MAX + 1);
+        let mut choices: Vec<&Value> = Vec::with_capacity(PAGE_APPS_MAX + 1);
         if let Some(apps) = apps {
-            choices.extend(apps.iter().take(APPS_MAX));
+            choices.extend(apps.iter().take(PAGE_APPS_MAX));
         }
         let listed = choices.len();
         if let Some(app) = self.current_app() {
@@ -190,7 +190,7 @@ impl LiveDashboard {
                 choices.push(app);
             }
         }
-        assert!(choices.len() <= APPS_MAX + 1);
+        assert!(choices.len() <= PAGE_APPS_MAX + 1);
 
         app_order(&choices, self.app_list.order, &self.app_list.search_text)
             .into_iter()
@@ -694,7 +694,7 @@ impl AppOrder {
 /// contains `search`, in `order`. Names compare in lowercase. An App with no reading in the
 /// column sorts last either way, and Apps that tie sort by name, then by position.
 pub fn app_order(apps: &[&Value], order: AppOrder, search: &str) -> Vec<usize> {
-    assert!(apps.len() <= APPS_MAX + 1);
+    assert!(apps.len() <= PAGE_APPS_MAX + 1);
 
     let search = search.to_lowercase();
     let mut keys = Vec::with_capacity(apps.len());

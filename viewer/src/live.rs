@@ -1057,7 +1057,7 @@ impl LiveSession {
                     app_index: u32::try_from(index).map_err(|_| Error::Bound("live App index"))?,
                     page: Page {
                         offset,
-                        limit: crate::live_app_response::PAGE_ROWS_MAX,
+                        limit: crate::live_app_response::PROCESSES_PAGE_ROWS_MAX,
                     },
                 })
             })

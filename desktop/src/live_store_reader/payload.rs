@@ -151,7 +151,7 @@ fn apps(
                     &bytes,
                     Page {
                         offset,
-                        limit: viewer::live_app_response::PAGE_ROWS_MAX,
+                        limit: viewer::live_app_response::PROCESSES_PAGE_ROWS_MAX,
                     },
                     &shared.cancellation,
                     command.epoch,

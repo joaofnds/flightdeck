@@ -204,7 +204,7 @@ impl LiveDashboard {
         let (offset, rows_max) = if members {
             (
                 self.reading_request().members_offset,
-                viewer::live_app_response::PAGE_ROWS_MAX,
+                viewer::live_app_response::PROCESSES_PAGE_ROWS_MAX,
             )
         } else {
             (

@@ -217,7 +217,7 @@ pub(crate) fn processes_page<'row>(
     count: usize,
     page: Page,
 ) -> Result<Value> {
-    let range = page_range(page, count, super::PAGE_ROWS_MAX)?;
+    let range = page_range(page, count, super::PROCESSES_PAGE_ROWS_MAX)?;
     let values: Vec<_> = processes
         .skip(range.start)
         .take(range.len())

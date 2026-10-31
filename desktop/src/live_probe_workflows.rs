@@ -73,10 +73,10 @@ fn run_apps_find(
         let apps = snapshot.apps.as_deref().ok_or("Missing live App list")?;
         identity_validate(&apps["selected"], &initial.selection["selected"])?;
         let rows = apps["apps"].as_array().ok_or("Missing captured App keys")?;
-        if rows.len() > crate::live_source::APPS_MAX {
+        if rows.len() > crate::live_source::PAGE_APPS_MAX {
             return Err(format!(
                 "Captured App key page exceeds {} rows",
-                crate::live_source::APPS_MAX
+                crate::live_source::PAGE_APPS_MAX
             ));
         }
         for row in rows {
