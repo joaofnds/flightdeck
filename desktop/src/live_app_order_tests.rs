@@ -47,6 +47,20 @@ fn cpu_ascending_lists_the_app_with_no_reading_last() {
 }
 
 #[test]
+fn name_descending_lists_the_names_from_the_end_of_the_alphabet() {
+    // Order four Apps by name from Z, which a second click on the App heading asks for.
+    let apps = apps_by_cpu();
+    let order = AppOrder {
+        column: AppColumn::Name,
+        descending: true,
+    };
+
+    let positions = app_order(&apps.each_ref(), order, "");
+
+    assert_eq!(names(&apps, &positions), ["d", "c", "b", "a"]);
+}
+
+#[test]
 fn search_keeps_the_apps_whose_name_contains_the_text_in_any_case() {
     // Search the Apps by an uppercase letter that only one lowercase name contains.
     let apps = apps_by_cpu();
@@ -54,6 +68,19 @@ fn search_keeps_the_apps_whose_name_contains_the_text_in_any_case() {
     let positions = app_order(&apps.each_ref(), AppOrder::default(), "B");
 
     assert_eq!(names(&apps, &positions), ["b"]);
+}
+
+#[test]
+fn search_matches_lowercase_text_in_a_name_with_capitals() {
+    // Search with lowercase text that one name holds only in capitals.
+    let apps = [
+        json!({"display_name": "Brave"}),
+        json!({"display_name": "safari"}),
+    ];
+
+    let positions = app_order(&apps.each_ref(), AppOrder::default(), "bra");
+
+    assert_eq!(names(&apps, &positions), ["Brave"]);
 }
 
 /// Three Apps whose bundle names end in ".app", which the list leaves out of the names it shows.
