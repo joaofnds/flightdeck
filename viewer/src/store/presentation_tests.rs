@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use super::{AppsSecond, Missing, TickApps};
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_response::{Detail, Page, Sample};
+use crate::live_app_response::{APPS_PAGE_ROWS_MAX, Detail, Page, Sample};
 use crate::store::ByteBudget;
 
 #[test]
@@ -250,6 +250,24 @@ fn detached_missing_processes_preserve_independent_compact_app_facts() {
     assert_eq!(budget.used(), detached.bytes());
     drop(detached);
     assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn admits_a_page_of_every_app_one_second_holds() {
+    // Goal: a retained second lists every App it can hold on one page, as a Sample does, so the
+    // App picker sorts and searches them all.
+    // Method: request a page as long as a second's most Apps from real captured facts.
+    let (second, _) = native_second(true, 2);
+
+    let page = second
+        .apps_page(Page {
+            offset: 0,
+            limit: APPS_PAGE_ROWS_MAX,
+        })
+        .unwrap();
+
+    assert_eq!(page["apps"].as_array().unwrap().len(), second.apps.len());
+    assert_eq!(page["page"]["next_offset"], Value::Null);
 }
 
 macro_rules! rejected_page {

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::live::identity_fixture::Fixture;
+use crate::live_app_response::{APPS_PAGE_ROWS_MAX, Page};
 use crate::store::{ByteBudget, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Store};
 use crate::{Cancellation, LiveSession};
 
@@ -102,6 +103,32 @@ fn a_small_raw_page_needs_only_its_requested_rows_admitted() {
     assert!(page.bytes() < 64 * 1024);
     drop(page);
     drop(held);
+}
+
+#[test]
+fn an_apps_page_lists_every_app_one_second_holds() {
+    // Goal: the retained context admits a page as long as a second's most Apps, so the App
+    // picker sorts and searches every App rather than one page of them.
+    // Method: retain a real context, then request its selected second's Apps on one such page.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let context = retained(&fixture);
+    let identity = context.catalog()["latest_observation"].clone();
+    let observation = context.observation_for_identity(100, &identity).unwrap();
+    let page = Page {
+        offset: 0,
+        limit: APPS_PAGE_ROWS_MAX,
+    };
+
+    let response = context
+        .apps_page_for(&observation, page, &Arc::new(Cancellation::default()), 0)
+        .unwrap();
+
+    assert_eq!(
+        response["page"]["total"],
+        response["apps"].as_array().unwrap().len()
+    );
+    assert_eq!(response["page"]["next_offset"], serde_json::Value::Null);
 }
 
 fn retained(fixture: &Fixture) -> Arc<QueryContext> {
