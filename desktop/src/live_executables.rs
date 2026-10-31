@@ -222,7 +222,19 @@ impl Executable {
 /// The prototype's column widths, in points, for the process group table: the group's name,
 /// its instances and `COLUMNS`. The table is wider than the page and scrolls sideways.
 const TABLE_WIDTHS: [f32; COLUMNS.len() + 2] = [
-    230.3, 79.7, 57.8, 77.4, 77.4, 74.4, 82.0, 78.3, 69.2, 86.0, 71.8, 82.3, 70.8,
+    crate::live_panel_table::NAME_WIDTH,
+    79.7,
+    57.8,
+    77.4,
+    77.4,
+    74.4,
+    82.0,
+    78.3,
+    69.2,
+    86.0,
+    71.8,
+    82.3,
+    70.8,
 ];
 
 /// The heading of the process group table, the top of the prototype's bordered panel.

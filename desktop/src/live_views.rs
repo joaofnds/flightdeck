@@ -106,7 +106,7 @@ impl LiveDashboard {
             | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
             Row::Heading(_) => (16.0, 8.0),
-            Row::SelfPart(SelfPart::Overview) => (8.0, 0.0),
+            Row::SelfPart(SelfPart::Overview) | Row::AppColumns("apps") => (8.0, 0.0),
             Row::SelfPart(_)
             | Row::App(_)
             | Row::Executable(_)
@@ -194,7 +194,10 @@ impl LiveDashboard {
             Row::Heading(title) => heading(title).into_any_element(),
             Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
             Row::Hardware => self.live_hardware().into_any_element(),
-            Row::App(index) => self.app_row(*index, cx),
+            Row::App(app) => {
+                let last = !matches!(self.rows.get(index + 1), Some(Row::App(_)));
+                self.app_row(*app, last, cx)
+            }
             Row::Executable(index) => self.executable_row(*index, cx),
             Row::Inventory => self.computer(cx).into_any_element(),
             Row::Spacer(height) | Row::Placeholder(_, height) => {

@@ -4,7 +4,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, 
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
-use crate::charts::{BLUE, GREEN, GRID, MUTED, ORANGE, PURPLE, YELLOW};
+use crate::charts::{BLUE, GREEN, MUTED, ORANGE, PURPLE, YELLOW};
 use crate::live_dashboard::{LiveDashboard, Picker, toggle};
 use crate::live_source::{AppKey, PAGE_APPS_MAX};
 use crate::live_views::chrome::select;
@@ -17,16 +17,22 @@ const SELECTED_APP_INDEX: usize = PAGE_APPS_MAX;
 /// list stays short enough to read at a glance.
 pub const APP_CHOICES_MAX: usize = 10;
 const JSON_BYTES_MAX: usize = 32 * 1024;
-/// The most metric columns a table row has, the process group table's eleven.
-const METRICS_MAX: usize = 11;
-/// The prototype's column widths, in points: names wide enough for a helper's full name.
-const NAME_WIDTH: f32 = 200.0;
-const COUNT_WIDTH: f32 = 65.0;
-const METRIC_WIDTH: f32 = 76.0;
+/// The App picker's column widths, in points: the App's name as wide as the process group
+/// table's, then its member count and `AppColumn::READINGS`, each wide enough for its heading
+/// and the arrow that shows the Apps are sorted by it.
+const APP_TABLE_WIDTHS: [f32; AppColumn::READINGS.len() + 2] = [
+    crate::live_panel_table::NAME_WIDTH,
+    92.0,
+    80.0,
+    92.0,
+    98.0,
+    80.0,
+    86.0,
+    92.0,
+];
 /// The Disk I/O column's position among an App's reading columns.
 const DISK_READING_INDEX: usize = 5;
 const _: () = {
-    assert!(crate::live_executables::COLUMNS.len() <= METRICS_MAX);
     assert!(JSON_BYTES_MAX > 2 * 4095);
     assert!(matches!(
         AppColumn::READINGS[DISK_READING_INDEX],
@@ -215,7 +221,8 @@ impl LiveDashboard {
             .collect()
     }
 
-    pub fn app_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// The picker's row of the App at `index`, which closes the table's panel when `last`.
+    pub fn app_row(&self, index: usize, last: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(app) = self.app_at(index) else {
             return unavailable("App row unavailable");
         };
@@ -229,9 +236,9 @@ impl LiveDashboard {
             "app-disk:{}:{}:{}",
             key.kind, key.bytes_hex, metrics[DISK_READING_INDEX]
         );
+        let [cpu, resident, footprint, power, energy, disk] = metrics;
 
-        div()
-            .id(SharedString::from(format!("app-choice-{index}")))
+        crate::live_panel_table::row(format!("app-choice-{index}"), last, &self.app_table_scroll)
             .accessibility_id(format!("flightdeck.app.{}.{}", key.kind, key.bytes_hex))
             .role(gpui::Role::Button)
             .aria_label(format!(
@@ -241,19 +248,6 @@ impl LiveDashboard {
                 value_rate(&app["cpu_percent_one_core"], "%")
             ))
             .aria_selected(selected)
-            .min_w_0()
-            .max_w_full()
-            .overflow_x_scroll()
-            .restrict_scroll_to_axis()
-            .track_scroll(&self.app_table_scroll)
-            .border_b_1()
-            .border_color(rgb(GRID))
-            .cursor_pointer()
-            .focusable()
-            .tab_stop(true)
-            .focus(crate::charts::focus_ring)
-            .bg(rgb(if selected { 0x20_30_41 } else { 0x14_19_24 }))
-            .hover(|style| style.bg(rgb(0x20_29_36)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.request.app = Some(key.clone());
                 this.request.executable = None;
@@ -264,11 +258,20 @@ impl LiveDashboard {
                 this.rebuild();
                 cx.notify();
             }))
-            .child(app_cells(
-                AppColumn::Name.cell(app),
-                AppColumn::Members.cell(app),
-                metrics,
+            .child(crate::live_panel_table::cells(
+                [
+                    AppColumn::Name.cell(app),
+                    AppColumn::Members.cell(app),
+                    cpu,
+                    resident,
+                    footprint,
+                    power,
+                    energy,
+                    disk,
+                ],
+                &APP_TABLE_WIDTHS,
                 reading_selector(DISK_READING_INDEX, &disk_selector),
+                Some(selected),
             ))
             .into_any_element()
     }
@@ -281,13 +284,14 @@ impl LiveDashboard {
     /// The App picker's search field over its headings, each heading a button that sorts the
     /// Apps by its column, the heading of the column they are sorted by carrying an arrow.
     pub fn app_list_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = app_table_row(AppColumn::READINGS.len());
+        let mut row = crate::live_panel_table::cells_row(&APP_TABLE_WIDTHS);
         let columns = [AppColumn::Name, AppColumn::Members]
             .into_iter()
             .chain(AppColumn::READINGS);
-        for (index, column) in columns.enumerate() {
+        for (index, (column, width)) in columns.zip(APP_TABLE_WIDTHS).enumerate() {
             let selector = format!("app-column:apps:{}", column.heading());
-            let cell = app_table_cell(index).debug_selector(move || selector.clone());
+            let cell = crate::live_panel_table::column(index, width)
+                .debug_selector(move || selector.clone());
             row = row.child(self.app_list_columns_button(cell, column, cx));
         }
 
@@ -299,21 +303,12 @@ impl LiveDashboard {
                     .flex()
                     .items_center()
                     .h(px(44.0))
-                    .px(px(8.0))
                     .text_size(px(11.0))
                     .children(self.app_list.search.clone()),
             )
             .child(
-                div()
-                    .id("app-columns-apps")
-                    .min_w_0()
-                    .max_w_full()
-                    .overflow_x_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(&self.app_table_scroll)
-                    .child(row)
-                    .bg(rgb(0x1a_22_2f))
-                    .text_color(rgb(MUTED)),
+                crate::live_panel_table::header("app-columns-apps", &self.app_table_scroll)
+                    .child(row),
             )
     }
 
@@ -444,67 +439,6 @@ pub(crate) fn app_cards(app: Option<&Value>) -> Vec<summary::Card> {
             ORANGE,
         ),
     ]
-}
-
-/// A table row's cells: the name, the count and the metrics, each found by the selector
-/// `selector` gives its column index and text, the name being column 0.
-pub fn app_cells<const METRICS: usize>(
-    name: String,
-    count: String,
-    metrics: [String; METRICS],
-    selector: impl Fn(usize, &str) -> String,
-) -> gpui::Div {
-    assert!(METRICS <= METRICS_MAX);
-
-    let mut row = app_table_row(METRICS);
-    for (index, cell) in [name, count].into_iter().chain(metrics).enumerate() {
-        let cell_selector = selector(index, &cell);
-        row = row.child(
-            app_table_cell(index)
-                .debug_selector(move || cell_selector.clone())
-                .child(cell),
-        );
-    }
-
-    row
-}
-
-/// The row that holds a table row's cells, wide enough for the name, the count and `metrics`.
-fn app_table_row(metrics: usize) -> gpui::Div {
-    assert!(metrics <= METRICS_MAX);
-
-    let count_metrics = u16::try_from(metrics).unwrap_or_else(|_| unreachable!());
-    let width_metrics = f32::from(count_metrics);
-
-    div()
-        .min_w(px(NAME_WIDTH
-            + COUNT_WIDTH
-            + width_metrics * METRIC_WIDTH
-            + (width_metrics + 1.0) * 8.0
-            + 16.0))
-        .h(px(26.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .text_size(px(11.0))
-}
-
-/// The cell of a table row's column `index`: the name is column 0 and the count column 1.
-fn app_table_cell(index: usize) -> gpui::Div {
-    match index {
-        0 => div().flex_1().min_w(px(NAME_WIDTH)).truncate(),
-        1 => div()
-            .w(px(COUNT_WIDTH))
-            .flex_shrink_0()
-            .text_right()
-            .truncate(),
-        _ => div()
-            .w(px(METRIC_WIDTH))
-            .flex_shrink_0()
-            .text_right()
-            .truncate(),
-    }
 }
 
 /// The selector of a reading's cell: its own text, the count's prefixed so a PID reads apart

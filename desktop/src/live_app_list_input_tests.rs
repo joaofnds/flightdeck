@@ -105,7 +105,58 @@ fn the_app_picker_lists_ten_of_600_apps(cx: &mut gpui::TestAppContext) {
     harness.teardown();
 }
 
+#[gpui::test]
+fn the_app_picker_draws_its_apps_as_the_inside_app_table_draws_its_process_groups(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: the App picker lists its Apps in the table that lists the process groups inside the
+    // App, with a heading as tall, rows as tall and a name column as wide.
+    // Method: list three Apps beside the open App's two process groups, then measure the name
+    // heading and the first two names of each table on the screen and compare the two.
+    let mut harness = AppHoverHarness::setup(cx);
+
+    harness.driver.seed_apps(&APPS);
+
+    let picker = harness
+        .driver
+        .table_geometry("app-column:apps:App", ["Alpha", "Bravo"]);
+    let groups = harness.driver.table_geometry(
+        "app-column:executables:Process group",
+        ["Accepted worker", "Accepted helper"],
+    );
+    assert_eq!(picker, groups);
+    harness.teardown();
+}
+
+/// Where a table draws its name heading and its first two rows' names, as distances that do not
+/// depend on where the table stands on the page.
+#[derive(Debug, PartialEq)]
+struct TableGeometry {
+    heading_width: gpui::Pixels,
+    name_width: gpui::Pixels,
+    name_height: gpui::Pixels,
+    heading_to_first_row: gpui::Pixels,
+    first_row_to_second: gpui::Pixels,
+}
+
 impl AppHoverDriver {
+    /// The geometry of the table whose name heading has the selector `heading` and whose rows
+    /// have the names `names`, in either order.
+    fn table_geometry(&mut self, heading: &'static str, names: [&'static str; 2]) -> TableGeometry {
+        let heading = self.context.debug_bounds(heading).expect(heading);
+        let mut rows = names.map(|name| self.context.debug_bounds(name).expect(name));
+        rows.sort_by(|first, second| f32::from(first.top()).total_cmp(&f32::from(second.top())));
+        let [first, second] = rows;
+
+        TableGeometry {
+            heading_width: heading.size.width,
+            name_width: first.size.width,
+            name_height: first.size.height,
+            heading_to_first_row: first.center().y - heading.center().y,
+            first_row_to_second: second.center().y - first.center().y,
+        }
+    }
+
     fn seed_apps(&mut self, apps: &[(&str, &str, Option<f64>)]) {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);

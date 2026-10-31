@@ -6,6 +6,9 @@ use gpui::{SharedString, div, prelude::*, px, rgb};
 
 use crate::charts::{BLUE, PANEL, TEXT};
 
+/// The width of a table's first column, which names each row, wide enough for a helper's
+/// full name.
+pub const NAME_WIDTH: f32 = 230.3;
 const RADIUS: f32 = 7.0;
 /// The heading's height with the panel's top border above it.
 const HEADER_HEIGHT: f32 = 38.0;
