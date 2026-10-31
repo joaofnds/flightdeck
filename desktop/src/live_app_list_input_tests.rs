@@ -147,6 +147,34 @@ fn the_app_picker_draws_its_apps_as_the_inside_app_table_draws_its_process_group
     harness.teardown();
 }
 
+#[gpui::test]
+fn opening_the_app_picker_leaves_the_process_groups_where_they_were_scrolled(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: the App picker, whose table is narrower than the process groups' table below it,
+    // leaves that table where a person scrolled it sideways.
+    // Method: in a window wider than the picker's table and narrower than the process groups',
+    // close the picker, turn the wheel sideways past the end of the process groups, open the
+    // picker, and see a group's name stay where the wheel left it.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(1200.0)));
+    harness.driver.context.run_until_parked();
+    harness.driver.click_app_select();
+    let unscrolled = harness.driver.name_left("Accepted worker");
+    harness.driver.wheel_sideways("Accepted worker", -600.0);
+    let scrolled = harness.driver.name_left("Accepted worker");
+
+    harness.driver.click_app_select();
+
+    assert!(scrolled < unscrolled);
+    assert_eq!(harness.driver.name_left("Accepted worker"), scrolled);
+    harness.teardown();
+}
+
 /// Where a table draws its name heading and its first two rows' names, as distances that do not
 /// depend on where the table stands on the page.
 #[derive(Debug, PartialEq)]
@@ -221,6 +249,24 @@ impl AppHoverDriver {
         self.context
             .simulate_click(bounds.center(), Modifiers::none());
         self.context.run_until_parked();
+    }
+
+    /// Turns the wheel sideways by `distance` over the middle of the name `name`, which must be
+    /// on the screen.
+    fn wheel_sideways(&mut self, name: &'static str, distance: f32) {
+        let bounds = self.context.debug_bounds(name).expect(name);
+        self.context.simulate_event(gpui::ScrollWheelEvent {
+            position: bounds.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(distance), gpui::px(0.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Where the name `name` starts on the screen, from its left.
+    fn name_left(&mut self, name: &'static str) -> gpui::Pixels {
+        self.context.debug_bounds(name).expect(name).left()
     }
 
     fn click_heading(&mut self, heading: &str) {

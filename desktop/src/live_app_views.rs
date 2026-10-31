@@ -247,7 +247,7 @@ impl LiveDashboard {
         );
         let [cpu, resident, footprint, power, energy, disk] = metrics;
 
-        crate::live_panel_table::row(format!("app-choice-{index}"), last, &self.app_table_scroll)
+        crate::live_panel_table::row(format!("app-choice-{index}"), last, &self.app_list.scroll)
             .accessibility_id(format!("flightdeck.app.{}.{}", key.kind, key.bytes_hex))
             .role(gpui::Role::Button)
             .aria_label(format!(
@@ -316,7 +316,7 @@ impl LiveDashboard {
                     .children(self.app_list.search.clone()),
             )
             .child(
-                crate::live_panel_table::header("app-columns-apps", &self.app_table_scroll)
+                crate::live_panel_table::header("app-columns-apps", &self.app_list.scroll)
                     .child(row),
             )
     }
@@ -659,6 +659,9 @@ pub struct AppList {
     /// The search the list was last built for, the field's text since its last change, which
     /// the list's rows are built from without access to the field.
     pub search_text: String,
+    /// How far the list's heading and rows are scrolled sideways. The process groups' table
+    /// keeps its own, since a narrower table sharing it would hold the wider one back.
+    pub scroll: gpui::ScrollHandle,
 }
 
 /// The order the Apps list shows its Apps in: by a column, the least or the most first.
