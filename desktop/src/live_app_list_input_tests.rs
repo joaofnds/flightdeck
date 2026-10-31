@@ -148,6 +148,37 @@ fn the_app_picker_draws_its_apps_as_the_inside_app_table_draws_its_process_group
 }
 
 #[gpui::test]
+fn the_last_app_the_picker_lists_closes_its_panel(cx: &mut gpui::TestAppContext) {
+    // Goal: the App picker's panel closes under the last App it lists, and under no App above.
+    // Method: list three Apps, search for two letters the first and the third names contain,
+    // and look for the panel's bottom edge on the row of each.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+
+    harness.driver.search_apps("ha");
+
+    assert!(harness.driver.closes_app_panel("Charlie"));
+    assert!(!harness.driver.closes_app_panel("Alpha"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_last_process_group_closes_the_inside_app_panel(cx: &mut gpui::TestAppContext) {
+    // Goal: the panel of the process groups inside the App closes under the last group it lists,
+    // and under no group above.
+    // Method: show the open App's two process groups and look for the panel's bottom edge on the
+    // row of each.
+    let mut harness = AppHoverHarness::setup(cx);
+
+    harness.driver.seed_apps(&APPS);
+
+    let context = &mut harness.driver.context;
+    assert!(context.debug_bounds("panel-bottom:executable-1").is_some());
+    assert!(context.debug_bounds("panel-bottom:executable-0").is_none());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn opening_the_app_picker_leaves_the_process_groups_where_they_were_scrolled(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -262,6 +293,16 @@ impl AppHoverDriver {
             touch_phase: gpui::TouchPhase::Moved,
         });
         self.context.run_until_parked();
+    }
+
+    /// Whether the App picker's panel closes under the row of `name`, one of `APPS`.
+    fn closes_app_panel(&mut self, name: &str) -> bool {
+        let index = APPS
+            .iter()
+            .position(|&(listed, _, _)| listed == name)
+            .expect(name);
+        let selector: &'static str = format!("panel-bottom:app-choice-{index}").leak();
+        self.context.debug_bounds(selector).is_some()
     }
 
     /// Where the name `name` starts on the screen, from its left.

@@ -32,10 +32,12 @@ pub fn header(id: &'static str, scroll: &gpui::ScrollHandle) -> gpui::Stateful<g
         .text_color(rgb(crate::charts::MUTED))
 }
 
-/// A row of a table with the panel's sides, and its bottom and corners when it is the last.
+/// A row of a table with the panel's sides, and its bottom and corners when it is the last,
+/// which tests then find by the selector `panel-bottom:` and the row's id.
 pub fn row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::Stateful<gpui::Div> {
+    let id = SharedString::from(id);
     div()
-        .id(SharedString::from(id))
+        .id(id.clone())
         .h(px(if last { ROW_HEIGHT + 0.5 } else { ROW_HEIGHT }))
         .min_w_0()
         .max_w_full()
@@ -49,7 +51,10 @@ pub fn row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::Statefu
         .bg(rgb(PANEL))
         .text_size(px(12.0))
         .text_color(rgb(TEXT))
-        .when(last, |row| row.rounded_b(px(RADIUS)))
+        .when(last, |row| {
+            row.rounded_b(px(RADIUS))
+                .debug_selector(move || format!("panel-bottom:{id}"))
+        })
         .cursor_pointer()
         .focusable()
         .tab_stop(true)
