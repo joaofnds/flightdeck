@@ -20,7 +20,8 @@ fn names(apps: &[Value], positions: &[usize]) -> Vec<String> {
 
 #[test]
 fn cpu_descending_lists_the_app_with_no_reading_last() {
-    // Order four Apps by CPU, the most first, where one has no CPU reading.
+    // Goal: an App with no CPU reading sorts after every App with one when the most comes first.
+    // Method: order four Apps by CPU, the most first, where one has no CPU reading.
     let apps = apps_by_cpu();
     let order = AppOrder {
         column: AppColumn::Cpu,
@@ -34,7 +35,9 @@ fn cpu_descending_lists_the_app_with_no_reading_last() {
 
 #[test]
 fn cpu_ascending_lists_the_app_with_no_reading_last() {
-    // Order the same Apps by CPU, the least first: no reading still sorts after every reading.
+    // Goal: an App with no reading sorts last when the least comes first too, rather than first
+    // as a reversed order would put it.
+    // Method: order four Apps by CPU, the least first, where one has no CPU reading.
     let apps = apps_by_cpu();
     let order = AppOrder {
         column: AppColumn::Cpu,
@@ -48,7 +51,8 @@ fn cpu_ascending_lists_the_app_with_no_reading_last() {
 
 #[test]
 fn name_descending_lists_the_names_from_the_end_of_the_alphabet() {
-    // Order four Apps by name from Z, which a second click on the App heading asks for.
+    // Goal: a second click on the App heading turns the name order around.
+    // Method: order four Apps by name from Z.
     let apps = apps_by_cpu();
     let order = AppOrder {
         column: AppColumn::Name,
@@ -62,7 +66,8 @@ fn name_descending_lists_the_names_from_the_end_of_the_alphabet() {
 
 #[test]
 fn search_keeps_the_apps_whose_name_contains_the_text_in_any_case() {
-    // Search the Apps by an uppercase letter that only one lowercase name contains.
+    // Goal: the search ignores the case of the text typed.
+    // Method: search four lowercase names for an uppercase letter that only one contains.
     let apps = apps_by_cpu();
 
     let positions = app_order(&apps.each_ref(), AppOrder::default(), "B");
@@ -72,7 +77,9 @@ fn search_keeps_the_apps_whose_name_contains_the_text_in_any_case() {
 
 #[test]
 fn search_matches_lowercase_text_in_a_name_with_capitals() {
-    // Search with lowercase text that one name holds only in capitals.
+    // Goal: the search ignores the case of the name as well.
+    // Method: search a name with capitals and one without for lowercase text that the first
+    // holds only in capitals.
     let apps = [
         json!({"display_name": "Brave"}),
         json!({"display_name": "safari"}),
@@ -94,7 +101,8 @@ fn apps_in_bundles() -> [Value; 3] {
 
 #[test]
 fn search_reads_the_name_the_list_shows_without_its_app_extension() {
-    // Search the bundled Apps for "app", which only AppCleaner's shown name contains.
+    // Goal: the search reads the name the list shows, which leaves out ".app".
+    // Method: search three bundle names for "app", which only AppCleaner's shown name contains.
     let apps = apps_in_bundles();
 
     let positions = app_order(&apps.each_ref(), AppOrder::default(), "app");
@@ -104,8 +112,9 @@ fn search_reads_the_name_the_list_shows_without_its_app_extension() {
 
 #[test]
 fn name_ascending_orders_the_names_the_list_shows_without_their_app_extension() {
-    // Order the bundled Apps by name from A, where "Foo" sorts before "Foo Bar" only once their
-    // ".app" is left out.
+    // Goal: the name order reads the names the list shows, which leave out ".app".
+    // Method: order three bundle names from A, where "Foo" sorts before "Foo Bar" only once
+    // their ".app" is left out.
     let apps = apps_in_bundles();
     let order = AppOrder {
         column: AppColumn::Name,
@@ -123,77 +132,90 @@ fn name_ascending_orders_the_names_the_list_shows_without_their_app_extension() 
 /// Four Apps whose order differs in each reading column, with a missing reading in most.
 fn apps_by_column() -> [Value; 4] {
     [
-        app_reading(
-            "a",
-            1,
-            (Some("300"), false),
-            (Some("100"), false),
-            None,
-            Some(4.0),
-            (true, Some(5.0)),
-        ),
-        app_reading(
-            "b",
-            4,
-            (None, false),
-            (Some("400"), false),
-            Some(1.0),
-            None,
-            (false, Some(9.0)),
-        ),
-        app_reading(
-            "c",
-            2,
-            (Some("900"), true),
-            (None, false),
-            Some(3.0),
-            Some(1.0),
-            (true, Some(1.0)),
-        ),
-        app_reading(
-            "d",
-            3,
-            (Some("100"), false),
-            (Some("200"), false),
-            Some(2.0),
-            Some(2.0),
-            (true, None),
-        ),
+        AppReadings {
+            name: "a",
+            members: 1,
+            resident: Some("300"),
+            footprint: Some("100"),
+            joules: Some(4.0),
+            disk_measured: true,
+            disk_bps: Some(5.0),
+            ..AppReadings::default()
+        },
+        AppReadings {
+            name: "b",
+            members: 4,
+            footprint: Some("400"),
+            watts: Some(1.0),
+            disk_bps: Some(9.0),
+            ..AppReadings::default()
+        },
+        AppReadings {
+            name: "c",
+            members: 2,
+            resident: Some("900"),
+            resident_overflowed: true,
+            watts: Some(3.0),
+            joules: Some(1.0),
+            disk_measured: true,
+            disk_bps: Some(1.0),
+            ..AppReadings::default()
+        },
+        AppReadings {
+            name: "d",
+            members: 3,
+            resident: Some("100"),
+            footprint: Some("200"),
+            watts: Some(2.0),
+            joules: Some(2.0),
+            disk_measured: true,
+            ..AppReadings::default()
+        },
     ]
+    .map(|readings| readings.app())
 }
 
 /// An App's readings: each memory reading is its known bytes, where None means no member was
-/// measured, and whether the sum overflowed, and its disk reading is whether any member's bytes
+/// measured, and whether its sum overflowed, and the disk reading is whether any member's bytes
 /// were measured and the rate.
-fn app_reading(
-    name: &str,
+#[derive(Default)]
+struct AppReadings {
+    name: &'static str,
     members: u64,
-    resident: (Option<&str>, bool),
-    footprint: (Option<&str>, bool),
+    resident: Option<&'static str>,
+    resident_overflowed: bool,
+    footprint: Option<&'static str>,
+    footprint_overflowed: bool,
     watts: Option<f64>,
     joules: Option<f64>,
-    disk: (bool, Option<f64>),
-) -> Value {
-    let measure = |(known, overflowed): (Option<&str>, bool)| {
-        json!({"known": known, "measured_members": u64::from(known.is_some()),
-            "unavailable_members": 0, "overflowed": overflowed})
-    };
-    let (disk_measured, disk_bps) = disk;
+    disk_measured: bool,
+    disk_bps: Option<f64>,
+}
 
-    json!({"display_name": name, "members": members,
-        "resident_bytes": measure(resident), "footprint_bytes": measure(footprint),
-        "energy_watts": watts, "energy_joules": joules,
-        "disk_io_bytes": {"known": "1000", "measured_members": u64::from(disk_measured),
-            "unavailable_members": 0, "overflowed": false},
-        "disk_io_bps": disk_bps})
+impl AppReadings {
+    fn app(&self) -> Value {
+        let measure = |known: Option<&str>, overflowed: bool| {
+            json!({"known": known, "measured_members": u64::from(known.is_some()),
+                "unavailable_members": 0, "overflowed": overflowed})
+        };
+
+        json!({"display_name": self.name, "members": self.members,
+            "resident_bytes": measure(self.resident, self.resident_overflowed),
+            "footprint_bytes": measure(self.footprint, self.footprint_overflowed),
+            "energy_watts": self.watts, "energy_joules": self.joules,
+            "disk_io_bytes": {"known": "1000", "measured_members": u64::from(self.disk_measured),
+                "unavailable_members": 0, "overflowed": false},
+            "disk_io_bps": self.disk_bps})
+    }
 }
 
 macro_rules! column_descending_case {
     ($name:ident, $column:expr, $expected:expr) => {
         #[test]
         fn $name() {
-            // Order the four Apps by the column, the most first, where the Apps with no reading
-            // in it, unmeasured or overflowed, sort last by name.
+            // Goal: each reading column orders the Apps by its own reading, the most first, with
+            // the Apps that have none in it, unmeasured or overflowed, last by name.
+            // Method: order four Apps whose order differs in each column by the column.
             let apps = apps_by_column();
             let order = AppOrder {
                 column: $column,
