@@ -87,11 +87,13 @@ impl LiveDashboard {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.picker = toggle(this.picker, Picker::App);
                                 // A person opens the picker to find an App, so its search
-                                // takes their keystrokes at once.
+                                // starts empty, over the first ten, and takes their keystrokes
+                                // at once.
                                 if this.picker == Some(Picker::App) {
                                     let Some(search) = &this.app_list.search else {
                                         unreachable!("create_dashboard_with sets the App search");
                                     };
+                                    search.update(cx, |search, cx| search.clear(window, cx));
                                     window.focus(&search.focus_handle(cx), cx);
                                 }
                                 this.rebuild();

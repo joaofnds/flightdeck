@@ -44,6 +44,12 @@ impl TextInput {
         }
     }
 
+    /// Empties the field, as cutting all its text would.
+    pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let length = self.text.content.encode_utf16().count();
+        self.replace_text_in_range(Some(0..length), "", window, cx);
+    }
+
     fn keyboard(
         &mut self,
         event: &gpui::KeyDownEvent,

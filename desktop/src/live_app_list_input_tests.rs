@@ -91,6 +91,24 @@ fn typing_right_after_opening_the_app_picker_searches_its_apps(cx: &mut gpui::Te
 }
 
 #[gpui::test]
+fn typing_right_after_reopening_the_app_picker_starts_a_new_search(cx: &mut gpui::TestAppContext) {
+    // Goal: text typed right after the App picker opens again replaces the search it closed
+    // with, so a person who reopens it to find another App lists that App.
+    // Method: search for two letters, close and reopen the picker with clicks on the App select,
+    // type the start of another name, and read which names the screen shows.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+    harness.driver.search_apps("ha");
+    harness.driver.click_app_select();
+    harness.driver.click_app_select();
+
+    harness.driver.type_text("br");
+
+    assert_eq!(harness.driver.listed(), ["Bravo"]);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_app_search_finds_an_app_listed_after_the_first_ten(cx: &mut gpui::TestAppContext) {
     // Goal: a search looks through every App of a second, not only the ten the picker lists
     // before it.
