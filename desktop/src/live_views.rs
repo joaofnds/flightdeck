@@ -106,11 +106,11 @@ impl LiveDashboard {
             | Row::CPUTop(_) => (4.0, 4.0),
             Row::OverviewRankings(_) => (6.0, 6.0),
             Row::Heading(_) => (16.0, 8.0),
-            Row::SelfPart(SelfPart::Overview) | Row::AppColumns("apps") => (8.0, 0.0),
+            Row::SelfPart(SelfPart::Overview) | Row::AppColumns => (8.0, 0.0),
             Row::SelfPart(_)
             | Row::App(_)
             | Row::Executable(_)
-            | Row::AppColumns("executables")
+            | Row::ExecutableColumns
             | Row::Disclosure(Section::AppTotals)
             | Row::ProcessGroupingAbout => (0.0, 0.0),
             Row::ProcessGroupBar => (0.0, 12.0),
@@ -179,10 +179,10 @@ impl LiveDashboard {
             Row::AppSelector => self.app_selector(cx).into_any_element(),
             Row::ProcessGroupBar => self.process_group_bar(cx).into_any_element(),
             Row::ProcessGroupingAbout => self.process_grouping_about().into_any_element(),
-            Row::AppColumns("executables") => {
+            Row::ExecutableColumns => {
                 crate::live_executables::table_header(&self.app_table_scroll).into_any_element()
             }
-            Row::AppColumns(_) => self.app_list_columns(cx).into_any_element(),
+            Row::AppColumns => self.app_list_columns(cx).into_any_element(),
             Row::Charts { panels, columns } | Row::ContextCharts { panels, columns } => {
                 self.row_content_charts(panels, *columns, cx)
             }

@@ -320,7 +320,10 @@ pub enum Row {
     ProcessGroupBar,
     /// The Apps page's note on process grouping and coverage, under the group table.
     ProcessGroupingAbout,
-    AppColumns(&'static str),
+    /// The App picker's search field over the headings of its table of Apps.
+    AppColumns,
+    /// The headings of the table of the process groups inside the App.
+    ExecutableColumns,
     CPUTop(Option<Rc<Panel>>),
     CPUActivity,
     CPUHistory,

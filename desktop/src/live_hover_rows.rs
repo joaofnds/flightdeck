@@ -467,13 +467,13 @@ impl LiveDashboard {
             // them and the rest arrive below, moving nothing it drew.
             if self.is_opening() {
                 rows.push(Row::Heading(format!("Inside {UNNAMED_APP}")));
-                rows.push(Row::AppColumns("executables"));
+                rows.push(Row::ExecutableColumns);
             }
             return rows;
         };
 
         if self.picker == Some(crate::live_dashboard::Picker::App) {
-            rows.push(Row::AppColumns("apps"));
+            rows.push(Row::AppColumns);
             for index in self.app_choice_indices() {
                 rows.push(Row::App(index));
             }
@@ -487,7 +487,7 @@ impl LiveDashboard {
             |detail| crate::live_app_views::app_name(&detail["app"]),
         );
         rows.push(Row::Heading(format!("Inside {name}")));
-        rows.push(Row::AppColumns("executables"));
+        rows.push(Row::ExecutableColumns);
         for index in 0..self.reading_executables().len().min(512) {
             rows.push(Row::Executable(index));
         }
