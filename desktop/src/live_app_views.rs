@@ -691,8 +691,8 @@ impl AppOrder {
 }
 
 /// The positions in `apps` of the Apps whose name, as the list shows it without ".app",
-/// contains `search`, in `order`. Names compare in lowercase. An App with no reading in the column sorts last either way, and Apps that
-/// tie sort by name, then by position.
+/// contains `search`, in `order`. Names compare in lowercase. An App with no reading in the
+/// column sorts last either way, and Apps that tie sort by name, then by position.
 pub fn app_order(apps: &[&Value], order: AppOrder, search: &str) -> Vec<usize> {
     assert!(apps.len() <= APPS_MAX + 1);
 
