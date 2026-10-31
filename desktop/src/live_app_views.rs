@@ -88,9 +88,12 @@ impl LiveDashboard {
                                 // A person opens the picker to find an App, so its search
                                 // takes their keystrokes at once.
                                 if this.picker == Some(Picker::App) {
-                                    if let Some(search) = &this.app_list.search {
-                                        window.focus(&search.focus_handle(cx), cx);
-                                    }
+                                    let Some(search) = &this.app_list.search else {
+                                        unreachable!(
+                                            "create_dashboard_with gives every dashboard its App search"
+                                        );
+                                    };
+                                    window.focus(&search.focus_handle(cx), cx);
                                 }
                                 this.rebuild();
                                 cx.notify();
