@@ -75,22 +75,22 @@ pub fn row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::Statefu
         .focus(crate::charts::focus_ring)
 }
 
-/// The cells of one row of a table, each as wide as its column's entry in `widths`. Each cell
-/// is found by the selector `selector` gives its column index and text. The name's cell, the
-/// first, holds the prototype's button, which `pressed` marks as the row selected, and tests then
-/// find by the selector `selected:` and the name.
+/// The cells of one row of a table, holding `texts`, each as wide as its column's entry in
+/// `widths`. Each cell is found by the selector `selector` gives its column index and text. The
+/// name's cell, the first, holds the prototype's button, which `pressed` marks as the row
+/// selected, and tests then find by the selector `selected:` and the name.
 pub fn cells<const COLUMNS: usize>(
-    cells: [String; COLUMNS],
+    texts: [String; COLUMNS],
     widths: &[f32; COLUMNS],
     selector: impl Fn(usize, &str) -> String,
     pressed: Option<bool>,
 ) -> gpui::Div {
     let mut row = cells_row(widths);
-    for (index, cell) in cells.into_iter().enumerate() {
-        let cell_selector = selector(index, &cell);
-        let column = column(index, widths[index]).debug_selector(move || cell_selector.clone());
+    for (index, text) in texts.into_iter().enumerate() {
+        let cell_selector = selector(index, &text);
+        let cell = column(index, widths[index]).debug_selector(move || cell_selector.clone());
         row = row.child(match (index, pressed) {
-            (0, Some(pressed)) => column.child(
+            (0, Some(pressed)) => cell.child(
                 div()
                     .h(px(44.0))
                     .px(px(8.0))
@@ -101,11 +101,11 @@ pub fn cells<const COLUMNS: usize>(
                         button
                             .bg(crate::charts::alpha(BLUE, 0.15))
                             .text_color(rgb(BLUE))
-                            .debug_selector(|| format!("selected:{cell}"))
+                            .debug_selector(|| format!("selected:{text}"))
                     })
-                    .child(cell),
+                    .child(text),
             ),
-            _ => column.child(cell),
+            _ => cell.child(text),
         });
     }
     row

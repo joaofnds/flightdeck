@@ -199,9 +199,9 @@ impl LiveDashboard {
             Row::Heading(title) => heading(title).into_any_element(),
             Row::Disclosure(section) => self.disclosure(*section, cx).into_any_element(),
             Row::Hardware => self.live_hardware().into_any_element(),
-            Row::App(app) => {
+            Row::App(app_index) => {
                 let last = !matches!(self.rows.get(index + 1), Some(Row::App(_)));
-                self.app_row(*app, last, cx)
+                self.app_row(*app_index, last, cx)
             }
             Row::Executable(executable_index) => {
                 let last = !matches!(self.rows.get(index + 1), Some(Row::Executable(_)));

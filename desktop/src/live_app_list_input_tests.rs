@@ -84,16 +84,16 @@ fn typing_right_after_opening_the_app_picker_searches_its_apps(cx: &mut gpui::Te
     harness.driver.click_app_select();
 
     harness.driver.click_app_select();
-    harness.driver.context.simulate_input("ha");
-    harness.driver.context.run_until_parked();
+    harness.driver.type_text("ha");
 
     assert_eq!(harness.driver.listed(), ["Alpha", "Charlie"]);
     harness.teardown();
 }
 
 #[gpui::test]
-fn the_app_search_finds_an_app_listed_after_the_first_512(cx: &mut gpui::TestAppContext) {
-    // Goal: the picker holds every App of a second, not only the first 512 the page once held.
+fn the_app_search_finds_an_app_listed_after_the_first_ten(cx: &mut gpui::TestAppContext) {
+    // Goal: a search looks through every App of a second, not only the ten the picker lists
+    // before it.
     // Method: list 600 Apps, search for the last one's name, and look for it on the screen.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_numbered_apps(600);
@@ -383,6 +383,11 @@ impl AppHoverDriver {
         let bounds = self.context.debug_bounds("app-search").expect("app-search");
         self.context
             .simulate_click(bounds.center(), Modifiers::none());
+        self.type_text(text);
+    }
+
+    /// Types `text` into whatever has the keyboard's focus.
+    fn type_text(&mut self, text: &str) {
         self.context.simulate_input(text);
         self.context.run_until_parked();
     }
