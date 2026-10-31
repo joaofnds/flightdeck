@@ -77,20 +77,31 @@ fn the_app_search_finds_an_app_listed_after_the_first_512(cx: &mut gpui::TestApp
     // Goal: the picker holds every App of a second, not only the first 512 the page once held.
     // Method: list 600 Apps, search for the last one's name, and look for it on the screen.
     let mut harness = AppHoverHarness::setup(cx);
-    let names: Vec<String> = (0..600).map(|index| format!("Echo {index:03}")).collect();
-    let keys: Vec<String> = (0..600)
-        .map(|index| format!("{:04x}", 0x1000 + index))
-        .collect();
-    let apps: Vec<_> = names
-        .iter()
-        .zip(&keys)
-        .map(|(name, key)| (name.as_str(), key.as_str(), None))
-        .collect();
-    harness.driver.seed_apps(&apps);
+    harness.driver.seed_numbered_apps(600);
 
     harness.driver.search_apps("Echo 599");
 
     assert!(harness.driver.context.debug_bounds("Echo 599").is_some());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_app_picker_lists_ten_of_600_apps(cx: &mut gpui::TestAppContext) {
+    // Goal: the open App picker lists ten Apps at most, however many the second holds.
+    // Method: list 600 Apps by name, then look for the tenth and the eleventh on the screen, and
+    // for the heading of the table below the picker, which shows the list was drawn past it.
+    let mut harness = AppHoverHarness::setup(cx);
+
+    harness.driver.seed_numbered_apps(600);
+
+    let context = &mut harness.driver.context;
+    assert!(context.debug_bounds("Echo 009").is_some());
+    assert!(context.debug_bounds("Echo 010").is_none());
+    assert!(
+        context
+            .debug_bounds("app-column:executables:Process group")
+            .is_some()
+    );
     harness.teardown();
 }
 
@@ -118,6 +129,20 @@ impl AppHoverDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+    }
+
+    /// Lists `count` Apps named Echo 000, Echo 001 and on, none with a CPU reading.
+    fn seed_numbered_apps(&mut self, count: usize) {
+        let names: Vec<String> = (0..count).map(|index| format!("Echo {index:03}")).collect();
+        let keys: Vec<String> = (0..count)
+            .map(|index| format!("{:04x}", 0x1000 + index))
+            .collect();
+        let apps: Vec<_> = names
+            .iter()
+            .zip(&keys)
+            .map(|(name, key)| (name.as_str(), key.as_str(), None))
+            .collect();
+        self.seed_apps(&apps);
     }
 
     fn click_heading(&mut self, heading: &str) {

@@ -13,6 +13,9 @@ use crate::live_views::{summary, text};
 /// The prototype's network cyan.
 const CYAN: u32 = 0x00_ff_ff;
 const SELECTED_APP_INDEX: usize = PAGE_APPS_MAX;
+/// The most Apps the App picker lists, the first in its order of those its search names, so the
+/// list stays short enough to read at a glance.
+pub const APP_CHOICES_MAX: usize = 10;
 const JSON_BYTES_MAX: usize = 32 * 1024;
 /// The most metric columns a table row has, the process group table's eleven.
 const METRICS_MAX: usize = 11;
@@ -201,6 +204,7 @@ impl LiveDashboard {
 
         app_order(&choices, self.app_list.order, &self.app_list.search_text)
             .into_iter()
+            .take(APP_CHOICES_MAX)
             .map(|position| {
                 if position < listed_count {
                     position

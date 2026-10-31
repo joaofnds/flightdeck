@@ -9,7 +9,7 @@ use crate::live_sections::Section;
 const UNNAMED_APP: &str = "selected App";
 /// The most rows the Apps page draws: one for each App the picker lists, and 2,048 for the
 /// rest of the page.
-const READING_ROWS_APPS_MAX: usize = crate::live_source::PAGE_APPS_MAX + 2048;
+const READING_ROWS_APPS_MAX: usize = crate::live_app_views::APP_CHOICES_MAX + 2048;
 
 impl LiveDashboard {
     pub(crate) fn reading_chart_columns(&self) -> usize {
