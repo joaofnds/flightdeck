@@ -125,6 +125,43 @@ fn the_app_picker_lists_ten_of_600_apps(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn a_search_more_than_ten_app_names_contain_lists_ten(cx: &mut gpui::TestAppContext) {
+    // Goal: a search that more than ten App names contain lists ten of those Apps at most.
+    // Method: list 600 Apps by name, search for text the first hundred names contain, then look
+    // for the tenth and the eleventh of them on the screen, and for the heading of the table
+    // below the picker, which shows the list was drawn past it.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_numbered_apps(600);
+
+    harness.driver.search_apps("Echo 0");
+
+    let context = &mut harness.driver.context;
+    assert!(context.debug_bounds("Echo 009").is_some());
+    assert!(context.debug_bounds("Echo 010").is_none());
+    assert!(
+        context
+            .debug_bounds("app-column:executables:Process group")
+            .is_some()
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_app_picker_marks_the_open_app_and_no_other(cx: &mut gpui::TestAppContext) {
+    // Goal: the App picker marks the row of the App the page shows as selected, and no other.
+    // Method: list three Apps beside the open one and look for the selected mark on the open
+    // App's name and on another App's.
+    let mut harness = AppHoverHarness::setup(cx);
+
+    harness.driver.seed_apps(&APPS);
+
+    let context = &mut harness.driver.context;
+    assert!(context.debug_bounds("selected:Example App").is_some());
+    assert!(context.debug_bounds("selected:Alpha").is_none());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_app_picker_draws_its_apps_as_the_inside_app_table_draws_its_process_groups(
     cx: &mut gpui::TestAppContext,
 ) {

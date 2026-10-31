@@ -77,7 +77,8 @@ pub fn row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::Statefu
 
 /// The cells of one row of a table, each as wide as its column's entry in `widths`. Each cell
 /// is found by the selector `selector` gives its column index and text. The name's cell, the
-/// first, holds the prototype's button, which `pressed` marks as the row selected.
+/// first, holds the prototype's button, which `pressed` marks as the row selected, and tests then
+/// find by the selector `selected:` and the name.
 pub fn cells<const COLUMNS: usize>(
     cells: [String; COLUMNS],
     widths: &[f32; COLUMNS],
@@ -100,6 +101,7 @@ pub fn cells<const COLUMNS: usize>(
                         button
                             .bg(crate::charts::alpha(BLUE, 0.15))
                             .text_color(rgb(BLUE))
+                            .debug_selector(|| format!("selected:{cell}"))
                     })
                     .child(cell),
             ),
