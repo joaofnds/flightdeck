@@ -277,7 +277,10 @@ fn probe_apps(snapshot: &Snapshot) -> Result<(), String> {
         .as_array()
         .ok_or_else(|| "Missing live App rows".to_owned())?;
     if rows.len() > crate::live_source::APPS_MAX {
-        return Err("Live App page exceeds 2048 rows".to_owned());
+        return Err(format!(
+            "Live App page exceeds {} rows",
+            crate::live_source::APPS_MAX
+        ));
     }
     if !rows.is_empty() {
         let detail = snapshot
@@ -370,7 +373,7 @@ fn probe_pagination(probe: &mut Probe) -> Result<Value, String> {
     let mut offsets = BTreeMap::new();
     offsets.insert("cpu".to_owned(), json!(probe_pagination_cpu(probe)?));
     let mut request = probe_request("apps");
-    request.apps_offset = u32::MAX - u32::MAX % 512;
+    request.apps_offset = u32::MAX - u32::MAX % viewer::live_app_response::APPS_PAGE_ROWS_MAX;
     request.members_offset = request.apps_offset;
     let snapshot = probe_read(probe, &request)?;
     probe_validate(&snapshot, "apps")?;

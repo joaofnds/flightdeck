@@ -12,7 +12,7 @@ const RAPID_REQUESTS: u32 = 32;
 const CONTEXT_SECONDS: u64 = 900;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const _: () = {
-    assert!(APP_PAGES_MAX * 512 == 32768);
+    assert!(APP_PAGES_MAX * viewer::live_app_response::APPS_PAGE_ROWS_MAX == 131_072);
     assert!(RAPID_REQUESTS > 1);
     assert!(OBSERVATIONS_MAX >= 900);
     assert!(CONTEXT_SECONDS + viewer::LEAD_IN_SECONDS == viewer::CHARTED_SECONDS);
@@ -74,7 +74,10 @@ fn run_apps_find(
         identity_validate(&apps["selected"], &initial.selection["selected"])?;
         let rows = apps["apps"].as_array().ok_or("Missing captured App keys")?;
         if rows.len() > crate::live_source::APPS_MAX {
-            return Err("Captured App key page exceeds 2048 rows".into());
+            return Err(format!(
+                "Captured App key page exceeds {} rows",
+                crate::live_source::APPS_MAX
+            ));
         }
         for row in rows {
             if row["key"]["kind"].as_str() == Some(kind) {
