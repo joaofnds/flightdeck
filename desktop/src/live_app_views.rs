@@ -266,17 +266,14 @@ impl LiveDashboard {
         Some(&selected_detail(snapshot.detail.as_deref(), self.request.app.as_ref())?["app"])
     }
 
-    /// The App picker's headings. The heading of each column the Apps can sort by is a button
-    /// that sorts them by it, and the heading of the column they are sorted by carries an arrow.
+    /// The App picker's headings, each a button that sorts the Apps by its column, the heading
+    /// of the column they are sorted by carrying an arrow.
     pub fn app_list_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = app_cells_row(APP_HEADINGS.len() - 2);
         for (index, (heading, column)) in APP_HEADINGS.into_iter().enumerate() {
             let selector = format!("app-column:apps:{heading}");
             let cell = app_cells_cell(index).debug_selector(move || selector.clone());
-            row = match column {
-                Some(column) => row.child(self.app_list_columns_button(cell, heading, column, cx)),
-                None => row.child(cell.child(heading)),
-            };
+            row = row.child(self.app_list_columns_button(cell, heading, column, cx));
         }
 
         div()
@@ -596,19 +593,25 @@ fn app_metrics(app: &Value) -> [String; 6] {
 pub enum AppColumn {
     #[default]
     Name,
+    Members,
     Cpu,
+    Resident,
+    Footprint,
+    Power,
+    Energy,
+    Disk,
 }
 
 /// The App picker's headings, in the order of its cells, with the column each sorts the Apps by.
-const APP_HEADINGS: [(&str, Option<AppColumn>); 8] = [
-    ("App", Some(AppColumn::Name)),
-    ("Members", None),
-    ("CPU %", Some(AppColumn::Cpu)),
-    ("Resident", None),
-    ("Footprint", None),
-    ("Power", None),
-    ("Energy", None),
-    ("Disk I/O", None),
+const APP_HEADINGS: [(&str, AppColumn); 8] = [
+    ("App", AppColumn::Name),
+    ("Members", AppColumn::Members),
+    ("CPU %", AppColumn::Cpu),
+    ("Resident", AppColumn::Resident),
+    ("Footprint", AppColumn::Footprint),
+    ("Power", AppColumn::Power),
+    ("Energy", AppColumn::Energy),
+    ("Disk I/O", AppColumn::Disk),
 ];
 
 /// The order the Apps list shows its Apps in: by a column, the least or the most first.
@@ -665,10 +668,29 @@ struct AppOrderKey {
     position: usize,
 }
 
+/// The reading of `app` its cell in `column` shows, or None where the cell shows none.
 fn app_order_reading(app: &Value, column: AppColumn) -> Option<f64> {
     match column {
         AppColumn::Name => None,
+        AppColumn::Members => app["members"].as_f64(),
         AppColumn::Cpu => app["cpu_percent_one_core"].as_f64(),
+        AppColumn::Resident => app_order_measure(&app["resident_bytes"]),
+        AppColumn::Footprint => app_order_measure(&app["footprint_bytes"]),
+        AppColumn::Power => app["energy_watts"].as_f64(),
+        AppColumn::Energy => app["energy_joules"].as_f64(),
+        AppColumn::Disk => match app_order_measure(&app["disk_io_bytes"]) {
+            Some(_) => app["disk_io_bps"].as_f64(),
+            None => None,
+        },
+    }
+}
+
+/// A measured sum's known value, or None where no member was measured, the sum overflowed or
+/// the sum is malformed, each of which its cell already shows.
+fn app_order_measure(value: &Value) -> Option<f64> {
+    match measure_value(value) {
+        Ok(Some(known)) => known.to_f64(),
+        Ok(None) | Err(_) => None,
     }
 }
 

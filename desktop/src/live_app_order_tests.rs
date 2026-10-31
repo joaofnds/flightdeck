@@ -55,3 +55,121 @@ fn search_keeps_the_apps_whose_name_contains_the_text_in_any_case() {
 
     assert_eq!(names(&apps, &positions), ["b"]);
 }
+
+/// Four Apps whose order differs in each reading column, with a missing reading in most.
+fn apps_by_column() -> [Value; 4] {
+    [
+        app_reading(
+            "a",
+            1,
+            (Some("300"), false),
+            (Some("100"), false),
+            None,
+            Some(4.0),
+            (true, Some(5.0)),
+        ),
+        app_reading(
+            "b",
+            4,
+            (None, false),
+            (Some("400"), false),
+            Some(1.0),
+            None,
+            (false, Some(9.0)),
+        ),
+        app_reading(
+            "c",
+            2,
+            (Some("900"), true),
+            (None, false),
+            Some(3.0),
+            Some(1.0),
+            (true, Some(1.0)),
+        ),
+        app_reading(
+            "d",
+            3,
+            (Some("100"), false),
+            (Some("200"), false),
+            Some(2.0),
+            Some(2.0),
+            (true, None),
+        ),
+    ]
+}
+
+/// An App's readings: each memory reading is its known bytes, where None means no member was
+/// measured, and whether the sum overflowed, and its disk reading is whether any member's bytes
+/// were measured and the rate.
+fn app_reading(
+    name: &str,
+    members: u64,
+    resident: (Option<&str>, bool),
+    footprint: (Option<&str>, bool),
+    watts: Option<f64>,
+    joules: Option<f64>,
+    disk: (bool, Option<f64>),
+) -> Value {
+    let measure = |(known, overflowed): (Option<&str>, bool)| {
+        json!({"known": known, "measured_members": u64::from(known.is_some()),
+            "unavailable_members": 0, "overflowed": overflowed})
+    };
+    let (disk_measured, disk_bps) = disk;
+
+    json!({"display_name": name, "members": members,
+        "resident_bytes": measure(resident), "footprint_bytes": measure(footprint),
+        "energy_watts": watts, "energy_joules": joules,
+        "disk_io_bytes": {"known": "1000", "measured_members": u64::from(disk_measured),
+            "unavailable_members": 0, "overflowed": false},
+        "disk_io_bps": disk_bps})
+}
+
+macro_rules! column_descending_case {
+    ($name:ident, $column:expr, $expected:expr) => {
+        #[test]
+        fn $name() {
+            // Order the four Apps by the column, the most first, where the Apps with no reading
+            // in it, unmeasured or overflowed, sort last by name.
+            let apps = apps_by_column();
+            let order = AppOrder {
+                column: $column,
+                descending: true,
+            };
+
+            let positions = app_order(&apps.each_ref(), order, "");
+
+            assert_eq!(names(&apps, &positions), $expected);
+        }
+    };
+}
+
+column_descending_case!(
+    members_descending_lists_the_app_with_the_most_members_first,
+    AppColumn::Members,
+    ["b", "d", "c", "a"]
+);
+column_descending_case!(
+    resident_descending_lists_unmeasured_and_overflowed_memory_last,
+    AppColumn::Resident,
+    ["a", "d", "b", "c"]
+);
+column_descending_case!(
+    footprint_descending_reads_the_footprint_and_not_the_resident_memory,
+    AppColumn::Footprint,
+    ["b", "d", "a", "c"]
+);
+column_descending_case!(
+    power_descending_lists_the_app_with_no_power_reading_last,
+    AppColumn::Power,
+    ["c", "d", "b", "a"]
+);
+column_descending_case!(
+    energy_descending_lists_the_app_with_no_energy_reading_last,
+    AppColumn::Energy,
+    ["a", "d", "c", "b"]
+);
+column_descending_case!(
+    disk_descending_lists_an_app_whose_disk_bytes_were_unmeasured_last,
+    AppColumn::Disk,
+    ["a", "c", "b", "d"]
+);
