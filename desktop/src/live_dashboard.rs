@@ -172,13 +172,8 @@ pub struct LiveDashboard {
     pub(crate) viewport_size: gpui::Size<gpui::Pixels>,
     /// The Apps page's picker whose choices are open, if any.
     pub picker: Option<Picker>,
-    /// The order the App picker lists its Apps in, which a click on a heading sets.
-    pub(crate) app_order: crate::live_app_views::AppOrder,
-    /// The field a person types part of an App's name into, to list only the Apps it names.
-    pub(crate) app_search: Option<gpui::Entity<crate::native_input::TextInput>>,
-    /// The search the App picker's list was last built for, the field's text since its last
-    /// change, which the list's rows are built from without access to the field.
-    pub(crate) app_search_text: String,
+    /// The order the App picker lists its Apps in and the search that narrows them.
+    pub(crate) app_list: crate::live_app_views::AppList,
     pub(crate) app_table_scroll: gpui::ScrollHandle,
     pub cpu_inspection: Option<crate::live_cpu_history::CPUInspection>,
     pub cpu_history_focus: Option<gpui::FocusHandle>,
@@ -418,9 +413,7 @@ impl LiveDashboard {
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
             viewport_size: gpui::size(px(0.0), px(0.0)),
             picker: None,
-            app_order: crate::live_app_views::AppOrder::default(),
-            app_search: None,
-            app_search_text: String::new(),
+            app_list: crate::live_app_views::AppList::default(),
             app_table_scroll: gpui::ScrollHandle::new(),
             cpu_inspection: None,
             cpu_history_focus: None,

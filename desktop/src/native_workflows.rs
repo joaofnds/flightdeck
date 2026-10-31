@@ -69,7 +69,7 @@ fn create_dashboard_with(
             dashboard.app_search_changed(&search, cx);
         })
         .detach();
-        dashboard.app_search = Some(search);
+        dashboard.app_list.search = Some(search);
         dashboard
     });
 

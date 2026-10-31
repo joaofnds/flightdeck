@@ -194,7 +194,7 @@ impl LiveDashboard {
         }
         assert!(choices.len() <= APPS_MAX + 1);
 
-        app_order(&choices, self.app_order, &self.app_search_text)
+        app_order(&choices, self.app_list.order, &self.app_list.search_text)
             .into_iter()
             .map(|position| {
                 if position < listed {
@@ -286,7 +286,7 @@ impl LiveDashboard {
                     .h(px(44.0))
                     .px(px(8.0))
                     .text_size(px(11.0))
-                    .children(self.app_search.clone()),
+                    .children(self.app_list.search.clone()),
             )
             .child(
                 div()
@@ -310,11 +310,11 @@ impl LiveDashboard {
         cx: &mut Context<Self>,
     ) {
         let text = &search.read(cx).text.content;
-        if *text == self.app_search_text {
+        if *text == self.app_list.search_text {
             return;
         }
 
-        self.app_search_text.clone_from(text);
+        self.app_list.search_text.clone_from(text);
         self.rebuild();
         cx.notify();
     }
@@ -326,9 +326,9 @@ impl LiveDashboard {
         column: AppColumn,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let label = if self.app_order.column != column {
+        let label = if self.app_list.order.column != column {
             heading.to_owned()
-        } else if self.app_order.descending {
+        } else if self.app_list.order.descending {
             format!("{heading} \u{2193}")
         } else {
             format!("{heading} \u{2191}")
@@ -342,7 +342,7 @@ impl LiveDashboard {
             .focus(crate::charts::focus_ring)
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.app_order = this.app_order.clicked(column);
+                this.app_list.order = this.app_list.order.clicked(column);
                 this.rebuild();
                 cx.notify();
             }))
@@ -654,6 +654,18 @@ const APP_HEADINGS: [(&str, AppColumn); 8] = [
     ("Energy", AppColumn::Energy),
     ("Disk I/O", AppColumn::Disk),
 ];
+
+/// The App picker's order and search, which its headings and search field set.
+#[derive(Default)]
+pub struct AppList {
+    /// The order a click on a heading sets.
+    pub order: AppOrder,
+    /// The field a person types part of an App's name into, to list only the Apps it names.
+    pub search: Option<gpui::Entity<crate::native_input::TextInput>>,
+    /// The search the list was last built for, the field's text since its last change, which
+    /// the list's rows are built from without access to the field.
+    pub search_text: String,
+}
 
 /// The order the Apps list shows its Apps in: by a column, the least or the most first.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
