@@ -194,7 +194,7 @@ impl LiveDashboard {
         }
         assert!(choices.len() <= APPS_MAX + 1);
 
-        app_order(&choices, self.app_order, "")
+        app_order(&choices, self.app_order, &self.app_search_text)
             .into_iter()
             .map(|position| {
                 if position < listed {
@@ -266,8 +266,8 @@ impl LiveDashboard {
         Some(&selected_detail(snapshot.detail.as_deref(), self.request.app.as_ref())?["app"])
     }
 
-    /// The App picker's headings, each a button that sorts the Apps by its column, the heading
-    /// of the column they are sorted by carrying an arrow.
+    /// The App picker's search field over its headings, each heading a button that sorts the
+    /// Apps by its column, the heading of the column they are sorted by carrying an arrow.
     pub fn app_list_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = app_cells_row(APP_HEADINGS.len() - 2);
         for (index, (heading, column)) in APP_HEADINGS.into_iter().enumerate() {
@@ -277,15 +277,46 @@ impl LiveDashboard {
         }
 
         div()
-            .id("app-columns-apps")
-            .min_w_0()
-            .max_w_full()
-            .overflow_x_scroll()
-            .restrict_scroll_to_axis()
-            .track_scroll(&self.app_table_scroll)
-            .child(row)
-            .bg(rgb(0x1a_22_2f))
-            .text_color(rgb(MUTED))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(44.0))
+                    .px(px(8.0))
+                    .text_size(px(11.0))
+                    .children(self.app_search.clone()),
+            )
+            .child(
+                div()
+                    .id("app-columns-apps")
+                    .min_w_0()
+                    .max_w_full()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&self.app_table_scroll)
+                    .child(row)
+                    .bg(rgb(0x1a_22_2f))
+                    .text_color(rgb(MUTED)),
+            )
+    }
+
+    /// Lists only the Apps the search field's new text names, once the text has changed, since
+    /// the field also tells of a moved cursor or selection.
+    pub(crate) fn app_search_changed(
+        &mut self,
+        search: &gpui::Entity<crate::native_input::TextInput>,
+        cx: &mut Context<Self>,
+    ) {
+        let text = &search.read(cx).text.content;
+        if *text == self.app_search_text {
+            return;
+        }
+
+        self.app_search_text.clone_from(text);
+        self.rebuild();
+        cx.notify();
     }
 
     fn app_list_columns_button(
@@ -601,6 +632,16 @@ pub enum AppColumn {
     Energy,
     Disk,
 }
+
+/// The App picker's search field, which keeps only the Apps whose name contains its text.
+pub const APP_SEARCH_FIELD: crate::native_input::Field = crate::native_input::Field {
+    id: "app-search",
+    accessibility_id: "flightdeck.app-search",
+    label: "Search Apps by name",
+    placeholder: "Part of an App's name",
+    hint: "Search Apps",
+    width: 240.0,
+};
 
 /// The App picker's headings, in the order of its cells, with the column each sorts the Apps by.
 const APP_HEADINGS: [(&str, AppColumn); 8] = [

@@ -55,6 +55,23 @@ fn a_click_on_the_app_heading_lists_the_apps_by_name_from_a(cx: &mut gpui::TestA
     harness.teardown();
 }
 
+#[gpui::test]
+fn typing_in_the_app_search_lists_only_the_apps_whose_name_contains_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    // Goal: text typed in the open App picker's search field keeps only the Apps whose name
+    // contains it, in the order the list had.
+    // Method: list three Apps, type two letters that two of the names contain, and read which
+    // names the screen shows and in what order.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+
+    harness.driver.search_apps("ha");
+
+    assert_eq!(harness.driver.listed(), ["Alpha", "Charlie"]);
+    harness.teardown();
+}
+
 impl AppHoverDriver {
     fn seed_apps(&mut self, apps: &[(&str, &str, Option<f64>)]) {
         self.view.update(&mut self.context, |dashboard, cx| {
@@ -89,11 +106,20 @@ impl AppHoverDriver {
         self.context.run_until_parked();
     }
 
-    /// The names of `APPS` in the order the picker draws them, top first.
+    /// Clicks the App picker's search field and types `text` into it.
+    fn search_apps(&mut self, text: &str) {
+        let bounds = self.context.debug_bounds("app-search").expect("app-search");
+        self.context
+            .simulate_click(bounds.center(), Modifiers::none());
+        self.context.simulate_input(text);
+        self.context.run_until_parked();
+    }
+
+    /// The names of `APPS` the picker draws, in its order, top first.
     fn listed(&mut self) -> Vec<&'static str> {
         let mut tops: Vec<_> = APPS
             .iter()
-            .map(|&(name, _, _)| (self.context.debug_bounds(name).expect(name).top(), name))
+            .filter_map(|&(name, _, _)| Some((self.context.debug_bounds(name)?.top(), name)))
             .collect();
         tops.sort_by(|first, second| f32::from(first.0).total_cmp(&f32::from(second.0)));
         tops.into_iter().map(|(_, name)| name).collect()

@@ -57,11 +57,19 @@ fn create_dashboard_with(
     build: impl FnOnce(&mut Context<LiveDashboard>) -> LiveDashboard,
 ) -> Entity<LiveDashboard> {
     let input = gpui::AppContext::new(cx, |cx| TextInput::new(TIME_FIELD, cx));
+    let search = gpui::AppContext::new(cx, |cx| {
+        TextInput::new(crate::live_app_views::APP_SEARCH_FIELD, cx)
+    });
     let entity = gpui::AppContext::new(cx, |cx| {
         let mut dashboard = build(cx);
         dashboard.settings.animate_fans = crate::live_launch::animate_fans(cx);
         dashboard.native.source = source;
         dashboard.native.input = Some(input);
+        cx.observe(&search, |dashboard, search, cx| {
+            dashboard.app_search_changed(&search, cx);
+        })
+        .detach();
+        dashboard.app_search = Some(search);
         dashboard
     });
 
