@@ -73,6 +73,25 @@ fn typing_in_the_app_search_lists_only_the_apps_whose_name_contains_it(
 }
 
 #[gpui::test]
+fn typing_right_after_opening_the_app_picker_searches_its_apps(cx: &mut gpui::TestAppContext) {
+    // Goal: the App picker's search field takes keystrokes as soon as a click opens the picker,
+    // with no click in the field.
+    // Method: close the picker the harness opened, open it again with a click on the App
+    // select, type two letters that two of three names contain, and read which names the screen
+    // shows.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+    harness.driver.click_app_select();
+
+    harness.driver.click_app_select();
+    harness.driver.context.simulate_input("ha");
+    harness.driver.context.run_until_parked();
+
+    assert_eq!(harness.driver.listed(), ["Alpha", "Charlie"]);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_app_search_finds_an_app_listed_after_the_first_512(cx: &mut gpui::TestAppContext) {
     // Goal: the picker holds every App of a second, not only the first 512 the page once held.
     // Method: list 600 Apps, search for the last one's name, and look for it on the screen.
@@ -194,6 +213,14 @@ impl AppHoverDriver {
             .map(|(name, key)| (name.as_str(), key.as_str(), None))
             .collect();
         self.seed_apps(&apps);
+    }
+
+    /// Clicks the App select, which opens the App picker or closes it.
+    fn click_app_select(&mut self) {
+        let bounds = self.context.debug_bounds("app-select").expect("app-select");
+        self.context
+            .simulate_click(bounds.center(), Modifiers::none());
+        self.context.run_until_parked();
     }
 
     fn click_heading(&mut self, heading: &str) {

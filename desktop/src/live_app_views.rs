@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Focusable, IntoElement, SharedString, div, prelude::*, px, rgb};
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
@@ -81,11 +81,20 @@ impl LiveDashboard {
                     .text_size(px(13.0))
                     .child("App")
                     .child(
-                        select(&label, 300.0).on_click(cx.listener(|this, _, _, cx| {
-                            this.picker = toggle(this.picker, Picker::App);
-                            this.rebuild();
-                            cx.notify();
-                        })),
+                        select(&label, 300.0)
+                            .debug_selector(|| "app-select".to_owned())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.picker = toggle(this.picker, Picker::App);
+                                // A person opens the picker to find an App, so its search
+                                // takes their keystrokes at once.
+                                if this.picker == Some(Picker::App) {
+                                    if let Some(search) = &this.app_list.search {
+                                        window.focus(&search.focus_handle(cx), cx);
+                                    }
+                                }
+                                this.rebuild();
+                                cx.notify();
+                            })),
                     ),
             )
             .child(
