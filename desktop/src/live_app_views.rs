@@ -20,9 +20,15 @@ const METRICS_MAX: usize = 11;
 const NAME_WIDTH: f32 = 200.0;
 const COUNT_WIDTH: f32 = 65.0;
 const METRIC_WIDTH: f32 = 76.0;
+/// The Disk I/O column's position among an App's reading columns.
+const DISK_READING_INDEX: usize = 5;
 const _: () = {
     assert!(crate::live_executables::COLUMNS.len() <= METRICS_MAX);
     assert!(JSON_BYTES_MAX > 2 * 4095);
+    assert!(matches!(
+        AppColumn::READINGS[DISK_READING_INDEX],
+        AppColumn::Disk
+    ));
 };
 
 impl LiveDashboard {
@@ -213,8 +219,11 @@ impl LiveDashboard {
             Err(error) => return unavailable(&error),
         };
         let selected = self.request.app.as_ref() == Some(&key);
-        let metrics = app_metrics(app);
-        let disk_selector = format!("app-disk:{}:{}:{}", key.kind, key.bytes_hex, metrics[5]);
+        let metrics = AppColumn::READINGS.map(|column| column.cell(app));
+        let disk_selector = format!(
+            "app-disk:{}:{}:{}",
+            key.kind, key.bytes_hex, metrics[DISK_READING_INDEX]
+        );
 
         div()
             .id(SharedString::from(format!("app-choice-{index}")))
@@ -251,10 +260,10 @@ impl LiveDashboard {
                 cx.notify();
             }))
             .child(app_cells(
-                app_name(app),
-                text(&app["members"]),
+                AppColumn::Name.cell(app),
+                AppColumn::Members.cell(app),
                 metrics,
-                reading_selector(5, &disk_selector),
+                reading_selector(DISK_READING_INDEX, &disk_selector),
             ))
             .into_any_element()
     }
@@ -267,11 +276,14 @@ impl LiveDashboard {
     /// The App picker's search field over its headings, each heading a button that sorts the
     /// Apps by its column, the heading of the column they are sorted by carrying an arrow.
     pub fn app_list_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = app_cells_row(APP_HEADINGS.len() - 2);
-        for (index, (heading, column)) in APP_HEADINGS.into_iter().enumerate() {
-            let selector = format!("app-column:apps:{heading}");
+        let mut row = app_cells_row(AppColumn::READINGS.len());
+        let columns = [AppColumn::Name, AppColumn::Members]
+            .into_iter()
+            .chain(AppColumn::READINGS);
+        for (index, column) in columns.enumerate() {
+            let selector = format!("app-column:apps:{}", column.heading());
             let cell = app_cells_cell(index).debug_selector(move || selector.clone());
-            row = row.child(self.app_list_columns_button(cell, heading, column, cx));
+            row = row.child(self.app_list_columns_button(cell, column, cx));
         }
 
         div()
@@ -320,10 +332,10 @@ impl LiveDashboard {
     fn app_list_columns_button(
         &self,
         cell: gpui::Div,
-        heading: &'static str,
         column: AppColumn,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let heading = column.heading();
         let label = if self.app_list.order.column != column {
             heading.to_owned()
         } else if self.app_list.order.descending {
@@ -606,17 +618,6 @@ fn measure_disk_rate(app: &Value) -> String {
     reading
 }
 
-fn app_metrics(app: &Value) -> [String; 6] {
-    [
-        value_rate(&app["cpu_percent_one_core"], "%"),
-        measure_memory(&app["resident_bytes"]),
-        measure_memory(&app["footprint_bytes"]),
-        value_rate(&app["energy_watts"], "W"),
-        value_rate(&app["energy_joules"], "J"),
-        measure_disk_rate(app),
-    ]
-}
-
 /// A column of the Apps list, by which the list can be sorted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AppColumn {
@@ -631,6 +632,63 @@ pub enum AppColumn {
     Disk,
 }
 
+impl AppColumn {
+    /// The columns of an App's readings, in the order of their cells after its name and its
+    /// member count.
+    const READINGS: [Self; 6] = [
+        Self::Cpu,
+        Self::Resident,
+        Self::Footprint,
+        Self::Power,
+        Self::Energy,
+        Self::Disk,
+    ];
+
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Name => "App",
+            Self::Members => "Members",
+            Self::Cpu => "CPU %",
+            Self::Resident => "Resident",
+            Self::Footprint => "Footprint",
+            Self::Power => "Power",
+            Self::Energy => "Energy",
+            Self::Disk => "Disk I/O",
+        }
+    }
+
+    /// The text of `app`'s cell in the column.
+    fn cell(self, app: &Value) -> String {
+        match self {
+            Self::Name => app_name(app),
+            Self::Members => text(&app["members"]),
+            Self::Cpu => value_rate(&app["cpu_percent_one_core"], "%"),
+            Self::Resident => measure_memory(&app["resident_bytes"]),
+            Self::Footprint => measure_memory(&app["footprint_bytes"]),
+            Self::Power => value_rate(&app["energy_watts"], "W"),
+            Self::Energy => value_rate(&app["energy_joules"], "J"),
+            Self::Disk => measure_disk_rate(app),
+        }
+    }
+
+    /// The reading of `app` its cell in the column shows, or None where the cell shows none.
+    fn reading(self, app: &Value) -> Option<f64> {
+        match self {
+            Self::Name => None,
+            Self::Members => app["members"].as_f64(),
+            Self::Cpu => app["cpu_percent_one_core"].as_f64(),
+            Self::Resident => app_order_measure(&app["resident_bytes"]),
+            Self::Footprint => app_order_measure(&app["footprint_bytes"]),
+            Self::Power => app["energy_watts"].as_f64(),
+            Self::Energy => app["energy_joules"].as_f64(),
+            Self::Disk => match app_order_measure(&app["disk_io_bytes"]) {
+                Some(_) => app["disk_io_bps"].as_f64(),
+                None => None,
+            },
+        }
+    }
+}
+
 /// The App picker's search field, which keeps only the Apps whose name contains its text.
 pub const APP_SEARCH_FIELD: crate::native_input::Field = crate::native_input::Field {
     id: "app-search",
@@ -640,18 +698,6 @@ pub const APP_SEARCH_FIELD: crate::native_input::Field = crate::native_input::Fi
     hint: "Search Apps",
     width: 240.0,
 };
-
-/// The App picker's headings, in the order of its cells, with the column each sorts the Apps by.
-const APP_HEADINGS: [(&str, AppColumn); 8] = [
-    ("App", AppColumn::Name),
-    ("Members", AppColumn::Members),
-    ("CPU %", AppColumn::Cpu),
-    ("Resident", AppColumn::Resident),
-    ("Footprint", AppColumn::Footprint),
-    ("Power", AppColumn::Power),
-    ("Energy", AppColumn::Energy),
-    ("Disk I/O", AppColumn::Disk),
-];
 
 /// The App picker's order and search, which its headings and search field set.
 #[derive(Default)]
@@ -702,7 +748,7 @@ pub fn app_order(apps: &[&Value], order: AppOrder, search: &str) -> Vec<usize> {
         let name = app_name(app).to_lowercase();
         if name.contains(&search) {
             keys.push(AppOrderKey {
-                reading: app_order_reading(app, order.column),
+                reading: order.column.reading(app),
                 name,
                 position,
             });
@@ -717,23 +763,6 @@ struct AppOrderKey {
     reading: Option<f64>,
     name: String,
     position: usize,
-}
-
-/// The reading of `app` its cell in `column` shows, or None where the cell shows none.
-fn app_order_reading(app: &Value, column: AppColumn) -> Option<f64> {
-    match column {
-        AppColumn::Name => None,
-        AppColumn::Members => app["members"].as_f64(),
-        AppColumn::Cpu => app["cpu_percent_one_core"].as_f64(),
-        AppColumn::Resident => app_order_measure(&app["resident_bytes"]),
-        AppColumn::Footprint => app_order_measure(&app["footprint_bytes"]),
-        AppColumn::Power => app["energy_watts"].as_f64(),
-        AppColumn::Energy => app["energy_joules"].as_f64(),
-        AppColumn::Disk => match app_order_measure(&app["disk_io_bytes"]) {
-            Some(_) => app["disk_io_bps"].as_f64(),
-            None => None,
-        },
-    }
 }
 
 /// A measured sum's known value, or None where no member was measured, the sum overflowed or
