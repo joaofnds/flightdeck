@@ -10,19 +10,34 @@ use gpui::{
 
 use crate::native_text::{Edit, Text};
 
-pub struct TimeInput {
+pub struct TextInput {
     pub text: Text,
     pub submission: Option<String>,
+    field: Field,
     focus: FocusHandle,
     line: Option<ShapedLine>,
     bounds: Option<Bounds<Pixels>>,
 }
 
-impl TimeInput {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+/// What tells one text field from another: its names, what it shows while empty, and its width.
+#[derive(Clone, Copy)]
+pub struct Field {
+    /// The element's id, which tests also find it by.
+    pub id: &'static str,
+    pub accessibility_id: &'static str,
+    pub label: &'static str,
+    pub placeholder: &'static str,
+    /// The text drawn in the empty field, shorter than the placeholder where room is short.
+    pub hint: &'static str,
+    pub width: f32,
+}
+
+impl TextInput {
+    pub fn new(field: Field, cx: &mut Context<Self>) -> Self {
         Self {
             text: Text::default(),
             submission: None,
+            field,
             focus: cx.focus_handle(),
             line: None,
             bounds: None,
@@ -108,7 +123,7 @@ impl TimeInput {
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let text: gpui::SharedString = if self.text.content.is_empty() {
-            "Unix second / HH:MM:SS".into()
+            self.field.hint.into()
         } else {
             self.text.content.clone().into()
         };
@@ -145,7 +160,7 @@ impl TimeInput {
             window,
             cx,
         ) {
-            eprintln!("Time entry text: {error}");
+            eprintln!("{} text: {error}", self.field.label);
         }
         if let Some(marked) = &self.text.marked {
             window.paint_quad(fill(
@@ -172,20 +187,21 @@ impl TimeInput {
     }
 }
 
-impl Render for TimeInput {
+impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let field = self.field;
         div()
-            .id("inspection-time")
-            .debug_selector(|| "inspection-time".into())
-            .accessibility_id("flightdeck.inspection-time")
+            .id(field.id)
+            .debug_selector(move || field.id.into())
+            .accessibility_id(field.accessibility_id)
             .role(gpui::Role::TextInput)
-            .aria_label("Inspect recording time")
+            .aria_label(field.label)
             .aria_value(self.text.content.clone())
-            .aria_placeholder("Unix second or local HH:MM:SS")
+            .aria_placeholder(field.placeholder)
             .track_focus(&self.focus)
             .tab_stop(true)
-            .w(px(162.0))
+            .w(px(field.width))
             .h(px(29.0))
             .px(px(7.0))
             .py(px(6.0))
@@ -220,7 +236,7 @@ impl Render for TimeInput {
     }
 }
 
-impl EntityInputHandler for TimeInput {
+impl EntityInputHandler for TextInput {
     fn text_for_range(
         &mut self,
         range: Range<usize>,

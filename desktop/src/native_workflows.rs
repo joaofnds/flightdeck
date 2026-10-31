@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::{Request, Snapshot, Update, Worker};
 use crate::live_source_mode::SourceMode;
-use crate::native_input::TimeInput;
+use crate::native_input::{Field, TextInput};
 
 gpui::actions!(
     flightdeck_native,
@@ -41,12 +41,22 @@ pub(crate) fn restore_dashboard(
     })
 }
 
+/// The field a person types a second of the recording into, to inspect it.
+const TIME_FIELD: Field = Field {
+    id: "inspection-time",
+    accessibility_id: "flightdeck.inspection-time",
+    label: "Inspect recording time",
+    placeholder: "Unix second or local HH:MM:SS",
+    hint: "Unix second / HH:MM:SS",
+    width: 162.0,
+};
+
 fn create_dashboard_with(
     source: SourceMode,
     cx: &mut gpui::App,
     build: impl FnOnce(&mut Context<LiveDashboard>) -> LiveDashboard,
 ) -> Entity<LiveDashboard> {
-    let input = gpui::AppContext::new(cx, TimeInput::new);
+    let input = gpui::AppContext::new(cx, |cx| TextInput::new(TIME_FIELD, cx));
     let entity = gpui::AppContext::new(cx, |cx| {
         let mut dashboard = build(cx);
         dashboard.settings.animate_fans = crate::live_launch::animate_fans(cx);
@@ -123,7 +133,7 @@ type PromptPoll = Box<dyn FnMut() -> Poll<Result<Option<Vec<PathBuf>>, String>>>
 
 #[derive(Default)]
 pub struct NativeControls {
-    pub input: Option<Entity<TimeInput>>,
+    pub input: Option<Entity<TextInput>>,
     pub alternative_page: u16,
     prompt: Option<PromptPoll>,
     candidate: Option<Candidate>,
