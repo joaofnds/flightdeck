@@ -26,7 +26,7 @@ The transitive block0.1.6 dependency emits a future-compiler incompatibility not
 Inbox TASK-47 retains that finding without suppression.
 
 Storage attribution scans a real sealed 600-App fixture and retains the exact
-same-second publication and leader beyond the first 512-row page. Installed chart
+same-second publication and a leader listed after the first 512 Apps. Installed chart
 input checks cover separate Read/Write coverage, small rates, historical loading,
 failure and restored readings. Four vertical-wheel regressions preserve horizontal
 column positions while the surrounding list scrolls. These are TestPlatform and
@@ -92,7 +92,7 @@ the existing pressure timeline, preserving gaps and the selected same-second pub
 
 Overview ranks CPU, resident memory and process power over all captured Apps, with
 exact integer ordering, proportional bars, metric help and selected-observation
-drilldown. Tests cover leaders after the first 512-row page, measured zero, partial
+drilldown. Tests cover leaders listed after the first 512 Apps, measured zero, partial
 and unavailable measurements, overflow, incomplete membership and deterministic ties.
 Installed-input checks preserve the full run/boot/publication and App key through
 hover, loading, failure, click and keyboard activation. The scan has a 24,000-App,
@@ -276,7 +276,10 @@ The worker owns the recording reader, waits 250 ms between read attempts, and pu
 capacity-one mailboxes. Generation checks and cancellation reject superseded work.
 Paused inspection holds an exact run, boot and publication. Charts retain actual
 wall-clock spacing, null gaps and run/boot/segment boundaries within a 900-second,
-4096-point context. Raw and App pages hold at most 512 rows.
+4096-point context. Raw pages and pages of an App's processes hold at most 512 rows. A page of
+Apps holds at most 2,048, every App the Store keeps for one second, so the App picker sorts and
+searches every App of the second. The worker's sample can hold up to 24,000 Apps a second, and
+the picker pages any past the first 2,048.
 
 ## Observed on 2026-10-17
 

@@ -183,7 +183,8 @@ target/release/flightdeck --reference --hardware --seconds 20
 
 Rendering uses GPUI's Metal backend, canvas paths and a virtualized list of panel
 rows. Live queries run on a dedicated worker with capacity-one request/result
-mailboxes, cancellation generations, 512-row pages and the backend's bounded cache.
+mailboxes, cancellation generations, pages of at most 512 rows or 2,048 Apps, and the backend's
+bounded cache.
 A 250 ms main-thread timer takes completed results, with prompt polling while the window
 awaits a restoration or another reply.
 Live Overview, while it follows the newest second, draws from the Store instead. The app
