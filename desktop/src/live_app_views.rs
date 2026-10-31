@@ -690,8 +690,8 @@ impl AppOrder {
     }
 }
 
-/// The positions in `apps` of the Apps whose name contains `search`, in `order`. Names compare
-/// in lowercase. An App with no reading in the column sorts last either way, and Apps that
+/// The positions in `apps` of the Apps whose name, as the list shows it without ".app",
+/// contains `search`, in `order`. Names compare in lowercase. An App with no reading in the column sorts last either way, and Apps that
 /// tie sort by name, then by position.
 pub fn app_order(apps: &[&Value], order: AppOrder, search: &str) -> Vec<usize> {
     assert!(apps.len() <= APPS_MAX + 1);
@@ -699,7 +699,7 @@ pub fn app_order(apps: &[&Value], order: AppOrder, search: &str) -> Vec<usize> {
     let search = search.to_lowercase();
     let mut keys = Vec::with_capacity(apps.len());
     for (position, app) in apps.iter().enumerate() {
-        let name = text(&app["display_name"]).to_lowercase();
+        let name = app_name(app).to_lowercase();
         if name.contains(&search) {
             keys.push(AppOrderKey {
                 reading: app_order_reading(app, order.column),

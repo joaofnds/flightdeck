@@ -56,6 +56,43 @@ fn search_keeps_the_apps_whose_name_contains_the_text_in_any_case() {
     assert_eq!(names(&apps, &positions), ["b"]);
 }
 
+/// Three Apps whose bundle names end in ".app", which the list leaves out of the names it shows.
+fn apps_in_bundles() -> [Value; 3] {
+    [
+        json!({"display_name": "Foo Bar.app"}),
+        json!({"display_name": "AppCleaner.app"}),
+        json!({"display_name": "Foo.app"}),
+    ]
+}
+
+#[test]
+fn search_reads_the_name_the_list_shows_without_its_app_extension() {
+    // Search the bundled Apps for "app", which only AppCleaner's shown name contains.
+    let apps = apps_in_bundles();
+
+    let positions = app_order(&apps.each_ref(), AppOrder::default(), "app");
+
+    assert_eq!(names(&apps, &positions), ["AppCleaner.app"]);
+}
+
+#[test]
+fn name_ascending_orders_the_names_the_list_shows_without_their_app_extension() {
+    // Order the bundled Apps by name from A, where "Foo" sorts before "Foo Bar" only once their
+    // ".app" is left out.
+    let apps = apps_in_bundles();
+    let order = AppOrder {
+        column: AppColumn::Name,
+        descending: false,
+    };
+
+    let positions = app_order(&apps.each_ref(), order, "");
+
+    assert_eq!(
+        names(&apps, &positions),
+        ["AppCleaner.app", "Foo.app", "Foo Bar.app"]
+    );
+}
+
 /// Four Apps whose order differs in each reading column, with a missing reading in most.
 fn apps_by_column() -> [Value; 4] {
     [
