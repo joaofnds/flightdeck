@@ -254,7 +254,7 @@ pub fn table_header(last: bool, scroll: &gpui::ScrollHandle) -> impl IntoElement
             headings,
             &TABLE_WIDTHS,
             |_, text| format!("app-column:executables:{text}"),
-            None,
+            crate::live_panel_table::NameCell::Text,
         ),
     )
 }
@@ -326,7 +326,7 @@ impl LiveDashboard {
                 ],
                 &TABLE_WIDTHS,
                 crate::live_app_views::reading_selector(DISK_COLUMN, &disk_selector),
-                Some(selected),
+                crate::live_panel_table::NameCell::Button { pressed: selected },
             ))
             .into_any_element()
     }

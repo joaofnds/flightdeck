@@ -281,7 +281,7 @@ impl LiveDashboard {
                 ],
                 &APP_TABLE_WIDTHS,
                 reading_selector(DISK_READING_INDEX, &disk_selector),
-                Some(selected),
+                crate::live_panel_table::NameCell::Button { pressed: selected },
             ))
             .into_any_element()
     }

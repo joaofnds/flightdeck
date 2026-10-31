@@ -75,22 +75,31 @@ pub fn row(id: String, last: bool, scroll: &gpui::ScrollHandle) -> gpui::Statefu
         .focus(crate::charts::focus_ring)
 }
 
+/// What the name's cell, the first of a row, draws its text in.
+#[derive(Clone, Copy)]
+pub enum NameCell {
+    /// The text alone, as a heading draws it.
+    Text,
+    /// The prototype's button, pressed when its row is the one selected, which tests then find by
+    /// the selector `selected:` and the name.
+    Button { pressed: bool },
+}
+
 /// The cells of one row of a table, holding `texts`, each as wide as its column's entry in
-/// `widths`. Each cell is found by the selector `selector` gives its column index and text. The
-/// name's cell, the first, holds the prototype's button, which `pressed` marks as the row
-/// selected, and tests then find by the selector `selected:` and the name.
+/// `widths`, the name's cell drawn as `name_cell` says. Each cell is found by the selector
+/// `selector` gives its column index and text.
 pub fn cells<const COLUMNS: usize>(
     texts: [String; COLUMNS],
     widths: &[f32; COLUMNS],
     selector: impl Fn(usize, &str) -> String,
-    pressed: Option<bool>,
+    name_cell: NameCell,
 ) -> gpui::Div {
     let mut row = cells_row(widths);
     for (index, text) in texts.into_iter().enumerate() {
         let cell_selector = selector(index, &text);
         let cell = column(index, widths[index]).debug_selector(move || cell_selector.clone());
-        row = row.child(match (index, pressed) {
-            (0, Some(pressed)) => cell.child(
+        row = row.child(match (index, name_cell) {
+            (0, NameCell::Button { pressed }) => cell.child(
                 div()
                     .h(px(44.0))
                     .px(px(8.0))
