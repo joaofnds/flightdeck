@@ -259,14 +259,15 @@ pub fn table_header(scroll: &gpui::ScrollHandle) -> impl IntoElement {
 }
 
 impl LiveDashboard {
-    pub fn executable_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    /// The process group table's row of the group at `index`, which closes the table's panel
+    /// when `last`.
+    pub fn executable_row(&self, index: usize, last: bool, cx: &mut Context<Self>) -> AnyElement {
         let Some(group) = self.reading_executables().get(index) else {
             return div()
                 .text_color(rgb(MUTED))
                 .child("Executable unavailable")
                 .into_any_element();
         };
-        let last = index + 1 == self.reading_executables().len();
         let selected = self.request.executable.as_ref() == Some(&group.key);
         let key = group.key.clone();
         let metrics = group.metrics();

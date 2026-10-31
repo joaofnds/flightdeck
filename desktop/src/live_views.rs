@@ -198,7 +198,10 @@ impl LiveDashboard {
                 let last = !matches!(self.rows.get(index + 1), Some(Row::App(_)));
                 self.app_row(*app, last, cx)
             }
-            Row::Executable(index) => self.executable_row(*index, cx),
+            Row::Executable(executable_index) => {
+                let last = !matches!(self.rows.get(index + 1), Some(Row::Executable(_)));
+                self.executable_row(*executable_index, last, cx)
+            }
             Row::Inventory => self.computer(cx).into_any_element(),
             Row::Spacer(height) | Row::Placeholder(_, height) => {
                 div().h(*height).into_any_element()
