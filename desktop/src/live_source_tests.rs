@@ -601,27 +601,110 @@ fn a_window_that_takes_the_resting_reader_renews_its_step_limit() {
     let mut kept = reader.hand_over();
     kept.request(SealedRecording::request()).unwrap();
 
-    let lease = reader.lease(&recording.root, None, 1);
+    let lease = reader.lease(&recording.root, &mut None, 1);
 
     assert_eq!(lease, super::Lease::Renewed);
 }
 
 #[test]
-fn a_window_that_reads_to_the_step_limit_is_told_so() {
-    // Goal: a window whose reader reached its limit reports it rather than going quiet.
-    // Method: run no steps over a reader with a page to read, and take the worker's output.
+fn a_window_keeps_reading_new_observations_across_its_step_limit() {
+    // Goal: a window left open keeps its live readings when a bounded run of steps ends.
+    // Method: exhaust one-step leases over a real live ring, publishing another observation
+    // between them, and take the snapshots the same reader delivers.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let mut reader = SnapshotReader::new();
+    let mut command = SnapshotReader::command();
+    command.mode = crate::live_source_mode::SourceMode::Live;
+    let mut command = Some(command);
+
+    let first = reader.lease(&recording.root, &mut command, 1);
+
+    let output = reader.shared.mailbox.lock().unwrap().output.take();
+    let Some(Update::Ready(snapshot)) = output else {
+        panic!("The worker did not publish live readings at its step limit");
+    };
+    assert_eq!(snapshot.selection["selected"]["publication"], 1);
+    assert_eq!(first, super::Lease::Renewed);
+
+    recording.publish();
+    let second = reader.lease(&recording.root, &mut command, 1);
+
+    let output = reader.shared.mailbox.lock().unwrap().output.take();
+    let Some(Update::Ready(snapshot)) = output else {
+        panic!("The worker did not publish the next live observation");
+    };
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert_eq!(second, super::Lease::Renewed);
+}
+
+#[test]
+fn a_window_automatically_reads_the_next_batch_when_its_step_run_ends() {
+    // Goal: the worker renews exhausted step runs without the window restarting it.
+    // Method: start the real worker with one-step runs and request two live observations.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish();
+    let mut worker = Worker::start_reader(
+        recording.root.clone(),
+        crate::live_source_mode::SourceMode::Live,
+        super::Rest::Following,
+        None,
+        1,
+    )
+    .unwrap();
+    let first =
+        SealedRecording::read_through(&mut worker, SealedRecording::request(), Worker::request)
+            .unwrap();
+
+    recording.publish();
+    let next =
+        SealedRecording::read_through(&mut worker, SealedRecording::request(), Worker::request)
+            .unwrap();
+
+    assert_eq!(first.selection["selected"]["publication"], 1);
+    assert_eq!(next.selection["selected"]["publication"], 2);
+}
+
+#[test]
+fn a_stopped_reader_ends_without_renewing_its_steps() {
+    // Goal: renewing exhausted step runs never prevents an explicit shutdown.
+    // Method: stop a reader before a one-step lease and check it ends without reading.
     let recording = SealedRecording::new();
     let mut reader = SnapshotReader::new();
-    let command = SnapshotReader::command();
+    reader
+        .shared
+        .stopped
+        .store(true, std::sync::atomic::Ordering::Release);
 
-    let lease = reader.lease(&recording.root, Some(command), 0);
+    let lease = reader.lease(&recording.root, &mut Some(SnapshotReader::command()), 1);
 
     assert_eq!(lease, super::Lease::Ended);
-    let output = reader.shared.mailbox.lock().unwrap().output.take();
-    let Some(Update::Failed { message, .. }) = output else {
-        panic!("The worker published no failure");
-    };
-    assert_eq!(message, "Live reader reached its seven-day session limit");
+    assert!(reader.shared.mailbox.lock().unwrap().output.is_none());
+}
+
+#[test]
+fn a_reader_with_a_broken_mailbox_ends_without_renewing_its_steps() {
+    // Goal: step renewal never keeps a worker running after its mailbox fails.
+    // Method: poison the reader's real mailbox and run a positive-step lease over it.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    let shared = Arc::clone(&reader.shared);
+    let failed = std::thread::spawn(move || {
+        let _mailbox = shared.mailbox.lock().unwrap();
+        panic!("Poison the fixture mailbox");
+    })
+    .join();
+    assert!(failed.is_err());
+
+    let lease = reader.lease(&recording.root, &mut Some(SnapshotReader::command()), 1);
+
+    assert_eq!(lease, super::Lease::Ended);
+    assert!(
+        reader
+            .shared
+            .stopped
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
 }
 
 #[test]
@@ -836,16 +919,10 @@ impl SnapshotReader {
     fn lease(
         &mut self,
         root: &std::path::Path,
-        mut command: Option<super::Command>,
+        command: &mut Option<super::Command>,
         steps_max: u64,
     ) -> super::Lease {
-        super::worker_lease(
-            root,
-            &self.shared,
-            &mut self.reader,
-            &mut command,
-            steps_max,
-        )
+        super::worker_lease(root, &self.shared, &mut self.reader, command, steps_max)
     }
 
     fn session(&self) -> &viewer::LiveSession {

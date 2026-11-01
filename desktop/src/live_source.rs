@@ -249,7 +249,7 @@ enum Histories {
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const WORKER_STEPS_MAX: u64 = 7 * 24 * 60 * 60 * 4;
-// Bounds the windows one reader serves, each of which gets WORKER_STEPS_MAX steps.
+// Bounds the renewed runs of steps, including those a new window starts.
 const WORKER_LEASES_MAX: u64 = 1 << 20;
 const ALTERNATIVES_MAX: usize = 4096;
 /// The most Apps a page of Apps lists, every App one second of the Store holds.
@@ -305,7 +305,13 @@ impl Worker {
         root: PathBuf,
         handle: viewer::store::QueryHandle,
     ) -> std::io::Result<Self> {
-        Self::start_reader(root, SourceMode::Live, Rest::Idle, Some(handle))
+        Self::start_reader(
+            root,
+            SourceMode::Live,
+            Rest::Idle,
+            Some(handle),
+            WORKER_STEPS_MAX,
+        )
     }
 
     pub fn mode(&self) -> SourceMode {
@@ -329,7 +335,7 @@ impl Worker {
     }
 
     fn start_mode(root: PathBuf, mode: SourceMode, rest: Rest) -> std::io::Result<Self> {
-        Self::start_reader(root, mode, rest, None)
+        Self::start_reader(root, mode, rest, None, WORKER_STEPS_MAX)
     }
 
     fn start_reader(
@@ -337,7 +343,9 @@ impl Worker {
         mode: SourceMode,
         rest: Rest,
         store: Option<viewer::store::QueryHandle>,
+        steps_max: u64,
     ) -> std::io::Result<Self> {
+        assert!(steps_max > 0);
         let shared = Arc::new(Shared::with_rest(rest));
         let control = Arc::clone(&shared);
         let observation =
@@ -347,7 +355,7 @@ impl Worker {
             .stack_size(4 * 1024 * 1024)
             .spawn(move || {
                 let observation = observation.enter();
-                worker_run(&root, &control, store);
+                worker_run(&root, &control, store, steps_max);
                 drop(observation);
             })?;
 
@@ -564,7 +572,12 @@ impl Drop for Worker {
     }
 }
 
-fn worker_run(root: &std::path::Path, shared: &Shared, store: Option<viewer::store::QueryHandle>) {
+fn worker_run(
+    root: &std::path::Path,
+    shared: &Shared,
+    store: Option<viewer::store::QueryHandle>,
+    steps_max: u64,
+) {
     let mut command = None;
     let mut reader = Reader {
         session: None,
@@ -576,24 +589,24 @@ fn worker_run(root: &std::path::Path, shared: &Shared, store: Option<viewer::sto
         retry_after: Instant::now(),
     };
     for _lease in 0..WORKER_LEASES_MAX {
-        let lease = worker_lease(root, shared, &mut reader, &mut command, WORKER_STEPS_MAX);
+        let lease = worker_lease(root, shared, &mut reader, &mut command, steps_max);
         if lease == Lease::Ended {
-            break;
+            shared.stopped.store(true, Ordering::Release);
+            return;
         }
     }
-    shared.stopped.store(true, Ordering::Release);
+    panic!("Live reader exhausted its lease bound");
 }
 
 /// How a run of the worker's steps ended.
 #[derive(Debug, PartialEq, Eq)]
 enum Lease {
-    /// A window took the resting reader, which gives that window the full step limit rather
-    /// than what the windows before it left.
+    /// A bounded run of steps finished, or a window took the resting reader.
     Renewed,
     Ended,
 }
 
-/// Steps the worker at most `steps_max` times, until a window takes the resting reader.
+/// Steps the worker at most `steps_max` times, renewing without dropping its reader or page.
 fn worker_lease(
     root: &std::path::Path,
     shared: &Shared,
@@ -613,17 +626,7 @@ fn worker_lease(
         let pause = worker_step(root, shared, reader, command);
         worker_pause_for(shared, pause);
     }
-    if let Some(command) = command {
-        worker_publish(
-            shared,
-            command.generation,
-            Update::Failed {
-                generation: command.generation,
-                message: "Live reader reached its seven-day session limit".to_owned(),
-            },
-        );
-    }
-    Lease::Ended
+    Lease::Renewed
 }
 
 /// What the worker found in its mailbox at the top of a step.
