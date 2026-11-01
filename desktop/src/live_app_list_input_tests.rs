@@ -12,6 +12,35 @@ const APPS: [(&str, &str, Option<f64>); 3] = [
 ];
 
 #[gpui::test]
+fn opening_the_app_picker_lists_the_busiest_apps_first(cx: &mut gpui::TestAppContext) {
+    // Goal: opening the picker lists Apps by CPU, busiest first, with missing readings last.
+    // Method: reopen the picker over Apps whose CPU readings differ from their name order.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+    harness.driver.click_app_select();
+
+    harness.driver.click_app_select();
+
+    assert_eq!(harness.driver.listed(), ["Charlie", "Alpha", "Bravo"]);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn reopening_the_app_picker_keeps_the_order_chosen_by_a_heading(cx: &mut gpui::TestAppContext) {
+    // Goal: reopening the picker keeps the order a person chose instead of resetting to CPU.
+    // Method: sort the Apps by name, close and reopen the picker, and read their shown order.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.seed_apps(&APPS);
+
+    harness.driver.click_heading("App");
+    harness.driver.click_app_select();
+    harness.driver.click_app_select();
+
+    assert_eq!(harness.driver.listed(), ["Alpha", "Bravo", "Charlie"]);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn clicking_the_cpu_heading_lists_the_apps_by_cpu_the_most_first(cx: &mut gpui::TestAppContext) {
     // Goal: a click on the CPU heading of the open App picker orders its Apps by CPU, the most
     // first, with the App that has no reading last.
@@ -19,6 +48,7 @@ fn clicking_the_cpu_heading_lists_the_apps_by_cpu_the_most_first(cx: &mut gpui::
     // order the names stand in on the screen.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_apps(&APPS);
+    harness.driver.click_heading("App");
 
     harness.driver.click_heading("CPU %");
 
@@ -33,6 +63,7 @@ fn a_second_click_on_the_cpu_heading_lists_the_apps_the_least_first(cx: &mut gpu
     // Method: click the CPU heading twice and read the order of the names on the screen.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_apps(&APPS);
+    harness.driver.click_heading("App");
     harness.driver.click_heading("CPU %");
 
     harness.driver.click_heading("CPU %");
@@ -68,7 +99,7 @@ fn typing_in_the_app_search_lists_only_the_apps_whose_name_contains_it(
 
     harness.driver.search_apps("ha");
 
-    assert_eq!(harness.driver.listed(), ["Alpha", "Charlie"]);
+    assert_eq!(harness.driver.listed(), ["Charlie", "Alpha"]);
     harness.teardown();
 }
 
@@ -86,7 +117,7 @@ fn typing_right_after_opening_the_app_picker_searches_its_apps(cx: &mut gpui::Te
     harness.driver.click_app_select();
     harness.driver.type_text("ha");
 
-    assert_eq!(harness.driver.listed(), ["Alpha", "Charlie"]);
+    assert_eq!(harness.driver.listed(), ["Charlie", "Alpha"]);
     harness.teardown();
 }
 
@@ -130,6 +161,7 @@ fn the_app_picker_lists_ten_of_600_apps(cx: &mut gpui::TestAppContext) {
     let mut harness = AppHoverHarness::setup(cx);
 
     harness.driver.seed_numbered_apps(600);
+    harness.driver.click_heading("App");
 
     let context = &mut harness.driver.context;
     assert!(context.debug_bounds("Echo 009").is_some());
@@ -190,6 +222,7 @@ fn the_app_picker_draws_its_apps_as_the_inside_app_table_draws_its_process_group
     let mut harness = AppHoverHarness::setup(cx);
 
     harness.driver.seed_apps(&APPS);
+    harness.driver.click_heading("App");
 
     let picker = harness
         .driver
@@ -209,6 +242,7 @@ fn the_last_app_the_picker_lists_closes_its_panel(cx: &mut gpui::TestAppContext)
     // and look for the panel's bottom edge on the row of each.
     let mut harness = AppHoverHarness::setup(cx);
     harness.driver.seed_apps(&APPS);
+    harness.driver.click_heading("App");
 
     harness.driver.search_apps("ha");
 

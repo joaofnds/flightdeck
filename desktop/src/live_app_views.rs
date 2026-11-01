@@ -564,9 +564,8 @@ fn measure_disk_rate(app: &Value) -> String {
 }
 
 /// A column of the Apps list, by which the list can be sorted.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppColumn {
-    #[default]
     Name,
     Members,
     Cpu,
@@ -661,10 +660,19 @@ pub struct AppList {
 }
 
 /// The order the Apps list shows its Apps in: by a column, the least or the most first.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppOrder {
     pub column: AppColumn,
     pub descending: bool,
+}
+
+impl Default for AppOrder {
+    fn default() -> Self {
+        Self {
+            column: AppColumn::Cpu,
+            descending: true,
+        }
+    }
 }
 
 impl AppOrder {
