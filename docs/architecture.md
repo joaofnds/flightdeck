@@ -46,9 +46,10 @@ window visibility are separate lifecycles.
 
 The root Cargo workspace contains the recording core and tools. The desktop has its
 own workspace and lockfile so UI dependencies stay separate. It depends on the core
-through local path dependencies. Viewer presentation code may allocate within its
-bounds; the collector's acquisition loop follows the stricter startup-allocation
-rules in [the coding style](coding-style.md).
+through local path dependencies. The desktop and viewer may allocate. Their memory must
+be bounded by the span of readings they retain rather than process uptime, as required
+by [the coding style](coding-style.md). The collector's acquisition loop follows its
+stricter startup-allocation rules.
 
 ## Collection and persistence boundaries
 
