@@ -22,6 +22,7 @@ const O_DIRECTORY: c_int = 0x0010_0000;
 const O_NONBLOCK: c_int = 4;
 
 unsafe extern "C" {
+    fn mkdirat(directory: c_int, path: *const c_char, mode: u32) -> c_int;
     fn openat(directory: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
     fn renameat(
         source_directory: c_int,
@@ -43,6 +44,30 @@ impl PrivateDirectory {
     pub fn open_directory(&self, name: &str) -> io::Result<Self> {
         let file = self.open_component(name, O_RDONLY | O_DIRECTORY, 0)?;
         verify_open(&file, true)?;
+
+        Ok(Self { file })
+    }
+
+    /// Creates or validates one child. `AlreadyExists` opens and validates without
+    /// repairing permissions or ACLs; every other mkdir error is returned.
+    /// New children are synced before their parent. A sync failure may leave a
+    /// visible child; callers must not infer absence from an error.
+    pub fn create_directory(&self, name: &str) -> io::Result<Self> {
+        let mut buffer = [0; NAME_MAX + 1];
+        let component = component_name(name, &mut buffer)?;
+        if unsafe { mkdirat(self.file.as_raw_fd(), component.as_ptr(), 0o700) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                return self.open_directory(name);
+            }
+            return Err(error);
+        }
+
+        let file = self.open_component(name, O_RDONLY | O_DIRECTORY, 0)?;
+        clear_acl(&file)?;
+        verify_open(&file, true)?;
+        full_sync(&file)?;
+        self.full_sync()?;
 
         Ok(Self { file })
     }
@@ -139,3 +164,114 @@ pub(super) fn component_name<'buffer>(
 #[cfg(test)]
 #[path = "descriptor_tests.rs"]
 mod tests;
+
+unsafe extern "C" {
+    fn __getdirentries64(
+        descriptor: c_int,
+        buffer: *mut c_char,
+        size: usize,
+        base: *mut i64,
+    ) -> isize;
+}
+
+impl PrivateDirectory {
+    /// Bounds names, dot entries and native calls without allocating a libc DIR.
+    /// One independent directory descriptor and a fixed 1048-byte name buffer
+    /// are retained only during this walk. No history collection is constructed.
+    pub fn visit_names(
+        &self,
+        limit: usize,
+        mut visit: impl FnMut(&str) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let descriptor = unsafe {
+            openat(
+                self.file.as_raw_fd(),
+                c".".as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let mut buffer = [0_u8; 1048];
+        let mut base = 0_i64;
+        let mut count = 0;
+        let mut dots = 0;
+        let bound = limit
+            .checked_add(3)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        for _ in 0..=bound {
+            let received = unsafe {
+                __getdirentries64(
+                    file.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    &raw mut base,
+                )
+            };
+            if received < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if received == 0 {
+                return Ok(());
+            }
+            let length = usize::try_from(received)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            if length > buffer.len() {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            visit_names_batch(&buffer[..length], limit, &mut count, &mut dots, &mut visit)?;
+        }
+        Err(io::Error::from(io::ErrorKind::InvalidData))
+    }
+}
+
+fn visit_names_batch(
+    bytes: &[u8],
+    limit: usize,
+    count: &mut usize,
+    dots: &mut usize,
+    visit: &mut impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut offset = 0;
+    // Each Darwin dirent64 has at least its 21-byte header and a name terminator.
+    for _ in 0..48 {
+        if offset == bytes.len() {
+            return Ok(());
+        }
+        if bytes.len() - offset < 22 {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let record = &bytes[offset..];
+        let record_length = usize::from(u16::from_ne_bytes([record[16], record[17]]));
+        let name_length = usize::from(u16::from_ne_bytes([record[18], record[19]]));
+        if record_length > record.len()
+            || record_length < 22
+            || name_length == 0
+            || name_length > NAME_MAX
+            || 21 + name_length >= record_length
+        {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        if record[21 + name_length] != 0 {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let name = std::str::from_utf8(&record[21..21 + name_length])
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        if name == "." || name == ".." {
+            *dots += 1;
+            if *dots > 2 {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+        } else {
+            *count += 1;
+            if *count > limit {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            visit(name)?;
+        }
+        offset += record_length;
+    }
+    Err(io::Error::from(io::ErrorKind::InvalidData))
+}

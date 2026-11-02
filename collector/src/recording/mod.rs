@@ -1,5 +1,7 @@
 //! Startup registration shared by the collector and its separate persistence worker.
 
+pub mod bootstrap;
+
 pub mod child;
 pub mod control;
 pub mod discovery;

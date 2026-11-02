@@ -94,7 +94,7 @@ fn parse(bytes: &[u8]) -> io::Result<Format> {
     })
 }
 
-fn parse_requirement(bytes: &[u8]) -> io::Result<u32> {
+pub(super) fn parse_requirement(bytes: &[u8]) -> io::Result<u32> {
     if bytes.len() != REQUIREMENT_BYTES || bytes[8] != b'\n' {
         return Err(invalid());
     }

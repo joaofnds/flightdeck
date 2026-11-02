@@ -452,6 +452,8 @@ fn descriptor_ownership_is_bounded_and_failures_release_every_open() {
             assert!(directory.open_file("absent").is_err());
             assert!(directory.open_directory("child").is_err());
             assert!(directory.open_directory("denied").is_err());
+            assert!(directory.create_directory("child").is_err());
+            assert!(directory.create_directory("denied").is_err());
             assert!(PrivateDirectory::open(&child).is_err());
             assert!(atomic_write(&child, "metadata", b"bad").is_err());
         }
@@ -577,4 +579,105 @@ fn open_relative(directory: &File, name: &CStr) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+#[test]
+fn retained_directory_publishes_and_creates_after_root_substitution() {
+    // Goal: retained publication and mkdir affect only the admitted inode.
+    // Method: replace its pathname with another private root before both operations.
+    let fixture = DirectoryFixture::new("retained-bootstrap");
+    let root = fixture.0.join("root");
+    create_private_dir(&root).unwrap();
+    let directory = PrivateDirectory::open(&root).unwrap();
+    let retained = fixture.0.join("retained");
+    fs::rename(&root, &retained).unwrap();
+    create_private_dir(&root).unwrap();
+
+    let calls = allocator_calls_in(|| {
+        atomic_write_in(&directory, "metadata", b"retained").unwrap();
+        drop(directory.create_directory("child").unwrap());
+        drop(directory.create_directory("child").unwrap());
+    });
+
+    assert_eq!(0, calls);
+    assert_eq!(
+        b"retained",
+        fs::read(retained.join("metadata")).unwrap().as_slice()
+    );
+    verify_directory(&retained.join("child")).unwrap();
+    assert_eq!(0, fs::read_dir(root).unwrap().count());
+}
+
+#[test]
+fn child_creation_refuses_existing_foreign_objects_without_repair() {
+    // Goal: create-or-validate never repairs or replaces existing objects.
+    // Method: admit a parent, then present nonprivate, ACL, file and symlink children.
+    let fixture = DirectoryFixture::new("mkdir-refusal");
+    let directory = PrivateDirectory::open(&fixture.0).unwrap();
+    let child = fixture.0.join("child");
+    create_private_dir(&child).unwrap();
+    fs::set_permissions(&child, fs::Permissions::from_mode(0o755)).unwrap();
+    drop(open_private_file(&fixture.0.join("file"), true).unwrap());
+    std::os::unix::fs::symlink("child", fixture.0.join("alias")).unwrap();
+    let acl = fixture.0.join("acl");
+    create_private_dir(&acl).unwrap();
+    add_acl(&acl);
+
+    let overlong = "x".repeat(NAME_MAX + 1);
+    let calls = allocator_calls_in(|| {
+        assert_eq!(
+            io::ErrorKind::PermissionDenied,
+            directory.create_directory("child").err().unwrap().kind()
+        );
+        assert!(directory.create_directory("file").is_err());
+        assert!(directory.create_directory("alias").is_err());
+        assert_eq!(
+            io::ErrorKind::PermissionDenied,
+            directory.create_directory("acl").err().unwrap().kind()
+        );
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            directory
+                .create_directory("../escape")
+                .err()
+                .unwrap()
+                .kind()
+        );
+        assert_eq!(
+            io::ErrorKind::InvalidInput,
+            directory.create_directory(&overlong).err().unwrap().kind()
+        );
+    });
+
+    assert_eq!(0, calls);
+    assert_eq!(0o755, fs::metadata(child).unwrap().mode() & 0o7777);
+    assert_eq!(1, read_acl_entries(&open_directory(&acl).unwrap()).unwrap());
+    assert!(
+        fs::symlink_metadata(fixture.0.join("alias"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn child_creation_retains_full_root_and_component_bounds() {
+    // Goal: mkdir admits the longest root and child without a combined path buffer.
+    // Method: create and reopen a maximum component beneath a 1023-byte root.
+    let fixture = DirectoryFixture::new("mkdir-long-root");
+    let root = fixture.long_root();
+    let directory = PrivateDirectory::open(&root).unwrap();
+    let name = "x".repeat(NAME_MAX);
+
+    let calls = allocator_calls_in(|| {
+        let child = directory.create_directory(&name).unwrap();
+        assert_close_on_exec(&child.file);
+        drop(child);
+        drop(directory.open_directory(&name).unwrap());
+    });
+
+    assert_eq!(0, calls);
+    let identities = [directory.file.metadata().unwrap()];
+    assert_eq!(1, fixture_descriptor_count(&identities));
+    drop(directory);
+    assert_eq!(0, fixture_descriptor_count(&identities));
 }

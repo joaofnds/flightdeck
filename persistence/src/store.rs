@@ -99,8 +99,9 @@ impl Store {
             }
             Err(error) => return Err(error),
         };
-        private::create_private_dir(&root.join("data"))?;
-        private::create_private_dir(&root.join("commits"))?;
+        let directory = private::PrivateDirectory::open(root)?;
+        drop(directory.create_directory("data")?);
+        drop(directory.create_directory("commits")?);
         Ok(Self {
             root: root.to_owned(),
             recording,

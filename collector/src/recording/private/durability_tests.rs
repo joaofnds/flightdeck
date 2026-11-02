@@ -16,15 +16,37 @@ fn reports_directory_sync_failure_after_complete_replacement() {
     verify_sync_failure(SyncBoundary::Directory);
 }
 
+#[test]
+fn reports_new_child_sync_failure() {
+    // Goal: mkdir does not report success before child durability.
+    // Method: refuse the new child's full-sync in an isolated native interposer child.
+    verify_sync_failure(SyncBoundary::NewChild);
+}
+
+#[test]
+fn reports_child_parent_sync_failure() {
+    // Goal: mkdir does not report success before parent durability.
+    // Method: refuse the parent's full-sync after creating the child.
+    verify_sync_failure(SyncBoundary::ChildParent);
+}
+
 #[derive(Clone, Copy)]
 enum SyncBoundary {
     PendingFile,
+    NewChild,
+    ChildParent,
     Directory,
 }
 
 impl SyncBoundary {
     fn test_name(self) -> &'static str {
         match self {
+            Self::NewChild => {
+                "recording::private::durability_tests::reports_new_child_sync_failure"
+            }
+            Self::ChildParent => {
+                "recording::private::durability_tests::reports_child_parent_sync_failure"
+            }
             Self::PendingFile => concat!(
                 "recording::private::durability_tests::",
                 "refuses_pending_file_sync_without_publishing_its_bytes"
@@ -38,14 +60,15 @@ impl SyncBoundary {
 
     fn target(self, root: &Path) -> PathBuf {
         match self {
+            Self::NewChild => root.join("child"),
+            Self::ChildParent | Self::Directory => root.to_path_buf(),
             Self::PendingFile => root.join("metadata.pending"),
-            Self::Directory => root.to_path_buf(),
         }
     }
 
     fn visible_bytes(self) -> &'static [u8] {
         match self {
-            Self::PendingFile => b"prior",
+            Self::PendingFile | Self::NewChild | Self::ChildParent => b"prior",
             Self::Directory => b"replacement",
         }
     }
@@ -95,9 +118,24 @@ fn verify_sync_failure(boundary: SyncBoundary) {
 }
 
 fn verify_sync_failure_child(root: &Path, boundary: SyncBoundary) {
-    let result = atomic_write(root, "metadata", b"replacement");
+    let directory = PrivateDirectory::open(root).unwrap();
+    let result = match boundary {
+        SyncBoundary::NewChild | SyncBoundary::ChildParent => {
+            directory.create_directory("child").map(drop)
+        }
+        SyncBoundary::PendingFile | SyncBoundary::Directory => {
+            atomic_write_in(&directory, "metadata", b"replacement")
+        }
+    };
 
     assert_eq!(Some(5), result.unwrap_err().raw_os_error());
+    match boundary {
+        SyncBoundary::NewChild | SyncBoundary::ChildParent => {
+            drop(directory.open_directory("child").unwrap());
+        }
+        SyncBoundary::PendingFile | SyncBoundary::Directory => {}
+    }
+
     assert_eq!(b"x", fs::read(root.join("observed")).unwrap().as_slice());
     assert_eq!(
         boundary.visible_bytes(),

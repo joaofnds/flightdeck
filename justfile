@@ -85,6 +85,7 @@ fmt:
     cargo fmt --all --check
     rustfmt --edition 2024 --check persister/tests/faults/sync.rs
     rustfmt --edition 2024 --check collector/src/recording/private/sync_fault.rs
+    rustfmt --edition 2024 --check collector/src/recording/bootstrap/classification_interpose.rs
 
 # Lint the root workspace.
 clippy:

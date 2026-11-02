@@ -136,6 +136,20 @@ fn security_attributes() -> Attrlist {
 }
 
 impl FileLock {
+    /// Takes genuine exclusive ownership through the caller's admitted root.
+    pub fn try_lock_in(directory: &PrivateDirectory, name: &str) -> io::Result<Self> {
+        let file = match directory.open_file(name) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => directory.create_file(name)?,
+            Err(error) => return Err(error),
+        };
+        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(Self { file })
+    }
+
     /// Bounded waiting is reserved for short registry transactions, never lifetime ownership.
     pub fn wait_short(path: &Path) -> io::Result<Self> {
         let start = Instant::now();
@@ -262,6 +276,13 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 /// Replaces bounded private metadata; the caller holds its publication lock.
 /// Owns at most two descriptors: the admitted directory and one pending file.
 pub fn atomic_write(root: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let directory = PrivateDirectory::open(root)?;
+    atomic_write_in(&directory, name, bytes)
+}
+
+/// Publishes through the supplied admitted inode, borrowing its descriptor and
+/// opening at most one pending file. The caller holds the publication lock.
+pub fn atomic_write_in(directory: &PrivateDirectory, name: &str, bytes: &[u8]) -> io::Result<()> {
     let mut name_buffer = [0; NAME_MAX + 1];
     directory::component_name(name, &mut name_buffer)?;
 
@@ -276,7 +297,6 @@ pub fn atomic_write(root: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let pending = std::str::from_utf8(&pending[..length])
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
 
-    let directory = PrivateDirectory::open(root)?;
     match directory.open_file(pending) {
         Ok(file) => {
             drop(file);

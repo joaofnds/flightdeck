@@ -1,6 +1,6 @@
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -222,4 +222,34 @@ fn history_directories(store: &Store, identity: &WindowIdentity) {
                 .unwrap();
         }
     }
+}
+
+#[test]
+fn startup_reuses_private_children_and_refuses_permission_repair() {
+    // Goal: Store startup consumes create-or-validate and preserves foreign permissions.
+    // Method: reopen a fresh Store, then loosen data and inspect it after refusal.
+    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "fd-startup-private-{}-{serial}",
+        std::process::id()
+    ));
+    drop(Store::open(&root).unwrap());
+    let identity = fs::metadata(root.join("data")).unwrap();
+
+    drop(Store::open(&root).unwrap());
+
+    assert_eq!(
+        identity.ino(),
+        fs::metadata(root.join("data")).unwrap().ino()
+    );
+    fs::set_permissions(root.join("data"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        std::io::ErrorKind::PermissionDenied,
+        Store::open(&root).err().unwrap().kind()
+    );
+    assert_eq!(
+        0o755,
+        fs::metadata(root.join("data")).unwrap().mode() & 0o7777
+    );
+    fs::remove_dir_all(root).unwrap();
 }
