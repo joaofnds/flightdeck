@@ -84,6 +84,7 @@ check-desktop: desktop-fmt desktop-clippy desktop-test seal-bench bundle-check
 fmt:
     cargo fmt --all --check
     rustfmt --edition 2024 --check persister/tests/faults/sync.rs
+    rustfmt --edition 2024 --check collector/src/recording/private/sync_fault.rs
 
 # Lint the root workspace.
 clippy:

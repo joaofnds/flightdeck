@@ -8,6 +8,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+mod directory;
+pub use directory::PrivateDirectory;
+
 pub struct FileLock {
     file: File,
 }
@@ -33,6 +36,8 @@ const O_EXCL: c_int = 0x0800;
 const O_CLOEXEC: c_int = 0x0100_0000;
 pub const PATH_MAX: usize = 1024;
 const NAME_MAX: usize = 255;
+const ATOMIC_WRITE_DESCRIPTORS_MAX: usize = 2;
+const _: () = assert!(ATOMIC_WRITE_DESCRIPTORS_MAX <= 8);
 const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 const F_FULLFSYNC: c_int = 51;
@@ -69,8 +74,6 @@ unsafe extern "C" {
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn mkdir(path: *const c_char, mode: u32) -> c_int;
     fn flock(file: c_int, operation: c_int) -> c_int;
-    fn rename(source: *const c_char, target: *const c_char) -> c_int;
-    fn unlink(path: *const c_char) -> c_int;
     fn fcntl(file: c_int, command: c_int, ...) -> c_int;
     fn fgetattrlist(
         file: c_int,
@@ -257,51 +260,46 @@ pub fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 /// Replaces bounded private metadata; the caller holds its publication lock.
+/// Owns at most two descriptors: the admitted directory and one pending file.
 pub fn atomic_write(root: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    if name.is_empty() {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
-    if name.bytes().any(|byte| byte == b'/' || byte == 0) {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    }
+    let mut name_buffer = [0; NAME_MAX + 1];
+    directory::component_name(name, &mut name_buffer)?;
+
     let mut pending = [0; NAME_MAX];
-    let length = name.len() + ".pending".len();
-    if length > pending.len() {
+    if name.len() > NAME_MAX - ".pending".len() {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
+
+    let length = name.len() + ".pending".len();
     pending[..name.len()].copy_from_slice(name.as_bytes());
     pending[name.len()..length].copy_from_slice(b".pending");
     let pending = std::str::from_utf8(&pending[..length])
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    let mut source_path = [0; PATH_MAX];
-    let source = join_path(root, pending, &mut source_path)?;
-    match verify_file(source) {
-        Ok(()) => atomic_write_remove(source)?,
+
+    let directory = PrivateDirectory::open(root)?;
+    match directory.open_file(pending) {
+        Ok(file) => {
+            drop(file);
+            directory.remove_file(pending)?;
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let mut file = open_private_file(source, true)?;
-    file.write_all(bytes)?;
-    full_sync(&file)?;
-    let mut target_path = [0; PATH_MAX];
-    let target = join_path(root, name, &mut target_path)?;
-    let mut source_name = [0; PATH_MAX];
-    let mut target_name = [0; PATH_MAX];
-    let source = path_name(source, &mut source_name)?;
-    let target = path_name(target, &mut target_name)?;
-    if unsafe { rename(source.as_ptr(), target.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    sync_directory(root)
-}
 
-fn atomic_write_remove(path: &Path) -> io::Result<()> {
-    let mut buffer = [0; PATH_MAX];
-    let name = path_name(path, &mut buffer)?;
-    if unsafe { unlink(name.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+    let mut file = directory.create_file(pending)?;
+    let publication = file
+        .write_all(bytes)
+        .and_then(|()| full_sync(&file))
+        .and_then(|()| directory.rename(pending, name));
+
+    if let Err(error) = publication {
+        directory.remove_file(pending)?;
+        directory.full_sync()?;
+
+        return Err(error);
     }
-    Ok(())
+
+    directory.full_sync()
 }
 
 pub fn make_file_private(path: &Path) -> io::Result<()> {
@@ -477,6 +475,10 @@ fn read_acl_entries(file: &File) -> io::Result<u32> {
 fn invalid() -> io::Error {
     io::Error::from(io::ErrorKind::InvalidData)
 }
+
+#[cfg(test)]
+#[path = "private/durability_tests.rs"]
+mod durability_tests;
 
 #[cfg(test)]
 mod tests {
