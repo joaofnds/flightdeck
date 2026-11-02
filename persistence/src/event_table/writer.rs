@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+use collector::recording::private::PrivateDirectory;
+use std::path::Path;
 use std::sync::Arc;
 
 use collector::ring::{FoundEvent, IdentityObservation, RingReader};
@@ -12,7 +13,7 @@ use crate::window::StagedTick;
 use crate::{Error, Losses, NumberedEvent, Result, WindowIdentity};
 
 pub(crate) struct Writer {
-    directory: PathBuf,
+    directory: PrivateDirectory,
     index: Index,
     rows: Vec<Row>,
     bytes: usize,
@@ -34,8 +35,7 @@ impl Writer {
         let reservation = budget
             .reserve(batch::WORKING_BYTES)
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
-        let directory = pending.join("events");
-        collector::recording::private::create_private_dir(&directory)?;
+        let directory = PrivateDirectory::open(pending)?.create_directory("events")?;
         Ok(Self {
             directory,
             index: Index {
@@ -164,10 +164,10 @@ impl Writer {
         }
         let mut frame = batch::frame(&self.rows, self.index.identities)?;
         batch::validate_frame(&frame, self.index.identities)?;
-        let path = self
+        let file = self
             .directory
-            .join(crate::event_recovery::batch_name(self.index.batches.len()));
-        crate::encoder::encode_write(&mut frame, crate::encoder::encode_open(&path)?)?;
+            .create_file(&crate::event_recovery::batch_name(self.index.batches.len()))?;
+        crate::encoder::encode_write(&mut frame, file)?;
         self.index.batches.push(Batch {
             first: self.rows[0].event.number,
             end: self.rows[self.rows.len() - 1].event.number + 1,
@@ -184,7 +184,8 @@ impl Writer {
         if self.index.rows == 0 {
             self.index.first = empty_first;
         }
-        self.index.write(&self.directory.join("index"))?;
+        self.index
+            .write_file(&mut self.directory.create_file("index")?)?;
         Ok(self.index)
     }
 }

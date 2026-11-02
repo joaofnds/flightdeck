@@ -33,6 +33,7 @@ const _: () = {
     assert!(BATCH_ROWS_MIN > 0);
     assert!(BATCH_ROWS_MIN <= BATCH_ROWS_MAX);
     assert!(BATCHES_MAX < 10_000);
+    assert!(BATCHES_MAX == 4096);
     assert!(crate::WRITE_BUFFER_BYTES == 1024 * 1024);
 };
 
@@ -230,6 +231,7 @@ pub(crate) fn frame(rows: &[Row], identities: bool) -> Result<DataFrame> {
 }
 
 pub(crate) fn validate_frame(frame: &DataFrame, identities: bool) -> Result<()> {
+    validate_numeric_frame(frame)?;
     crate::event_observation::validate(frame, 0..frame.height())?;
     if identities {
         let selected = crate::identity::event_validation_frame(frame)?;
@@ -244,4 +246,71 @@ pub(crate) fn validate_frame(frame: &DataFrame, identities: bool) -> Result<()> 
 
 pub(super) fn empty(identities: bool) -> Result<DataFrame> {
     frame(&[], identities)
+}
+
+fn validate_numeric_frame(frame: &DataFrame) -> Result<()> {
+    use crate::schema::{availability, event_kind, noticed};
+    if frame.height() > BATCH_ROWS_MAX {
+        return Err(Error::Bound("event numeric rows"));
+    }
+    let kinds = frame.column("kind")?.u8()?;
+    let availability = frame.column("availability")?.u8()?;
+    let noticed = frame.column("noticed")?.u8()?;
+    let coalition = frame.column("coalition")?.u64()?;
+    for name in ["event", "run_tick", "pid"] {
+        if frame.column(name)?.null_count() != 0 {
+            return Err(Error::Bound("event required numeric value"));
+        }
+    }
+    for row in 0..frame.height() {
+        let kind = kinds.get(row).ok_or(Error::Bound("event kind"))?;
+        let code = availability
+            .get(row)
+            .ok_or(Error::Bound("event availability"))?;
+        let exit = kind == event_kind::EXIT;
+        let valid = match kind {
+            event_kind::START | event_kind::EXEC => {
+                code == availability::NOT_APPLICABLE && noticed.get(row).is_none()
+            }
+            event_kind::EXIT => {
+                matches!(
+                    code,
+                    availability::MEASURED | availability::REFUSED | availability::GONE
+                ) && matches!(
+                    noticed.get(row),
+                    Some(noticed::ON_EXIT | noticed::ALREADY_EXITED)
+                )
+            }
+            _ => false,
+        };
+        if !valid || (kind != event_kind::START && coalition.get(row).is_some()) {
+            return Err(Error::Bound("event numeric semantics"));
+        }
+        validate_numeric_usage(frame, row, exit && code == availability::MEASURED)?;
+    }
+    Ok(())
+}
+
+fn validate_numeric_usage(frame: &DataFrame, row: usize, present: bool) -> Result<()> {
+    for name in [
+        "awake_ns_at_start",
+        "user_ns",
+        "system_ns",
+        "energy_nj",
+        "instructions",
+        "super_instructions",
+        "cycles",
+        "idle_wakeups",
+        "interrupt_wakeups",
+        "pageins",
+        "resident_bytes",
+        "footprint_bytes",
+        "disk_read_bytes",
+        "disk_written_bytes",
+    ] {
+        if frame.column(name)?.u64()?.get(row).is_some() != present {
+            return Err(Error::Bound("event usage payload"));
+        }
+    }
+    Ok(())
 }

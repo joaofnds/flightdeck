@@ -3,6 +3,7 @@
 mod allocation_tests;
 pub mod app_tables;
 mod battery;
+pub mod canonical;
 pub mod disks;
 mod encoder;
 pub mod engine;
@@ -23,6 +24,7 @@ pub mod sealed_apps;
 mod store;
 mod system;
 mod temperatures;
+pub mod transaction;
 mod window;
 pub mod window_ticks;
 pub mod worker;
@@ -32,8 +34,9 @@ pub use owned_identity::IdentitySource;
 pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::{require_numeric_source, tick_buffer};
 pub use store::{
-    Begin, CommitBoundary, PendingWindow, Store, list_committed, ownership_contended,
-    read_committed, reread_committed,
+    BatchFact, Begin, CommitBoundary, FileIdentity, IndexFact, InventoryStep, InventoryWork,
+    OriginalFile, OriginalInventory, OriginalPlacement, PendingWindow, RegisteredAttempt,
+    RegisteredFile, Store, list_committed, ownership_contended, read_committed, reread_committed,
 };
 
 pub use encoder::{

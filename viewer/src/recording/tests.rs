@@ -1227,7 +1227,7 @@ refuses_damaged_ticks! {
         |frame| with_column(frame, (col("run_tick") + lit(1)).alias("run_tick"));
     refuses_a_tick_of_events_of_one_number, "events", "sealed tick event order",
         |frame| with_column(frame, col("event").min().alias("event"));
-    refuses_a_tick_of_an_event_of_no_kind, "events", "sealed tick event kind",
+    refuses_a_tick_of_an_event_of_no_kind, "events", "event numeric semantics",
         |frame| with_column(frame, lit(9).cast(DataType::UInt8).alias("kind"));
 }
 

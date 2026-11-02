@@ -25,6 +25,7 @@ pub(crate) struct PendingEvents {
 
 impl Store {
     pub(crate) fn begin_events(&self, run: &RunIdentity) -> io::Result<EventBegin> {
+        self.require_composed_catalog()?;
         self.validate_identity(&crate::WindowIdentity {
             run: *run,
             window: 0,

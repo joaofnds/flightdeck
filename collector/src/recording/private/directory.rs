@@ -8,6 +8,7 @@ use std::ffi::{CStr, c_char, c_int};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 /// Owns one directory descriptor. Each open adds at most one descriptor, including
@@ -15,6 +16,16 @@ use std::path::Path;
 /// No descendant operation reconstructs an absolute path or follows a final symlink.
 pub struct PrivateDirectory {
     file: File,
+}
+
+/// Stable directory content/identity observation; enumeration may update only access time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectoryIdentity {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
 }
 
 const O_DIRECTORY: c_int = 0x0010_0000;
@@ -34,6 +45,39 @@ unsafe extern "C" {
 }
 
 impl PrivateDirectory {
+    pub(super) fn open_enumeration(&self) -> io::Result<File> {
+        let descriptor = unsafe {
+            openat(
+                self.file.as_raw_fd(),
+                c".".as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW,
+            )
+        };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        verify_open(&file, true)?;
+        Ok(file)
+    }
+
+    pub fn identity(&self) -> io::Result<DirectoryIdentity> {
+        let stat = self.file.metadata()?;
+        Ok(DirectoryIdentity {
+            device: stat.dev(),
+            inode: stat.ino(),
+            bytes: stat.len(),
+            modified: (stat.mtime(), stat.mtime_nsec()),
+            changed: (stat.ctime(), stat.ctime_nsec()),
+        })
+    }
+
+    pub fn same_inode(&self, other: &Self) -> io::Result<bool> {
+        let first = self.file.metadata()?;
+        let second = other.file.metadata()?;
+        Ok(first.dev() == second.dev() && first.ino() == second.ino())
+    }
+
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = open_directory_flags(path, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)?;
         verify_open(&file, true)?;
@@ -166,12 +210,20 @@ pub(super) fn component_name<'buffer>(
 mod tests;
 
 unsafe extern "C" {
-    fn __getdirentries64(
+    pub(super) fn __getdirentries64(
         descriptor: c_int,
         buffer: *mut c_char,
         size: usize,
         base: *mut i64,
     ) -> isize;
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct DirectoryWork {
+    pub open_attempts: u64,
+    pub read_calls: u64,
+    pub entries: u64,
+    pub names: u64,
 }
 
 impl PrivateDirectory {
@@ -181,8 +233,18 @@ impl PrivateDirectory {
     pub fn visit_names(
         &self,
         limit: usize,
+        visit: impl FnMut(&str) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.visit_names_counted(limit, &mut DirectoryWork::default(), visit)
+    }
+
+    pub fn visit_names_counted(
+        &self,
+        limit: usize,
+        work: &mut DirectoryWork,
         mut visit: impl FnMut(&str) -> io::Result<()>,
     ) -> io::Result<()> {
+        work.open_attempts += 1;
         let descriptor = unsafe {
             openat(
                 self.file.as_raw_fd(),
@@ -202,6 +264,7 @@ impl PrivateDirectory {
             .checked_add(3)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
         for _ in 0..=bound {
+            work.read_calls += 1;
             let received = unsafe {
                 __getdirentries64(
                     file.as_raw_fd(),
@@ -221,7 +284,14 @@ impl PrivateDirectory {
             if length > buffer.len() {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
-            visit_names_batch(&buffer[..length], limit, &mut count, &mut dots, &mut visit)?;
+            visit_names_batch(
+                &buffer[..length],
+                limit,
+                &mut count,
+                &mut dots,
+                &mut visit,
+                work,
+            )?;
         }
         Err(io::Error::from(io::ErrorKind::InvalidData))
     }
@@ -233,6 +303,7 @@ fn visit_names_batch(
     count: &mut usize,
     dots: &mut usize,
     visit: &mut impl FnMut(&str) -> io::Result<()>,
+    work: &mut DirectoryWork,
 ) -> io::Result<()> {
     let mut offset = 0;
     // Each Darwin dirent64 has at least its 21-byte header and a name terminator.
@@ -243,28 +314,16 @@ fn visit_names_batch(
         if bytes.len() - offset < 22 {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
+        work.entries += 1;
         let record = &bytes[offset..];
-        let record_length = usize::from(u16::from_ne_bytes([record[16], record[17]]));
-        let name_length = usize::from(u16::from_ne_bytes([record[18], record[19]]));
-        if record_length > record.len()
-            || record_length < 22
-            || name_length == 0
-            || name_length > NAME_MAX
-            || 21 + name_length >= record_length
-        {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        }
-        if record[21 + name_length] != 0 {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        }
-        let name = std::str::from_utf8(&record[21..21 + name_length])
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        let (record_length, name) = decode_entry(record)?;
         if name == "." || name == ".." {
             *dots += 1;
             if *dots > 2 {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
         } else {
+            work.names += 1;
             *count += 1;
             if *count > limit {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
@@ -274,4 +333,26 @@ fn visit_names_batch(
         offset += record_length;
     }
     Err(io::Error::from(io::ErrorKind::InvalidData))
+}
+
+pub(super) fn decode_entry(record: &[u8]) -> io::Result<(usize, &str)> {
+    if record.len() < 22 {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+
+    let length = usize::from(u16::from_ne_bytes([record[16], record[17]]));
+    let name_length = usize::from(u16::from_ne_bytes([record[18], record[19]]));
+    if length < 22
+        || length > record.len()
+        || name_length == 0
+        || name_length > NAME_MAX
+        || 21 + name_length >= length
+        || record[21 + name_length] != 0
+    {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+
+    let name = std::str::from_utf8(&record[21..21 + name_length])
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    Ok((length, name))
 }

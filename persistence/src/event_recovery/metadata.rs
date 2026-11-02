@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{self, Read, Write};
 
 use collector::ring::{Identity, RunIdentity};
@@ -59,7 +58,7 @@ impl Manifest {
         Ok(())
     }
 
-    pub(crate) fn write(&self, file: &mut File) -> io::Result<()> {
+    pub(crate) fn write(&self, file: &mut impl Write) -> io::Result<()> {
         self.validate()?;
         let value = &self.recovery;
         let words = [
@@ -91,7 +90,7 @@ impl Manifest {
         Ok(())
     }
 
-    pub(crate) fn read(file: &mut File) -> io::Result<Self> {
+    pub(crate) fn read(file: &mut impl Read) -> io::Result<Self> {
         let mut bytes = Vec::with_capacity(WORDS_MAX * 8 + 1);
         file.take(collector::u64_from_usize(WORDS_MAX * 8 + 1))
             .read_to_end(&mut bytes)?;

@@ -28,6 +28,32 @@ impl Index {
     }
 
     pub(crate) fn read_file(file: &mut std::fs::File, expected: &Manifest) -> Result<Self> {
+        let index = Self::read_attempt_file(file, &expected.identity, None)?;
+        let count = index.batches.len();
+        let rows = expected
+            .tables
+            .iter()
+            .find(|table| table.name == "events")
+            .ok_or(Error::Bound("missing event table"))?
+            .rows;
+        if index.identity != expected.identity
+            || index.first != expected.events_first
+            || index.end != expected.events_end
+            || index.rows != rows
+            || expected.event_batches
+                != Some(u32::try_from(count).map_err(|_| Error::Bound("event index batches"))?)
+        {
+            return Err(Error::Bound("event index commitment"));
+        }
+        Ok(index)
+    }
+
+    /// Reads finite attempted coverage without manufacturing a final ordinary manifest.
+    pub(crate) fn read_attempt_file(
+        file: &mut std::fs::File,
+        identity: &WindowIdentity,
+        identities: Option<bool>,
+    ) -> Result<Self> {
         let mut bytes = Vec::with_capacity(BYTES_MAX + 1);
         file.take(collector::u64_from_usize(BYTES_MAX + 1))
             .read_to_end(&mut bytes)?;
@@ -37,6 +63,7 @@ impl Index {
         {
             return Err(Error::Bound("event index size"));
         }
+
         let word = |index: usize| -> Result<u64> {
             Ok(u64::from_le_bytes(
                 bytes
@@ -49,10 +76,12 @@ impl Index {
         if word(0)? != MAGIC || word(1)? != 1 || word(12)? > 1 {
             return Err(Error::Bound("event index protocol"));
         }
+
         let count = usize::try_from(word(13)?).map_err(|_| Error::Bound("event index batches"))?;
         if count > BATCHES_MAX || bytes.len() != (HEADER_WORDS + count * 3) * 8 {
             return Err(Error::Bound("event index batches"));
         }
+
         let mut batches = Vec::with_capacity(count);
         for index in 0..count {
             let start = HEADER_WORDS + index * 3;
@@ -78,27 +107,21 @@ impl Index {
             batches,
         };
         index.validate()?;
-        let rows = expected
-            .tables
-            .iter()
-            .find(|table| table.name == "events")
-            .ok_or(Error::Bound("missing event table"))?
-            .rows;
-        if index.identity != expected.identity
-            || index.first != expected.events_first
-            || index.end != expected.events_end
-            || index.rows != rows
-            || expected.event_batches
-                != Some(u32::try_from(count).map_err(|_| Error::Bound("event index batches"))?)
+        if index.identity != *identity
+            || identities.is_some_and(|profile| profile != index.identities)
         {
-            return Err(Error::Bound("event index commitment"));
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData).into());
         }
         Ok(index)
     }
 
+    #[cfg(test)]
     pub(crate) fn write(&self, path: &Path) -> Result<()> {
+        self.write_file(&mut private::open_private_file(path, true)?)
+    }
+
+    pub(crate) fn write_file(&self, file: &mut impl Write) -> Result<()> {
         self.validate()?;
-        let mut file = private::open_private_file(path, true)?;
         let run = self.identity.run;
         let header = [
             MAGIC,

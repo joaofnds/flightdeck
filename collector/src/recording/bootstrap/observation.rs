@@ -21,10 +21,20 @@ impl<'root, 'bytes> StateObservation<'root, 'bytes> {
         recording: Identity,
         bytes: &'bytes mut [u8; STATE_BYTES],
     ) -> io::Result<Option<Self>> {
-        if bootstrap_present(root)? {
+        Self::begin_counted(root, recording, bytes, &mut 0)
+    }
+
+    pub fn begin_counted(
+        root: &'root PrivateDirectory,
+        recording: Identity,
+        bytes: &'bytes mut [u8; STATE_BYTES],
+        attempts: &mut u64,
+    ) -> io::Result<Option<Self>> {
+        if bootstrap_present(root, attempts)? {
             return Ok(None);
         }
 
+        *attempts += 1;
         let mut file = root.open_file("namespace-state")?;
         read_into(&mut file, bytes)?;
         if !matches!(
@@ -45,10 +55,19 @@ impl<'root, 'bytes> StateObservation<'root, 'bytes> {
     /// Independently opens the current name, comparing it while the first inode
     /// is retained. False means Pending/Retry, never an empty completed walk.
     pub fn unchanged(&self, scratch: &mut [u8; STATE_BYTES]) -> io::Result<bool> {
-        if bootstrap_present(self.root)? {
+        self.unchanged_counted(scratch, &mut 0)
+    }
+
+    pub fn unchanged_counted(
+        &self,
+        scratch: &mut [u8; STATE_BYTES],
+        attempts: &mut u64,
+    ) -> io::Result<bool> {
+        if bootstrap_present(self.root, attempts)? {
             return Ok(false);
         }
 
+        *attempts += 1;
         let mut current = match self.root.open_file("namespace-state") {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -72,7 +91,8 @@ impl<'root, 'bytes> StateObservation<'root, 'bytes> {
     }
 }
 
-fn bootstrap_present(root: &PrivateDirectory) -> io::Result<bool> {
+fn bootstrap_present(root: &PrivateDirectory, attempts: &mut u64) -> io::Result<bool> {
+    *attempts += 1;
     match root.open_file("bootstrap") {
         Ok(file) => {
             drop(file);

@@ -12,6 +12,13 @@ use crate::layout::{self, Kind, WindowKey};
 use crate::metadata::invalid;
 use crate::{Manifest, WindowIdentity};
 
+mod attempt;
+mod inventory;
+pub use attempt::{RegisteredAttempt, RegisteredFile};
+pub use inventory::{
+    BatchFact, FileIdentity, IndexFact, InventoryStep, InventoryWork, OriginalFile,
+    OriginalInventory, OriginalPlacement,
+};
 mod event_table;
 pub(crate) mod events;
 #[cfg(test)]
@@ -20,6 +27,8 @@ pub(crate) use events::EventBegin;
 
 pub struct Store {
     root: PathBuf,
+    directory: private::PrivateDirectory,
+    protocol_two: bool,
     recording: Identity,
     owner: FileLock,
     staging: Arc<AtomicBool>,
@@ -87,7 +96,34 @@ const _: () = {
 
 impl Store {
     pub fn open(root: &Path) -> io::Result<Self> {
-        collector::recording::check_writer(root)?;
+        if let Err(error) = collector::recording::check_writer(root) {
+            if error.kind() != io::ErrorKind::Unsupported {
+                return Err(error);
+            }
+            let directory = private::PrivateDirectory::open(root)?;
+            let mut scratch = [0; 4097];
+            if let collector::recording::bootstrap::Classification::Initialized(recording) =
+                collector::recording::bootstrap::classify(&directory, &mut scratch)?
+            {
+                let owner = match FileLock::try_lock_in(&directory, "persister.lock") {
+                    Ok(owner) => owner,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        return Err(io::Error::new(io::ErrorKind::WouldBlock, OwnershipBusy));
+                    }
+                    Err(error) => return Err(error),
+                };
+                directory.full_sync()?;
+                return Ok(Self {
+                    root: root.to_owned(),
+                    directory,
+                    protocol_two: true,
+                    recording,
+                    owner,
+                    staging: Arc::new(AtomicBool::new(false)),
+                });
+            }
+            return Err(error);
+        }
         private::create_private_dir(root)?;
         let registration = FileLock::wait_short(&root.join("registration.lock"))?;
         let recording = collector::recording::recording_identity(root)?;
@@ -104,10 +140,22 @@ impl Store {
         drop(directory.create_directory("commits")?);
         Ok(Self {
             root: root.to_owned(),
+            directory,
+            protocol_two: false,
             recording,
             owner,
             staging: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    pub(crate) fn require_composed_catalog(&self) -> io::Result<()> {
+        if self.protocol_two {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "protocol-two canonical frontier/recovery is not composed",
+            ));
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -116,10 +164,11 @@ impl Store {
     }
 
     pub fn registration_lock(&self) -> io::Result<FileLock> {
-        FileLock::try_lock(&self.root.join("registration.lock"))
+        FileLock::try_lock_in(&self.directory, "registration.lock")
     }
 
     pub fn progress(&self, run: &RunIdentity) -> io::Result<Option<Manifest>> {
+        self.require_composed_catalog()?;
         let identity = WindowIdentity {
             run: *run,
             window: 0,
@@ -179,6 +228,7 @@ impl Store {
     }
 
     pub fn existing(&self, identity: &WindowIdentity) -> io::Result<Option<Manifest>> {
+        self.require_composed_catalog()?;
         self.validate_identity(identity)?;
         match Self::verify_partition(&self.root, Kind::Commits, identity) {
             Ok(()) => {}
@@ -201,6 +251,7 @@ impl Store {
     }
 
     pub fn begin(&self, identity: &WindowIdentity) -> io::Result<Begin> {
+        self.require_composed_catalog()?;
         if self
             .staging
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -603,3 +654,6 @@ fn partition_root(root: &Path, kind: Kind, identity: &WindowIdentity) -> PathBuf
 fn visit_names(path: &Path, visit: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
     layout::visit_names(path, visit)
 }
+
+#[cfg(test)]
+mod registration_tests;

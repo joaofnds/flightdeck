@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{self, Read, Write};
 
 pub use collector::recording::discovery::TimeBounds;
@@ -40,7 +39,7 @@ const _: () = {
 };
 
 impl Manifest {
-    pub(crate) fn write(&self, file: &mut File) -> io::Result<()> {
+    pub(crate) fn write(&self, file: &mut impl Write) -> io::Result<()> {
         self.validate()?;
         file.write_all(MAGIC)?;
         file.write_all(&u64::from(crate::SCHEMA_VERSION).to_le_bytes())?;
@@ -85,7 +84,7 @@ impl Manifest {
         Ok(())
     }
 
-    pub(crate) fn read(file: &mut File) -> io::Result<Self> {
+    pub(crate) fn read(file: &mut impl Read) -> io::Result<Self> {
         let mut bytes = Vec::with_capacity(usize::try_from(METADATA_BYTES_MAX).map_err(invalid)?);
         file.take(METADATA_BYTES_MAX + 1).read_to_end(&mut bytes)?;
         if u64::try_from(bytes.len()).map_err(invalid)? > METADATA_BYTES_MAX {
@@ -279,7 +278,7 @@ impl<'a> Decoder<'a> {
     }
 }
 
-fn write_bounds(file: &mut File, bounds: Option<TimeBounds>) -> io::Result<()> {
+fn write_bounds(file: &mut impl Write, bounds: Option<TimeBounds>) -> io::Result<()> {
     let words = match bounds {
         Some(bounds) => [1, bounds.min, bounds.max],
         None => [0, 0, 0],
@@ -290,7 +289,7 @@ fn write_bounds(file: &mut File, bounds: Option<TimeBounds>) -> io::Result<()> {
     Ok(())
 }
 
-fn write_string(file: &mut File, value: &str) -> io::Result<()> {
+fn write_string(file: &mut impl Write, value: &str) -> io::Result<()> {
     file.write_all(&u64::try_from(value.len()).map_err(invalid)?.to_le_bytes())?;
     file.write_all(value.as_bytes())
 }

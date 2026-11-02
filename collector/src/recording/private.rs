@@ -9,7 +9,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod directory;
-pub use directory::PrivateDirectory;
+mod names;
+pub use directory::{DirectoryIdentity, DirectoryWork, PrivateDirectory};
+pub use names::PrivateNames;
 
 pub struct FileLock {
     file: File,

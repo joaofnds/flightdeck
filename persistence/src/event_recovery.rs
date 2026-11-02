@@ -10,7 +10,7 @@ use crate::{Losses, Result};
 pub(crate) mod batch;
 mod discovery;
 pub(crate) mod metadata;
-mod read;
+pub(crate) mod read;
 
 pub(crate) use batch::write_tail;
 pub use discovery::{Discovery, DiscoveryPage};

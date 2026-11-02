@@ -845,7 +845,7 @@ fn window_number(reader: &RingReader, tick: &Tick) -> Result<u64> {
     )
 }
 
-fn timing_window_number(reader: &RingReader, timing: &PublicationTiming) -> Result<u64> {
+pub(crate) fn timing_window_number(reader: &RingReader, timing: &PublicationTiming) -> Result<u64> {
     match (timing.times, reader.run_start_continuous_ns()) {
         (Some(times), Some(start)) => times
             .continuous_ns

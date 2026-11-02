@@ -681,3 +681,57 @@ fn child_creation_retains_full_root_and_component_bounds() {
     drop(directory);
     assert_eq!(0, fixture_descriptor_count(&identities));
 }
+
+#[test]
+fn retained_names_retry_the_failed_entry_and_report_stable_eof() {
+    // Goal: incremental enumeration never advances past a refused name or reallocates.
+    // Method: refuse the first non-dot name, repeat it, then exhaust the retained descriptor.
+    let fixture = DirectoryFixture::new("retained-names");
+    let directory = PrivateDirectory::open(&fixture.0).unwrap();
+    directory.create_file("one").unwrap();
+    let mut work = DirectoryWork::default();
+    let mut names = directory.names(&mut work).unwrap();
+    let mut refused = false;
+    for _ in 0..4 {
+        let result = names.step(&mut work, |name| {
+            if name == "." || name == ".." {
+                Ok(())
+            } else {
+                assert_eq!(name, "one");
+                Err(io::Error::from(io::ErrorKind::Other))
+            }
+        });
+        if result.is_err() {
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused);
+    let calls = allocator_calls_in(|| {
+        assert!(
+            names
+                .step(&mut work, |name| {
+                    assert_eq!(name, "one");
+                    Ok(())
+                })
+                .unwrap()
+        );
+        let mut ended = false;
+        for _ in 0..4 {
+            if !names.step(&mut work, |_| Ok(())).unwrap() {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended);
+        let before = work.read_calls;
+        assert!(
+            !names
+                .step(&mut work, |_| panic!("entry after EOF"))
+                .unwrap()
+        );
+        assert_eq!(work.read_calls, before);
+    });
+    assert_eq!(calls, 0);
+    assert_eq!(work.names, 2);
+}
