@@ -9,6 +9,58 @@ use std::mem::offset_of;
 const RUSAGE_INFO_V6: i32 = 6;
 const WNOHANG: i32 = 1;
 const WAIT_INTERRUPTS_MAX: usize = 8;
+const P_PID: u32 = 1;
+const WEXITED: i32 = 4;
+const WNOWAIT: i32 = 0x20;
+const SIGCHLD: i32 = 20;
+
+/// Observes exit without reaping, so native lifetime footprint remains readable.
+pub(super) fn exited(pid: i32) -> io::Result<bool> {
+    for _interruption in 0..WAIT_INTERRUPTS_MAX {
+        let mut info = Siginfo::default();
+        let result = unsafe {
+            waitid(
+                P_PID,
+                u32::try_from(pid).map_err(io::Error::other)?,
+                &raw mut info,
+                WNOHANG | WEXITED | WNOWAIT,
+            )
+        };
+        if result == 0 {
+            let pid_bytes = info.0[1].to_ne_bytes();
+            let si_pid =
+                i32::from_ne_bytes([pid_bytes[4], pid_bytes[5], pid_bytes[6], pid_bytes[7]]);
+            let signal_bytes = info.0[0].to_ne_bytes();
+            let si_signo = i32::from_ne_bytes([
+                signal_bytes[0],
+                signal_bytes[1],
+                signal_bytes[2],
+                signal_bytes[3],
+            ]);
+            if si_pid == 0 {
+                return Ok(false);
+            }
+            if si_pid != pid || si_signo != SIGCHLD {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(EINTR) {
+            return Err(error);
+        }
+    }
+    Err(io::Error::from(io::ErrorKind::Interrupted))
+}
+
+#[derive(Default)]
+#[repr(C)]
+// Same opaque native declaration as processes::child_that_has_exited. Darwin's
+// sys/signal.h places si_signo at byte0 and si_pid at byte12 of this 104-byte record.
+struct Siginfo([u64; 13]);
+
+const _: () = assert!(size_of::<Siginfo>() == 104);
+const _: () = assert!(align_of::<Siginfo>() == 8);
 
 pub(super) fn sample(pid: i32, timebase: Timebase) -> io::Result<ChildCost> {
     let mut record = RusageInfoV6::default();
@@ -191,4 +243,5 @@ unsafe extern "C" {
     pub(super) fn kill(pid: c_int, signal: c_int) -> c_int;
     fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *mut c_void) -> c_int;
     fn wait4(pid: c_int, status: *mut c_int, options: c_int, usage: *mut Rusage) -> c_int;
+    fn waitid(kind: u32, id: u32, info: *mut Siginfo, options: i32) -> i32;
 }

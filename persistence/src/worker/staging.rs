@@ -3,21 +3,37 @@ use super::{ReadEvents, Tick, Window, WindowIdentity};
 
 pub(super) struct Staging {
     window: Window,
+    pending: crate::PendingWindow,
+    events: crate::event_table::writer::Writer,
     identities: Vec<IdentityObservation>,
     captured: bool,
     publications_pending: u64,
 }
 
 impl Staging {
-    pub(super) fn new(reader: &RingReader, identity: WindowIdentity, limits: Limits) -> Self {
+    pub(super) fn new(
+        reader: &RingReader,
+        identity: WindowIdentity,
+        limits: Limits,
+        pending: crate::PendingWindow,
+        memory_limit: u64,
+    ) -> Result<Self> {
         let captured = reader.dictionary_capacity().is_some();
-
-        Self {
+        let events = crate::event_table::writer::Writer::new(
+            pending.path(),
+            identity,
+            reader.next_event(),
+            captured,
+            memory_limit,
+        )?;
+        Ok(Self {
             window: Window::new(identity, limits),
+            pending,
+            events,
             identities: Vec::with_capacity(if captured { limits.processes } else { 0 }),
             captured,
             publications_pending: 0,
-        }
+        })
     }
 
     pub(super) fn read(
@@ -90,15 +106,31 @@ impl Staging {
         }
 
         losses.events += copied_losses.events;
+        let Some(copied) = self.window.ticks.last() else {
+            unreachable!("successful publication copy adds one tick");
+        };
+        self.events
+            .publication(reader, copied, self.window.programs.as_deref(), losses)?;
 
         Ok(())
     }
 
-    pub(super) fn finish(self, losses: &mut Losses) -> Window {
+    pub(super) fn finish(
+        mut self,
+        reader: &mut RingReader,
+        losses: &mut Losses,
+    ) -> Result<super::StagedWindow> {
         if self.window.tick_count() == 0 {
             losses.publications += self.publications_pending;
         }
 
-        self.window
+        if self.window.tick_count() > 0 {
+            let first = self.window.ticks[0].events_first;
+            self.window.event_index = Some(self.events.finish(reader, first)?);
+        }
+        Ok(super::StagedWindow {
+            window: self.window,
+            pending: self.pending,
+        })
     }
 }

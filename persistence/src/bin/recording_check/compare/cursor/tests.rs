@@ -118,6 +118,7 @@ fn reference() -> Reference {
 
 fn manifest(directory: &str, publications: std::ops::Range<u64>) -> Manifest {
     Manifest {
+        event_batches: None,
         identity: WindowIdentity {
             run: reference().identity,
             window: publications.start,

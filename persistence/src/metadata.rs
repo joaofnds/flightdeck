@@ -19,6 +19,8 @@ pub struct Manifest {
     pub losses: Losses,
     pub data_directory: String,
     pub tables: Vec<TableManifest>,
+    /// None is the legacy single events.parquet; Some names a bounded physical event table.
+    pub event_batches: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +31,7 @@ pub struct Losses {
 }
 
 const MAGIC: &[u8; 8] = b"FDSEAL01";
-const ENCODING_VERSION: u64 = 1;
+const ENCODING_VERSION: u64 = 2;
 const METADATA_BYTES_MAX: u64 = 4096;
 const TABLES_MAX: usize = 16;
 const DIRECTORY_BYTES_MAX: usize = 256;
@@ -78,6 +80,7 @@ impl Manifest {
             write_string(file, table.name)?;
             file.write_all(&table.rows.to_le_bytes())?;
         }
+        file.write_all(&self.event_batches.map_or(u64::MAX, u64::from).to_le_bytes())?;
 
         Ok(())
     }
@@ -98,7 +101,8 @@ impl Manifest {
         if decoder.word()? != u64::from(crate::SCHEMA_VERSION) {
             return Err(invalid("schema version"));
         }
-        if decoder.word()? != ENCODING_VERSION {
+        let encoding = decoder.word()?;
+        if encoding != 1 && encoding != ENCODING_VERSION {
             return Err(invalid("encoding version"));
         }
         let identity = WindowIdentity {
@@ -125,6 +129,7 @@ impl Manifest {
             awake_ns: decoder.bounds()?,
             data_directory: decoder.string()?.to_owned(),
             tables: Vec::with_capacity(TABLES_MAX),
+            event_batches: None,
         };
         let count = decoder.word()?;
         if count > u64::try_from(TABLES_MAX).map_err(invalid)? {
@@ -137,6 +142,12 @@ impl Manifest {
                 rows: decoder.word()?,
             });
         }
+        if encoding == ENCODING_VERSION {
+            let count = decoder.word()?;
+            if count != u64::MAX {
+                manifest.event_batches = Some(u32::try_from(count).map_err(invalid)?);
+            }
+        }
         if decoder.position != bytes.len() {
             return Err(invalid("trailing metadata"));
         }
@@ -145,6 +156,13 @@ impl Manifest {
     }
 
     pub(crate) fn validate(&self) -> io::Result<()> {
+        if let Some(count) = self.event_batches {
+            if u64::from(count)
+                > collector::u64_from_usize(crate::event_recovery::metadata::BATCHES_MAX)
+            {
+                return Err(invalid("event table batches"));
+            }
+        }
         if self.publication_first >= self.publication_end {
             return Err(invalid("publication range"));
         }

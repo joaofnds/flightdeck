@@ -32,6 +32,20 @@ pub enum AdmissionRefusal {
     },
 }
 
+/// Brackets concrete-file I/O with the descriptor identity retained by its captured owner.
+pub(super) fn capture_verified<T>(
+    file: &mut File,
+    capture: impl FnOnce(&mut File) -> std::result::Result<T, AdmissionRefusal>,
+) -> std::result::Result<(T, super::sources::Fingerprint), AdmissionRefusal> {
+    let before = super::sources::Fingerprint::from_file(file).map_err(refuse)?;
+    let input = capture(file)?;
+    if super::sources::Fingerprint::from_file(file).map_err(refuse)? != before {
+        return Err(AdmissionRefusal::Bound("changed parquet capture source"));
+    }
+
+    Ok((input, before))
+}
+
 impl AdmittedFile {
     /// Reads the file once, within the caller's compressed-byte allowance and admission's limits.
     /// The caller must separately bound concurrent readers and their decoded results.
@@ -79,6 +93,20 @@ impl AdmittedFile {
         row_limit: Option<u32>,
         materialize: impl FnOnce(Buffer<u8>) -> Result<FileMetadata>,
     ) -> Result<DataFrame> {
+        let slice = row_limit
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| Error::Bound("parquet prefix rows"))?
+            .map(|length| (0, length));
+        self.read_slice_with_metadata(columns, slice, materialize)
+    }
+
+    pub(super) fn read_slice_with_metadata(
+        &self,
+        columns: &[&str],
+        slice: Option<(usize, usize)>,
+        materialize: impl FnOnce(Buffer<u8>) -> Result<FileMetadata>,
+    ) -> Result<DataFrame> {
         if let Some(reservation) = &self.reservation {
             assert_eq!(reservation.bytes(), self.bytes.capacity());
         }
@@ -94,11 +122,6 @@ impl AdmittedFile {
             }
         }
 
-        let slice = row_limit
-            .map(usize::try_from)
-            .transpose()
-            .map_err(|_| Error::Bound("parquet prefix rows"))?
-            .map(|length| (0, length));
         let columns = columns.iter().map(|name| (*name).to_owned()).collect();
         crate::work::ingestion::record_content(crate::work::ingestion::Kind::ProjectionDecode, 0);
         // Native statistics borrow the footer; all metadata aliases must die inside this scope.

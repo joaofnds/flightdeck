@@ -12,7 +12,8 @@ use persistence::schema::{
     identity_availability,
 };
 use polars::prelude::{
-    DataFrame, DataType, Expr, Null, SortMultipleOptions, UInt32Type, UInt64Type, col, lit,
+    DataFrame, DataType, Expr, IntoLazy, Null, SortMultipleOptions, UInt32Type, UInt64Type, col,
+    lit,
 };
 
 use super::apps::AppMinute;
@@ -322,7 +323,6 @@ pub(crate) fn read_processes_batch_with_endpoints(
     };
     let mut rows = read_processes_rows(
         processes,
-        Table::Processes,
         [
             lit(0_u8).cast(DataType::UInt8).alias("app_origin"),
             null("app_event", DataType::UInt64),
@@ -333,33 +333,9 @@ pub(crate) fn read_processes_batch_with_endpoints(
         ],
     )?;
 
-    // The assembly takes each observation's events in the order of their numbers.
-    let mut events = minute.table(Table::Events)?;
-    events.plan = events.plan.sort(
-        ["event"],
-        SortMultipleOptions {
-            descending: vec![false],
-            nulls_last: vec![false],
-            multithreaded: false,
-            maintain_order: true,
-            limit: None,
-        },
-    );
-    let events = read_processes_rows(
-        events,
-        Table::Events,
-        [
-            lit(1_u8).cast(DataType::UInt8).alias("app_origin"),
-            col("event").alias("app_event"),
-            col("kind").alias("app_kind"),
-            col("run_tick").alias("app_tick"),
-            null("threads", DataType::Int32),
-            null("gpu_ns", DataType::UInt64),
-        ],
-    )?;
+    let events = read_processes_batch_events(minute)?;
     rows.vstack_mut_owned(events)
         .map_err(persistence::Error::from)?;
-    rows.rechunk_mut();
 
     let publications: Vec<u64> = endpoints
         .iter()
@@ -372,6 +348,42 @@ pub(crate) fn read_processes_batch_with_endpoints(
         rows,
         order,
     })
+}
+
+fn read_processes_batch_events(minute: &SealedMinute) -> Result<DataFrame, Refused> {
+    let origin = [
+        lit(1_u8).cast(DataType::UInt8).alias("app_origin"),
+        col("event").alias("app_event"),
+        col("kind").alias("app_kind"),
+        col("run_tick").alias("app_tick"),
+        null("threads", DataType::Int32),
+        null("gpu_ns", DataType::UInt64),
+    ];
+    let events = super::events::associated(minute)?
+        .lazy()
+        .with_columns(origin)
+        .select(BATCH_COLUMNS.map(col))
+        .collect()
+        .map_err(persistence::Error::from)?;
+    if minute.manifest.event_batches.is_some() {
+        // Parts validate their native event order, so associated rows already have the
+        // assembly's order. Keep leased chunks instead of copying them into an unleased sort.
+        return Ok(events);
+    }
+
+    // Legacy physical order is by process. Sort only the associated rows after validation.
+    Ok(events
+        .sort(
+            ["app_event"],
+            SortMultipleOptions {
+                descending: vec![false],
+                nulls_last: vec![false],
+                multithreaded: false,
+                maintain_order: true,
+                limit: None,
+            },
+        )
+        .map_err(persistence::Error::from)?)
 }
 
 /// The endpoint of each of `minute`'s ticks, in the order the table holds them.
@@ -435,20 +447,16 @@ pub(super) fn read_processes_endpoints_rows(
     Ok(endpoints)
 }
 
-/// The rows of `table`, the minute's table `kind` of processes or events, in the columns the
-/// assembly reads, with `origin` the columns where the two kinds' rows differ. Rows of a table
+/// The rows of the minute's process `table`, in the columns the assembly reads, with
+/// `origin` the columns where processes differ from events. Rows of a table
 /// that holds the identity fields pass the identity admission rule, and a table sealed before
 /// them holds processes of unsupported identity, as the SQL replay reads it.
-fn read_processes_rows(
-    mut table: SealedTable,
-    kind: Table,
-    origin: [Expr; 6],
-) -> Result<DataFrame, Refused> {
+fn read_processes_rows(mut table: SealedTable, origin: [Expr; 6]) -> Result<DataFrame, Refused> {
     let held = table.holds(&IDENTITY_FIELDS.map(|(name, _)| name))?;
     let mut columns = if held {
-        validation_columns(kind)
+        validation_columns(Table::Processes)
     } else {
-        read_processes_rows_legacy(kind)
+        read_processes_rows_legacy()
     };
     columns.push(col("pid"));
     columns.extend(USAGE_COLUMNS.map(col));
@@ -464,20 +472,16 @@ fn read_processes_rows(
     }
 
     if held {
-        validate(kind, &frame, 0..frame.height())?;
+        validate(Table::Processes, &frame, 0..frame.height())?;
     }
     Ok(frame
         .select(BATCH_COLUMNS)
         .map_err(persistence::Error::from)?)
 }
 
-/// The identity columns of a process or event table sealed before processes carried their
+/// The identity columns of a process table sealed before processes carried their
 /// identity, as the SQL replay normalizes them.
-fn read_processes_rows_legacy(kind: Table) -> Vec<Expr> {
-    let usage = match kind {
-        Table::Events => col("availability"),
-        _ => lit(availability::MEASURED),
-    };
+fn read_processes_rows_legacy() -> Vec<Expr> {
     vec![
         lit(identity_availability::UNSUPPORTED)
             .cast(DataType::UInt8)
@@ -486,7 +490,9 @@ fn read_processes_rows_legacy(kind: Table) -> Vec<Expr> {
         null("pid_version", DataType::Int32),
         null("executable_name", DataType::Binary),
         null("app_path", DataType::Binary),
-        usage.cast(DataType::UInt8).alias("usage_availability"),
+        lit(availability::MEASURED)
+            .cast(DataType::UInt8)
+            .alias("usage_availability"),
     ]
 }
 

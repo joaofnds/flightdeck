@@ -15,7 +15,8 @@ still to build.
 flowchart LR
     Mac[macOS counters] --> Collector[collector process]
     Collector --> Ring[Bounded shared-memory ring]
-    Collector -->|starts| Persister[persister process]
+    Recorder[recorder process] -->|starts or adopts| Collector
+    Recorder -->|starts or adopts| Persister[persister process]
     Ring --> Persister
     Persister --> Saved[Immutable sealed minutes on disk]
     Ring --> Readers[viewer readers inside the desktop process]
@@ -30,8 +31,8 @@ history and recovery after a reader falls behind. A recording continues across
 collector runs. Run, boot and publication identities distinguish observations,
 including observations that share a wall-clock second.
 
-The desktop attaches to an existing compatible collector or starts one when needed.
-It stops only a collector it started. Opening a saved recording with `--recording`
+The desktop attaches to an existing compatible recording or starts its recorder when needed.
+Closing or quitting the GUI detaches from the recorder; acquisition and saving continue. Opening a saved recording with `--recording`
 is read-only unless collection is explicitly requested. Collector ownership and
 window visibility are separate lifecycles.
 
@@ -39,6 +40,7 @@ window visibility are separate lifecycles.
 | --- | --- | --- |
 | `model` | Shared data types | [`model/src`](../model/src) |
 | `collector` | macOS acquisition, process tracking, ring publication and recording registration | [Collector guide](collector.md), [`collector/src`](../collector/src) |
+| `recorder` | Worker lifecycle, bounded retries, adoption, explicit stop and combined cost reporting | [`collector/src/bin/recorder.rs`](../collector/src/bin/recorder.rs) |
 | `persister` | Separate executable that saves collected readings | [`persister/src/main.rs`](../persister/src/main.rs) |
 | `persistence` | Saved layout, bounded admission, Parquet encoding and query execution | [`persistence/src/lib.rs`](../persistence/src/lib.rs) |
 | `viewer` | Recording interpretation, identities, rates, App histories and live Store | [`viewer/src/lib.rs`](../viewer/src/lib.rs) |
@@ -69,14 +71,35 @@ read error leaves that source unavailable for the tick, while other sources cont
 reader retains its handle and buffers for the next tick; partial updates cannot escape as
 fresh readings. A native call that hangs can still block the acquisition thread.
 
-Each collector or persister process sends diagnostics through a fixed-capacity queue to
+Each recorder, collector or persister process sends diagnostics through a fixed-capacity queue to
 its own output thread. The producer never waits for the destination; overload loses reports
 with explicit counters. Slow diagnostics therefore do not control the recording's progress.
+
+The recorder holds only the controller lock. Workers hold their own acquisition and commit
+locks and publish separate fixed-size health records with native process creation identity.
+The private mapping also binds the recording, cohort authority and source compatibility
+fingerprint. Durable health advances after canonical commit synchronization. Recorder loss
+leaves healthy workers running; explicit relaunch verifies survivors before adopting them.
+A persister operating failure receives bounded retries while acquisition continues.
 
 The persister first reads timing and completion information to decide whether a window is
 ready. Only then does it allocate payload buffers, copy the readings and encode them. It
 still admits and maps the source on each pass, and releases that mapping before encoding.
 Its memory watchdog stays active between operations, including while the main worker waits.
+
+New recording roots declare separate reader and writer protocol requirements. The reader
+can inspect legacy roots; the writer requires a new root instead of converting legacy data
+in place. Within one sealed window, Events is one logical table backed by bounded physical
+parts and an index under the same canonical commit. Readers bind each opened part to the
+captured file identity before decoding, then validate row identity and provenance before
+exposing a budgeted frame.
+
+Recovery also preserves events whose observations have left the ring. Such rows retain
+their native identity and event number, with an explicitly unavailable publication. They
+remain visible to raw queries and do not become App frames. A completed source with no
+recoverable observations commits an event-only object, discoverable through the terminal
+discovery and paging APIs. The ordinary saved-recording Session does not yet expose those
+objects as a selectable inspection source.
 
 New process and App GPU time remains unavailable because the inspected native client
 counters cannot establish process-creation ownership. Machine GPU measurements and existing

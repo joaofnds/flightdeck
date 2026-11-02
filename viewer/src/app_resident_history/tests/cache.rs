@@ -267,24 +267,41 @@ fn resident_history_rejects_replaced_saved_files_on_a_cache_hit() {
 fn resident_history_keeps_saved_facts_when_the_session_catalog_is_replaced() {
     // Goal: saved resident reuse belongs to live History rather than one saved Session catalog.
     // Method: warm facts, replace the actual saved reader, warm selected detail, and repeat.
-    let (fixture, mut session) = saved_context();
-    let first = session.app_resident_history().unwrap();
-    session.history = Some(crate::Session::open(&fixture.root).unwrap());
-    session.apps_page(0).unwrap();
-    let saved = session.history.as_ref().unwrap();
-    let reads = saved.source_reads.get();
+    for multipart in [false, true] {
+        let (fixture, mut session) = saved_context_with(multipart);
+        let first = session.app_resident_history().unwrap();
+        session.history = Some(crate::Session::open(&fixture.root).unwrap());
+        session.apps_page(0).unwrap();
+        let saved = session.history.as_ref().unwrap();
+        let reads = saved.source_reads.get();
 
-    let repeated = session.app_resident_history().unwrap();
+        let repeated = session.app_resident_history().unwrap();
 
-    assert_eq!(repeated, first);
-    assert_eq!(saved.source_reads.get() - reads, 1);
+        assert_eq!(repeated, first);
+        assert_eq!(saved.source_reads.get() - reads, 1);
+    }
 }
 
 fn saved_context() -> (Fixture, LiveSession) {
+    saved_context_with(false)
+}
+
+fn saved_context_with(multipart: bool) -> (Fixture, LiveSession) {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(11));
     fixture.publish_with_usage(1001, &usage(29));
-    fixture.seal();
+    if multipart {
+        fixture.writer.finish();
+        let outcome = persistence::worker::run(
+            &fixture.root,
+            persistence::worker::default_memory_limit(),
+            &crate::live::identity_fixture::Underived,
+        )
+        .unwrap();
+        assert!(matches!(outcome, persistence::worker::Outcome::Complete));
+    } else {
+        fixture.seal();
+    }
     collector::recording::Registry {
         runs: Vec::new(),
         evictions: 0,

@@ -397,6 +397,7 @@ impl Fixture {
             .commit(
                 pending,
                 persistence::Manifest {
+                    event_batches: None,
                     identity: window.identity,
                     publication_first: publications.start,
                     publication_end: publications.end,

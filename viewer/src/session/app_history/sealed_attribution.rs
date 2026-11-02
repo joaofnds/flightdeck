@@ -150,7 +150,7 @@ impl Session {
         ResidentPin {
             manifest: self.windows[kept.window].clone(),
             files: vec![ResidentFile {
-                path: kept.path.clone(),
+                kind: super::SourceFileKind::Parquet(kept.path.clone()),
                 alias: kept.source.clone(),
             }],
         }

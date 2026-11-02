@@ -1,4 +1,5 @@
 use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use polars::prelude::*;
@@ -46,6 +47,15 @@ impl Encoder {
 
         let mut tables = Vec::with_capacity(TABLES.len());
         for table in TABLES {
+            if matches!(table, Table::Events) {
+                if let Some(index) = &window.event_index {
+                    tables.push(TableManifest {
+                        name: table.name(),
+                        rows: index.rows,
+                    });
+                    continue;
+                }
+            }
             let mut frame = frame_in_file_order(table, window)?.sort(
                 table.catalog().key.to_vec(),
                 SortMultipleOptions {
@@ -87,12 +97,17 @@ pub fn encode_derived(
     Ok(TableManifest { name, rows })
 }
 
-fn encode_open(path: &Path) -> Result<std::fs::File> {
+pub(crate) fn encode_open(path: &Path) -> Result<std::fs::File> {
     if path.to_str().is_none() {
         return Err(Error::Bound("path encoding"));
     }
 
-    match OpenOptions::new().write(true).create_new(true).open(path) {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
         Ok(file) => Ok(file),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(Error::Bound("existing table"))
@@ -108,7 +123,7 @@ const DATA_PAGE_BYTES: u64 = 1024 * 1024;
 /// What a table's bytes gather in before they reach its file, the size of a data page.
 pub const WRITE_BUFFER_BYTES: u64 = DATA_PAGE_BYTES;
 
-fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> {
+pub(crate) fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> {
     frame.rechunk_mut();
     // Parquet writes each header and page on its own, a system call apiece without a buffer.
     let capacity = usize::try_from(WRITE_BUFFER_BYTES).map_err(|_| Error::Bound("write buffer"))?;
@@ -230,8 +245,8 @@ fn frame_declared(table: Table, window: &Window, frame: &DataFrame) {
 }
 
 pub(crate) fn usage_columns<'usage, Row>(
-    rows: &[Row],
-    usage: impl Fn(&Row) -> Option<&'usage collector::processes::Usage>,
+    rows: &'usage [Row],
+    usage: impl Fn(&'usage Row) -> Option<&'usage collector::processes::Usage>,
 ) -> Vec<Column> {
     columns!(rows;
         "awake_ns_at_start" => |row| usage(row).map(|value| value.awake_ns_at_start),
@@ -275,7 +290,10 @@ pub fn declared_columns(table: Table, window: &Window) -> Vec<catalog::Column> {
             (identities, &catalog::IDENTITY),
             (system && identities, &[catalog::PROCESS_GPU]),
         ],
-        Table::Events => &[(identities, &catalog::IDENTITY)],
+        Table::Events => &[
+            (identities, &catalog::IDENTITY),
+            (true, &catalog::EVENT_OBSERVATION),
+        ],
         _ => &[],
     };
     let declared = table.catalog();

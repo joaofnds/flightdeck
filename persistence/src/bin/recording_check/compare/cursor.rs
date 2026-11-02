@@ -107,11 +107,19 @@ impl<'source> Cursor<'source> {
             .root
             .join(&manifest.data_directory)
             .join(format!("{}.parquet", self.table.name()));
-        let source = persistence::query::table_source(
-            self.connection,
-            self.table,
-            TableSource::Parquet(&path),
-        )?;
+        let source = if matches!(self.table, Table::Events) {
+            let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(
+                usize::try_from(persistence::resources::WORKING_BYTES_MAX)
+                    .map_err(|_| bound("reference query memory"))?,
+            ));
+            self.connection.event_source(self.root, manifest, &budget)?
+        } else {
+            persistence::query::table_source(
+                self.connection,
+                self.table,
+                TableSource::Parquet(&path),
+            )?
+        };
         let measured = if self.label == "processes" {
             "usage_availability=0 AND "
         } else {

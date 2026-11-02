@@ -40,10 +40,12 @@ const _: () = assert!(catalog::TICKS.column_count() <= TICK_COLUMNS_MAX);
 /// Optional process/event columns; the original schema-1 tables and seal remain unchanged.
 /// A complete extension uses this version on every row. Absent columns mean legacy data.
 pub const IDENTITY_VERSION: u8 = 1;
-/// Admission and validation share this limit for each extended process/event table.
+/// The limit for extended process rows and retained associated event rows. Complete event
+/// tables admit `EVENT_ROWS_MAX` rows, validated through bounded physical batches.
 pub const IDENTITY_ROWS_MAX: u64 = 1_048_576;
 pub const IDENTITY_PATH_BYTES_MAX: usize = collector::ring::PROGRAM_PATH_BYTES_MAX;
 pub const IDENTITY_FIELDS: [(&str, &str); 7] = fields(catalog::IDENTITY);
+pub const EVENT_OBSERVATION_FIELDS: [(&str, &str); 2] = fields(catalog::EVENT_OBSERVATION);
 
 pub mod identity_availability {
     pub const MEASURED: u8 = 0;

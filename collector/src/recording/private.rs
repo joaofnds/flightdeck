@@ -236,6 +236,13 @@ pub fn verify_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Opens the same private inode for a startup mapping without replacing live backing.
+pub fn open_private_file_writable(path: &Path) -> io::Result<File> {
+    let file = open_file(path, O_RDWR | O_NOFOLLOW, 0)?;
+    verify_open(&file, false)?;
+    Ok(file)
+}
+
 pub fn full_sync(file: &File) -> io::Result<()> {
     file.sync_all()?;
     if unsafe { fcntl(file.as_raw_fd(), F_FULLFSYNC) } != 0 {
@@ -306,8 +313,13 @@ pub fn make_file_private(path: &Path) -> io::Result<()> {
     if !metadata.is_file() {
         return Err(invalid());
     }
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    clear_acl(&file)?;
+    // Rewriting correct metadata before every full sync serializes avoidable storage writes.
+    if metadata.mode() & 0o7777 != 0o600 {
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    if read_acl_entries(&file)? != 0 {
+        clear_acl(&file)?;
+    }
     verify_open(&file, false)
 }
 
@@ -584,6 +596,109 @@ mod tests {
 
         assert_eq!(0, calls);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn already_private_files_keep_their_native_change_time_without_allocating() {
+        // Goal: sealing an already private file does not dirty metadata before full sync.
+        // Method: advance a separate file's native clock, then compare the target's ctime.
+        let directory = PrivacyDirectory::new("unchanged");
+        let path = directory.0.join("target");
+        let file = open_private_file(&path, true).unwrap();
+        let witness = open_private_file(&directory.0.join("witness"), true).unwrap();
+        let before = file.metadata().unwrap();
+        let before = (before.ctime(), before.ctime_nsec());
+        assert!(
+            privacy_clock_advanced(&witness, before),
+            "native filesystem change-time separation unavailable"
+        );
+
+        let calls = allocator_calls_in(|| make_file_private(&path).unwrap());
+
+        let after = file.metadata().unwrap();
+        assert_eq!(before, (after.ctime(), after.ctime_nsec()));
+        assert_eq!(0, calls);
+        verify_file(&path).unwrap();
+    }
+
+    #[test]
+    fn normalizes_real_permissions_and_acl_without_allocating() {
+        // Goal: avoiding redundant writes still repairs a non-private owned file.
+        // Method: install mode0644 and a real extended ACL, then normalize both together.
+        let directory = PrivacyDirectory::new("normalize");
+        let path = directory.0.join("target");
+        let file = open_private_file(&path, true).unwrap();
+        file.set_permissions(fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let status = Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(1, read_acl_entries(&file).unwrap());
+        assert!(verify_file(&path).is_err());
+
+        let calls = allocator_calls_in(|| make_file_private(&path).unwrap());
+
+        assert_eq!(0o600, file.metadata().unwrap().mode() & 0o7777);
+        assert_eq!(0, read_acl_entries(&file).unwrap());
+        verify_file(&path).unwrap();
+        assert_eq!(0, calls);
+    }
+
+    #[test]
+    fn privacy_normalization_refuses_final_symlinks_and_directories() {
+        // Goal: idempotent normalization retains final-link and artifact-kind refusals.
+        // Method: try a final symlink and directory through the real helper.
+        let directory = PrivacyDirectory::new("refusal");
+        let path = directory.0.join("target");
+        drop(open_private_file(&path, true).unwrap());
+        let alias = directory.0.join("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+
+        let calls = allocator_calls_in(|| {
+            assert_eq!(
+                Some(62),
+                make_file_private(&alias).unwrap_err().raw_os_error()
+            );
+            assert_eq!(
+                io::ErrorKind::InvalidData,
+                make_file_private(&directory.0).unwrap_err().kind()
+            );
+        });
+
+        assert_eq!(0, calls);
+    }
+
+    struct PrivacyDirectory(std::path::PathBuf);
+
+    impl PrivacyDirectory {
+        fn new(case: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("flightdeck-privacy-{case}-{}", std::process::id()));
+            create_private_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for PrivacyDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn privacy_clock_advanced(file: &File, before: (i64, i64)) -> bool {
+        for index in 0..1024 {
+            let mode = if index % 2 == 0 { 0o400 } else { 0o600 };
+            file.set_permissions(fs::Permissions::from_mode(mode))
+                .unwrap();
+            let metadata = file.metadata().unwrap();
+            if (metadata.ctime(), metadata.ctime_nsec()) > before {
+                return true;
+            }
+        }
+        false
     }
 
     #[test]

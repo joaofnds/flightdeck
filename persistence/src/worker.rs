@@ -48,7 +48,25 @@ struct Writers<'derive> {
 }
 
 pub fn run(root: &Path, memory_limit: u64, derive: &dyn Derive) -> Result<Outcome> {
-    run_paced(root, memory_limit, derive, &mut thread::sleep)
+    run_paced(root, memory_limit, derive, &mut thread::sleep, None)
+}
+
+pub fn run_managed(
+    root: &Path,
+    memory_limit: u64,
+    derive: &dyn Derive,
+    authority: Option<collector::ring::Identity>,
+) -> Result<Outcome> {
+    let control = if let Some(authority) = authority {
+        let control = collector::recording::control::Control::open_writable(root)?;
+        if control.authority() != authority {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+        }
+        Some(control)
+    } else {
+        None
+    };
+    run_paced(root, memory_limit, derive, &mut thread::sleep, control)
 }
 
 fn run_paced(
@@ -56,14 +74,23 @@ fn run_paced(
     memory_limit: u64,
     derive: &dyn Derive,
     pause: &mut dyn FnMut(Duration),
+    control: Option<collector::recording::control::Control>,
 ) -> Result<Outcome> {
     let watchdog = Watchdog::start(memory_limit)?;
     let operation = watchdog.operation()?;
-    let mut store = match Store::open(root) {
+    let store = match Store::open(root) {
         Ok(store) => store,
         Err(error) if crate::ownership_contended(&error) => return Ok(Outcome::Owned),
         Err(error) => return Err(error.into()),
     };
+    let mut health = control
+        .map(|control| {
+            collector::recording::control::Reporter::new(
+                control,
+                collector::recording::control::Role::Persister,
+            )
+        })
+        .transpose()?;
     let writers = Writers {
         encoder: Encoder,
         derive,
@@ -71,16 +98,18 @@ fn run_paced(
     drop(operation);
     let registry_path = root.join("runs");
     let mut registry_buffer = [0_u8; 4097];
-    let mut recovery = Recovery::default();
+    let mut recovery = Recovery {
+        memory_limit,
+        ..Recovery::default()
+    };
     for _pass in 0..u64::MAX {
         let operation = watchdog.operation()?;
         let runs = run_registry(&registry_path, &mut registry_buffer, &mut recovery)?;
         let pass = run_pass(root, &store, &writers, &runs, &mut recovery)?;
+        report_progress(&mut health, &recovery)?;
         match pass {
             Pass::Drained => {
-                if let Some(owned) = run_release(root, store, &recovery.states)? {
-                    store = owned;
-                } else {
+                if let Some(registration) = run_release(root, &store, &recovery.states)? {
                     drop(operation);
                     drop(watchdog);
                     let memory = crate::resources::Footprint::read()?;
@@ -88,6 +117,13 @@ fn run_paced(
                         "persister finished footprint_bytes={} footprint_bytes_max={}",
                         memory.current_bytes, memory.lifetime_bytes_max
                     ));
+                    if let Some(health) = &mut health {
+                        health.set_state(collector::recording::control::State::Stopped)?;
+                    }
+                    // Reporter destruction can publish on failure, so it precedes role release.
+                    drop(health);
+                    drop(store);
+                    drop(registration);
                     return Ok(Outcome::Complete);
                 }
             }
@@ -104,10 +140,40 @@ fn run_paced(
     unreachable!("persistence polling bound exhausted")
 }
 
-fn run_release(root: &Path, store: Store, states: &[RunState; 2]) -> Result<Option<Store>> {
+fn report_progress(
+    health: &mut Option<collector::recording::control::Reporter>,
+    recovery: &Recovery,
+) -> Result<()> {
+    if let Some(health) = health {
+        let committed = recovery
+            .states
+            .iter()
+            .rev()
+            .find(|state| state.committed > 0);
+        if let Some(state) = committed {
+            let identity = state
+                .identity
+                .ok_or(crate::Error::Bound("committed run identity"))?;
+            health.update(
+                collector::recording::control::State::Running,
+                identity.run,
+                state.committed,
+            )?;
+        } else {
+            health.refresh()?;
+        }
+    }
+    Ok(())
+}
+
+fn run_release(
+    root: &Path,
+    store: &Store,
+    states: &[RunState; 2],
+) -> Result<Option<collector::recording::private::FileLock>> {
     let registration = match store.registration_lock() {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(Some(store)),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
         Err(error) => return Err(error.into()),
     };
     let mut buffer = [0; 4097];
@@ -124,13 +190,11 @@ fn run_release(root: &Path, store: Store, states: &[RunState; 2]) -> Result<Opti
             )
         });
         if !terminal {
-            return Ok(Some(store));
+            return Ok(None);
         }
     }
-    // A replacement cannot register between the final check and releasing ownership.
-    drop(store);
-    drop(registration);
-    Ok(None)
+    // The caller retains this barrier through its terminal report and role-lock release.
+    Ok(Some(registration))
 }
 
 fn run_registry(
@@ -176,6 +240,7 @@ fn run_pass(
     for (index, registered) in runs.iter().enumerate() {
         let closed = index + 1 < runs.len();
         let state = &mut recovery.states[index];
+        state.memory_limit = recovery.memory_limit;
         if state.source == SourceState::Unchecked {
             state.source =
                 if Registry::completed(root, &registered.identity, &registered.ring_name)? {
@@ -233,15 +298,19 @@ struct Recovery {
     evictions: Option<u64>,
     // Prior unsealed history has unknown extent; this does not count lost current rows.
     pending_unknown: bool,
+    memory_limit: u64,
 }
 
 #[derive(Default)]
 struct RunState {
     identity: Option<RunIdentity>,
     next_publication: u64,
+    next_event: u64,
+    committed: u64,
     losses: Losses,
     source: SourceState,
     loaded: bool,
+    memory_limit: u64,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,39 +374,49 @@ fn persist_one(
         return Ok(Progress::Unavailable);
     };
     if !state.loaded {
-        state.next_publication = store
-            .progress(&registered.identity)?
-            .map_or(reader.publication_first(), |manifest| {
-                manifest.publication_end
-            });
+        let durable = store.progress(&registered.identity)?;
+        state.committed = durable
+            .as_ref()
+            .map_or(0, |manifest| manifest.publication_end - 1);
+        state.next_event = durable
+            .as_ref()
+            .map_or(reader.event_first(), |manifest| manifest.events_end);
+        state.next_publication = durable.map_or(reader.publication_first(), |manifest| {
+            manifest.publication_end
+        });
         state.loaded = true;
         if state.next_publication > 0 {
             reader.seek_publication(state.next_publication)?;
         }
     }
     match persist_one_stage(reader, store, registered, closed, state)? {
-        Staged::Window(window) => {
-            let committed = seal(store, writers, &window, state)?;
+        Staged::Window(staged) => {
+            let window = staged.window;
+            seal_pending(store, writers, &window, state, staged.pending)?;
             let publication_end = window.publication_range().end;
             // The worker runs its next pass at once after a seal, so a seal must move on.
             assert!(state.next_publication < publication_end);
             state.next_publication = publication_end;
-            if committed {
-                state.losses = Losses::default();
-            }
+            state.next_event = window.event_range().end;
+            state.losses = Losses::default();
             Ok(Progress::Sealed)
         }
         Staged::Waiting => Ok(Progress::Waiting),
         Staged::Complete => Ok(Progress::Complete),
-        Staged::Unavailable => Ok(Progress::Unavailable),
+        Staged::Terminal => persist_terminal(store, registered, state),
     }
 }
 
 enum Staged {
-    Window(Window),
+    Window(Box<StagedWindow>),
     Waiting,
     Complete,
-    Unavailable,
+    Terminal,
+}
+
+struct StagedWindow {
+    window: Window,
+    pending: crate::PendingWindow,
 }
 
 // Owning the mapping here guarantees its release before the caller enters the engine.
@@ -361,7 +440,7 @@ fn persist_one_stage(
 
 fn persist_one_stage_end(
     reader: &RingReader,
-    registered: &RegisteredRun,
+    _registered: &RegisteredRun,
     closed: bool,
     state: &mut RunState,
 ) -> Result<Staged> {
@@ -376,14 +455,13 @@ fn persist_one_stage_end(
         return Ok(Staged::Waiting);
     }
 
-    let known_loss = state.losses.publications > 0 || state.losses.events > 0;
-    if known_loss {
-        source_unavailable(
-            registered,
-            state,
-            "unsealed loss without surviving readings",
-        );
-        return Ok(Staged::Unavailable);
+    let first = if state.next_event == 0 {
+        reader.event_first()
+    } else {
+        state.next_event
+    };
+    if first <= reader.event_newest()? || state.losses != Losses::default() {
+        return Ok(Staged::Terminal);
     }
 
     state.source = SourceState::Complete;
@@ -391,17 +469,90 @@ fn persist_one_stage_end(
     Ok(Staged::Complete)
 }
 
+fn persist_terminal(
+    store: &Store,
+    registered: &RegisteredRun,
+    state: &mut RunState,
+) -> Result<Progress> {
+    let pending = match store.begin_events(&registered.identity)? {
+        crate::store::EventBegin::Committed(manifest) => {
+            state.next_event = manifest.recovery.events_end;
+            state.losses = Losses::default();
+            state.source = SourceState::Complete;
+            return Ok(Progress::Complete);
+        }
+        crate::store::EventBegin::Pending(pending) => pending,
+    };
+    let Some(reader) = persist_one_open(registered, state)? else {
+        return Ok(Progress::Unavailable);
+    };
+    let first = if state.next_event == 0 {
+        reader.event_first()
+    } else {
+        state.next_event
+    };
+    let end = reader
+        .event_newest()?
+        .checked_add(1)
+        .ok_or(crate::Error::Bound("terminal event end"))?;
+    let memory_limit = if state.memory_limit == 0 {
+        WORKING_BYTES_MAX
+    } else {
+        state.memory_limit
+    };
+    let manifest = crate::event_recovery::write_tail(
+        &pending.path,
+        reader,
+        &registered.identity,
+        first..end,
+        state.losses,
+        usize::try_from(memory_limit).map_err(|_| crate::Error::Bound("terminal memory limit"))?,
+    )?;
+    let manifest = store.commit_events(pending, manifest, &mut |_| Ok(()))?;
+    state.next_event = manifest.recovery.events_end;
+    state.losses = Losses::default();
+    state.source = SourceState::Complete;
+    Ok(Progress::Complete)
+}
+
 fn persist_one_stage_selected(
+    store: &Store,
     reader: &mut RingReader,
     tick: &mut Tick,
     identity: WindowIdentity,
     limits: Limits,
     state: &mut RunState,
-) -> Result<Option<Window>> {
+) -> Result<Option<StagedWindow>> {
     let first = reader.next_publication();
-    let window = stage_window(reader, tick, identity, limits, &mut state.losses)?;
-    if window.tick_count() > 0 {
-        return Ok(Some(window));
+    if state.next_event == 0 {
+        state.next_event = reader.event_first();
+    }
+    reader.seek_event(state.next_event)?;
+    let pending = match store.begin(&identity)? {
+        Begin::Committed(manifest) => {
+            reader.seek_publication(manifest.publication_end)?;
+            state.next_publication = manifest.publication_end;
+            state.next_event = manifest.events_end;
+            return Ok(None);
+        }
+        Begin::Pending(pending) => pending,
+    };
+    let memory_limit = if state.memory_limit == 0 {
+        WORKING_BYTES_MAX
+    } else {
+        state.memory_limit
+    };
+    let staged = stage_window(
+        reader,
+        tick,
+        identity,
+        limits,
+        &mut state.losses,
+        pending,
+        memory_limit,
+    )?;
+    if staged.window.tick_count() > 0 {
+        return Ok(Some(staged));
     }
 
     let next = reader.next_publication();
@@ -469,8 +620,10 @@ fn stage_window(
     identity: WindowIdentity,
     limits: Limits,
     losses: &mut Losses,
-) -> Result<Window> {
-    let mut staged = staging::Staging::new(reader, identity, limits);
+    pending: crate::PendingWindow,
+    memory_limit: u64,
+) -> Result<StagedWindow> {
+    let mut staged = staging::Staging::new(reader, identity, limits, pending, memory_limit)?;
 
     for _step in 0..=reader.shape().slot_count {
         if !staged.read(reader, tick, losses)? {
@@ -478,7 +631,7 @@ fn stage_window(
         }
     }
 
-    Ok(staged.finish(losses))
+    staged.finish(reader, losses)
 }
 
 struct ReadEvents {
@@ -556,15 +709,32 @@ fn read_events(
 }
 
 /// Seals a window, and returns whether this seal committed it rather than finding it sealed.
-fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState) -> Result<bool> {
-    let started = std::time::Instant::now();
+#[cfg(test)]
+fn seal(
+    store: &Store,
+    writers: &Writers<'_>,
+    window: &Window,
+    state: &mut RunState,
+) -> Result<bool> {
     let pending = match store.begin(&window.identity)? {
         Begin::Committed(_) => return Ok(false),
         Begin::Pending(pending) => pending,
     };
 
+    seal_pending(store, writers, window, state, pending)?;
+    Ok(true)
+}
+
+fn seal_pending(
+    store: &Store,
+    writers: &Writers<'_>,
+    window: &Window,
+    state: &mut RunState,
+    pending: crate::PendingWindow,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+
     let mut tables = writers.encoder.encode(window, pending.path())?;
-    let publications = window.publication_range();
     tables.extend(seal_derived(
         writers.derive,
         &Derivation {
@@ -573,21 +743,9 @@ fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState)
         },
     )?);
 
-    let events = window.event_range();
-    let manifest = Manifest {
-        identity: window.identity,
-        publication_first: publications.start,
-        publication_end: publications.end,
-        events_first: events.start,
-        events_end: events.end,
-        wall_ns: bounds(window, |value| value.wall_ns),
-        continuous_ns: bounds(window, |value| value.continuous_ns),
-        awake_ns: bounds(window, |value| value.awake_ns),
-        losses: state.losses,
-        data_directory: String::new(),
-        tables,
-    };
+    let manifest = seal_manifest(window, tables, state.losses)?;
     let committed = store.commit(pending, manifest)?;
+    state.committed = committed.publication_end - 1;
     collector::diagnostics::error(format_args!(
         "persister sealed window={} publications={}..{} loss={} events_lost={} \
         seal_ns={} staged_bytes={} tables={}",
@@ -601,7 +759,33 @@ fn seal(store: &Store, writers: &Writers<'_>, window: &Window, state: &RunState)
         committed.tables.len()
     ));
 
-    Ok(true)
+    Ok(())
+}
+
+fn seal_manifest(window: &Window, tables: Vec<TableManifest>, losses: Losses) -> Result<Manifest> {
+    let publications = window.publication_range();
+    let events = window.event_range();
+    Ok(Manifest {
+        identity: window.identity,
+        publication_first: publications.start,
+        publication_end: publications.end,
+        events_first: events.start,
+        events_end: events.end,
+        wall_ns: bounds(window, |value| value.wall_ns),
+        continuous_ns: bounds(window, |value| value.continuous_ns),
+        awake_ns: bounds(window, |value| value.awake_ns),
+        losses,
+        data_directory: String::new(),
+        tables,
+        event_batches: window
+            .event_index
+            .as_ref()
+            .map(|index| {
+                u32::try_from(index.batches.len())
+                    .map_err(|_| crate::Error::Bound("event part count"))
+            })
+            .transpose()?,
+    })
 }
 
 /// The tables derived for a window, or none when deriving fails, since a reader can derive
@@ -851,12 +1035,18 @@ mod tests {
         .unwrap();
         let mut pauses = Vec::new();
 
-        let outcome = run_paced(&root.0, WORKING_BYTES_MAX, &Underived, &mut |pause| {
-            pauses.push(pause);
-            assert_eq!(1, pauses.len(), "the worker paused after the ring finished");
-            publish_readable_identity(&mut writer);
-            writer.finish();
-        });
+        let outcome = run_paced(
+            &root.0,
+            WORKING_BYTES_MAX,
+            &Underived,
+            &mut |pause| {
+                pauses.push(pause);
+                assert_eq!(1, pauses.len(), "the worker paused after the ring finished");
+                publish_readable_identity(&mut writer);
+                writer.finish();
+            },
+            None,
+        );
 
         collector::ring::unlink_generation(writer.name()).unwrap();
         assert!(matches!(outcome.unwrap(), Outcome::Complete));
@@ -1011,17 +1201,16 @@ mod tests {
             (41, u64::MAX, i32::MIN, b"worker\xff".to_vec(), None, 1),
             row
         );
-        let event_path = root.0.join(&manifest.data_directory).join("events.parquet");
-        assert_saved_identity_event(&connection, &event_path);
+        assert_saved_identity_event(&connection, &root.0, &manifest);
     }
 
-    fn assert_saved_identity_event(connection: &crate::engine::Engine, path: &Path) {
-        let events = crate::query::table_source(
-            connection,
-            crate::schema::Table::Events,
-            crate::query::TableSource::Parquet(path),
-        )
-        .unwrap();
+    fn assert_saved_identity_event(
+        connection: &crate::engine::Engine,
+        root: &Path,
+        manifest: &Manifest,
+    ) {
+        let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(128 * 1024 * 1024));
+        let events = connection.event_source(root, manifest, &budget).unwrap();
         let frame = connection
             .query(&format!(
                 "SELECT process_unique_id,pid_version,executable_name, \
@@ -1051,16 +1240,16 @@ mod tests {
             derive: &Underived,
         };
         let first = window(store.recording(), 0);
-        let unknown = RunState {
+        let mut unknown = RunState {
             losses: Losses {
                 unknown: true,
                 ..Losses::default()
             },
             ..RunState::default()
         };
-        assert!(seal(&store, &writers, &first, &RunState::default()).unwrap());
+        assert!(seal(&store, &writers, &first, &mut RunState::default()).unwrap());
 
-        let acknowledged = seal(&store, &writers, &first, &unknown).unwrap();
+        let acknowledged = seal(&store, &writers, &first, &mut unknown).unwrap();
 
         assert!(!acknowledged);
         assert!(
@@ -1072,7 +1261,7 @@ mod tests {
                 .unknown
         );
         let next = window(store.recording(), 1);
-        assert!(seal(&store, &writers, &next, &unknown).unwrap());
+        assert!(seal(&store, &writers, &next, &mut unknown).unwrap());
         assert!(
             store
                 .existing(&next.identity)
@@ -1106,6 +1295,34 @@ mod tests {
     }
 
     #[test]
+    fn retains_health_ownership_after_a_failed_final_registry_read() {
+        // Goal: a final registry error cannot leave the failing reporter without its role lock.
+        // Method: corrupt the registry at release and inspect ownership before reporter drop.
+        use collector::recording::control::{Control, Reporter, Role, State};
+        use collector::recording::private::FileLock;
+        let root = Directory::new();
+        let control = Control::create(&root.0).unwrap();
+        let store = Store::open(&root.0).unwrap();
+        let health = Reporter::new(control, Role::Persister).unwrap();
+        std::fs::write(root.0.join("runs"), b"invalid registry").unwrap();
+
+        let result = run_release(&root.0, &store, &[RunState::default(), RunState::default()]);
+        let owned = FileLock::held(&root.0.join("persister.lock")).unwrap();
+        drop(health);
+
+        assert!(result.is_err());
+        assert!(owned);
+        assert_eq!(
+            Control::open(&root.0)
+                .unwrap()
+                .read(Role::Persister)
+                .unwrap()
+                .state,
+            State::Failed
+        );
+    }
+
+    #[test]
     fn keeps_ownership_when_a_new_registration_arrives_before_release() {
         // Goal: a replacement never loses persistence between the final poll and owner exit.
         // Method: register a fresh identity before release, then inspect real lock ownership.
@@ -1118,19 +1335,29 @@ mod tests {
         .write(&root.0)
         .unwrap();
 
-        let store = run_release(&root.0, store, &[RunState::default(), RunState::default()])
-            .unwrap()
-            .unwrap();
+        assert!(
+            run_release(&root.0, &store, &[RunState::default(), RunState::default()])
+                .unwrap()
+                .is_none()
+        );
 
         assert!(crate::ownership_contended(
             &Store::open(&root.0).err().unwrap()
         ));
         Registry::default().write(&root.0).unwrap();
-        assert!(
-            run_release(&root.0, store, &[RunState::default(), RunState::default()])
+        let registration =
+            run_release(&root.0, &store, &[RunState::default(), RunState::default()])
                 .unwrap()
-                .is_none()
+                .unwrap();
+        assert!(
+            collector::recording::private::FileLock::held(&root.0.join("persister.lock")).unwrap()
         );
+        assert!(
+            collector::recording::private::FileLock::held(&root.0.join("registration.lock"))
+                .unwrap()
+        );
+        drop(store);
+        drop(registration);
         assert!(Store::open(&root.0).is_ok());
     }
 
@@ -1144,6 +1371,8 @@ mod tests {
             RunState {
                 identity: Some(run.identity),
                 next_publication: 17,
+                next_event: 23,
+                committed: 11,
                 losses: Losses {
                     publications: 7,
                     events: 9,
@@ -1151,12 +1380,14 @@ mod tests {
                 },
                 source: SourceState::Unavailable,
                 loaded: true,
+                memory_limit: WORKING_BYTES_MAX,
             },
         ];
 
         run_states(&mut states, &[run]);
 
         assert_eq!(states[0].next_publication, 17);
+        assert_eq!(states[0].committed, 11);
         assert_eq!(states[0].losses.publications, 7);
         assert_eq!(states[0].losses.events, 9);
         assert!(states[0].losses.unknown);
@@ -1205,7 +1436,7 @@ mod tests {
         };
         let window = window(store.recording(), 0);
 
-        seal(&store, &writers, &window, &RunState::default()).unwrap();
+        seal(&store, &writers, &window, &mut RunState::default()).unwrap();
 
         let sealed = store.existing(&window.identity).unwrap().unwrap();
         assert_eq!(sealed.tables.last().unwrap().name, "app_ranks");
@@ -1226,7 +1457,7 @@ mod tests {
         };
         let window = window(store.recording(), 0);
 
-        let committed = seal(&store, &writers, &window, &RunState::default()).unwrap();
+        let committed = seal(&store, &writers, &window, &mut RunState::default()).unwrap();
 
         assert!(committed);
         let reopened = store.existing(&window.identity).unwrap().unwrap();

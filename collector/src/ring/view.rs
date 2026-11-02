@@ -276,6 +276,17 @@ impl RingReader {
         self.opened.events.next
     }
 
+    /// The run's declared event origin, including numbers overwritten before this reader opened.
+    #[must_use]
+    pub fn event_first(&self) -> u64 {
+        self.opened.events.first
+    }
+
+    /// The last event made visible, independently of a subsequent observation publication.
+    pub fn event_newest(&self) -> io::Result<u64> {
+        read_newest(&self.opened.mapping.words()[layout::HEADER_EVENT_NEWEST])
+    }
+
     pub fn read_event(&mut self) -> io::Result<FoundEvent> {
         self.opened.read_event()
     }

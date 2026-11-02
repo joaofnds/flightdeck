@@ -829,13 +829,24 @@ struct TableWork {
     captures: usize,
     collections: usize,
     projections: usize,
+    tick_projections: usize,
+    event_projections: usize,
 }
 
 fn table_work(trace: &Trace, key: &Key) -> TableWork {
+    let events = source_work(trace);
+    let events = events.iter().filter(|event| event.key == *key);
     TableWork {
         captures: minute_work(trace, key, Kind::ContentCapture),
         collections: minute_work(trace, key, Kind::NativeCollect),
         projections: minute_work(trace, key, Kind::ProjectionDecode),
+        tick_projections: events
+            .clone()
+            .filter(|event| event.kind == Kind::ProjectionDecode && event.table == Some("ticks"))
+            .count(),
+        event_projections: events
+            .filter(|event| event.kind == Kind::ProjectionDecode && event.table == Some("events"))
+            .count(),
     }
 }
 
@@ -844,7 +855,9 @@ fn assert_reopened(trace: &Trace, key: &Key, before: &TableWork) {
     // Only process/events tables reopen; cached endpoint headers need no new tick projection.
     assert_eq!(after.captures, before.captures + 2);
     assert_eq!(after.collections, before.collections + 2);
-    assert_eq!(after.projections, before.projections);
+    assert_eq!(after.tick_projections, before.tick_projections);
+    assert_eq!(after.event_projections, before.event_projections + 1);
+    assert_eq!(after.projections, before.projections + 1);
 }
 
 fn assert_older_resolved(run: &PendingStage, trace: &Trace) {

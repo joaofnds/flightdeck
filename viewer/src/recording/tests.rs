@@ -543,6 +543,337 @@ fn a_sealed_minute_gives_the_frames_the_replay_of_its_files_gives() {
 }
 
 #[test]
+fn recovered_events_without_observations_remain_raw_without_entering_app_frames() {
+    // Goal: retained events outlive observation slots without inventing App samples.
+    // Method: wrap eight observation slots while 32 events survive, recover, then read both paths.
+    let fixture = sealed_recovered_events_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let engine = Engine::new();
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+    let source = engine
+        .event_source(&fixture.root, &manifest, &budget)
+        .unwrap();
+    let events = engine
+        .query(&format!("SELECT * FROM {source} ORDER BY event"))
+        .unwrap();
+
+    assert_eq!(events.height(), 32);
+    assert_eq!(events.column("publication").unwrap().null_count(), 24);
+    assert_eq!(manifest.losses.publications, 32);
+    assert_eq!(manifest.losses.events, 8);
+    let numbers: Vec<u64> = events
+        .column("event")
+        .unwrap()
+        .u64()
+        .unwrap()
+        .into_no_null_iter()
+        .collect();
+    assert_eq!(numbers, (9..41).collect::<Vec<_>>());
+    assert_eq!(events.column("executable_name").unwrap().null_count(), 0);
+    assert_eq!(events.column("process_unique_id").unwrap().null_count(), 0);
+    let frames = decoded_frames(&minute).unwrap();
+    assert_eq!(frames.len(), 8);
+    assert_eq!(frames, replayed_frames(&fixture));
+    let ticks = minute_ticks(&mut MinuteTicks::default(), &minute).unwrap();
+    assert_eq!(ticks.len(), 8);
+    assert!(ticks.iter().all(|tick| tick.execs.len() == 1));
+}
+
+#[test]
+fn detached_events_pass_native_identity_validation_before_app_filtering() {
+    // Goal: excluding detached events from App frames cannot conceal corrupt native identities.
+    // Method: recover real detached rows, corrupt only their identity version, and read frames.
+    let fixture = sealed_recovered_events_minute();
+    damage_table(&fixture, "events", |frame| {
+        with_column(
+            frame,
+            when(col("publication").is_null())
+                .then(lit(2).cast(DataType::UInt8))
+                .otherwise(col("identity_version"))
+                .alias("identity_version"),
+        )
+    });
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+    let result = decoded_frames(&minute);
+
+    assert!(matches!(
+        result,
+        Err(Refused::Decode(persistence::Error::Bound(
+            "process identity version"
+        )))
+    ));
+}
+
+#[test]
+fn saved_session_pages_the_selected_publication_from_multipart_events() {
+    // Goal: the production saved viewer keeps exact event pages after physical partitioning.
+    // Method: recover a detached prefix, select a surviving observation and use Session paging.
+    let fixture = sealed_recovered_events_minute_with(Fixture::publish_with_system_rows);
+    let mut session = crate::session::Session::open(&fixture.root).unwrap();
+
+    let selection = session.select(1_040, 0).unwrap();
+    let page = session.page("events", 0).unwrap();
+
+    assert_eq!(selection["selected"]["publication"], 40);
+    assert_eq!(page["total"], 1);
+    let columns = page["columns"].as_array().unwrap();
+    let publication = columns
+        .iter()
+        .position(|name| name == "publication")
+        .unwrap();
+    let event = columns.iter().position(|name| name == "event").unwrap();
+    let rows = page["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][publication], "40");
+    assert_eq!(rows[0][event], "40");
+}
+
+#[test]
+fn multipart_event_source_pin_detects_replacement_after_cache_rebinding() {
+    // Goal: a cached App result cannot validate against a different physical event source.
+    // Method: replace a part, check the retained pin, then compare a fresh registration's pin.
+    let fixture = sealed_recovered_events_minute();
+    let manifest = persistence::read_committed(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let engine = Engine::new();
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+    let (before, pin) = engine
+        .event_source_pinned(&fixture.root, &manifest, &budget)
+        .unwrap();
+    let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
+    let part = table.part(0).unwrap();
+    let retained = fixture.root.join("original-event-part.parquet");
+    std::fs::rename(part.path(), &retained).unwrap();
+    std::fs::copy(&retained, part.path()).unwrap();
+
+    assert!(!pin.validate().unwrap());
+    assert!(
+        engine
+            .event_source(&fixture.root, &manifest, &budget)
+            .is_err()
+    );
+    drop(engine);
+    let engine = Engine::new();
+    let (after, rebound) = engine
+        .event_source_pinned(&fixture.root, &manifest, &budget)
+        .unwrap();
+
+    assert_eq!(before, after);
+    assert_ne!(pin, rebound);
+    assert!(rebound.validate().unwrap());
+}
+
+#[test]
+fn multipart_resident_cache_rejects_replaced_event_parts() {
+    // Goal: a warm saved App history stays pinned to the multipart facts it consumed.
+    // Method: warm the real saved resident cache, replace an event part, then repeat the query.
+    let fixture = sealed_recovered_events_minute_with(Fixture::publish_with_system_rows);
+    Registry::default().write(&fixture.root).unwrap();
+    let mut session = crate::live::LiveSession::open(&fixture.root).unwrap();
+    session.select(1_040, 0).unwrap();
+    session.app_resident_history().unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
+    let part = table.part(0).unwrap();
+    let retained = fixture.root.join("original-resident-part.parquet");
+    std::fs::rename(part.path(), &retained).unwrap();
+    std::fs::copy(&retained, part.path()).unwrap();
+
+    let result = session.app_resident_history();
+
+    assert!(matches!(
+        result,
+        Err(persistence::Error::Bound("resident cache file changed"))
+    ));
+}
+
+#[test]
+fn detached_event_inputs_are_collected_in_bounded_batches() {
+    // Goal: an event prefix cannot force a whole-tail frame into App reconstruction.
+    // Method: recover three full event batches plus eight associated rows and trace real reads.
+    let fixture = sealed_batched_events_minute();
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let trace =
+        persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
+    let scope = trace.enter();
+
+    let frames = decoded_frames(&minute).unwrap();
+
+    drop(scope);
+    let mut work = Vec::new();
+    trace.snapshot(&mut work).unwrap();
+    let reads = work
+        .iter()
+        .filter(|event| {
+            event.table == Some("events")
+                && event.kind == persistence::work::ingestion::Kind::NativeCollect
+        })
+        .count();
+    assert_eq!(frames.len(), 8);
+    assert_eq!(reads, 4);
+}
+
+#[test]
+fn multipart_event_oversize_is_a_permanent_input_refusal_before_capture() {
+    // Goal: a malformed physical part cannot appear as recoverable capacity blockage.
+    // Method: resize a real committed part to30MiBbefore pinning and trace the typed caller.
+    let fixture = sealed_recovered_events_minute();
+    let marker = marker(&fixture, 0);
+    let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
+    let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
+    let part = table.part(0).unwrap();
+    let path = part.path().to_owned();
+    drop((part, table));
+    collector::recording::private::open_private_file_writable(&path)
+        .unwrap()
+        .set_len(30 * 1024 * 1024)
+        .unwrap();
+    let budget = Arc::new(persistence::resources::ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let minute = super::ScopedSealedMinute::open_processes_using(
+        &super::SealedSource {
+            root: &fixture.root,
+            marker: &marker,
+        },
+        &manifest,
+        &budget,
+        &operation,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
+    )
+    .unwrap();
+    let trace = persistence::work::ingestion::Trace::new(manifest.identity.run.recording);
+    let scope = trace.enter();
+
+    let result = super::events::associated(&minute);
+
+    assert!(matches!(
+        result,
+        Err(Refused::Input(
+            persistence::engine::AdmissionRefusal::Bound("parquet file bytes")
+        ))
+    ));
+    drop(scope);
+    let mut work = Vec::new();
+    trace.snapshot(&mut work).unwrap();
+    assert!(!work.iter().any(|event| matches!(
+        event.kind,
+        persistence::work::ingestion::Kind::ContentCapture
+            | persistence::work::ingestion::Kind::NativeCollect
+            | persistence::work::ingestion::Kind::ProjectionDecode
+    )));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn multipart_event_admission_refuses_before_decode_and_retries_after_release() {
+    // Goal: App event reconstruction shares the caller's ledger and retains output charges.
+    // Method: exhaust its budget, trace the refusal, then release and read the same real seal.
+    let fixture = sealed_recovered_events_minute();
+    let marker = marker(&fixture, 0);
+    let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let minute = super::ScopedSealedMinute::open_processes_using(
+        &super::SealedSource {
+            root: &fixture.root,
+            marker: &marker,
+        },
+        &manifest,
+        &budget,
+        &operation,
+        &persistence::engine::AdmittedTable::from_file_budgeted,
+    )
+    .unwrap();
+    let retained = budget.reserve(budget.maximum()).unwrap();
+    let trace = persistence::work::ingestion::Trace::new(manifest.identity.run.recording);
+    let scope = trace.enter();
+
+    let refused = super::events::associated(&minute);
+
+    drop(scope);
+    assert!(matches!(
+        refused,
+        Err(Refused::Input(
+            persistence::engine::AdmissionRefusal::Budget
+        ))
+    ));
+    let mut work = Vec::new();
+    trace.snapshot(&mut work).unwrap();
+    assert!(!work.iter().any(|event| {
+        matches!(
+            event.kind,
+            persistence::work::ingestion::Kind::NativeCollect
+                | persistence::work::ingestion::Kind::ProjectionDecode
+        )
+    }));
+
+    drop(retained);
+    let frame = super::events::associated(&minute).unwrap();
+    assert_eq!(frame.height(), 8);
+    assert_eq!(frame.column("publication").unwrap().null_count(), 0);
+    assert!(budget.used() > 0);
+    let clone = frame.clone();
+    drop(frame);
+    assert!(budget.used() > 0);
+    drop(clone);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn an_empty_multipart_event_table_keeps_the_normalized_app_schema() {
+    // Goal: a valid event-free window can be read through the same new physical format.
+    // Method: seal real observations with no events and reconstruct their process frames.
+    let mut fixture = Fixture::new();
+    for second in 1_001..=1_003 {
+        fixture.publish_with_events(second, &[]);
+    }
+    fixture.writer.finish();
+    let outcome = persistence::worker::run(
+        &fixture.root,
+        persistence::worker::default_memory_limit(),
+        &crate::live::identity_fixture::Underived,
+    )
+    .unwrap();
+    assert!(matches!(outcome, persistence::worker::Outcome::Complete));
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    assert_eq!(minute.manifest.event_batches, Some(0));
+
+    let events = super::events::associated(&minute).unwrap();
+    let frames = decoded_frames(&minute).unwrap();
+
+    assert_eq!(events.height(), 0);
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames, replayed_frames(&fixture));
+}
+
+#[test]
+fn corruption_in_a_later_detached_batch_refuses_the_app_frames() {
+    // Goal: bounded reading validates every detached batch before excluding it from Apps.
+    // Method: corrupt a native identity in the third recovered prefix batch and read frames.
+    let fixture = sealed_batched_events_minute();
+    damage_table(&fixture, "events", |frame| {
+        with_column(
+            frame,
+            when(col("event").eq(lit(32_769_u64)))
+                .then(lit(2).cast(DataType::UInt8))
+                .otherwise(col("identity_version"))
+                .alias("identity_version"),
+        )
+    });
+    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+
+    let result = decoded_frames(&minute);
+
+    assert!(matches!(
+        result,
+        Err(Refused::Decode(persistence::Error::Bound(
+            "process identity version"
+        )))
+    ));
+}
+
+#[test]
 fn a_minute_sealed_before_process_identity_gives_the_frames_its_replay_gives() {
     // Goal: a minute sealed before processes carried their identity gives frames of processes
     // whose identity is unsupported, as its replay gives them.
@@ -1000,6 +1331,62 @@ fn sealed_events_minute() -> Fixture {
     sealed_events_minute_of(Fixture::new())
 }
 
+fn sealed_recovered_events_minute() -> Fixture {
+    sealed_recovered_events_minute_with(Fixture::publish)
+}
+
+fn sealed_recovered_events_minute_with(publish: fn(&mut Fixture, u64)) -> Fixture {
+    let mut fixture = Fixture::new();
+    for second in 1_001..=1_040 {
+        publish(&mut fixture, second);
+    }
+    fixture.writer.finish();
+    let outcome = persistence::worker::run(
+        &fixture.root,
+        persistence::worker::default_memory_limit(),
+        &crate::live::identity_fixture::Underived,
+    )
+    .unwrap();
+    assert!(matches!(outcome, persistence::worker::Outcome::Complete));
+    fixture
+}
+
+fn sealed_batched_events_minute() -> Fixture {
+    let mut fixture = Fixture::new();
+    wide_ring(&mut fixture, |place, shape, identity| {
+        let shape = Shape {
+            event_capacity: 3 * 16_384 + 9,
+            ..shape
+        };
+        Writer::create_with_identity(
+            place,
+            shape,
+            DictionaryCapacity {
+                entries: 4,
+                arena_bytes: 32_768,
+            },
+            identity,
+            0,
+        )
+    });
+    let events: Vec<_> = (0..16_384).map(|_| Event::Exec { pid: 7 }).collect();
+    for second in 1_001..=1_003 {
+        fixture.publish_with_events(second, &events);
+    }
+    for second in 1_004..=1_011 {
+        fixture.publish(second);
+    }
+    fixture.writer.finish();
+    let outcome = persistence::worker::run(
+        &fixture.root,
+        persistence::worker::default_memory_limit(),
+        &crate::live::identity_fixture::Underived,
+    )
+    .unwrap();
+    assert!(matches!(outcome, persistence::worker::Outcome::Complete));
+    fixture
+}
+
 /// `fixture` with the observations `sealed_events_minute` seals, sealed as minute 0.
 fn sealed_events_minute_of(mut fixture: Fixture) -> Fixture {
     let last = Usage {
@@ -1181,7 +1568,13 @@ fn replayed_frames(fixture: &Fixture) -> Vec<Frame> {
     let manifest = persistence::read_committed(&fixture.root, &marker(fixture, 0)).unwrap();
     let directory = fixture.root.join(&manifest.data_directory);
     let connection = Engine::new();
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let source = |table: Table| {
+        if matches!(table, Table::Events) && manifest.event_batches.is_some() {
+            return connection
+                .event_source(&fixture.root, &manifest, &budget)
+                .unwrap();
+        }
         let path = directory.join(format!("{}.parquet", table.name()));
         table_source(&connection, table, TableSource::Parquet(&path)).unwrap()
     };
@@ -1284,15 +1677,27 @@ pub(crate) fn sealed_system_minute() -> Fixture {
 /// Replaces table `name` of `fixture`'s sealed minute 0 with the copy `damage` makes of it.
 fn damage_table(fixture: &Fixture, name: &str, damage: fn(DataFrame) -> DataFrame) {
     let manifest = persistence::read_committed(&fixture.root, &marker(fixture, 0)).unwrap();
-    let path = fixture
-        .root
-        .join(manifest.data_directory)
-        .join(format!("{name}.parquet"));
-    let frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
+    if name == "events" && manifest.event_batches.is_some() {
+        let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
+        for index in 0..table.len() {
+            let part = table.part(index).unwrap();
+            damage_table_file(part.path(), damage);
+        }
+    } else {
+        let path = fixture
+            .root
+            .join(manifest.data_directory)
+            .join(format!("{name}.parquet"));
+        damage_table_file(&path, damage);
+    }
+}
+
+fn damage_table_file(path: &std::path::Path, damage: fn(DataFrame) -> DataFrame) {
+    let frame = persistence::engine::scan(path).unwrap().collect().unwrap();
     let mut damaged = damage(frame);
 
-    std::fs::remove_file(&path).unwrap();
-    let file = collector::recording::private::open_private_file(&path, true).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let file = collector::recording::private::open_private_file(path, true).unwrap();
     ParquetWriter::new(file)
         .with_compression(ParquetCompression::Zstd(Some(
             ZstdLevel::try_new(3).unwrap(),

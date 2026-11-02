@@ -89,21 +89,15 @@ const PIPELINE: [(&str, &str); 4] = [
     ),
 ];
 
-const SIGNALS: [(&str, &str); 5] = [
-    (
-        "Collector memory · Not captured",
-        "Collector resident memory and physical footprint were not logged. The persister \
-         footprint chart does not include the collector.",
-    ),
+const SIGNALS: [(&str, &str); 4] = [
     (
         "Ring reader lag · Not captured",
         "Latest/consumed publication and event cursors, oldest retained record, and overwrite \
          distance. Ring capacity is not queue occupancy.",
     ),
     (
-        "Recording freshness · Not captured",
-        "Last durable observation, time since last seal, unknown-extent losses, disk bytes/free \
-         space and write failures.",
+        "Recording storage · Not captured",
+        "Recording disk usage and free disk space are not measured.",
     ),
     (
         "Query performance · Not captured",
@@ -546,11 +540,9 @@ impl LiveDashboard {
                         "No complete minute yet.",
                     ))
                     .child(caption(
-                        "Read from the output of the collector this app started, as it runs. \
-                         Report ends are the run's elapsed time at each report; minute \
-                         CPU calculations use each reported elapsed_ns. No values are \
-                         interpolated. Source report values are retained; displayed precision \
-                         follows each metric.",
+                        "Recording reports received by this app. CPU shares use each interval's \
+                         measured awake duration. Unmeasured worker intervals and final lifetime \
+                         peaks remain unavailable; sampled memory maxima are lower bounds.",
                     ))
             })
     }
@@ -788,8 +780,7 @@ fn source_bar(name: &str, value: f32, largest: f32) -> impl IntoElement {
         )
 }
 
-/// The weight of each column: the width of its longest text plus the cell padding, so the
-/// columns share the table's width as the prototype's auto-sized columns do.
+/// Each column's readable width, including its longest text and cell padding.
 fn column_weights(headings: &[&str], rows: &[Vec<String>]) -> Vec<f32> {
     headings
         .iter()
@@ -808,26 +799,36 @@ fn column_weights(headings: &[&str], rows: &[Vec<String>]) -> Vec<f32> {
         .collect()
 }
 
-fn table(id: &str, headings: &[&str], rows: &[Vec<String>], empty: &str) -> gpui::Div {
+fn table(
+    id: &str,
+    headings: &[&str],
+    rows: &[Vec<String>],
+    empty: &str,
+) -> gpui::Stateful<gpui::Div> {
     let weights = column_weights(headings, rows);
-    let mut table = div().flex().flex_col().text_size(px(12.0)).child(
-        div()
-            .flex()
-            .py(px(10.0))
-            .border_b_1()
-            .border_color(rgb(GRID))
-            .bg(rgb(RAISED))
-            .text_size(px(11.0))
-            .line_height(px(16.5))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(rgb(MUTED))
-            .children(
-                headings
-                    .iter()
-                    .enumerate()
-                    .map(|(index, heading)| cell(index, heading, weights[index])),
-            ),
-    );
+    let mut table = div()
+        .flex()
+        .flex_col()
+        .min_w(px(weights.iter().sum()))
+        .text_size(px(12.0))
+        .child(
+            div()
+                .flex()
+                .py(px(10.0))
+                .border_b_1()
+                .border_color(rgb(GRID))
+                .bg(rgb(RAISED))
+                .text_size(px(11.0))
+                .line_height(px(16.5))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgb(MUTED))
+                .children(
+                    headings
+                        .iter()
+                        .enumerate()
+                        .map(|(index, heading)| cell(index, heading, weights[index])),
+                ),
+        );
     let shown = rows.len().min(128);
     for (index, row) in rows.iter().take(shown).enumerate() {
         let selector = format!("self-{id}:{}", row.join("|"));
@@ -857,7 +858,11 @@ fn table(id: &str, headings: &[&str], rows: &[Vec<String>], empty: &str) -> gpui
         );
     }
     div()
-        .overflow_hidden()
+        .id(gpui::SharedString::from(format!("self-table-{id}")))
+        .min_w_0()
+        .max_w_full()
+        .overflow_x_scroll()
+        .restrict_scroll_to_axis()
         .border_1()
         .border_color(rgb(LINE))
         .bg(rgb(PANEL))

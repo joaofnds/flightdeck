@@ -595,6 +595,7 @@ fn large_fixture_commit(root: &Path, window: &persistence::Window) {
         .commit(
             pending,
             Manifest {
+                event_batches: None,
                 identity: window.identity,
                 publication_first: publications.start,
                 publication_end: publications.end,

@@ -1525,6 +1525,7 @@ dependencies = [
  "collector",
  "model",
  "polars",
+ "polars-arrow",
  "polars-arrow-format",
  "polars-buffer",
  "polars-parquet",

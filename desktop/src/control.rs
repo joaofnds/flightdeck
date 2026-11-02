@@ -484,6 +484,7 @@ const HELP: &[&str] = &[
     "click X Y",
     "drag X Y TO_X TO_Y",
     "scroll X Y DELTA_Y",
+    "scroll-x X Y DELTA_X",
     "exit X Y",
     "key KEYSTROKE",
     "accessibility increment|decrement TITLE",
@@ -494,7 +495,7 @@ const HELP: &[&str] = &[
 /// Pointer input at window coordinates in points, as the platform would deliver it.
 fn pointer(words: &[&str], window: &mut Window, cx: &mut App) -> Result<Value, String> {
     let action = words.first().copied().unwrap_or("");
-    if !matches!(action, "move" | "click" | "scroll" | "exit") {
+    if !matches!(action, "move" | "click" | "scroll" | "scroll-x" | "exit") {
         return Err(format!("unknown command {action:?}; try help"));
     }
 
@@ -510,6 +511,12 @@ fn pointer(words: &[&str], window: &mut Window, cx: &mut App) -> Result<Value, S
         "scroll" => events.push(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
             position,
             delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(-number(words, 3)?))),
+            modifiers,
+            touch_phase: gpui::TouchPhase::Moved,
+        })),
+        "scroll-x" => events.push(PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(point(px(-number(words, 3)?), px(0.0))),
             modifiers,
             touch_phase: gpui::TouchPhase::Moved,
         })),
@@ -730,6 +737,7 @@ fn state(dashboard: &LiveDashboard, window: &Window, cx: &App) -> Value {
         "selected_second": dashboard.shown_second(),
         "selected": selection["selected"],
         "status": dashboard.status(),
+        "recording_status": crate::live_launch::collector_status(cx),
         "error": dashboard.error,
         "hover_second": dashboard.chart_hover.as_ref().map(|hover| hover.second),
         "target_second": dashboard.reading_target().map(|target| target.second),

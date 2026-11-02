@@ -16,6 +16,34 @@ use crate::engine::source_tests::{Fixture, write_frame};
 use crate::resources::ByteBudget;
 
 #[test]
+fn file_capture_refuses_a_source_changed_before_its_identity_check_finishes() {
+    // Goal: a complete byte copy cannot hide a source mutation during concrete-file I/O.
+    // Method: forward real admitted capture, then append before the adapter validates the FD.
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let mut file = std::fs::File::open(&fixture.path).unwrap();
+    let size = file.metadata().unwrap().len();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let result = super::capture_verified(&mut file, |file| {
+        let input = capture_budgeted(file, size, &budget)?;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&fixture.path)
+            .unwrap()
+            .write_all(&[0])
+            .unwrap();
+        Ok(input)
+    });
+
+    assert!(matches!(
+        result,
+        Err(AdmissionRefusal::Bound("changed parquet capture source"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn does_not_report_a_grown_input_as_a_complete_content_capture() {
     // Goal: completed byte capture includes the final size check, while retaining attempts.
     // Method: offer more bytes than the admitted length and observe the actual capture entry.

@@ -159,6 +159,7 @@ fn prepare_manifest(
 ) {
     assert!(output.is_none());
     *output = Some(Manifest {
+        event_batches: None,
         identity: WindowIdentity {
             run: source.identity,
             window: 0,

@@ -310,7 +310,7 @@ impl Cache {
         let missing: Vec<ResidentFile> = pin
             .files
             .into_iter()
-            .filter(|file| pinned.files.iter().all(|kept| kept.path != file.path))
+            .filter(|file| pinned.files.iter().all(|kept| kept.kind != file.kind))
             .collect();
         if missing.is_empty() {
             return Ok(());
@@ -322,7 +322,7 @@ impl Cache {
             - pinned.files.capacity() * size_of::<ResidentFile>()
             + missing
                 .iter()
-                .map(|file| file.path.capacity() + file.alias.capacity())
+                .map(|file| file.kind.bytes() + file.alias.capacity())
                 .sum::<usize>();
         if size_of::<ResidentPin>() + after > crate::live_app_history::PIN_BYTES_MAX {
             return Err(Error::Bound("attribution cache pin bytes"));

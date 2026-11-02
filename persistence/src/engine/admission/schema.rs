@@ -8,6 +8,9 @@ use polars_parquet_format::{ConvertedType, LogicalType, SchemaElement, Type};
 
 use crate::{Error, Result};
 
+mod storage;
+pub(crate) use storage::{Storage, storage_types};
+
 const METADATA_ENTRIES_MAX: usize = 32;
 const METADATA_BYTES_MAX: usize = 64 * 1024;
 const COLUMN_NAME_BYTES_MAX: usize = 128;
@@ -54,6 +57,13 @@ pub(super) fn validate_physical(field: &SchemaElement) -> Result<()> {
 }
 
 fn validate_arrow_envelope(encoded: &str, physical: &[SchemaElement]) -> Result<()> {
+    with_arrow_schema(encoded, |schema| validate_arrow_schema(schema, physical))
+}
+
+fn with_arrow_schema<T>(
+    encoded: &str,
+    consume: impl FnOnce(&ipc::SchemaRef<'_>) -> Result<T>,
+) -> Result<T> {
     // The enclosing footer is bounded before the native Base64 decoder allocates this buffer.
     let bytes = STANDARD
         .decode(encoded)
@@ -69,14 +79,15 @@ fn validate_arrow_envelope(encoded: &str, physical: &[SchemaElement]) -> Result<
         bytes.as_slice()
     };
 
-    validate_arrow_schema(payload, physical)
-}
-
-fn validate_arrow_schema(payload: &[u8], physical: &[SchemaElement]) -> Result<()> {
     let message = ipc::MessageRef::read_as_root(payload).map_err(arrow_error)?;
     let Some(ipc::MessageHeaderRef::Schema(schema)) = message.header().map_err(arrow_error)? else {
         return Err(Error::Bound("parquet Arrow schema metadata"));
     };
+
+    consume(&schema)
+}
+
+fn validate_arrow_schema(schema: &ipc::SchemaRef<'_>, physical: &[SchemaElement]) -> Result<()> {
     if schema.endianness().map_err(arrow_error)? != ipc::Endianness::Little {
         return Err(Error::Bound("parquet Arrow schema metadata"));
     }

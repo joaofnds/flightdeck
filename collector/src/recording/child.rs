@@ -34,11 +34,42 @@ pub struct Finished {
     pub resident_bytes_max: u64,
 }
 
+/// Final own-child CPU and the native physical peak sampled while its zombie still exists.
+pub struct ReapedChild {
+    pub finished: Finished,
+    pub footprint: io::Result<ChildCost>,
+}
+
 #[derive(Clone, Copy)]
 enum State {
     Running,
     Exited(Finished),
     Unmeasured,
+}
+
+/// Read native resource usage. An observer must verify process creation on both sides;
+/// an unreaped child can instead be identified by the caller's exclusive wait ownership.
+pub fn sample_process(pid: i32, timebase: Timebase) -> io::Result<ChildCost> {
+    native::sample(pid, timebase)
+}
+
+/// Reap only a caller-owned, still-unreaped child and retain its final native CPU total.
+/// The caller drops the Child handle on Some and must not call std's wait methods as well.
+pub fn reap_owned(
+    child: &std::process::Child,
+    timebase: Timebase,
+) -> io::Result<Option<ReapedChild>> {
+    let pid = i32::try_from(child.id()).map_err(io::Error::other)?;
+    if !native::exited(pid)? {
+        return Ok(None);
+    }
+    let footprint = native::sample(pid, timebase);
+    let reaped =
+        native::wait(pid, false)?.ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    Ok(Some(ReapedChild {
+        finished: reaped.finished()?,
+        footprint,
+    }))
 }
 
 impl Finished {

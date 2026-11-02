@@ -8,7 +8,7 @@ const RING: &str = "FLIGHTDECK_GROUP_TEST_RING";
 
 #[test]
 fn delivers_a_co_ending_minute_through_group_admission() {
-    // Goal: a minute's co-ending tick and recording reports survive actual group admission.
+    // Goal: a minute's co-ending tick and identity reports survive actual group admission.
     // Method: run the collector orchestration on its existing accelerated test schedule.
     minute_case(false);
 }
@@ -94,22 +94,20 @@ fn minute_child(root: &Path, overdue: bool) -> ! {
         rescan_interval: DEFAULT_RESCAN_INTERVAL,
         ring_name: name.to_owned(),
         recording: Some(root.join("recording")),
+        recorder_authority: None,
         parent_pid: None,
     };
     let owner = owner::Owner::bind(None).unwrap();
     let mut out = diagnostics::stdout_group();
     {
         let place = Place::for_user(name).unwrap();
-        let mut run = Run::start_with(
+        let mut run = Run::start(
             Timebase::read().unwrap(),
             TEST_TICK_PERIOD_NS,
             DEFAULT_RESCAN_INTERVAL,
             &place,
             options.recording.as_ref().unwrap(),
             &mut *out,
-            |_root, timebase| {
-                Persister::spawn_command(&mut std::process::Command::new("/usr/bin/true"), timebase)
-            },
         )
         .unwrap();
         out.submit();
@@ -124,6 +122,7 @@ fn minute_child(root: &Path, overdue: bool) -> ! {
             &mut run,
             Err(io::ErrorKind::NotFound.into()),
             &mut out,
+            &mut None,
         )
         .unwrap();
         out.submit();
@@ -150,14 +149,8 @@ fn assert_minute_pair(output: &str, last_tick: u64) {
     assert!(minute_range.0 <= tick_range.0);
     assert_eq!(minute_range.1, last_tick);
     assert_eq!(minute, tick + 3);
-    let recording = lines[minute + 1..]
-        .iter()
-        .position(|line| line.starts_with("recording minute elapsed_ns="))
-        .map(|index| minute + 1 + index)
-        .unwrap();
-    assert_eq!(minute + 3, recording);
-    assert!(lines[recording + 1].starts_with("recording cumulative collector_cpu_ns="));
-    assert!(lines[recording + 2].starts_with("identity minute "));
+    assert!(lines[minute + 3].starts_with("identity minute "));
+    assert!(!lines.iter().any(|line| line.starts_with("recording ")));
     assert!(!output.contains("diagnostic loss"), "{output}");
     eprintln!("admitted minute range={minute_range:?} co_ending_ticks={tick_range:?}");
 }

@@ -73,6 +73,7 @@ impl Scanning {
                 if let Some(manifest) = store.existing(&identity)? {
                     self.reader.seek_publication(manifest.publication_end)?;
                     state.next_publication = manifest.publication_end;
+                    state.next_event = manifest.events_end;
                     return Ok(None);
                 }
 
@@ -85,13 +86,14 @@ impl Scanning {
                 self.reader.seek_publication(publication)?;
                 let mut tick = crate::tick_buffer(&self.reader.shape())?;
                 super::persist_one_stage_selected(
+                    store,
                     &mut self.reader,
                     &mut tick,
                     identity,
                     self.limits,
                     state,
                 )
-                .map(|window| window.map(Staged::Window))
+                .map(|window| window.map(Box::new).map(Staged::Window))
             }
         }
     }

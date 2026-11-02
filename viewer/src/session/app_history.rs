@@ -68,30 +68,21 @@ struct SourceQuery {
 }
 
 struct SourceFile {
-    path: PathBuf,
+    kind: SourceFileKind,
     alias: String,
 }
 
+#[derive(Clone, PartialEq)]
+pub(crate) enum SourceFileKind {
+    Parquet(PathBuf),
+    EventParts(persistence::engine::EventSourcePin),
+}
+
 impl SourceQuery {
-    fn refresh(
-        &self,
-        connection: &persistence::engine::Engine,
-        manifest: &persistence::Manifest,
-    ) -> Result<()> {
+    fn refresh(&self, session: &Session, window: usize) -> Result<()> {
         assert!(self.files.len() <= 2);
         for file in &self.files {
-            let _observation = if persistence::work::ingestion::is_active() {
-                Some(persistence::work::ingestion::minute_source(
-                    manifest,
-                    file.path
-                        .file_stem()
-                        .and_then(|name| name.to_str())
-                        .and_then(persistence::work::ingestion::table_name),
-                ))
-            } else {
-                None
-            };
-            if connection.parquet_source(&file.path)? != file.alias {
+            if !file.kind.matches_query(session, window, &file.alias)? {
                 return Err(Error::Bound("changed committed App history source"));
             }
         }
@@ -106,8 +97,59 @@ impl SourceQuery {
             + self
                 .files
                 .iter()
-                .map(|file| file.path.capacity() + file.alias.capacity())
+                .map(|file| file.alias.capacity() + file.kind.bytes())
                 .sum::<usize>()
+    }
+}
+
+impl SourceFileKind {
+    pub(crate) fn bytes(&self) -> usize {
+        match self {
+            Self::Parquet(path) => path.capacity(),
+            // The shared pin keeps its own charge in the Session event ledger.
+            Self::EventParts(_) => 0,
+        }
+    }
+
+    fn matches(&self, session: &Session, window: usize, expected_alias: &str) -> Result<bool> {
+        if let Self::EventParts(expected) = self {
+            // Materialized facts outlive a Session and its ledger-specific SQL aliases.
+            // Their immutable source pin still has to match every committed file.
+            let _observation = session.source_scope(window, Some("events"));
+            return expected.validate();
+        }
+        self.matches_query(session, window, expected_alias)
+    }
+
+    fn matches_query(
+        &self,
+        session: &Session,
+        window: usize,
+        expected_alias: &str,
+    ) -> Result<bool> {
+        let table = match self {
+            Self::Parquet(path) => path.file_stem().and_then(|name| name.to_str()),
+            Self::EventParts(_) => Some("events"),
+        };
+        let _observation = session.source_scope(window, table);
+        let alias = match self {
+            Self::Parquet(path) => session.connection.parquet_source(path)?,
+            Self::EventParts(expected) => {
+                if !expected.validate()? {
+                    return Ok(false);
+                }
+                let (alias, current) = session.connection.event_source_pinned(
+                    &session.root,
+                    &session.windows[window],
+                    &session.event_query_budget,
+                )?;
+                if current != *expected {
+                    return Ok(false);
+                }
+                alias
+            }
+        };
+        Ok(alias == expected_alias)
     }
 }
 
@@ -576,7 +618,7 @@ impl Session {
             .ok_or(Error::Bound("committed App history source output"))?;
 
         // A long history can retain SQL after the engine's bounded scan cache evicts its aliases.
-        source.refresh(&self.connection, &self.windows[window])?;
+        source.refresh(self, window)?;
 
         Ok(&source.sql)
     }
@@ -604,13 +646,28 @@ impl Session {
         let mut files = Vec::with_capacity(names.len());
         for name in names {
             let _observation = self.source_scope(window, Some(name));
+            if *name == "events" {
+                let (alias, pin) = self.connection.event_source_pinned(
+                    &self.root,
+                    &self.windows[window],
+                    &self.event_query_budget,
+                )?;
+                files.push(SourceFile {
+                    kind: SourceFileKind::EventParts(pin),
+                    alias,
+                });
+                continue;
+            }
             let path = self
                 .root
                 .join(&self.windows[window].data_directory)
                 .join(format!("{name}.parquet"));
             let alias = self.connection.parquet_source(&path)?;
 
-            files.push(SourceFile { path, alias });
+            files.push(SourceFile {
+                kind: SourceFileKind::Parquet(path),
+                alias,
+            });
         }
 
         Ok(SourceQuery { sql, files })

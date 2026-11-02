@@ -942,7 +942,7 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
     fixture.seal_minute(2);
     let charges = fixture_payload_charges(&fixture);
     let payload_maximum = *charges.iter().max().unwrap();
-    let maximum = payload_maximum + fixture_input_peak(&fixture);
+    let maximum = payload_maximum + fixture_load_peak(&fixture);
     assert!(*charges.iter().min().unwrap() > 0);
     assert!(charges.iter().sum::<usize>() > payload_maximum);
     assert!(charges.iter().min().unwrap() * 2 > payload_maximum);
@@ -993,45 +993,28 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
     assert_eq!(budget.used(), 0);
 }
 
-fn fixture_input_peak(fixture: &Fixture) -> usize {
-    // The cursor certificate requires 43 MiB scratch alongside retained ticks and names.
-    let budget = Arc::new(ByteBudget::new(usize::MAX));
-    let mut peak = 0;
-    for window in 0..4 {
-        let marker = persistence::layout::WindowKey {
-            run: fixture.writer.identity().unwrap().run,
-            window,
-        }
-        .marker(&fixture.root);
-        if !marker.exists() {
-            continue;
-        }
-        let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
-        let directory = fixture.root.join(manifest.data_directory);
-        let path = directory.join("ticks.parquet");
-        let file = std::fs::File::open(path).unwrap();
-        let input = persistence::engine::AdmittedTable::from_file_budgeted(file, &budget).unwrap();
-        peak = peak.max(43 * 1024 * 1024 + budget.used());
-        for name in [
-            "cpus",
-            "memory",
-            "interfaces",
-            "gpu_states",
-            "core_states",
-            "fans",
-            "processes",
-            "events",
-        ] {
-            let file = std::fs::File::open(directory.join(format!("{name}.parquet"))).unwrap();
-            let table =
-                persistence::engine::AdmittedTable::from_file_budgeted(file, &budget).unwrap();
-            peak = peak.max(43 * 1024 * 1024 + budget.used());
-            drop(table);
-        }
-        drop(input);
-    }
+fn fixture_load_peak(fixture: &Fixture) -> usize {
+    // Observe the real loader's peak, including event pins, profiles and normalization work.
+    // The later test adds only its explicitly retained payloads and checks every capture entry.
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let mut observations = 0;
+    let outcome =
+        super::recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
+            let super::apps::TickApps::Loaded(apps) = apps else {
+                panic!("valid fixture must load within the unchanged 64 MiB allowance");
+            };
+            assert_eq!(apps.processes.as_ref().unwrap().len(), 2);
+            observations += 1;
+        })
+        .unwrap();
+    assert_eq!(outcome.left_out, None);
+    drop(outcome);
+    assert!(observations > 0);
     assert_eq!(budget.used(), 0);
-    peak
+    budget.used_peak()
 }
 
 fn fixture_payload_charges(fixture: &Fixture) -> Vec<usize> {
@@ -1091,7 +1074,7 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
     }
     let charges = fixture_payload_charges(&fixture);
     let payload_maximum = charges.iter().max().unwrap() * 3;
-    let maximum = payload_maximum + fixture_input_peak(&fixture);
+    let maximum = payload_maximum + fixture_load_peak(&fixture);
     assert!(charges.iter().sum::<usize>() > payload_maximum);
     let budget = Arc::new(ByteBudget::new(maximum));
     let mut span = super::Span::new(1, super::Buffers::new(2, AppsSecond::with_room));

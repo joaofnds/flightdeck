@@ -221,6 +221,12 @@ mod tests {
                     _ => {}
                 }
             }
+            if matches!(table, Table::Events) {
+                expected.extend([
+                    ("event_observation_version", "UTINYINT"),
+                    ("event_observation_availability", "UTINYINT"),
+                ]);
+            }
             let expected = expected
                 .into_iter()
                 .map(|(name, kind)| Field::new(name.into(), saved_schema::data_type(kind)))

@@ -169,6 +169,47 @@ impl RecordingHarness {
         self.assert_old_source_retained();
     }
 
+    pub fn old_loss_only_recovery(&self) -> persistence::event_recovery::Recovery {
+        let registry = Registry::read(&self.root).unwrap();
+        let old = registry
+            .runs
+            .iter()
+            .find(|run| run.ring_name == self.old_source)
+            .unwrap();
+        assert!(Registry::completed(&self.root, &old.identity, &old.ring_name).unwrap());
+        self.assert_old_source_retained();
+        let mut buffer: Box<[_; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]> =
+            vec![0; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap();
+        let mut discovery =
+            persistence::event_recovery::Discovery::open(&self.root, &mut buffer).unwrap();
+        let page = discovery.next_page(2).unwrap();
+        assert!(page.complete);
+        assert_eq!(page.runs.len(), 1);
+        let recovered = page.runs[0];
+        assert_eq!(recovered.run, old.identity);
+        assert_eq!(recovered.rows, 0);
+        let events =
+            persistence::event_recovery::read_page(&self.root, &old.identity, 1, 1).unwrap();
+        assert_eq!(events.rows.height(), 0);
+        assert_eq!(events.next, None);
+        assert_eq!(events.losses, recovered.losses);
+        assert_eq!(
+            events.coverage,
+            recovered.events_first..recovered.events_end
+        );
+        assert_eq!(
+            persistence::read_committed(&self.root, &self.marker(&self.old_run, 0))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        eprintln!("canonical loss-only recovery={recovered:?}");
+        recovered
+    }
+
     pub fn new_window_prior_loss_unknown(&self) -> bool {
         persistence::read_committed(&self.root, &self.marker(&self.new_run, 0))
             .unwrap()

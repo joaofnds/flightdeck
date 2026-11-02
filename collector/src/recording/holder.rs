@@ -188,16 +188,36 @@ mod tests {
     fn a_collector_that_cannot_register_withdraws_the_last_announcement() {
         // Goal: a new holder is never read as the run its predecessor announced.
         // Method: stop one collector, then start another whose registration fails after it
-        // takes the recording, since the recording's identity no longer reads.
+        // takes the supported recording, since its run registry no longer reads.
         let fixture = Fixture::new("withdrawn");
         drop(fixture.start());
-        private::atomic_write(&fixture.root, "identity", b"damaged\n").unwrap();
+        private::atomic_write(&fixture.root, "runs", b"damaged\n").unwrap();
 
         let (writer, registered) = fixture.started();
 
         assert!(registered.is_err());
         assert_eq!(Holder::Unannounced, holder(&fixture.root).unwrap());
         drop(writer);
+    }
+
+    #[test]
+    fn a_refused_root_format_preserves_the_previous_announcement_without_taking_ownership() {
+        // Goal: a writer cannot mutate an incompatible root or impersonate its old owner.
+        // Method: damage a finished root's identity and compare its announcement after refusal.
+        let fixture = Fixture::new("format-refused");
+        drop(fixture.start());
+        let announcement = std::fs::read(fixture.root.join(ANNOUNCEMENT)).unwrap();
+        private::atomic_write(&fixture.root, "identity", b"damaged\n").unwrap();
+        let error = fixture
+            .try_started()
+            .err()
+            .expect("invalid root was accepted");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read(fixture.root.join(ANNOUNCEMENT)).unwrap(),
+            announcement
+        );
+        assert_eq!(holder(&fixture.root).unwrap(), Holder::Absent);
     }
 
     #[test]
@@ -333,6 +353,10 @@ mod tests {
         }
 
         fn started(&self) -> (Writer, io::Result<()>) {
+            self.try_started().unwrap()
+        }
+
+        fn try_started(&self) -> io::Result<(Writer, io::Result<()>)> {
             let shape = Shape {
                 slot_count: 2,
                 cpu_capacity: 1,
@@ -344,10 +368,10 @@ mod tests {
                 coalition_capacity: 1,
                 event_capacity: 2,
             };
-            let started = Registration::start(&self.root, &self.place, shape, 0).unwrap();
+            let started = Registration::start(&self.root, &self.place, shape, 0)?;
             let (writer, registered) = started.into_parts();
             self.rings.borrow_mut().push(writer.name().to_owned());
-            (writer, registered)
+            Ok((writer, registered))
         }
 
         fn start(&self) -> Writer {

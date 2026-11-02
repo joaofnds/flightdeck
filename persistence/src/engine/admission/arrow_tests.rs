@@ -36,6 +36,128 @@ struct ArrowProbe<'a> {
 }
 
 #[test]
+fn captured_scalar_tags_match_native_arrow_override_types() {
+    // Goal: compact admitted field tags report the exact schema the native decoder returns.
+    // Method: capture every supported scalar from a real file with its Arrow override intact.
+    let fixture = Fixture::with_frame(recording_frame());
+
+    assert_captured_types(&fixture);
+}
+
+#[test]
+fn captured_scalar_tags_preserve_metadata_selected_binary_offsets() {
+    // Goal: bounded tags preserve the native type selected by Polars field metadata.
+    // Method: give real binary storage a maintained LargeBinary override, then compare schemas.
+    assert_binary_metadata(&[(Some("pl"), Some("maintain_type"))], true);
+}
+
+#[test]
+fn captured_scalar_tags_use_the_last_complete_duplicate_metadata_value() {
+    // Goal: the native map's last-value rule also governs bounded scalar tags.
+    // Method: override maintain_type with another complete value above real binary storage.
+    assert_binary_metadata(
+        &[
+            (Some("pl"), Some("maintain_type")),
+            (Some("pl"), Some("other")),
+        ],
+        false,
+    );
+}
+
+#[test]
+fn captured_scalar_tags_ignore_incomplete_metadata_pairs() {
+    // Goal: incomplete IPC pairs cannot erase the native maintained-type value.
+    // Method: append missing-value and missing-key entries, then compare both actual schemas.
+    assert_binary_metadata(
+        &[
+            (Some("pl"), Some("maintain_type")),
+            (Some("pl"), None),
+            (None, Some("other")),
+        ],
+        true,
+    );
+}
+
+fn assert_binary_metadata(entries: &[(Option<&str>, Option<&str>)], maintained: bool) {
+    let frame = DataFrame::new(
+        1,
+        vec![Column::new("bytes".into(), [b"native bytes".as_slice()])],
+    )
+    .unwrap();
+    let fixture = Fixture::with_frame(frame);
+    let encoded = arrow_fields_metadata(vec![ipc::Field {
+        name: Some("bytes".to_owned()),
+        nullable: true,
+        type_: Some(ipc::Type::LargeBinary(Box::new(ipc::LargeBinary {}))),
+        dictionary: None,
+        children: None,
+        custom_metadata: Some(
+            entries
+                .iter()
+                .map(|(key, value)| ipc::KeyValue {
+                    key: key.map(str::to_owned),
+                    value: value.map(str::to_owned),
+                })
+                .collect(),
+        ),
+    }]);
+    fixture.change_arrow_metadata(|entry| entry.value = Some(encoded));
+    assert_eq!(
+        fixture.query().column("bytes").unwrap().dtype(),
+        &if maintained {
+            polars::prelude::DataType::BinaryOffset
+        } else {
+            polars::prelude::DataType::Binary
+        }
+    );
+
+    assert_captured_types(&fixture);
+}
+
+#[test]
+fn captured_scalar_tags_match_native_legacy_annotation_types() {
+    // Goal: legacy metadata without an Arrow override retains its scalar signedness and widths.
+    // Method: remove only the override and compare captured tags against the native reader.
+    let fixture = Fixture::with_frame(recording_frame());
+    fixture.change_metadata(|metadata| metadata.key_value_metadata = None);
+
+    assert_captured_types(&fixture);
+}
+
+#[test]
+fn captured_scalar_tags_match_native_override_without_physical_annotations() {
+    // Goal: valid Arrow widths must not be replaced with the wider bare physical storage type.
+    // Method: retain the real override while removing physical logical/converted annotations.
+    let fixture = Fixture::with_frame(recording_frame());
+    fixture.change_metadata(|metadata| {
+        for field in &mut metadata.schema[1..] {
+            field.logical_type = None;
+            field.converted_type = None;
+        }
+    });
+
+    assert_captured_types(&fixture);
+}
+
+fn assert_captured_types(fixture: &Fixture) {
+    let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(64 * 1024 * 1024));
+    let input = crate::engine::AdmittedTable::from_file_budgeted(
+        std::fs::File::open(&fixture.path).unwrap(),
+        &budget,
+    )
+    .unwrap();
+    let native = fixture.query();
+    let expected: Vec<_> = native
+        .schema()
+        .iter()
+        .map(|(name, kind)| (name.as_str(), kind.clone()))
+        .collect();
+    assert_eq!(input.fields().collect::<Vec<_>>(), expected);
+    drop(input);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn reads_current_arrow_metadata_without_changing_saved_counter_types() {
     // Goal: the admission guard preserves valid current Arrow schema metadata.
     // Method: query native saved unsigned counters, including their full-width maximum.

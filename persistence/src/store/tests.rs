@@ -13,6 +13,35 @@ use crate::{Losses, Manifest, TableManifest, TimeBounds, WindowIdentity};
 const WINDOWS: u64 = 10_081;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+#[test]
+fn a_legacy_root_is_readable_but_a_new_writer_refuses_without_changing_it() {
+    // Goal: format transition never converts an active or dormant legacy recording in place.
+    // Method: keep only legacy identity and an announcement, then compare the root on refusal.
+    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+    let root =
+        std::env::temp_dir().join(format!("fd-legacy-refusal-{}-{serial}", std::process::id()));
+    collector::recording::private::create_private_dir(&root).unwrap();
+    let identity = b"00000000000000010000000000000002\n";
+    collector::recording::private::atomic_write(&root, "identity", identity).unwrap();
+    collector::recording::private::atomic_write(&root, "collector.announcement", b"sentinel\n")
+        .unwrap();
+    assert_eq!(
+        collector::recording::read_identity(&root).unwrap(),
+        collector::ring::Identity([1, 2])
+    );
+    let refused = Store::open(&root)
+        .err()
+        .expect("new writer accepted legacy root");
+    assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(fs::read(root.join("identity")).unwrap(), identity);
+    assert_eq!(
+        fs::read(root.join("collector.announcement")).unwrap(),
+        b"sentinel\n"
+    );
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
 struct History {
     store: Store,
     root: PathBuf,
@@ -130,6 +159,7 @@ fn history_window(store: &Store, identity: &WindowIdentity, payload: &Path, wind
     history_directories(store, &identity);
     let wall_ns = window * 60_000_000_000;
     let mut manifest = Manifest {
+        event_batches: None,
         identity,
         publication_first: window * 60 + 1,
         publication_end: window * 60 + 2,

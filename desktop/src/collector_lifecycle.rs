@@ -9,6 +9,8 @@ mod diagnostics;
 mod health;
 #[path = "collector_lifecycle_policy.rs"]
 mod policy;
+#[path = "collector_lifecycle_recorder.rs"]
+mod recorder;
 
 #[cfg(test)]
 #[path = "collector_lifecycle_tests.rs"]
@@ -113,6 +115,12 @@ impl CollectorSession {
         }
     }
 
+    pub fn detach(&mut self) {
+        self.0.standard = None;
+        self.0.diagnostic = None;
+        self.0.health.clear();
+    }
+
     pub fn finished(&self) -> bool {
         if self.0.policy.state == State::Stopped {
             return true;
@@ -157,6 +165,13 @@ impl CollectorSession {
     pub fn status(&self) -> Option<(String, bool)> {
         if self.0.configuration.mode == Mode::Attach {
             return None;
+        }
+        if let Some(notice) = self.0.health.notice() {
+            let failure = self.0.policy.failure.as_deref();
+            return Some((
+                failure.map_or_else(|| notice.clone(), |failure| format!("{notice} · {failure}")),
+                self.0.policy.can_retry(),
+            ));
         }
 
         let notice = if let Some(failure) = &self.0.policy.failure {
@@ -247,7 +262,7 @@ impl CollectorSession {
             })?;
         self.0.policy.launched(child.id(), self.0.started.elapsed());
         eprintln!(
-            "Started owned collector {} parent={}",
+            "Started recorder {} from viewer={}",
             child.id(),
             std::process::id()
         );
@@ -268,7 +283,7 @@ impl CollectorSession {
             self.0.child = None;
             let final_drained = self.drain_outputs();
             eprintln!(
-                "Owned collector {pid} diagnostic file peak bytes: stdout={} stderr={}",
+                "Owned collector {pid} diagnostic batch peak bytes: stdout={} stderr={}",
                 self.0.standard.as_ref().map_or(0, Output::peak_bytes),
                 self.0.diagnostic.as_ref().map_or(0, Output::peak_bytes)
             );
@@ -347,22 +362,9 @@ impl CollectorSession {
     }
 
     fn failed(&mut self, message: &str) {
-        if self.0.child.is_some() {
-            if self.0.policy.failure.is_none() {
-                self.0.policy.failure = Some(message.chars().take(OUTPUT_BYTES_MAX).collect());
-            }
-            self.begin_stop();
-        } else {
-            self.0.policy.fail(message);
-        }
-    }
-}
-
-impl Drop for CollectorSession {
-    fn drop(&mut self) {
-        if let Err(error) = self.signal_term() {
-            eprintln!("Flightdeck owned collector cleanup: {error}");
-        }
+        self.0
+            .policy
+            .fail(&message.chars().take(OUTPUT_BYTES_MAX).collect::<String>());
     }
 }
 
@@ -370,10 +372,10 @@ pub(super) fn binary(executable: &Path) -> io::Result<PathBuf> {
     let directory = executable.parent().ok_or(io::ErrorKind::InvalidInput)?;
     if directory.file_name() == Some(std::ffi::OsStr::new("MacOS")) {
         let contents = directory.parent().ok_or(io::ErrorKind::InvalidInput)?;
-        return Ok(contents.join("Helpers/collector"));
+        return Ok(contents.join("Helpers/recorder"));
     }
 
-    Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/release/collector"))
+    Ok(Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/release/recorder"))
 }
 
 /// The command that starts the collector on `ring`. It sets the library's thread defaults
@@ -387,8 +389,6 @@ fn spawn_command(configuration: &Configuration, ring: &str) -> Command {
         .arg(ring)
         .arg("--recording")
         .arg(&configuration.root)
-        .arg("--parent-pid")
-        .arg(std::process::id().to_string())
         .envs(persistence::engine::THREAD_DEFAULTS.environment());
     command
 }

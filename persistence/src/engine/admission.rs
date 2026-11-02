@@ -2,6 +2,7 @@
 
 mod protocol;
 mod schema;
+pub(super) use schema::{Storage, storage_types};
 
 #[cfg(test)]
 mod arrow_tests;
@@ -35,7 +36,7 @@ const ROWS_MAX: u64 = 8_388_608;
 /// Above the widest table, the App parts a window derives as it seals, which asserts it fits.
 pub const COLUMNS_MAX: usize = 96;
 pub(super) const COLUMN_NAME_BYTES_MAX: usize = 128;
-const ROW_GROUPS_MAX: usize = 2048;
+pub(super) const ROW_GROUPS_MAX: usize = 2048;
 const PAGES_MAX: u64 = 65_536;
 
 const _: () = {
@@ -155,6 +156,40 @@ pub(super) fn validate_reader_metadata(
     }
 
     Ok(metadata)
+}
+
+pub(super) fn validate_decode_limits(
+    metadata: &ThriftFileMetadata,
+    limits: &super::admitted_table::DecodeLimits,
+) -> Result<()> {
+    bounded(metadata.num_rows, limits.rows, "strict parquet rows")?;
+    if metadata.row_groups.len() > limits.row_groups {
+        return Err(Error::Bound("strict parquet row groups"));
+    }
+    if metadata.schema.len() - 1 > limits.columns {
+        return Err(Error::Bound("strict parquet columns"));
+    }
+    let mut expanded = 0_u64;
+    for group in &metadata.row_groups {
+        for column in &group.columns {
+            let column = column
+                .meta_data
+                .as_ref()
+                .ok_or(Error::Bound("parquet column metadata"))?;
+            let bytes = bounded(
+                column.total_uncompressed_size,
+                limits.expanded_bytes,
+                "strict parquet expanded bytes",
+            )?;
+            expanded = expanded
+                .checked_add(bytes)
+                .ok_or(Error::Bound("strict parquet expanded bytes"))?;
+            if expanded > limits.expanded_bytes {
+                return Err(Error::Bound("strict parquet expanded bytes"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_footer(file: &mut (impl Read + Seek), size: u64) -> Result<Extent> {
@@ -622,6 +657,15 @@ fn validate_pages_complete(
 ) -> Result<()> {
     if measurements.values != bounded(column.num_values, ROWS_MAX, "parquet column values")? {
         return Err(Error::Bound("parquet page values"));
+    }
+    if measurements.expanded_bytes
+        != bounded(
+            column.total_uncompressed_size,
+            EXPANDED_BYTES_MAX,
+            "parquet column bytes",
+        )?
+    {
+        return Err(Error::Bound("parquet declared expanded bytes"));
     }
     totals.expanded_bytes = totals
         .expanded_bytes

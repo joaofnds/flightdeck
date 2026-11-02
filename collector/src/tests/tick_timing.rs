@@ -315,14 +315,13 @@ impl Fixture {
         let timebase = Timebase::read().unwrap();
         let recording = TestRecording::new(name);
         let mut output = io::Cursor::new(vec![0; 65_536].into_boxed_slice());
-        let run = Run::start_with(
+        let run = Run::start(
             timebase,
             TEST_TICK_PERIOD_NS,
             DEFAULT_RESCAN_INTERVAL,
             &recording.ring.place,
             &recording.root,
             &mut output,
-            |_root, timebase| slow_persister(timebase, 3),
         )
         .unwrap();
         let mut reader = Reader::open(&recording.ring.place.lock_path).unwrap();

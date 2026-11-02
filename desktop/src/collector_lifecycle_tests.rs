@@ -7,6 +7,120 @@ use serde_json::json;
 
 use super::*;
 use crate::live_source::Snapshot;
+use collector::recording::control::{Control, Reporter, Role, State as WorkerState};
+
+#[test]
+fn attached_health_separates_acquisition_and_durable_failure_without_output() {
+    // Goal: an attaching GUI observes durable failure without any stderr/stdout channel.
+    // Method: publish real lifecycle records with advancing acquisition and a failed persister.
+    let fixture = Recording::managed();
+    let _controller_lock =
+        collector::recording::private::FileLock::try_lock(&fixture.root.join("controller.lock"))
+            .unwrap();
+    let _persister_lock =
+        collector::recording::private::FileLock::try_lock(&fixture.root.join("persister.lock"))
+            .unwrap();
+    let mut controller = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Controller,
+    )
+    .unwrap();
+    let mut collector = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Collector,
+    )
+    .unwrap();
+    let mut persister = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Persister,
+    )
+    .unwrap();
+    controller
+        .update(WorkerState::Running, Identity([0; 2]), 0)
+        .unwrap();
+    collector
+        .update(WorkerState::Running, fixture.run(), 3)
+        .unwrap();
+    persister
+        .update(WorkerState::Failed, fixture.run(), 1)
+        .unwrap();
+    let mut session = fixture.session(Mode::Auto);
+
+    session.tick();
+
+    let (notice, retry) = session.status().unwrap();
+    assert!(notice.contains("Acquisition: running;"), "{notice}");
+    assert!(notice.contains("Durable recording: failed"), "{notice}");
+    assert!(!retry);
+    assert!(session.0.standard.is_none());
+    assert!(session.0.diagnostic.is_none());
+    assert_eq!(session.owned_pid(), None);
+}
+
+#[test]
+fn surviving_acquisition_without_controller_requires_explicit_recovery() {
+    // Goal: a surviving worker never implies that automatic recovery is available.
+    // Method: publish only acquisition health, inspect it through the GUI, then request retry.
+    let fixture = Recording::managed();
+    let mut collector = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Collector,
+    )
+    .unwrap();
+    collector
+        .update(WorkerState::Running, fixture.run(), 7)
+        .unwrap();
+    let mut session = fixture.session(Mode::Auto);
+
+    session.tick();
+
+    let (notice, retry) = session.status().unwrap();
+    assert!(notice.contains("Acquisition: running;"), "{notice}");
+    assert!(notice.contains("Recovery: unavailable"), "{notice}");
+    assert!(retry);
+    assert!(session.0.child.is_none());
+    let source = session.source_if_needed().unwrap();
+    session.retry();
+    assert_eq!(
+        session.0.policy.step(Duration::from_secs(1), &source),
+        Action::Spawn
+    );
+}
+
+#[test]
+fn an_interrupted_controller_health_write_preserves_independent_worker_health() {
+    // Goal: a controller dying during publication cannot hide healthy acquisition status.
+    // Method: leave its real mapped sequence odd while another role publishes a complete record.
+    use std::os::unix::fs::FileExt;
+    let fixture = Recording::managed();
+    let mut collector = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Collector,
+    )
+    .unwrap();
+    collector
+        .update(WorkerState::Running, fixture.run(), 7)
+        .unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(fixture.root.join("recorder.control"))
+        .unwrap();
+    file.write_all_at(&1_u64.to_ne_bytes(), 16 * 8).unwrap();
+    let mut session = fixture.session(Mode::Auto);
+
+    session.tick();
+
+    let (notice, retry) = session.status().unwrap();
+    assert!(notice.contains("Acquisition: running;"), "{notice}");
+    assert!(notice.contains("Recovery: unavailable"), "{notice}");
+    assert!(retry);
+    let source = session.source_if_needed().unwrap();
+    session.retry();
+    assert_eq!(
+        session.0.policy.step(Duration::from_secs(1), &source),
+        Action::Spawn
+    );
+}
 
 #[test]
 fn paused_selection_does_not_freeze_owned_collector_health() {
@@ -30,6 +144,7 @@ fn paused_selection_does_not_freeze_owned_collector_health() {
     session.0.started = Instant::now()
         .checked_sub(STARTUP_LIMIT + Duration::from_secs(1))
         .unwrap();
+    fixture.publish();
     session.tick();
     assert!(session.ready());
 }
@@ -356,6 +471,11 @@ fn the_collector_starts_with_the_library_thread_defaults() {
         .collect();
     let environment: BTreeMap<_, _> = command.get_envs().collect();
     assert_eq!(environment, expected);
+    assert!(
+        !command
+            .get_args()
+            .any(|argument| argument == "--parent-pid")
+    );
 }
 
 #[test]
@@ -395,8 +515,21 @@ impl Recording {
     }
 
     fn with_ring(ring: &str) -> Self {
+        Self::with_ring_control(ring, false)
+    }
+
+    fn managed() -> Self {
+        let token = identity_text(random_identity().unwrap());
+        Self::with_ring_control(&format!("gpui-managed-{token}"), true)
+    }
+
+    fn with_ring_control(ring: &str, managed: bool) -> Self {
         let token = identity_text(random_identity().unwrap());
         let root = std::env::temp_dir().join(format!("flightdeck-lifecycle-{token}"));
+        if managed {
+            collector::recording::private::create_private_dir(&root).unwrap();
+            Control::create(&root).unwrap();
+        }
         let place = Place::for_user(ring).unwrap();
         let (writer, registered) = Registration::start(&root, &place, Self::shape(), 1)
             .unwrap()

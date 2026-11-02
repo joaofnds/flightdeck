@@ -158,7 +158,7 @@ impl Session {
             self.validate_commitment(kept.window)?;
         }
         for ((window, _kind), source) in &replay.restore.sources {
-            source.refresh(&self.connection, &self.windows[*window])?;
+            source.refresh(self, *window)?;
         }
 
         self.operation.check()
@@ -257,9 +257,7 @@ impl Session {
             }
             self.validate_commitment(window)?;
             for file in &pin.files {
-                let _observation =
-                    self.source_scope(window, file.path.file_stem().and_then(|name| name.to_str()));
-                if self.connection.parquet_source(&file.path)? != file.alias {
+                if !file.kind.matches(self, window, &file.alias)? {
                     return Err(Error::Bound("resident cache file changed"));
                 }
             }
@@ -302,7 +300,7 @@ impl Session {
                 .iter()
                 .chain(ticks.files.iter())
                 .map(|file| ResidentFile {
-                    path: file.path.clone(),
+                    kind: file.kind.clone(),
                     alias: file.alias.clone(),
                 })
                 .collect(),

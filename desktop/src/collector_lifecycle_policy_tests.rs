@@ -11,9 +11,11 @@ fn existing(publication: u64) -> Source {
         observation: Some(Observation {
             pid: 42,
             run: "00000000000000000000000000000001".into(),
-            boot: "00000000000000000000000000000002".into(),
+            boot: Some("00000000000000000000000000000002".into()),
+            authority: None,
             publication,
         }),
+        ..Source::default()
     }
 }
 
@@ -219,6 +221,59 @@ fn explicit_attachment_stays_read_only_after_its_producer_stops() {
     assert_eq!(policy.state, State::Attached);
     assert!(!policy.can_retry());
     assert!(!policy.needs_health());
+}
+
+#[test]
+fn controller_ownership_and_acquisition_readiness_use_different_processes() {
+    // Goal: recorder ownership cannot be mistaken for the acquisition worker's identity.
+    // Method: start controller 99 and observe advancing collector 42 under that controller.
+    let mut policy = Policy::new(Mode::Explicit);
+    policy.launched(99, Duration::ZERO);
+    let mut source = existing(1);
+    source.controller_pid = Some(99);
+    assert_eq!(policy.step(Duration::ZERO, &source), Action::None);
+    source.observation.as_mut().unwrap().publication = 2;
+    assert_eq!(policy.step(Duration::from_secs(1), &source), Action::None);
+    assert_eq!(policy.state, State::Running);
+    assert_eq!(policy.owned_pid, Some(99));
+}
+
+#[test]
+fn recovered_structured_health_clears_a_transient_viewer_failure() {
+    // Goal: a failed health read cannot permanently hide a recovered managed recording.
+    // Method: fail the viewer's observation, then publish healthy controller/collector records.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.fail("health was temporarily unreadable");
+    let mut source = existing(10);
+    source.controller_pid = Some(99);
+    assert_eq!(policy.step(Duration::from_secs(1), &source), Action::None);
+    assert_eq!(policy.state, State::Attached);
+    assert!(policy.failure.is_none());
+    assert_eq!(policy.owned_pid, None);
+}
+
+#[test]
+fn an_explicit_recorder_start_can_reclaim_surviving_workers() {
+    // Goal: the explicit start action may replace an absent controller without another click.
+    // Method: start in Explicit mode with acquisition alive and controller health absent.
+    let mut policy = Policy::new(Mode::Explicit);
+    let mut source = existing(10);
+    source.controller_missing = true;
+    assert_eq!(policy.step(Duration::ZERO, &source), Action::Spawn);
+}
+
+#[test]
+fn controller_health_loss_after_attachment_offers_explicit_recovery() {
+    // Goal: advancing acquisition cannot hide the loss of controller health after attachment.
+    // Method: attach to advancing readings, then make only controller health unreadable.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.step(Duration::ZERO, &existing(1));
+    policy.step(Duration::from_secs(1), &existing(2));
+    let mut source = existing(3);
+    source.controller_unavailable = true;
+    assert_eq!(policy.step(Duration::from_secs(2), &source), Action::None);
+    assert!(policy.can_retry());
+    assert_eq!(policy.owned_pid, None);
 }
 
 #[test]

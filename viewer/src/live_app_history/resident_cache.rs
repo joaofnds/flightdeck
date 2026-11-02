@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use persistence::{Error, Manifest, Result, WindowIdentity};
 
 use super::{CompactMeasure, Observation};
@@ -8,7 +6,7 @@ use crate::live::resident_history::{
     AppReading, Capture, SavedResidents, capture_header, kept_readings,
 };
 use crate::live_app_response::KeyKind;
-use crate::session::OBSERVATIONS_MAX;
+use crate::session::{OBSERVATIONS_MAX, SourceFileKind};
 
 pub(crate) struct ResidentCache {
     points: Vec<ResidentPoint>,
@@ -36,7 +34,7 @@ pub(crate) struct ResidentPin {
 }
 
 pub(crate) struct ResidentFile {
-    pub path: PathBuf,
+    pub kind: SourceFileKind,
     pub alias: String,
 }
 
@@ -358,7 +356,7 @@ impl ResidentPin {
             + self
                 .files
                 .iter()
-                .map(|file| file.path.capacity() + file.alias.capacity())
+                .map(|file| file.kind.bytes() + file.alias.capacity())
                 .sum::<usize>()
     }
 }

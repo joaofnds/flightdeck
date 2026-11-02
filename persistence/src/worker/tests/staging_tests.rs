@@ -147,7 +147,7 @@ fn waits_for_the_open_successor_after_losing_the_selected_minute() {
     };
 
     assert!(
-        persist_one_stage_selected(&mut reader, &mut tick, selected, limits, &mut state)
+        persist_one_stage_selected(&store, &mut reader, &mut tick, selected, limits, &mut state)
             .unwrap()
             .is_none()
     );
@@ -192,7 +192,12 @@ fn leaves_a_missed_suffix_for_the_next_minute() {
     let mut reader = RingReader::open_generation(ring.0.name()).unwrap();
     let limits = Limits::from_shape(&reader.shape()).unwrap();
     let mut tick = crate::tick_buffer(&reader.shape()).unwrap();
-    let mut staged = staging::Staging::new(&reader, WindowIdentity { run, window: 0 }, limits);
+    let identity = WindowIdentity { run, window: 0 };
+    let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
+        panic!("new window")
+    };
+    let mut staged =
+        staging::Staging::new(&reader, identity, limits, pending, WORKING_BYTES_MAX).unwrap();
     let mut losses = Losses::default();
     assert!(staged.read(&mut reader, &mut tick, &mut losses).unwrap());
     ring.publish(61);
@@ -200,7 +205,8 @@ fn leaves_a_missed_suffix_for_the_next_minute() {
 
     assert!(staged.read(&mut reader, &mut tick, &mut losses).unwrap());
     assert!(!staged.read(&mut reader, &mut tick, &mut losses).unwrap());
-    let window = staged.finish(&mut losses);
+    let staged = staged.finish(&mut reader, &mut losses).unwrap();
+    let window = staged.window;
 
     assert_eq!(window.publication_range(), 1..2);
     assert_eq!(losses.publications, 0);
@@ -210,18 +216,17 @@ fn leaves_a_missed_suffix_for_the_next_minute() {
         encoder: Encoder,
         derive: &Underived,
     };
-    assert!(
-        seal(
-            &store,
-            &writers,
-            &window,
-            &RunState {
-                losses,
-                ..RunState::default()
-            }
-        )
-        .unwrap()
-    );
+    seal_pending(
+        &store,
+        &writers,
+        &window,
+        &mut RunState {
+            losses,
+            ..RunState::default()
+        },
+        staged.pending,
+    )
+    .unwrap();
     drop(store);
     ring.0.finish();
     let recovered = Store::open(&root.0).unwrap();
@@ -265,7 +270,8 @@ fn advances_a_wholly_lost_selection_without_returning_an_empty_window() {
     };
 
     let result =
-        persist_one_stage_selected(&mut reader, &mut tick, selected, limits, &mut state).unwrap();
+        persist_one_stage_selected(&store, &mut reader, &mut tick, selected, limits, &mut state)
+            .unwrap();
 
     assert!(result.is_none());
     assert_eq!(state.next_publication, 2);
@@ -343,6 +349,7 @@ fn refuses_a_lost_selection_that_has_not_advanced() {
     let mut state = RunState::default();
 
     let result = persist_one_stage_selected(
+        &store,
         &mut reader,
         &mut tick,
         WindowIdentity { run, window: 0 },
@@ -383,7 +390,17 @@ fn completes_an_empty_source_with_only_prior_unknown_loss() {
 
     assert!(matches!(result, Progress::Complete));
     assert_eq!(state.source, SourceState::Complete);
-    assert!(state.losses.unknown);
+    assert_eq!(state.losses, Losses::default());
+    let durable = crate::event_recovery::read_page(&root.0, &registered.identity, 1, 1).unwrap();
+    assert_eq!(durable.rows.height(), 0);
+    assert_eq!(
+        durable.losses,
+        Losses {
+            unknown: true,
+            ..Losses::default()
+        }
+    );
+    assert!(store.progress(&registered.identity).unwrap().is_none());
 }
 
 struct Ring(collector::ring::Writer, u64);

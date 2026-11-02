@@ -272,7 +272,7 @@ mod tests {
         let identity = collector::recording::recording_identity(&ring.root).unwrap();
 
         assert_eq!(
-            33,
+            74,
             std::fs::metadata(ring.root.join("identity")).unwrap().len()
         );
         assert!(!pending.exists());

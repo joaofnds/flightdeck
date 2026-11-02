@@ -66,6 +66,7 @@ impl Harness {
             "build both actual binaries before this check"
         );
         fs::copy(&collector, root.join("collector")).unwrap();
+        fs::copy(collector.with_file_name("recorder"), root.join("recorder")).unwrap();
         fs::copy(&persister, root.join("persister")).unwrap();
 
         Self {
@@ -274,9 +275,10 @@ impl Harness {
             .take(8)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert!(entries.len() <= 6);
+        assert!(entries.len() <= 7);
         let names = [
             "collector",
+            "recorder",
             "persister",
             "filler.log",
             "collector-stderr.log",

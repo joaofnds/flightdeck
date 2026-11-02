@@ -10,6 +10,144 @@ use crate::engine::source_tests::Fixture;
 use crate::resources::ByteBudget;
 
 #[test]
+fn underreported_expansion_is_refused_before_native_decode() {
+    // Goal: a footer cannot understate the measured page expansion used by decode preflight.
+    // Method: change only one real column's declared total while preserving its page bytes.
+    use polars_parquet_format::thrift::protocol::TCompactOutputProtocol;
+    let fixture = Fixture::new();
+    let mut bytes = std::fs::read(&fixture.path).unwrap();
+    let mut metadata = super::admission::validate_reader_metadata(
+        &mut std::io::Cursor::new(&bytes),
+        u64::try_from(bytes.len()).unwrap(),
+    )
+    .unwrap();
+    metadata.row_groups[0].columns[0]
+        .meta_data
+        .as_mut()
+        .unwrap()
+        .total_uncompressed_size -= 1;
+    let mut footer = Vec::new();
+    metadata
+        .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut footer))
+        .unwrap();
+    let trailer = bytes.len() - 8;
+    let length = u32::from_le_bytes(bytes[trailer..trailer + 4].try_into().unwrap());
+    bytes.truncate(trailer - usize::try_from(length).unwrap());
+    bytes.extend_from_slice(&footer);
+    bytes.extend_from_slice(&u32::try_from(footer.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(b"PAR1");
+    std::fs::write(&fixture.path, bytes).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let result =
+        AdmittedTable::from_file_budgeted_profiled(File::open(&fixture.path).unwrap(), &budget);
+    assert!(matches!(
+        result,
+        Err(AdmissionRefusal::Bound("parquet declared expanded bytes"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn profiled_slice_reserves_only_whole_intersecting_groups_before_decode() {
+    // Goal: legacy slices charge their native row-group payload before values are decoded.
+    // Method: select either or both real groups, then exhaust exactly one byte of work room.
+    let fixture = Fixture::new();
+    let mut frame = polars::prelude::DataFrame::new(
+        124,
+        vec![polars::prelude::Column::new(
+            "counter".into(),
+            (0_u64..124).collect::<Vec<_>>(),
+        )],
+    )
+    .unwrap();
+    std::fs::remove_file(&fixture.path).unwrap();
+    write_groups(&fixture.path, &mut frame);
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let table =
+        AdmittedTable::from_file_budgeted_profiled(File::open(&fixture.path).unwrap(), &budget)
+            .unwrap();
+    let first = table.reserve_slice_work(0, 1).unwrap();
+    let second = table.reserve_slice_work(62, 1).unwrap();
+    let both = table.reserve_slice_work(61, 2).unwrap();
+    assert_eq!(both.bytes(), first.bytes() + second.bytes());
+    let required = first.bytes();
+    assert!(required > 0);
+    drop((first, second, both));
+    let absent = table.reserve_slice_work(124, 1).unwrap();
+    assert_eq!(absent.bytes(), 0);
+    drop(absent);
+    let pressure = budget
+        .reserve(budget.maximum() - budget.used() - required + 1)
+        .unwrap();
+    assert!(matches!(
+        table.reserve_slice_work(0, 1),
+        Err(AdmissionRefusal::Budget)
+    ));
+    drop(pressure);
+    let work = table.reserve_slice_work(0, 1).unwrap();
+    assert_eq!(
+        table
+            .read_slice_metadata_budgeted(&["counter"], 0, 1)
+            .unwrap()
+            .height(),
+        1
+    );
+    drop(work);
+    drop(table);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn strict_expansion_refusal_precedes_native_decode_and_releases_every_charge() {
+    // Goal: a terminal batch cannot enter native decoding above its independently smaller cap.
+    // Method: admit exact fixture bounds, then lower expanded bytes by one with the same bytes.
+    let fixture = Fixture::new();
+    let mut file = File::open(&fixture.path).unwrap();
+    let size = file.metadata().unwrap().len();
+    let metadata = super::admission::validate_reader_metadata(&mut file, size).unwrap();
+    let expanded = metadata
+        .row_groups
+        .iter()
+        .flat_map(|group| &group.columns)
+        .map(|column| {
+            u64::try_from(column.meta_data.as_ref().unwrap().total_uncompressed_size).unwrap()
+        })
+        .sum();
+    let limits = super::DecodeLimits {
+        compressed_bytes: size,
+        expanded_bytes: expanded,
+        rows: 1,
+        row_groups: 1,
+        columns: 1,
+    };
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let table = AdmittedTable::from_file_budgeted_with_limits(
+        File::open(&fixture.path).unwrap(),
+        &budget,
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(table.read(&["counter"], Some(1)).unwrap().height(), 1);
+    drop(table);
+    assert_eq!(budget.used(), 0);
+    let refused = AdmittedTable::from_file_budgeted_with_limits(
+        File::open(&fixture.path).unwrap(),
+        &budget,
+        &super::DecodeLimits {
+            expanded_bytes: expanded - 1,
+            ..limits
+        },
+    );
+
+    assert!(matches!(
+        refused,
+        Err(AdmissionRefusal::Bound("strict parquet expanded bytes"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn denied_capture_calls_neither_read_nor_seek_on_a_real_file() {
     // Goal: read/seek observation remains distinct from final position and layout observations.
     // Method: forward both traits to a real file through the constructor's actual capture helper.
@@ -147,15 +285,15 @@ fn captures_from_zero_and_retains_exact_input_and_column_storage_until_drop() {
 
     assert!(table.contains_column("counter"));
     assert!(!table.contains_column("missing"));
-    assert_eq!(budget.used(), size + 129);
+    assert_eq!(budget.used(), size + 130);
     assert_eq!(
         allocations.allocated_bytes - allocations.deallocated_bytes,
-        size + 129
+        size + 130
     );
-    assert!(allocations.layouts[..allocations.allocations].contains(&(129, 1)));
+    assert!(allocations.layouts[..allocations.allocations].contains(&(130, 1)));
     let ((), frees) = observe(&budget, || drop(table));
-    assert_eq!(frees.deallocated_bytes, size + 129);
-    assert!(frees.deallocation_charge_min >= 129);
+    assert_eq!(frees.deallocated_bytes, size + 130);
+    assert!(frees.deallocation_charge_min >= 130);
     assert_eq!(budget.used(), 0);
     assert_eq!(
         crate::engine::Row::new(&frame, 0)
@@ -220,19 +358,20 @@ fn name_owner_denial_makes_no_backing_request_after_validated_metadata_setup() {
     )
     .unwrap();
     let denied = Arc::new(ByteBudget::new(0));
-    let allowed = Arc::new(ByteBudget::new(129));
+    let allowed = Arc::new(ByteBudget::new(130));
+    let types = super::admission::storage_types(&metadata).unwrap();
 
     let (result, refusal) = observe(&denied, || {
-        super::ColumnNames::capture(&metadata.schema[1..], &denied)
+        super::ColumnNames::capture(&metadata.schema[1..], &types, &denied)
     });
     let (names, granted) = observe(&allowed, || {
-        super::ColumnNames::capture(&metadata.schema[1..], &allowed)
+        super::ColumnNames::capture(&metadata.schema[1..], &types, &allowed)
     });
 
     assert!(matches!(result, Err(AdmissionRefusal::Budget)));
     assert_eq!(refusal.allocations, 0);
-    assert_eq!(&granted.layouts[..granted.allocations], &[(129, 1)]);
-    assert_eq!(allowed.used(), 129);
+    assert_eq!(&granted.layouts[..granted.allocations], &[(130, 1)]);
+    assert_eq!(allowed.used(), 130);
     drop(names.unwrap());
     assert_eq!(allowed.used(), 0);
 }

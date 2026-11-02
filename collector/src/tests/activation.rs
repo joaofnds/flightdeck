@@ -23,14 +23,13 @@ fn publishes_scheduled_identity_in_warm_up_and_following_live_ticks() {
     let timebase = Timebase::read().unwrap();
     let recording = TestRecording::new("identityrun");
     let mut output = io::sink();
-    let mut run = Run::start_with(
+    let mut run = Run::start(
         timebase,
         TEST_TICK_PERIOD_NS,
         DEFAULT_RESCAN_INTERVAL,
         &recording.ring.place,
         &recording.root,
         &mut output,
-        |_root, timebase| slow_persister(timebase, 3),
     )
     .unwrap();
     let mut reader = RingReader::open(&recording.ring.place.lock_path).unwrap();
@@ -87,14 +86,13 @@ fn reports_each_identity_sample_in_one_warm_up_minute_or_tail_interval() {
     // Method: report known fixed counts in three successive intervals against a real ring.
     let timebase = Timebase::read().unwrap();
     let recording = TestRecording::new("identityreport");
-    let run = Run::start_with(
+    let run = Run::start(
         timebase,
         TEST_TICK_PERIOD_NS,
         DEFAULT_RESCAN_INTERVAL,
         &recording.ring.place,
         &recording.root,
         &mut io::sink(),
-        |_root, timebase| slow_persister(timebase, 3),
     )
     .unwrap();
     let mut report = identity_report::IdentityReport::default();

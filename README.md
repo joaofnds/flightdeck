@@ -13,15 +13,15 @@ the app and reading it from Grafana are weighed in
 
 ## Collector
 
-`collector` reads process and system counters once a second without root and starts a separate
-persister. [How the collector works](docs/collector.md) describes its parts, one tick, and why
+`collector` starts a recorder that owns separate acquisition and persistence workers.
+Acquisition reads process and system counters once a second without root. [How the collector works](docs/collector.md) describes its parts, one tick, and why
 each part is built the way it is. Each `recording minute` reports `combined_percent` of one
-core for collection and persistence together; compare it with the 5% budget. The source-cost
-report's budget share and power in mW describe the collector alone. Build both sibling
+core over 60 awake seconds for the recorder, collection and persistence together; compare it with the 5% budget. The source-cost
+report's budget share and power in mW describe the collector alone. Build all three sibling
 executables:
 
 ```sh
-cargo build --release -p collector -p persister --bin collector --bin persister
+cargo build --release -p collector -p persister --bin collector --bin recorder --bin persister
 ./target/release/collector --seconds 300
 ```
 
@@ -49,8 +49,9 @@ It hands each tick to a shared-memory ring that only its user can read. `--ring 
 while another collector holds that lock. The home directory is resolved from the user's
 uid. The default private recording is beside that lock at `NAME.recording`;
 `--recording PATH` selects an isolated recording destination independently of `--ring`.
-One collector owns that recording at a time. A second collector using another ring and
-the same recording continues collecting but cannot persist its readings there.
+One recorder controls that recording at a time. A competing start refuses the held
+controller lock. Acquisition and persistence retain their own lifetime locks, so a
+controller exit cannot grant another process permission to replace a live writer.
 Choose a UTF-8 recording path containing none of `*`, `?` or `[`. Creation accepts other
 paths, but the query API and checker refuse them because the engine interprets them as
 file patterns. The persister keeps immutable Parquet windows of 60 elapsed seconds,
@@ -61,11 +62,18 @@ The ring stays after the collector exits, with a virtual size determined by its 
 and format. The recording registry retains at most the active and one earlier ring.
 Disk recordings survive the
 rings' removal or a reboot; unsealed data may be lost. A missing, refused or failed
-persister reports failure while collection continues into the bounded ring. The collector
-starts it once at startup and does not respawn it during collection. Finite runs, Ctrl-C
-and SIGTERM drain and reap their child, and report the drain's CPU separately. If an
-earlier persister still owns the recording, its replacement reports that ownership and
-unavailable CPU while collection continues. Recording directories are created with
+persister leaves acquisition running into the bounded ring. The recorder retries operating
+failures with delays of 1, 2, 4, then 5 seconds. A fixed private control mapping reports
+acquisition and durable recording separately; durable progress advances only after a
+canonical seal commits. Finite runs, Ctrl-C and SIGTERM ask acquisition to stop and drain
+the saved tail. GUI quit detaches while recording continues.
+
+If the recorder dies, healthy workers continue. Automatic recovery then needs an explicit
+recorder start; no installed service restarts it. Repeating the same command adopts workers
+only when their native creation identity, authority and build protocol match. To request
+shutdown from another terminal, run `recorder --recording PATH --stop yes`. A stale mapped
+stop request cannot target a later cohort. The recorder measures all three processes; a
+final CPU total for an adopted worker it cannot reap is reported as unavailable. Recording directories are created with
 owner-only access; files use mode 0600 and inherited access-control entries are removed.
 
 New process and App GPU time is unavailable because the driver client counters do not prove
@@ -100,10 +108,13 @@ just dev
 Mise acts only for a contributor who trusts the file, and without it the recipes in
 `justfile` run as they are under Rust 1.98.0.
 
-The movable bundle contains the app, collector, persister and schematic artwork.
+The movable bundle contains four executables—the app, recorder, collector and persister—and
+schematic artwork.
 Default launch follows the last fifteen minutes of live readings, attaching to an
-existing collector or starting its own when collection is absent. Only a collector
-started by the app is stopped when it quits. `--recording PATH` opens a recording
+existing recording or starting a recorder when collection is absent. Quitting detaches the
+app while the recorder and its workers continue. Stop them explicitly with
+`Flightdeck.app/Contents/Helpers/recorder --recording PATH --stop yes`, using the recording's
+path. `--recording PATH` on the app opens a recording
 read-only; `--reference` opens captured prototype data.
 
 The UI uses GPUI's Metal rendering without a browser runtime. Its separate Cargo
@@ -186,6 +197,8 @@ lints and tests the root workspace through `fmt`, `clippy` and `test`. `check-de
 the same for the desktop workspace through the recipes named `desktop-`, then runs
 `seal-bench`, which prints what sealing a minute costs, and last `bundle-check`, which
 packages the app and compares the bundle's executables with the ones the build made.
+CI also runs `just test-event-capacity`: feature-enabled lint and optimized maximum event
+fidelity checks. This workload is separate from `just check` and is opt-in locally.
 
 CI adds only what its runner needs. It skips the tests in modules named `this_mac`, since
 its virtual Mac lacks the hardware they read, and runs the ignored tests that need a second
@@ -193,11 +206,12 @@ user, which its sudo gives without a password. After each job it refuses a ring 
 left in Application Support, which on your Mac a running Flightdeck holds. The repository
 installs no git hook, so nothing runs on your machine unless you run it. A clone that set
 `core.hooksPath` for the hook this repository once carried can drop it with
-`git config --unset core.hooksPath`. To get the check's verdict before you push, run it
-under that toolchain:
+`git config --unset core.hooksPath`. To run the main checks under that toolchain, and
+optionally the additional workload CI always runs:
 
 ```sh
 just check
+just test-event-capacity
 ```
 
 `just coverage` reports the lines the tests run, with the cargo-llvm-cov that `mise.toml`

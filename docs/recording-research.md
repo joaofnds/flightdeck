@@ -741,12 +741,15 @@ writer waits for no acknowledgment and wakes readers with a broadcast, so no rea
 can stall it. The ring's event log overwrites only events of ticks the ring no longer
 holds, and a reader that fell behind learns what it missed from the gap. The writer holds
 a startup exclusion lock file, and a process of the same user that takes that lock keeps a
-new collector from starting. The recording also has a lifetime `collector.lock`; another
-process of the same user holding it prevents persistence for a new collector, which
-continues collection. The collector that takes it removes the last holder's
+new collector from starting. Public collector startup enters the recorder, whose
+`recorder.lock` permits one controller. Acquisition and persistence retain their own
+`collector.lock` and `persister.lock` if that controller exits. An authorized managed
+collector refuses startup if registration cannot acquire its lock; it reports the original
+error before publishing a reading. The collector that takes the lock removes the last holder's
 `collector.announcement`, and once its run is registered writes a new one naming that run
-and a fingerprint of the collector's source, so a reader asks the kernel whether the lock is
-held, without taking it, and reads which run and which build hold it.
+and a compatibility fingerprint of the worker cohort's sources, so a reader asks the kernel
+whether the lock is held, without taking it, and reads which run and build hold it. The
+[collector guide](collector.md#stopping-and-failing) describes the current lifecycle.
 
 Every user shares the names of shared-memory objects, so each ring's name carries 60
 random bits that the collector writes nowhere but its lock file. The lock file is
@@ -810,7 +813,7 @@ and saved-progress metadata. Mappings are released before encoding. This removes
 premature payload work, not every waiting allocation or native call. The whole-process
 memory watchdog continues checking between operations; its threshold can be overshot.
 
-Both executables isolate stdout/stderr delivery behind a bounded diagnostic queue and
+The recorder, collector and persister isolate stdout/stderr delivery behind a bounded diagnostic queue and
 a dedicated writer. Full queues, contention or failed destinations lose diagnostic groups
 with accounting instead of stopping recording. Normal exit bounds the final diagnostic
 drain; fatal watchdog exits do not wait for delivery. The [collector guide](collector.md)
@@ -845,7 +848,7 @@ missing an entry, and on a case whose crate no member depends on.
 
 - Used: Persistence constructs typed DataFrames and writes sorted, immutable Parquet tables of schema version 1; the viewer runs bounded native SQL plans over saved files and staged frames. The source is pinned to the Python Polars 2.0.0 release commit `22a147de3d2bb2e44b97338a2510816c7105c9f2`, whose Rust workspace version is 0.55.1. The published Rust crate 0.55.2 is a different release. Default features are disabled; Flightdeck selects lazy execution, SQL, Parquet and narrow unsigned integers. The collector does not depend on Polars.
 - Performance: A prototype on Rust Polars 0.55.2 returned the same typed answers as DuckDB on representative snapshot, context and process-history scans, including wide counters and binary paths. Implementing its columnar optimizer, SIMD kernels, Parquet decoding and Zstandard encoding here would add substantial maintenance work. The Viewer query measurements section compares the 2.0 release with DuckDB through the viewer's public calls.
-- Maintenance: Keep the exact release commit, `Cargo.lock` and `desktop/Cargo.lock`. The release also requires its upstream `hashbrown` patch at `d76a6f81abd8f388676aff15068236a8d21c7e1a`; downstream workspace roots must repeat that Cargo patch. Its SQL crate enables a broad set of expression features, and the Parquet graph includes asynchronous I/O, HTTP/TLS and object-store support even though Flightdeck uses local files and synchronous application code. Default lazy collection uses Streaming at this pin; explicitly selected engines remain separate paths. Query cancellation is cooperative. Each viewer request records the cancellation epoch it started under and refuses its result once a newer request has advanced the epoch, even if a kernel finishes after cancellation. Row limits on the frames copied from the ring, and result and cache limits, bound logical work, but Polars supplies no working-memory quota of its own. The persister retains its separate process and physical-footprint watchdog. Startup defaults both native worker pools to one thread through a same-PID re-exec before engine or UI initialization, except the desktop app's compute pool, which starts with six, since the app reads a chart context and its older tail on six threads at once and each waits on that pool for its queries, and the app sets its collector's settings to the one-thread defaults whatever settings the app runs with, explicit ones included, so the persister that collector starts keeps one; a `sample` profile of the viewer benchmark worker still showed four `tokio-rt-worker` threads besides those pools, and each viewer request runs a short-lived cancellation watcher thread. Explicit positive settings from 1 through 64 are preserved; other values return an error. Library callers choose their own startup policy. Resource measurements must record effective settings and the observed native pool size. Recheck types, ordering, query cancellation, memory and compiler support on upgrades. Sources: [2.0 release](https://github.com/pola-rs/polars/releases/tag/py-2.0.0), [release dependency pins](https://github.com/pola-rs/polars/blob/22a147de3d2bb2e44b97338a2510816c7105c9f2/Cargo.toml).
+- Maintenance: Keep the exact release commit, `Cargo.lock` and `desktop/Cargo.lock`. The release also requires its upstream `hashbrown` patch at `d76a6f81abd8f388676aff15068236a8d21c7e1a`; downstream workspace roots must repeat that Cargo patch. Its SQL crate enables a broad set of expression features, and the Parquet graph includes asynchronous I/O, HTTP/TLS and object-store support even though Flightdeck uses local files and synchronous application code. Default lazy collection uses Streaming at this pin; explicitly selected engines remain separate paths. Query cancellation is cooperative. Each viewer request records the cancellation epoch it started under and refuses its result once a newer request has advanced the epoch, even if a kernel finishes after cancellation. Row limits on the frames copied from the ring, and result and cache limits, bound logical work, but Polars supplies no working-memory quota of its own. The persister retains its separate process and physical-footprint watchdog. Startup defaults both native worker pools to one thread through a same-PID re-exec before engine or UI initialization, except the desktop app's compute pool, which starts with six, since the app reads a chart context and its older tail on six threads at once and each waits on that pool for its queries. The app gives the recorder the one-thread worker settings regardless of its own settings; the recorder's persister inherits those values. A historical `sample` profile of the viewer benchmark worker showed four `tokio-rt-worker` threads besides those pools, and each viewer request runs a short-lived cancellation watcher thread. Explicit positive settings from 1 through 64 are preserved; other values return an error. Library callers choose their own startup policy. Resource measurements must record effective settings and the observed native pool size. Recheck types, ordering, query cancellation, memory and compiler support on upgrades. Sources: [2.0 release](https://github.com/pola-rs/polars/releases/tag/py-2.0.0), [release dependency pins](https://github.com/pola-rs/polars/blob/22a147de3d2bb2e44b97338a2510816c7105c9f2/Cargo.toml).
 
 
 ### base64
@@ -860,7 +863,14 @@ missing an entry, and on a case whose crate no member depends on.
 - Performance: The bridge moves the original byte allocation; Buffer clones and slices share its owner. Implementing compatible reference counting and native scan sources here would duplicate the dependency's ownership machinery. Native schema inspection still copies footer bytes, and decoding/results require separate accounting.
 - Maintenance: Keep both lockfiles and this revision aligned with polars. Check backing-pointer preservation, clone/slice lifetime and destruction before reservation release. The foreign-owner box, shared-storage box and source Arc remain unresolved native wrapper allocations; their sizes cannot be added to the reservation inside the foreign owner because it releases before those wrappers are freed. Default lazy collection at this pin uses Streaming; explicitly chosen engines are separate paths. Preserve scan options and query ordering when upgrading.
 
+### polars-arrow
+
+- Used: The bounded event source adapter attaches byte reservations to its Arrow value and validity buffers, so clones and slices of those buffers keep their charge. Buffers created by outer query transformations need separate accounting, tracked by P08 of the architecture remediation. This names the same Arrow types already used by Polars at revision `22a147de3d2bb2e44b97338a2510816c7105c9f2`, with default features disabled; it adds no external implementation to the dependency graph.
+- Performance: Compacting each bounded event part releases detached program arenas before the next part is read. Buffer ownership carries the reservation without copying again when a result is cloned or sliced.
+- Maintenance: Keep this pin and both lockfiles aligned with Polars. Test every event column type, validity bitmap, clone, slice and last-owner release. The narrow bitmap constructor must check its bit offset and length against the owned byte buffer before using the native unchecked constructor.
+
 ### polars-arrow-format
+
 
 - Used: The saved-file checks examine embedded Arrow IPC schemas through native borrowed generated accessors before Polars converts their types. Version =0.2.1 already belongs to the selected native graph; default features are disabled and only IPC support is requested.
 - Performance: Admission limits fields, metadata entries and the aggregate bytes a native conversion may copy, including repeated references to a shared FlatBuffer string. It rejects unsupported nested, dictionary and extension types without recursively unpacking a schema. A separate IPC parser would duplicate the format's offset and tag validation.
@@ -1101,8 +1111,8 @@ time, and an exited child's CPU),
 windows were compared with `clickhouse-local` over `procs.csv`. The machine readings
 were timed with a test added to a copy of the Go collector in `/tmp/sysmon-bench`.
 
-Build the sibling binaries with `cargo build --release -p collector -p persistence
---bin collector --bin persister`, then run `./target/release/collector --seconds 300`.
+Build the sibling binaries with `cargo build --release -p collector -p persister
+--bin collector --bin recorder --bin persister`, then run `./target/release/collector --seconds 300`.
 It prints each source's cost, the combined recording CPU, and separate drain cost.
 The historical collector's three
 five-minute runs were release builds of d8788c8, before IOReport and the SMC, 737719d

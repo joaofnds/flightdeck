@@ -1,7 +1,10 @@
 //! Startup registration shared by the collector and its separate persistence worker.
 
 pub mod child;
+pub mod control;
 pub mod discovery;
+pub mod exit_watch;
+pub mod format;
 mod holder;
 pub mod private;
 mod registry;
@@ -28,13 +31,13 @@ const _: () = assert!(
 
 use std::ffi::{c_char, c_int, c_void};
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::clock::{self, Timebase};
 use crate::ring::{Identity, LockedPlace, ObservationTimes, Place, RunIdentity, Shape, Writer};
-use private::{FileLock, create_private_dir, open_private_file};
+use private::{FileLock, create_private_dir};
 
 unsafe extern "C" {
     fn getentropy(buffer: *mut c_void, length: usize) -> c_int;
@@ -211,7 +214,22 @@ impl Registration {
         layout: RingLayout,
         start_continuous_ns: u64,
     ) -> io::Result<StartedRecording> {
+        let preflight = match check_writer(root) {
+            Ok(()) => None,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::Unsupported
+                ) =>
+            {
+                return Err(error);
+            }
+            Err(error) => Some(error),
+        };
         let locked = LockedPlace::acquire(place)?;
+        if let Some(error) = preflight {
+            return Self::start_unregistered(locked, shape, start_continuous_ns, error, None, true);
+        }
 
         let ownership = match Self::start_ownership(root) {
             Ok(ownership) => ownership,
@@ -359,39 +377,29 @@ impl Registration {
     }
 }
 
-/// Reads the one canonical 32-hex-digit identity and its single line ending.
+/// Reads legacy or supported versioned roots without granting writer compatibility.
 pub fn read_identity(root: &Path) -> io::Result<Identity> {
-    let mut path_buffer = [0; private::PATH_MAX];
-    let path = private::join_path(root, "identity", &mut path_buffer)?;
-    let mut file = open_private_file(path, false)?;
-    let mut bytes = [0; 34];
-    let mut length = 0;
-    while length < bytes.len() {
-        let read = file.read(&mut bytes[length..])?;
-        if read == 0 {
-            break;
-        }
-        length += read;
+    format::read_identity(root)
+}
+
+/// Refuses unsupported existing roots before any writer lock, announcement or data mutation.
+/// An absent root may be initialized later under the registration lock.
+pub fn check_writer(root: &Path) -> io::Result<()> {
+    match format::read_writer_identity(root) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => recording_identity_check_new(root),
+        Err(error) => Err(error),
     }
-    if length != 33 {
-        return Err(io::Error::from(io::ErrorKind::InvalidData));
-    }
-    if bytes[32] != b'\n' {
-        return Err(io::Error::from(io::ErrorKind::InvalidData));
-    }
-    let text = std::str::from_utf8(&bytes[..32])
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-    parse_identity(text)
 }
 
 /// Initializes only an absent identity, under the caller's registration lock.
 pub fn recording_identity(root: &Path) -> io::Result<Identity> {
-    match read_identity(root) {
+    match format::read_writer_identity(root) {
         Ok(identity) => Ok(identity),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             recording_identity_check_new(root)?;
             let identity = random_identity()?;
-            write_atomic(root, "identity", &format!("{}\n", identity_text(identity)))?;
+            format::create(root, identity)?;
             Ok(identity)
         }
         Err(error) => Err(error),
@@ -399,7 +407,7 @@ pub fn recording_identity(root: &Path) -> io::Result<Identity> {
 }
 
 fn recording_identity_check_new(root: &Path) -> io::Result<()> {
-    for artifact in ["data", "commits", "runs", "retired"] {
+    for artifact in ["data", "commits", "runs", "retired", "event-recovery"] {
         let mut buffer = [0; private::PATH_MAX];
         let path = private::join_path(root, artifact, &mut buffer)?;
         match std::fs::symlink_metadata(path) {

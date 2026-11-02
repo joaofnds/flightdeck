@@ -1223,6 +1223,7 @@ impl SealedRecording {
             .commit(
                 pending,
                 persistence::Manifest {
+                    event_batches: None,
                     identity,
                     publication_first: publications.start,
                     publication_end: publications.end,

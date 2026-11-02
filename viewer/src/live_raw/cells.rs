@@ -201,6 +201,8 @@ impl<'a> View<'a> {
             "cpu_celsius" => tick.cpu_celsius.is_some() || tick.gpu_celsius.is_some(),
             "load_average_1" | "frequency_khz" => self.machine.tick.system.is_some(),
             "identity_version" => self.raw().identities.is_some(),
+            // A captured publication proves association; these fields are synthesized last.
+            "event_observation_version" => false,
             "gpu_ns" => self.machine.tick.system.is_some() && self.raw().identities.is_some(),
             _ => unreachable!("catalog optional group"),
         }
@@ -789,6 +791,10 @@ impl<'a> View<'a> {
         let (pid, measured, kind, coalition, availability, noticed) = event_facts(&event.event);
         match name {
             "event" => unsigned(event.number),
+            "event_observation_version" => unsigned(persistence::event_observation::VERSION),
+            "event_observation_availability" => {
+                unsigned(persistence::event_observation::ASSOCIATED)
+            }
             "run_tick" => unsigned(event.tick),
             "pid" => Cell::Signed(i64::from(pid)),
             "kind" => unsigned(kind),

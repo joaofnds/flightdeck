@@ -12,10 +12,10 @@ const _: () = assert!(ATTACHED_HEALTH_INTERVAL.as_millis() < DISCOVERY_LIMIT.as_
 pub(super) const FINISHING_LIMIT: Duration =
     Duration::from_secs(1).saturating_mul(collector::recording::STOP_LIMIT_SECONDS);
 pub(super) const UNANNOUNCED_FAILURE: &str = "A collector holds this recording without naming \
-     its build, since it predates this Flightdeck or could not register its run. Quit the \
-     Flightdeck that started it, then retry.";
+     its build, since it predates this Flightdeck or could not register its run. Stop the \
+     recording with the version that started it, then retry.";
 pub(super) const UNRECOGNIZED_FAILURE: &str = "The running collector announces itself in a \
-     format another version of Flightdeck writes. Quit the Flightdeck that started it, then retry.";
+     format another version of Flightdeck writes. Stop that recording explicitly, then retry.";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Mode {
@@ -52,7 +52,8 @@ pub(super) enum Action {
 pub(super) struct Observation {
     pub pid: u32,
     pub run: String,
-    pub boot: String,
+    pub boot: Option<String>,
+    pub authority: Option<String>,
     pub publication: u64,
 }
 
@@ -62,6 +63,9 @@ pub(super) struct Source {
     pub producer_alive: bool,
     pub build: Build,
     pub observation: Option<Observation>,
+    pub controller_pid: Option<u32>,
+    pub controller_missing: bool,
+    pub controller_unavailable: bool,
 }
 
 /// What the collector holding the recording says built it.
@@ -81,7 +85,7 @@ pub(super) enum Build {
 pub(super) fn other_build_failure(build: u64) -> String {
     format!(
         "The running collector is built from other code than this Flightdeck (build {build:016x}, \
-         expected {:016x}). Quit the Flightdeck that started it, then retry.",
+         expected {:016x}). Stop that recording explicitly, then retry.",
         collector::recording::BUILD
     )
 }
@@ -119,6 +123,7 @@ pub(super) struct Policy {
     /// When the policy last took a step, which an attached collection's next health read
     /// waits from.
     stepped: Option<Duration>,
+    restart_requested: bool,
 }
 
 impl Policy {
@@ -137,6 +142,7 @@ impl Policy {
             stopping: false,
             finishing_since: None,
             stepped: None,
+            restart_requested: mode == Mode::Explicit,
         }
     }
 
@@ -145,7 +151,18 @@ impl Policy {
         match self.state {
             State::Discovering => self.discover(now, source),
             State::Starting => self.starting(now, source),
-            State::Attached => self.attached(now, source),
+            State::Attached | State::Running => self.attached(now, source),
+            State::Failed if source.controller_pid.is_some() && source.producer_alive => {
+                self.failure = None;
+                self.since = Some(now);
+                self.previous.clone_from(&source.observation);
+                self.state = if self.owned_pid == source.controller_pid {
+                    State::Running
+                } else {
+                    State::Attached
+                };
+                Action::None
+            }
             State::Stopping => {
                 if self.expired(now, SHUTDOWN_LIMIT) {
                     self.failure = Some("Collector exceeded its 125-second saving deadline".into());
@@ -170,6 +187,14 @@ impl Policy {
     fn discover(&mut self, now: Duration, source: &Source) -> Action {
         if self.since.is_none() {
             self.since = Some(now);
+        }
+        if source.controller_missing || source.controller_unavailable {
+            if self.restart_requested {
+                self.state = State::Starting;
+                return Action::Spawn;
+            }
+            self.fail("Recorder controller is unavailable; retry to restore automatic recovery");
+            return Action::None;
         }
         if let Build::Other(build) = source.build {
             self.fail(&other_build_failure(build));
@@ -243,6 +268,19 @@ impl Policy {
     }
 
     fn attached(&mut self, now: Duration, source: &Source) -> Action {
+        if source.controller_missing || source.controller_unavailable {
+            self.fail(
+                "Recorder controller is unavailable; surviving workers have no verified \
+                 automatic recovery",
+            );
+            return Action::None;
+        }
+        if source.controller_pid.is_some() {
+            if self.advanced(source.observation.as_ref()) {
+                self.since = Some(now);
+            }
+            return Action::None;
+        }
         if self.mode == Mode::Attach {
             return Action::None;
         }
@@ -268,6 +306,13 @@ impl Policy {
 
     fn starting(&mut self, now: Duration, source: &Source) -> Action {
         assert!(self.since.is_some());
+        if source.controller_pid == self.owned_pid && source.controller_pid.is_some() {
+            if self.advanced(source.observation.as_ref()) {
+                self.state = State::Running;
+            }
+            // The controller owns recovery. A viewer's readiness deadline cannot stop it.
+            return Action::None;
+        }
         if let Build::Other(build) = source.build {
             self.failure = Some(owned_build_failure(build));
             return self.stop(now);
@@ -285,7 +330,7 @@ impl Policy {
         }
 
         if let Some(observation) = &source.observation {
-            if Some(observation.pid) == self.owned_pid {
+            if source.controller_pid.or(Some(observation.pid)) == self.owned_pid {
                 if self.advanced(source.observation.as_ref()) {
                     self.state = State::Running;
                     return Action::None;
@@ -310,6 +355,9 @@ impl Policy {
                 }
 
                 if previous.boot != current.boot {
+                    return false;
+                }
+                if previous.authority != current.authority {
                     return false;
                 }
 
@@ -379,10 +427,14 @@ impl Policy {
             self.previous = None;
             self.stopping = false;
             self.finishing_since = None;
+            self.restart_requested = true;
         }
     }
 
     pub fn can_retry(&self) -> bool {
+        if self.mode == Mode::Attach {
+            return false;
+        }
         if self.state != State::Failed {
             return false;
         }
@@ -391,12 +443,14 @@ impl Policy {
     }
 
     pub fn needs_health(&self) -> bool {
-        if self.state == State::Starting {
-            return true;
+        if self.mode == Mode::Attach {
+            return false;
         }
-
-        if self.state == State::Attached {
-            return self.mode != Mode::Attach;
+        if matches!(
+            self.state,
+            State::Starting | State::Running | State::Attached | State::Failed
+        ) {
+            return true;
         }
 
         if self.state != State::Discovering {
@@ -410,7 +464,7 @@ impl Policy {
     /// once a second, since the shared collector publishes once a second and the app ticks four
     /// times.
     pub fn health_due(&self, now: Duration) -> bool {
-        if self.state != State::Attached {
+        if !matches!(self.state, State::Attached | State::Running | State::Failed) {
             return true;
         }
 

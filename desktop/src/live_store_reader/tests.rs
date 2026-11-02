@@ -670,6 +670,7 @@ fn seal_recording(recording: &LiveRecording, minute: u64) {
         .commit(
             pending,
             persistence::Manifest {
+                event_batches: None,
                 identity: window.identity,
                 publication_first: publications.start,
                 publication_end: publications.end,

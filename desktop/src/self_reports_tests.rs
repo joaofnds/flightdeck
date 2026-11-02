@@ -20,6 +20,41 @@ fn read(reports: &mut SelfReports, lines: &[&str], second: u64) {
 }
 
 #[test]
+fn controller_reports_include_every_process_without_a_matching_tick_line() {
+    // Goal: independent recorder reports preserve all resource charges and unknown totals.
+    // Method: feed the production stdout framing with an unavailable combined CPU interval.
+    let mut reports = SelfReports::default();
+    let lines = [
+        "recording minute elapsed_ns=60000000000 recorder_cpu_ns=30000000 \
+         collector_cpu_ns=600000000 persister_cpu_ns=900000000 combined_cpu_ns=unavailable \
+         combined_percent=unavailable reason=adopted_exit_unmeasured",
+        "recording cumulative recorder_cpu_ns=30000000 collector_cpu_ns=600000000 \
+         persister_cpu_ns=900000000 recorder_footprint_bytes=1048576 \
+         recorder_footprint_bytes_max=2097152 collector_footprint_bytes=3145728 \
+         collector_footprint_bytes_max=4194304 acquisition_footprint_bytes=4194304 \
+         current_footprint_bytes=5242880 lifetime_footprint_bytes_max=6291456",
+    ];
+    reports.output(
+        Some(lines.map(String::from).into()),
+        super::OutputStream::Stdout,
+        1060,
+    );
+    let minute = &reports.minutes[0];
+    assert_eq!(minute.second, 1060);
+    assert_eq!(minute.recorder_cpu_ns, Some(30_000_000));
+    assert_eq!(minute.collector_cpu_ns, 600_000_000);
+    assert_eq!(minute.persister_cpu_ns, 900_000_000);
+    assert_eq!(minute.combined_percent, None);
+    assert_eq!(minute.recorder_footprint_bytes, Some(1_048_576));
+    assert_eq!(minute.recorder_footprint_bytes_max, Some(2_097_152));
+    assert_eq!(minute.collector_footprint_bytes, Some(3_145_728));
+    assert_eq!(minute.collector_footprint_bytes_max, Some(4_194_304));
+    assert_eq!(minute.acquisition_footprint_bytes, Some(4_194_304));
+    assert_eq!(minute.footprint_bytes, Some(5_242_880));
+    assert_eq!(minute.footprint_bytes_max, Some(6_291_456));
+}
+
+#[test]
 fn a_ten_second_report_becomes_one_tick_report() {
     // Goal: the three lines of a ten-second report give its cost, lateness and coverage.
     // Method: read a report the collector wrote and inspect the one tick report it makes.
@@ -271,7 +306,17 @@ fn a_minute_joins_its_cost_and_the_persister_footprint() {
             elapsed_ns: 60_015_526_708,
             collector_cpu_ns: 1_897_702_834,
             persister_cpu_ns: 39_109_625,
-            combined_percent: 3.227_186,
+            collector_cpu_complete: true,
+            persister_cpu_complete: true,
+            combined_percent: Some(3.227_186),
+            recorder_cpu_ns: None,
+            recorder_footprint_bytes: None,
+            recorder_footprint_bytes_max: None,
+            collector_footprint_bytes: None,
+            collector_footprint_bytes_max: None,
+            collector_sampled_footprint_bytes_max: None,
+            persister_sampled_footprint_bytes_max: None,
+            acquisition_footprint_bytes: None,
             footprint_bytes: Some(4_112_936),
             footprint_bytes_max: Some(4_850_288),
         }]

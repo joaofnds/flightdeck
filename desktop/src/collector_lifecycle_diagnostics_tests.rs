@@ -1,7 +1,7 @@
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::fd::AsRawFd;
 
-use super::{FILE_BYTES_MAX, LINE_BYTES_MAX, LINES_MAX, Output, TAIL_BYTES_MAX};
+use super::{LINE_BYTES_MAX, LINES_MAX, Output, TAIL_BYTES_MAX};
 use crate::self_reports::{OutputStream, SelfReports};
 
 const TICK: &str = concat!(
@@ -19,7 +19,7 @@ const CUMULATIVE: &str = "recording cumulative current_footprint_bytes=2 \
 #[test]
 fn skipped_bytes_cannot_complete_an_older_pending_minute() {
     // Goal: a later cumulative line cannot finish a minute whose ending was lost.
-    // Method: leave a real report pending, overflow the file tail, then deliver a later ending.
+    // Method: leave a real report pending, exceed the line bound, then deliver a later ending.
     let mut output = Output::new().unwrap();
     let mut writer = output.writer().unwrap();
     let mut reports = SelfReports::default();
@@ -62,7 +62,7 @@ fn a_full_group_after_a_damaged_drain_recovers() {
 #[test]
 fn stderr_loss_leaves_the_stdout_minute_pending() {
     // Goal: losing persister diagnostics cannot damage an intact collector stdout report.
-    // Method: hold a stdout minute pending while a separate real stderr file loses a line.
+    // Method: hold a stdout minute pending while a separate real stderr socket loses a line.
     let mut standard = Output::new().unwrap();
     let mut diagnostic = Output::new().unwrap();
     let mut writer = standard.writer().unwrap();
@@ -115,43 +115,44 @@ fn too_many_buffered_lines_discard_the_batch() {
 }
 
 #[test]
-fn file_truncation_discards_the_affected_drain() {
-    // Goal: a truncated descriptor cannot join its replacement bytes to pending output.
-    // Method: drain a partial line, truncate the same file, then append a short replacement.
-    let mut output = Output::new().unwrap();
-    let mut writer = output.writer().unwrap();
-    writer.write_all(b"an unfinished earlier report").unwrap();
-    output.drain().unwrap();
-    assert!(output.take_lines().unwrap().is_empty());
-
-    writer.set_len(0).unwrap();
-    writer.write_all(b"cut\nwhole\n").unwrap();
-    output.drain().unwrap();
-
-    assert!(output.take_lines().is_none());
-}
-
-#[test]
-fn writer_survives_parent_reader_departure_without_a_path() {
-    // Goal: helper output stays writable after the app releases its diagnostic reader.
-    // Method: retain the real writer descriptor, drop the reader, and write to its unlinked inode.
+fn detached_reader_refuses_output_without_retaining_an_unbounded_file() {
+    // Goal: detached recording never accumulates a file that only the absent GUI truncates.
+    // Method: fill the real socket to backpressure, close its reader and observe EPIPE.
     let output = Output::new().unwrap();
     let mut writer = output.writer().unwrap();
-    let metadata = writer.metadata().unwrap();
-    assert_eq!(0, metadata.nlink());
-    assert_eq!(0o600, metadata.permissions().mode() & 0o777);
+    let descriptor = writer.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    assert!(flags >= 0);
+    assert_eq!(
+        unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    let mut full = false;
+    for _attempt in 0..64 {
+        match writer.write(&[0; TAIL_BYTES_MAX]) {
+            Ok(count) => assert!(count > 0),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                full = true;
+                break;
+            }
+            Err(error) => panic!("socket write: {error}"),
+        }
+    }
+    assert!(
+        full,
+        "diagnostic transport exceeded its bounded kernel buffer"
+    );
     drop(output);
-
-    writer
-        .write_all(b"helper finished after parent departure\n")
-        .unwrap();
-    assert_eq!(39, writer.metadata().unwrap().len());
+    assert_eq!(
+        writer.write(b"after detach").unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
 }
 
 #[test]
-fn positional_reads_preserve_append_writes_and_independent_channels() {
+fn socket_reads_preserve_writes_and_independent_channels() {
     // Goal: reading diagnostics never moves a helper's output position or joins channels.
-    // Method: alternate real file writes and reads while a second channel remains empty.
+    // Method: alternate real socket writes and reads while a second channel remains empty.
     let mut standard = Output::new().unwrap();
     let mut diagnostic = Output::new().unwrap();
     let mut writer = standard.writer().unwrap();
@@ -166,24 +167,21 @@ fn positional_reads_preserve_append_writes_and_independent_channels() {
 }
 
 #[test]
-fn oversized_output_retains_tail_and_append_resumes_after_truncation() {
-    // Goal: diagnostic memory and step-based disk retention have explicit limits.
-    // Method: exceed the file limit, drain its last bytes, then append after truncation.
+fn repeated_output_retains_only_the_bounded_tail() {
+    // Goal: repeated reads retain a fixed diagnostic tail regardless of recording age.
+    // Method: send and drain many bounded chunks, then check the retained tail and final bytes.
     let mut output = Output::new().unwrap();
     let mut writer = output.writer().unwrap();
-    let size = usize::try_from(FILE_BYTES_MAX + 1).unwrap();
-    writer.write_all(&vec![b'x'; size]).unwrap();
-    output.drain().unwrap();
-    assert_eq!(FILE_BYTES_MAX + 1, output.peak_bytes());
-    assert_eq!(0, writer.metadata().unwrap().len());
-
+    for _chunk in 0..100 {
+        writer.write_all(&[b'x'; TAIL_BYTES_MAX]).unwrap();
+        output.drain().unwrap();
+    }
     writer.write_all(b"done").unwrap();
     output.drain().unwrap();
-    assert_eq!(4, writer.metadata().unwrap().len());
     let text = output.text();
     assert_eq!(TAIL_BYTES_MAX, text.len());
     assert!(text.ends_with("done"));
-    assert!(text.starts_with('x'));
+    assert!(output.peak_bytes() <= u64::try_from(TAIL_BYTES_MAX).unwrap());
 }
 
 #[test]

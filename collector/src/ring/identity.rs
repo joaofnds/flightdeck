@@ -547,23 +547,18 @@ pub(super) fn copy_program(
     let mut entry = Descriptor::EMPTY;
     descriptor(words, layout, program.number, &mut entry)?;
 
-    for (index, byte) in buffers.executable_name[..entry.executable_name_bytes]
-        .iter_mut()
-        .enumerate()
-    {
-        *byte = arena_byte(words, layout, entry.offset + index);
-    }
-
-    for (index, byte) in buffers.app_path[..entry.app_path_bytes]
-        .iter_mut()
-        .enumerate()
-    {
-        *byte = arena_byte(
-            words,
-            layout,
-            entry.offset + entry.executable_name_bytes + index,
-        );
-    }
+    copy_program_bytes(
+        words,
+        layout,
+        entry.offset,
+        &mut buffers.executable_name[..entry.executable_name_bytes],
+    );
+    copy_program_bytes(
+        words,
+        layout,
+        entry.offset + entry.executable_name_bytes,
+        &mut buffers.app_path[..entry.app_path_bytes],
+    );
 
     ProgramBytes {
         executable_name: &buffers.executable_name[..entry.executable_name_bytes],
@@ -577,6 +572,28 @@ pub(super) fn copy_program(
     .map_err(|_| invalid_error())?;
 
     Ok((entry.executable_name_bytes, entry.app_path_bytes))
+}
+
+fn copy_program_bytes(words: &[AtomicU64], layout: &Layout, offset: usize, bytes: &mut [u8]) {
+    assert!(bytes.len() <= PROGRAM_PATH_BYTES_MAX);
+    assert!(offset <= layout.arena_bytes);
+    assert!(bytes.len() <= layout.arena_bytes - offset);
+
+    // Published entries are immutable. One atomic load supplies up to eight field bytes.
+    let first = offset % 8;
+    let prefix = (8 - first).min(bytes.len());
+    if prefix > 0 {
+        // Floor to the word containing the field's first byte.
+        let word = load(words, layout.arena_start + offset / 8).to_le_bytes();
+        bytes[..prefix].copy_from_slice(&word[first..first + prefix]);
+    }
+
+    // Floor to a word index; a nonempty suffix starts exactly at this boundary.
+    let start = (offset + prefix) / 8;
+    for (index, chunk) in bytes[prefix..].chunks_mut(8).enumerate() {
+        let word = load(words, layout.arena_start + start + index).to_le_bytes();
+        chunk.copy_from_slice(&word[..chunk.len()]);
+    }
 }
 
 pub(super) fn store_observation(record: &[AtomicU64], value: &IdentityObservation) {
@@ -1052,6 +1069,103 @@ mod tests {
                 program: *program,
             },
         }
+    }
+
+    #[test]
+    fn copies_program_fields_across_every_word_boundary() {
+        // Goal: copying packed native fields preserves bytes and leaves output padding alone.
+        // Method: roundtrip all word offsets/tails, absent Apps and maximum-length fields.
+        for name_length in (1..=17).chain([PROGRAM_PATH_BYTES_MAX - 1, PROGRAM_PATH_BYTES_MAX]) {
+            copies_program_fields_across_every_word_boundary_check(name_length, None);
+            for app_length in (6..=22).chain([PROGRAM_PATH_BYTES_MAX - 1, PROGRAM_PATH_BYTES_MAX]) {
+                copies_program_fields_across_every_word_boundary_check(
+                    name_length,
+                    Some(app_length),
+                );
+            }
+        }
+    }
+
+    fn copies_program_fields_across_every_word_boundary_check(
+        name_length: usize,
+        app_length: Option<usize>,
+    ) {
+        let name: Vec<u8> = (0..name_length)
+            .map(|index| 128 + u8::try_from(index % 128).unwrap())
+            .collect();
+        let app = app_length.map(|length| {
+            let mut path = vec![0xff; length];
+            path[0] = b'/';
+            path[length - 4..].copy_from_slice(b".app");
+            path
+        });
+        let (layout, words, program) =
+            copies_program_fields_across_every_word_boundary_intern(&ProgramBytes {
+                executable_name: &name,
+                app_path: app.as_deref(),
+            });
+        let mut name_output = [0xa5; PROGRAM_PATH_BYTES_MAX];
+        let mut app_output = [0xa5; PROGRAM_PATH_BYTES_MAX];
+
+        let lengths = copy_program(
+            &words,
+            &layout,
+            &program,
+            1,
+            &mut ProgramBuffers {
+                executable_name: &mut name_output,
+                app_path: &mut app_output,
+            },
+        )
+        .unwrap_or_else(|error| {
+            panic!("name_length={name_length}, app_length={app_length:?}: {error}")
+        });
+
+        let expected_app = app.as_deref().unwrap_or_default();
+        assert_eq!(
+            lengths,
+            (name.len(), expected_app.len()),
+            "name_length={name_length}, app_length={app_length:?}"
+        );
+        assert_eq!(
+            &name_output[..lengths.0],
+            name,
+            "name_length={name_length}, app_length={app_length:?}"
+        );
+        assert_eq!(
+            &app_output[..lengths.1],
+            expected_app,
+            "name_length={name_length}, app_length={app_length:?}"
+        );
+        assert!(
+            name_output[lengths.0..].iter().all(|byte| *byte == 0xa5),
+            "name_length={name_length}, app_length={app_length:?}"
+        );
+        assert!(
+            app_output[lengths.1..].iter().all(|byte| *byte == 0xa5),
+            "name_length={name_length}, app_length={app_length:?}"
+        );
+    }
+
+    fn copies_program_fields_across_every_word_boundary_intern(
+        bytes: &ProgramBytes<'_>,
+    ) -> (Layout, Vec<AtomicU64>, ProgramReference) {
+        let (layout, words, mut index) = dictionary(DictionaryCapacity {
+            entries: 1,
+            arena_bytes: 8192,
+        });
+        let name_length = bytes.executable_name.len();
+        let app_length = bytes.app_path.map(<[u8]>::len);
+        let mut program = None;
+        index
+            .intern(&words, &layout, bytes, &mut program)
+            .unwrap_or_else(|error| {
+                panic!("name_length={name_length}, app_length={app_length:?}: {error:?}")
+            });
+        let program = program.unwrap_or_else(|| {
+            panic!("name_length={name_length}, app_length={app_length:?}: absent program")
+        });
+        (layout, words, program)
     }
 
     #[test]

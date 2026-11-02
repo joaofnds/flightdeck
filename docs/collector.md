@@ -35,7 +35,9 @@ flowchart TB
   events --> wait
 
   publish --> ring["Shared-memory ring<br/>120 slots and an event log"]
-  ring --> persister["persister process"]
+  recorder["recorder process"] -->|starts or adopts| collector
+  recorder -->|starts or adopts| persister["persister process"]
+  ring --> persister
   ring --> app["Desktop app<br/>live charts"]
   persister --> recording[("Recording<br/>Parquet, one window a minute")]
   recording --> app
@@ -54,7 +56,7 @@ The ring is a POSIX shared-memory object that only the user can open. It holds t
 published ticks, normally two minutes, and a log of process events beside them. Any process
 of the same user can map it read-only and read at its own pace.
 
-The persister is a child the collector starts once at startup. It reads the ring and seals
+The recorder starts acquisition and persistence as independent workers. The persister reads the ring and seals
 each window of 60 elapsed seconds into immutable Parquet files, the sealed minutes of the
 recording. The desktop app combines those sealed minutes with the ticks the ring holds that
 are not sealed yet, which is roughly the minute in progress, so the newest seconds come from
@@ -124,8 +126,8 @@ actual elapsed acquisition time since tick 20. Publication numbers remain consec
 this gap does not look like ring data lost by a slow reader.
 
 Every 10 ticks and every 60 the collector submits a report of its own cost, broken down by
-source. The minute report gives the CPU of the collector and the persister together as a
-share of one core, to compare with the budget below.
+source. The recorder reports the CPU of itself, acquisition and persistence together each
+minute as a share of one core, to compare with the budget below.
 
 ## Following processes between ticks
 
@@ -218,12 +220,31 @@ or staging, it preserves surviving unsealed readings and records the loss instea
 skipping the rest of that window. A completion marker is checked against the publication
 frontier before the source is retired, so completion cannot hide a final publication.
 
-The persister seals each window of 60 elapsed seconds into one Parquet file per table, sorted
-by series and compressed with Zstandard. Two of those tables, the per-App ranks and parts, are
+The persister seals each window of 60 elapsed seconds into immutable Parquet tables,
+compressed with Zstandard. Most tables occupy one file sorted by series. Events occupies
+bounded files in event-number order under one index, while its query presentation retains
+the process order. Each event file holds at most 16,384 rows and 8 MiB of owned input payload;
+encoding workspace is charged separately. Two tables, the per-App ranks and parts, are
 derived from the others as the window seals. A window becomes visible through a commit marker
 written only once every table of it is synced to disk, so a reader never sees half a minute.
+
+An event can outlive its observation in the ring. Recovery saves its original event number
+and native identity with unavailable observation provenance and a null publication. Raw
+queries retain these rows; App derivation cannot place them into an observed tick. When a
+completed source has events or losses but no recoverable observation, the persister commits
+one bounded event-only object without inventing a minute or timestamp. The terminal
+discovery and paging APIs expose these objects even after the run leaves the live registry.
+The ordinary saved-recording Session still needs an inspection route for them.
+
+New recording roots carry a 74-byte identity envelope with separate required reader and
+writer versions. Readers accept supported legacy roots, but new writers refuse them before
+taking ownership or changing their files. Older binaries reject the new envelope, so they
+cannot append an incompatible run. The transition requires a new recording root.
+
 The persister checks its current and kernel lifetime-peak physical footprint every 100 ms
-against a limit, 2 GiB by default, and exits if either exceeds it. That is a threshold it
+against the limit passed by the recorder, 256 MiB, and exits if either exceeds it. The
+standalone persister API retains its older 2 GiB default; production recording passes the
+approved limit explicitly. That is a threshold it
 may overshoot, not a quota macOS enforces.
 This watchdog keeps checking between sealing operations because native allocations can
 outlive an operation. It also enforces active-operation deadlines. Parking it while the
@@ -231,7 +252,7 @@ worker waits would weaken that protection, so its nominal ten checks a second re
 
 ## Diagnostics cannot hold up recording
 
-The collector and persister install separate process-local diagnostic services at startup.
+The recorder, collector and persister install separate process-local diagnostic services at startup.
 If a writer cannot start, reporting is disabled without preventing recording.
 Each producer formats into fixed storage and attempts to submit a complete group using
 nonwaiting locks. Four queue slots each hold up to 8 KiB. A full queue, two producers
@@ -245,7 +266,7 @@ delivery can proceed, and the desktop reports those gaps rather than treating a 
 cost report as a zero-cost interval. If the writer itself blocks, diagnostic delivery can
 stop while ring publication and persistence continue.
 
-Normal exit releases recording resources and reaps the persister before allowing up to
+Normal recorder exit drains recording resources and reaps or verifies worker exit before allowing up to
 100 ms for final diagnostics. It then exits without waiting indefinitely for the writer.
 A fatal watchdog exit makes a nonwaiting reporting attempt and exits immediately.
 Diagnostic delivery is therefore best-effort; recorded readings use the ring and sealed
@@ -276,9 +297,22 @@ the persister fails or another one owns the recording.
 
 ## Stopping and failing
 
-On Ctrl-C, SIGTERM, the end of a `--seconds` run, or the process exit of the app that started
-it, the collector stops collecting, waits for the persister to seal its last window, and reaps it. If
-the persister takes longer than two minutes it is killed.
+Public `collector` startup replaces itself with the sibling recorder before any diagnostics
+thread starts. The recorder launches acquisition with a private cohort authority; that worker
+never launches a persister. Each worker keeps its own lifetime lock if the recorder exits.
+
+On Ctrl-C, SIGTERM, the end of a `--seconds` run, or an explicit recorder stop request,
+acquisition finishes its ring and the persister seals the recoverable tail. The recorder
+reaps its children or verifies an adopted worker has exited before releasing ownership.
+GUI quit detaches. An explicit CLI `--parent-pid` binding still stops when that parent exits.
+
+The recorder checks worker state once a second. Operating failures retry after 1, 2, 4 and
+then 5 seconds, with the failure class, retry count and next attempt in the control mapping.
+A configuration failure or invariant abort stops supervision visibly. The persister reports
+Running only after a canonical seal has synchronized; a live encoder awaiting its first
+window remains Starting. If the recorder dies, workers continue but cannot restart each
+other. An explicit start verifies authority, protocol, build and native creation identity
+before adopting a surviving cohort. Worker locks prevent competing writers.
 
 A source that fails to open at startup, such as an SMC or IOReport a Mac does not have, is left
 out and every other source is recorded. A failed battery or disk read is reported and the tick
@@ -292,8 +326,9 @@ bridge a failed tick. There is no retry within the tick, and a native call that 
 return still blocks collection.
 A failed read of the machine, the interfaces, the processes or the coalitions ends the run,
 as does a metering failure or a failed assertion, since the release build aborts on a panic.
-Nothing restarts the collector on its own. The desktop app shows a Retry control when the
-collector it started fails, and running as a launch agent is planned but not built.
+The recorder retries an operating exit after preserving the old run's recoverable tail.
+An invariant abort leaves supervision visibly failed and requires an explicit restart.
+Running as a launch agent is planned but not built.
 
 ## Why it is built this way
 
@@ -362,7 +397,7 @@ Polars, which takes far more memory and code than collecting does. Running it in
 keeps that memory and any failure away from collection, gives it its own memory limit, and lets
 each process's CPU be measured on its own. The collector's release binary stays under a
 megabyte, while the persister's carries Polars and is over a hundred times larger, and a
-persister that dies costs saved history but not live readings.
+persister that dies leaves live readings intact while the recorder attempts recovery.
 
 **Parquet in one-minute windows.** On a synthetic week the research compared sealed Parquet,
 sealed DuckDB files and DuckLake. Parquet used the least disk and the least CPU to write, and
@@ -380,16 +415,24 @@ between the two, since over 90% of it was system time (Rust against Zig).
 **Assertions stay on in production.** The release profile keeps overflow checks and aborts on a
 panic, following [coding-style.md](coding-style.md). A collector that finds its own state
 wrong stops instead of recording wrong readings, and the persister seals what the ring holds
-once a collector is started again.
+while the failed collector remains stopped.
 
 ## Cost and budget
 
-Collection and persistence together get 5% of one core, averaged over each minute (Decisions).
-The collector's minute report prints `combined_percent` against that budget, and its per-source
+Recorder, collection and persistence together get 5% of one core over each full awake minute.
+Resource reports label `clock=awake_ns` and pace against `mach_absolute_time`;
+`continuous_elapsed_ns` exposes any sleep gap without adding it to the CPU denominator.
+The recorder's minute report includes its own CPU in `combined_percent`; the collector's per-source
 report shows where the collector's share goes. Source meters measure thread CPU, not elapsed
 driver-call latency. Use current reports for current cost: older dated research describes
 older workloads and builds, including builds without today's source and identity reads.
 Diagnostic loss can make those reports incomplete.
+
+Worker exit CPU and footprint are measured before an owned child is reaped. An adopted
+worker's missing final CPU invalidates that interval's percentage; later fully measured
+intervals recover, while the cumulative total stays incomplete. A sampled footprint maximum
+is a lower bound. If the native lifetime peak is unavailable, reports and the Self page keep
+that distinction instead of showing a measured zero.
 
 The budget is a target, not an enforced CPU cap. Removing discarded-event acquisition,
 unused PID-buffer clearing and premature persister payload work reduces specific operations;
@@ -573,13 +616,14 @@ runs, and readers find the ring by reading the name from it (The ring).
 
 ### The recording
 
-**Window.** The span of 60 elapsed seconds of a run that the persister seals together, one
-Parquet file per table, and the final window of a run may be shorter. Windows are kept by run
+**Window.** The span of 60 elapsed seconds of a run that the persister seals together as
+immutable tables, with bounded physical parts for Events. The final window of a run may be
+shorter. Windows are kept by run
 and by elapsed day, 1,440 windows a day. A sealed window is what the glossary calls a sealed
 minute.
 
 **Series.** The readings of one process, coalition or other thing across a window. The persister
-sorts each table by its series, the process tables by process identity, so the values of one
+sorts observation tables by series, the process table by process identity, so the values of one
 series sit together, which is what makes them compress to 0.24 bytes a value (Why it is built
 this way).
 
@@ -619,7 +663,8 @@ earlier run, with each one's ring and collector pid (The persister and the recor
   `interfaces.rs`, `battery.rs`, `disks.rs`, `system.rs`: one source each.
 - `collector/src/programs/`: the executable path of each process.
 - `collector/src/ring/`: the ring's layout, writer, readers and wake.
-- `collector/src/recording/`: registering a run with the recording and starting the persister.
+- `collector/src/recording/`: registration, worker locks, mapped lifecycle health and cost accounting.
+- `collector/src/bin/recorder.rs`: paced worker supervision, adoption and orderly stop.
 - `collector/src/cost.rs`: the per-source cost meter behind the reports.
 - `collector/src/diagnostics.rs` and `diagnostics/`: bounded report admission and output.
 - `persister/` and `persistence/src/worker.rs`: the loop that seals windows from the ring.

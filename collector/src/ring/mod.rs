@@ -809,6 +809,12 @@ impl Writer {
         read_identity(self.mapping.words(), &self.layout)
     }
 
+    /// The exact last publication this writer made, independent of skipped scheduled ticks.
+    #[must_use]
+    pub fn publication_newest(&self) -> u64 {
+        self.publication
+    }
+
     /// Marks a known orderly end; a crash leaves this false.
     pub fn finish(&mut self) {
         self.mapping.words()[layout::HEADER_COMPLETED].store(1, Ordering::Release);

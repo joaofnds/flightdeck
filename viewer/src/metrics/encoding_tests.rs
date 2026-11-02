@@ -103,6 +103,7 @@ impl Recording {
             .commit(
                 pending,
                 persistence::Manifest {
+                    event_batches: None,
                     identity,
                     publication_first: 1,
                     publication_end: self.window.publication_range().end,

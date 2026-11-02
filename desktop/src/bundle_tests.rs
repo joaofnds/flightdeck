@@ -21,11 +21,13 @@ impl Fixture {
             executable: root.join("flightdeck"),
             collector: root.join("collector"),
             persister: root.join("persister"),
+            recorder: root.join("recorder"),
             output: root.join("Flightdeck.app"),
         };
         write_executable(&inputs.executable, b"app");
         write_executable(&inputs.collector, b"collector");
         write_executable(&inputs.persister, b"persister");
+        write_executable(&inputs.recorder, b"recorder");
         Self { root, inputs }
     }
 }
@@ -62,6 +64,10 @@ fn complete_bundle_keeps_the_built_executables_and_resources() {
     assert_eq!(
         std::fs::read(contents.join("Helpers/persister")).unwrap(),
         b"persister"
+    );
+    assert_eq!(
+        std::fs::read(contents.join("Helpers/recorder")).unwrap(),
+        b"recorder"
     );
 }
 
@@ -150,7 +156,12 @@ fn rebuilt_bundle_replaces_each_executable_with_a_new_file() {
     let fixture = Fixture::new();
     create_from(&fixture.inputs).unwrap();
     let contents = fixture.inputs.output.join("Contents");
-    let names = ["MacOS/flightdeck", "Helpers/collector", "Helpers/persister"];
+    let names = [
+        "MacOS/flightdeck",
+        "Helpers/collector",
+        "Helpers/recorder",
+        "Helpers/persister",
+    ];
     let before = names.map(|name| std::fs::metadata(contents.join(name)).unwrap().ino());
     write_executable(&fixture.inputs.executable, b"rebuilt app");
 

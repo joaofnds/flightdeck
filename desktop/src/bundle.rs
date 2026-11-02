@@ -30,6 +30,7 @@ pub fn create() -> Result<(), Box<dyn std::error::Error>> {
 
     let inputs = Inputs {
         executable,
+        recorder: collector.with_file_name("recorder"),
         collector,
         persister,
         output,
@@ -45,6 +46,7 @@ struct Inputs {
     executable: PathBuf,
     collector: PathBuf,
     persister: PathBuf,
+    recorder: PathBuf,
     output: PathBuf,
 }
 
@@ -65,6 +67,7 @@ fn create_from(inputs: &Inputs) -> io::Result<()> {
     validate_executable(&inputs.executable)?;
     validate_executable(&inputs.collector)?;
     validate_executable(&inputs.persister)?;
+    validate_executable(&inputs.recorder)?;
 
     let contents = inputs.output.join("Contents");
     std::fs::create_dir_all(contents.join("MacOS"))?;
@@ -73,6 +76,7 @@ fn create_from(inputs: &Inputs) -> io::Result<()> {
     create_from_executable(&inputs.executable, &contents.join("MacOS/flightdeck"))?;
     create_from_executable(&inputs.collector, &contents.join("Helpers/collector"))?;
     create_from_executable(&inputs.persister, &contents.join("Helpers/persister"))?;
+    create_from_executable(&inputs.recorder, &contents.join("Helpers/recorder"))?;
     for (name, bytes) in RESOURCES {
         std::fs::write(contents.join(name), bytes)?;
     }
@@ -110,6 +114,7 @@ fn validate_bundle(executable: &Path) -> io::Result<()> {
 
     validate_executable(&contents.join("Helpers/collector"))?;
     validate_executable(&contents.join("Helpers/persister"))?;
+    validate_executable(&contents.join("Helpers/recorder"))?;
 
     for (name, expected) in RESOURCES {
         let path = contents.join(name);

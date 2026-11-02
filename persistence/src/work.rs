@@ -13,6 +13,7 @@ pub struct Counts {
     pub sql_plans: u64,
     pub collections: u64,
     pub string_cells: u64,
+    pub source_metadata_checks: u64,
 }
 
 thread_local! {

@@ -587,6 +587,7 @@ fn seal(fixture: &Fixture, selected: &persistence::Window, publication: u64) {
         .commit(
             pending,
             persistence::Manifest {
+                event_batches: None,
                 identity: selected.identity,
                 publication_first: publication,
                 publication_end: publication + 1,

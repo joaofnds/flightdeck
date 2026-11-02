@@ -37,7 +37,17 @@ fn minute(second: u64) -> MinuteReport {
         elapsed_ns: 60_000_000_000,
         collector_cpu_ns: 852_000_000,
         persister_cpu_ns: 148_200_000,
-        combined_percent: 1.666,
+        collector_cpu_complete: true,
+        persister_cpu_complete: true,
+        combined_percent: Some(1.666),
+        recorder_cpu_ns: None,
+        recorder_footprint_bytes: None,
+        recorder_footprint_bytes_max: None,
+        collector_footprint_bytes: None,
+        collector_footprint_bytes_max: None,
+        collector_sampled_footprint_bytes_max: None,
+        persister_sampled_footprint_bytes_max: None,
+        acquisition_footprint_bytes: None,
         footprint_bytes: Some(10_863_247),
         footprint_bytes_max: None,
     }
@@ -158,10 +168,16 @@ fn legends_read_the_inspected_report_as_the_prototype_writes_them() {
     assert_eq!(
         shown,
         [
-            vec!["1.42 %", "0.25 %", "1.67 %"],
+            vec!["Unavailable", "1.42 %", "0.25 %", "1.67 %"],
             vec!["1.42 %"],
             vec!["3.2 ms", "9.0 ms"],
-            vec!["10.36 MiB", "Unavailable"],
+            vec![
+                "Unavailable",
+                "Unavailable",
+                "Unavailable",
+                "10.36 MiB",
+                "Unavailable"
+            ],
             vec!["1,069 processes", "354 processes", "0 processes"],
             vec!["1 count", "0 count"],
         ]
@@ -178,7 +194,10 @@ fn a_chart_with_no_report_at_the_inspected_second_says_so() {
 
     let shown = readings(&reports, Some(1_010));
 
-    assert_eq!(shown[0], ["No report", "No report", "No report"]);
+    assert_eq!(
+        shown[0],
+        ["No report", "No report", "No report", "No report"]
+    );
 }
 
 #[test]
@@ -317,8 +336,90 @@ fn the_minute_table_splits_the_budget_between_collector_and_persister() {
 
     assert_eq!(
         row[1..],
-        ["1.420%", "0.247%", "1.666%", "10.36 MiB", "Unavailable"]
+        [
+            "Unavailable",
+            "1.420%",
+            "0.247%",
+            "1.666%",
+            "Unavailable",
+            "Unavailable",
+            "Unavailable",
+            "Unavailable",
+            "Unavailable",
+            "10.36 MiB",
+            "Unavailable",
+            "Unavailable",
+            "Unavailable"
+        ]
     );
+}
+
+#[test]
+fn missing_final_footprints_keep_sampled_maxima_separate_from_lifetime_maxima() {
+    // Goal: a refused final sample cannot make a sampled lower bound a lifetime maximum.
+    // Method: render real recorder framing with unavailable final peaks and known samples.
+    let mut reports = started();
+    reports.standard(
+        "recording minute elapsed_ns=60000000000 recorder_cpu_ns=30000000 \
+         collector_cpu_ns=600000000 persister_cpu_ns=900000000 combined_percent=2.55",
+        1_060,
+    );
+    reports.standard(
+        "recording cumulative recorder_cpu_ns=30000000 recorder_footprint_bytes=1048576 \
+         recorder_footprint_bytes_max=2097152 collector_footprint_bytes=0 \
+         collector_footprint_bytes_max=unavailable current_footprint_bytes=0 \
+         lifetime_footprint_bytes_max=unavailable collector_sampled_footprint_bytes_max=4194304 \
+         persister_sampled_footprint_bytes_max=8388608",
+        1_060,
+    );
+    let rows = minute_rows(&reports);
+    let reading = |heading| {
+        let column = super::MINUTE_HEADINGS
+            .iter()
+            .position(|name| *name == heading)
+            .unwrap();
+        rows[0][column].as_str()
+    };
+
+    assert_eq!(reading("Collector lifetime maximum"), "Unavailable");
+    assert_eq!(reading("Persister lifetime maximum"), "Unavailable");
+    assert_eq!(reading("Collector footprint"), "0.00 MiB");
+    assert_eq!(reading("Persister footprint"), "0.00 MiB");
+    assert_eq!(reading("Collector sampled maximum"), "4.00 MiB");
+    assert_eq!(reading("Persister sampled maximum"), "8.00 MiB");
+}
+
+#[test]
+fn incomplete_worker_cpu_stays_unavailable_until_a_complete_interval_arrives() {
+    // Goal: an adopted exit cannot display a partial CPU count as the full interval's share.
+    // Method: render an incomplete minute, then a complete one with cumulative loss retained.
+    let mut reports = started();
+    for (second, collector_complete, combined) in
+        [(1_060, "false", "unavailable"), (1_120, "true", "2.55")]
+    {
+        reports.standard(
+            &format!(
+                "recording minute elapsed_ns=60000000000 recorder_cpu_ns=30000000 \
+                 collector_cpu_ns=600000000 persister_cpu_ns=900000000 \
+                 collector_cpu_complete={collector_complete} persister_cpu_complete=true \
+                 combined_percent={combined}"
+            ),
+            second,
+        );
+        reports.standard(
+            "recording cumulative recorder_cpu_ns=30000000 collector_cpu_complete=false \
+             persister_cpu_complete=true",
+            second,
+        );
+    }
+    let rows = minute_rows(&reports);
+
+    assert_eq!(rows[0][2], "Unavailable");
+    assert_eq!(rows[0][3], "1.500%");
+    assert_eq!(rows[0][4], "Unavailable");
+    assert_eq!(rows[1][2], "1.000%");
+    assert_eq!(rows[1][3], "1.500%");
+    assert_eq!(rows[1][4], "2.550%");
 }
 
 #[test]

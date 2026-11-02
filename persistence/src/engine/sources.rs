@@ -2,9 +2,14 @@ use std::collections::VecDeque;
 use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use polars::prelude::LazyFrame;
 use polars::sql::SQLContext;
 
+use super::AdmittedReadRefusal;
+use super::event_source::EventSourcePin;
+use crate::resources::ByteBudget;
 use crate::{Error, Result};
 
 pub const PARQUET_SOURCES_MAX: usize = 128;
@@ -16,6 +21,8 @@ pub(super) struct Sources {
 
 struct Source {
     fingerprint: Fingerprint,
+    event_budget: Option<Arc<ByteBudget>>,
+    event_pin: Option<EventSourcePin>,
     alias: String,
     path: PathBuf,
     // Evicted with its registration, since the relation names the registered alias.
@@ -27,8 +34,8 @@ struct Relation {
     text: String,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Fingerprint {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Fingerprint {
     device: u64,
     inode: u64,
     length: u64,
@@ -53,7 +60,7 @@ impl Sources {
         if let Some(index) = self
             .entries
             .iter()
-            .position(|entry| entry.fingerprint == fingerprint)
+            .position(|entry| entry.fingerprint == fingerprint && entry.event_budget.is_none())
         {
             let cached = &self.entries[index];
             if cached.path.as_path() != path {
@@ -90,6 +97,8 @@ impl Sources {
         context.register(&alias, frame);
         self.entries.push_back(Source {
             fingerprint,
+            event_budget: None,
+            event_pin: None,
             alias: alias.clone(),
             path: path.to_owned(),
             relation: None,
@@ -97,6 +106,84 @@ impl Sources {
         assert!(self.entries.len() <= PARQUET_SOURCES_MAX);
 
         Ok(alias)
+    }
+
+    pub fn event_source(
+        &mut self,
+        context: &mut SQLContext,
+        pin: &EventSourcePin,
+        budget: &Arc<ByteBudget>,
+        derive: impl FnOnce() -> std::result::Result<LazyFrame, AdmittedReadRefusal>,
+    ) -> std::result::Result<(String, EventSourcePin), AdmittedReadRefusal> {
+        assert!(self.entries.len() <= PARQUET_SOURCES_MAX);
+        let fingerprint = pin.marker_fingerprint();
+        let directory = pin.marker_directory();
+        if let Some(index) = self.entries.iter().position(|entry| {
+            entry.fingerprint == fingerprint
+                && entry
+                    .event_pin
+                    .as_ref()
+                    .is_some_and(|kept| kept.marker_directory() == directory)
+                && entry
+                    .event_budget
+                    .as_ref()
+                    .is_some_and(|kept| Arc::ptr_eq(kept, budget))
+        }) {
+            return self.event_source_cached(index, pin);
+        }
+
+        let frame = derive()?;
+        if !pin.validate()? {
+            return Err(Error::Bound("changed event query source").into());
+        }
+        let alias = format!(
+            "{}_events_{:016x}_{:016x}_{:x}",
+            fingerprint.alias(),
+            directory.0,
+            directory.1,
+            Arc::as_ptr(budget).addr()
+        );
+        if self.entries.len() == PARQUET_SOURCES_MAX {
+            let evicted = self
+                .entries
+                .pop_front()
+                .ok_or(Error::Bound("event source cache empty"))?;
+            context.unregister(&evicted.alias);
+        }
+        context.register(&alias, frame);
+        self.entries.push_back(Source {
+            fingerprint,
+            event_budget: Some(Arc::clone(budget)),
+            event_pin: Some(pin.clone()),
+            alias: alias.clone(),
+            path: pin.marker().to_owned(),
+            relation: None,
+        });
+        assert!(self.entries.len() <= PARQUET_SOURCES_MAX);
+        Ok((alias, pin.clone()))
+    }
+
+    fn event_source_cached(
+        &mut self,
+        index: usize,
+        pin: &EventSourcePin,
+    ) -> std::result::Result<(String, EventSourcePin), AdmittedReadRefusal> {
+        let cached = &self.entries[index];
+        if cached.event_pin.as_ref() != Some(pin) || !pin.validate()? {
+            return Err(Error::Bound("changed cached event query source").into());
+        }
+        let source = self
+            .entries
+            .remove(index)
+            .ok_or(Error::Bound("event source cache index"))?;
+        let alias = source.alias.clone();
+        let pin = source
+            .event_pin
+            .as_ref()
+            .ok_or(Error::Bound("missing cached event source pin"))?
+            .clone();
+        self.entries.push_back(source);
+        Ok((alias, pin))
     }
 
     pub fn relation(&self, alias: &str, kind: &str) -> Option<String> {
@@ -139,6 +226,16 @@ impl From<&Metadata> for Fingerprint {
 }
 
 impl Fingerprint {
+    pub(super) fn from_file(file: &std::fs::File) -> Result<Self> {
+        crate::work::record(|counts| counts.source_metadata_checks += 1);
+        Ok(Self::from(&file.metadata()?))
+    }
+
+    pub(super) fn read(path: &Path) -> Result<Self> {
+        let file = collector::recording::private::open_private_file(path, false)?;
+        Self::from_file(&file)
+    }
+
     fn alias(&self) -> String {
         // The complete tuple gives rebinding a stable name without hashing or SQL path literals.
         format!(

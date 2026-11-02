@@ -18,7 +18,7 @@ dev: bundle
 
 # Build the app with its collector and persister helpers, and package them as one bundle.
 bundle:
-    cargo build --locked --release -p collector -p persister --bin collector --bin persister
+    cargo build --locked --release -p collector -p persister --bin collector --bin recorder --bin persister
     cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
     desktop/target/release/flightdeck --bundle
     desktop/target/Flightdeck.app/Contents/MacOS/flightdeck --bundle --check
@@ -30,14 +30,14 @@ bundle-check: bundle
     directory="$(mktemp -d)" && trap 'rm -rf "$directory"' EXIT && \
     contents=desktop/target/Flightdeck.app/Contents && \
     shasum -a 256 desktop/target/release/flightdeck target/release/collector \
-        target/release/persister | cut -c 1-64 > "$directory/built" && \
+        target/release/recorder target/release/persister | cut -c 1-64 > "$directory/built" && \
     shasum -a 256 "$contents/MacOS/flightdeck" "$contents/Helpers/collector" \
-        "$contents/Helpers/persister" | cut -c 1-64 > "$directory/packaged" && \
+        "$contents/Helpers/recorder" "$contents/Helpers/persister" | cut -c 1-64 > "$directory/packaged" && \
     diff -u "$directory/built" "$directory/packaged" && \
     cp "$contents/Helpers/collector" "$directory/collector" && \
     printf changed >> "$directory/collector" && \
     shasum -a 256 "$contents/MacOS/flightdeck" "$directory/collector" \
-        "$contents/Helpers/persister" | cut -c 1-64 > "$directory/tampered" && \
+        "$contents/Helpers/recorder" "$contents/Helpers/persister" | cut -c 1-64 > "$directory/tampered" && \
     ! diff -u "$directory/built" "$directory/tampered"
 
 # The tag must name what it ships, so the tree must be clean. The next version counts from
@@ -83,6 +83,7 @@ check-desktop: desktop-fmt desktop-clippy desktop-test seal-bench bundle-check
 # Check the formatting of the root workspace.
 fmt:
     cargo fmt --all --check
+    rustfmt --edition 2024 --check persister/tests/faults/sync.rs
 
 # Lint the root workspace.
 clippy:
@@ -90,8 +91,14 @@ clippy:
 
 # Test the root workspace.
 test:
-    cargo build --locked -p collector -p persister --bin collector --bin persister
+    cargo build --locked -p collector -p persister --bin collector --bin recorder --bin persister
     cargo test --locked --workspace --no-fail-fast -- {{test_arguments}}
+
+# Opt-in optimized maximum native event fidelity and worker resource observations.
+test-event-capacity:
+    cargo clippy --locked -p persister --features event-capacity --test event_stream -- --deny warnings
+    cargo build --release --locked -p collector -p persister --bin collector --bin recorder --bin persister
+    cargo test --release --locked -p persister --features event-capacity --test event_stream -- --include-ignored --no-capture --test-threads=1
 
 # Check the formatting of the desktop workspace.
 desktop-fmt:

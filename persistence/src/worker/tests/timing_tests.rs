@@ -5,6 +5,8 @@ use crate::resources::ByteBudget;
 use collector::ring::{ObservationTimes, Place, Readings, Writer};
 use std::io::Read;
 
+mod terminal_tests;
+
 #[test]
 fn waits_for_malformed_current_payload_then_refuses_it_when_complete() {
     // Goal: open timing does not certify payload, and staging refuses that same payload.
@@ -593,10 +595,14 @@ impl Scenario {
     }
 
     fn at(root: Directory) -> Self {
+        Self::at_retention(root, 4, 5)
+    }
+
+    fn at_retention(root: Directory, slots: u64, events: u64) -> Self {
         let store = Store::open(&root.0).unwrap();
         let mut registered = registered(store.recording());
         registered.collector_pid = std::process::id();
-        let ring = WaitingRing::new(&root, &mut registered, 1);
+        let ring = WaitingRing::with_retention(&root, &mut registered, 1, slots, events);
         Self {
             store,
             registered,
@@ -764,12 +770,22 @@ struct WaitingRing(Writer);
 
 impl WaitingRing {
     fn new(root: &Directory, registered: &mut RegisteredRun, process_capacity: u64) -> Self {
+        Self::with_retention(root, registered, process_capacity, 4, 5)
+    }
+
+    fn with_retention(
+        root: &Directory,
+        registered: &mut RegisteredRun,
+        process_capacity: u64,
+        slots: u64,
+        events: u64,
+    ) -> Self {
         let place = Place {
             lock_path: root.0.join("ring.lock"),
             name_prefix: "/fdwait".to_owned(),
         };
         let shape = Shape {
-            slot_count: 4,
+            slot_count: slots,
             cpu_capacity: 1,
             interface_capacity: 1,
             core_capacity: 1,
@@ -777,8 +793,7 @@ impl WaitingRing {
             fan_capacity: 1,
             process_capacity,
             coalition_capacity: 1,
-            // One record past the four ticks' events, so the next tick's event has room.
-            event_capacity: 5,
+            event_capacity: events,
         };
         let writer = Writer::create_with_system(
             &place,
@@ -873,5 +888,191 @@ fn waiting_process() -> processes::Process {
 impl Drop for WaitingRing {
     fn drop(&mut self) {
         collector::ring::unlink_generation(self.0.name()).unwrap();
+    }
+}
+
+#[test]
+fn recovery_at_each_minute_offset_keeps_the_normal_seal_boundary() {
+    // Goal: a persister restart at any offset preserves the active minute and exact saved tail.
+    // Method: reset only worker state at all sixty offsets against the actual ring/seal path.
+    for offset in 0..60 {
+        let mut source = Scenario::new();
+        source.publish(0);
+        if offset > 0 {
+            source.publish(offset);
+        }
+        assert!(matches!(source.pass().unwrap(), Progress::Waiting));
+        source.state = RunState::default();
+        assert!(matches!(source.pass().unwrap(), Progress::Waiting));
+        assert!(
+            source
+                .store
+                .progress(&source.registered.identity)
+                .unwrap()
+                .is_none()
+        );
+        source.publish(60);
+        assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+        let boundary = if offset == 0 { 2 } else { 3 };
+        assert_exact_window(&source, 0, 1..boundary, 1..boundary, Losses::default());
+        source.state = RunState::default();
+        assert!(matches!(source.pass().unwrap(), Progress::Waiting));
+        assert_eq!(source.state.committed, boundary - 1);
+        source.ring.0.finish();
+        assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+        assert_exact_window(
+            &source,
+            1,
+            boundary..boundary + 1,
+            boundary..boundary + 1,
+            Losses::default(),
+        );
+        assert!(matches!(source.pass().unwrap(), Progress::Complete));
+        eprintln!(
+            "minute_offset={offset} first_window=1..{boundary} \
+             final_window={boundary}..{} no_early_seal=true",
+            boundary + 1
+        );
+    }
+}
+
+#[test]
+fn recovery_after_retention_saves_surviving_publications_and_events_with_exact_loss() {
+    // Goal: downtime beyond both ring bounds saves the remaining tail with explicit loss.
+    // Method: write seven readings into four publication slots and five event slots, then restart.
+    let mut source = Scenario::new();
+    for tick in 0..7 {
+        source.publish(tick);
+    }
+    source.state = RunState::default();
+    source.ring.0.finish();
+    assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+    assert_exact_window(
+        &source,
+        0,
+        4..8,
+        3..8,
+        Losses {
+            publications: 3,
+            events: 2,
+            unknown: false,
+        },
+    );
+    assert!(matches!(source.pass().unwrap(), Progress::Complete));
+}
+
+#[test]
+fn a_closed_run_before_its_first_observation_keeps_its_event_without_a_minute() {
+    // Goal: an event published before its observation survives producer death as raw history.
+    // Method: withhold only the publication header of an owned real ring, then recover it closed.
+    let mut source = Scenario::new();
+    source.publish(0);
+    let reader = RingReader::open_generation(source.ring.0.name()).unwrap();
+    let snapshot = WritableSource::new(
+        source.ring.0.name(),
+        reader.mapped_size_bytes(),
+        ForgedWord {
+            watched: 4,
+            expected: 1,
+            index: 4,
+            value: 0,
+        },
+    );
+    source.registered.ring_name.clone_from(&snapshot.name);
+    source.snapshot = Some(snapshot);
+
+    assert!(matches!(source.pass().unwrap(), Progress::Waiting));
+    assert!(matches!(
+        source.pass_retired(true).unwrap(),
+        Progress::Complete
+    ));
+
+    assert!(
+        source
+            .store
+            .progress(&source.registered.identity)
+            .unwrap()
+            .is_none()
+    );
+    let page = crate::event_recovery::read_page(&source.root.0, &source.registered.identity, 1, 8)
+        .unwrap();
+    assert_eq!(page.rows.height(), 1);
+    assert_eq!(page.rows.column("publication").unwrap().null_count(), 1);
+    assert_eq!(
+        page.rows.column("event").unwrap().u64().unwrap().get(0),
+        Some(1)
+    );
+    assert_eq!(page.coverage, 1..2);
+    assert_eq!(page.losses, Losses::default());
+    assert_eq!(page.next, None);
+    let mut buffer: Box<[_; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]> =
+        vec![0; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+    let mut discovery =
+        crate::event_recovery::Discovery::open(&source.root.0, &mut buffer).unwrap();
+    let discovered = discovery.next_page(8).unwrap();
+    assert!(discovered.complete);
+    assert_eq!(discovered.runs.len(), 1);
+    assert_eq!(discovered.runs[0].run, source.registered.identity);
+    assert_eq!(discovered.runs[0].rows, 1);
+}
+
+fn assert_exact_window(
+    source: &Scenario,
+    window: u64,
+    publications: std::ops::Range<u64>,
+    events: std::ops::Range<u64>,
+    losses: Losses,
+) {
+    let manifest = source
+        .store
+        .existing(&WindowIdentity {
+            run: source.registered.identity,
+            window,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        manifest.publication_first..manifest.publication_end,
+        publications
+    );
+    assert_eq!(manifest.events_first..manifest.events_end, events);
+    assert_eq!(manifest.losses, losses);
+    let engine = crate::engine::Engine::new();
+    for (table, column, expected) in [
+        ("ticks", "publication", publications),
+        ("events", "event", events),
+    ] {
+        let relation = if table == "events" {
+            let budget = std::sync::Arc::new(ByteBudget::new(128 * 1024 * 1024));
+            engine
+                .event_source(&source.root.0, &manifest, &budget)
+                .unwrap()
+        } else {
+            let file = source
+                .root
+                .0
+                .join(&manifest.data_directory)
+                .join(format!("{table}.parquet"));
+            engine
+                .register_lazy(table, crate::engine::scan(&file).unwrap())
+                .unwrap();
+            table.to_owned()
+        };
+        let saved = engine
+            .query(&format!(
+                "SELECT {column} FROM {relation} ORDER BY {column}"
+            ))
+            .unwrap();
+        let actual: Vec<_> = saved
+            .column(column)
+            .unwrap()
+            .u64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        assert_eq!(actual, expected.collect::<Vec<_>>());
     }
 }

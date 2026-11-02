@@ -35,12 +35,10 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
             timer.set_running(false);
         }
 
-        // The collector saves its last readings and exits on its own once asked, and also when
-        // the app that started it is gone, so quitting asks it and does not wait for it.
-        collection.session.begin_stop();
-        if let Some(failure) = collection.session.failure() {
-            eprintln!("Flightdeck collector shutdown: {failure}");
+        if let Some(timer) = collection.quick_timer.take() {
+            timer.set_running(false);
         }
+        collection.session.detach();
         std::future::ready(())
     })
     .detach();

@@ -22,6 +22,11 @@ pub(crate) const OBSERVATIONS_MAX: usize = 4096;
 pub(crate) const PAGE_ROWS: u64 = 512;
 const WINDOWS_MAX: usize = 65_536;
 const NS: u64 = 1_000_000_000;
+/// All context readers share this allowance for event-part inputs and retained query buffers.
+const EVENT_QUERY_BYTES_MAX: usize = 256 * 1024 * 1024;
+
+#[cfg(test)]
+mod legacy_event_tests;
 
 pub struct Session {
     root: PathBuf,
@@ -40,6 +45,7 @@ pub struct Session {
     connection: Engine,
     /// The connections a context's readers read through, one each, so their queries run at once.
     context_connections: Vec<Engine>,
+    event_query_budget: Arc<persistence::resources::ByteBudget>,
     first: Option<u64>,
     last: Option<u64>,
     unknown: u64,
@@ -231,14 +237,7 @@ impl Session {
         let earlier_markers = reopen_markers(root, recording, earlier);
         let mut windows = Vec::new();
         discover(root, recording, &mut windows, &operation)?;
-        let verified = windows
-            .iter()
-            .map(|manifest| {
-                let marker = layout::WindowKey::from(&manifest.identity).marker(root);
-                let kept = earlier_markers.get(&marker).copied();
-                AtomicBool::new(kept == Some(manifest))
-            })
-            .collect();
+        let verified = reopen_verified(root, &windows, &earlier_markers);
         let connection = data::connection();
         operation.attach(&connection)?;
         let mut session = Self {
@@ -247,6 +246,9 @@ impl Session {
             verified,
             connection,
             context_connections: (0..CONTEXT_READERS).map(|_| data::connection()).collect(),
+            event_query_budget: Arc::new(persistence::resources::ByteBudget::new(
+                EVENT_QUERY_BYTES_MAX,
+            )),
             first: None,
             last: None,
             unknown: 0,
@@ -792,6 +794,7 @@ impl Session {
             windows: &self.windows,
             verified: &self.verified,
             connection,
+            event_query_budget: &self.event_query_budget,
             operation: &self.operation,
             #[cfg(test)]
             source_reads: &self.source_reads,
@@ -910,6 +913,7 @@ pub(crate) struct Reader<'session> {
     pub(crate) windows: &'session [Manifest],
     verified: &'session [AtomicBool],
     connection: &'session Engine,
+    event_query_budget: &'session Arc<persistence::resources::ByteBudget>,
     operation: &'session Operation,
     #[cfg(test)]
     source_reads: &'session Count,
@@ -945,6 +949,14 @@ impl Reader<'_> {
             .ok_or(Error::Bound("table name"))?;
         self.validate_commitment(window)?;
         let manifest = &self.windows[window];
+        if name == "events" {
+            let _observation =
+                persistence::work::ingestion::minute_source(manifest, Some("events"));
+            return self
+                .connection
+                .event_source(self.root, manifest, self.event_query_budget);
+        }
+
         let path = self
             .root
             .join(&manifest.data_directory)
@@ -1148,6 +1160,22 @@ pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
     Ok(result)
 }
 
+/// Reuses verification only where the same marker still names the same full commitment.
+fn reopen_verified(
+    root: &Path,
+    windows: &[Manifest],
+    earlier: &BTreeMap<PathBuf, &Manifest>,
+) -> Vec<AtomicBool> {
+    windows
+        .iter()
+        .map(|manifest| {
+            let marker = layout::WindowKey::from(&manifest.identity).marker(root);
+            let kept = earlier.get(&marker).copied();
+            AtomicBool::new(kept == Some(manifest))
+        })
+        .collect()
+}
+
 /// The windows of `earlier` from the recording `recording`, by the path of their marker.
 fn reopen_markers<'earlier>(
     root: &Path,
@@ -1268,6 +1296,7 @@ mod cpu_history_saved;
 mod app_history;
 pub(crate) use app_history::AttributionReplay;
 pub(crate) use app_history::ProcessGroupsReplay;
+pub(crate) use app_history::SourceFileKind;
 pub(crate) use app_history::{KeptAttribution, KeptResident};
 mod committed_apps;
 #[cfg(test)]

@@ -141,6 +141,7 @@ fn summaries(
             let role = match reporter.role.load(Ordering::Relaxed) {
                 0 => "collector",
                 1 => "persister",
+                2 => "recorder",
                 _ => unreachable!("reporter role is installed before writer startup"),
             };
             summary.format(role, affected, &snapshot);

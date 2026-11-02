@@ -60,8 +60,8 @@ fn wrapping_observation() -> Result<()> {
     assert_eq!(ledger.faults, 0);
     assert_eq!(ledger.live(), 2);
     assert!(ledger.matches(pointer, length, 1));
-    // One field retains the pinned ColumnName layout: 128 bytes plus its length byte.
-    assert_eq!(charge, length + 129);
+    // One field retains 128 name bytes, one length byte and one native storage-type tag.
+    assert_eq!(charge, length + 130);
     assert_wrappers(&trace.events[wrapping..constructed]);
     for event in &trace.events[wrapping..trace.count] {
         ledger.apply(*event);

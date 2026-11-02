@@ -82,6 +82,7 @@ mod tests {
 
     fn manifest(identity: WindowIdentity) -> Manifest {
         Manifest {
+            event_batches: None,
             identity,
             publication_first: 20,
             publication_end: 23,

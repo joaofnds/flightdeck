@@ -3911,6 +3911,7 @@ mod tests {
             .commit(
                 pending,
                 persistence::Manifest {
+                    event_batches: None,
                     identity: window.identity,
                     publication_first: publications.start,
                     publication_end: publications.end,
@@ -4052,7 +4053,17 @@ mod tests {
             saved.page("processes", 0).unwrap()["rows"],
             processes["rows"]
         );
-        assert_eq!(saved.page("events", 0).unwrap()["rows"], events["rows"]);
+        let saved_events = saved.page("events", 0).unwrap();
+        assert_eq!(saved_events["columns"], events["columns"]);
+        assert_eq!(saved_events["rows"], events["rows"]);
+        let columns = events["columns"].as_array().unwrap();
+        for (name, expected) in [
+            ("event_observation_version", "1"),
+            ("event_observation_availability", "0"),
+        ] {
+            let index = columns.iter().position(|column| column == name).unwrap();
+            assert_eq!(events["rows"][0][index], expected);
+        }
     }
 
     #[test]

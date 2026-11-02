@@ -153,6 +153,7 @@ mod tests {
             let tables = Encoder.encode(&window, pending.path()).unwrap();
             extend(pending.path());
             let manifest = persistence::Manifest {
+                event_batches: None,
                 identity,
                 publication_first: 1,
                 publication_end: 5,
@@ -252,6 +253,7 @@ mod tests {
             let tables = Encoder.encode(&window, pending.path()).unwrap();
             extend(pending.path());
             let manifest = persistence::Manifest {
+                event_batches: None,
                 identity,
                 publication_first: 1,
                 publication_end: 62,
@@ -580,7 +582,7 @@ mod tests {
             serde_json::json!([
                 "2", "5", "1", "42", "3", null, "0", "0", "101", "102", "103", "104", "105", "106",
                 "107", "108", "109", "110", "111", "112", "113", "114", null, "3", "0", null, null,
-                null, null
+                null, null, "1", "0"
             ])
         );
         assert_eq!(events["rows"][1][6], "2");

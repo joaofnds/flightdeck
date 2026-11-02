@@ -13,12 +13,12 @@ just dev
 
 `just dev` builds the helpers and the app, packages them, checks the bundle and opens it,
 with the tools `mise.toml` pins, as the repository README describes. The bundle contains
-the app, required collector and persister executables, and artwork; missing helpers fail
+the app, required recorder, collector and persister executables, and artwork; missing helpers fail
 packaging. It can be moved outside the checkout.
 
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
-It attaches to an advancing existing collector or starts its own when collection
-is absent. It attaches only to a collector built from the same collector code, and
+It attaches to an advancing existing recording or starts a recorder controller when collection
+is absent. It attaches only to a compatible worker build, and
 otherwise fails with both builds named. A ring states its own layout, which every reader
 checks, so an app opening a recording another build wrote reads it only where the
 layouts agree. A collector counts as running only while it holds the recording's lifetime
@@ -52,7 +52,8 @@ target/debug/flightdeck-control --socket /tmp/flightdeck.sock \
   --command state --command 'screenshot /tmp/battery.png' --command quit
 ```
 
-`state` reports the route, the selected and hovered seconds, the live status, the
+`state` reports the route, the selected and hovered seconds, the live status, recording
+health and retry availability as shown in the window, the
 viewport, the scroll position, Settings state and animation counters. `show` explicitly
 shows and focuses this window; `minimize` minimizes it. `rows` lists the page's rows, which
 `reveal ROW_KEY` scrolls to the top. `hovers` reports the latest 64 chart hovers, oldest
@@ -60,8 +61,9 @@ first, each with its page, its second and `complete_ms`, the time the app measur
 handling the pointer move to the page holding that second's complete readings. It is null
 for a hover that ended, or whose read failed, before then. `count` counts every hover since
 launch. The socket answers at the window's own pace, so its round trip cannot time a hover.
-Pointer commands take window coordinates in points. A screenshot renders GPUI's frame
-offscreen at its scale factor. Native Metal fan animation is a separate surface and needs
+Pointer commands take window coordinates in points. `scroll-x X Y DELTA_X` sends a
+horizontal wheel delta to inspect tables wider than their viewport. A screenshot renders
+GPUI's frame offscreen at its scale factor. Native Metal fan animation is a separate surface and needs
 a visible window capture. The socket screenshot waits up to five seconds for the readings and
 reports in `settled` whether they arrived. Builds without the feature refuse `--control`.
 
@@ -83,20 +85,35 @@ publications, observation gaps, errors and cache accounting. It stops/drops the 
 then waits five seconds before exiting; this does not prove a blocked worker joined.
 Neither mode opens a window or measures rendering performance.
 
-`--start-collector` writes new observations. The default recording uses the shared
-`flightdeck` ring; an explicit `--recording PATH` starts an isolated ring. Once that
-collector exits and its readings are saved, the app removes the isolated ring and its lock
-file, so a scratch recording leaves no ring behind. Only one collector can own a ring. Startup and child-exit failures appear with a Retry
-control. The app sends signals only to the collector it started; attaching to
-another collector does not give it shutdown ownership, so quitting leaves that collector
-running. A live launch keeps running
+`--start-collector` writes new observations through the recorder controller. The default
+recording uses the shared `flightdeck` ring; an explicit `--recording PATH` starts an
+isolated ring. The controller owns recovery and the workers retain their own recording
+locks. The status line reports acquisition and durable-recording health separately from
+bounded shared records, even when diagnostic output is unavailable. If the controller
+exits, surviving workers continue and the status says automatic recovery is unavailable.
+Retry explicitly starts a controller that verifies surviving worker identities before adoption.
+Opening a recording read-only grants no start or shutdown authority.
+
+A live launch keeps running
 once its window closes, with no Dock icon, so collection goes on and no reading is
 missed. Its item in the menu bar brings the window back, as does opening the app
 again, and a right click or Control-click on the item opens a menu with Quit. A
 launch that opens a recording read-only, runs for `--seconds` or listens on
-`--control` still quits with its last window. Quitting stops owned collection and
-waits for its final save. The save budget is 125 seconds, followed by a two-second
-forced-exit budget.
+`--control` still quits with its last window. Closing or quitting the GUI leaves recording
+running. Its diagnostic socket readers close on quit; the workers' bounded diagnostic
+queues handle delivery failure without blocking acquisition or durable health. The Self
+page includes recorder, collector and persister CPU, and individual footprint charges.
+The recorder plus collector share the 256 MiB acquisition ceiling; the persister has its
+own 256 MiB ceiling. CPU intervals cover one full awake minute; an incomplete worker
+interval and its combined percentage remain unavailable. The next complete interval
+can display normally. Missing final footprint samples leave lifetime maxima unavailable;
+the table retains sampled maxima as separate lower bounds.
+
+To stop a candidate recording explicitly, run the matching build's
+`target/release/recorder --recording /absolute/path/to/session.recording --stop yes`
+from the repository root. The controller stops acquisition and drains eligible tail.
+Headless `--live-check` and `--live-soak` runs still explicitly stop a recorder they start
+when their measurement ends. An attaching GUI never signals another owner's processes.
 Xcode and its command-line tools are required. GPUI and its macOS backend come from a
 fork, https://github.com/joaofnds/zed on branch `flightdeck-gpui`, at the revision
 `Cargo.toml` pins. The branch is upstream revision

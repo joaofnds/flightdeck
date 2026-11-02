@@ -1,16 +1,16 @@
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 
 pub(super) struct Output(Box<Storage>);
 
 struct Storage {
-    file: File,
+    reader: UnixStream,
+    writer: UnixStream,
     tail: VecDeque<u8>,
     buffer: Box<[u8]>,
-    position: u64,
     peak_bytes: u64,
     /// The line being written, kept until its newline arrives.
     line: Vec<u8>,
@@ -21,14 +21,12 @@ struct Storage {
 }
 
 const TAIL_BYTES_MAX: usize = 16_384;
-const FILE_BYTES_MAX: u64 = 1_048_576;
-const CREATE_ATTEMPTS_MAX: u16 = 64;
 const READ_ATTEMPTS_MAX: u16 = 32;
+const SOCKET_BYTES: libc::c_int = 65_536;
 /// The collector's longest report line is about 600 bytes.
 const LINE_BYTES_MAX: usize = 4_096;
 /// Lines kept between two reads, a minute's reports many times over.
 const LINES_MAX: usize = 256;
-static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 const _: () = {
     assert!(TAIL_BYTES_MAX <= 1_048_576);
     assert!(size_of::<Output>() <= 16);
@@ -36,13 +34,43 @@ const _: () = {
 
 impl Output {
     pub fn new() -> io::Result<Self> {
-        let file = create_file()?;
+        let (reader, writer) = UnixStream::pair()?;
+        reader.set_nonblocking(true)?;
+        // A detached GUI closes its reader. Helpers must receive EPIPE rather than SIGPIPE.
+        let enabled: libc::c_int = 1;
+        let status = unsafe {
+            libc::setsockopt(
+                writer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                std::ptr::from_ref(&enabled).cast(),
+                libc::socklen_t::try_from(size_of_val(&enabled)).map_err(io::Error::other)?,
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        for (stream, option) in [(&writer, libc::SO_SNDBUF), (&reader, libc::SO_RCVBUF)] {
+            let status = unsafe {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    option,
+                    std::ptr::from_ref(&SOCKET_BYTES).cast(),
+                    libc::socklen_t::try_from(size_of_val(&SOCKET_BYTES))
+                        .map_err(io::Error::other)?,
+                )
+            };
+            if status != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
 
         Ok(Self(Box::new(Storage {
-            file,
+            reader,
+            writer,
             tail: VecDeque::with_capacity(TAIL_BYTES_MAX),
             buffer: vec![0; TAIL_BYTES_MAX].into_boxed_slice(),
-            position: 0,
             peak_bytes: 0,
             line: Vec::with_capacity(LINE_BYTES_MAX),
             line_damaged: false,
@@ -52,34 +80,11 @@ impl Output {
     }
 
     pub fn writer(&self) -> io::Result<File> {
-        self.0.file.try_clone()
+        self.0.writer.try_clone().map(OwnedFd::from).map(File::from)
     }
 
     pub fn drain(&mut self) -> io::Result<()> {
-        let length = self.0.file.metadata()?.len();
-        self.0.peak_bytes = self.0.peak_bytes.max(length);
-        let tail_bytes = u64::try_from(TAIL_BYTES_MAX).map_err(io::Error::other)?;
-        if self.0.position > length {
-            self.0.position = 0;
-            self.0.line_damaged = true;
-            self.0.discontinuous = true;
-        }
-        let skipped_to = length.saturating_sub(tail_bytes);
-        if self.0.position < skipped_to {
-            self.0.position = skipped_to;
-            self.0.line_damaged = true;
-            self.0.discontinuous = true;
-        }
-
-        self.drain_tail(length)?;
-        if length > FILE_BYTES_MAX {
-            // Writers retain O_APPEND, so truncation cannot create a sparse output file.
-            // Diagnostic bytes appended concurrently with this truncation may be omitted.
-            self.0.file.set_len(0)?;
-            self.0.position = 0;
-            self.0.line_damaged = true;
-            self.0.discontinuous = true;
-        }
+        self.drain_tail()?;
         if self.0.discontinuous {
             self.0.lines.clear();
             if !self.0.line.is_empty() {
@@ -90,26 +95,13 @@ impl Output {
         Ok(())
     }
 
-    fn drain_tail(&mut self, length: u64) -> io::Result<()> {
+    fn drain_tail(&mut self) -> io::Result<()> {
+        let mut bytes = 0_u64;
         for _attempt in 0..READ_ATTEMPTS_MAX {
-            if self.0.position == length {
-                return Ok(());
-            }
-
-            let remaining = usize::try_from(length - self.0.position).map_err(io::Error::other)?;
-            let size = remaining.min(self.0.buffer.len());
-            match self
-                .0
-                .file
-                .read_at(&mut self.0.buffer[..size], self.0.position)
-            {
-                Ok(0) => {
-                    self.0.line_damaged = true;
-                    self.0.discontinuous = true;
-                    return Ok(());
-                }
+            match self.0.reader.read(&mut self.0.buffer) {
+                Ok(0) => break,
                 Ok(count) => {
-                    self.0.position += u64::try_from(count).map_err(io::Error::other)?;
+                    bytes += u64::try_from(count).map_err(io::Error::other)?;
                     for index in 0..count {
                         let byte = self.0.buffer[index];
                         if self.0.tail.len() == TAIL_BYTES_MAX {
@@ -120,13 +112,12 @@ impl Output {
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error),
             }
         }
-
-        Err(io::Error::other(
-            "Collector diagnostic read retry bound exhausted",
-        ))
+        self.0.peak_bytes = self.0.peak_bytes.max(bytes);
+        Ok(())
     }
 
     /// Whole lines in order, or none when a discontinuity invalidated the entire batch.
@@ -177,33 +168,6 @@ impl Storage {
         self.line_damaged = false;
         assert!(self.lines.len() <= LINES_MAX);
     }
-}
-
-fn create_file() -> io::Result<File> {
-    for _attempt in 0..CREATE_ATTEMPTS_MAX {
-        let serial = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("flightdeck-output-{}-{serial}", std::process::id()));
-        let opened = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path);
-        let file = match opened {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        };
-
-        // The child owns an inode, not a pathname requiring cleanup after parent death.
-        std::fs::remove_file(path)?;
-        return Ok(file);
-    }
-
-    Err(io::Error::other(
-        "Collector diagnostic file creation bound exhausted",
-    ))
 }
 
 #[cfg(test)]

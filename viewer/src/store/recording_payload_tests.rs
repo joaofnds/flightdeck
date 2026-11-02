@@ -1619,6 +1619,10 @@ fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();
     let captures = AtomicU64::new(0);
+    let trace = persistence::work::ingestion::Trace::new(
+        collector::recording::read_identity(&fixture.root).unwrap(),
+    );
+    let scope = trace.enter();
 
     let result = super::load_minute(
         &fixture.root,
@@ -1642,6 +1646,17 @@ fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
     assert_eq!(captures.load(Ordering::Relaxed), 1);
     assert!(replay_decoder.predecessor.is_none());
     assert_eq!(budget.used(), 0);
+    drop(scope);
+    let mut work = Vec::new();
+    trace.snapshot(&mut work).unwrap();
+    assert!(!work.iter().any(|event| {
+        event.table == Some("events")
+            && matches!(
+                event.kind,
+                persistence::work::ingestion::Kind::NativeCollect
+                    | persistence::work::ingestion::Kind::ProjectionDecode
+            )
+    }));
 }
 
 #[test]

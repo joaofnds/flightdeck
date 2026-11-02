@@ -42,25 +42,30 @@ mod tests {
     );
 
     #[test]
-    fn retains_unsealed_loss_after_a_producer_dies_during_overwrite() {
-        // Goal: loss without a readable successor never gets a durability receipt.
-        // Method: recover a frozen interrupted overwrite twice, then seal a healthy run.
+    fn preserves_loss_without_fabricated_readings_after_an_interrupted_overwrite() {
+        // Goal: loss with no readable successor remains canonical across worker restarts.
+        // Method: query the terminal loss-only object twice, then seal a healthy new run.
         let mut recording = RecordingHarness::start();
         recording.leave_a_faulty_old_source(SourceFault::InterruptedOverwrite);
 
         recording.restart_worker();
         recording.wait_for_worker_exit();
-        recording.assert_old_source_unretired();
+        let before = recording.old_loss_only_recovery();
+        assert_eq!(before.losses.publications, 2);
+        assert_eq!(before.losses.events, 0);
+        assert!(!before.losses.unknown);
+        assert_eq!(before.events_first, 1);
+        assert_eq!(before.events_end, 1);
         recording.restart_worker();
         recording.wait_for_worker_exit();
-        recording.assert_old_source_unretired();
+        assert_eq!(before, recording.old_loss_only_recovery());
         recording.restart_collection_with_new_window();
         recording.restart_worker();
         recording.wait_for_new_window();
 
-        recording.assert_old_source_unretired();
+        assert_eq!(before, recording.old_loss_only_recovery());
         assert_eq!(recording.processes_at_second(2_000), vec![(41, 101)]);
-        assert!(recording.new_window_prior_loss_unknown());
+        assert!(!recording.new_window_prior_loss_unknown());
     }
 
     #[test]

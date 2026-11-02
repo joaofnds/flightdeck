@@ -11,28 +11,67 @@ use crate::schema::{
 };
 use crate::{Error, Result};
 
-/// The most columns a process or event source has once every optional extension is in it.
-pub(crate) const COLUMNS_MAX: usize = 32;
+mod event_frame;
+pub(crate) use event_frame::event_validation_frame;
+
+/// Event provenance cannot widen the existing process-table admission bound.
+pub(crate) const COLUMNS_MAX: usize = model::catalog::PROCESSES.column_count();
 
 pub(crate) fn normalize(connection: &Engine, table: Table, source: &str) -> Result<String> {
     let schema = connection.schema(source)?;
-    if schema.len() > COLUMNS_MAX {
+    let present = validate_fields(table, || {
+        schema
+            .iter()
+            .map(|(name, kind)| (name.as_str(), kind.clone()))
+    })?;
+    if !present {
+        if matches!(table, Table::Events) {
+            normalize_validate_events(connection, source, false)?;
+        }
+        return Ok(normalize_legacy_source(table, source));
+    }
+
+    normalize_validate(connection, table, source)?;
+    Ok(source.to_owned())
+}
+
+pub(crate) fn validate_fields<'a, Columns: Iterator<Item = (&'a str, DataType)>>(
+    table: Table,
+    columns: impl Fn() -> Columns,
+) -> Result<bool> {
+    let count = columns().count();
+    let columns_max = if matches!(table, Table::Events) {
+        let extended = crate::event_observation::extended_fields(columns())?;
+        model::catalog::EVENTS.column_count()
+            - if extended {
+                0
+            } else {
+                crate::event_observation::EVENT_OBSERVATION_FIELDS.len()
+            }
+    } else {
+        COLUMNS_MAX
+    };
+    if count > columns_max {
         return Err(Error::Bound("table column count"));
     }
 
+    if matches!(table, Table::Events) {
+        validate_fields_events(&columns)?;
+    }
+
     let mut fields = [false; IDENTITY_FIELDS.len()];
-    for (name, data_type) in schema.iter() {
+    for (name, data_type) in columns() {
         if name.len() > 128 {
             return Err(Error::Bound("table column name"));
         }
 
         for (index, (field, kind)) in IDENTITY_FIELDS.iter().enumerate() {
             if name.eq_ignore_ascii_case(field) {
-                if name.as_str() != *field {
+                if name != *field {
                     return Err(Error::Bound("process identity field spelling"));
                 }
 
-                if crate::query::storage_type(data_type)? != *kind {
+                if crate::query::storage_type(&data_type)? != *kind {
                     return Err(Error::Bound("process identity storage type"));
                 }
 
@@ -43,23 +82,40 @@ pub(crate) fn normalize(connection: &Engine, table: Table, source: &str) -> Resu
 
     let present = fields.into_iter().filter(|present| *present).count();
     if present == 0 {
-        if schema.len() + IDENTITY_FIELDS.len() > COLUMNS_MAX {
+        if count + IDENTITY_FIELDS.len() > columns_max {
             return Err(Error::Bound("normalized table column count"));
         }
 
-        return Ok(normalize_legacy_source(table, source));
+        return Ok(false);
     }
 
     if present != IDENTITY_FIELDS.len() {
         return Err(Error::Bound("incomplete process identity extension"));
     }
 
-    normalize_validate(connection, table, source)?;
+    Ok(true)
+}
 
-    Ok(source.to_owned())
+fn validate_fields_events<'a, Columns: Iterator<Item = (&'a str, DataType)>>(
+    columns: &impl Fn() -> Columns,
+) -> Result<()> {
+    for expected in model::catalog::EVENTS.columns {
+        let (_, actual) = columns()
+            .find(|(name, _)| *name == expected.name)
+            .ok_or(Error::Bound("event base field"))?;
+        if crate::query::storage_type(&actual)? != crate::schema::storage_name(expected.kind) {
+            return Err(Error::Bound("event base storage type"));
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_validate(connection: &Engine, table: Table, source: &str) -> Result<()> {
+    if matches!(table, Table::Events) {
+        return normalize_validate_events(connection, source, true);
+    }
+
     let limit =
         u32::try_from(IDENTITY_ROWS_MAX + 1).map_err(|_| Error::Bound("process identity rows"))?;
     let plan = connection
@@ -76,17 +132,71 @@ fn normalize_validate(connection: &Engine, table: Table, source: &str) -> Result
     validate(table, &frame, 0..frame.height())
 }
 
+fn normalize_validate_events(connection: &Engine, source: &str, identities: bool) -> Result<()> {
+    use crate::event_observation::{BATCH_ROWS_MAX, ROWS_MAX};
+    let schema = connection.schema(source)?;
+    let extended = crate::event_observation::extended(schema.as_ref())?;
+    let maximum = if extended {
+        ROWS_MAX
+    } else {
+        usize::try_from(IDENTITY_ROWS_MAX).map_err(|_| Error::Bound("event rows"))?
+    };
+    let projection = if identities {
+        validation_columns_with_event_observation(Table::Events, extended)
+    } else {
+        let mut projection = vec![col("publication")];
+        projection.extend(crate::event_observation::columns(extended));
+        projection
+    };
+    let plan = connection
+        .plan(&format!("SELECT * FROM {source}"))?
+        .select(projection);
+    let mut associated = 0_u64;
+    for offset in (0..=maximum).step_by(BATCH_ROWS_MAX) {
+        let length = (maximum - offset + 1).min(BATCH_ROWS_MAX);
+        let frame = connection.collect(plan.clone().slice(
+            i64::try_from(offset).map_err(|_| Error::Bound("event row offset"))?,
+            u32::try_from(length).map_err(|_| Error::Bound("event batch rows"))?,
+        ))?;
+        if offset + frame.height() > maximum {
+            return Err(Error::Bound("event rows"));
+        }
+        if identities {
+            validate(Table::Events, &frame, 0..frame.height())?;
+        } else {
+            crate::event_observation::validate(&frame, 0..frame.height())?;
+        }
+        let publication = if identities {
+            "event_publication"
+        } else {
+            "publication"
+        };
+        associated +=
+            collector::u64_from_usize(frame.height() - frame.column(publication)?.null_count());
+        if associated > IDENTITY_ROWS_MAX {
+            return Err(Error::Bound("associated event rows"));
+        }
+        if frame.height() < length {
+            return Ok(());
+        }
+    }
+    Err(Error::Bound("event rows"))
+}
+
 /// The columns `validate` reads of a process or event table that holds the identity fields,
 /// each by the name `validate` reads it under.
 #[must_use]
 pub fn validation_columns(table: Table) -> Vec<Expr> {
+    validation_columns_with_event_observation(table, false)
+}
+
+/// Projects every identity constraint plus explicit event provenance where it is present.
+/// Legacy event projections remain strictly associated; callers must inspect the full group.
+#[must_use]
+pub fn validation_columns_with_event_observation(table: Table, extended: bool) -> Vec<Expr> {
     assert!(matches!(table, Table::Processes | Table::Events));
 
-    let payload: Vec<_> = table
-        .columns()
-        .skip_while(|field| *field != "awake_ns_at_start")
-        .collect();
-    assert!(!payload.is_empty());
+    let payload = validation_payload(table);
     let present = payload
         .iter()
         .fold(lit(true), |all, field| all.and(col(*field).is_not_null()));
@@ -98,7 +208,7 @@ pub fn validation_columns(table: Table) -> Vec<Expr> {
         _ => "usage_availability",
     };
 
-    vec![
+    let mut columns = vec![
         col("identity_version"),
         col("identity_availability"),
         col("process_unique_id"),
@@ -111,17 +221,38 @@ pub fn validation_columns(table: Table) -> Vec<Expr> {
         col(availability)
             .cast(DataType::UInt8)
             .alias("source_usage_availability"),
-        col("publication")
+        col("pid")
             .is_not_null()
-            .and(col("pid").is_not_null())
+            .and(if matches!(table, Table::Events) {
+                lit(true)
+            } else {
+                col("publication").is_not_null()
+            })
             .alias("observation_present"),
-    ]
+    ];
+    if matches!(table, Table::Events) {
+        columns.push(col("publication").alias("event_publication"));
+        columns.extend(crate::event_observation::columns(extended));
+    }
+    columns
+}
+
+fn validation_payload(table: Table) -> Vec<&'static str> {
+    let fields: Vec<_> = table
+        .columns()
+        .skip_while(|field| *field != "awake_ns_at_start")
+        .collect();
+    assert!(!fields.is_empty());
+    fields
 }
 
 /// Refuses the rows `rows` of `frame`, rows of `table` with the columns `validation_columns`
 /// names, unless each holds an identity and a usage as format 1 writes them.
 pub fn validate(table: Table, frame: &DataFrame, rows: Range<usize>) -> Result<()> {
     assert!(rows.end <= frame.height());
+    if matches!(table, Table::Events) {
+        crate::event_observation::validate_named(frame, rows.clone(), "event_publication")?;
+    }
 
     let columns = ValidationColumns::new(frame)?;
     for row in rows {

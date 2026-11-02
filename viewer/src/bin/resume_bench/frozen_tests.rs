@@ -724,6 +724,7 @@ fn seal(root: &std::path::Path, window: &Window) {
         .commit(
             pending,
             Manifest {
+                event_batches: None,
                 identity: window.identity,
                 publication_first: publications.start,
                 publication_end: publications.end,

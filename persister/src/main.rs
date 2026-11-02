@@ -20,8 +20,8 @@ fn run() -> i32 {
         umask(0o077);
     }
     // At logout and shutdown macOS terminates every process, this one too, while it seals the
-    // minute its collector left. It exits once that collector is gone, and the collector kills
-    // it after two minutes, so it never needs the signal to stop.
+    // minute its collector left. The recorder stops acquisition first; this worker exits
+    // after committing the remaining tail, so it never needs the signal to stop.
     if unsafe { signal(SIGTERM, SIG_IGN) } == SIG_ERR {
         collector::diagnostics::error(format_args!(
             "persister startup: {}",
@@ -32,25 +32,57 @@ fn run() -> i32 {
     let options = collector::arguments("persister").and_then(|words| options(&words));
     let derive = persistence::sealed_apps::SealedApps::default();
     match options {
-        Ok((root, memory)) => match persistence::worker::run(&root, memory, &derive) {
-            Ok(persistence::worker::Outcome::Complete) => 0,
-            Ok(persistence::worker::Outcome::Owned) => {
-                collector::diagnostics::error(format_args!(
-                    "recording owned by surviving persister; CPU not measured"
-                ));
-                i32::from(collector::recording::child::OWNERSHIP_EXIT_STATUS)
+        Ok((root, memory, authority)) => {
+            match persistence::worker::run_managed(&root, memory, &derive, authority) {
+                Ok(persistence::worker::Outcome::Complete) => 0,
+                Ok(persistence::worker::Outcome::Owned) => {
+                    collector::diagnostics::error(format_args!(
+                        "recording owned by surviving persister; CPU not measured"
+                    ));
+                    i32::from(collector::recording::child::OWNERSHIP_EXIT_STATUS)
+                }
+                Err(error) => {
+                    collector::diagnostics::error(format_args!(
+                        "persister failed; unsealed history is at risk: {error}"
+                    ));
+                    failure_status(&error)
+                }
             }
-            Err(error) => {
-                collector::diagnostics::error(format_args!(
-                    "persister failed; unsealed history is at risk: {error}"
-                ));
-                1
-            }
-        },
+        }
         Err(error) => {
             collector::diagnostics::error(format_args!("{error}"));
             2
         }
+    }
+}
+
+fn failure_status(error: &persistence::Error) -> i32 {
+    match error {
+        persistence::Error::Io(error) if error.kind() == std::io::ErrorKind::OutOfMemory => 74,
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn memory_reservation_failure_reports_the_watchdog_resource_exit() {
+        // Goal: reservation refusal has the same controller meaning as native pressure.
+        // Method: use the production exit mapping for memory, ordinary I/O and format failures.
+        assert_eq!(
+            super::failure_status(&std::io::Error::from(std::io::ErrorKind::OutOfMemory).into()),
+            74
+        );
+        assert_eq!(
+            super::failure_status(
+                &std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()
+            ),
+            1
+        );
+        assert_eq!(
+            super::failure_status(&persistence::Error::Bound("input")),
+            1
+        );
     }
 }
 
@@ -63,18 +95,22 @@ unsafe extern "C" {
     fn umask(mask: u16) -> u16;
 }
 
-fn options(words: &[String]) -> Result<(PathBuf, u64), String> {
+fn options(words: &[String]) -> Result<(PathBuf, u64, Option<collector::ring::Identity>), String> {
     let usage = || "usage: persister --recording PATH [--memory-bytes N]".to_owned();
     let mut root = None;
+    let mut authority = None;
     let mut memory = persistence::worker::default_memory_limit();
     for pair in words.chunks(2) {
         match pair {
             [flag, value] if flag == "--recording" => root = Some(PathBuf::from(value)),
+            [flag, value] if flag == "--recorder-authority" => {
+                authority = Some(collector::recording::parse_identity(value).map_err(|_| usage())?);
+            }
             [flag, value] if flag == "--memory-bytes" => {
                 memory = value.parse().map_err(|_| usage())?;
             }
             _ => return Err(usage()),
         }
     }
-    Ok((root.ok_or_else(usage)?, memory))
+    Ok((root.ok_or_else(usage)?, memory, authority))
 }

@@ -59,6 +59,7 @@ pub struct Window {
     pub(crate) ticks: Vec<StagedTick>,
     bytes: u64,
     pub(crate) programs: Option<Box<Programs>>,
+    pub(crate) event_index: Option<crate::event_table::index::Index>,
 }
 
 pub(crate) struct StagedTick {
@@ -101,6 +102,7 @@ pub(crate) struct IdentityRows {
     pub events: Vec<OwnedIdentity>,
 }
 
+#[derive(Clone)]
 pub(crate) struct EventRecord {
     pub number: u64,
     pub tick: u64,
@@ -256,6 +258,7 @@ impl Window {
                 size_of::<Self>() + WINDOW_TICKS_MAX * size_of::<StagedTick>(),
             ),
             programs: None,
+            event_index: None,
         }
     }
 
@@ -299,6 +302,9 @@ impl Window {
 
     #[must_use]
     pub fn event_range(&self) -> std::ops::Range<u64> {
+        if let Some(index) = &self.event_index {
+            return index.first..index.end;
+        }
         match (self.ticks.first(), self.ticks.last()) {
             (Some(first), Some(last)) => first.events_first..last.events_end,
             _ => 0..0,
@@ -547,7 +553,7 @@ fn staging_bytes(tick: &Tick, event_count: usize) -> u64 {
 }
 
 impl EventRecord {
-    fn copy(source: &NumberedEvent<'_>) -> Self {
+    pub(crate) fn copy(source: &NumberedEvent<'_>) -> Self {
         use crate::schema::{availability, event_kind, noticed};
         let (pid, kind, coalition, usage, availability, noticed) = match source.event {
             Event::Start { pid, coalition } => (

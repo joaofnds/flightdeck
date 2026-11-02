@@ -28,6 +28,7 @@ static REPORTER: Reporter = Reporter::new();
 pub enum Role {
     Collector,
     Persister,
+    Recorder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +107,7 @@ pub fn install(role: Role) {
         match role {
             Role::Collector => 0,
             Role::Persister => 1,
+            Role::Recorder => 2,
         },
         Ordering::Relaxed,
     );

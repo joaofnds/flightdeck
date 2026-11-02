@@ -12,7 +12,7 @@ use crate::live_projection::fixed_text;
 use crate::live_views::summary::Card;
 use crate::self_reports::{MinuteReport, SelfReports, TickReport};
 
-/// The recording's CPU budget, collector and persister together, in percent of one core.
+/// The recorder, collector and persister CPU budget together, in percent of one core.
 pub const BUDGET_PERCENT: f32 = 5.0;
 pub const CHARTS_COUNT: usize = 6;
 
@@ -24,6 +24,7 @@ enum Group {
 
 #[derive(Clone, Copy)]
 enum Field {
+    MinuteRecorder,
     MinuteCollector,
     MinutePersister,
     MinuteCombined,
@@ -32,6 +33,13 @@ enum Field {
     LateMaximum,
     Footprint,
     FootprintMaximum,
+    RecorderFootprint,
+    RecorderFootprintMaximum,
+    CollectorFootprint,
+    CollectorFootprintMaximum,
+    CollectorSampledFootprintMaximum,
+    PersisterSampledFootprintMaximum,
+    AcquisitionFootprint,
     Observed,
     Refused,
     Gone,
@@ -61,13 +69,14 @@ const DEFINITIONS: [Definition; CHARTS_COUNT] = [
         digits: 2,
         group: Group::Minutes,
         fields: &[
+            (Field::MinuteRecorder, "Recorder", YELLOW),
             (Field::MinuteCollector, "Collector", BLUE),
             (Field::MinutePersister, "Persister", PURPLE),
             (Field::MinuteCombined, "Combined", ORANGE),
         ],
         budget: true,
-        caption: "Completed one-minute intervals · 100% is one CPU core. The 5% budget covers \
-                  collector + persister, excluding the viewer.",
+        caption: "Completed awake-minute intervals · 100% is one CPU core. The 5% budget covers \
+                  recorder + collector + persister, excluding the viewer.",
     },
     Definition {
         id: "self-collector",
@@ -98,18 +107,22 @@ const DEFINITIONS: [Definition; CHARTS_COUNT] = [
     },
     Definition {
         id: "self-footprint",
-        title: "Persister memory footprint",
+        title: "Recording memory footprint",
         unit: "MiB",
         maximum: None,
         digits: 2,
         group: Group::Minutes,
         fields: &[
-            (Field::Footprint, "Current footprint", PURPLE),
-            (Field::FootprintMaximum, "Lifetime maximum", TEXT),
+            (Field::RecorderFootprint, "Recorder", YELLOW),
+            (Field::CollectorFootprint, "Collector", BLUE),
+            (Field::AcquisitionFootprint, "Recorder + collector", ORANGE),
+            (Field::Footprint, "Persister", PURPLE),
+            (Field::FootprintMaximum, "Persister lifetime maximum", TEXT),
         ],
         budget: false,
-        caption: "Minute observations of process footprint, not RSS or DuckDB buffer usage. \
-                  Native hard working-memory limit: 2 GiB.",
+        caption: "Native process memory charges. Limits: recorder + collector 256 MiB; \
+                  persister 256 MiB. Shared mappings can be charged to more than one process. \
+                  Sampled maxima are lower bounds when a final lifetime maximum is unavailable.",
     },
     Definition {
         id: "self-processes",
@@ -144,10 +157,9 @@ const DEFINITIONS: [Definition; CHARTS_COUNT] = [
     },
 ];
 
-pub const HELP: &str = "Reports the collector this app started writes of its own cost: every \
-    ten seconds, every minute with the persister's, and for every window it seals. Ten-second \
-    reports, one-minute CPU and memory observations and completed seals have different scopes. \
-    Uncaptured signals remain unavailable.";
+pub const HELP: &str = "Shows recording costs received by this app. Collector reports cover ten \
+    ticks; recorder reports cover awake-minute CPU intervals and worker memory observations. \
+    Completed seals report their own work. Uncaptured signals remain unavailable.";
 
 /// One chart of the Self page with the readings its legend shows for the inspected report.
 pub struct Chart {
@@ -191,7 +203,10 @@ pub fn cards(reports: &SelfReports) -> Vec<Card> {
         |minute| {
             card(
                 "Recording CPU",
-                format!("{}%", fixed_text(minute.combined_percent, 2)),
+                minute.combined_percent.map_or_else(
+                    || "Unavailable".into(),
+                    |percent| format!("{}%", fixed_text(percent, 2)),
+                ),
                 "Last complete minute · 5% of one core budget".into(),
             )
         },
@@ -471,11 +486,27 @@ fn tick_value(field: Field, tick: &TickReport) -> Option<f32> {
 
 fn minute_value(field: Field, minute: &MinuteReport) -> Option<f32> {
     match field {
-        Field::MinuteCollector => share(minute.collector_cpu_ns, minute.elapsed_ns),
-        Field::MinutePersister => share(minute.persister_cpu_ns, minute.elapsed_ns),
-        Field::MinuteCombined => Some(minute.combined_percent),
+        Field::MinuteRecorder => share(minute.recorder_cpu_ns?, minute.elapsed_ns),
+        Field::MinuteCollector if minute.collector_cpu_complete => {
+            share(minute.collector_cpu_ns, minute.elapsed_ns)
+        }
+        Field::MinutePersister if minute.persister_cpu_complete => {
+            share(minute.persister_cpu_ns, minute.elapsed_ns)
+        }
+        Field::MinuteCombined => minute.combined_percent,
         Field::Footprint => mebibytes(minute.footprint_bytes?),
         Field::FootprintMaximum => mebibytes(minute.footprint_bytes_max?),
+        Field::RecorderFootprint => mebibytes(minute.recorder_footprint_bytes?),
+        Field::RecorderFootprintMaximum => mebibytes(minute.recorder_footprint_bytes_max?),
+        Field::CollectorFootprint => mebibytes(minute.collector_footprint_bytes?),
+        Field::CollectorFootprintMaximum => mebibytes(minute.collector_footprint_bytes_max?),
+        Field::CollectorSampledFootprintMaximum => {
+            mebibytes(minute.collector_sampled_footprint_bytes_max?)
+        }
+        Field::PersisterSampledFootprintMaximum => {
+            mebibytes(minute.persister_sampled_footprint_bytes_max?)
+        }
+        Field::AcquisitionFootprint => mebibytes(minute.acquisition_footprint_bytes?),
         _ => None,
     }
 }
@@ -583,13 +614,21 @@ pub fn report_rows(reports: &SelfReports) -> Vec<Vec<String>> {
         .collect()
 }
 
-pub const MINUTE_HEADINGS: [&str; 6] = [
+pub const MINUTE_HEADINGS: [&str; 14] = [
     "Minute ends",
+    "Recorder CPU",
     "Collector CPU",
     "Persister CPU",
     "Combined CPU",
-    "Current footprint",
-    "Lifetime maximum",
+    "Recorder footprint",
+    "Recorder lifetime maximum",
+    "Collector footprint",
+    "Collector lifetime maximum",
+    "Recorder + collector footprint",
+    "Persister footprint",
+    "Persister lifetime maximum",
+    "Collector sampled maximum",
+    "Persister sampled maximum",
 ];
 
 #[must_use]
@@ -601,11 +640,19 @@ pub fn minute_rows(reports: &SelfReports) -> Vec<Vec<String>> {
             let percent = |field| minute_value(field, minute).map(f64::from);
             vec![
                 row_end(reports, minute.second),
+                value(percent(Field::MinuteRecorder), "%", 3),
                 value(percent(Field::MinuteCollector), "%", 3),
                 value(percent(Field::MinutePersister), "%", 3),
                 value(percent(Field::MinuteCombined), "%", 3),
+                value(percent(Field::RecorderFootprint), " MiB", 2),
+                value(percent(Field::RecorderFootprintMaximum), " MiB", 2),
+                value(percent(Field::CollectorFootprint), " MiB", 2),
+                value(percent(Field::CollectorFootprintMaximum), " MiB", 2),
+                value(percent(Field::AcquisitionFootprint), " MiB", 2),
                 value(percent(Field::Footprint), " MiB", 2),
                 value(percent(Field::FootprintMaximum), " MiB", 2),
+                value(percent(Field::CollectorSampledFootprintMaximum), " MiB", 2),
+                value(percent(Field::PersisterSampledFootprintMaximum), " MiB", 2),
             ]
         })
         .collect()

@@ -9,6 +9,7 @@ use super::policy::{Build, Observation, RecordingStatus, Source};
 pub(super) struct Health(Box<Storage>);
 
 struct Storage {
+    recorder: Option<super::recorder::Recorder>,
     registry: Box<[u8; 4097]>,
     readers: [Option<Box<Reader>>; READERS_MAX],
 }
@@ -25,12 +26,25 @@ const _: () = assert!(size_of::<Health>() <= 16);
 impl Health {
     pub fn new() -> Self {
         Self(Box::new(Storage {
+            recorder: None,
             registry: Box::new([0; 4097]),
             readers: [None, None],
         }))
     }
 
     pub fn read(&mut self, root: &Path, owned_pid: Option<u32>) -> io::Result<Source> {
+        self.0.recorder = None;
+        if let Some(recorder) = super::recorder::Recorder::read(root)? {
+            let source = recorder.source()?;
+            self.0.recorder = Some(recorder);
+            self.0.readers = [None, None];
+            return Ok(source);
+        }
+
+        self.read_legacy(root, owned_pid)
+    }
+
+    fn read_legacy(&mut self, root: &Path, owned_pid: Option<u32>) -> io::Result<Source> {
         let recording = match read_identity(root) {
             Ok(identity) => identity,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -100,7 +114,15 @@ impl Health {
     }
 
     pub fn clear(&mut self) {
+        self.0.recorder = None;
         self.0.readers = [None, None];
+    }
+
+    pub fn notice(&self) -> Option<String> {
+        self.0
+            .recorder
+            .as_ref()
+            .map(super::recorder::Recorder::notice)
     }
 }
 
@@ -173,7 +195,8 @@ fn read_observation(reader: &Reader, pid: u32) -> io::Result<Option<Observation>
     Ok(Some(Observation {
         pid,
         run: identity_text(reader.identity.run).to_string(),
-        boot: identity_text(reader.identity.boot).to_string(),
+        boot: Some(identity_text(reader.identity.boot).to_string()),
+        authority: None,
         publication,
     }))
 }

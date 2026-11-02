@@ -1,6 +1,6 @@
-//! The collector's own reports of what collecting costs, read from the output of the collector
-//! this app started. The collector writes a report every ten ticks, one every minute with the
-//! persister's cost, and the persister writes a line for every window it seals.
+//! Recording costs received over the bounded diagnostic transport owned by this app.
+//! The collector reports ten-tick costs; the recorder reports awake-minute worker costs;
+//! the persister reports each completed seal. Missing delivery remains explicit.
 
 use std::collections::VecDeque;
 
@@ -47,14 +47,26 @@ pub struct TickReport {
     pub event_drops: u64,
 }
 
-/// One minute of the recording's cost, the collector's and the persister's together.
+/// One minute of recording cost, including the controller when its report supplies it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MinuteReport {
     pub second: u64,
     pub elapsed_ns: u64,
+    pub recorder_cpu_ns: Option<u64>,
+    /// Measured portions remain recorded when an interval lacks a worker's final sample.
     pub collector_cpu_ns: u64,
     pub persister_cpu_ns: u64,
-    pub combined_percent: f32,
+    pub collector_cpu_complete: bool,
+    pub persister_cpu_complete: bool,
+    pub combined_percent: Option<f32>,
+    pub recorder_footprint_bytes: Option<u64>,
+    pub recorder_footprint_bytes_max: Option<u64>,
+    pub collector_footprint_bytes: Option<u64>,
+    pub collector_footprint_bytes_max: Option<u64>,
+    /// Observed lower bounds, retained separately when final lifetime peaks are unavailable.
+    pub collector_sampled_footprint_bytes_max: Option<u64>,
+    pub persister_sampled_footprint_bytes_max: Option<u64>,
+    pub acquisition_footprint_bytes: Option<u64>,
     /// The persister's physical footprint now and at most over its life.
     pub footprint_bytes: Option<u64>,
     pub footprint_bytes_max: Option<u64>,
@@ -86,6 +98,7 @@ pub struct SelfReports {
     /// Every seal of the run, including those past the bound of `seals`.
     pub seal_totals: SealTotals,
     pending: Pending,
+    pending_recorder: Option<MinuteReport>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -113,6 +126,7 @@ impl SelfReports {
     /// Consumes one bounded output batch; a missing batch reports a delivery discontinuity.
     pub fn output(&mut self, lines: Option<VecDeque<String>>, stream: OutputStream, second: u64) {
         let Some(lines) = lines else {
+            self.pending_recorder = None;
             if matches!(stream, OutputStream::Stdout) {
                 self.pending = Pending::None;
             }
@@ -123,7 +137,7 @@ impl SelfReports {
         for line in lines {
             match stream {
                 OutputStream::Stdout => self.standard(&line, second),
-                OutputStream::Stderr => self.diagnostic(&line),
+                OutputStream::Stderr => self.diagnostic_at(&line, second),
             }
         }
     }
@@ -140,6 +154,10 @@ impl SelfReports {
     /// Reads one line of the collector's standard output.
     pub fn standard(&mut self, line: &str, second: u64) {
         if self.loss(line) {
+            return;
+        }
+        if line.starts_with("recording ") && field::<u64>(line, "recorder_cpu_ns=").is_some() {
+            self.diagnostic_at(line, second);
             return;
         }
         if let Some(rest) = line.strip_prefix("ticks ") {
@@ -214,6 +232,34 @@ impl SelfReports {
         }
     }
 
+    fn diagnostic_at(&mut self, line: &str, second: u64) {
+        if let Some(rest) = line.strip_prefix("recording minute ") {
+            self.pending_recorder = minute(rest, second);
+        } else if let Some(rest) = line.strip_prefix("recording cumulative ") {
+            if let Some(mut report) = self.pending_recorder.take() {
+                report.recorder_footprint_bytes = field(rest, "recorder_footprint_bytes=");
+                report.recorder_footprint_bytes_max = field(rest, "recorder_footprint_bytes_max=");
+                report.collector_footprint_bytes = field(rest, "collector_footprint_bytes=");
+                report.collector_footprint_bytes_max =
+                    field(rest, "collector_footprint_bytes_max=");
+                report.collector_sampled_footprint_bytes_max =
+                    field(rest, "collector_sampled_footprint_bytes_max=");
+                report.persister_sampled_footprint_bytes_max =
+                    field(rest, "persister_sampled_footprint_bytes_max=");
+                report.acquisition_footprint_bytes = field(rest, "acquisition_footprint_bytes=");
+                report.footprint_bytes = field(rest, "current_footprint_bytes=");
+                report.footprint_bytes_max = field(rest, "lifetime_footprint_bytes_max=");
+                push(&mut self.minutes, report, MINUTE_REPORTS_MAX);
+                self.revision = self.revision.wrapping_add(1);
+            }
+        } else {
+            if line.starts_with("recording tail ") || loss_summary(line).is_some() {
+                self.pending_recorder = None;
+            }
+            self.diagnostic(line);
+        }
+    }
+
     fn loss(&mut self, line: &str) -> bool {
         let Some(affects_standard) = loss_summary(line) else {
             return false;
@@ -221,6 +267,7 @@ impl SelfReports {
 
         if affects_standard {
             self.pending = Pending::None;
+            self.pending_recorder = None;
         }
         self.mark_incomplete();
         true
@@ -255,7 +302,7 @@ fn loss_summary(line: &str) -> Option<bool> {
     let (role, rest) = line
         .strip_prefix("diagnostic loss role=")?
         .split_once(' ')?;
-    if !matches!(role, "collector" | "persister") {
+    if !matches!(role, "collector" | "persister" | "recorder") {
         return None;
     }
     let (stream, counts) = rest.strip_prefix("stream=")?.split_once(' ')?;
@@ -365,15 +412,41 @@ fn processes(text: &str, report: &mut TickReport) -> Option<()> {
 
 /// `elapsed_ns=60015526708 collector_cpu_ns=… persister_cpu_ns=… combined_percent=3.227186`.
 fn minute(text: &str, second: u64) -> Option<MinuteReport> {
+    let combined_percent = field(text, "combined_percent=");
+    let collector_cpu_complete =
+        minute_complete(text, "collector_cpu_complete=", combined_percent.is_some());
+    let persister_cpu_complete =
+        minute_complete(text, "persister_cpu_complete=", combined_percent.is_some());
     Some(MinuteReport {
         second,
         elapsed_ns: field(text, "elapsed_ns=")?,
+        recorder_cpu_ns: field(text, "recorder_cpu_ns="),
         collector_cpu_ns: field(text, "collector_cpu_ns=")?,
         persister_cpu_ns: field(text, "persister_cpu_ns=")?,
-        combined_percent: field(text, "combined_percent=")?,
+        collector_cpu_complete,
+        persister_cpu_complete,
+        combined_percent: combined_percent
+            .filter(|_| collector_cpu_complete && persister_cpu_complete),
+        recorder_footprint_bytes: None,
+        recorder_footprint_bytes_max: None,
+        collector_footprint_bytes: None,
+        collector_footprint_bytes_max: None,
+        collector_sampled_footprint_bytes_max: None,
+        persister_sampled_footprint_bytes_max: None,
+        acquisition_footprint_bytes: None,
         footprint_bytes: None,
         footprint_bytes_max: None,
     })
+}
+
+/// Older reports certify both worker counts through their measured combined percentage.
+fn minute_complete(text: &str, key: &str, legacy_complete: bool) -> bool {
+    for part in text.split(' ') {
+        if let Some(value) = part.strip_prefix(key) {
+            return value == "true";
+        }
+    }
+    legacy_complete
 }
 
 /// `window=0 publications=1..61 loss=0 events_lost=0 seal_ns=281035875 staged_bytes=91129424`.

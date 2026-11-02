@@ -9,6 +9,7 @@ base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 collector = { path = "../collector" }
 model = { path = "../model" }
 polars = { workspace = true }
+polars-arrow = { workspace = true }
 polars-buffer = { workspace = true }
 polars-arrow-format = { version = "=0.2.1", default-features = false, features = ["ipc"] }
 polars-parquet = { workspace = true }

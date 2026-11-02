@@ -61,6 +61,12 @@ pub(crate) fn release(root: &std::path::Path) {
     std::fs::write(root.join("release"), b"release").unwrap();
 }
 
+pub(crate) fn observation(root: &std::path::Path) -> String {
+    let path = root.join("observation");
+    wait_ready(&path);
+    std::fs::read_to_string(path).unwrap()
+}
+
 fn wait_ready(path: &std::path::Path) {
     for _attempt in 0..400 {
         if path.exists() {
@@ -99,11 +105,19 @@ fn run_helper() {
     });
     std::fs::write(path, b"ready").unwrap();
     // Each wait gives up after ten seconds, with a status naming the step that never came.
-    if !run_helper_wait(|| TERMINATED.load(Ordering::Relaxed)) {
-        std::process::exit(18);
-    }
     if !run_helper_wait(|| release.exists()) {
         std::process::exit(19);
+    }
+    let observed = if TERMINATED.load(Ordering::Relaxed) {
+        "stopping"
+    } else {
+        "running"
+    };
+    let pending = release.with_file_name("observation.pending");
+    std::fs::write(&pending, observed).unwrap();
+    std::fs::rename(pending, release.with_file_name("observation")).unwrap();
+    if !run_helper_wait(|| TERMINATED.load(Ordering::Relaxed)) {
+        std::process::exit(18);
     }
     std::process::exit(0);
 }

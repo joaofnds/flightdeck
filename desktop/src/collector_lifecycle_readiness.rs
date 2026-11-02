@@ -38,9 +38,9 @@ pub(super) fn wait(collector: &mut CollectorSession) -> Result<(), String> {
                 serde_json::json!({"event":"owned_collector_ready",
                 "elapsed_seconds":collector.elapsed().as_secs_f64(),
                 "readiness_elapsed_seconds":started.elapsed().as_secs_f64(),
-                "collector_pid":collector.owned_pid(), "first_publication":first,
+                "recorder_pid":collector.owned_pid(), "first_publication":first,
                 "latest_publication":latest, "observations":observations,
-                "readiness_source":"registered_ring_headers"})
+                "readiness_source":"recorder_health_or_legacy_ring_headers"})
             );
             return Ok(());
         }

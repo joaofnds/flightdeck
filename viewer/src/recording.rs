@@ -4,6 +4,7 @@
 //! same readings.
 
 pub(crate) mod apps;
+mod events;
 mod machine;
 mod minute_ticks;
 pub(crate) mod processes;

@@ -353,6 +353,7 @@ mod tests {
         };
         let tables = Encoder.encode(second, pending.path()).unwrap();
         let manifest = persistence::Manifest {
+            event_batches: None,
             identity: second.identity,
             publication_first: 2,
             publication_end: 3,

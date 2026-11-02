@@ -135,6 +135,7 @@ fn collect(root: &Path, bound: bool) {
         rescan_interval: super::DEFAULT_RESCAN_INTERVAL,
         ring_name: std::env::var(RING).unwrap(),
         recording: Some(root.join("recording")),
+        recorder_authority: None,
         parent_pid: if bound {
             Some(std::env::var(EXPECTED).unwrap().parse().unwrap())
         } else {

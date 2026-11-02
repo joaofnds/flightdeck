@@ -26,7 +26,8 @@ pub enum TableSource<'a> {
 /// Validates optional identity, battery, disk, temperature, system, core clock and GPU time
 /// columns before exposing them to queries.
 /// Legacy process/event sources gain typed unavailable metadata; counters remain unchanged.
-/// Extended sources scan at most 1,048,577 rows, rejecting more than 1,048,576.
+/// Process validation admits at most 1,048,576 rows. Events validate at most 1,966,080
+/// rows in bounded batches; consumers retain at most 1,048,576 associated event rows.
 /// Battery and system tick validation each scan at most 62 rows, rejecting more than 61.
 /// A saved source is validated once while the engine retains its registration, so saved
 /// files must not change after they are first read.
@@ -53,7 +54,8 @@ fn table_source_normalize(connection: &Engine, table: Table, source: &str) -> Re
     }
 
     if matches!(table, Table::Events) {
-        return crate::identity::normalize(connection, table, source);
+        let source = crate::identity::normalize(connection, table, source)?;
+        return crate::event_observation::normalize(connection, &source);
     }
 
     if matches!(table, Table::Ticks) {
@@ -142,8 +144,15 @@ fn visit_names(path: &Path, mut visit: impl FnMut(&str) -> Result<()>) -> Result
 
 fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i32, u64)>> {
     let connection = Engine::new();
+    let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(
+        usize::try_from(crate::resources::WORKING_BYTES_MAX)
+            .map_err(|_| crate::Error::Bound("query memory"))?,
+    ));
     let directory = root.join(&manifest.data_directory);
     let source = |table: Table| {
+        if matches!(table, Table::Events) {
+            return connection.event_source(root, manifest, &budget);
+        }
         table_source(
             &connection,
             table,

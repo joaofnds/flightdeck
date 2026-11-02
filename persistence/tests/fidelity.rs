@@ -851,6 +851,7 @@ mod tests {
                 .commit(
                     pending,
                     Manifest {
+                        event_batches: None,
                         identity,
                         publication_first: 17,
                         publication_end: 19,
@@ -1381,6 +1382,7 @@ mod tests {
             .commit(
                 pending,
                 Manifest {
+                    event_batches: None,
                     identity: window.identity,
                     publication_first: 1,
                     publication_end: 2,

@@ -12,8 +12,11 @@ use crate::layout::{self, Kind, WindowKey};
 use crate::metadata::invalid;
 use crate::{Manifest, WindowIdentity};
 
+mod event_table;
+pub(crate) mod events;
 #[cfg(test)]
 mod tests;
+pub(crate) use events::EventBegin;
 
 pub struct Store {
     root: PathBuf,
@@ -84,6 +87,7 @@ const _: () = {
 
 impl Store {
     pub fn open(root: &Path) -> io::Result<Self> {
+        collector::recording::check_writer(root)?;
         private::create_private_dir(root)?;
         let registration = FileLock::wait_short(&root.join("registration.lock"))?;
         let recording = collector::recording::recording_identity(root)?;
@@ -390,6 +394,10 @@ impl Store {
         private::verify_directory(&path)?;
         Self::validate_files(&path, manifest, true)?;
         for table in &manifest.tables {
+            if table.name == "events" && manifest.event_batches.is_some() {
+                event_table::validate(&path.join("events"), manifest, false)?;
+                continue;
+            }
             private::verify_file(&path.join(format!("{}.parquet", table.name)))?;
         }
         Ok(())
@@ -398,6 +406,10 @@ impl Store {
     fn sync_tables(pending: &Path, manifest: &Manifest) -> io::Result<()> {
         Self::validate_files(pending, manifest, false)?;
         for table in &manifest.tables {
+            if table.name == "events" && manifest.event_batches.is_some() {
+                event_table::sync(&pending.join("events"), manifest)?;
+                continue;
+            }
             let path = pending.join(format!("{}.parquet", table.name));
             private::make_file_private(&path)?;
             private::full_sync(&private::open_private_file(&path, false)?)?;
@@ -425,11 +437,14 @@ impl Store {
                     continue;
                 }
             }
-            if !manifest
-                .tables
-                .iter()
-                .any(|table| name == format!("{}.parquet", table.name))
-            {
+            if name == "events" && manifest.event_batches.is_some() {
+                count += 1;
+                continue;
+            }
+            if !manifest.tables.iter().any(|table| {
+                !(table.name == "events" && manifest.event_batches.is_some())
+                    && name == format!("{}.parquet", table.name)
+            }) {
                 return Err(invalid("unexpected window file"));
             }
             count += 1;
@@ -454,6 +469,10 @@ impl Store {
                 return Ok(());
             };
             let path = entry?.path();
+            if path.file_name().is_some_and(|name| name == "events") {
+                event_table::remove_pending(&path)?;
+                continue;
+            }
             private::verify_file(&path)?;
             files.push(path);
         }
@@ -515,10 +534,20 @@ fn validate_data_directory(manifest: &Manifest) -> io::Result<()> {
 }
 
 pub fn read_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
+    let mut file = private::open_private_file(marker, false)?;
+    read_committed_file(root, marker, &mut file)
+}
+
+/// Reads the caller's opened marker so its identity can be bound across parsing.
+pub(crate) fn read_committed_file(
+    root: &Path,
+    marker: &Path,
+    file: &mut File,
+) -> io::Result<Manifest> {
     private::verify_directory(root)?;
-    let (manifest, file) = read_marker(root, marker)?;
+    let manifest = read_marker_file(root, marker, file)?;
     Store::verify_partition(root, Kind::Commits, &manifest.identity)?;
-    Store::validate_committed(root, &manifest, &file)?;
+    Store::validate_committed(root, &manifest, file)?;
     if collector::recording::read_identity(root)? != manifest.identity.run.recording {
         return Err(invalid("recording identity mismatch"));
     }
@@ -553,12 +582,17 @@ fn read_linked_marker(root: &Path, marker: &Path) -> io::Result<Manifest> {
 
 fn read_marker(root: &Path, marker: &Path) -> io::Result<(Manifest, File)> {
     let mut file = private::open_private_file(marker, false)?;
-    let manifest = Manifest::read(&mut file)?;
+    let manifest = read_marker_file(root, marker, &mut file)?;
+    Ok((manifest, file))
+}
+
+fn read_marker_file(root: &Path, marker: &Path, file: &mut File) -> io::Result<Manifest> {
+    let manifest = Manifest::read(file)?;
     let expected = WindowKey::from(&manifest.identity).marker(root);
     if expected != marker {
         return Err(invalid("noncanonical marker path"));
     }
-    Ok((manifest, file))
+    Ok(manifest)
 }
 
 fn partition_root(root: &Path, kind: Kind, identity: &WindowIdentity) -> PathBuf {

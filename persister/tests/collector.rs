@@ -61,6 +61,10 @@ mod tests {
                 .unwrap();
             copy_executable(built_collector_executable(), &directory.join("collector"));
             copy_executable(
+                &built_collector_executable().with_file_name("recorder"),
+                &directory.join("recorder"),
+            );
+            copy_executable(
                 Path::new(env!("CARGO_BIN_EXE_persister")),
                 &directory.join("persister"),
             );
@@ -81,6 +85,17 @@ mod tests {
 
     impl Drop for TestRing {
         fn drop(&mut self) {
+            if !workers_stopped(&self.recording) {
+                eprintln!(
+                    "Owned fixture retained with live workers: {}",
+                    self.recording.display()
+                );
+                assert!(
+                    std::thread::panicking(),
+                    "owned workers survived fixture cleanup"
+                );
+                return;
+            }
             fs::remove_dir_all(&self.directory).unwrap();
             // The lock file names the ring, as the writer recorded it, so a change to how rings
             // are named cannot leave one behind unseen.
@@ -119,7 +134,18 @@ mod tests {
 
             let built = Command::new(env!("CARGO"))
                 .args(["build", "--locked"])
-                .args(["--package", "collector", "--bin", "collector"])
+                .args([
+                    "--package",
+                    "collector",
+                    "--package",
+                    "persister",
+                    "--bin",
+                    "collector",
+                    "--bin",
+                    "recorder",
+                    "--bin",
+                    "persister",
+                ])
                 .args(["--profile", profile])
                 .arg("--target-dir")
                 .arg(target_directory)
@@ -170,18 +196,26 @@ mod tests {
         child: Option<Child>,
         stdout: PathBuf,
         stderr: PathBuf,
+        recording: PathBuf,
     }
 
     impl RunningCollector {
         fn start(ring: &TestRing) -> Self {
+            Self::start_command(
+                ring,
+                Command::new(ring.collector_executable())
+                    .arg("--ring")
+                    .arg(&ring.name)
+                    .arg("--recording")
+                    .arg(&ring.recording),
+            )
+        }
+
+        fn start_command(ring: &TestRing, command: &mut Command) -> Self {
             let stdout = ring.directory.join("stdout");
             let stderr = ring.directory.join("stderr");
 
-            let child = Command::new(ring.collector_executable())
-                .arg("--ring")
-                .arg(&ring.name)
-                .arg("--recording")
-                .arg(&ring.recording)
+            let child = command
                 .stdout(fs::File::create_new(&stdout).unwrap())
                 .stderr(fs::File::create_new(&stderr).unwrap())
                 .process_group(0)
@@ -192,6 +226,7 @@ mod tests {
                 child: Some(child),
                 stdout,
                 stderr,
+                recording: ring.recording.clone(),
             }
         }
 
@@ -211,7 +246,7 @@ mod tests {
                 .output()
                 .unwrap();
             let children = String::from_utf8(children.stdout).unwrap();
-            assert_eq!(1, children.lines().count(), "{children}");
+            assert_eq!(2, children.lines().count(), "{children}");
 
             for child in children.lines() {
                 assert_eq!(0, unsafe { kill(child.parse().unwrap(), SIGTERM) });
@@ -244,13 +279,41 @@ mod tests {
 
     impl Drop for RunningCollector {
         fn drop(&mut self) {
+            if self.recording.join("recorder.control").exists() {
+                match collector::recording::control::Control::open_writable(&self.recording) {
+                    Ok(control) => control.request_stop().unwrap(),
+                    Err(error) => eprintln!("Owned fixture stop mapping refused: {error}"),
+                }
+            }
+            let stopped = wait_until(Duration::from_secs(30), || {
+                let controller = self
+                    .child
+                    .as_mut()
+                    .is_none_or(|child| child.try_wait().unwrap().is_some());
+                controller && workers_stopped(&self.recording)
+            });
+            if !stopped {
+                eprintln!(
+                    "Owned fixture exceeded bounded stop: {}",
+                    self.recording.display()
+                );
+            }
             if let Some(mut child) = self.child.take() {
                 if child.try_wait().unwrap().is_none() {
                     child.kill().unwrap();
-                    child.wait().unwrap();
+                    assert!(wait_until(Duration::from_secs(10), || child
+                        .try_wait()
+                        .unwrap()
+                        .is_some()));
                 }
             }
         }
+    }
+
+    fn workers_stopped(root: &Path) -> bool {
+        ["collector.lock", "persister.lock"]
+            .iter()
+            .all(|name| !collector::recording::private::FileLock::held(&root.join(name)).unwrap())
     }
 
     fn wait_for_publications(ring: &TestRing) {
@@ -299,11 +362,8 @@ mod tests {
         let run = only_entry(&root.join("commits"));
         let day = only_entry(&run);
         let marker = only_entry(&day);
-        let bytes = fs::read(marker).unwrap();
-        assert_eq!(&bytes[..8], b"FDSEAL01");
-        let first = u64::from_le_bytes(bytes[80..88].try_into().unwrap());
-        let end = u64::from_le_bytes(bytes[88..96].try_into().unwrap());
-        first..end
+        let manifest = persistence::read_committed(root, &marker).unwrap();
+        manifest.publication_first..manifest.publication_end
     }
 
     /// What the test read of one publication.
@@ -316,6 +376,26 @@ mod tests {
     }
 
     /// The line "whole run, ticks F-L: ..., N slips" of the collector's summary `out`.
+    fn assert_stopped(root: &Path) {
+        let control = collector::recording::control::Control::open(root).unwrap();
+        for role in [
+            collector::recording::control::Role::Controller,
+            collector::recording::control::Role::Collector,
+            collector::recording::control::Role::Persister,
+        ] {
+            let health = control.read(role).unwrap();
+            assert_eq!(health.state, collector::recording::control::State::Stopped);
+            assert!(!health.alive().unwrap());
+        }
+        assert!(
+            control
+                .read(collector::recording::control::Role::Persister)
+                .unwrap()
+                .publication
+                > 0
+        );
+    }
+
     fn whole_run(out: &str) -> &str {
         out.lines()
             .find(|line| line.starts_with("whole run, ticks "))
@@ -365,12 +445,14 @@ mod tests {
         // Method: run the collector for two seconds under a ring name of this test's own, then
         // read every publication of the ring it left, in this process.
         let ring = TestRing::new("ticks");
-        let collected = Command::new(ring.collector_executable())
-            .args(["--seconds", "2", "--ring", &ring.name])
-            .arg("--recording")
-            .arg(&ring.recording)
-            .output()
-            .unwrap();
+        let mut collected = RunningCollector::start_command(
+            &ring,
+            Command::new(ring.collector_executable())
+                .args(["--seconds", "2", "--ring", &ring.name])
+                .arg("--recording")
+                .arg(&ring.recording),
+        );
+        let collected = collected.finish();
         let last_tick = last_tick(stdout(&collected));
         let slips = slips(stdout(&collected));
 
@@ -400,7 +482,7 @@ mod tests {
             found.iter().all(|published| published.coalitions > 0),
             "{found:?}"
         );
-        assert!(stdout(&collected).contains("persister_status=0"));
+        assert_stopped(&ring.recording);
         assert_eq!(1..last_tick + 2, committed_range(&ring.recording));
     }
 
@@ -419,14 +501,17 @@ mod tests {
         symlink(ring.collector_executable(), &collector).unwrap();
         symlink("/usr/bin/false", launch.join("persister")).unwrap();
 
-        let output = Command::new(collector)
-            .args(["--seconds", "1", "--ring", &ring.name])
-            .arg("--recording")
-            .arg(&ring.recording)
-            .output()
-            .unwrap();
+        let mut running = RunningCollector::start_command(
+            &ring,
+            Command::new(collector)
+                .args(["--seconds", "1", "--ring", &ring.name])
+                .arg("--recording")
+                .arg(&ring.recording),
+        );
+        let output = running.finish();
 
-        assert!(stdout(&output).contains("persister_status=0"));
+        assert!(output.status.success(), "{output:?}");
+        assert_stopped(&ring.recording);
         let reader = collector::ring::RingReader::open(&ring.place.lock_path).unwrap();
         assert_eq!(
             reader.publication_first()..reader.publication_newest().unwrap() + 1,
@@ -452,7 +537,7 @@ mod tests {
             reader.publication_first()..reader.publication_newest().unwrap() + 1,
             committed_range(&ring.recording)
         );
-        assert!(stdout(&output).contains("persister_status=0"));
+        assert_stopped(&ring.recording);
         assert!(!stdout(&output).contains("persister failed during drain"));
     }
 
@@ -470,7 +555,7 @@ mod tests {
         let output = collector.finish();
 
         assert!(output.status.success(), "{output:?}");
-        assert!(stdout(&output).contains("persister_status=0"), "{output:?}");
+        assert_stopped(&ring.recording);
         assert!(
             !stdout(&output).contains("persister failed during drain"),
             "{output:?}"

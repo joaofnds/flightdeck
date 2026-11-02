@@ -15,7 +15,7 @@ struct ProcessRow<'window> {
 }
 
 struct EventRow<'window> {
-    tick: &'window StagedTick,
+    publication: Option<u64>,
     event: &'window EventRecord,
     identity: Option<&'window OwnedIdentity>,
 }
@@ -140,7 +140,7 @@ pub(crate) fn events_in_file_order(window: &Window) -> Result<DataFrame> {
 
 fn events_frame(window: &Window, rows: &[EventRow<'_>]) -> Result<DataFrame> {
     let mut columns = columns!(rows;
-        "publication" => |row| row.tick.observation.publication,
+        "publication" => |row| row.publication,
         "event" => |row| row.event.number,
         "run_tick" => |row| row.event.tick,
         "pid" => |row| row.event.pid,
@@ -153,12 +153,26 @@ fn events_frame(window: &Window, rows: &[EventRow<'_>]) -> Result<DataFrame> {
     if let Some(programs) = window.programs.as_deref() {
         columns.extend(identity_columns(rows, programs, |row| row.identity));
     }
+    columns.extend(columns!(rows;
+        "event_observation_version" => |_| crate::event_observation::VERSION,
+        "event_observation_availability" => |row| {
+            if row.publication.is_some() {
+                crate::event_observation::ASSOCIATED
+            } else {
+                crate::event_observation::UNAVAILABLE
+            }
+        },
+    ));
 
     Ok(DataFrame::new(rows.len(), columns)?)
 }
 
 fn events_rows(window: &Window) -> Vec<EventRow<'_>> {
-    let count = window.ticks.iter().map(|tick| tick.events.len()).sum();
+    let count = window
+        .ticks
+        .iter()
+        .map(|tick| tick.events.len())
+        .sum::<usize>();
     let mut rows = Vec::with_capacity(count);
     for tick in &window.ticks {
         if let Some(identities) = &tick.identities {
@@ -168,7 +182,7 @@ fn events_rows(window: &Window) -> Vec<EventRow<'_>> {
                 assert_eq!(event.pid, identity.pid);
                 assert_eq!(event.availability, identity.usage);
                 rows.push(EventRow {
-                    tick,
+                    publication: Some(tick.observation.publication),
                     event,
                     identity: Some(identity),
                 });
@@ -177,7 +191,7 @@ fn events_rows(window: &Window) -> Vec<EventRow<'_>> {
             assert!(window.programs.is_none());
             for event in &tick.events {
                 rows.push(EventRow {
-                    tick,
+                    publication: Some(tick.observation.publication),
                     event,
                     identity: None,
                 });

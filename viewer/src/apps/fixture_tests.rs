@@ -214,6 +214,7 @@ impl Fixture {
                 .commit(
                     pending,
                     Manifest {
+                        event_batches: None,
                         identity: window.identity,
                         publication_first: 1,
                         publication_end: 3,

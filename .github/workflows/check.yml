@@ -68,6 +68,8 @@ jobs:
       # Captured output grows a buffer the allocation tests count against the collector, so
       # --no-capture writes it to stderr as the collector does in production.
       - run: just test_arguments='--include-ignored --no-capture --skip ::this_mac::' check-root
+      # Full-capacity event fidelity uses the optimized worker and its production deadline.
+      - run: just test-event-capacity
       # A lock file left in Application Support names a ring that stays in memory after its
       # writer exits, about 800 MB of address space, so whatever ran above removes both. It stays
       # out of the justfile, since on a contributor's Mac a running Flightdeck holds its lock

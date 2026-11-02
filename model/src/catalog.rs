@@ -277,8 +277,14 @@ pub const EVENTS: Table = Table {
         column("disk_read_bytes", U64),
         column("disk_written_bytes", U64),
     ],
-    groups: &[&IDENTITY],
+    groups: &[&IDENTITY, &EVENT_OBSERVATION],
 };
+
+/// Whether an event retains its original observation association; both columns travel together.
+pub const EVENT_OBSERVATION: [Column; 2] = [
+    column("event_observation_version", U8),
+    column("event_observation_availability", U8),
+];
 /// The tick columns of the battery's raw readings, beside the version of their encoding.
 pub const BATTERY: [Column; 12] = [
     column("battery_version", U8),

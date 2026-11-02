@@ -56,6 +56,7 @@ pub(crate) struct Prepared {
     slots: Vec<Option<usize>>,
     references: Vec<Option<(ProgramReference, usize)>>,
     bytes: usize,
+    bytes_max: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -186,7 +187,17 @@ impl Prepared {
         source: &IdentitySource<'_>,
         programs: Option<&Programs>,
     ) -> Result<()> {
+        Self::initialize_bounded(output, source, programs, PROGRAM_BYTES_MAX)
+    }
+
+    pub fn initialize_bounded(
+        output: &mut Option<Box<Self>>,
+        source: &IdentitySource<'_>,
+        programs: Option<&Programs>,
+        bytes_max: usize,
+    ) -> Result<()> {
         assert!(output.is_none());
+        assert!(bytes_max <= PROGRAM_BYTES_MAX);
 
         let count = (source.processes.len() + source.events.len()).min(PROGRAMS_MAX);
         let slots = (count.max(1).next_power_of_two() * 2).min(LOOKUP_SLOTS);
@@ -198,6 +209,7 @@ impl Prepared {
             slots: Vec::new(),
             references: Vec::new(),
             bytes: 0,
+            bytes_max,
         }));
 
         prepared.processes = Vec::with_capacity(source.processes.len());
@@ -348,6 +360,9 @@ impl Prepared {
 
         let bytes = programs.map_or(0, |programs| programs.bytes.len());
         let added = name.len() + app.len();
+        if self.bytes + added > self.bytes_max {
+            return Err(Error::Bound("identity batch bytes"));
+        }
         if bytes + self.bytes + added > PROGRAM_BYTES_MAX {
             return Err(Error::Bound("identity program bytes"));
         }
@@ -401,7 +416,7 @@ pub(crate) fn usage_code(value: collector::ring::UsageAvailability) -> u8 {
     }
 }
 
-fn copy_identity_code(value: collector::ring::IdentityAvailability) -> u8 {
+pub(crate) fn copy_identity_code(value: collector::ring::IdentityAvailability) -> u8 {
     use crate::schema::identity_availability;
     use collector::ring::IdentityAvailability;
     match value {
