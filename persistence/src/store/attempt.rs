@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -42,14 +43,14 @@ use crate::transaction::{AttemptInput, AttemptOperation, Predecessor};
 /// }
 /// ```
 pub struct RegisteredAttempt<'store> {
-    transaction: Identity,
-    input: AttemptInput,
-    directory: PrivateDirectory,
-    resumed: bool,
-    _permit: StagingPermit,
-    owner: &'store FileLock,
-    root: &'store PrivateDirectory,
-    placement: super::inventory::OriginalPlacement,
+    pub(super) transaction: Identity,
+    pub(super) input: AttemptInput,
+    pub(super) directory: PrivateDirectory,
+    pub(super) resumed: bool,
+    pub(super) _permit: StagingPermit,
+    pub(super) owner: &'store FileLock,
+    pub(super) root: &'store PrivateDirectory,
+    pub(super) placement: super::inventory::OriginalPlacement,
 }
 
 /// An admitted writable file that retains the registered owner's lifetime.
@@ -97,6 +98,11 @@ impl RegisteredAttempt<'_> {
     }
 
     pub fn create_file(&self, name: &str) -> io::Result<RegisteredFile<'_>> {
+        if name == "metadata" {
+            return Err(unresolved(
+                "metadata requires the typed source/endpoint writer",
+            ));
+        }
         self.validate_file_name(name)?;
         if self.resumed {
             return Err(unresolved(
@@ -199,7 +205,14 @@ impl Store {
         reader: &mut RingReader,
         frontier: crate::canonical::SourceFrontierRead<'_, '_>,
     ) -> io::Result<RegisteredAttempt<'_>> {
-        self.register_attempt_inner(input, Some(reader), &mut [0; 4097], None, Some(frontier))
+        let budget = Arc::clone(frontier.byte_budget());
+        self.register_attempt_inner(
+            input,
+            Some(reader),
+            &mut [0; 4097],
+            Some(&budget),
+            Some(frontier),
+        )
     }
 
     /// Reopens retained authority without requiring a surviving transport. It grants no append.
@@ -244,19 +257,13 @@ impl Store {
         let slot = codec::decode_slot(&scratch[..length], self.recording, SlotKind::Foreground)?;
         let (transaction, resumed) = match slot {
             codec::Slot::Idle => {
-                let reader = reader
-                    .ok_or_else(|| unresolved("new registration requires source evidence"))?;
-                if input.run.recording != self.recording
-                    || reader.identity() != Some(input.run)
-                    || reader.dictionary_capacity().is_some() != input.captured
-                {
-                    return Err(invalid());
-                }
-                self.validate_source_frontier(input, reader, budget, frontier)?;
-                let transaction = collector::recording::random_identity()?;
-                let mut bytes = [0; 4096];
-                input.encode_registered(transaction, &mut bytes)?;
-                private::atomic_write_in(root, "foreground", &bytes)?;
+                let transaction = self.register_attempt_fresh(
+                    input,
+                    reader,
+                    budget,
+                    frontier,
+                    &scratch[..length],
+                )?;
                 (transaction, false)
             }
             codec::Slot::Occupied { .. } => {
@@ -281,7 +288,37 @@ impl Store {
         })
     }
 
-    fn register_attempt_directory(
+    fn register_attempt_fresh(
+        &self,
+        input: &AttemptInput,
+        reader: Option<&mut RingReader>,
+        budget: Option<&Arc<crate::resources::ByteBudget>>,
+        frontier: Option<crate::canonical::SourceFrontierRead<'_, '_>>,
+        old: &[u8],
+    ) -> io::Result<Identity> {
+        let root = &self.directory;
+        let reader =
+            reader.ok_or_else(|| unresolved("new registration requires source evidence"))?;
+        if input.run.recording != self.recording
+            || reader.identity() != Some(input.run)
+            || reader.dictionary_capacity().is_some() != input.captured
+            || crate::transaction::SourceTiming::from_reader(reader) != input.source
+        {
+            return Err(invalid());
+        }
+        self.validate_source_frontier(input, reader, budget, frontier)?;
+        let _control = budget
+            .ok_or_else(invalid)?
+            .reserve(16 * 1024)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let transaction = registered_transaction(root, input, old)?;
+        let mut bytes = [0; 4096];
+        input.encode_registered(transaction, &mut bytes)?;
+        super::publication_control::replace(root, "foreground", old, &bytes, &mut 0)?;
+        Ok(transaction)
+    }
+
+    pub(super) fn register_attempt_directory(
         &self,
         input: &AttemptInput,
         transaction: Identity,
@@ -371,6 +408,7 @@ impl Store {
                 "inherited event rows require registered inventory reconciliation",
             ));
         }
+        validate_terminal_source(input, reader)?;
         let generation = reader.generation();
         let position = reader.next_publication();
         let result = validate_scanning_prefix(input, reader)
@@ -380,15 +418,44 @@ impl Store {
         if reader.generation() != generation || reader.identity() != Some(input.run) {
             return Err(invalid());
         }
-        if let AttemptOperation::Terminal { event_end } = input.operation {
-            if !reader.completed() || reader.event_newest()?.checked_add(1) != Some(event_end) {
-                return Err(unresolved(
-                    "terminal final endpoint requires acquired completion and fixed generation",
-                ));
-            }
-        }
+        validate_terminal_source(input, reader)?;
         Ok(())
     }
+}
+
+pub(super) fn validate_terminal_source(
+    input: &AttemptInput,
+    reader: &RingReader,
+) -> io::Result<()> {
+    let AttemptOperation::Terminal { event_end } = input.operation else {
+        return Ok(());
+    };
+    let generation = reader.generation();
+    // Completion acquire precedes the final header reads, including when a previous
+    // read returned Nothing just before the producer's last publication.
+    if !reader.completed() {
+        return Err(unresolved("terminal source is not complete"));
+    }
+    let publication_end = reader
+        .publication_newest()?
+        .checked_add(1)
+        .ok_or_else(invalid)?;
+    let selected_event_end = reader.event_newest()?.checked_add(1).ok_or_else(invalid)?;
+    if publication_end != input.losses.publication_inherited_end || selected_event_end != event_end
+    {
+        return Err(unresolved(
+            "terminal final publication/event boundary is not owned",
+        ));
+    }
+    if reader.generation() != generation
+        || reader.identity() != Some(input.run)
+        || crate::transaction::SourceTiming::from_reader(reader) != input.source
+        || reader.publication_newest()?.checked_add(1) != Some(publication_end)
+        || reader.event_newest()?.checked_add(1) != Some(selected_event_end)
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn validate_scanning_prefix(input: &AttemptInput, reader: &mut RingReader) -> io::Result<()> {
@@ -471,14 +538,17 @@ fn validate_selected_window(input: &AttemptInput, reader: &mut RingReader) -> io
 }
 
 fn validate_controls(root: &PrivateDirectory, recording: Identity) -> io::Result<()> {
-    match root.open_file("foreground.pending") {
-        Ok(_) => {
-            return Err(unresolved(
-                "interrupted slot publication requires pending-slot reconciliation",
-            ));
+    let mut visible = [0; 4097];
+    let length = read_slot(root, &mut visible)?;
+    if !matches!(
+        codec::decode_slot(&visible[..length], recording, SlotKind::Foreground)?,
+        codec::Slot::Idle
+    ) {
+        match root.open_file("foreground.pending") {
+            Ok(file) => reconcile_registered_scratch(root, recording, file)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
     }
     let mut state_bytes = [0; 256];
     let state = collector::recording::bootstrap::StateObservation::begin(
@@ -530,4 +600,100 @@ impl RegisteredAttempt<'_> {
     pub fn original_placement(&self) -> super::inventory::OriginalPlacement {
         self.placement
     }
+}
+
+fn reconcile_registered_scratch(
+    root: &PrivateDirectory,
+    recording: Identity,
+    mut pending: File,
+) -> io::Result<()> {
+    let mut candidate = [0; 4097];
+    let mut candidate_length = 0;
+    while candidate_length < candidate.len() {
+        let count = pending.read(&mut candidate[candidate_length..])?;
+        if count == 0 {
+            break;
+        }
+        candidate_length += count;
+    }
+    if candidate_length != 4096 {
+        return Err(unresolved(
+            "short slot scratch retains unresolved authority",
+        ));
+    }
+    AttemptInput::decode_registered(&candidate[..candidate_length], recording)?;
+    let mut current = [0; 4097];
+    let length = read_slot(root, &mut current)?;
+    AttemptInput::decode_registered(&current[..length], recording)?;
+    if current[..length] != candidate[..candidate_length] {
+        return Err(unresolved(
+            "slot scratch differs from visible Registered authority",
+        ));
+    }
+    // The visible inode remains authoritative. Restore its durability before discarding a copy.
+    private::full_sync(&root.open_file("foreground")?)?;
+    root.full_sync()?;
+    let retained = pending.metadata()?;
+    let current_name = root.open_file("foreground.pending")?.metadata()?;
+    if retained.dev() != current_name.dev() || retained.ino() != current_name.ino() {
+        return Err(invalid());
+    }
+    root.remove_file("foreground.pending")?;
+    root.full_sync()
+}
+
+fn registered_transaction(
+    root: &PrivateDirectory,
+    input: &AttemptInput,
+    idle: &[u8],
+) -> io::Result<Identity> {
+    let mut pending = match root.open_file("foreground.pending") {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return collector::recording::random_identity();
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = [0; 4097];
+    let length = pending.read(&mut bytes)?;
+    // A short syscall read is not EOF. Bounded fill keeps truncation distinct from read failure.
+    let mut length = length;
+    while length < bytes.len() {
+        let count = pending.read(&mut bytes[length..])?;
+        if count == 0 {
+            break;
+        }
+        length += count;
+    }
+    if length == 4096 {
+        if bytes[..length] == *idle {
+            return collector::recording::random_identity();
+        }
+        let (transaction, candidate) =
+            AttemptInput::decode_registered(&bytes[..length], input.run.recording)?;
+        if candidate != *input {
+            return Err(invalid());
+        }
+        return Ok(transaction);
+    }
+    if length > 4096 {
+        return Err(invalid());
+    }
+    let random = collector::recording::random_identity()?;
+    let mut transaction_bytes = [0; 16];
+    transaction_bytes[..8].copy_from_slice(&random.0[0].to_be_bytes());
+    transaction_bytes[8..].copy_from_slice(&random.0[1].to_be_bytes());
+    if length > 32 {
+        transaction_bytes[..(length - 32).min(16)].copy_from_slice(&bytes[32..length.min(48)]);
+    }
+    let transaction = Identity([
+        u64::from_be_bytes(transaction_bytes[..8].try_into().map_err(|_| invalid())?),
+        u64::from_be_bytes(transaction_bytes[8..].try_into().map_err(|_| invalid())?),
+    ]);
+    let mut expected = [0; 4096];
+    input.encode_registered(transaction, &mut expected)?;
+    if !expected.starts_with(&bytes[..length]) {
+        return Err(invalid());
+    }
+    Ok(transaction)
 }

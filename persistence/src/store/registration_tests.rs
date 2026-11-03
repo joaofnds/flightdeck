@@ -16,29 +16,41 @@ struct Fixture {
     writer: collector::ring::Writer,
     run: RunIdentity,
     transport_removed: bool,
+    source: crate::transaction::SourceTiming,
+    place: collector::ring::Place,
+}
+fn fixture_root(base: &Path, long: bool) -> PathBuf {
+    let mut root = base.join("recording");
+    private::create_private_dir(&root).unwrap();
+    if long {
+        root = root.canonicalize().unwrap();
+        for _ in 0..8 {
+            let remaining = 1023 - root.as_os_str().len();
+            if remaining == 0 {
+                break;
+            }
+            root.push("x".repeat((remaining - 1).min(200)));
+            private::create_private_dir(&root).unwrap();
+        }
+        assert_eq!(root.as_os_str().len(), 1023);
+    }
+    root
 }
 impl Fixture {
     fn new(long: bool) -> Self {
         Self::new_profile(long, false)
     }
     fn new_profile(long: bool, captured: bool) -> Self {
+        Self::new_profile_origin(long, captured, 1)
+    }
+    fn new_profile_origin(long: bool, captured: bool, origin: u64) -> Self {
+        Self::new_source(long, captured, origin, true)
+    }
+    fn new_source(long: bool, captured: bool, origin: u64, initial_publication: bool) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("fd-attempt-{}-{serial}", std::process::id()));
         private::create_private_dir(&base).unwrap();
-        let mut root = base.join("recording");
-        private::create_private_dir(&root).unwrap();
-        if long {
-            root = root.canonicalize().unwrap();
-            for _ in 0..8 {
-                let remaining = 1023 - root.as_os_str().len();
-                if remaining == 0 {
-                    break;
-                }
-                root.push("x".repeat((remaining - 1).min(200)));
-                private::create_private_dir(&root).unwrap();
-            }
-            assert_eq!(root.as_os_str().len(), 1023);
-        }
+        let root = fixture_root(&base, long);
         let directory = PrivateDirectory::open(&root).unwrap();
         let lock = FileLock::try_lock_in(&directory, "registration.lock").unwrap();
         let recording = bootstrap::initialize(&directory, &lock, &mut [0; 4097]).unwrap();
@@ -50,7 +62,7 @@ impl Fixture {
         };
         let place = collector::ring::Place {
             lock_path: base.join("ring.lock"),
-            name_prefix: format!("/fdattempt{}{serial}", std::process::id()),
+            name_prefix: format!("/fda{:x}{serial:x}", std::process::id()),
         };
         let shape = Shape {
             slot_count: 1,
@@ -72,24 +84,32 @@ impl Fixture {
                     arena_bytes: 16 * 1024,
                 },
                 &run,
-                1,
+                origin,
             )
             .unwrap()
         } else {
-            collector::ring::Writer::create_recording(&place, shape, &run, 1).unwrap()
+            collector::ring::Writer::create_recording(&place, shape, &run, origin).unwrap()
         };
-        publish_count(&mut writer, 1);
+        if initial_publication {
+            publish_count(&mut writer, 1);
+        }
+        let source = crate::transaction::SourceTiming::from_reader(
+            &RingReader::open_generation(writer.name()).unwrap(),
+        );
         Self {
             base,
             root,
             writer,
             run,
             transport_removed: false,
+            source,
+            place,
         }
     }
     fn input(&self, terminal: bool) -> AttemptInput {
         AttemptInput {
             run: self.run,
+            source: self.source,
             operation: if terminal {
                 AttemptOperation::Terminal { event_end: 1 }
             } else {
@@ -201,9 +221,9 @@ fn dropped_registered_ordinary_keeps_its_encoded_batch_and_authority() {
 fn terminal_registration_requires_completion_before_any_slot_change() {
     // Goal: a caller cannot certify a terminal endpoint with an unchecked boolean.
     // Method: observe refusal on a live generation, then acquire the finished source.
-    let mut fixture = Fixture::new(false);
-    let input = fixture.input(true);
+    let mut fixture = Fixture::new_source(false, false, 1, false);
     let store = Store::open(&fixture.root).unwrap();
+    let input = fixture.input(true);
     let before = fixture.slot();
     assert_eq!(
         store
@@ -334,16 +354,17 @@ fn ordinary_registration_preserves_scanning_loss_and_unknown_provenance() {
 }
 
 #[test]
-fn terminal_registration_preserves_prebegin_scanning_loss() {
-    // Goal: terminal registration transfers the same loss owner before creating payloads.
-    // Method: wrap publications, finish the exact generation and decode its occupied slot.
+fn terminal_registration_does_not_recharge_prebegin_scanning_loss_after_handoff() {
+    // Goal: ordinary canonical ownership consumes scanning loss before terminal registration.
+    // Method: wrap, save the retained final tick and assert the terminal charges zero old loss.
     let mut fixture = Fixture::new(false);
     publish_three(&mut fixture.writer);
     fixture.writer.finish();
-    let mut input = fixture.input(true);
-    input.losses.publication_inherited_end = 4;
-    input.losses.publications = 3;
     let store = Store::open(&fixture.root).unwrap();
+    let (input, ordinary) = publication_tests::settle_latest_ordinary(&mut fixture, &store);
+    assert_eq!(ordinary.losses.publications, 3);
+    assert_eq!(input.losses.publications, 0);
+    assert_eq!(input.losses.publication_inherited_end, 5);
     drop(
         store
             .register_attempt(&input, &mut fixture.reader(), &registration_budget())
@@ -673,15 +694,15 @@ fn resumed_authority_does_not_require_the_original_transport() {
 }
 
 #[test]
-fn unfinished_slot_scratch_refuses_without_deleting_it() {
+fn contradictory_slot_scratch_refuses_without_deleting_it() {
     // Goal: generic replacement cannot erase unchecked transaction scratch.
-    // Method: leave private truncated scratch beside Idle and compare bytes after begin.
+    // Method: leave private contradictory scratch beside Idle and compare bytes after begin.
     let fixture = Fixture::new(false);
     let store = Store::open(&fixture.root).unwrap();
     let root = PrivateDirectory::open(&fixture.root).unwrap();
     root.create_file("foreground.pending")
         .unwrap()
-        .write_all(b"FDTXN002")
+        .write_all(b"FDTXN099")
         .unwrap();
     let before = fixture.slot();
     assert_eq!(
@@ -694,12 +715,12 @@ fn unfinished_slot_scratch_refuses_without_deleting_it() {
             .err()
             .unwrap()
             .kind(),
-        io::ErrorKind::Unsupported
+        io::ErrorKind::InvalidData
     );
     assert_eq!(fixture.slot(), before);
     assert_eq!(
         fs::read(fixture.root.join("foreground.pending")).unwrap(),
-        b"FDTXN002"
+        b"FDTXN099"
     );
     root.open_directory("data")
         .unwrap()
@@ -733,7 +754,7 @@ fn canonical_loss_predecessor_establishes_the_next_unowned_domains() {
         collector::recording::identity_text(fixture.run.boot),
         1
     );
-    fs::hard_link(&metadata, fixture.root.join("ordinary").join(key)).unwrap();
+    fs::hard_link(&metadata, ordinary_fixture_gate(&fixture.root, &key)).unwrap();
     let mut input = fixture.input(false);
     input.operation = AttemptOperation::Ordinary {
         window: 0,
@@ -758,7 +779,15 @@ fn canonical_loss_predecessor_establishes_the_next_unowned_domains() {
 fn canonical_loss_prefix(run: RunIdentity, transaction: Identity) -> [u8; 512] {
     let mut prefix = [0_u8; 512];
     prefix[..8].copy_from_slice(b"FDCAN002");
-    for (offset, value) in [(8, 1_u32), (12, 4), (80, 1), (84, 3), (168, 3), (264, 1)] {
+    for (offset, value) in [
+        (8, 1_u32),
+        (12, 4),
+        (80, 1),
+        (84, 3),
+        (168, 3),
+        (192, 1),
+        (264, 1),
+    ] {
         prefix[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
     }
     for (offset, identity) in [
@@ -777,6 +806,8 @@ fn canonical_loss_prefix(run: RunIdentity, transaction: Identity) -> [u8; 512] {
         (128, 2),
         (136, 1),
         (144, 1),
+        (160, 3),
+        (200, 1),
         (304, 1),
         (312, 1),
         (320, 1),
@@ -891,7 +922,7 @@ fn gap_successor(fixture: &Fixture, saved: u64) -> AttemptInput {
     .unwrap();
     fs::hard_link(
         metadata,
-        fixture.root.join("ordinary").join(key.file_name()),
+        ordinary_fixture_gate(&fixture.root, &key.file_name()),
     )
     .unwrap();
     let mut input = fixture.input(false);
@@ -1064,7 +1095,7 @@ fn budget_history(fixture: &Fixture) -> AttemptInput {
     .unwrap();
     fs::hard_link(
         loss.join("metadata"),
-        fixture.root.join("ordinary").join(key.file_name()),
+        ordinary_fixture_gate(&fixture.root, &key.file_name()),
     )
     .unwrap();
     let mut input = fixture.input(false);
@@ -1081,3 +1112,258 @@ fn budget_history(fixture: &Fixture) -> AttemptInput {
     input.losses.publication_inherited_end = 4;
     input
 }
+
+#[test]
+fn matching_registered_scratch_cannot_block_transport_free_resume() {
+    // Goal: duplicate slot scratch cannot permanently block an already durable authority.
+    // Method: retain actual encoded bytes and an event, remove transport, then reopen Store.
+    let mut fixture = Fixture::new(false);
+    let store = Store::open(&fixture.root).unwrap();
+    let attempt = store
+        .register_attempt(
+            &fixture.input(false),
+            &mut fixture.reader(),
+            &registration_budget(),
+        )
+        .unwrap();
+    let transaction = attempt.transaction();
+    crate::encoder::encode_write(&mut event_frame(), attempt.create_event_batch(0).unwrap())
+        .unwrap();
+    let before = fixture.slot();
+    let directory = PrivateDirectory::open(&fixture.root).unwrap();
+    directory
+        .create_file("foreground.pending")
+        .unwrap()
+        .write_all(&before)
+        .unwrap();
+    drop(attempt);
+    drop(store);
+    collector::ring::unlink_generation(fixture.writer.name()).unwrap();
+    fixture.transport_removed = true;
+    let store = Store::open(&fixture.root).unwrap();
+    let mut attempt = store.resume_attempt().unwrap();
+    assert_eq!(attempt.transaction(), transaction);
+    assert_eq!(fixture.slot(), before);
+    assert_eq!(
+        directory
+            .open_file("foreground.pending")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    let mut census = attempt.original_inventory(&registration_budget()).unwrap();
+    for _ in 0..80 {
+        if census.step().unwrap() == InventoryStep::Enumerated {
+            assert!(matches!(
+                census.batches()[0],
+                BatchFact::Complete { rows: 1, .. }
+            ));
+            return;
+        }
+    }
+    panic!("census did not finish");
+}
+
+#[test]
+fn foreign_registered_scratch_is_retained_beside_unchanged_authority() {
+    // Goal: a syntactically valid competing transaction cannot be discarded as stale scratch.
+    // Method: place a different transaction's full record beside a real occupied Store slot.
+    let fixture = Fixture::new(false);
+    let store = Store::open(&fixture.root).unwrap();
+    let input = fixture.input(false);
+    drop(
+        store
+            .register_attempt(&input, &mut fixture.reader(), &registration_budget())
+            .unwrap(),
+    );
+    let before = fixture.slot();
+    let mut foreign = [0; 4096];
+    input
+        .encode_registered(Identity([90, 91]), &mut foreign)
+        .unwrap();
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    root.create_file("foreground.pending")
+        .unwrap()
+        .write_all(&foreign)
+        .unwrap();
+    assert!(store.resume_attempt().is_err());
+    let mut retained = [0; 4096];
+    root.open_file("foreground.pending")
+        .unwrap()
+        .read_exact(&mut retained)
+        .unwrap();
+    assert_eq!(retained, foreign);
+    assert_eq!(fixture.slot(), before);
+}
+
+#[test]
+fn namespace_root_seals_refuse_before_registration_mutation() {
+    // Goal: EXEC08 rejects the old root-leaf grammar before canonical or slot mutation.
+    // Method: leave128 root links, verify refusal and retain the Idle authority unchanged.
+    let mut fixture = Fixture::new(false);
+    publish_count(&mut fixture.writer, 128);
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    for origin in 1..=128 {
+        publish_root_loss(&root, &fixture.root, &fixture.run, origin);
+    }
+    let store = Store::open(&fixture.root).unwrap();
+    let before = fixture.slot();
+    let result = store.register_attempt(
+        &fixture.input(false),
+        &mut fixture.reader(),
+        &registration_budget(),
+    );
+    assert_eq!(result.err().unwrap().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(fixture.slot(), before);
+}
+
+fn publish_root_loss(root: &PrivateDirectory, path: &Path, run: &RunIdentity, origin: u64) {
+    let transaction = Identity([200, origin]);
+    let mut prefix = canonical_loss_prefix(*run, transaction);
+    for (offset, value) in [
+        (104, 0),
+        (112, origin),
+        (128, origin + 1),
+        (304, origin),
+        (312, origin),
+        (352, origin + 1),
+    ] {
+        prefix[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+    }
+    if origin > 1 {
+        for (offset, value) in [
+            (272, 200_u64),
+            (280, origin - 1),
+            (288, 4),
+            (296, origin - 1),
+        ] {
+            prefix[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+        }
+    }
+    let object = root
+        .open_directory("data")
+        .unwrap()
+        .create_directory(&collector::recording::identity_text(transaction).to_string())
+        .unwrap();
+    object
+        .create_directory("loss")
+        .unwrap()
+        .create_file("metadata")
+        .unwrap()
+        .write_all(&prefix)
+        .unwrap();
+    // Existing production readers admit hard-link gates; this fixture supplies no writer proof.
+    let source = path
+        .join("data")
+        .join(collector::recording::identity_text(transaction).to_string())
+        .join("loss/metadata");
+    let key =
+        crate::canonical::CanonicalKey::source(crate::canonical::Namespace::Ordinary, run, origin)
+            .unwrap();
+    fs::hard_link(source, path.join("ordinary").join(key.file_name())).unwrap();
+}
+
+fn ordinary_fixture_gate(root: &Path, key: &str) -> PathBuf {
+    let leaf = root.join("ordinary").join(&key[..1]);
+    private::create_private_dir(&leaf).unwrap();
+    leaf.join(key)
+}
+
+#[path = "publication_tests.rs"]
+mod publication_tests;
+
+#[test]
+fn compatible_registration_prefix_requires_live_validation_before_recomputation() {
+    // Goal: stale scratch does not block a valid retry or authorize unvalidated artifacts.
+    // Method: retain a short header through source mismatch, then recompute the legal transition.
+    let fixture = Fixture::new(false);
+    let store = Store::open(&fixture.root).unwrap();
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    root.create_file("foreground.pending")
+        .unwrap()
+        .write_all(b"FDTXN002")
+        .unwrap();
+    let before = fixture.slot();
+    let mut wrong = fixture.input(false);
+    wrong.source.origin_continuous_ns = Some(0);
+    assert_eq!(
+        store
+            .register_attempt(&wrong, &mut fixture.reader(), &registration_budget())
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert_eq!(fixture.slot(), before);
+    assert_eq!(
+        fs::read(fixture.root.join("foreground.pending")).unwrap(),
+        b"FDTXN002"
+    );
+    let attempt = store
+        .register_attempt(
+            &fixture.input(false),
+            &mut fixture.reader(),
+            &registration_budget(),
+        )
+        .unwrap();
+    assert!(!attempt.resumed());
+    assert!(!fixture.root.join("foreground.pending").exists());
+    assert_eq!(
+        AttemptInput::decode_registered(&fixture.slot(), fixture.run.recording)
+            .unwrap()
+            .0,
+        attempt.transaction()
+    );
+}
+
+#[test]
+fn source_timing_mismatch_and_closed_slot_bytes_refuse_before_artifacts() {
+    // Goal: only admitted source timing enters Registered and reserved bytes stay closed.
+    // Method: vary source evidence before Store admission and corrupt each fixed field afterward.
+    let fixture = Fixture::new(false);
+    let store = Store::open(&fixture.root).unwrap();
+    let before = fixture.slot();
+    for source in [
+        crate::transaction::SourceTiming {
+            layout: 3,
+            origin_continuous_ns: Some(0),
+        },
+        crate::transaction::SourceTiming {
+            layout: 3,
+            origin_continuous_ns: None,
+        },
+        crate::transaction::SourceTiming {
+            layout: 4,
+            origin_continuous_ns: Some(1),
+        },
+    ] {
+        let mut input = fixture.input(false);
+        input.source = source;
+        assert!(
+            store
+                .register_attempt(&input, &mut fixture.reader(), &registration_budget())
+                .is_err()
+        );
+        assert_eq!(fixture.slot(), before);
+        assert_eq!(fs::read_dir(fixture.root.join("data")).unwrap().count(), 0);
+    }
+    let mut bytes = [0; 4096];
+    fixture
+        .input(false)
+        .encode_registered(Identity([99, 100]), &mut bytes)
+        .unwrap();
+    assert_eq!(&bytes[224..232], &3u64.to_be_bytes());
+    assert_eq!(&bytes[232..236], &1u32.to_be_bytes());
+    assert_eq!(&bytes[240..248], &1u64.to_be_bytes());
+    for offset in [235, 236, 248, 255] {
+        let mut changed = bytes;
+        changed[offset] = 2;
+        assert!(AttemptInput::decode_registered(&changed, fixture.run.recording).is_err());
+    }
+    bytes[232..236].fill(0);
+    bytes[240..248].fill(0);
+    assert!(AttemptInput::decode_registered(&bytes, fixture.run.recording).is_err());
+}
+
+#[path = "loss_proof_tests.rs"]
+mod loss_proof_tests;

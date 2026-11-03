@@ -4,6 +4,8 @@ use std::io;
 use collector::recording::bootstrap::codec::{self, Operation, Phase, Slot, SlotKind};
 use collector::ring::{Identity, RunIdentity};
 
+pub(crate) mod normal;
+
 const _: () = {
     assert!(codec::SLOT_BYTES == 4096);
     assert!(codec::PAYLOAD_BYTES == 2048);
@@ -16,7 +18,69 @@ pub struct AttemptInput {
     pub run: RunIdentity,
     pub operation: AttemptOperation,
     pub captured: bool,
+    pub source: SourceTiming,
     pub losses: LossTransfer,
+}
+
+/// Immutable timing evidence admitted from the same identified source generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceTiming {
+    pub layout: u64,
+    pub origin_continuous_ns: Option<u64>,
+}
+impl SourceTiming {
+    #[must_use]
+    pub fn from_reader(reader: &collector::ring::RingReader) -> Self {
+        Self {
+            layout: reader.source_layout_version(),
+            origin_continuous_ns: reader.run_start_continuous_ns(),
+        }
+    }
+    pub(crate) fn validate(&self, captured: bool) -> io::Result<()> {
+        if self.layout != if captured { 4 } else { 3 } || self.origin_continuous_ns.is_none() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+
+        Ok(())
+    }
+    pub(crate) fn window(&self, run_tick: u64, continuous_ns: Option<u64>) -> io::Result<u64> {
+        let origin = self.origin_continuous_ns.ok_or_else(invalid)?;
+        elapsed_window(run_tick, continuous_ns, Some(origin))
+    }
+    pub(crate) fn encode(&self, bytes: &mut [u8], layout: usize, kind: usize, origin: usize) {
+        put64(bytes, layout, self.layout);
+        put32(bytes, kind, u32::from(self.origin_continuous_ns.is_some()));
+        put64(bytes, origin, self.origin_continuous_ns.unwrap_or(0));
+    }
+    pub(crate) fn decode(
+        bytes: &[u8],
+        layout: usize,
+        kind: usize,
+        origin: usize,
+    ) -> io::Result<Self> {
+        let value = get64(bytes, origin)?;
+        Ok(Self {
+            layout: get64(bytes, layout)?,
+            origin_continuous_ns: match get32(bytes, kind)? {
+                0 if value == 0 => None,
+                1 => Some(value),
+                _ => return Err(invalid()),
+            },
+        })
+    }
+}
+pub(crate) fn elapsed_window(
+    run_tick: u64,
+    continuous_ns: Option<u64>,
+    origin: Option<u64>,
+) -> io::Result<u64> {
+    match (continuous_ns, origin) {
+        (Some(time), Some(start)) => time
+            .checked_sub(start)
+            .map(|elapsed| elapsed / 60_000_000_000)
+            .ok_or_else(invalid),
+        _ => Ok(run_tick / 60),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +138,7 @@ pub enum UnknownReason {
 
 impl AttemptInput {
     pub fn validate(&self) -> io::Result<()> {
+        self.source.validate(self.captured)?;
         nonzero(self.run.recording)?;
         nonzero(self.run.run)?;
         nonzero(self.run.boot)?;
@@ -168,6 +233,7 @@ impl AttemptInput {
         put32(bytes, 128, 1);
         put32(bytes, 132, 4096);
         put_identity(bytes, 208, transaction);
+        self.source.encode(bytes, 224, 232, 240);
         self.losses.encode(&mut bytes[1088..1344]);
         Ok(())
     }
@@ -207,6 +273,7 @@ impl AttemptInput {
             },
             operation,
             captured: get32(bytes, 124)? == 1,
+            source: SourceTiming::decode(bytes, 224, 232, 240)?,
             losses: LossTransfer::decode(&bytes[1088..1344])?,
         };
         // Exact reconstruction checks constants, every unused field and every reserved byte.
@@ -394,6 +461,8 @@ mod tests {
             (139, 255),
             (215, 7),
             (223, 8),
+            (231, 3),
+            (235, 1),
             (1099, 1),
             (1103, 1),
             (1143, 10),

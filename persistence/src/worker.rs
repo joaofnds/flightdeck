@@ -15,10 +15,8 @@ use collector::tracker::Event;
 use crate::resources::{WORKING_BYTES_MAX, Watchdog};
 use crate::{
     Begin, Encoder, Limits, Losses, Manifest, NumberedEvent, Observation, Result, Store,
-    TableManifest, TimeBounds, Window, WindowIdentity,
+    TableManifest, Window, WindowIdentity,
 };
-
-const WINDOW_NS: u64 = 60_000_000_000;
 
 mod scanning;
 mod staging;
@@ -762,7 +760,11 @@ fn seal_pending(
     Ok(())
 }
 
-fn seal_manifest(window: &Window, tables: Vec<TableManifest>, losses: Losses) -> Result<Manifest> {
+pub(crate) fn seal_manifest(
+    window: &Window,
+    tables: Vec<TableManifest>,
+    losses: Losses,
+) -> Result<Manifest> {
     let publications = window.publication_range();
     let events = window.event_range();
     Ok(Manifest {
@@ -771,9 +773,11 @@ fn seal_manifest(window: &Window, tables: Vec<TableManifest>, losses: Losses) ->
         publication_end: publications.end,
         events_first: events.start,
         events_end: events.end,
-        wall_ns: bounds(window, |value| value.wall_ns),
-        continuous_ns: bounds(window, |value| value.continuous_ns),
-        awake_ns: bounds(window, |value| value.awake_ns),
+        wall_ns: crate::metadata::clock_bounds(window.observations().map(|value| value.wall_ns)),
+        continuous_ns: crate::metadata::clock_bounds(
+            window.observations().map(|value| value.continuous_ns),
+        ),
+        awake_ns: crate::metadata::clock_bounds(window.observations().map(|value| value.awake_ns)),
         losses,
         data_directory: String::new(),
         tables,
@@ -817,24 +821,6 @@ fn seal_derived(derive: &dyn Derive, derivation: &Derivation<'_>) -> Result<Vec<
     }
 }
 
-fn bounds(window: &Window, field: impl Fn(&Observation) -> Option<u64>) -> Option<TimeBounds> {
-    let mut result: Option<TimeBounds> = None;
-    for observation in window.observations() {
-        let value = field(observation)?;
-        result = Some(match result {
-            Some(bounds) => TimeBounds {
-                min: bounds.min.min(value),
-                max: bounds.max.max(value),
-            },
-            None => TimeBounds {
-                min: value,
-                max: value,
-            },
-        });
-    }
-    result
-}
-
 fn window_number(reader: &RingReader, tick: &Tick) -> Result<u64> {
     timing_window_number(
         reader,
@@ -846,14 +832,12 @@ fn window_number(reader: &RingReader, tick: &Tick) -> Result<u64> {
 }
 
 pub(crate) fn timing_window_number(reader: &RingReader, timing: &PublicationTiming) -> Result<u64> {
-    match (timing.times, reader.run_start_continuous_ns()) {
-        (Some(times), Some(start)) => times
-            .continuous_ns
-            .checked_sub(start)
-            .map(|elapsed| elapsed / WINDOW_NS)
-            .ok_or(crate::Error::Bound("continuous time order")),
-        _ => Ok(timing.run_tick / 60),
-    }
+    crate::transaction::elapsed_window(
+        timing.run_tick,
+        timing.times.map(|times| times.continuous_ns),
+        reader.run_start_continuous_ns(),
+    )
+    .map_err(|_| crate::Error::Bound("continuous time order"))
 }
 
 fn persist_one_closed(

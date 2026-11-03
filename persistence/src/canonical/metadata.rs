@@ -73,7 +73,7 @@ impl CanonicalLoss {
             unknown: self.unknown_flags != 0,
         })
     }
-    fn encode(&self, bytes: &mut [u8]) {
+    pub(crate) fn encode(&self, bytes: &mut [u8]) {
         self.inherited.encode(bytes);
         put32(bytes, 12, self.unknown_flags);
         put64(bytes, 96, self.publication_end);
@@ -81,7 +81,7 @@ impl CanonicalLoss {
         put64(bytes, 112, self.publications_new);
         put64(bytes, 120, self.events_new);
     }
-    fn decode(bytes: &[u8]) -> io::Result<Self> {
+    pub(crate) fn decode(bytes: &[u8]) -> io::Result<Self> {
         let loss = Self {
             inherited: LossTransfer::decode(bytes)?,
             publication_end: word(bytes, 96)?,
@@ -161,6 +161,7 @@ pub struct CanonicalMetadata {
     pub(crate) canonical_origin: u64,
     pub(crate) original_end: u64,
     pub(crate) source_layout: u64,
+    pub(crate) source_origin: Option<u64>,
     pub(crate) evidence: EndpointEvidence,
     pub(crate) lifecycle: Lifecycle,
     pub(crate) captured: bool,
@@ -248,6 +249,8 @@ impl CanonicalMetadata {
             canonical_origin: word(bytes, 120)?,
             original_end: word(bytes, 128)?,
             source_layout: word(bytes, 160)?,
+            source_origin: crate::transaction::SourceTiming::decode(bytes, 160, 192, 200)?
+                .origin_continuous_ns,
             evidence: match small(bytes, 168)? {
                 0 => EndpointEvidence::Unknown,
                 1 => EndpointEvidence::OrdinaryIndex,
@@ -312,6 +315,11 @@ impl CanonicalMetadata {
         ] {
             put64(bytes, offset, value);
         }
+        crate::transaction::SourceTiming {
+            layout: self.source_layout,
+            origin_continuous_ns: self.source_origin,
+        }
+        .encode(bytes, 160, 192, 200);
         self.encode_tags(bytes);
         put32(
             bytes,
@@ -353,6 +361,12 @@ impl CanonicalMetadata {
                 Body::LossOnly => 0,
             },
         );
+    }
+    pub(crate) fn timing(&self) -> crate::transaction::SourceTiming {
+        crate::transaction::SourceTiming {
+            layout: self.source_layout,
+            origin_continuous_ns: self.source_origin,
+        }
     }
     pub(crate) fn validate_key(&self, namespace: Namespace, key: &CanonicalKey) -> io::Result<()> {
         let origin = match (namespace, self.kind) {
@@ -423,6 +437,7 @@ impl CanonicalMetadata {
             )
     }
     pub(crate) fn validate(&self) -> io::Result<()> {
+        self.timing().validate(self.captured)?;
         self.validate_provenance()?;
         self.loss.validate()?;
         let loss = self.loss.totals()?;

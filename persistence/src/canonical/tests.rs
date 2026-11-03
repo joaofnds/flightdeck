@@ -71,7 +71,8 @@ impl Fixture {
             attempted_origin: u64::from(base != RawBase::Recovery),
             canonical_origin: 0,
             original_end: if base == RawBase::Recovery { 0 } else { 2 },
-            source_layout: 4,
+            source_layout: 3,
+            source_origin: Some(0),
             evidence: EndpointEvidence::FixedSource,
             lifecycle: Lifecycle::Active,
             captured: false,
@@ -127,6 +128,10 @@ impl Fixture {
         };
         let key = CanonicalKey::source(namespace, &metadata.run, origin).unwrap();
         let mut leaf = self.root.join(namespace.name());
+        if components.is_empty() {
+            leaf.push(&key.file_name()[..1]);
+            private::create_private_dir(&leaf).unwrap();
+        }
         for component in components {
             leaf.push(component);
             private::create_private_dir(&leaf).unwrap();
@@ -492,13 +497,14 @@ fn gate_aliases_charge_one_owner_and_keep_last_saved_window_through_a_gap() {
     metadata.window = 10;
     let (raw, key) = fixture.publish(&metadata, Namespace::Ordinary, &[]);
     let event_key = CanonicalKey::source(Namespace::Fragments, &fixture.run, 1).unwrap();
-    fs::hard_link(
-        raw.join("metadata"),
-        fixture
+    fs::hard_link(raw.join("metadata"), {
+        let leaf = fixture
             .root
             .join("event-fragments")
-            .join(event_key.file_name()),
-    )
+            .join(&event_key.file_name()[..1]);
+        private::create_private_dir(&leaf).unwrap();
+        leaf.join(event_key.file_name())
+    })
     .unwrap();
     let (frontier, work) = fixture.frontier();
     assert_eq!(frontier.prior_window(), Some(9));
@@ -596,7 +602,11 @@ fn leaf_128_and_sixteen_way_branch_have_bounded_exact_ranges() {
     // Method: fill one128-link leaf and a separate sixteen-child branch, then seek both directions.
     let fixture = Fixture::new();
     let root = PrivateDirectory::open(&fixture.root).unwrap();
-    let leaf = root.open_directory("ordinary").unwrap();
+    let leaf = root
+        .open_directory("ordinary")
+        .unwrap()
+        .create_directory("0")
+        .unwrap();
     for origin in 1..=128 {
         let key = CanonicalKey::source(Namespace::Ordinary, &fixture.run, origin).unwrap();
         leaf.create_file(&key.file_name()).unwrap();
@@ -623,7 +633,7 @@ fn leaf_128_and_sixteen_way_branch_have_bounded_exact_ranges() {
         assert!(matches!(cursor.step().unwrap(), ReadStep::Found(key) if key == expected));
     }
     assert!(matches!(cursor.step().unwrap(), ReadStep::End));
-    assert_eq!(cursor.work().entries, 128);
+    assert_eq!(cursor.work().entries, 129);
     let branch = root.open_directory("observations-unknown").unwrap();
     for digit in 0_u8..16 {
         let name = format!("{digit:x}");
@@ -740,7 +750,11 @@ fn overfull_leaf_counts_the_rejected_name_and_never_reports_end() {
     // Method: provide129 links and inspect the owning traversal's failed-operation counts.
     let fixture = Fixture::new();
     let root = PrivateDirectory::open(&fixture.root).unwrap();
-    let leaf = root.open_directory("ordinary").unwrap();
+    let leaf = root
+        .open_directory("ordinary")
+        .unwrap()
+        .create_directory("0")
+        .unwrap();
     for origin in 1..=129 {
         leaf.create_file(
             &CanonicalKey::source(Namespace::Ordinary, &fixture.run, origin)
@@ -764,8 +778,8 @@ fn overfull_leaf_counts_the_rejected_name_and_never_reports_end() {
         cursor.step().unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
-    assert_eq!(cursor.work().entries, 129);
-    assert!(cursor.work().native_entries >= 129);
+    assert_eq!(cursor.work().entries, 130);
+    assert!(cursor.work().native_entries >= 130);
     assert!(cursor.work().directory_reads > 0);
 }
 #[test]
@@ -1019,3 +1033,5 @@ fn known_original_publication_end_must_follow_the_attempted_origin() {
     );
     assert!(bytes.is_empty());
 }
+
+mod insertion;

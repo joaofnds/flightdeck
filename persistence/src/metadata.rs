@@ -29,6 +29,26 @@ pub struct Losses {
     pub unknown: bool,
 }
 
+/// A manifest bound describes every tick; any unavailable clock makes it unavailable.
+pub(crate) fn clock_bounds(values: impl Iterator<Item = Option<u64>>) -> Option<TimeBounds> {
+    let mut result: Option<TimeBounds> = None;
+    for (index, value) in values.enumerate() {
+        assert!(index < crate::window::WINDOW_TICKS_MAX);
+        let value = value?;
+        result = Some(match result {
+            Some(bounds) => TimeBounds {
+                min: bounds.min.min(value),
+                max: bounds.max.max(value),
+            },
+            None => TimeBounds {
+                min: value,
+                max: value,
+            },
+        });
+    }
+    result
+}
+
 const MAGIC: &[u8; 8] = b"FDSEAL01";
 const ENCODING_VERSION: u64 = 2;
 const METADATA_BYTES_MAX: u64 = 4096;

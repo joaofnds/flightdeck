@@ -1,3 +1,4 @@
+use super::node::{Entry, Grammar};
 use crate::resources::{ByteBudget, ByteReservation};
 use collector::recording::bootstrap::StateObservation;
 use collector::recording::private::{DirectoryWork, PrivateDirectory};
@@ -79,9 +80,9 @@ impl CanonicalKey {
 /// The exact64-byte logical node locator used by structural transaction descriptors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NodeLocator {
-    namespace: Namespace,
-    prefix: [u8; 60],
-    nibbles: u8,
+    pub(crate) namespace: Namespace,
+    pub(crate) prefix: [u8; 60],
+    pub(crate) nibbles: u8,
 }
 impl NodeLocator {
     pub fn from_key(namespace: Namespace, key: CanonicalKey, nibbles: u8) -> io::Result<Self> {
@@ -167,6 +168,27 @@ pub struct ReadWork {
     pub metadata_admissions: u64,
     pub raw_admissions: u64,
     pub node_attempts: u64,
+    pub links: u64,
+    pub full_syncs: u64,
+    pub creates: u64,
+    pub renames: u64,
+    pub removals: u64,
+}
+impl ReadWork {
+    pub(crate) fn add(&mut self, work: Self) {
+        self.namespace_attempts += work.namespace_attempts;
+        self.raw_admissions += work.raw_admissions;
+        self.metadata_admissions += work.metadata_admissions;
+        self.entries += work.entries;
+        self.native_entries += work.native_entries;
+        self.directory_reads += work.directory_reads;
+        self.node_attempts += work.node_attempts;
+        self.links += work.links;
+        self.full_syncs += work.full_syncs;
+        self.creates += work.creates;
+        self.renames += work.renames;
+        self.removals += work.removals;
+    }
 }
 #[derive(Clone, Copy)]
 struct Prefix {
@@ -266,6 +288,16 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         );
         *work_out = work;
         let state = observed?.ok_or_else(retry)?;
+        Self::from_state(root, namespace, range, state, work, reservation)
+    }
+    fn from_state(
+        root: &'root PrivateDirectory,
+        namespace: Namespace,
+        range: SeekRange,
+        state: StateObservation<'root, 'state>,
+        work: ReadWork,
+        reservation: ByteReservation,
+    ) -> io::Result<Self> {
         Ok(Self {
             root,
             state,
@@ -301,13 +333,7 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         Ok(())
     }
     pub(crate) fn add_work(&mut self, work: ReadWork) {
-        self.work.namespace_attempts += work.namespace_attempts;
-        self.work.raw_admissions += work.raw_admissions;
-        self.work.metadata_admissions += work.metadata_admissions;
-        self.work.entries += work.entries;
-        self.work.native_entries += work.native_entries;
-        self.work.directory_reads += work.directory_reads;
-        self.work.node_attempts += work.node_attempts;
+        self.work.add(work);
     }
     #[must_use]
     pub fn current_locator(&self) -> NodeLocator {
@@ -407,45 +433,24 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
     fn load_node(&mut self) -> io::Result<()> {
         let directory = self.open_current()?;
         let locator = self.current_locator();
-        let prefix = Prefix {
-            bytes: locator.prefix,
-            nibbles: locator.nibbles,
-        };
         let mut children = [Prefix::EMPTY; 16];
         let mut child_count = 0;
         let mut leaf_count = 0;
         let mut native = DirectoryWork::default();
+        let mut grammar = Grammar::new(&locator);
         let result = directory.visit_names_counted(128, &mut native, |name| {
-            if let Some(digits) = name.strip_suffix(".seal") {
-                if child_count != 0
-                    || digits.len() != self.namespace.width() * 2
-                    || leaf_count >= 128
-                {
-                    return Err(invalid());
+            match grammar.admit(name)? {
+                Entry::Seal(key) => {
+                    self.leaf[leaf_count] = key;
+                    leaf_count += 1;
                 }
-                let parsed = parse_prefix(digits)?;
-                if !extends(&parsed, &prefix) {
-                    return Err(invalid());
+                Entry::Child(child) => {
+                    children[child_count] = Prefix {
+                        bytes: child.prefix,
+                        nibbles: child.nibbles,
+                    };
+                    child_count += 1;
                 }
-                self.leaf[leaf_count] = CanonicalKey {
-                    bytes: parsed.bytes,
-                    length: u8::try_from(self.namespace.width()).map_err(|_| invalid())?,
-                };
-                leaf_count += 1;
-            } else {
-                if leaf_count != 0
-                    || child_count >= 16
-                    || name.len() + usize::from(prefix.nibbles) > self.namespace.width() * 2
-                {
-                    return Err(invalid());
-                }
-                let full = format!(
-                    "{}{}",
-                    hex(&prefix.bytes, 0, usize::from(prefix.nibbles)),
-                    name
-                );
-                children[child_count] = parse_prefix(&full)?;
-                child_count += 1;
             }
             Ok(())
         });
@@ -455,11 +460,8 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         self.work.native_entries += native.entries;
         self.work.directory_reads += native.read_calls;
         result?;
-        load_node_sort(
-            &mut children[..child_count],
-            &prefix,
-            &mut self.leaf[..leaf_count],
-        )?;
+        children[..child_count].sort_unstable_by_key(|prefix| prefix.bytes);
+        self.leaf[..leaf_count].sort_unstable();
         self.stack[self.depth].children = children;
         self.stack[self.depth].count = u8::try_from(child_count).map_err(|_| invalid())?;
         self.stack[self.depth].loaded = true;
@@ -495,36 +497,28 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         self.root
     }
 }
-fn parse_prefix(name: &str) -> io::Result<Prefix> {
-    if name.is_empty() || name.len() > 120 {
-        return Err(invalid());
-    }
-    let mut prefix = Prefix::EMPTY;
-    prefix.nibbles = u8::try_from(name.len()).map_err(|_| invalid())?;
-    for (index, byte) in name.bytes().enumerate() {
-        let value = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => return Err(invalid()),
-        };
-        if index.is_multiple_of(2) {
-            prefix.bytes[index / 2] = value << 4;
-        } else {
-            prefix.bytes[index / 2] |= value;
+impl<'root> CanonicalCursor<'root, 'static> {
+    pub(crate) fn begin_owned(
+        root: &'root PrivateDirectory,
+        recording: Identity,
+        namespace: Namespace,
+        range: SeekRange,
+        budget: &Arc<ByteBudget>,
+    ) -> io::Result<Self> {
+        if usize::from(range.first.length) != namespace.width()
+            || range.first.length != range.last.length
+            || range.first > range.last
+        {
+            return Err(invalid());
         }
+        let reservation = budget
+            .reserve(256 * 1024)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let mut work = ReadWork::default();
+        let state = StateObservation::begin_owned(root, recording, &mut work.namespace_attempts)?
+            .ok_or_else(retry)?;
+        Self::from_state(root, namespace, range, state, work, reservation)
     }
-    Ok(prefix)
-}
-fn nibble(bytes: &[u8; 60], index: usize) -> u8 {
-    if index.is_multiple_of(2) {
-        bytes[index / 2] >> 4
-    } else {
-        bytes[index / 2] & 0x0f
-    }
-}
-fn extends(child: &Prefix, parent: &Prefix) -> bool {
-    (0..usize::from(parent.nibbles))
-        .all(|index| nibble(&child.bytes, index) == nibble(&parent.bytes, index))
 }
 fn intersects(prefix: &Prefix, range: &SeekRange) -> bool {
     let mut high = prefix.bytes;
@@ -554,26 +548,4 @@ pub(crate) fn invalid() -> io::Error {
 }
 pub(crate) fn retry() -> io::Error {
     io::Error::from(io::ErrorKind::WouldBlock)
-}
-
-fn load_node_sort(
-    children: &mut [Prefix],
-    prefix: &Prefix,
-    leaves: &mut [CanonicalKey],
-) -> io::Result<()> {
-    children.sort_unstable_by_key(|prefix| prefix.bytes);
-    for index in 1..children.len() {
-        if nibble(&children[index - 1].bytes, usize::from(prefix.nibbles))
-            == nibble(&children[index].bytes, usize::from(prefix.nibbles))
-        {
-            return Err(invalid());
-        }
-    }
-    leaves.sort_unstable();
-    for index in 1..leaves.len() {
-        if leaves[index - 1] == leaves[index] {
-            return Err(invalid());
-        }
-    }
-    Ok(())
 }

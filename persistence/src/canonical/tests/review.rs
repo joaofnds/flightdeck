@@ -273,6 +273,7 @@ fn canonical_gate_admission_enforces_the_shared_owned_payload_boundary() {
         let fixture = Fixture::new();
         let mut metadata = event_metadata(&fixture, false);
         metadata.captured = true;
+        metadata.source_layout = 4;
         metadata.loss.event_end = 16_385;
         if let Body::Events(inner) = &mut metadata.body {
             inner.identities = true;
@@ -310,6 +311,7 @@ fn canonical_gate_rejects_unknown_numeric_kind_in_both_profiles() {
         let fixture = Fixture::new();
         let mut metadata = event_metadata(&fixture, false);
         metadata.captured = captured;
+        metadata.source_layout = if captured { 4 } else { 3 };
         let count = if captured { 16_384 } else { 1 };
         metadata.loss.event_end = count + 1;
         if let Body::Events(inner) = &mut metadata.body {
@@ -355,6 +357,7 @@ fn canonical_rows_preserve_valid_start_exec_and_exit_semantics_in_both_profiles(
         let fixture = Fixture::new();
         let mut metadata = event_metadata(&fixture, false);
         metadata.captured = captured;
+        metadata.source_layout = if captured { 4 } else { 3 };
         metadata.loss.event_end = 4;
         if let Body::Events(inner) = &mut metadata.body {
             inner.identities = captured;

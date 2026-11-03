@@ -55,8 +55,14 @@ unsafe extern "C" fn route_fcntl(_descriptor: i32, _command: i32) -> i32 {
 }
 
 unsafe extern "C" fn refuse_full_sync(descriptor: i32, command: i32) -> i32 {
+    unsafe { trace_operation(b'S', descriptor) };
     let target = unsafe { getenv(c"FLIGHTDECK_PRIVATE_SYNC_TARGET".as_ptr()) };
-    let armed = unsafe { getenv(c"FLIGHTDECK_REGISTRATION_ARMED".as_ptr()) };
+    let sync_armed = unsafe { getenv(c"FLIGHTDECK_SYNC_ARMED".as_ptr()) };
+    let armed = if sync_armed.is_null() {
+        unsafe { getenv(c"FLIGHTDECK_REGISTRATION_ARMED".as_ptr()) }
+    } else {
+        sync_armed
+    };
     if target.is_null() || armed.is_null() || unsafe { access(armed, 0) } != 0 {
         return unsafe { fcntl(descriptor, command) };
     }
@@ -70,6 +76,11 @@ unsafe extern "C" fn refuse_full_sync(descriptor: i32, command: i32) -> i32 {
         return unsafe { fcntl(descriptor, command) };
     }
 
+    if !unsafe { getenv(c"FLIGHTDECK_SYNC_EFFECT".as_ptr()) }.is_null()
+        && unsafe { fcntl(descriptor, command) } != 0
+    {
+        return -1;
+    }
     unsafe { record_refusal() };
     unsafe { *__error() = 5 };
 
@@ -106,14 +117,26 @@ unsafe extern "C" fn refuse_read(descriptor: i32, bytes: *mut c_void, length: us
     let target = unsafe { getenv(c"FLIGHTDECK_INVENTORY_READ_TARGET".as_ptr()) };
     let armed = unsafe { getenv(c"FLIGHTDECK_REGISTRATION_ARMED".as_ptr()) };
     if target.is_null() || armed.is_null() || unsafe { access(armed, 0) } != 0 {
+        unsafe { pause_read(descriptor) };
         return unsafe { read(descriptor, bytes, length) };
     }
     let mut path = [0_u8; 1024];
     if unsafe { fcntl(descriptor, 50, path.as_mut_ptr()) } != 0 {
         return -1;
     }
-    if unsafe { strcmp(path.as_ptr().cast(), target) } != 0 {
+    let selected = unsafe { strcmp(path.as_ptr().cast(), target) } == 0;
+    unsafe { pause_read(descriptor) };
+    if !selected {
         return unsafe { read(descriptor, bytes, length) };
+    }
+    if unsafe { fcntl(descriptor, 50, path.as_mut_ptr()) } == 0
+        && unsafe { strcmp(path.as_ptr().cast(), target) } != 0
+    {
+        let message = b"FD-READ-PATH-CHANGED\n";
+        assert_eq!(
+            unsafe { write(1, message.as_ptr().cast(), message.len()) },
+            isize::try_from(message.len()).unwrap()
+        );
     }
     unsafe { replace_state(descriptor) };
     unsafe { record_refusal() };
@@ -164,6 +187,7 @@ unsafe extern "C" fn read_directory(
     if !root.is_null() {
         unsafe { observe_descriptors(root) };
     }
+    unsafe { pause_read(fd) };
     unsafe { replace_state(fd) };
     unsafe { *__error() = error };
     result
@@ -240,4 +264,179 @@ unsafe fn observe_descriptors(root: *const c_char) {
     let record = [n[0], n[1], r[0], r[1]];
     assert_eq!(unsafe { write(fd, record.as_ptr().cast(), 4) }, 4);
     assert_eq!(unsafe { close(fd) }, 0);
+}
+
+static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    returned: i16,
+}
+unsafe extern "C" {
+    fn poll(descriptors: *mut PollFd, count: u32, timeout: i32) -> i32;
+    fn renameat(source: i32, name: *const c_char, target: i32, destination: *const c_char) -> i32;
+    fn linkat(
+        source: i32,
+        name: *const c_char,
+        target: i32,
+        destination: *const c_char,
+        flags: i32,
+    ) -> i32;
+    fn unlinkat(directory: i32, name: *const c_char, flags: i32) -> i32;
+}
+unsafe fn pause_read(fd: i32) {
+    let target = unsafe { getenv(c"FLIGHTDECK_PAUSE_TARGET".as_ptr()) };
+    if target.is_null() {
+        return;
+    }
+    let mut path = [0_u8; 1024];
+    if unsafe { fcntl(fd, 50, path.as_mut_ptr()) } != 0
+        || unsafe { strcmp(path.as_ptr().cast(), target) } != 0
+    {
+        return;
+    }
+    if PAUSED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let message = b"FD-PAUSED\n";
+    assert_eq!(
+        unsafe { write(1, message.as_ptr().cast(), message.len()) },
+        isize::try_from(message.len()).unwrap()
+    );
+    let mut input = PollFd {
+        fd: 0,
+        events: 1,
+        returned: 0,
+    };
+    assert_eq!(unsafe { poll(&raw mut input, 1, 30_000) }, 1);
+    let mut byte = [0_u8; 1];
+    assert_eq!(unsafe { read(0, byte.as_mut_ptr().cast(), 1) }, 1);
+    assert_eq!(byte[0], b'g');
+}
+unsafe fn trace_operation(kind: u8, directory: i32) {
+    let log = unsafe { getenv(c"FLIGHTDECK_PUBLICATION_TRACE".as_ptr()) };
+    let root = unsafe { getenv(c"FLIGHTDECK_FD_ROOT".as_ptr()) };
+    if log.is_null() || root.is_null() {
+        return;
+    }
+    let mut path = [0_u8; 1024];
+    let length = unsafe { strlen(root) };
+    if unsafe { fcntl(directory, 50, path.as_mut_ptr()) } != 0
+        || unsafe { strncmp(path.as_ptr().cast(), root, length) } != 0
+        || (path[length] != 0 && path[length] != b'/')
+    {
+        return;
+    }
+    let fd = unsafe { open(log, 0x1 | 0x8 | 0x0100_0000) };
+    assert!(fd >= 0);
+    assert_eq!(unsafe { write(fd, (&raw const kind).cast(), 1) }, 1);
+    assert_eq!(unsafe { close(fd) }, 0);
+}
+unsafe fn mutation_fault(directory: i32, name: *const c_char, operation: &std::ffi::CStr) -> bool {
+    let expected = unsafe { getenv(c"FLIGHTDECK_MUTATION_TARGET".as_ptr()) };
+    let kind = unsafe { getenv(c"FLIGHTDECK_MUTATION_KIND".as_ptr()) };
+    let armed = unsafe { getenv(c"FLIGHTDECK_REGISTRATION_ARMED".as_ptr()) };
+    if expected.is_null()
+        || kind.is_null()
+        || armed.is_null()
+        || unsafe { access(armed, 0) } != 0
+        || unsafe { strcmp(kind, operation.as_ptr()) } != 0
+    {
+        return false;
+    }
+    let mut path = [0_u8; 1024];
+    if unsafe { fcntl(directory, 50, path.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    let prefix = unsafe { strlen(path.as_ptr().cast()) };
+    let length = unsafe { strlen(name) };
+    if prefix + 1 + length >= path.len() {
+        return false;
+    }
+    path[prefix] = b'/';
+    for index in 0..length {
+        path[prefix + 1 + index] = unsafe { *name.add(index).cast::<u8>() };
+    }
+    unsafe { strcmp(path.as_ptr().cast(), expected) == 0 }
+}
+#[repr(C)]
+struct RenameInterpose {
+    replacement: unsafe extern "C" fn(i32, *const c_char, i32, *const c_char) -> i32,
+    original: unsafe extern "C" fn(i32, *const c_char, i32, *const c_char) -> i32,
+}
+#[used]
+#[unsafe(link_section = "__DATA,__interpose")]
+static INTERPOSE_RENAME: RenameInterpose = RenameInterpose {
+    replacement: rename_effect,
+    original: renameat,
+};
+unsafe extern "C" fn rename_effect(
+    source: i32,
+    name: *const c_char,
+    target: i32,
+    destination: *const c_char,
+) -> i32 {
+    unsafe { trace_operation(b'R', target) };
+    let result = unsafe { renameat(source, name, target, destination) };
+    if result == 0 && unsafe { mutation_fault(target, destination, c"rename") } {
+        unsafe {
+            record_refusal();
+            *__error() = 5;
+        }
+        return -1;
+    }
+    result
+}
+#[repr(C)]
+struct LinkInterpose {
+    replacement: unsafe extern "C" fn(i32, *const c_char, i32, *const c_char, i32) -> i32,
+    original: unsafe extern "C" fn(i32, *const c_char, i32, *const c_char, i32) -> i32,
+}
+#[used]
+#[unsafe(link_section = "__DATA,__interpose")]
+static INTERPOSE_LINK: LinkInterpose = LinkInterpose {
+    replacement: link_effect,
+    original: linkat,
+};
+unsafe extern "C" fn link_effect(
+    source: i32,
+    name: *const c_char,
+    target: i32,
+    destination: *const c_char,
+    flags: i32,
+) -> i32 {
+    unsafe { trace_operation(b'L', target) };
+    let result = unsafe { linkat(source, name, target, destination, flags) };
+    if result == 0 && unsafe { mutation_fault(target, destination, c"link") } {
+        unsafe {
+            record_refusal();
+            *__error() = 5;
+        }
+        return -1;
+    }
+    result
+}
+#[repr(C)]
+struct UnlinkInterpose {
+    replacement: unsafe extern "C" fn(i32, *const c_char, i32) -> i32,
+    original: unsafe extern "C" fn(i32, *const c_char, i32) -> i32,
+}
+#[used]
+#[unsafe(link_section = "__DATA,__interpose")]
+static INTERPOSE_UNLINK: UnlinkInterpose = UnlinkInterpose {
+    replacement: unlink_effect,
+    original: unlinkat,
+};
+unsafe extern "C" fn unlink_effect(directory: i32, name: *const c_char, flags: i32) -> i32 {
+    unsafe { trace_operation(b'U', directory) };
+    let result = unsafe { unlinkat(directory, name, flags) };
+    if result == 0 && unsafe { mutation_fault(directory, name, c"unlink") } {
+        unsafe {
+            record_refusal();
+            *__error() = 5;
+        }
+        return -1;
+    }
+    result
 }

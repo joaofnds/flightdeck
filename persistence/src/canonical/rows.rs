@@ -84,47 +84,15 @@ fn verify_rows(
                 .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?,
         )
     };
-    let mut inherited = 0_u64;
-    let mut rows = 0_u64;
-    match &metadata.body {
+    let (rows, inherited) = match &metadata.body {
         Body::LossOnly => return Ok(()),
         Body::Ordinary(manifest) => {
-            verify_ticks(directory, metadata, manifest, budget, work)?;
-            work.namespace_attempts += 1;
-            work.node_attempts += 1;
-            let events = directory.open_directory("events")?;
-            work.namespace_attempts += 1;
-            work.raw_admissions += 1;
-            let index = crate::event_table::index::Index::read_file(
-                &mut events.open_file("index")?,
-                manifest,
-            )
-            .map_err(source_error)?;
-            if index.identities != metadata.captured {
-                return Err(invalid());
-            }
-            for (ordinal, batch) in index.batches.iter().enumerate() {
-                let counts = verify_batch(&events, metadata, batch, ordinal, true, budget, work)?;
-                rows += counts.0;
-                inherited += counts.1;
-            }
+            verify_rows_ordinary(directory, metadata, manifest, budget, work)?
         }
         Body::Events(manifest) => {
-            for (ordinal, batch) in manifest.batches.iter().enumerate() {
-                let counts = verify_batch(
-                    directory,
-                    metadata,
-                    batch,
-                    ordinal,
-                    metadata.kind == crate::transaction::CanonicalKind::Fragment,
-                    budget,
-                    work,
-                )?;
-                rows += counts.0;
-                inherited += counts.1;
-            }
+            verify_rows_batches(directory, metadata, &manifest.batches, None, budget, work)?
         }
-    }
+    };
     let domain = &metadata.loss.inherited;
     if inherited.checked_add(domain.events) != Some(domain.event_inherited_end - domain.event_start)
         || (rows - inherited).checked_add(metadata.loss.events_new)
@@ -134,23 +102,110 @@ fn verify_rows(
     }
     Ok(())
 }
-fn verify_batch(
+fn verify_rows_ordinary(
+    directory: &PrivateDirectory,
+    metadata: &CanonicalMetadata,
+    manifest: &crate::Manifest,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<(u64, u64)> {
+    let ticks = verify_ticks(directory, metadata, manifest, budget, work)?;
+    work.namespace_attempts += 1;
+    work.node_attempts += 1;
+    let events = directory.open_directory("events")?;
+    work.namespace_attempts += 1;
+    work.raw_admissions += 1;
+    let index =
+        crate::event_table::index::Index::read_file(&mut events.open_file("index")?, manifest)
+            .map_err(source_error)?;
+    if index.identities != metadata.captured {
+        return Err(invalid());
+    }
+    verify_rows_batches(
+        &events,
+        metadata,
+        &index.batches,
+        Some(&ticks),
+        budget,
+        work,
+    )
+}
+fn verify_rows_batches(
+    directory: &PrivateDirectory,
+    metadata: &CanonicalMetadata,
+    batches: &[crate::event_recovery::Batch],
+    ticks: Option<&[TickSpan]>,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<(u64, u64)> {
+    let mut rows = 0;
+    let mut inherited = 0;
+    for (ordinal, batch) in batches.iter().enumerate() {
+        let counts = verify_batch(
+            directory,
+            metadata,
+            batch,
+            &BatchMode {
+                ordinal,
+                associated: metadata.kind != crate::transaction::CanonicalKind::Terminal,
+                ticks,
+            },
+            budget,
+            work,
+        )?;
+        rows += counts.0;
+        inherited += counts.1;
+    }
+    Ok((rows, inherited))
+}
+pub(crate) struct TickSpan {
+    pub publication: u64,
+    pub first: u64,
+    pub end: u64,
+}
+pub(crate) struct BatchMode<'ticks> {
+    pub ordinal: usize,
+    pub associated: bool,
+    pub ticks: Option<&'ticks [TickSpan]>,
+}
+pub(crate) fn verify_batch(
     directory: &PrivateDirectory,
     metadata: &CanonicalMetadata,
     batch: &crate::event_recovery::Batch,
-    ordinal: usize,
-    associated: bool,
+    mode: &BatchMode<'_>,
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
 ) -> io::Result<(u64, u64)> {
     work.namespace_attempts += 1;
+    let file = directory.open_file(&crate::event_recovery::batch_name(mode.ordinal))?;
+    verify_batch_file(file, metadata, batch, mode, budget, work)
+}
+pub(crate) fn verify_batch_file(
+    file: File,
+    metadata: &CanonicalMetadata,
+    batch: &crate::event_recovery::Batch,
+    mode: &BatchMode<'_>,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<(u64, u64)> {
+    let (frame, counts) = admit_batch_file(file, metadata, batch, mode, budget, work)?;
+    drop(frame);
+    Ok(counts)
+}
+pub(crate) fn admit_batch_file(
+    file: File,
+    metadata: &CanonicalMetadata,
+    batch: &crate::event_recovery::Batch,
+    mode: &BatchMode<'_>,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<(polars::prelude::DataFrame, (u64, u64))> {
     work.raw_admissions += 1;
-    let file = directory.open_file(&crate::event_recovery::batch_name(ordinal))?;
     let frame = crate::event_recovery::read::read_batch_file(
         file,
         batch,
         metadata.captured,
-        associated,
+        mode.associated,
         budget,
     )
     .map_err(source_error)?;
@@ -159,22 +214,51 @@ fn verify_batch(
         .map_err(crate::metadata::invalid)?
         .u64()
         .map_err(crate::metadata::invalid)?;
+    if let Some(ticks) = mode.ticks {
+        let publications = frame
+            .column("publication")
+            .map_err(crate::metadata::invalid)?
+            .u64()
+            .map_err(crate::metadata::invalid)?;
+        for (index, number) in numbers.into_no_null_iter().enumerate() {
+            match publications.get(index) {
+                Some(publication)
+                    if ticks.iter().any(|tick| {
+                        tick.publication == publication && number >= tick.first && number < tick.end
+                    }) => {}
+                None if !ticks
+                    .iter()
+                    .any(|tick| number >= tick.first && number < tick.end) => {}
+                _ => return Err(invalid()),
+            }
+        }
+    }
     let inherited = numbers
         .into_no_null_iter()
         .filter(|number| *number < metadata.loss.inherited.event_inherited_end)
         .count();
-    Ok((
+    let counts = (
         collector::u64_from_usize(frame.height()),
         collector::u64_from_usize(inherited),
-    ))
+    );
+    Ok((frame, counts))
 }
-fn verify_ticks(
+pub(crate) fn verify_ticks(
     directory: &PrivateDirectory,
     metadata: &CanonicalMetadata,
     manifest: &crate::Manifest,
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
-) -> io::Result<()> {
+) -> io::Result<Vec<TickSpan>> {
+    let frame = tick_frame(directory, manifest, budget, work)?;
+    verify_ticks_frame(&frame, metadata, manifest)
+}
+fn tick_frame(
+    directory: &PrivateDirectory,
+    manifest: &crate::Manifest,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<polars::prelude::DataFrame> {
     work.namespace_attempts += 1;
     work.raw_admissions += 1;
     let limits = DecodeLimits {
@@ -200,33 +284,97 @@ fn verify_ticks(
     if table.row_count() != count {
         return Err(invalid());
     }
-    let frame = table
-        .read_metadata_budgeted(&["publication"], Some(61))
-        .map_err(read_error)?;
-    let publications = frame
-        .column("publication")
-        .map_err(crate::metadata::invalid)?
-        .u64()
-        .map_err(crate::metadata::invalid)?;
+    table
+        .read_metadata_budgeted(
+            &[
+                "publication",
+                "run_tick",
+                "continuous_ns",
+                "wall_ns",
+                "awake_ns",
+                "events_first",
+                "events_end",
+            ],
+            Some(61),
+        )
+        .map_err(read_error)
+}
+fn verify_ticks_frame(
+    frame: &polars::prelude::DataFrame,
+    metadata: &CanonicalMetadata,
+    manifest: &crate::Manifest,
+) -> io::Result<Vec<TickSpan>> {
+    let publications = tick_column(frame, "publication")?;
     if publications.null_count() != 0 || publications.get(0) != Some(metadata.canonical_origin) {
         return Err(invalid());
     }
+    let run_ticks = tick_column(frame, "run_tick")?;
+    let continuous = tick_column(frame, "continuous_ns")?;
+    let wall = tick_column(frame, "wall_ns")?;
+    let awake = tick_column(frame, "awake_ns")?;
+    let firsts = tick_column(frame, "events_first")?;
+    let ends = tick_column(frame, "events_end")?;
+    let mut ticks = Vec::with_capacity(61);
+    let mut previous_end = manifest.events_first;
+    if tick_bounds(wall) != manifest.wall_ns
+        || tick_bounds(continuous) != manifest.continuous_ns
+        || tick_bounds(awake) != manifest.awake_ns
+    {
+        return Err(invalid());
+    }
     let mut previous = None;
-    for publication in publications.into_no_null_iter() {
+    for (index, publication) in publications.into_no_null_iter().enumerate() {
+        if continuous.get(index).is_some() != wall.get(index).is_some()
+            || continuous.get(index).is_some() != awake.get(index).is_some()
+            || metadata.timing().window(
+                run_ticks.get(index).ok_or_else(invalid)?,
+                continuous.get(index),
+            )? != metadata.window
+        {
+            return Err(invalid());
+        }
         if publication < metadata.loss.inherited.publication_inherited_end
             || publication >= metadata.original_end
             || previous.is_some_and(|old| publication <= old)
         {
             return Err(invalid());
         }
+        let first = firsts.get(index).ok_or_else(invalid)?;
+        let end = ends.get(index).ok_or_else(invalid)?;
+        if first < previous_end || first > end || end > manifest.events_end {
+            return Err(invalid());
+        }
+        ticks.push(TickSpan {
+            publication,
+            first,
+            end,
+        });
+        previous_end = end;
         previous = Some(publication);
     }
     if previous.and_then(|last| last.checked_add(1)) != Some(metadata.original_end) {
         return Err(invalid());
     }
-    Ok(())
+    if previous_end != manifest.events_end {
+        return Err(invalid());
+    }
+    Ok(ticks)
 }
 
+fn tick_column<'frame>(
+    frame: &'frame polars::prelude::DataFrame,
+    name: &str,
+) -> io::Result<&'frame polars::prelude::UInt64Chunked> {
+    frame
+        .column(name)
+        .map_err(crate::metadata::invalid)?
+        .u64()
+        .map_err(crate::metadata::invalid)
+}
+
+fn tick_bounds(column: &polars::prelude::UInt64Chunked) -> Option<crate::TimeBounds> {
+    crate::metadata::clock_bounds((0..column.len()).map(|index| column.get(index)))
+}
 fn validate_tick_schema(table: &AdmittedTable) -> io::Result<()> {
     for group in std::iter::once(model::catalog::TICKS.columns)
         .chain(model::catalog::TICKS.groups.iter().copied())
@@ -251,14 +399,14 @@ fn validate_tick_schema(table: &AdmittedTable) -> io::Result<()> {
     Ok(())
 }
 
-fn source_error(error: crate::Error) -> io::Error {
+pub(crate) fn source_error(error: crate::Error) -> io::Error {
     match error {
         crate::Error::Io(error) => error,
         crate::Error::Bound("terminal read budget") => io::Error::from(io::ErrorKind::OutOfMemory),
         error => crate::metadata::invalid(error),
     }
 }
-fn admission_error(error: AdmissionRefusal) -> io::Error {
+pub(crate) fn admission_error(error: AdmissionRefusal) -> io::Error {
     match error {
         AdmissionRefusal::Budget => io::Error::from(io::ErrorKind::OutOfMemory),
         AdmissionRefusal::Bound(message) => crate::metadata::invalid(message),
@@ -267,9 +415,44 @@ fn admission_error(error: AdmissionRefusal) -> io::Error {
         }
     }
 }
-fn read_error(error: AdmittedReadRefusal) -> io::Error {
+pub(crate) fn read_error(error: AdmittedReadRefusal) -> io::Error {
     match error {
         AdmittedReadRefusal::Admission(error) => admission_error(error),
         AdmittedReadRefusal::Decode(error) => source_error(error),
     }
+}
+
+/// Reads only the already validated bounded tick identity/clock columns for publication.
+pub(crate) fn observation_keys(
+    directory: &PrivateDirectory,
+    metadata: &CanonicalMetadata,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<Vec<(Namespace, CanonicalKey)>> {
+    let Body::Ordinary(manifest) = &metadata.body else {
+        return Ok(Vec::new());
+    };
+    let frame = tick_frame(directory, manifest, budget, work)?;
+    verify_ticks_frame(&frame, metadata, manifest)?;
+    let publications = tick_column(&frame, "publication")?;
+    let clocks = tick_column(&frame, "wall_ns")?;
+    let mut keys = Vec::with_capacity(61);
+    for (index, publication) in publications.into_no_null_iter().enumerate() {
+        let mut bytes = [0; 60];
+        let (namespace, offset) = if let Some(clock) = clocks.get(index) {
+            let hour = u32::try_from(clock / 3_600_000_000_000).map_err(|_| invalid())?;
+            bytes[..4].copy_from_slice(&hour.to_be_bytes());
+            bytes[4..12].copy_from_slice(&(clock % 3_600_000_000_000).to_be_bytes());
+            (Namespace::Known, 12)
+        } else {
+            (Namespace::Unknown, 0)
+        };
+        let source = CanonicalKey::source(Namespace::Ordinary, &metadata.run, publication)?;
+        bytes[offset..offset + 40].copy_from_slice(&source.bytes[..40]);
+        keys.push((
+            namespace,
+            CanonicalKey::from_bytes(namespace, &bytes[..namespace.width()])?,
+        ));
+    }
+    Ok(keys)
 }

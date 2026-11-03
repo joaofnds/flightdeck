@@ -14,10 +14,16 @@ use crate::{Manifest, WindowIdentity};
 
 mod attempt;
 mod inventory;
+mod normal_proof;
+mod publication;
+mod publication_control;
 pub use attempt::{RegisteredAttempt, RegisteredFile};
 pub use inventory::{
     BatchFact, FileIdentity, IndexFact, InventoryStep, InventoryWork, OriginalFile,
     OriginalInventory, OriginalPlacement,
+};
+pub use publication::{
+    NormalProof, NormalPublication, ProofStep, PublicationStep, PublicationWork,
 };
 mod event_table;
 pub(crate) mod events;

@@ -42,6 +42,13 @@ unsafe extern "C" {
         target: *const c_char,
     ) -> c_int;
     fn unlinkat(directory: c_int, path: *const c_char, flags: c_int) -> c_int;
+    fn linkat(
+        source: c_int,
+        name: *const c_char,
+        target: c_int,
+        destination: *const c_char,
+        flags: c_int,
+    ) -> c_int;
 }
 
 impl PrivateDirectory {
@@ -97,6 +104,11 @@ impl PrivateDirectory {
     /// New children are synced before their parent. A sync failure may leave a
     /// visible child; callers must not infer absence from an error.
     pub fn create_directory(&self, name: &str) -> io::Result<Self> {
+        self.create_directory_counted(name, &mut 0)
+    }
+
+    /// Counts attempted durability barriers, including a failing prefix of creation.
+    pub fn create_directory_counted(&self, name: &str, syncs: &mut u64) -> io::Result<Self> {
         let mut buffer = [0; NAME_MAX + 1];
         let component = component_name(name, &mut buffer)?;
         if unsafe { mkdirat(self.file.as_raw_fd(), component.as_ptr(), 0o700) } != 0 {
@@ -110,7 +122,9 @@ impl PrivateDirectory {
         let file = self.open_component(name, O_RDONLY | O_DIRECTORY, 0)?;
         clear_acl(&file)?;
         verify_open(&file, true)?;
+        *syncs += 1;
         full_sync(&file)?;
+        *syncs += 1;
         self.full_sync()?;
 
         Ok(Self { file })
@@ -145,6 +159,85 @@ impl PrivateDirectory {
         let descriptor = self.file.as_raw_fd();
 
         if unsafe { renameat(descriptor, source.as_ptr(), descriptor, target.as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
+    }
+
+    pub fn device_inode(&self) -> io::Result<(u64, u64)> {
+        let metadata = self.file.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    /// The transaction owner validates both placements before this non-copying move.
+    pub fn rename_to(&self, name: &str, target: &Self, destination: &str) -> io::Result<()> {
+        let mut source_buffer = [0; NAME_MAX + 1];
+        let source = component_name(name, &mut source_buffer)?;
+        let mut target_buffer = [0; NAME_MAX + 1];
+        let destination = component_name(destination, &mut target_buffer)?;
+        if unsafe {
+            renameat(
+                self.file.as_raw_fd(),
+                source.as_ptr(),
+                target.file.as_raw_fd(),
+                destination.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(())
+    }
+
+    /// Links one admitted regular inode; an existing destination must be the same inode.
+    pub fn link_to(&self, name: &str, target: &Self, destination: &str) -> io::Result<()> {
+        self.link_to_counted(name, target, destination, &mut 0)
+    }
+
+    pub fn link_to_counted(
+        &self,
+        name: &str,
+        target: &Self,
+        destination: &str,
+        attempts: &mut u64,
+    ) -> io::Result<()> {
+        *attempts += 1;
+        let source_file = self.open_file(name)?;
+        let source_metadata = source_file.metadata()?;
+        let mut source_buffer = [0; NAME_MAX + 1];
+        let source = component_name(name, &mut source_buffer)?;
+        let mut target_buffer = [0; NAME_MAX + 1];
+        let destination_component = component_name(destination, &mut target_buffer)?;
+        if unsafe {
+            linkat(
+                self.file.as_raw_fd(),
+                source.as_ptr(),
+                target.file.as_raw_fd(),
+                destination_component.as_ptr(),
+                0,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+        *attempts += 1;
+        let linked = target.open_file(destination)?.metadata()?;
+        if linked.dev() != source_metadata.dev() || linked.ino() != source_metadata.ino() {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_directory(&self, name: &str) -> io::Result<()> {
+        let mut buffer = [0; NAME_MAX + 1];
+        let name = component_name(name, &mut buffer)?;
+        if unsafe { unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0x80) } != 0 {
             return Err(io::Error::last_os_error());
         }
 

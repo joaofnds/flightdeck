@@ -493,9 +493,9 @@ fn census_keeps_overlapping_originals_as_distinct_facts() {
 }
 
 #[test]
-fn terminal_census_preserves_sparse_detached_rows_without_transport() {
-    // Goal: terminal inventory is bound to actual acquired completion and direct batch names.
-    // Method: publish a real event, register end2, encode ordinal99 and remove transport.
+fn terminal_census_refuses_replayed_sparse_rows_after_ordinary_ownership() {
+    // Goal: terminal inventory cannot charge a row already owned by the ordinary predecessor.
+    // Method: save the real tick/event, then retain replayed ordinal99 through an explicit refusal.
     let mut fixture = Fixture::new(false);
     let memory = collector::machine::Memory::default();
     fixture.writer.publish(&collector::ring::Readings {
@@ -513,9 +513,8 @@ fn terminal_census_preserves_sparse_detached_rows_without_transport() {
         dropped: collector::ring::Dropped::default(),
     });
     fixture.writer.finish();
-    let mut input = fixture.input(true);
-    input.operation = AttemptOperation::Terminal { event_end: 2 };
     let store = Store::open(&fixture.root).unwrap();
+    let (input, _) = publication_tests::settle_latest_ordinary(&mut fixture, &store);
     let attempt = store
         .register_attempt(&input, &mut fixture.reader(), &registration_budget())
         .unwrap();
@@ -524,18 +523,20 @@ fn terminal_census_preserves_sparse_detached_rows_without_transport() {
     remove_transport(&mut fixture);
     let mut attempt = store.resume_attempt().unwrap();
     let mut census = attempt.original_inventory(&budget()).unwrap();
-    enumerate(&mut census);
-    assert!(matches!(
-        census.batches()[99],
-        BatchFact::Complete {
-            first: 1,
-            end: 2,
-            rows: 1,
-            ..
+    let mut refused = false;
+    for _ in 0..160 {
+        if let Err(crate::Error::Io(error)) = census.step() {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            refused = true;
+            break;
         }
-    ));
-    assert_eq!(census.index(), IndexFact::Missing);
-    assert_eq!(census.registered_event_start(), 1);
+    }
+    assert!(refused);
+    assert!(
+        original(&fixture, attempt.transaction(), true)
+            .join("0099.parquet")
+            .exists()
+    );
 }
 
 #[test]
@@ -870,6 +871,7 @@ fn typed_metadata_reopen_refuses_an_in_place_rewrite() {
         )
         .unwrap();
     attempt
+        .original_directory()
         .create_file("metadata")
         .unwrap()
         .write_all(b"opaque")
@@ -1070,6 +1072,7 @@ fn native_prepared_child(root: &Path) {
     let run = reader.identity().unwrap();
     let input = AttemptInput {
         run,
+        source: crate::transaction::SourceTiming::from_reader(&reader),
         operation: AttemptOperation::Ordinary {
             window: 0,
             attempted_origin: 1,

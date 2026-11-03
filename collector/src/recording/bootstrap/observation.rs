@@ -10,8 +10,52 @@ use std::{fs::File, io};
 pub struct StateObservation<'root, 'bytes> {
     root: &'root PrivateDirectory,
     file: File,
-    bytes: &'bytes [u8; STATE_BYTES],
+    bytes: ObservationBytes<'bytes>,
     recording: Identity,
+}
+
+enum ObservationBytes<'bytes> {
+    Borrowed(&'bytes [u8; STATE_BYTES]),
+    Owned(Box<[u8; STATE_BYTES]>),
+}
+impl ObservationBytes<'_> {
+    fn value(&self) -> &[u8; STATE_BYTES] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+impl<'root> StateObservation<'root, 'static> {
+    /// Retains fixed immutable bytes for a consuming writer's bounded read continuation.
+    /// This observes Quiet only and grants no transaction repair or mutation authority.
+    pub fn begin_owned(
+        root: &'root PrivateDirectory,
+        recording: Identity,
+        attempts: &mut u64,
+    ) -> io::Result<Option<Self>> {
+        if bootstrap_present(root, attempts)? {
+            return Ok(None);
+        }
+
+        *attempts += 1;
+        let mut file = root.open_file("namespace-state")?;
+        let mut bytes = [0; STATE_BYTES];
+        read_into(&mut file, &mut bytes)?;
+        if !matches!(
+            decode_state(&bytes, recording)?,
+            NamespaceState::Quiet { .. }
+        ) {
+            return Ok(None);
+        }
+
+        Ok(Some(Self {
+            root,
+            file,
+            bytes: ObservationBytes::Owned(Box::new(bytes)),
+            recording,
+        }))
+    }
 }
 
 impl<'root, 'bytes> StateObservation<'root, 'bytes> {
@@ -47,7 +91,7 @@ impl<'root, 'bytes> StateObservation<'root, 'bytes> {
         Ok(Some(Self {
             root,
             file,
-            bytes,
+            bytes: ObservationBytes::Borrowed(bytes),
             recording,
         }))
     }
@@ -80,7 +124,7 @@ impl<'root, 'bytes> StateObservation<'root, 'bytes> {
         }
 
         read_into(&mut current, scratch)?;
-        if scratch != self.bytes {
+        if scratch != self.bytes.value() {
             return Ok(false);
         }
 

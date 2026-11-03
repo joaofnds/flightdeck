@@ -155,7 +155,7 @@ enum NamesPhase {
 /// }
 /// ```
 pub struct OriginalInventory<'attempt, 'store> {
-    attempt: &'attempt RegisteredAttempt<'store>,
+    attempt: InventoryOwner<'attempt, 'store>,
     names: Option<PrivateNames>,
     names_phase: NamesPhase,
     name_count: usize,
@@ -178,6 +178,166 @@ pub struct OriginalInventory<'attempt, 'store> {
     work: InventoryWork,
     budget: Arc<ByteBudget>,
     _reservation: ByteReservation,
+}
+pub(super) struct NormalInventory {
+    files: [Option<FileIdentity>; 12],
+    batches: Vec<BatchFact>,
+    index: IndexFact,
+    original_identity: DirectoryIdentity,
+    events_identity: Option<DirectoryIdentity>,
+    _reservation: ByteReservation,
+}
+impl NormalInventory {
+    pub(super) fn absent(&self, name: &str) -> io::Result<bool> {
+        let position = TABLE_FILES
+            .iter()
+            .position(|held| *held == name)
+            .ok_or_else(invalid)?;
+        Ok(self.files[position].is_none())
+    }
+
+    pub(super) fn file(&self, name: &str, file: &File) -> io::Result<()> {
+        let position = if name == "metadata" {
+            11
+        } else {
+            TABLE_FILES
+                .iter()
+                .position(|held| *held == name)
+                .ok_or_else(invalid)?
+        };
+        if self.files[position] != Some(FileIdentity::read(file)?) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn batch(&self, ordinal: usize, file: &File) -> io::Result<()> {
+        let Some(BatchFact::Complete { file: expected, .. }) = self.batches.get(ordinal) else {
+            return Err(invalid());
+        };
+        if *expected != FileIdentity::read(file)? {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn index(&self, file: &File) -> io::Result<()> {
+        let IndexFact::Valid { file: expected, .. } = self.index else {
+            return Err(invalid());
+        };
+        if expected != FileIdentity::read(file)? {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn directories(
+        &self,
+        directory: &PrivateDirectory,
+        events: Option<&PrivateDirectory>,
+    ) -> io::Result<()> {
+        if directory.identity()? != self.original_identity
+            || events.map(PrivateDirectory::identity).transpose()? != self.events_identity
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+enum InventoryOwner<'attempt, 'store> {
+    Borrowed(&'attempt RegisteredAttempt<'store>),
+    Owned(Box<RegisteredAttempt<'store>>),
+}
+impl<'store> std::ops::Deref for InventoryOwner<'_, 'store> {
+    type Target = RegisteredAttempt<'store>;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(owner) => owner,
+            Self::Owned(owner) => owner,
+        }
+    }
+}
+impl<'store> OriginalInventory<'store, 'store> {
+    pub(super) fn owned(
+        mut owner: RegisteredAttempt<'store>,
+        budget: &Arc<ByteBudget>,
+    ) -> io::Result<Self> {
+        let OriginalInventory {
+            attempt: _,
+            names,
+            names_phase,
+            name_count,
+            dots,
+            events,
+            original_identity,
+            events_identity,
+            next,
+            batches,
+            files,
+            index,
+            index_data,
+            rows,
+            maximum_end,
+            overlaps,
+            unordered,
+            index_conflict,
+            previous_first,
+            work,
+            budget,
+            _reservation: reservation,
+        } = owner.original_inventory(budget)?;
+        Ok(Self {
+            attempt: InventoryOwner::Owned(Box::new(owner)),
+            names,
+            names_phase,
+            name_count,
+            dots,
+            events,
+            original_identity,
+            events_identity,
+            next,
+            batches,
+            files,
+            index,
+            index_data,
+            rows,
+            maximum_end,
+            overlaps,
+            unordered,
+            index_conflict,
+            previous_first,
+            work,
+            budget,
+            _reservation: reservation,
+        })
+    }
+    pub(super) fn owner(&self) -> &RegisteredAttempt<'store> {
+        &self.attempt
+    }
+    pub(super) fn into_normal(self) -> io::Result<(RegisteredAttempt<'store>, NormalInventory)> {
+        let Self {
+            attempt,
+            files,
+            batches,
+            index,
+            original_identity,
+            events_identity,
+            _reservation: mut reservation,
+            ..
+        } = self;
+        reservation.shrink_to(SUMMARY_BYTES);
+        let InventoryOwner::Owned(owner) = attempt else {
+            return Err(invalid());
+        };
+        Ok((
+            *owner,
+            NormalInventory {
+                files,
+                batches,
+                index,
+                original_identity,
+                events_identity,
+                _reservation: reservation,
+            },
+        ))
+    }
 }
 impl<'store> RegisteredAttempt<'store> {
     pub fn original_inventory<'attempt>(
@@ -211,7 +371,7 @@ impl<'store> RegisteredAttempt<'store> {
         };
         let names = self.original_directory().names(&mut work.directory)?;
         Ok(OriginalInventory {
-            attempt: self,
+            attempt: InventoryOwner::Borrowed(self),
             names: Some(names),
             names_phase: NamesPhase::Original,
             name_count: 0,
@@ -322,6 +482,89 @@ impl OriginalInventory<'_, '_> {
         Ok(InventoryStep::Continue)
     }
 
+    pub(super) fn normal_batches(
+        &self,
+        metadata: &crate::canonical::CanonicalMetadata,
+    ) -> io::Result<Vec<crate::event_recovery::Batch>> {
+        match &metadata.body {
+            crate::canonical::metadata::Body::Ordinary(_) => Ok(self
+                .index_data
+                .as_ref()
+                .ok_or_else(invalid)?
+                .batches
+                .clone()),
+            crate::canonical::metadata::Body::Events(manifest) => Ok(manifest.batches.clone()),
+            crate::canonical::metadata::Body::LossOnly => Err(invalid()),
+        }
+    }
+    pub(super) fn metadata_file(&self, file: &File) -> io::Result<()> {
+        if self.files[11] != Some(FileIdentity::read(file)?) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn validate_normal(
+        &self,
+        metadata: &crate::canonical::CanonicalMetadata,
+    ) -> io::Result<()> {
+        use crate::canonical::metadata::Body;
+        if !self.enumerated() || self.overlaps || self.unordered || self.exceeds_logical_limit() {
+            return Err(invalid());
+        }
+        let batches: &[crate::event_recovery::Batch] = match &metadata.body {
+            Body::Ordinary(manifest) => {
+                if self.index_conflict {
+                    return Err(invalid());
+                }
+                let index = self.index_data.as_ref().ok_or_else(invalid)?;
+                if index.identity != manifest.identity
+                    || index.first != manifest.events_first
+                    || index.end != manifest.events_end
+                    || manifest.event_batches
+                        != Some(u32::try_from(index.batches.len()).map_err(|_| invalid())?)
+                    || manifest
+                        .tables
+                        .iter()
+                        .find(|table| table.name == "events")
+                        .map(|table| table.rows)
+                        != Some(index.rows)
+                {
+                    return Err(invalid());
+                }
+                for (position, name) in TABLE_FILES.iter().enumerate() {
+                    let stem = name.strip_suffix(".parquet").ok_or_else(invalid)?;
+                    let present = self.files[position].is_some();
+                    let declared = manifest.tables.iter().any(|table| table.name == stem);
+                    if (present && !declared)
+                        || (!present && declared && !crate::schema::DERIVED_TABLES.contains(&stem))
+                    {
+                        return Err(invalid());
+                    }
+                }
+                &index.batches
+            }
+            Body::Events(manifest)
+                if metadata.kind == crate::transaction::CanonicalKind::Terminal =>
+            {
+                &manifest.batches
+            }
+            _ => return Err(io::Error::from(io::ErrorKind::Unsupported)),
+        };
+        for (ordinal, fact) in self.batches.iter().enumerate() {
+            match (batches.get(ordinal), fact) {
+                (None, BatchFact::Missing) => {}
+                (
+                    Some(expected),
+                    BatchFact::Complete {
+                        first, end, rows, ..
+                    },
+                ) if expected.first == *first && expected.end == *end && expected.rows == *rows => {
+                }
+                _ => return Err(invalid()),
+            }
+        }
+        Ok(())
+    }
     fn validate_directories(&mut self) -> io::Result<()> {
         if self.attempt.original_directory().identity()? != self.original_identity {
             return Err(invalid());

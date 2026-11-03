@@ -36,7 +36,7 @@ pub struct Recovery {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Batch {
+pub struct Batch {
     pub first: u64,
     pub end: u64,
     pub rows: u64,

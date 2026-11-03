@@ -119,16 +119,23 @@ fn verify_sync_failure(boundary: SyncBoundary) {
 
 fn verify_sync_failure_child(root: &Path, boundary: SyncBoundary) {
     let directory = PrivateDirectory::open(root).unwrap();
+    let mut syncs = 0;
     let result = match boundary {
-        SyncBoundary::NewChild | SyncBoundary::ChildParent => {
-            directory.create_directory("child").map(drop)
-        }
+        SyncBoundary::NewChild | SyncBoundary::ChildParent => directory
+            .create_directory_counted("child", &mut syncs)
+            .map(drop),
         SyncBoundary::PendingFile | SyncBoundary::Directory => {
             atomic_write_in(&directory, "metadata", b"replacement")
         }
     };
 
     assert_eq!(Some(5), result.unwrap_err().raw_os_error());
+    match boundary {
+        SyncBoundary::NewChild => assert_eq!(syncs, 1),
+        SyncBoundary::ChildParent => assert_eq!(syncs, 2),
+        _ => {}
+    }
+
     match boundary {
         SyncBoundary::NewChild | SyncBoundary::ChildParent => {
             drop(directory.open_directory("child").unwrap());

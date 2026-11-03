@@ -16,6 +16,7 @@ pub struct SourceFrontier {
     prior_window: Option<u64>,
     ordered_window: Option<u64>,
     captured: bool,
+    timing: crate::transaction::SourceTiming,
     complete: bool,
     trailing_unknown: bool,
     unknown_provenance: Option<crate::transaction::UnknownProvenance>,
@@ -87,6 +88,7 @@ impl SourceFrontier {
             || self.event_end != input.losses.event_start
             || self.prior_window != input.losses.prior_window
             || self.captured != input.captured
+            || self.timing != input.source
         {
             return Err(invalid());
         }
@@ -152,6 +154,9 @@ impl<'root, 'state> SourceFrontierRead<'root, 'state> {
             result: None,
             failed: false,
         })
+    }
+    pub(crate) fn byte_budget(&self) -> &Arc<ByteBudget> {
+        &self.budget
     }
     #[must_use]
     pub fn work(&self) -> ReadWork {
@@ -257,6 +262,31 @@ impl<'root, 'state> SourceFrontierRead<'root, 'state> {
         Ok(())
     }
 }
+impl<'root> SourceFrontierRead<'root, 'static> {
+    pub(crate) fn begin_owned(
+        root: &'root PrivateDirectory,
+        run: RunIdentity,
+        budget: &Arc<ByteBudget>,
+    ) -> io::Result<Self> {
+        let cursor = CanonicalCursor::begin_owned(
+            root,
+            run.recording,
+            Namespace::Ordinary,
+            SeekRange::source_tail(Namespace::Ordinary, &run)?,
+            budget,
+        )?;
+        Ok(Self {
+            cursor,
+            run,
+            budget: Arc::clone(budget),
+            stage: 0,
+            selected: None,
+            ordinary_tail: None,
+            result: None,
+            failed: false,
+        })
+    }
+}
 fn source_value(candidate: &AdmittedCanonical, ordered_window: Option<u64>) -> SourceFrontier {
     let metadata = &candidate.metadata;
     SourceFrontier {
@@ -266,6 +296,7 @@ fn source_value(candidate: &AdmittedCanonical, ordered_window: Option<u64>) -> S
         prior_window: metadata.effective_window(),
         ordered_window,
         captured: metadata.captured,
+        timing: metadata.timing(),
         trailing_unknown: metadata.trailing_unknown,
         unknown_provenance: metadata.loss.inherited.unknown.clone(),
         complete: metadata.certified_terminal(),
@@ -318,7 +349,9 @@ fn choose_validate_successor(
     later: &CanonicalMetadata,
 ) -> io::Result<()> {
     let domain = &later.loss.inherited;
-    if earlier.certified_terminal()
+    if earlier.timing() != later.timing()
+        || earlier.captured != later.captured
+        || earlier.certified_terminal()
         || earlier.loss.publication_end > domain.publication_start
         || earlier.loss.event_end > domain.event_start
         || earlier.effective_window() > domain.prior_window

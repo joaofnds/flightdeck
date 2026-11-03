@@ -595,8 +595,20 @@ fn retained_directory_publishes_and_creates_after_root_substitution() {
 
     let calls = allocator_calls_in(|| {
         atomic_write_in(&directory, "metadata", b"retained").unwrap();
-        drop(directory.create_directory("child").unwrap());
-        drop(directory.create_directory("child").unwrap());
+        let mut syncs = 0;
+        drop(
+            directory
+                .create_directory_counted("child", &mut syncs)
+                .unwrap(),
+        );
+        assert_eq!(syncs, 2);
+        syncs = 0;
+        drop(
+            directory
+                .create_directory_counted("child", &mut syncs)
+                .unwrap(),
+        );
+        assert_eq!(syncs, 0);
     });
 
     assert_eq!(0, calls);

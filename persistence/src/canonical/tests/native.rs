@@ -14,12 +14,11 @@ fn native_inflight_state_replacement_overrides_absence_and_raw_error() {
         let fixture = Fixture::new();
         let trigger = if raw {
             let metadata = fixture.metadata(CanonicalKind::LossOnly);
-            fixture.root.join("ordinary").join(
-                fixture
-                    .publish(&metadata, Namespace::Ordinary, &[])
-                    .1
-                    .file_name(),
-            )
+            let key = fixture
+                .publish(&metadata, Namespace::Ordinary, &[])
+                .1
+                .file_name();
+            fixture.root.join("ordinary").join(&key[..1]).join(key)
         } else {
             fixture.root.join("ordinary")
         };
