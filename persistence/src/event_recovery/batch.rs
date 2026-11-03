@@ -20,6 +20,12 @@ pub(crate) struct Row {
     pub app: Option<Vec<u8>>,
 }
 
+struct RowIdentity {
+    identity: OwnedIdentity,
+    name: Option<Vec<u8>>,
+    app: Option<Vec<u8>>,
+}
+
 pub(crate) const PROGRAM_BYTES_MAX: usize = 2 * collector::ring::PROGRAM_PATH_BYTES_MAX;
 pub(crate) const ROWS_BYTES_MAX: usize = BATCH_ROWS_MAX * size_of::<Row>();
 const BATCH_ROWS_MIN: usize = (BATCH_BYTES_MAX - ROWS_BYTES_MAX) / PROGRAM_BYTES_MAX;
@@ -313,4 +319,114 @@ fn validate_numeric_usage(frame: &DataFrame, row: usize, present: bool) -> Resul
         }
     }
     Ok(())
+}
+
+/// Copies one row from a fully validated bounded frame, retaining every persisted field.
+pub(crate) fn owned_row(frame: &DataFrame, position: usize, captured: bool) -> Result<Row> {
+    if position >= frame.height() {
+        return Err(Error::Bound("owned event position"));
+    }
+    let number =
+        |name: &str| -> Result<Option<u64>> { Ok(frame.column(name)?.u64()?.get(position)) };
+    let required =
+        |name: &str| -> Result<u64> { number(name)?.ok_or(Error::Bound("owned event number")) };
+    let byte = |name: &str| -> Result<u8> {
+        frame
+            .column(name)?
+            .u8()?
+            .get(position)
+            .ok_or(Error::Bound("owned event byte"))
+    };
+    let pid = frame
+        .column("pid")?
+        .i32()?
+        .get(position)
+        .ok_or(Error::Bound("owned event pid"))?;
+    let usage = if number("user_ns")?.is_some() {
+        Some(collector::processes::Usage {
+            awake_ns_at_start: required("awake_ns_at_start")?,
+            user_ns: required("user_ns")?,
+            system_ns: required("system_ns")?,
+            energy_nj: required("energy_nj")?,
+            instructions: required("instructions")?,
+            super_instructions: required("super_instructions")?,
+            cycles: required("cycles")?,
+            idle_wakeups: required("idle_wakeups")?,
+            interrupt_wakeups: required("interrupt_wakeups")?,
+            pageins: required("pageins")?,
+            resident_bytes: required("resident_bytes")?,
+            footprint_bytes: required("footprint_bytes")?,
+            disk_read_bytes: required("disk_read_bytes")?,
+            disk_written_bytes: required("disk_written_bytes")?,
+        })
+    } else {
+        None
+    };
+    let mut row = Row {
+        publication: number("publication")?,
+        event: EventRecord {
+            number: required("event")?,
+            tick: required("run_tick")?,
+            pid,
+            kind: byte("kind")?,
+            coalition: number("coalition")?,
+            usage,
+            availability: byte("availability")?,
+            noticed: frame.column("noticed")?.u8()?.get(position),
+        },
+        identity: None,
+        name: None,
+        app: None,
+    };
+    if captured {
+        let identity = owned_row_identity(frame, position, pid)?;
+        row.identity = Some(identity.identity);
+        row.name = identity.name;
+        row.app = identity.app;
+    }
+    Ok(row)
+}
+
+fn owned_row_identity(frame: &DataFrame, position: usize, pid: i32) -> Result<RowIdentity> {
+    let number =
+        |name: &str| -> Result<Option<u64>> { Ok(frame.column(name)?.u64()?.get(position)) };
+    let byte = |name: &str| -> Result<u8> {
+        frame
+            .column(name)?
+            .u8()?
+            .get(position)
+            .ok_or(Error::Bound("owned identity byte"))
+    };
+    let identity = OwnedIdentity {
+        pid,
+        creation: match (
+            number("process_unique_id")?,
+            frame.column("pid_version")?.i32()?.get(position),
+        ) {
+            (Some(unique_id), Some(pid_version)) => Some(collector::ring::ProcessCreation {
+                unique_id,
+                pid_version,
+            }),
+            (None, None) => None,
+            _ => return Err(Error::Bound("owned creation pair")),
+        },
+        availability: byte("identity_availability")?,
+        usage: byte("usage_availability")?,
+        program: None,
+    };
+    let name = frame
+        .column("executable_name")?
+        .binary()?
+        .get(position)
+        .map(<[u8]>::to_vec);
+    let app = frame
+        .column("app_path")?
+        .binary()?
+        .get(position)
+        .map(<[u8]>::to_vec);
+    Ok(RowIdentity {
+        identity,
+        name,
+        app,
+    })
 }

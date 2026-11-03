@@ -11,8 +11,14 @@ use collector::ring::RingReader;
 
 pub struct LossPublication<'store> {
     inner: NormalPublication<'store>,
+    census: Option<super::super::inventory::census::io_owner::CensusWriter>,
+    census_reader: Option<super::super::inventory::census::io_owner::CensusReader>,
+    census_binding: Option<crate::transaction::census_binding::CensusBinding>,
+    cleanup_admission: usize,
+    output_admission: usize,
     proof: Option<super::super::normal_proof::SourceProof>,
     endpoint: Option<u64>,
+    snapshot: Option<(u64, u64)>,
     evidence: u32,
     intent: Option<NormalState>,
     adopted: bool,
@@ -55,13 +61,29 @@ impl<'store> RegisteredAttempt<'store> {
         let scratch = budget
             .reserve(64 * 1024)
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let current = super::super::publication_control::read_normal(
+            &super::super::publication_control::CountedControl {
+                root: self.root,
+                ledger: Some(ledger),
+            },
+            self.input.run.recording,
+        )?;
+        if current.row_plan.is_some() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
         let proof = source_proof(reader, &self.input, scratch, ledger)?;
-        let state = NormalState::registered(self.transaction, self.input.clone());
+        let state = current;
         let inner = NormalPublication::new(self, state, budget, None, Some(ledger.clone()))?;
         Ok(LossPublication {
             inner,
+            census: None,
+            census_reader: None,
+            census_binding: None,
+            cleanup_admission: 0,
+            output_admission: 0,
             proof: Some(proof),
             endpoint: None,
+            snapshot: None,
             evidence: 0,
             intent: None,
             adopted: false,
@@ -131,6 +153,9 @@ impl Store {
             },
             self.recording,
         )?;
+        if state.row_plan.is_some() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
         ledger.namespace_attempt();
         let base = self.directory.open_directory(base_name(&state.input))?;
         ledger.namespace_attempt();
@@ -155,6 +180,7 @@ impl Store {
             input: state.input.clone(),
             directory,
             resumed: true,
+            candidates: false,
             _permit: permit,
             owner: &self.owner,
             root: &self.directory,
@@ -174,32 +200,7 @@ impl<'store> LossPublication<'store> {
     ) -> io::Result<Self> {
         normal_namespace(&attempt, &state, Some(ledger))?;
         if state.phase == Phase::Registered {
-            if state.input.losses.unknown.is_some() {
-                return Err(io::Error::from(io::ErrorKind::WouldBlock));
-            }
-
-            let reader = reader.ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
-            let scratch = budget
-                .reserve(64 * 1024)
-                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
-            let proof = source_proof(reader, &attempt.input, scratch, ledger)?;
-            let inner = NormalPublication::new(
-                attempt,
-                state,
-                budget,
-                Some(reservation),
-                Some(ledger.clone()),
-            )?;
-            return Ok(LossPublication {
-                inner,
-                proof: Some(proof),
-                endpoint: None,
-                evidence: 0,
-                intent: None,
-                adopted: false,
-                ledger: ledger.clone(),
-                accounted: PublicationWork::default(),
-            });
+            return Self::resume_registered(attempt, state, reader, budget, reservation, ledger);
         }
         if state.salvage.is_none() {
             return Err(invalid());
@@ -210,8 +211,14 @@ impl<'store> LossPublication<'store> {
         inner.metadata = Some(inner.state.loss_metadata()?);
         Ok(LossPublication {
             inner,
+            census: None,
+            census_reader: None,
+            census_binding: None,
+            cleanup_admission: 0,
+            output_admission: 0,
             proof: None,
             endpoint: None,
+            snapshot: None,
             evidence: 0,
             intent: None,
             adopted: false,
@@ -221,7 +228,7 @@ impl<'store> LossPublication<'store> {
     }
 }
 
-impl LossPublication<'_> {
+impl<'store> LossPublication<'store> {
     fn local_work(&self) -> PublicationWork {
         let mut work = self.inner.work();
         if let Some(proof) = &self.proof {
@@ -240,11 +247,96 @@ impl LossPublication<'_> {
         self.ledger.record(&self.local_work(), &mut self.accounted);
         result
     }
+    fn resume_registered(
+        attempt: RegisteredAttempt<'store>,
+        state: NormalState,
+        reader: Option<RingReader>,
+        budget: &Arc<ByteBudget>,
+        reservation: super::ByteReservation,
+        ledger: &super::super::PublicationLedger,
+    ) -> io::Result<Self> {
+        if state.input.losses.unknown.is_some() {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+
+        let reader = reader.ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
+        let scratch = budget
+            .reserve(64 * 1024)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let proof = source_proof(reader, &attempt.input, scratch, ledger)?;
+        let intent = super::super::publication_control::pending(
+            &super::super::publication_control::CountedControl {
+                root: attempt.root,
+                ledger: Some(ledger),
+            },
+            &state,
+        )?
+        .filter(|next| next.census.kind == 2);
+        let inner = NormalPublication::new(
+            attempt,
+            state,
+            budget,
+            Some(reservation),
+            Some(ledger.clone()),
+        )?;
+        Ok(LossPublication {
+            inner,
+            census: None,
+            census_reader: None,
+            census_binding: None,
+            cleanup_admission: 0,
+            output_admission: 0,
+            proof: Some(proof),
+            endpoint: None,
+            snapshot: None,
+            evidence: 0,
+            intent,
+            adopted: false,
+            ledger: ledger.clone(),
+            accounted: PublicationWork::default(),
+        })
+    }
     fn step_inner(&mut self) -> io::Result<PublicationStep> {
         if self.inner.done {
             return Ok(PublicationStep::Idle);
         }
 
+        if self.step_inner_visible()? {
+            return Ok(PublicationStep::Continue);
+        }
+        if self.inner.inventory.is_some() {
+            self.census()?;
+        } else if self.inner.state.salvage.is_some()
+            && self.inner.witness.is_none()
+            && self.inner.state.cleanup.region != 8
+        {
+            self.load_census()?;
+        } else if self.inner.state.salvage.is_none() {
+            if self.inner.tables_next < super::super::attempt::TABLE_FILES.len() {
+                self.original_table()?;
+            } else if self.snapshot.is_none() {
+                self.prove()?;
+            } else if self.census_binding.is_none() {
+                self.prepare_census()?;
+            } else {
+                self.commit_plan()?;
+            }
+        } else if self.output_admission < 4109 && self.inner.state.cleanup.region != 8 {
+            self.output_admission = self.step_inner_admission()?;
+        } else if !self.inner.ready {
+            self.output()?;
+        } else if self.inner.state.phase == Phase::SalvageCommitted {
+            self.cleanup()?;
+        } else {
+            self.inner.step_publication()?;
+        }
+        Ok(if self.inner.done {
+            PublicationStep::Idle
+        } else {
+            PublicationStep::Continue
+        })
+    }
+    fn step_inner_visible(&mut self) -> io::Result<bool> {
         let owner = if let Some(inventory) = &self.inner.inventory {
             inventory.owner()
         } else {
@@ -269,29 +361,31 @@ impl LossPublication<'_> {
                 &mut self.inner.work,
             )?;
             self.adopted = true;
-            return Ok(PublicationStep::Continue);
+            return Ok(true);
         }
 
-        if self.inner.inventory.is_some() {
-            self.census()?;
-        } else if self.inner.state.salvage.is_none() {
-            if self.inner.tables_next < super::super::attempt::TABLE_FILES.len() {
-                self.original_table()?;
-            } else {
-                self.prove()?;
-            }
-        } else if !self.inner.ready {
-            self.output()?;
-        } else if self.inner.state.phase == Phase::SalvageCommitted {
-            self.cleanup()?;
-        } else {
-            self.inner.step_publication()?;
+        if self.inner.state.census.kind == 2 && self.inner.state.cleanup.region != 8 {
+            super::super::inventory::census::io_owner::check_bound(
+                owner,
+                &self.inner.state.census,
+                &self.ledger,
+            )?;
         }
-        Ok(if self.inner.done {
-            PublicationStep::Idle
-        } else {
-            PublicationStep::Continue
-        })
+        Ok(false)
+    }
+    fn step_inner_admission(&self) -> io::Result<usize> {
+        let next = self
+            .inner
+            .witness
+            .as_ref()
+            .ok_or_else(invalid)?
+            .census_cleanup_pass(
+                self.inner.attempt.as_ref().ok_or_else(invalid)?,
+                &self.inner.state,
+                self.output_admission,
+                &self.ledger,
+            )?;
+        Ok(next)
     }
     fn census(&mut self) -> io::Result<()> {
         let inventory = self.inner.inventory.as_mut().ok_or_else(invalid)?;
@@ -305,15 +399,71 @@ impl LossPublication<'_> {
         self.inner.work.inventory = inventory.work();
         let (end, evidence) = result?;
         self.evidence = evidence;
-        let (owner, witness) = self
+        let object =
+            super::super::inventory::census::io_owner::object(inventory.owner(), &self.ledger)?;
+        self.census = Some(
+            super::super::inventory::census::io_owner::CensusWriter::new(
+                inventory.census_header(object.device_inode()?)?,
+                &self.inner.budget,
+                &self.ledger,
+            )?,
+        );
+        let (owner, mut witness) = self
             .inner
             .inventory
             .take()
             .ok_or_else(invalid)?
             .into_normal()?;
+        witness.census_bind_header(self.census.as_ref().ok_or_else(invalid)?.header());
         self.inner.attempt = Some(owner);
         self.inner.witness = Some(witness);
         self.endpoint = end;
+        Ok(())
+    }
+    fn prepare_census(&mut self) -> io::Result<()> {
+        let retained = self
+            .intent
+            .as_ref()
+            .filter(|state| state.census.kind == 2)
+            .map_or(&self.inner.state.census, |state| &state.census);
+        let binding = self.census.as_mut().ok_or_else(invalid)?.step(
+            self.inner.witness.as_ref().ok_or_else(invalid)?,
+            self.inner.attempt.as_ref().ok_or_else(invalid)?,
+            retained,
+        )?;
+        if let Some(binding) = binding {
+            if binding.kind == 1 {
+                if self.intent.is_none() {
+                    let mut next = self.inner.state.clone();
+                    next.census = binding;
+                    self.intent = Some(next);
+                }
+                self.inner
+                    .commit_state(self.intent.as_ref().ok_or_else(invalid)?.clone())?;
+                self.intent = None;
+            } else {
+                self.census_binding = Some(binding);
+            }
+        }
+        Ok(())
+    }
+    fn load_census(&mut self) -> io::Result<()> {
+        if self.census_reader.is_none() {
+            self.census_reader = Some(
+                super::super::inventory::census::io_owner::CensusReader::new(
+                    &self.inner.budget,
+                    &self.ledger,
+                )?,
+            );
+        }
+        if let Some(witness) = self.census_reader.as_mut().ok_or_else(invalid)?.step(
+            self.inner.attempt.as_ref().ok_or_else(invalid)?,
+            &self.inner.state.census,
+            &self.inner.budget,
+        )? {
+            self.inner.witness = Some(witness);
+            self.census_reader = None;
+        }
         Ok(())
     }
     fn original_table(&mut self) -> io::Result<()> {
@@ -389,13 +539,24 @@ impl LossPublication<'_> {
         let Some(snapshot) = proof.loss_snapshot(input, metadata.loss.event_end)? else {
             return Ok(());
         };
-        let next = proof_plan(
+        self.snapshot = Some(snapshot);
+        Ok(())
+    }
+    fn commit_plan(&mut self) -> io::Result<()> {
+        self.proof
+            .as_mut()
+            .ok_or_else(invalid)?
+            .check(&self.inner.state.input)?;
+        let metadata = self.inner.metadata.as_ref().ok_or_else(invalid)?;
+        let snapshot = self.snapshot.ok_or_else(invalid)?;
+        let mut next = proof_plan(
             &self.inner.state,
             self.intent.as_ref(),
             metadata,
             snapshot,
             self.evidence,
         );
+        next.census = self.census_binding.ok_or_else(invalid)?;
         self.intent = Some(next.clone());
         self.inner.commit_state(next)?;
         self.adopted = true;
@@ -408,7 +569,6 @@ impl LossPublication<'_> {
                 self.inner.work.proof_event_next,
             ) = proof.positions();
         }
-        self.inner.witness = None;
         self.proof = None;
         Ok(())
     }
@@ -480,7 +640,7 @@ impl LossPublication<'_> {
         let object = base.open_directory(
             &collector::recording::identity_text(attempt.transaction).to_string(),
         )?;
-        object.visit_names_counted(3, &mut self.inner.work.inventory.directory, loss_child)?;
+        object.visit_names_counted(4, &mut self.inner.work.inventory.directory, loss_child)?;
         let loss = object.create_directory_counted("loss", &mut self.inner.work.full_syncs)?;
         sync_directory(&loss, &mut self.inner.work)?;
         sync_directory(&object, &mut self.inner.work)?;
@@ -514,6 +674,20 @@ impl LossPublication<'_> {
         Ok(())
     }
     fn cleanup(&mut self) -> io::Result<()> {
+        if self.inner.state.cleanup.region != 8 && self.cleanup_admission < 4109 {
+            self.cleanup_admission = self
+                .inner
+                .witness
+                .as_ref()
+                .ok_or_else(invalid)?
+                .census_cleanup_pass(
+                    self.inner.attempt.as_ref().ok_or_else(invalid)?,
+                    &self.inner.state,
+                    self.cleanup_admission,
+                    &self.ledger,
+                )?;
+            return Ok(());
+        }
         cleanup_original(&mut self.inner)
     }
 }
@@ -592,6 +766,85 @@ fn loss_links(metadata: &CanonicalMetadata) -> io::Result<Vec<(Namespace, Canoni
     Ok(links)
 }
 fn cleanup_original(inner: &mut NormalPublication<'_>) -> io::Result<()> {
+    cleanup_original_quiet(inner)?;
+    if cleanup_original_gate(inner)? {
+        return Ok(());
+    }
+    let attempt = inner.attempt.as_ref().ok_or_else(invalid)?;
+    inner.work.cleanup_directory_attempts += 1;
+    let base = attempt.root.open_directory(base_name(&attempt.input))?;
+    inner.work.cleanup_directory_attempts += 1;
+    let object =
+        base.open_directory(&collector::recording::identity_text(attempt.transaction).to_string())?;
+    drop(base);
+    object.visit_names_counted(4, &mut inner.work.inventory.directory, loss_child)?;
+    if inner.state.cleanup.region == 8 {
+        super::super::inventory::census::io_owner::retire(
+            attempt,
+            &inner.state,
+            inner.ledger.as_ref().ok_or_else(invalid)?,
+        )?;
+        cleanup_original_idle(inner)?;
+        inner.done = true;
+        return Ok(());
+    }
+    let original = loss_original_counted(&object, &mut inner.work.cleanup_directory_attempts)?;
+    if let Some((directory, _)) = &original {
+        inner
+            .witness
+            .as_ref()
+            .ok_or_else(invalid)?
+            .cleanup_original_directory(directory)?;
+    }
+    let mut next = inner.state.clone();
+    let mut cursor = next.cleanup;
+    cursor = cleanup_pass(
+        cursor,
+        original.as_ref(),
+        &mut inner.work,
+        &CleanupAdmission {
+            input: &attempt.input,
+            budget: &inner.budget,
+            event_end: inner.state.loss.event_end,
+            witness: inner.witness.as_ref().ok_or_else(invalid)?,
+        },
+        &object,
+    )?;
+    if cursor.directory == 2 {
+        inner.work.cleanup_directory_attempts += 1;
+        let base = attempt.root.open_directory(base_name(&attempt.input))?;
+        sync_directory(&base, &mut inner.work)?;
+        next.cleanup = Cleanup {
+            region: 8,
+            ..Default::default()
+        };
+        inner.commit_state(next)?;
+    } else {
+        next.cleanup = cursor;
+        drop(original);
+        drop(object);
+        inner.commit_state(next)?;
+    }
+    Ok(())
+}
+fn cleanup_original_gate(inner: &mut NormalPublication<'_>) -> io::Result<bool> {
+    let attempt = inner.attempt.as_ref().ok_or_else(invalid)?;
+    if inner.link_next < inner.links.len() {
+        let (namespace, key) = &inner.links[inner.link_next];
+        insert::verify(
+            attempt.root,
+            &attempt.directory,
+            *namespace,
+            key,
+            &mut inner.work.canonical,
+        )?;
+        inner.link_next += 1;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+fn cleanup_original_quiet(inner: &NormalPublication<'_>) -> io::Result<()> {
     let attempt = inner.attempt.as_ref().ok_or_else(invalid)?;
     if super::super::publication_control::read_state(
         &super::super::publication_control::CountedControl {
@@ -605,49 +858,6 @@ fn cleanup_original(inner: &mut NormalPublication<'_>) -> io::Result<()> {
         return Err(invalid());
     }
 
-    if inner.link_next < inner.links.len() {
-        let (namespace, key) = &inner.links[inner.link_next];
-        insert::verify(
-            attempt.root,
-            &attempt.directory,
-            *namespace,
-            key,
-            &mut inner.work.canonical,
-        )?;
-        inner.link_next += 1;
-        return Ok(());
-    }
-
-    inner.work.cleanup_directory_attempts += 1;
-    let base = attempt.root.open_directory(base_name(&attempt.input))?;
-    inner.work.cleanup_directory_attempts += 1;
-    let object =
-        base.open_directory(&collector::recording::identity_text(attempt.transaction).to_string())?;
-    drop(base);
-    object.visit_names_counted(3, &mut inner.work.inventory.directory, loss_child)?;
-    let original = loss_original_counted(&object, &mut inner.work.cleanup_directory_attempts)?;
-    let mut next = inner.state.clone();
-    let mut cursor = next.cleanup;
-    cursor = cleanup_pass(
-        cursor,
-        original.as_ref(),
-        &mut inner.work,
-        &CleanupAdmission {
-            input: &attempt.input,
-            budget: &inner.budget,
-            event_end: inner.state.loss.event_end,
-        },
-        &object,
-    )?;
-    if cursor.directory == 2 {
-        cleanup_original_idle(inner)?;
-        inner.done = true;
-    } else {
-        next.cleanup = cursor;
-        drop(original);
-        drop(object);
-        inner.commit_state(next)?;
-    }
     Ok(())
 }
 fn cleanup_original_idle(inner: &mut NormalPublication<'_>) -> io::Result<()> {
@@ -677,6 +887,7 @@ struct CleanupAdmission<'a> {
     input: &'a crate::transaction::AttemptInput,
     budget: &'a Arc<ByteBudget>,
     event_end: u64,
+    witness: &'a super::super::inventory::NormalInventory,
 }
 fn cleanup_pass(
     mut cursor: Cleanup,
@@ -730,6 +941,9 @@ fn cleanup_batches(
         } else {
             None
         };
+        if let Some(events) = &events {
+            admission.witness.cleanup_directories(directory, events)?;
+        }
         let parent = if matches!(admission.input.operation, AttemptOperation::Ordinary { .. }) {
             events.as_ref()
         } else {
@@ -779,6 +993,7 @@ fn cleanup_directories(
             if matches!(admission.input.operation, AttemptOperation::Ordinary { .. }) {
                 work.cleanup_directory_attempts += 1;
                 if let Some(events) = optional_directory(directory, "events")? {
+                    admission.witness.cleanup_directories(directory, &events)?;
                     remove_raw(&events, "index", work, admission)?;
                     events.visit_names_counted(0, &mut work.inventory.directory, |_| {
                         Err(invalid())
@@ -822,7 +1037,7 @@ fn optional_directory(
     }
 }
 fn loss_child(name: &str) -> io::Result<()> {
-    if matches!(name, "loss" | "pending" | "ready") {
+    if matches!(name, "loss" | "pending" | "ready" | "original-census") {
         Ok(())
     } else {
         Err(invalid())
@@ -855,6 +1070,7 @@ fn remove_raw(
     match directory.open_file(name) {
         Ok(mut file) => {
             let before = super::super::inventory::FileIdentity::read(&file)?;
+            admission.witness.cleanup_named(name, &file)?;
             cleanup_admit(&mut file, name, work, admission)?;
             work.cleanup_file_attempts += 1;
             let current = directory.open_file(name)?;

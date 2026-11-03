@@ -137,6 +137,13 @@ impl PrivateDirectory {
         Ok(file)
     }
 
+    /// Opens existing private scratch for bounded repair by its consuming owner.
+    pub fn open_file_writable(&self, name: &str) -> io::Result<File> {
+        let file = self.open_component(name, O_RDWR | O_NONBLOCK, 0)?;
+        verify_open(&file, false)?;
+        Ok(file)
+    }
+
     /// Creates exclusively. An existing artifact is never reopened for mutation.
     pub fn create_file(&self, name: &str) -> io::Result<File> {
         let file = self.open_component(name, O_RDWR | O_CREAT | O_EXCL, 0o600)?;

@@ -19,6 +19,9 @@ use std::sync::atomic::Ordering;
 #[path = "loss_only.rs"]
 mod loss_only;
 pub use loss_only::LossPublication;
+#[path = "row_publication.rs"]
+mod row_publication;
+pub use row_publication::{RowPublication, RowPublicationStep};
 
 pub struct NormalPublication<'store> {
     inventory: Option<OriginalInventory<'store, 'store>>,
@@ -40,6 +43,7 @@ pub struct NormalPublication<'store> {
     links: Vec<(Namespace, CanonicalKey)>,
     link_next: usize,
     done: bool,
+    row_unresolved: bool,
     draft: Option<CanonicalMetadata>,
     proof: Option<super::normal_proof::SourceProof>,
     work: PublicationWork,
@@ -53,6 +57,9 @@ enum Validation {
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PublicationWork {
+    pub census_write_operations: u64,
+    pub census_write_requested_bytes: u64,
+    pub decode_admission_bytes: u64,
     pub canonical: ReadWork,
     pub inventory: super::InventoryWork,
     pub links: u64,
@@ -310,6 +317,7 @@ impl Store {
             input: state.input.clone(),
             directory,
             resumed: true,
+            candidates: false,
             _permit: permit,
             owner: &self.owner,
             root: &self.directory,
@@ -336,7 +344,7 @@ impl<'store> NormalPublication<'store> {
                 .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?,
         };
         normal_namespace(&attempt, &state, ledger.as_ref())?;
-        normal_original_only(&attempt, ledger.as_ref())?;
+        normal_original_only(&attempt, &state, ledger.as_ref())?;
         let mut owner = Self::blank(attempt, state, budget, reservation);
         owner.ledger = ledger;
         let inventory = OriginalInventory::owned_counted(
@@ -381,6 +389,7 @@ impl<'store> NormalPublication<'store> {
             links: Vec::with_capacity(62),
             link_next: 0,
             done: false,
+            row_unresolved: false,
             draft: None,
             proof: None,
             work: PublicationWork::default(),
@@ -736,6 +745,9 @@ impl<'store> NormalPublication<'store> {
         Ok(())
     }
     fn commit_state(&mut self, next: NormalState) -> io::Result<()> {
+        if !super::publication_control::census_next(&self.state, &next) {
+            return Err(invalid());
+        }
         let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
         let mut before = [0; 4096];
         let mut after = [0; 4096];
@@ -885,8 +897,30 @@ impl<'store> NormalPublication<'store> {
 
         Ok(true)
     }
+    fn select_row_source(&mut self, index: usize) -> io::Result<()> {
+        if self.state.row_plan.is_none() || index >= self.links.len() {
+            return Ok(());
+        }
+        let attempt = self.attempt.as_mut().ok_or_else(invalid)?;
+        self.work.inventory.open_attempts += 1;
+        let base = attempt.root.open_directory("data")?;
+        self.work.inventory.open_attempts += 1;
+        let object = base.open_directory(
+            &collector::recording::identity_text(attempt.transaction).to_string(),
+        )?;
+        self.work.inventory.open_attempts += 1;
+        // Rebind the consumed capability rather than retain another source descriptor
+        // across insertion. Original cleanup reopens through the fixed object.
+        attempt.directory = object.open_directory(&format!("fragment-{index}"))?;
+        Ok(())
+    }
     fn publish_link(&mut self) -> io::Result<()> {
         self.require_busy()?;
+        self.select_row_source(if self.state.structure.is_some() {
+            usize::try_from(self.state.next).map_err(|_| invalid())?
+        } else {
+            self.link_next
+        })?;
         let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
         if self.state.structure.is_some() {
             return self.publish_structure();
@@ -913,12 +947,20 @@ impl<'store> NormalPublication<'store> {
         } else {
             let mut next = self.state.clone();
             next.phase = Phase::Published;
+            if let Some(plan) = &mut next.row_plan {
+                plan.committed = (1 << self.links.len()) - 1;
+            }
             next.next = u64::try_from(self.links.len()).map_err(|_| invalid())?;
             self.commit_state(next)?;
         }
         Ok(())
     }
     fn publish_structure(&mut self) -> io::Result<()> {
+        self.select_row_source(if self.state.structure.is_some() {
+            usize::try_from(self.state.next).map_err(|_| invalid())?
+        } else {
+            self.link_next
+        })?;
         let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
         let mut structure = self.state.structure.clone().ok_or_else(invalid)?;
         let index = usize::try_from(self.state.next).map_err(|_| invalid())?;
@@ -987,6 +1029,9 @@ impl<'store> NormalPublication<'store> {
         Ok(())
     }
     fn finish_quiet(&mut self) -> io::Result<()> {
+        if self.link_next < self.links.len() {
+            self.select_row_source(self.link_next)?;
+        }
         let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
         // Reapply all exact links after restart, even if the slot claims Published.
         if self.link_next < self.links.len() {
@@ -1031,7 +1076,11 @@ impl<'store> NormalPublication<'store> {
             &mut self.work.full_syncs,
         )?;
         let mut next = self.state.clone();
-        next.phase = if self.state.salvage.is_some() {
+        next.phase = if self.state.row_plan.is_some()
+            && (self.state.original_end == 0 || self.row_unresolved)
+        {
+            Phase::UnresolvedExtent
+        } else if self.state.salvage.is_some() || self.state.row_plan.is_some() {
             Phase::SalvageCommitted
         } else {
             Phase::Cleanup
@@ -1187,6 +1236,7 @@ fn normal_namespace(
 }
 fn normal_original_only(
     attempt: &RegisteredAttempt<'_>,
+    state: &NormalState,
     ledger: Option<&super::PublicationLedger>,
 ) -> io::Result<()> {
     if let Some(ledger) = ledger {
@@ -1203,8 +1253,8 @@ fn normal_original_only(
         OriginalPlacement::Ready => "ready",
     };
     let mut work = PublicationWork::default();
-    let result = object.visit_names_counted(1, &mut work.inventory.directory, |name| {
-        if name == selected {
+    let result = object.visit_names_counted(2, &mut work.inventory.directory, |name| {
+        if name == selected || (name == "original-census" && state.census.kind == 1) {
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::Unsupported))
@@ -1247,8 +1297,18 @@ fn write_metadata(
     state: &NormalState,
     ledger: Option<&super::PublicationLedger>,
 ) -> io::Result<()> {
+    write_metadata_at(attempt, &attempt.directory, metadata, work, state, ledger)
+}
+fn write_metadata_at(
+    attempt: &RegisteredAttempt<'_>,
+    directory: &PrivateDirectory,
+    metadata: &CanonicalMetadata,
+    work: &mut PublicationWork,
+    state: &NormalState,
+    ledger: Option<&super::PublicationLedger>,
+) -> io::Result<()> {
     metadata.validate()?;
-    let directory = &attempt.directory;
+    work.inventory.open_attempts += 1;
     match directory.open_file("metadata") {
         Ok(mut file) => {
             let before = file.metadata()?;
@@ -1265,13 +1325,16 @@ fn write_metadata(
             if before.len() < comparison.expected {
                 // Only this exact registered, unpublished owner may replace a matching
                 // torn prefix. A linked or contradictory file remains evidence and refuses.
-                write_metadata_validate_prefix(attempt, &before, state, ledger)?;
+                write_metadata_validate_prefix(attempt, directory, &before, state, ledger)?;
 
                 work.full_syncs += 1;
+                work.inventory.open_attempts += 1;
                 private::full_sync(&attempt.root.open_file("foreground")?)?;
                 sync_directory(attempt.root, work)?;
+                work.canonical.removals += 1;
                 directory.remove_file("metadata")?;
                 sync_directory(directory, work)?;
+                work.canonical.creates += 1;
                 let mut replacement = directory.create_file("metadata")?;
                 metadata.write(&mut replacement)?;
                 work.full_syncs += 1;
@@ -1285,6 +1348,7 @@ fn write_metadata(
             if error.kind() == io::ErrorKind::NotFound
                 && matches!(state.phase, Phase::Registered | Phase::SalvagePlanned) =>
         {
+            work.canonical.creates += 1;
             let mut file = directory.create_file("metadata")?;
             metadata.write(&mut file)?;
             work.full_syncs += 1;
@@ -1296,6 +1360,7 @@ fn write_metadata(
 }
 fn write_metadata_validate_prefix(
     attempt: &RegisteredAttempt<'_>,
+    directory: &PrivateDirectory,
     before: &std::fs::Metadata,
     state: &NormalState,
     ledger: Option<&super::PublicationLedger>,
@@ -1315,7 +1380,7 @@ fn write_metadata_validate_prefix(
     }
 
     normal_namespace(attempt, state, ledger)?;
-    let current = attempt.directory.open_file("metadata")?.metadata()?;
+    let current = directory.open_file("metadata")?.metadata()?;
     if before.dev() != current.dev()
         || before.ino() != current.ino()
         || before.len() != current.len()

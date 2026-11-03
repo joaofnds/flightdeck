@@ -4,6 +4,7 @@ use std::io;
 use collector::recording::bootstrap::codec::{self, Operation, Phase, Slot, SlotKind};
 use collector::ring::{Identity, RunIdentity};
 
+pub(crate) mod census_binding;
 pub(crate) mod normal;
 pub(crate) mod salvage;
 pub(crate) mod source_binding;
@@ -254,6 +255,12 @@ impl AttemptInput {
         else {
             return Err(invalid());
         };
+        if phase == Phase::SalvagePlanned {
+            let state = normal::NormalState::decode(bytes, recording)?;
+            if state.row_plan.is_some() {
+                return Ok((state.transaction, state.input));
+            }
+        }
         if phase != Phase::Registered || operation == Operation::ExceptionalFragment {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,

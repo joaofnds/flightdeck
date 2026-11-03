@@ -1375,3 +1375,6 @@ fn prior_or_unknown_source_layout_cannot_acquire_registered_authority() {
         }
     }
 }
+
+#[path = "row_salvage_tests.rs"]
+mod row_salvage_tests;

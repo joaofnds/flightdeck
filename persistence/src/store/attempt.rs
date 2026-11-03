@@ -47,6 +47,7 @@ pub struct RegisteredAttempt<'store> {
     pub(super) input: AttemptInput,
     pub(super) directory: PrivateDirectory,
     pub(super) resumed: bool,
+    pub(super) candidates: bool,
     pub(super) _permit: StagingPermit,
     pub(super) owner: &'store FileLock,
     pub(super) root: &'store PrivateDirectory,
@@ -282,6 +283,7 @@ impl Store {
             directory: directory.0,
             placement: directory.1,
             resumed,
+            candidates: false,
             _permit: permit,
             owner: &self.owner,
             root: &self.directory,
@@ -337,7 +339,20 @@ impl Store {
         private::full_sync(&root.open_file("foreground")?)?;
         root.full_sync()?;
         let object = base.create_directory(&name)?;
-        object.visit_names(5, |name| {
+        let state = super::publication_control::read_normal(root, input.run.recording)?;
+        object.visit_names(6, |name| {
+            if name == "original-census" {
+                if state.census.kind != 2 {
+                    return Err(invalid());
+                }
+                let file = object.open_file(name)?;
+                if file.metadata()?.nlink() != 1
+                    || Some(super::inventory::FileIdentity::read(&file)?) != state.census.file
+                {
+                    return Err(invalid());
+                }
+                return Ok(());
+            }
             if !["pending", "ready", "fragment-0", "fragment-1", "loss"].contains(&name) {
                 return Err(invalid());
             }
@@ -349,7 +364,8 @@ impl Store {
         root.full_sync()?;
         object.full_sync()?;
         base.full_sync()?;
-        let selected = super::inventory::select_original(&object)?;
+        let selected =
+            super::inventory::select_original_mode(&object, &mut 0, state.row_plan.is_some())?;
         if let Some(selected) = selected {
             if !resumed {
                 selected.0.visit_names(0, |_| Err(invalid()))?;
@@ -600,15 +616,25 @@ impl RegisteredAttempt<'_> {
         let object = base
             .open_directory(&collector::recording::identity_text(self.transaction).to_string())?;
         drop(base);
-        object.visit_names_counted(5, names, |name| {
-            if ["pending", "ready", "fragment-0", "fragment-1", "loss"].contains(&name) {
+        object.visit_names_counted(6, names, |name| {
+            if [
+                "pending",
+                "ready",
+                "fragment-0",
+                "fragment-1",
+                "loss",
+                "original-census",
+            ]
+            .contains(&name)
+            {
                 Ok(())
             } else {
                 Err(invalid())
             }
         })?;
         let (directory, placement) =
-            super::inventory::select_original_counted(&object, opens)?.ok_or_else(invalid)?;
+            super::inventory::select_original_mode(&object, opens, self.candidates)?
+                .ok_or_else(invalid)?;
         if placement != self.placement || !directory.same_inode(&self.directory)? {
             return Err(invalid());
         }

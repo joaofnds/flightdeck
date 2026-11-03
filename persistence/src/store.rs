@@ -13,10 +13,13 @@ use crate::metadata::invalid;
 use crate::{Manifest, WindowIdentity};
 
 mod attempt;
+mod census_digest;
 mod inventory;
 mod normal_proof;
 mod publication;
 mod publication_control;
+mod row_candidates;
+mod row_merge;
 pub use attempt::{RegisteredAttempt, RegisteredFile};
 pub use inventory::{
     BatchFact, FileIdentity, IndexFact, InventoryStep, InventoryWork, OriginalFile,
@@ -25,6 +28,7 @@ pub use inventory::{
 mod publication_ledger;
 pub use publication::{
     LossPublication, NormalProof, NormalPublication, ProofStep, PublicationStep, PublicationWork,
+    RowPublication, RowPublicationStep,
 };
 pub use publication_ledger::PublicationLedger;
 mod event_table;

@@ -75,7 +75,9 @@ fn record_delta(
     current: &PublicationWork,
     previous: &PublicationWork,
 ) {
-    add_fields!(total, current, previous; links, controls, control_reads, full_syncs,
+    add_fields!(total, current, previous; census_write_operations, census_write_requested_bytes,
+        decode_admission_bytes, links, controls,
+        control_reads, full_syncs,
         source_reads, source_observations, proof_operations, cleanup_positions,
         cleanup_file_attempts,
         cleanup_directory_attempts, cleanup_removals);

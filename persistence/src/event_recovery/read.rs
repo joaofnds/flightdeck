@@ -94,7 +94,18 @@ pub(crate) fn read_batch_file(
     associated: bool,
     budget: &Arc<ByteBudget>,
 ) -> Result<DataFrame> {
+    read_batch_file_counted(file, batch, identities, associated, budget, &mut 0)
+}
+pub(crate) fn read_batch_file_counted(
+    file: std::fs::File,
+    batch: &super::Batch,
+    identities: bool,
+    associated: bool,
+    budget: &Arc<ByteBudget>,
+    decoded_bytes: &mut u64,
+) -> Result<DataFrame> {
     let frame = decode_batch_file(file, identities, budget)?;
+    *decoded_bytes += collector::u64_from_usize(frame.estimated_size(true));
     read_batch_validate(&frame, batch, identities, associated)?;
     Ok(frame)
 }

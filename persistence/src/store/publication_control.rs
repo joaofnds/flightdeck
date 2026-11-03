@@ -30,6 +30,23 @@ pub(super) fn read_state(
 ) -> io::Result<NamespaceState> {
     codec::decode_state(&read(root, "namespace-state", 256)?, recording)
 }
+pub(super) fn read_optional_normal(
+    root: &impl ControlDirectory,
+    recording: Identity,
+    work: &mut super::PublicationWork,
+) -> io::Result<Option<NormalState>> {
+    let visible = read(root, "foreground", 4096)?;
+    if matches!(
+        codec::decode_slot(&visible, recording, codec::SlotKind::Foreground)?,
+        codec::Slot::Idle
+    ) {
+        sync_file(root, "foreground", &mut work.full_syncs)?;
+        sync_directory(root, &mut work.full_syncs)?;
+        Ok(None)
+    } else {
+        read_normal(root, recording).map(Some)
+    }
+}
 pub(super) fn read_normal(
     root: &impl ControlDirectory,
     recording: Identity,
@@ -47,11 +64,17 @@ pub(super) fn read_normal(
                 codec::Slot::Idle
             ) && matches!(current.phase, Phase::Cleanup | Phase::SalvageCommitted)
             {
+                if current.census.kind == 2 && current.cleanup.region != 8 {
+                    return Err(invalid());
+                }
                 return Ok(current);
             }
 
             if candidate == visible {
-                replace(root, "foreground", &visible, &visible, &mut 0)?;
+                let mut syncs = 0;
+                let result = replace(root, "foreground", &visible, &visible, &mut syncs);
+                root.record_reconcile_syncs(syncs);
+                result?;
                 return Ok(current);
             }
 
@@ -60,6 +83,16 @@ pub(super) fn read_normal(
                 return Err(invalid());
             }
 
+            if current.phase == Phase::Registered
+                && current.census.kind == 0
+                && next.census.kind == 1
+            {
+                let mut syncs = 0;
+                let result = replace(root, "foreground", &visible, &candidate, &mut syncs);
+                root.record_reconcile_syncs(syncs);
+                result?;
+                return Ok(next);
+            }
             // Recompute this exact successor from admitted raw/effect evidence before
             // adopting it. A complete scratch file is still intent, not effect proof.
             Ok(current)
@@ -76,37 +109,44 @@ fn legal_next(old: &NormalState, new: &NormalState) -> bool {
     }
 
     let phases = (old.phase, new.phase);
+    if phases == (Phase::Registered, Phase::Registered) {
+        let mut expected = old.clone();
+        expected.census = new.census;
+        return *new == expected
+            && ((old.census.kind == 0 && new.census.kind == 1) || old.census == new.census);
+    }
+    if !census_next(old, new) {
+        return false;
+    }
     if phases == (Phase::Registered, Phase::SalvagePlanned) {
-        return old.salvage.is_none() && new.salvage.is_some();
+        return old.salvage.is_none()
+            && old.row_plan.is_none()
+            && (new.salvage.is_some() || new.row_plan.is_some());
+    }
+    if old.row_plan != new.row_plan && !legal_next_rows(old, new) {
+        return false;
     }
     if old.salvage != new.salvage {
         return false;
     }
-    if old.cleanup != new.cleanup
-        && !(phases == (Phase::SalvageCommitted, Phase::SalvageCommitted)
-            && (
-                old.cleanup.region,
-                old.cleanup.ordinal,
-                old.cleanup.table,
-                old.cleanup.directory,
-            ) < (
-                new.cleanup.region,
-                new.cleanup.ordinal,
-                new.cleanup.table,
-                new.cleanup.directory,
-            ))
-    {
+    if !legal_next_cleanup(old, new) {
         return false;
     }
     if phases == (Phase::Registered, Phase::Ready) {
         return true;
     }
 
+    if phases == (Phase::SalvagePlanned, Phase::SalvagePlanned) && old.row_plan.is_some() {
+        return true;
+    }
     if old.original_end != new.original_end || old.origin != new.origin || old.loss != new.loss {
         return false;
     }
 
-    match phases {
+    legal_next_phase(old, new)
+}
+fn legal_next_phase(old: &NormalState, new: &NormalState) -> bool {
+    match (old.phase, new.phase) {
         (Phase::Ready | Phase::SalvagePlanned, Phase::Publishing) => {
             new.sequence > 0 && new.structure.is_none() && new.next == 0
         }
@@ -131,12 +171,54 @@ fn legal_next(old: &NormalState, new: &NormalState) -> bool {
         (Phase::Publishing, Phase::Published) => {
             old.sequence == new.sequence && old.structure.is_none() && new.structure.is_none()
         }
-        (Phase::Published, Phase::Cleanup | Phase::SalvageCommitted)
-        | (Phase::SalvageCommitted, Phase::SalvageCommitted) => {
+        (Phase::Published, Phase::Cleanup | Phase::SalvageCommitted | Phase::UnresolvedExtent)
+        | (Phase::SalvageCommitted, Phase::SalvageCommitted | Phase::UnresolvedExtent) => {
             old.sequence == new.sequence && old.next == new.next
         }
         _ => false,
     }
+}
+pub(super) fn census_next(old: &NormalState, new: &NormalState) -> bool {
+    if old.transaction != new.transaction || old.input != new.input {
+        return false;
+    }
+    old.census == new.census
+        || match (old.phase, new.phase, old.census.kind, new.census.kind) {
+            (Phase::Registered, Phase::Registered, 0, 1) => true,
+            (Phase::Registered, Phase::SalvagePlanned, 1, 2) => {
+                old.census.digest == new.census.digest
+            }
+            _ => false,
+        }
+}
+fn legal_next_cleanup(old: &NormalState, new: &NormalState) -> bool {
+    let phases = (old.phase, new.phase);
+    old.cleanup == new.cleanup
+        || (phases == (Phase::SalvageCommitted, Phase::SalvageCommitted)
+            && (
+                old.cleanup.region,
+                old.cleanup.ordinal,
+                old.cleanup.table,
+                old.cleanup.directory,
+            ) < (
+                new.cleanup.region,
+                new.cleanup.ordinal,
+                new.cleanup.table,
+                new.cleanup.directory,
+            ))
+}
+fn legal_next_rows(old: &NormalState, new: &NormalState) -> bool {
+    let (Some(before), Some(after)) = (old.row_plan, new.row_plan) else {
+        return false;
+    };
+    let mut expected = before;
+    expected.split = after.split;
+    expected.rows = after.rows;
+    expected.committed = after.committed;
+    expected == after
+        && (before.split == after.split || before.split == 0)
+        && (before.rows == after.rows || before.rows == [0, 0])
+        && before.committed & after.committed == before.committed
 }
 pub(super) fn visible(root: &impl ControlDirectory, state: &NormalState) -> io::Result<()> {
     let bytes = read(root, "foreground", 4096)?;
@@ -149,6 +231,9 @@ pub(super) fn visible(root: &impl ControlDirectory, state: &NormalState) -> io::
         codec::Slot::Idle
     ) && matches!(state.phase, Phase::Cleanup | Phase::SalvageCommitted)
     {
+        if state.census.kind == 2 && state.cleanup.region != 8 {
+            return Err(invalid());
+        }
         return Ok(());
     }
 
@@ -323,6 +408,7 @@ pub(super) trait ControlDirectory {
     fn record_read_bytes(&self, _bytes: u64) {}
     fn record_write(&self, _bytes: u64) {}
     fn record_file_sync(&self) {}
+    fn record_reconcile_syncs(&self, _syncs: u64) {}
 }
 impl ControlDirectory for PrivateDirectory {
     fn open_file(&self, name: &str) -> io::Result<std::fs::File> {
@@ -384,6 +470,9 @@ impl ControlDirectory for CountedControl<'_> {
             work.control_write_operations += 1;
             work.control_write_requested_bytes += bytes;
         });
+    }
+    fn record_reconcile_syncs(&self, syncs: u64) {
+        self.update(|work| work.full_syncs += syncs);
     }
     fn record_file_sync(&self) {
         self.update(|work| work.control_file_sync_attempts += 1);

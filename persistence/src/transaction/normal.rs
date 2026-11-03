@@ -1,4 +1,4 @@
-//! Closed normal and exact count0 publication state; row-bearing salvage remains refused.
+//! Closed normal, exact loss-only and fixed row-bearing publication state.
 use super::{
     AttemptInput, AttemptOperation, Identity, LossTransfer, Operation, Phase, RunIdentity, Slot,
     SlotKind, SourceTiming, codec, get_identity, get32, get64, invalid, io, put32, put64,
@@ -143,6 +143,8 @@ pub(crate) struct NormalState {
     pub structure: Option<Structure>,
     pub salvage: Option<super::salvage::LossPlan>,
     pub cleanup: super::salvage::Cleanup,
+    pub census: super::census_binding::CensusBinding,
+    pub row_plan: Option<super::salvage::RowPlan>,
 }
 impl NormalState {
     pub fn registered(transaction: Identity, input: AttemptInput) -> Self {
@@ -165,23 +167,32 @@ impl NormalState {
             next: 0,
             structure: None,
             salvage: None,
+            row_plan: None,
             cleanup: super::salvage::Cleanup::default(),
+            census: super::census_binding::CensusBinding::default(),
         }
     }
     pub fn encode(&self, bytes: &mut [u8; 4096]) -> io::Result<()> {
         self.input.encode_registered(self.transaction, bytes)?;
+        self.census
+            .encode((&mut bytes[1400..1496]).try_into().map_err(|_| invalid())?)?;
         if self.phase == Phase::Registered {
-            if *self != Self::registered(self.transaction, self.input.clone()) {
+            let mut expected = Self::registered(self.transaction, self.input.clone());
+            expected.census = self.census;
+            if self.census.kind > 1 || *self != expected {
                 return Err(invalid());
             }
 
             return Ok(());
         }
 
+        if let Some(plan) = &self.row_plan {
+            return self.encode_rows(bytes, plan);
+        }
         if let Some(plan) = &self.salvage {
             return self.encode_loss(bytes, plan);
         }
-        if self.cleanup != super::salvage::Cleanup::default() {
+        if self.census.kind != 0 || self.cleanup != super::salvage::Cleanup::default() {
             return Err(invalid());
         }
         let phase = match self.phase {
@@ -248,11 +259,110 @@ impl NormalState {
         }
         Ok(())
     }
+    fn encode_rows(
+        &self,
+        bytes: &mut [u8; 4096],
+        plan: &super::salvage::RowPlan,
+    ) -> io::Result<()> {
+        if plan.first != self.input.losses.event_start
+            || plan.layout != self.input.source.layout
+            || self.salvage.is_some()
+            || self.origin != 0
+            || !matches!(self.input.operation, AttemptOperation::Ordinary { .. })
+        {
+            return Err(invalid());
+        }
+        let phase = match self.phase {
+            Phase::SalvagePlanned => 6,
+            Phase::Publishing => 3,
+            Phase::Published => 4,
+            Phase::SalvageCommitted => 7,
+            Phase::UnresolvedExtent => 8,
+            _ => return Err(invalid()),
+        };
+        if self.census.kind != 2 {
+            return Err(invalid());
+        }
+        self.validate_row_state(plan, phase)?;
+        put32(bytes, 48, phase);
+        put32(bytes, 140, plan.endpoint);
+        put64(bytes, 144, self.original_end);
+        put64(bytes, 152, plan.end);
+        put32(
+            bytes,
+            188,
+            u32::from(self.original_end == 0 || self.phase == Phase::UnresolvedExtent),
+        );
+        put64(bytes, 192, self.sequence);
+        put64(bytes, 200, self.next);
+        self.loss.encode(&mut bytes[1088..1344]);
+        plan.encode((&mut bytes[256..512]).try_into().map_err(|_| invalid())?)?;
+        self.cleanup
+            .encode((&mut bytes[1024..1088]).try_into().map_err(|_| invalid())?)?;
+        if let Some(structure) = &self.structure {
+            if phase != 3 {
+                return Err(invalid());
+            }
+            structure.encode(&mut bytes[512..1024])?;
+        }
+        Ok(())
+    }
+    fn validate_row_state(&self, plan: &super::salvage::RowPlan, phase: u32) -> io::Result<()> {
+        if plan.rows == [0, 0] {
+            let mut expected = Self::registered(self.transaction, self.input.clone());
+            expected.phase = self.phase;
+            expected.row_plan = Some(*plan);
+            expected.census = self.census;
+            if *self != expected || phase != 6 {
+                return Err(invalid());
+            }
+        } else {
+            self.loss.totals()?;
+            let accounted = plan.rows[0]
+                .checked_add(plan.rows[1])
+                .and_then(|rows| rows.checked_add(self.loss.inherited.events))
+                .and_then(|total| total.checked_add(self.loss.events_new))
+                .ok_or_else(invalid)?;
+            if self.loss.inherited != self.input.losses
+                || self.loss.event_end != plan.end
+                || accounted != plan.end - plan.first
+                || self.next > 2
+                || ((phase == 3 || phase == 4 || phase == 7) && self.sequence == 0)
+                || (self.cleanup != super::salvage::Cleanup::default() && !matches!(phase, 7 | 8))
+            {
+                return Err(invalid());
+            }
+        }
+        let used = 1 + u64::from(plan.rows[1] != 0);
+        if (phase == 6 && (self.sequence != 0 || self.next != 0 || plan.committed != 0))
+            || (phase == 8 && self.sequence == 0)
+            || (matches!(phase, 4 | 7 | 8)
+                && (self.next != used || plan.committed != (1 << used) - 1))
+            || (self.cleanup.region > 1 && self.cleanup.region != 8)
+            || (self.cleanup.region == 8
+                && (phase != 7
+                    || self.original_end == 0
+                    || self.cleanup
+                        != super::salvage::Cleanup {
+                            region: 8,
+                            ..Default::default()
+                        }))
+            || self.cleanup.table != 0
+            || self.cleanup.directory > 1
+            || (self.cleanup.directory != 0 && self.cleanup.ordinal != 4096)
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
     fn encode_loss(
         &self,
         bytes: &mut [u8; 4096],
         plan: &super::salvage::LossPlan,
     ) -> io::Result<()> {
+        if self.census.kind != 2 {
+            return Err(invalid());
+        }
         self.validate_loss_state(plan)?;
         let phase = match self.phase {
             Phase::SalvagePlanned
@@ -305,7 +415,7 @@ impl NormalState {
             || plan.end != self.loss.event_end
             || plan.layout != self.input.source.layout
             || plan.terminal != matches!(self.input.operation, AttemptOperation::Terminal { .. })
-            || self.cleanup.region > 3
+            || (self.cleanup.region > 3 && self.cleanup.region != 8)
             || (self.cleanup.region != 0 && self.phase != Phase::SalvageCommitted)
             || (self.cleanup.region == 1
                 && (self.cleanup.table != 0 || self.cleanup.directory != 0))
@@ -396,6 +506,24 @@ impl NormalState {
             },
         })
     }
+    fn decode_registered_census(
+        bytes: &[u8],
+        recording: Identity,
+        transaction: Identity,
+    ) -> io::Result<Self> {
+        let census = super::census_binding::CensusBinding::decode(
+            bytes[1400..1496].try_into().map_err(|_| invalid())?,
+        )?;
+        if census.kind > 1 {
+            return Err(invalid());
+        }
+        let mut registered = <[u8; 4096]>::try_from(bytes).map_err(|_| invalid())?;
+        registered[1400..1496].fill(0);
+        let (_, input) = AttemptInput::decode_registered(&registered, recording)?;
+        let mut state = Self::registered(transaction, input);
+        state.census = census;
+        Ok(state)
+    }
     pub fn decode(bytes: &[u8], recording: Identity) -> io::Result<Self> {
         let Slot::Occupied {
             phase,
@@ -407,10 +535,8 @@ impl NormalState {
             return Err(invalid());
         };
         if phase == Phase::Registered {
-            let (_, input) = AttemptInput::decode_registered(bytes, recording)?;
-            return Ok(Self::registered(transaction, input));
+            return Self::decode_registered_census(bytes, recording, transaction);
         }
-
         if !matches!(
             phase,
             Phase::Ready
@@ -419,21 +545,33 @@ impl NormalState {
                 | Phase::Cleanup
                 | Phase::SalvagePlanned
                 | Phase::SalvageCommitted
+                | Phase::UnresolvedExtent
         ) {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
-
         let input = Self::decode_input(bytes, recording, operation)?;
         let state = Self {
             transaction,
             input,
             phase,
+            census: super::census_binding::CensusBinding::decode(
+                bytes[1400..1496].try_into().map_err(|_| invalid())?,
+            )?,
             original_end: get64(bytes, 144)?,
             origin: get64(bytes, 1344)?,
             loss: CanonicalLoss::decode(&bytes[1088..1344])?,
             sequence: get64(bytes, 192)?,
             next: get64(bytes, 200)?,
-            salvage: if bytes[256..512].iter().all(|byte| *byte == 0) {
+            row_plan: if matches!(get32(bytes, 260)?, 1 | 2) {
+                Some(super::salvage::RowPlan::decode(
+                    bytes[256..512].try_into().map_err(|_| invalid())?,
+                )?)
+            } else {
+                None
+            },
+            salvage: if matches!(get32(bytes, 260)?, 1 | 2)
+                || bytes[256..512].iter().all(|byte| *byte == 0)
+            {
                 None
             } else {
                 Some(super::salvage::LossPlan::decode(
@@ -454,7 +592,6 @@ impl NormalState {
         if expected != bytes {
             return Err(invalid());
         }
-
         Ok(state)
     }
 }
@@ -662,7 +799,66 @@ mod tests {
         ] {
             literal[offset] = value;
         }
+        literal[1403] = 2;
+        literal[1456..1464].copy_from_slice(&394_720u64.to_be_bytes());
         literal
+    }
+    fn row_plan_slot_literal() -> [u8; 4096] {
+        let mut literal = normal_literal(2);
+        for (offset, value) in [
+            (48, 6u32),
+            (140, 2),
+            (188, 1),
+            (256, 1),
+            (260, 1),
+            (304, 2),
+            (308, 2),
+        ] {
+            literal[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        for (offset, value) in [
+            (144, 0u64),
+            (152, 3),
+            (264, 1),
+            (272, 3),
+            (280, 1),
+            (288, 1),
+            (296, 5),
+            (320, 2),
+            (1184, 1),
+            (1192, 3),
+            (1200, 0),
+            (1344, 0),
+        ] {
+            literal[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+        }
+        literal[1403] = 2;
+        literal[1456..1464].copy_from_slice(&394_720u64.to_be_bytes());
+        literal
+    }
+    #[test]
+    fn row_conservation_rejects_overflow_and_accepts_the_exact_u64_boundary() {
+        // Goal: malformed retained row counts return an operating error instead of panicking.
+        // Method: decode literal slots at overflow, exact conservation and adjacent mismatch.
+        let recording = Identity([1, 2]);
+        let mut literal = row_plan_slot_literal();
+        assert!(NormalState::decode(&literal, recording).is_ok());
+        for offset in [152, 272, 1192] {
+            literal[offset..offset + 8].copy_from_slice(&u64::MAX.to_be_bytes());
+        }
+        for (lost, valid) in [
+            (u64::MAX - 1, false),
+            (u64::MAX - 3, true),
+            (u64::MAX - 4, false),
+        ] {
+            literal[1208..1216].copy_from_slice(&lost.to_be_bytes());
+            let result = NormalState::decode(&literal, recording);
+            if valid {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
+        }
     }
     #[test]
     fn count_zero_slot_and_cleanup_match_independent_literal_offsets() {
@@ -671,6 +867,10 @@ mod tests {
         let recording = Identity([1, 2]);
         let mut state = NormalState::decode(&normal_literal(2), recording).unwrap();
         state.phase = Phase::SalvagePlanned;
+        state.census = super::super::census_binding::CensusBinding::decode(
+            count_zero_slot_literal()[1400..1496].try_into().unwrap(),
+        )
+        .unwrap();
         state.origin = 0;
         state.loss.publications_new = 2;
         state.salvage = Some(super::super::salvage::LossPlan {
@@ -731,6 +931,48 @@ mod tests {
                     "offset {offset}"
                 );
             }
+        }
+    }
+    #[test]
+    fn census_binding_closes_registered_normal_and_retirement_phases() {
+        // Goal: commitment consumes normal authority and only settled phase7 may retire.
+        // Method: mutate literal payloads and round-trip the exact96-byte binding and region8.
+        let recording = Identity([1, 2]);
+        let input = NormalState::decode(&normal_literal(2), recording)
+            .unwrap()
+            .input;
+        let mut selected = NormalState::registered(Identity([7, 8]), input);
+        selected.census.kind = 1;
+        selected.census.digest = [42; 32];
+        let mut bytes = [0; 4096];
+        selected.encode(&mut bytes).unwrap();
+        assert_eq!(&bytes[1400..1408], &[0, 0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(&bytes[1408..1440], &[42; 32]);
+        assert_eq!(NormalState::decode(&bytes, recording).unwrap(), selected);
+        assert!(AttemptInput::decode_registered(&bytes, recording).is_err());
+        let complete = count_zero_slot_literal();
+        let mut ordinary = normal_literal(2);
+        ordinary[1400..1496].copy_from_slice(&complete[1400..1496]);
+        assert!(NormalState::decode(&ordinary, recording).is_err());
+        let mut state = NormalState::decode(&complete, recording).unwrap();
+        state.phase = Phase::SalvageCommitted;
+        state.sequence = 9;
+        state.next = 1;
+        state.cleanup.region = 8;
+        state.encode(&mut bytes).unwrap();
+        assert_eq!(
+            &bytes[1024..1040],
+            &[0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(NormalState::decode(&bytes, recording).unwrap(), state);
+        for phase in [Phase::SalvagePlanned, Phase::UnresolvedExtent] {
+            state.phase = phase;
+            assert!(state.encode(&mut bytes).is_err());
+        }
+        for offset in [1404, 1407, 1496, 2111] {
+            let mut bad = complete;
+            bad[offset] = 1;
+            assert!(NormalState::decode(&bad, recording).is_err());
         }
     }
 }

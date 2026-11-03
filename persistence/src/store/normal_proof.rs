@@ -22,7 +22,7 @@ pub(super) struct SourceProof {
     pub operations: u64,
     pub frame: Option<DataFrame>,
     pub workspace: Option<ByteReservation>,
-    _reservation: ByteReservation,
+    reservation: ByteReservation,
 }
 const _: () = assert!(size_of::<SourceProof>() < 64 * 1024);
 impl SourceProof {
@@ -47,10 +47,58 @@ impl SourceProof {
             operations: 0,
             frame: None,
             workspace: None,
-            _reservation: reservation,
+            reservation,
         };
         proof.check(input)?;
         Ok(proof)
+    }
+    pub(super) fn release_workspace(&mut self) {
+        self.frame = None;
+        self.workspace = None;
+        self.reservation.shrink_to(64 * 1024);
+    }
+    pub(super) fn ordinary_end(
+        &mut self,
+        input: &AttemptInput,
+        events_end: u64,
+        budget: &std::sync::Arc<crate::resources::ByteBudget>,
+    ) -> io::Result<u64> {
+        let end = self.loss_publication_end(input)?;
+        let AttemptOperation::Ordinary { window, .. } = input.operation else {
+            return Err(invalid());
+        };
+        self.checked_read(input, |reader| {
+            let shape = reader.shape();
+            let limits = crate::Limits::from_shape(&shape)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            let bytes = 4096
+                + limits.cpus * size_of::<collector::machine::CPUTicks>()
+                + limits.interfaces * size_of::<collector::interfaces::Interface>()
+                + (limits.states + limits.cores * limits.states) * size_of::<u64>()
+                + limits.cores * size_of::<usize>()
+                + limits.fans * size_of::<f32>()
+                + limits.processes * size_of::<collector::processes::Process>()
+                + limits.coalitions * size_of::<collector::coalitions::Coalition>();
+            let _workspace = budget
+                .reserve(bytes)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+            let mut tick =
+                crate::tick_buffer(&shape).map_err(|error| io::Error::other(error.to_string()))?;
+            reader.seek_publication(end)?;
+            match reader.read_into(&mut tick)? {
+                Found::Publication { publication, .. }
+                    if publication == end
+                        && input
+                            .source
+                            .window(tick.run_tick, tick.times.map(|time| time.continuous_ns))?
+                            > window
+                        && tick.events.start == events_end =>
+                {
+                    Ok(end)
+                }
+                _ => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            }
+        })
     }
     pub fn loss_publication_end(&mut self, input: &AttemptInput) -> io::Result<u64> {
         if matches!(input.operation, AttemptOperation::Terminal { .. }) {

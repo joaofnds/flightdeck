@@ -1774,9 +1774,12 @@ fn native_loss_child_armed(
     state: &crate::transaction::normal::NormalState,
 ) -> bool {
     match boundary {
+        "plan" | "plan-adopt" | "plan-root-adopt" | "plan-live" => {
+            state.phase == bootstrap::codec::Phase::Registered && state.census.kind == 1
+        }
         "quiet" => state.phase == bootstrap::codec::Phase::Published,
         "cleanup" => state.cleanup.region == 1 && state.cleanup.ordinal == 0,
-        "idle" | "idle-adopt" => state.cleanup.region == 3 && state.cleanup.directory == 1,
+        "idle" | "idle-adopt" => state.cleanup.region == 8,
         _ => true,
     }
 }
@@ -2321,3 +2324,6 @@ fn a_new_object_cannot_prove_pre_origin_loss_even_with_its_own_binding() {
         collector::ring::unlink_generation(&old_name).unwrap();
     }
 }
+
+#[path = "loss_census_tests.rs"]
+mod census_tests;

@@ -12,6 +12,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
 
+#[path = "original_census.rs"]
+pub(super) mod census;
+
 const BATCHES: usize = 4096;
 const PASS_POSITIONS: usize = 128 - 16;
 const POSITIONS: usize = TABLE_FILES.len() + 2 + BATCHES;
@@ -83,6 +86,57 @@ impl FileIdentity {
             modified: (stat.mtime(), stat.mtime_nsec()),
             changed: (stat.ctime(), stat.ctime_nsec()),
         })
+    }
+    pub(crate) fn census_encode(&self, bytes: &mut [u8; 56]) -> io::Result<()> {
+        if !(0..1_000_000_000).contains(&self.modified.1)
+            || !(0..1_000_000_000).contains(&self.changed.1)
+        {
+            return Err(invalid());
+        }
+        for (index, value) in [self.device, self.inode, self.bytes].iter().enumerate() {
+            bytes[index * 8..index * 8 + 8].copy_from_slice(&value.to_be_bytes());
+        }
+        for (index, value) in [
+            self.modified.0,
+            self.modified.1,
+            self.changed.0,
+            self.changed.1,
+        ]
+        .iter()
+        .enumerate()
+        {
+            bytes[24 + index * 8..32 + index * 8].copy_from_slice(&value.to_be_bytes());
+        }
+        Ok(())
+    }
+    pub(crate) fn census_decode(bytes: &[u8; 56]) -> io::Result<Self> {
+        let word = |index: usize| -> io::Result<u64> {
+            Ok(u64::from_be_bytes(
+                bytes[index * 8..index * 8 + 8]
+                    .try_into()
+                    .map_err(|_| invalid())?,
+            ))
+        };
+        let signed = |index: usize| -> io::Result<i64> {
+            Ok(i64::from_be_bytes(
+                bytes[index * 8..index * 8 + 8]
+                    .try_into()
+                    .map_err(|_| invalid())?,
+            ))
+        };
+        let identity = Self {
+            device: word(0)?,
+            inode: word(1)?,
+            bytes: word(2)?,
+            modified: (signed(3)?, signed(4)?),
+            changed: (signed(5)?, signed(6)?),
+        };
+        let mut expected = [0; 56];
+        identity.census_encode(&mut expected)?;
+        if expected != *bytes {
+            return Err(invalid());
+        }
+        Ok(identity)
     }
     #[must_use]
     pub fn bytes(&self) -> u64 {
@@ -181,14 +235,81 @@ pub struct OriginalInventory<'attempt, 'store> {
     _reservation: ByteReservation,
 }
 pub(super) struct NormalInventory {
+    census_header: Option<census::CensusHeader>,
+    cleanup_original_inode: (u64, u64),
+    cleanup_events_inode: Option<(u64, u64)>,
     files: [Option<FileIdentity>; 12],
     batches: Vec<BatchFact>,
     index: IndexFact,
-    original_identity: DirectoryIdentity,
+    original_identity: Option<DirectoryIdentity>,
     events_identity: Option<DirectoryIdentity>,
     _reservation: ByteReservation,
 }
 impl NormalInventory {
+    pub(super) fn cleanup_directories(
+        &self,
+        original: &PrivateDirectory,
+        events: &PrivateDirectory,
+    ) -> io::Result<()> {
+        if original.device_inode()? != self.cleanup_original_inode
+            || Some(events.device_inode()?) != self.cleanup_events_inode
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub(super) fn cleanup_batch(&self, ordinal: usize, file: &mut File) -> io::Result<bool> {
+        if file.metadata()?.nlink() != 1 {
+            return Err(invalid());
+        }
+        let identity = FileIdentity::read(file)?;
+        let expected = match self.batches.get(ordinal) {
+            Some(BatchFact::Complete { file, .. } | BatchFact::Malformed { file, .. }) => *file,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unpreserved/conflicting original census identity",
+                ));
+            }
+        };
+        if identity != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unpreserved/conflicting original census identity",
+            ));
+        }
+        let disposable = matches!(
+            self.batches[ordinal],
+            BatchFact::Malformed { framed: false, .. }
+        );
+        if disposable && parquet_framing(file, identity.bytes)? {
+            return Err(invalid());
+        }
+        if FileIdentity::read(file)? != identity {
+            return Err(invalid());
+        }
+        Ok(disposable)
+    }
+    pub(super) fn cleanup_index(&self, file: &File) -> io::Result<bool> {
+        if file.metadata()?.nlink() != 1 {
+            return Err(invalid());
+        }
+        let (expected, malformed) = match self.index {
+            IndexFact::Valid { file, .. } => (file, false),
+            IndexFact::Malformed { file } => (file, true),
+            _ => return Err(invalid()),
+        };
+        if FileIdentity::read(file)? != expected {
+            return Err(invalid());
+        }
+        Ok(malformed)
+    }
+    pub(super) fn cleanup_absent(&self, ordinal: usize) -> io::Result<()> {
+        if self.batches.get(ordinal) != Some(&BatchFact::Missing) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
     pub(super) fn absent(&self, name: &str) -> io::Result<bool> {
         let position = TABLE_FILES
             .iter()
@@ -234,7 +355,7 @@ impl NormalInventory {
         directory: &PrivateDirectory,
         events: Option<&PrivateDirectory>,
     ) -> io::Result<()> {
-        if directory.identity()? != self.original_identity
+        if Some(directory.identity()?) != self.original_identity
             || events.map(PrivateDirectory::identity).transpose()? != self.events_identity
         {
             return Err(invalid());
@@ -310,20 +431,35 @@ impl<'store> OriginalInventory<'store, 'store> {
             _reservation: reservation,
         })
     }
+    pub(super) fn allow_candidates(&mut self) -> io::Result<()> {
+        let InventoryOwner::Owned(owner) = &mut self.attempt else {
+            return Err(invalid());
+        };
+        owner.candidates = true;
+        Ok(())
+    }
     pub(super) fn owner(&self) -> &RegisteredAttempt<'store> {
         &self.attempt
     }
     pub(super) fn into_normal(self) -> io::Result<(RegisteredAttempt<'store>, NormalInventory)> {
+        let cleanup_original_inode = self.attempt.original_directory().device_inode()?;
+        let cleanup_events_inode = self
+            .events
+            .as_ref()
+            .map(PrivateDirectory::device_inode)
+            .transpose()?;
         let Self {
             attempt,
             files,
             batches,
             index,
+            index_data,
             original_identity,
             events_identity,
             _reservation: mut reservation,
             ..
         } = self;
+        drop(index_data);
         reservation.shrink_to(SUMMARY_BYTES);
         let InventoryOwner::Owned(owner) = attempt else {
             return Err(invalid());
@@ -331,10 +467,13 @@ impl<'store> OriginalInventory<'store, 'store> {
         Ok((
             *owner,
             NormalInventory {
+                census_header: None,
+                cleanup_original_inode,
+                cleanup_events_inode,
                 files,
                 batches,
                 index,
-                original_identity,
+                original_identity: Some(original_identity),
                 events_identity,
                 _reservation: reservation,
             },
@@ -469,7 +608,13 @@ impl OriginalInventory<'_, '_> {
     pub fn step(&mut self) -> Result<InventoryStep> {
         self.validate_directories()?;
         if self.names_phase != NamesPhase::Done {
-            self.step_names()?;
+            let result = self.step_names();
+            if result.is_err() {
+                self.names = None;
+                self.name_count = 0;
+                self.dots = 0;
+            }
+            result?;
             return Ok(InventoryStep::Continue);
         }
         for _ in 0..PASS_POSITIONS {
@@ -602,7 +747,19 @@ impl OriginalInventory<'_, '_> {
         Ok(())
     }
 
+    fn step_names_open(&mut self) -> io::Result<()> {
+        if self.names.is_none() {
+            let directory = match self.names_phase {
+                NamesPhase::Original => self.attempt.original_directory(),
+                NamesPhase::Events => self.events.as_ref().ok_or_else(invalid)?,
+                NamesPhase::Done => return Err(invalid()),
+            };
+            self.names = Some(directory.names(&mut self.work.directory)?);
+        }
+        Ok(())
+    }
     fn step_names(&mut self) -> io::Result<()> {
+        self.step_names_open()?;
         for _ in 0..PASS_POSITIONS {
             let Some(names) = self.names.as_mut() else {
                 return Err(invalid());
@@ -895,9 +1052,16 @@ pub(super) fn select_original_counted(
     object: &PrivateDirectory,
     opens: &mut u64,
 ) -> io::Result<Option<(PrivateDirectory, OriginalPlacement)>> {
+    select_original_mode(object, opens, false)
+}
+pub(super) fn select_original_mode(
+    object: &PrivateDirectory,
+    opens: &mut u64,
+    candidates: bool,
+) -> io::Result<Option<(PrivateDirectory, OriginalPlacement)>> {
     for name in ["fragment-0", "fragment-1", "loss"] {
         *opens += 1;
-        if optional_directory(object, name)?.is_some() {
+        if optional_directory(object, name)?.is_some() && (!candidates || name == "loss") {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "registered candidate/loss placements require fixed-plan reconciliation",

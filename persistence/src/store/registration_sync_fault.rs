@@ -77,6 +77,10 @@ unsafe extern "C" fn refuse_full_sync(descriptor: i32, command: i32) -> i32 {
         return unsafe { fcntl(descriptor, command) };
     }
 
+    let after = unsafe { getenv(c"FLIGHTDECK_SYNC_AFTER_EXISTS".as_ptr()) };
+    if !after.is_null() && unsafe { access(after, 0) } != 0 {
+        return unsafe { fcntl(descriptor, command) };
+    }
     if !unsafe { getenv(c"FLIGHTDECK_SYNC_EFFECT".as_ptr()) }.is_null()
         && unsafe { fcntl(descriptor, command) } != 0
     {
@@ -500,11 +504,16 @@ unsafe extern "C" fn route_openat(_directory: i32, _name: *const c_char, _flags:
 }
 unsafe extern "C" fn observe_openat(directory: i32, name: *const c_char, flags: i32) -> i32 {
     unsafe { trace_control_name(b'O', directory, name) };
+    if unsafe { observe_openat_paced(directory, name) } {
+        return -1;
+    }
     let open_arm = unsafe { getenv(c"FLIGHTDECK_CONTROL_OPEN_ARMED".as_ptr()) };
     let enabled = open_arm.is_null() || unsafe { access(open_arm, 0) } == 0;
     if enabled
         && unsafe { mutation_fault(directory, name, c"open") }
         && !unsafe { replace_cleanup_name(directory, name) }
+        && (unsafe { getenv(c"FLIGHTDECK_OPEN_EVERY_THIRD".as_ptr()) }.is_null()
+            || OPEN_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 3 == 2)
     {
         unsafe {
             record_refusal();
@@ -521,7 +530,26 @@ unsafe extern "C" fn observe_createat(
     mode: u32,
 ) -> i32 {
     unsafe { trace_control_name(b'C', directory, name) };
-    unsafe { openat(directory, name, flags, mode) }
+    if unsafe { mutation_fault(directory, name, c"create") } {
+        unsafe {
+            record_refusal();
+            *__error() = 5;
+        }
+        return -1;
+    }
+    let result = unsafe { openat(directory, name, flags, mode) };
+    if result >= 0
+        && unsafe { mutation_fault(directory, name, c"create-effect") }
+        && unsafe { metadata_sequence_byte() }.is_none_or(|byte| byte == b'c')
+    {
+        assert_eq!(unsafe { close(result) }, 0);
+        unsafe {
+            record_refusal();
+            *__error() = 5;
+        }
+        return -1;
+    }
+    result
 }
 unsafe fn control_component(name: *const c_char) -> bool {
     [
@@ -740,4 +768,103 @@ unsafe fn replace_cleanup_name(directory: i32, name: *const c_char) -> bool {
         unsafe { record_refusal() };
     }
     true
+}
+
+#[repr(C)]
+struct WriteInterpose {
+    replacement: unsafe extern "C" fn(i32, *const c_void, usize) -> isize,
+    original: unsafe extern "C" fn(i32, *const c_void, usize) -> isize,
+}
+#[used]
+#[unsafe(link_section = "__DATA,__interpose")]
+static INTERPOSE_WRITE: WriteInterpose = WriteInterpose {
+    replacement: metadata_write_fault,
+    original: write,
+};
+unsafe extern "C" fn metadata_write_fault(file: i32, bytes: *const c_void, count: usize) -> isize {
+    let target = unsafe { getenv(c"FLIGHTDECK_METADATA_WRITE_TARGET".as_ptr()) };
+    let arm = unsafe { getenv(c"FLIGHTDECK_REGISTRATION_ARMED".as_ptr()) };
+    let mode = unsafe { getenv(c"FLIGHTDECK_METADATA_WRITE_MODE".as_ptr()) };
+    if target.is_null() || arm.is_null() || mode.is_null() || unsafe { access(arm, 0) } != 0 {
+        return unsafe { write(file, bytes, count) };
+    }
+    let mut path = [0_u8; 1024];
+    if unsafe { fcntl(file, 50, path.as_mut_ptr()) } != 0
+        || unsafe { strcmp(path.as_ptr().cast(), target) } != 0
+    {
+        return unsafe { write(file, bytes, count) };
+    }
+    let sequence = unsafe { metadata_sequence_byte() };
+    if (unsafe { strcmp(mode, c"inner".as_ptr()) } == 0 || sequence == Some(b'i')) && count == 512 {
+        return unsafe { write(file, bytes, count) };
+    }
+    let prefix = if unsafe { strcmp(mode, c"complete".as_ptr()) } == 0 || sequence == Some(b'p') {
+        count
+    } else {
+        count.min(137)
+    };
+    let result = unsafe { write(file, bytes, prefix) };
+    if result < 0 {
+        return result;
+    }
+    unsafe {
+        record_refusal();
+        *__error() = 5;
+    }
+    -1
+}
+
+static OPEN_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+unsafe fn observe_openat_paced(directory: i32, name: *const c_char) -> bool {
+    let root = unsafe { getenv(c"FLIGHTDECK_PACED_ROOT".as_ptr()) };
+    let log = unsafe { getenv(c"FLIGHTDECK_PACED_LOG".as_ptr()) };
+    if root.is_null() || log.is_null() {
+        return false;
+    }
+    let length = unsafe { strlen(name) };
+    if length != 12 || unsafe { strcmp(name.add(4), c".parquet".as_ptr()) } != 0 {
+        return false;
+    }
+    let mut path = [0_u8; 1024];
+    if unsafe { fcntl(directory, 50, path.as_mut_ptr()) } != 0
+        || unsafe { strncmp(path.as_ptr().cast(), root, strlen(root)) } != 0
+    {
+        return false;
+    }
+    let output = unsafe { open(log, 0x1 | 0x8 | 0x0100_0000) };
+    assert!(output >= 0);
+    assert_eq!(unsafe { write(output, b"x".as_ptr().cast(), 1) }, 1);
+    assert_eq!(unsafe { close(output) }, 0);
+    let armed = unsafe { getenv(c"FLIGHTDECK_PACED_BATCH_ARM".as_ptr()) };
+    if !armed.is_null()
+        && unsafe { access(armed, 0) } == 0
+        && unsafe { strcmp(name, c"0066.parquet".as_ptr()) } == 0
+    {
+        unsafe {
+            record_refusal();
+            *__error() = 5;
+        }
+        return true;
+    }
+    false
+}
+
+unsafe fn metadata_sequence_byte() -> Option<u8> {
+    let mode = unsafe { getenv(c"FLIGHTDECK_METADATA_WRITE_MODE".as_ptr()) };
+    if mode.is_null() || unsafe { strcmp(mode, c"sequence".as_ptr()) } != 0 {
+        return None;
+    }
+    let arm = unsafe { getenv(c"FLIGHTDECK_REGISTRATION_ARMED".as_ptr()) };
+    if arm.is_null() {
+        return None;
+    }
+    let file = unsafe { open(arm, 0) };
+    if file < 0 {
+        return None;
+    }
+    let mut byte = 0u8;
+    let count = unsafe { read(file, (&raw mut byte).cast(), 1) };
+    assert_eq!(unsafe { close(file) }, 0);
+    assert_eq!(count, 1);
+    Some(byte)
 }
