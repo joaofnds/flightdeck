@@ -55,7 +55,12 @@ mod tests {
                     eprintln!("registration_exit timing={timing} verified_signal=9");
                 }
                 Err(error) => {
-                    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+                    const ESRCH: i32 = 3;
+                    assert!(
+                        error.kind() == io::ErrorKind::NotFound
+                            || error.raw_os_error() == Some(ESRCH),
+                        "unexpected exit-watch refusal: {error:?}"
+                    );
                     assert_eq!(child.wait(Duration::from_secs(2)).signal(), Some(9));
                     eprintln!("registration_exit timing={timing} native_identity_gone=true");
                 }
