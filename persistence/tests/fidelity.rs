@@ -75,7 +75,7 @@ mod tests {
         publish_captured_legacy(&mut writer, &source);
         writer.finish();
         let mut reader = RingReader::open(&place.lock_path).unwrap();
-        assert_eq!(3, reader.source_layout_version());
+        assert_eq!(5, reader.source_layout_version());
         let reference = recording.0.join("source.reference");
 
         let captured = capture::run(&place.lock_path, &reference, 10);
@@ -256,7 +256,7 @@ mod tests {
 
     fn assert_event_loss(lock_path: &std::path::Path, shape: &Shape) {
         let mut reader = RingReader::open(lock_path).unwrap();
-        assert_eq!(4, reader.source_layout_version());
+        assert_eq!(6, reader.source_layout_version());
         let mut tick = persistence::tick_buffer(shape).unwrap();
         assert!(matches!(
             reader.read_into(&mut tick).unwrap(),

@@ -1237,6 +1237,7 @@ fn source_for_root(anchor: &Fixture, run: Identity) -> Fixture {
     publish_count(&mut writer, 1);
     let old_name = fixture.writer.name().to_owned();
     fixture.writer = writer;
+    fixture.binding = fixture.reader().object_binding().unwrap();
     collector::ring::unlink_generation(&old_name).unwrap();
     fixture.place = place;
     fixture.root = anchor.root.clone();
@@ -2000,6 +2001,7 @@ fn sixty_one_source_window(fixture: &mut Fixture) -> Window {
     let writer = collector::ring::Writer::create_recording(&place, shape, &fixture.run, 1).unwrap();
     let old = fixture.writer.name().to_owned();
     fixture.writer = writer;
+    fixture.binding = fixture.reader().object_binding().unwrap();
     collector::ring::unlink_generation(&old).unwrap();
     fixture.place = place;
     for number in 0..61 {

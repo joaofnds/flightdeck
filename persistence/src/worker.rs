@@ -577,8 +577,11 @@ fn persist_one_open(
                     | io::ErrorKind::InvalidData
                     | io::ErrorKind::InvalidInput
                     | io::ErrorKind::Unsupported
+                    | io::ErrorKind::WouldBlock
             ) =>
         {
+            // Registration follows ready-ring publication. An announced unready object
+            // is unavailable history, not a pending creation that can block other runs.
             source_unavailable(registered, state, error);
             return Ok(None);
         }

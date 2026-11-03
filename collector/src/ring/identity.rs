@@ -498,7 +498,7 @@ pub(super) fn dictionary_usage(
     words: &[AtomicU64],
     layout: &Layout,
 ) -> io::Result<Option<DictionaryUsage>> {
-    if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+    if !layout::captured(layout.version) {
         return Ok(None);
     }
 
@@ -825,7 +825,7 @@ pub(super) fn load_event_identity(
     owner: u64,
     output: &mut IdentityObservation,
 ) -> io::Result<()> {
-    if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+    if !layout::captured(layout.version) {
         legacy(event_pid(event), event_usage(event), output);
         return Ok(());
     }
@@ -886,7 +886,7 @@ pub(super) fn load_processes(
 ) -> io::Result<()> {
     identities.clear();
 
-    if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+    if !layout::captured(layout.version) {
         for process in &tick.processes {
             let mut value = IdentityObservation::EMPTY;
             legacy(process.pid, UsageAvailability::Measured, &mut value);
@@ -971,7 +971,7 @@ pub(super) fn validate_publication(
     identities: &IdentityPublication,
     owner: u64,
 ) -> io::Result<()> {
-    if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+    if !layout::captured(layout.version) {
         return invalid();
     }
 

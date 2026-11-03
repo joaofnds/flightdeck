@@ -1,4 +1,4 @@
-//! Volatile source complement proof. Only complete immutable metadata persists its result.
+//! Source complement proof; complete metadata or a fixed count0 plan persists its result.
 use crate::canonical::rows::TickSpan;
 use crate::resources::ByteReservation;
 use crate::transaction::{AttemptInput, AttemptOperation, SourceTiming};
@@ -18,6 +18,7 @@ pub(super) struct SourceProof {
     remaining: usize,
     pub losses: [u64; 4],
     pub reads: u64,
+    pub observations: std::cell::Cell<u64>,
     pub operations: u64,
     pub frame: Option<DataFrame>,
     pub workspace: Option<ByteReservation>,
@@ -30,7 +31,7 @@ impl SourceProof {
         input: &AttemptInput,
         reservation: ByteReservation,
     ) -> io::Result<Self> {
-        let generation = reader.generation();
+        let generation = input.binding.generation;
         let proof = Self {
             reader,
             generation,
@@ -42,6 +43,7 @@ impl SourceProof {
             remaining: OPERATIONS,
             losses: [0; 4],
             reads: 0,
+            observations: std::cell::Cell::new(0),
             operations: 0,
             frame: None,
             workspace: None,
@@ -49,6 +51,79 @@ impl SourceProof {
         };
         proof.check(input)?;
         Ok(proof)
+    }
+    pub fn loss_publication_end(&mut self, input: &AttemptInput) -> io::Result<u64> {
+        if matches!(input.operation, AttemptOperation::Terminal { .. }) {
+            self.checked_read(input, |reader| {
+                super::attempt::validate_terminal_source(input, reader)
+            })?;
+            return Ok(input.losses.publication_inherited_end);
+        }
+        let first = input.losses.publication_start;
+        if first < input.binding.publication_first {
+            return Err(invalid());
+        }
+        self.checked_read(input, |reader| {
+            reader.seek_publication(first)?;
+            match reader.read_timing_into(&mut PublicationTiming::default())? {
+                Found::Missed {
+                    first: observed,
+                    end,
+                } if observed == first && end > first => Ok(end),
+                Found::Publication { publication, .. } if publication == first => Ok(first),
+                Found::Nothing
+                    if reader.completed()
+                        && reader.publication_newest()?.checked_add(1) == Some(first) =>
+                {
+                    Ok(first)
+                }
+                _ => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+            }
+        })
+    }
+    pub fn loss_event_end(&mut self, input: &AttemptInput) -> io::Result<Option<u64>> {
+        if !self.operation() {
+            return Ok(None);
+        }
+        self.checked_read(input, |reader| {
+            if !reader.completed() {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            let publication_end = reader
+                .publication_newest()?
+                .checked_add(1)
+                .ok_or_else(invalid)?;
+            let end = reader.event_newest()?.checked_add(1).ok_or_else(invalid)?;
+            if reader.publication_newest()?.checked_add(1) != Some(publication_end)
+                || reader.event_newest()?.checked_add(1) != Some(end)
+            {
+                return Err(invalid());
+            }
+            Ok(Some(end))
+        })
+    }
+    pub fn loss_snapshot(
+        &mut self,
+        input: &AttemptInput,
+        end: u64,
+    ) -> io::Result<Option<(u64, u64)>> {
+        if !self.operation() {
+            return Ok(None);
+        }
+        self.checked_read(input, |reader| {
+            reader.seek_event(end)?;
+            let first = match reader.read_event()? {
+                FoundEvent::Missed { first, end: next } if first == end && next > end => next,
+                FoundEvent::Event { number, .. } if number == end => end,
+                FoundEvent::Nothing => end,
+                _ => return Err(invalid()),
+            };
+            let newest = reader.event_newest()?.checked_add(1).ok_or_else(invalid)?;
+            if newest < first || newest - first > reader.shape().event_capacity {
+                return Err(invalid());
+            }
+            Ok(Some((first, newest)))
+        })
     }
     pub fn begin_pass(&mut self) {
         self.remaining = OPERATIONS;
@@ -65,7 +140,9 @@ impl SourceProof {
         (self.publication, self.event)
     }
     pub fn check(&self, input: &AttemptInput) -> io::Result<()> {
-        if self.reader.generation() != self.generation
+        self.observations.set(self.observations.get() + 1);
+        if self.reader.object_binding()? != input.binding
+            || self.reader.generation() != self.generation
             || self.reader.identity() != Some(input.run)
             || SourceTiming::from_reader(&self.reader) != input.source
             || self.reader.dictionary_capacity().is_some() != input.captured
@@ -92,6 +169,14 @@ impl SourceProof {
         end: u64,
         publication: bool,
     ) -> io::Result<u64> {
+        let origin = if publication {
+            input.binding.publication_first
+        } else {
+            input.binding.event_first
+        };
+        if first < origin {
+            return Err(invalid());
+        }
         let result = self.checked_read(input, |reader| {
             if publication {
                 reader.seek_publication(first)?;

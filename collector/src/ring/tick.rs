@@ -24,7 +24,7 @@ use crate::smc::SmcReadings;
 use crate::tracker::Event;
 use crate::{push_without_growing, u64_from_usize};
 
-const _: () = assert!(super::layout::LAYOUT_VERSION == super::layout::LAYOUT_VERSION_OBSERVED);
+const _: () = assert!(super::layout::LAYOUT_VERSION == 5);
 
 /// What the collector read in one tick, as the writer publishes it.
 pub struct Readings<'a> {

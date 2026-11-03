@@ -347,7 +347,7 @@ mod tests {
         });
 
         assert_eq!(0, calls);
-        assert_eq!(4, reader.source_layout_version());
+        assert_eq!(6, reader.source_layout_version());
         assert_eq!(b"helper\xff", &name[..7]);
         assert_eq!(b"/A.app", &app[..6]);
     }
@@ -597,10 +597,10 @@ mod tests {
 
     #[test]
     fn refuses_a_reader_identity_associated_with_another_numeric_pid() {
-        // v4 header40 + slot43 + cpu2 + interface10 + gpu1 + core2 + fan1 = PID word99.
-        const NUMERIC_PID_WORD: usize = 40 + 43 + 2 + 10 + 1 + 2 + 1;
+        // v6 header44 + slot43 + cpu2 + interface10 + gpu1 + core2 + fan1 = PID word103.
+        const NUMERIC_PID_WORD: usize = 44 + 43 + 2 + 10 + 1 + 2 + 1;
         // Goal: untrusted measured identities cannot name another numeric process row.
-        // Method: publish valid v4 data, replace its numeric PID and read through RingReader.
+        // Method: publish valid v6 data, replace its numeric PID and read through RingReader.
         let place = TestPlace::new("id_reader_pid");
         let mut writer = identity_writer(&place, SHAPE, 1);
         let mut program = None;
@@ -633,7 +633,7 @@ mod tests {
             )
             .unwrap();
         let mapping = writable_identity_ring(&place);
-        assert_eq!(99, NUMERIC_PID_WORD);
+        assert_eq!(103, NUMERIC_PID_WORD);
         assert!(NUMERIC_PID_WORD < mapping.length / size_of::<u64>());
         assert_eq!(1, unsafe {
             mapping.address.cast::<u64>().add(NUMERIC_PID_WORD).read()
@@ -780,7 +780,7 @@ mod tests {
             .read_identity_into(&mut tick, &mut identities)
             .unwrap();
 
-        assert_eq!(3, reader.source_layout_version());
+        assert_eq!(5, reader.source_layout_version());
         assert!(reader.dictionary_capacity().is_none());
         assert_eq!([original], tick.processes[..]);
         assert_eq!(
@@ -1127,8 +1127,8 @@ mod tests {
 
     /// Header words the forging tests change, as the ring's layout places them.
     const HEADER_LAYOUT_VERSION: usize = 1;
-    const HEADER_WORDS: usize = 32;
-    const LAYOUT_VERSION_OBSERVED: u64 = 3;
+    const HEADER_WORDS: usize = 44;
+    const LAYOUT_VERSION_OBSERVED: u64 = 5;
     const HEADER_PUBLICATION_FIRST: usize = 3;
     const HEADER_PUBLICATION_NEWEST: usize = 4;
     const HEADER_EVENT_NEWEST: usize = 7;

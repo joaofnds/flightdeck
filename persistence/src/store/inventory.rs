@@ -74,7 +74,7 @@ pub struct FileIdentity {
     changed: (i64, i64),
 }
 impl FileIdentity {
-    fn read(file: &File) -> io::Result<Self> {
+    pub(super) fn read(file: &File) -> io::Result<Self> {
         let stat = file.metadata()?;
         Ok(Self {
             device: stat.dev(),
@@ -95,6 +95,7 @@ pub enum BatchFact {
     Missing,
     Malformed {
         file: FileIdentity,
+        framed: bool,
     },
     Complete {
         file: FileIdentity,
@@ -255,9 +256,10 @@ impl<'store> std::ops::Deref for InventoryOwner<'_, 'store> {
     }
 }
 impl<'store> OriginalInventory<'store, 'store> {
-    pub(super) fn owned(
+    pub(super) fn owned_counted(
         mut owner: RegisteredAttempt<'store>,
         budget: &Arc<ByteBudget>,
+        startup: &mut InventoryWork,
     ) -> io::Result<Self> {
         let OriginalInventory {
             attempt: _,
@@ -282,7 +284,7 @@ impl<'store> OriginalInventory<'store, 'store> {
             work,
             budget,
             _reservation: reservation,
-        } = owner.original_inventory(budget)?;
+        } = owner.original_inventory_counted(budget, startup)?;
         Ok(Self {
             attempt: InventoryOwner::Owned(Box::new(owner)),
             names,
@@ -777,7 +779,10 @@ impl OriginalInventory<'_, '_> {
             return Err(invalid().into());
         }
         if !framed {
-            self.batches[ordinal] = BatchFact::Malformed { file: identity };
+            self.batches[ordinal] = BatchFact::Malformed {
+                file: identity,
+                framed: false,
+            };
             return Ok(());
         }
         self.work.raw_file_clones += 1;
@@ -793,31 +798,45 @@ impl OriginalInventory<'_, '_> {
         }
         match result {
             Ok(batch) => {
-                if batch.first < self.registered_event_start() {
-                    return Err(invalid().into());
-                }
-                if let AttemptOperation::Terminal { event_end } = self.attempt.input().operation {
-                    if batch.end > event_end {
-                        return Err(invalid().into());
-                    }
-                }
+                let fact = self.probe_batch_complete(identity, &batch)?;
                 self.overlaps |= batch.first < self.maximum_end;
                 self.unordered |= batch.first <= self.previous_first;
                 self.maximum_end = self.maximum_end.max(batch.end);
                 self.previous_first = batch.first;
                 self.rows += batch.rows;
-                self.batches[ordinal] = BatchFact::Complete {
-                    file: identity,
-                    first: batch.first,
-                    end: batch.end,
-                    rows: batch.rows,
-                };
+                self.batches[ordinal] = fact;
             }
             Err(Error::Bound("changed parquet capture source")) => return Err(invalid().into()),
-            Err(Error::Bound(_)) => self.batches[ordinal] = BatchFact::Malformed { file: identity },
+            Err(Error::Bound(_)) => {
+                self.batches[ordinal] = BatchFact::Malformed {
+                    file: identity,
+                    framed: true,
+                }
+            }
             Err(error) => return Err(error),
         }
         Ok(())
+    }
+
+    fn probe_batch_complete(
+        &self,
+        identity: FileIdentity,
+        batch: &crate::event_recovery::Batch,
+    ) -> Result<BatchFact> {
+        if batch.first < self.registered_event_start() {
+            return Err(invalid().into());
+        }
+        if let AttemptOperation::Terminal { event_end } = self.attempt.input().operation {
+            if batch.end > event_end {
+                return Err(invalid().into());
+            }
+        }
+        Ok(BatchFact::Complete {
+            file: identity,
+            first: batch.first,
+            end: batch.end,
+            rows: batch.rows,
+        })
     }
 
     /// Reopens a fixed ordinary table/metadata position only after census and identity checking.
@@ -925,7 +944,7 @@ fn optional_file(parent: &PrivateDirectory, name: &str) -> io::Result<Option<Fil
         Err(error) => Err(error),
     }
 }
-fn parquet_framing(file: &mut File, bytes: u64) -> io::Result<bool> {
+pub(super) fn parquet_framing(file: &mut File, bytes: u64) -> io::Result<bool> {
     if bytes < 12 {
         return Ok(false);
     }

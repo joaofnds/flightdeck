@@ -9,10 +9,12 @@
 //! event, and each slot names the events of its tick.
 
 mod battery;
+mod binding;
 mod disks;
 mod event;
 mod identity;
 mod layout;
+pub use binding::ObjectBinding;
 mod object;
 mod system;
 mod tick;
@@ -610,7 +612,7 @@ impl Writer {
         reference_owner: u64,
         dictionary: &mut Option<identity::DictionaryIndex>,
     ) {
-        if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+        if !layout::captured(layout.version) {
             return;
         }
 
@@ -629,6 +631,7 @@ impl Writer {
         origin: WriterOrigin,
     ) -> io::Result<Self> {
         let LockedPlace { place, lock } = locked;
+        let object_identity = crate::recording::random_identity()?;
         let reference_owner = next_reference_owner()?;
         let mut dictionary = None;
 
@@ -655,19 +658,14 @@ impl Writer {
 
         let created = create_object(&names, previous.generation, &layout)?;
 
-        // A failed start removes its unnamed ring, or it would consume future generations.
-        let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)
-            .inspect_err(|_| create_unlink(&created.name))?;
-
         let header = Header {
             generation: created.generation,
             publication_first: previous.publication_newest + 1,
             run_start_ns,
             event_first: previous.event_newest + 1,
+            object_identity,
         };
-        store_header(mapping.words(), &layout, &header);
-        store_origin(mapping.words(), &origin);
-        store_supplemental_headers(mapping.words(), &layout);
+        let mapping = create_layout_mapping(&created, &layout, &header, &origin)?;
 
         create_name(&lock, &created.name).inspect_err(|_| create_unlink(&created.name))?;
         // Only once the lock file names the new ring, so a reader that reads the lock file from
@@ -903,6 +901,7 @@ pub struct Reader {
 
 /// A ring a reader opened, before it has room for the ring's ticks.
 struct Opened {
+    immutable: Option<[u64; 64]>,
     name: LockedName,
     mapping: Mapping,
     publications: Cursor,
@@ -955,7 +954,17 @@ impl Opened {
             newest: event_newest,
         })?;
 
+        let immutable = if layout::bound(layout.version) {
+            let before = binding::snapshot(words, &layout)?;
+            if binding::snapshot(words, &layout)? != before {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            Some(before)
+        } else {
+            None
+        };
         Ok(Opened {
+            immutable,
             name,
             publications: Cursor::new(first, layout.publications_held(newest)),
             run_start_ns,
@@ -1093,6 +1102,22 @@ impl Opened {
             }),
         }
     }
+}
+
+fn create_layout_mapping(
+    created: &object::Created,
+    layout: &Layout,
+    header: &Header,
+    origin: &WriterOrigin<'_>,
+) -> io::Result<Mapping> {
+    // A failed start removes its unnamed ring, or it would consume future generations.
+    let mapping = Mapping::new(&created.object, layout.word_count(), PROT_READ | PROT_WRITE)
+        .inspect_err(|_| create_unlink(&created.name))?;
+    store_header(mapping.words(), layout, header);
+    store_origin(mapping.words(), origin);
+    store_supplemental_headers(mapping.words(), layout);
+    mapping.words()[layout::HEADER_MAGIC].store(layout::MAGIC, Ordering::Release);
+    Ok(mapping)
 }
 
 fn store_supplemental_headers(words: &[AtomicU64], layout: &Layout) {

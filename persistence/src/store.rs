@@ -22,9 +22,11 @@ pub use inventory::{
     BatchFact, FileIdentity, IndexFact, InventoryStep, InventoryWork, OriginalFile,
     OriginalInventory, OriginalPlacement,
 };
+mod publication_ledger;
 pub use publication::{
-    NormalProof, NormalPublication, ProofStep, PublicationStep, PublicationWork,
+    LossPublication, NormalProof, NormalPublication, ProofStep, PublicationStep, PublicationWork,
 };
+pub use publication_ledger::PublicationLedger;
 mod event_table;
 pub(crate) mod events;
 #[cfg(test)]

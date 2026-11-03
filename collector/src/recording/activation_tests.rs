@@ -72,7 +72,7 @@ fn registers_an_identity_ring_without_reacquiring_its_place_lock() {
     registered.unwrap();
     let reader = RingReader::open_generation(writer.name()).unwrap();
 
-    assert_eq!(reader.source_layout_version(), 4);
+    assert_eq!(reader.source_layout_version(), 6);
     assert_eq!(
         reader.dictionary_capacity().unwrap().entries,
         capacity().entries
@@ -114,7 +114,7 @@ fn refuses_a_second_identity_collector_before_mutating_either_registry() {
         RingReader::open_generation(writer.name())
             .unwrap()
             .source_layout_version(),
-        4
+        6
     );
 }
 
@@ -136,7 +136,7 @@ fn keeps_registration_refusal_on_the_existing_unregistered_v3_fallback() {
         registered.unwrap_err().kind(),
         io::ErrorKind::PermissionDenied
     );
-    assert_eq!(reader.source_layout_version(), 3);
+    assert_eq!(reader.source_layout_version(), 5);
     assert!(reader.dictionary_capacity().is_none());
     assert!(reader.identity().is_none());
     assert_eq!(reader.run_start_continuous_ns(), Some(71));
@@ -154,7 +154,7 @@ fn keeps_the_compatibility_registration_entry_point_on_v3() {
     registered.unwrap();
     let reader = RingReader::open_generation(writer.name()).unwrap();
 
-    assert_eq!(reader.source_layout_version(), 3);
+    assert_eq!(reader.source_layout_version(), 5);
     assert!(reader.dictionary_capacity().is_none());
     assert_eq!(reader.identity(), writer.identity());
 }
@@ -181,8 +181,8 @@ fn plans_the_full_profile_below_the_existing_one_gibibyte_reader_limit() {
 
     let bytes = Writer::identity_size_bytes(shape, capacity).unwrap();
 
-    assert_eq!(bytes, 1_012_654_976);
-    assert_eq!(1024 * 1024 * 1024 - bytes, 61_086_848);
+    assert_eq!(bytes, 1_012_655_008);
+    assert_eq!(1024 * 1024 * 1024 - bytes, 61_086_816);
 }
 
 #[test]

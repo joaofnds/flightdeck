@@ -150,7 +150,7 @@ impl SystemLayout {
         start..start + self.record_words
     }
 
-    fn header(&self) -> [u64; HEADER_WORDS] {
+    pub(super) fn header(&self) -> [u64; HEADER_WORDS] {
         [
             MAGIC,
             VERSION,

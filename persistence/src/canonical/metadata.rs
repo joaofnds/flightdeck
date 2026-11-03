@@ -160,6 +160,7 @@ pub struct CanonicalMetadata {
     pub(crate) attempted_origin: u64,
     pub(crate) canonical_origin: u64,
     pub(crate) original_end: u64,
+    pub(crate) binding: collector::ring::ObjectBinding,
     pub(crate) source_layout: u64,
     pub(crate) source_origin: Option<u64>,
     pub(crate) evidence: EndpointEvidence,
@@ -170,6 +171,28 @@ pub struct CanonicalMetadata {
     pub(crate) body: Body,
 }
 impl CanonicalMetadata {
+    pub(crate) fn loss_routes(&self) -> io::Result<[Option<Namespace>; 2]> {
+        if self.kind != CanonicalKind::LossOnly {
+            return Err(invalid());
+        }
+
+        let alias = (self.base == RawBase::Data
+            && self.loss.event_end > self.loss.inherited.event_start)
+            .then_some(Namespace::Fragments);
+        let final_gate = if self.base == RawBase::Recovery {
+            Some(Namespace::Terminal)
+        } else if self.loss.publication_end > self.loss.inherited.publication_start {
+            Some(Namespace::Ordinary)
+        } else {
+            None
+        };
+        if alias.is_none() && final_gate.is_none() {
+            return Err(invalid());
+        }
+
+        Ok([alias, final_gate])
+    }
+
     pub fn write(&self, file: &mut impl Write) -> io::Result<()> {
         self.validate()?;
         let mut inner = Vec::with_capacity(4096);
@@ -248,6 +271,7 @@ impl CanonicalMetadata {
             attempted_origin: word(bytes, 112)?,
             canonical_origin: word(bytes, 120)?,
             original_end: word(bytes, 128)?,
+            binding: crate::transaction::source_binding::decode(&bytes[208..256])?,
             source_layout: word(bytes, 160)?,
             source_origin: crate::transaction::SourceTiming::decode(bytes, 160, 192, 200)?
                 .origin_continuous_ns,
@@ -326,6 +350,7 @@ impl CanonicalMetadata {
             188,
             u32::try_from(inner_length).map_err(|_| invalid())?,
         );
+        crate::transaction::source_binding::encode(&self.binding, &mut bytes[208..256])?;
         self.loss.encode(&mut bytes[256..]);
         Ok(())
     }
@@ -438,6 +463,7 @@ impl CanonicalMetadata {
     }
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.timing().validate(self.captured)?;
+        crate::transaction::source_binding::validate(&self.binding)?;
         self.validate_provenance()?;
         self.loss.validate()?;
         let loss = self.loss.totals()?;

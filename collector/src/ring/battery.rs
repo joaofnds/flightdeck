@@ -60,13 +60,16 @@ impl BatteryLayout {
         start..start + RECORD_WORDS
     }
 
-    pub(super) fn store_header(&self, words: &[AtomicU64]) {
-        let header = [
+    pub(super) fn header(&self) -> [u64; HEADER_WORDS] {
+        [
             MAGIC,
             VERSION,
             u64_from_usize(self.slot_count),
             u64_from_usize(RECORD_WORDS),
-        ];
+        ]
+    }
+    pub(super) fn store_header(&self, words: &[AtomicU64]) {
+        let header = self.header();
 
         for (index, value) in header.iter().enumerate() {
             words[self.start + index].store(*value, Ordering::Relaxed);

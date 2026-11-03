@@ -42,9 +42,9 @@ fn carries_optional_battery_with_the_original_tick_and_identity() {
     assert_eq!(owned.tick().battery, Some(battery));
     assert_eq!(tick, *owned.tick());
     assert_eq!(borrowed.identity(), Some(fixture.identity));
-    assert_eq!(borrowed.source_layout_version(), 4);
+    assert_eq!(borrowed.source_layout_version(), 6);
     assert_eq!(borrowed.run_start_continuous_ns(), Some(100));
-    assert_eq!(borrowed.mapped_size_bytes(), 2736);
+    assert_eq!(borrowed.mapped_size_bytes(), 2768);
     assert!(fixture.writer.battery_supported());
     assert!(borrowed.battery_supported());
     assert_eq!(
@@ -210,7 +210,7 @@ fn treats_page_rounded_original_v4_storage_as_no_battery_tail() {
     assert!(fixture.writer.layout.battery.is_none());
     assert!(!fixture.writer.battery_supported());
     assert!(!reader.battery_supported());
-    assert_eq!(reader.mapped_size_bytes(), 2512);
+    assert_eq!(reader.mapped_size_bytes(), 2544);
     assert_eq!(
         reader.read_into(&mut tick).unwrap(),
         Found::Publication {

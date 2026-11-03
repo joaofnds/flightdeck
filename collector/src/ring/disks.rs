@@ -59,13 +59,16 @@ impl DisksLayout {
         start..start + encoding::WORDS_MAX
     }
 
-    pub(super) fn store_header(&self, words: &[AtomicU64]) {
-        let values = [
+    pub(super) fn header(&self) -> [u64; HEADER_WORDS] {
+        [
             MAGIC,
             VERSION,
             u64_from_usize(self.slot_count),
             u64_from_usize(encoding::WORDS_MAX),
-        ];
+        ]
+    }
+    pub(super) fn store_header(&self, words: &[AtomicU64]) {
+        let values = self.header();
         for (index, value) in values.iter().enumerate() {
             words[self.start + index].store(*value, Ordering::Relaxed);
         }

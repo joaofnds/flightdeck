@@ -244,7 +244,7 @@ impl Fixture {
     fn stage(&self, identity: &RunIdentity, output: &mut Option<Window>) {
         let mut reader = RingReader::open_generation(&self.ring).unwrap();
         assert!(reader.completed());
-        assert_eq!(reader.source_layout_version(), 4);
+        assert_eq!(reader.source_layout_version(), 6);
         let mut tick = persistence::tick_buffer(&SHAPE).unwrap();
         let mut identities = Vec::with_capacity(5);
         let window = output.insert(Window::new(

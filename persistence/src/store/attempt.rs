@@ -300,6 +300,7 @@ impl Store {
         let reader =
             reader.ok_or_else(|| unresolved("new registration requires source evidence"))?;
         if input.run.recording != self.recording
+            || reader.object_binding()? != input.binding
             || reader.identity() != Some(input.run)
             || reader.dictionary_capacity().is_some() != input.captured
             || crate::transaction::SourceTiming::from_reader(reader) != input.source
@@ -307,6 +308,9 @@ impl Store {
             return Err(invalid());
         }
         self.validate_source_frontier(input, reader, budget, frontier)?;
+        if reader.object_binding()? != input.binding {
+            return Err(invalid());
+        }
         let _control = budget
             .ok_or_else(invalid)?
             .reserve(16 * 1024)
@@ -415,7 +419,10 @@ impl Store {
             .and_then(|()| validate_selected_window(input, reader));
         reader.seek_publication(position)?;
         result?;
-        if reader.generation() != generation || reader.identity() != Some(input.run) {
+        if reader.object_binding()? != input.binding
+            || reader.generation() != generation
+            || reader.identity() != Some(input.run)
+        {
             return Err(invalid());
         }
         validate_terminal_source(input, reader)?;
@@ -430,6 +437,9 @@ pub(super) fn validate_terminal_source(
     let AttemptOperation::Terminal { event_end } = input.operation else {
         return Ok(());
     };
+    if reader.object_binding()? != input.binding {
+        return Err(invalid());
+    }
     let generation = reader.generation();
     // Completion acquire precedes the final header reads, including when a previous
     // read returned Nothing just before the producer's last publication.
@@ -447,7 +457,8 @@ pub(super) fn validate_terminal_source(
             "terminal final publication/event boundary is not owned",
         ));
     }
-    if reader.generation() != generation
+    if reader.object_binding()? != input.binding
+        || reader.generation() != generation
         || reader.identity() != Some(input.run)
         || crate::transaction::SourceTiming::from_reader(reader) != input.source
         || reader.publication_newest()?.checked_add(1) != Some(publication_end)
@@ -459,6 +470,13 @@ pub(super) fn validate_terminal_source(
 }
 
 fn validate_scanning_prefix(input: &AttemptInput, reader: &mut RingReader) -> io::Result<()> {
+    if input.losses.publication_start < input.binding.publication_first
+        && input.losses.publication_start < input.losses.publication_inherited_end
+    {
+        return Err(unresolved(
+            "prior-object loss needs independently transferred evidence",
+        ));
+    }
     reader.seek_publication(input.losses.publication_start)?;
     let mut timing = PublicationTiming::default();
     let bound = reader

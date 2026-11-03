@@ -116,6 +116,15 @@ impl RingReader {
         })
     }
 
+    /// Reobserves immutable header evidence rather than returning a cached binding.
+    pub fn object_binding(&self) -> io::Result<super::ObjectBinding> {
+        let admitted = self
+            .opened
+            .immutable
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
+        super::binding::read(self.opened.mapping.words(), &self.opened.layout, admitted)
+    }
     /// The exact wire layout, including legacy2/3 versus optional identity4.
     #[must_use]
     pub fn source_layout_version(&self) -> u64 {
@@ -125,7 +134,7 @@ impl RingReader {
     #[must_use]
     pub fn dictionary_capacity(&self) -> Option<super::DictionaryCapacity> {
         let layout = &self.opened.layout;
-        if layout.version != layout::LAYOUT_VERSION_IDENTITY {
+        if !layout::captured(layout.version) {
             return None;
         }
 
@@ -211,7 +220,7 @@ impl RingReader {
         program: &super::ProgramReference,
         buffers: &mut super::ProgramBuffers,
     ) -> io::Result<(usize, usize)> {
-        if self.opened.layout.version != layout::LAYOUT_VERSION_IDENTITY {
+        if !layout::captured(self.opened.layout.version) {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
 

@@ -16,7 +16,7 @@ pub fn run(lock: &Path, reference: &Path, seconds: u64) -> Result<()> {
 
     let started = Instant::now();
     let mut reader = open(lock, started, seconds)?;
-    let identity_capable = reader.source_layout_version() == 4;
+    let identity_capable = reader.dictionary_capacity().is_some();
     let identity = reader
         .identity()
         .ok_or(Error::Bound("source run identity unavailable"))?;

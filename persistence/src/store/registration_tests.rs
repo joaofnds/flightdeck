@@ -17,6 +17,7 @@ struct Fixture {
     run: RunIdentity,
     transport_removed: bool,
     source: crate::transaction::SourceTiming,
+    binding: collector::ring::ObjectBinding,
     place: collector::ring::Place,
 }
 fn fixture_root(base: &Path, long: bool) -> PathBuf {
@@ -96,7 +97,12 @@ impl Fixture {
         let source = crate::transaction::SourceTiming::from_reader(
             &RingReader::open_generation(writer.name()).unwrap(),
         );
+        let binding = RingReader::open_generation(writer.name())
+            .unwrap()
+            .object_binding()
+            .unwrap();
         Self {
+            binding,
             base,
             root,
             writer,
@@ -110,6 +116,7 @@ impl Fixture {
         AttemptInput {
             run: self.run,
             source: self.source,
+            binding: self.binding,
             operation: if terminal {
                 AttemptOperation::Terminal { event_end: 1 }
             } else {
@@ -806,7 +813,7 @@ fn canonical_loss_prefix(run: RunIdentity, transaction: Identity) -> [u8; 512] {
         (128, 2),
         (136, 1),
         (144, 1),
-        (160, 3),
+        (160, 5),
         (200, 1),
         (304, 1),
         (312, 1),
@@ -816,6 +823,10 @@ fn canonical_loss_prefix(run: RunIdentity, transaction: Identity) -> [u8; 512] {
         (360, 1),
         (368, 1),
     ] {
+        prefix[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
+    }
+    prefix[208..212].copy_from_slice(&1_u32.to_be_bytes());
+    for (offset, value) in [(216, 17_u64), (224, 18), (232, 1), (240, 1), (248, 1)] {
         prefix[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
     }
     prefix
@@ -1325,15 +1336,15 @@ fn source_timing_mismatch_and_closed_slot_bytes_refuse_before_artifacts() {
     let before = fixture.slot();
     for source in [
         crate::transaction::SourceTiming {
-            layout: 3,
+            layout: 5,
             origin_continuous_ns: Some(0),
         },
         crate::transaction::SourceTiming {
-            layout: 3,
+            layout: 5,
             origin_continuous_ns: None,
         },
         crate::transaction::SourceTiming {
-            layout: 4,
+            layout: 6,
             origin_continuous_ns: Some(1),
         },
     ] {
@@ -1352,7 +1363,7 @@ fn source_timing_mismatch_and_closed_slot_bytes_refuse_before_artifacts() {
         .input(false)
         .encode_registered(Identity([99, 100]), &mut bytes)
         .unwrap();
-    assert_eq!(&bytes[224..232], &3u64.to_be_bytes());
+    assert_eq!(&bytes[224..232], &5u64.to_be_bytes());
     assert_eq!(&bytes[232..236], &1u32.to_be_bytes());
     assert_eq!(&bytes[240..248], &1u64.to_be_bytes());
     for offset in [235, 236, 248, 255] {

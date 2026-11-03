@@ -650,13 +650,13 @@ impl Scenario {
     }
 
     fn change_slot_word(&mut self, publication: u64, slot_word: usize, value: u64) {
-        // This fixture has a v4 header and one of every base capacity including identity.
+        // This fixture has a v6 header and one of every base capacity including identity.
         const SLOT_WORDS: usize = 43 + 2 + 10 + 1 + 2 + 1 + 18 + 10 + 6;
         let reader = RingReader::open_generation(self.ring.0.name()).unwrap();
-        assert_eq!(reader.source_layout_version(), 4);
+        assert_eq!(reader.source_layout_version(), 6);
         assert_eq!(reader.shape().process_capacity, 1);
         assert_eq!(reader.shape().slot_count, 4);
-        let slot = 40 + usize::try_from((publication - 1) % 4).unwrap() * SLOT_WORDS;
+        let slot = 44 + usize::try_from((publication - 1) % 4).unwrap() * SLOT_WORDS;
         let snapshot = WritableSource::new(
             self.ring.0.name(),
             reader.mapped_size_bytes(),

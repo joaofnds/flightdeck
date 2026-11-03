@@ -285,6 +285,7 @@ fn restart_empty(fixture: &mut Fixture) {
         collector::ring::Writer::create_recording(&fixture.place, shape, &fixture.run, 1).unwrap();
     collector::ring::unlink_generation(fixture.writer.name()).unwrap();
     fixture.writer = next;
+    fixture.binding = fixture.reader().object_binding().unwrap();
     collector::ring::unlink_generation(&old_name).unwrap();
     fixture.source = crate::transaction::SourceTiming::from_reader(&fixture.reader());
 }

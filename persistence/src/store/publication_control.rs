@@ -5,13 +5,35 @@ use collector::recording::private::{self, PrivateDirectory};
 use collector::ring::Identity;
 use std::io::{self, Read, Write};
 
+/// Restore the validated visible controls before a reopened owner performs any effect.
+pub(super) fn adopt(
+    root: &impl ControlDirectory,
+    state: &NormalState,
+    work: &mut super::PublicationWork,
+) -> io::Result<()> {
+    work.control_reads += 1;
+    work.canonical.namespace_attempts += 1;
+    visible(root, state)?;
+    work.canonical.namespace_attempts += 1;
+    sync_file(root, "foreground", &mut work.full_syncs)?;
+    sync_directory(root, &mut work.full_syncs)?;
+    work.control_reads += 1;
+    work.canonical.namespace_attempts += 1;
+    read_state(root, state.input.run.recording)?;
+    work.canonical.namespace_attempts += 1;
+    sync_file(root, "namespace-state", &mut work.full_syncs)?;
+    sync_directory(root, &mut work.full_syncs)
+}
 pub(super) fn read_state(
-    root: &PrivateDirectory,
+    root: &impl ControlDirectory,
     recording: Identity,
 ) -> io::Result<NamespaceState> {
     codec::decode_state(&read(root, "namespace-state", 256)?, recording)
 }
-pub(super) fn read_normal(root: &PrivateDirectory, recording: Identity) -> io::Result<NormalState> {
+pub(super) fn read_normal(
+    root: &impl ControlDirectory,
+    recording: Identity,
+) -> io::Result<NormalState> {
     let visible = read(root, "foreground", 4096)?;
     let current = NormalState::decode(&visible, recording)?;
     match optional_read(root, "foreground.pending", 4096) {
@@ -23,7 +45,7 @@ pub(super) fn read_normal(root: &PrivateDirectory, recording: Identity) -> io::R
             if matches!(
                 codec::decode_slot(&candidate, recording, codec::SlotKind::Foreground)?,
                 codec::Slot::Idle
-            ) && current.phase == Phase::Cleanup
+            ) && matches!(current.phase, Phase::Cleanup | Phase::SalvageCommitted)
             {
                 return Ok(current);
             }
@@ -54,6 +76,28 @@ fn legal_next(old: &NormalState, new: &NormalState) -> bool {
     }
 
     let phases = (old.phase, new.phase);
+    if phases == (Phase::Registered, Phase::SalvagePlanned) {
+        return old.salvage.is_none() && new.salvage.is_some();
+    }
+    if old.salvage != new.salvage {
+        return false;
+    }
+    if old.cleanup != new.cleanup
+        && !(phases == (Phase::SalvageCommitted, Phase::SalvageCommitted)
+            && (
+                old.cleanup.region,
+                old.cleanup.ordinal,
+                old.cleanup.table,
+                old.cleanup.directory,
+            ) < (
+                new.cleanup.region,
+                new.cleanup.ordinal,
+                new.cleanup.table,
+                new.cleanup.directory,
+            ))
+    {
+        return false;
+    }
     if phases == (Phase::Registered, Phase::Ready) {
         return true;
     }
@@ -63,7 +107,7 @@ fn legal_next(old: &NormalState, new: &NormalState) -> bool {
     }
 
     match phases {
-        (Phase::Ready, Phase::Publishing) => {
+        (Phase::Ready | Phase::SalvagePlanned, Phase::Publishing) => {
             new.sequence > 0 && new.structure.is_none() && new.next == 0
         }
         (Phase::Publishing, Phase::Publishing) => {
@@ -87,11 +131,14 @@ fn legal_next(old: &NormalState, new: &NormalState) -> bool {
         (Phase::Publishing, Phase::Published) => {
             old.sequence == new.sequence && old.structure.is_none() && new.structure.is_none()
         }
-        (Phase::Published, Phase::Cleanup) => old.sequence == new.sequence && old.next == new.next,
+        (Phase::Published, Phase::Cleanup | Phase::SalvageCommitted)
+        | (Phase::SalvageCommitted, Phase::SalvageCommitted) => {
+            old.sequence == new.sequence && old.next == new.next
+        }
         _ => false,
     }
 }
-pub(super) fn visible(root: &PrivateDirectory, state: &NormalState) -> io::Result<()> {
+pub(super) fn visible(root: &impl ControlDirectory, state: &NormalState) -> io::Result<()> {
     let bytes = read(root, "foreground", 4096)?;
     if matches!(
         codec::decode_slot(
@@ -100,7 +147,7 @@ pub(super) fn visible(root: &PrivateDirectory, state: &NormalState) -> io::Resul
             codec::SlotKind::Foreground
         )?,
         codec::Slot::Idle
-    ) && state.phase == Phase::Cleanup
+    ) && matches!(state.phase, Phase::Cleanup | Phase::SalvageCommitted)
     {
         return Ok(());
     }
@@ -113,7 +160,7 @@ pub(super) fn visible(root: &PrivateDirectory, state: &NormalState) -> io::Resul
     }
 }
 pub(super) fn pending(
-    root: &PrivateDirectory,
+    root: &impl ControlDirectory,
     state: &NormalState,
 ) -> io::Result<Option<NormalState>> {
     let Some(bytes) = optional_read(root, "foreground.pending", 4096)? else {
@@ -130,7 +177,7 @@ pub(super) fn pending(
             codec::SlotKind::Foreground
         )?,
         codec::Slot::Idle
-    ) && state.phase == Phase::Cleanup
+    ) && matches!(state.phase, Phase::Cleanup | Phase::SalvageCommitted)
     {
         return Ok(None);
     }
@@ -142,7 +189,12 @@ pub(super) fn pending(
 
     Ok(Some(candidate))
 }
-pub(super) fn check(root: &PrivateDirectory, name: &str, old: &[u8], new: &[u8]) -> io::Result<()> {
+pub(super) fn check(
+    root: &impl ControlDirectory,
+    name: &str,
+    old: &[u8],
+    new: &[u8],
+) -> io::Result<()> {
     let current = read(root, name, old.len())?;
     if current != old && current != new {
         return Err(invalid());
@@ -156,7 +208,7 @@ pub(super) fn check(root: &PrivateDirectory, name: &str, old: &[u8], new: &[u8])
     Ok(())
 }
 pub(super) fn replace(
-    root: &PrivateDirectory,
+    root: &impl ControlDirectory,
     name: &str,
     old: &[u8],
     new: &[u8],
@@ -206,14 +258,16 @@ pub(super) fn replace(
         sync_directory(root, syncs)?;
     }
     let mut file = root.create_file(&pending_name)?;
+    root.record_write(u64::try_from(new.len()).map_err(|_| invalid())?);
     file.write_all(new)?;
     *syncs += 1;
+    root.record_file_sync();
     private::full_sync(&file)?;
     drop(file);
     root.rename(&pending_name, name)?;
     sync_directory(root, syncs)
 }
-fn read(root: &PrivateDirectory, name: &str, size: usize) -> io::Result<Vec<u8>> {
+fn read(root: &impl ControlDirectory, name: &str, size: usize) -> io::Result<Vec<u8>> {
     let bytes =
         optional_read(root, name, size)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     if bytes.len() != size {
@@ -223,7 +277,7 @@ fn read(root: &PrivateDirectory, name: &str, size: usize) -> io::Result<Vec<u8>>
     Ok(bytes)
 }
 fn optional_read(
-    root: &PrivateDirectory,
+    root: &impl ControlDirectory,
     name: &str,
     maximum: usize,
 ) -> io::Result<Option<Vec<u8>>> {
@@ -233,23 +287,105 @@ fn optional_read(
         Err(error) => return Err(error),
     };
     let mut bytes = Vec::with_capacity(maximum + 1);
-    (&mut file)
+    root.record_read();
+    let result = (&mut file)
         .take(u64::try_from(maximum + 1).map_err(|_| invalid())?)
-        .read_to_end(&mut bytes)?;
+        .read_to_end(&mut bytes);
+    root.record_read_bytes(u64::try_from(bytes.len()).map_err(|_| invalid())?);
+    result?;
     if bytes.len() > maximum {
         return Err(invalid());
     }
 
     Ok(Some(bytes))
 }
-fn sync_file(root: &PrivateDirectory, name: &str, syncs: &mut u64) -> io::Result<()> {
+fn sync_file(root: &impl ControlDirectory, name: &str, syncs: &mut u64) -> io::Result<()> {
     *syncs += 1;
-    private::full_sync(&root.open_file(name)?)
+    let file = root.open_file(name)?;
+    root.record_file_sync();
+    private::full_sync(&file)
 }
-fn sync_directory(root: &PrivateDirectory, syncs: &mut u64) -> io::Result<()> {
+fn sync_directory(root: &impl ControlDirectory, syncs: &mut u64) -> io::Result<()> {
     *syncs += 1;
     root.full_sync()
 }
 fn invalid() -> io::Error {
     io::Error::from(io::ErrorKind::InvalidData)
+}
+
+pub(super) trait ControlDirectory {
+    fn open_file(&self, name: &str) -> io::Result<std::fs::File>;
+    fn create_file(&self, name: &str) -> io::Result<std::fs::File>;
+    fn remove_file(&self, name: &str) -> io::Result<()>;
+    fn rename(&self, old: &str, new: &str) -> io::Result<()>;
+    fn full_sync(&self) -> io::Result<()>;
+    fn record_read(&self) {}
+    fn record_read_bytes(&self, _bytes: u64) {}
+    fn record_write(&self, _bytes: u64) {}
+    fn record_file_sync(&self) {}
+}
+impl ControlDirectory for PrivateDirectory {
+    fn open_file(&self, name: &str) -> io::Result<std::fs::File> {
+        self.open_file(name)
+    }
+    fn create_file(&self, name: &str) -> io::Result<std::fs::File> {
+        self.create_file(name)
+    }
+    fn remove_file(&self, name: &str) -> io::Result<()> {
+        self.remove_file(name)
+    }
+    fn rename(&self, old: &str, new: &str) -> io::Result<()> {
+        self.rename(old, new)
+    }
+    fn full_sync(&self) -> io::Result<()> {
+        self.full_sync()
+    }
+}
+pub(super) struct CountedControl<'a> {
+    pub root: &'a PrivateDirectory,
+    pub ledger: Option<&'a super::PublicationLedger>,
+}
+impl CountedControl<'_> {
+    fn update(&self, update: impl FnOnce(&mut super::PublicationWork)) {
+        if let Some(ledger) = self.ledger {
+            ledger.update(update);
+        }
+    }
+}
+impl ControlDirectory for CountedControl<'_> {
+    fn open_file(&self, name: &str) -> io::Result<std::fs::File> {
+        self.update(|work| work.control_file_opens += 1);
+        self.root.open_file(name)
+    }
+    fn create_file(&self, name: &str) -> io::Result<std::fs::File> {
+        self.update(|work| work.control_file_creates += 1);
+        self.root.create_file(name)
+    }
+    fn remove_file(&self, name: &str) -> io::Result<()> {
+        self.update(|work| work.control_remove_attempts += 1);
+        self.root.remove_file(name)
+    }
+    fn rename(&self, old: &str, new: &str) -> io::Result<()> {
+        self.update(|work| work.control_rename_attempts += 1);
+        self.root.rename(old, new)
+    }
+    fn full_sync(&self) -> io::Result<()> {
+        self.update(|work| work.control_directory_sync_attempts += 1);
+        self.root.full_sync()
+    }
+    fn record_read(&self) {
+        self.update(|work| work.control_read_operations += 1);
+    }
+    fn record_read_bytes(&self, bytes: u64) {
+        self.update(|work| work.control_read_bytes += bytes);
+    }
+    fn record_write(&self, bytes: u64) {
+        self.update(|work| {
+            work.control_write_operations += 1;
+            work.control_write_requested_bytes += bytes;
+        });
+    }
+    fn record_file_sync(&self) {
+        self.update(|work| work.control_file_sync_attempts += 1);
+    }
 }

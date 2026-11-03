@@ -1,4 +1,4 @@
-//! Closed normal-publication state. Salvage and maintenance remain non-executable.
+//! Closed normal and exact count0 publication state; row-bearing salvage remains refused.
 use super::{
     AttemptInput, AttemptOperation, Identity, LossTransfer, Operation, Phase, RunIdentity, Slot,
     SlotKind, SourceTiming, codec, get_identity, get32, get64, invalid, io, put32, put64,
@@ -141,6 +141,8 @@ pub(crate) struct NormalState {
     pub sequence: u64,
     pub next: u64,
     pub structure: Option<Structure>,
+    pub salvage: Option<super::salvage::LossPlan>,
+    pub cleanup: super::salvage::Cleanup,
 }
 impl NormalState {
     pub fn registered(transaction: Identity, input: AttemptInput) -> Self {
@@ -162,6 +164,8 @@ impl NormalState {
             sequence: 0,
             next: 0,
             structure: None,
+            salvage: None,
+            cleanup: super::salvage::Cleanup::default(),
         }
     }
     pub fn encode(&self, bytes: &mut [u8; 4096]) -> io::Result<()> {
@@ -174,6 +178,12 @@ impl NormalState {
             return Ok(());
         }
 
+        if let Some(plan) = &self.salvage {
+            return self.encode_loss(bytes, plan);
+        }
+        if self.cleanup != super::salvage::Cleanup::default() {
+            return Err(invalid());
+        }
         let phase = match self.phase {
             Phase::Ready => 2,
             Phase::Publishing => 3,
@@ -185,29 +195,7 @@ impl NormalState {
             return Err(invalid());
         }
 
-        match self.input.operation {
-            AttemptOperation::Ordinary {
-                attempted_origin, ..
-            } => {
-                if self.origin < attempted_origin
-                    || self.origin >= self.original_end
-                    || self.loss.publication_end != self.original_end
-                {
-                    return Err(invalid());
-                }
-
-                put32(bytes, 140, 4);
-            }
-            AttemptOperation::Terminal { event_end } => {
-                if self.origin != 0
-                    || self.original_end != 0
-                    || self.loss.event_end != event_end
-                    || self.loss.publication_end != self.input.losses.publication_inherited_end
-                {
-                    return Err(invalid());
-                }
-            }
-        }
+        self.encode_normal_origin(bytes)?;
         if self.phase == Phase::Ready
             && (self.sequence != 0 || self.next != 0 || self.structure.is_some())
         {
@@ -234,6 +222,180 @@ impl NormalState {
         }
         Ok(())
     }
+    fn encode_normal_origin(&self, bytes: &mut [u8; 4096]) -> io::Result<()> {
+        match self.input.operation {
+            AttemptOperation::Ordinary {
+                attempted_origin, ..
+            } => {
+                if self.origin < attempted_origin
+                    || self.origin >= self.original_end
+                    || self.loss.publication_end != self.original_end
+                {
+                    return Err(invalid());
+                }
+
+                put32(bytes, 140, 4);
+            }
+            AttemptOperation::Terminal { event_end } => {
+                if self.origin != 0
+                    || self.original_end != 0
+                    || self.loss.event_end != event_end
+                    || self.loss.publication_end != self.input.losses.publication_inherited_end
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn encode_loss(
+        &self,
+        bytes: &mut [u8; 4096],
+        plan: &super::salvage::LossPlan,
+    ) -> io::Result<()> {
+        self.validate_loss_state(plan)?;
+        let phase = match self.phase {
+            Phase::SalvagePlanned
+                if self.sequence == 0 && self.next == 0 && self.structure.is_none() =>
+            {
+                6
+            }
+            Phase::Publishing if self.sequence > 0 => 3,
+            Phase::Published if self.sequence > 0 && self.structure.is_none() => 4,
+            Phase::SalvageCommitted if self.sequence > 0 && self.structure.is_none() => 7,
+            _ => return Err(invalid()),
+        };
+        put32(bytes, 48, phase);
+        put32(bytes, 140, plan.endpoint);
+        put64(bytes, 144, self.original_end);
+        put64(bytes, 152, self.loss.event_end);
+        put32(bytes, 184, u32::from(plan.terminal));
+        put64(bytes, 192, self.sequence);
+        put64(bytes, 200, self.next);
+        plan.encode((&mut bytes[256..512]).try_into().map_err(|_| invalid())?)?;
+        self.cleanup
+            .encode((&mut bytes[1024..1088]).try_into().map_err(|_| invalid())?)?;
+        self.loss.encode(&mut bytes[1088..1344]);
+        if let Some(structure) = &self.structure {
+            if self.phase != Phase::Publishing {
+                return Err(invalid());
+            }
+            structure.encode(&mut bytes[512..1024])?;
+        }
+        Ok(())
+    }
+    fn validate_loss_state(&self, plan: &super::salvage::LossPlan) -> io::Result<()> {
+        if !matches!(plan.endpoint, 1 | 3) {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        let metadata = self.loss_metadata()?;
+        metadata.validate()?;
+        let links = u64::try_from(metadata.loss_routes()?.iter().flatten().count())
+            .map_err(|_| invalid())?;
+        if self.next > links
+            || (matches!(self.phase, Phase::Published | Phase::SalvageCommitted)
+                && self.next != links)
+        {
+            return Err(invalid());
+        }
+        if self.loss.inherited != self.input.losses
+            || self.origin != 0
+            || self.next > 2
+            || plan.first != self.input.losses.event_start
+            || plan.end != self.loss.event_end
+            || plan.layout != self.input.source.layout
+            || plan.terminal != matches!(self.input.operation, AttemptOperation::Terminal { .. })
+            || self.cleanup.region > 3
+            || (self.cleanup.region != 0 && self.phase != Phase::SalvageCommitted)
+            || (self.cleanup.region == 1
+                && (self.cleanup.table != 0 || self.cleanup.directory != 0))
+            || (self.cleanup.region == 2
+                && (self.cleanup.ordinal != 0
+                    || self.cleanup.table != 0
+                    || self.cleanup.directory != 0))
+            || (self.cleanup.region == 3
+                && (self.cleanup.ordinal != 0
+                    || self.cleanup.table != 0
+                    || self.cleanup.directory > 1))
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    pub fn loss_metadata(&self) -> io::Result<crate::canonical::CanonicalMetadata> {
+        use crate::canonical::{CanonicalMetadata, EndpointEvidence, Lifecycle, RawBase, RawChild};
+        let plan = self.salvage.as_ref().ok_or_else(invalid)?;
+        let (base, window, attempted_origin) = match self.input.operation {
+            AttemptOperation::Ordinary {
+                window,
+                attempted_origin,
+            } => (RawBase::Data, window, attempted_origin),
+            AttemptOperation::Terminal { event_end }
+                if event_end == self.loss.event_end
+                    && self.loss.publication_end == self.input.losses.publication_inherited_end
+                    && self.original_end == 0 =>
+            {
+                (RawBase::Recovery, 0, 0)
+            }
+            AttemptOperation::Terminal { .. } => return Err(invalid()),
+        };
+        Ok(CanonicalMetadata {
+            run: self.input.run,
+            transaction: self.transaction,
+            kind: super::CanonicalKind::LossOnly,
+            base,
+            child: RawChild::Loss,
+            window,
+            attempted_origin,
+            canonical_origin: 0,
+            original_end: self.original_end,
+            binding: self.input.binding,
+            source_layout: self.input.source.layout,
+            source_origin: self.input.source.origin_continuous_ns,
+            evidence: match plan.endpoint {
+                1 => EndpointEvidence::OrdinaryIndex,
+                3 => EndpointEvidence::FixedSource,
+                4 => EndpointEvidence::ReadyManifest,
+                _ => return Err(invalid()),
+            },
+            lifecycle: if plan.terminal {
+                Lifecycle::AcquiredCompletion
+            } else {
+                Lifecycle::Active
+            },
+            captured: self.input.captured,
+            trailing_unknown: false,
+            loss: self.loss.clone(),
+            body: crate::canonical::metadata::Body::LossOnly,
+        })
+    }
+    fn decode_input(
+        bytes: &[u8],
+        recording: Identity,
+        operation: Operation,
+    ) -> io::Result<AttemptInput> {
+        Ok(AttemptInput {
+            run: RunIdentity {
+                recording,
+                run: get_identity(bytes, 64)?,
+                boot: get_identity(bytes, 80)?,
+            },
+            captured: get32(bytes, 124)? == 1,
+            source: SourceTiming::decode(bytes, 224, 232, 240)?,
+            binding: super::source_binding::decode(&bytes[1352..1400])?,
+            losses: LossTransfer::decode(&bytes[1088..1344])?,
+            operation: match operation {
+                Operation::Ordinary => AttemptOperation::Ordinary {
+                    window: get64(bytes, 96)?,
+                    attempted_origin: get64(bytes, 104)?,
+                },
+                Operation::Terminal => AttemptOperation::Terminal {
+                    event_end: get64(bytes, 152)?,
+                },
+                Operation::ExceptionalFragment => return Err(invalid()),
+            },
+        })
+    }
     pub fn decode(bytes: &[u8], recording: Identity) -> io::Result<Self> {
         let Slot::Occupied {
             phase,
@@ -251,31 +413,17 @@ impl NormalState {
 
         if !matches!(
             phase,
-            Phase::Ready | Phase::Publishing | Phase::Published | Phase::Cleanup
+            Phase::Ready
+                | Phase::Publishing
+                | Phase::Published
+                | Phase::Cleanup
+                | Phase::SalvagePlanned
+                | Phase::SalvageCommitted
         ) {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
 
-        let input = AttemptInput {
-            run: RunIdentity {
-                recording,
-                run: get_identity(bytes, 64)?,
-                boot: get_identity(bytes, 80)?,
-            },
-            captured: get32(bytes, 124)? == 1,
-            source: SourceTiming::decode(bytes, 224, 232, 240)?,
-            losses: LossTransfer::decode(&bytes[1088..1344])?,
-            operation: match operation {
-                Operation::Ordinary => AttemptOperation::Ordinary {
-                    window: get64(bytes, 96)?,
-                    attempted_origin: get64(bytes, 104)?,
-                },
-                Operation::Terminal => AttemptOperation::Terminal {
-                    event_end: get64(bytes, 152)?,
-                },
-                Operation::ExceptionalFragment => return Err(invalid()),
-            },
-        };
+        let input = Self::decode_input(bytes, recording, operation)?;
         let state = Self {
             transaction,
             input,
@@ -285,6 +433,16 @@ impl NormalState {
             loss: CanonicalLoss::decode(&bytes[1088..1344])?,
             sequence: get64(bytes, 192)?,
             next: get64(bytes, 200)?,
+            salvage: if bytes[256..512].iter().all(|byte| *byte == 0) {
+                None
+            } else {
+                Some(super::salvage::LossPlan::decode(
+                    bytes[256..512].try_into().map_err(|_| invalid())?,
+                )?)
+            },
+            cleanup: super::salvage::Cleanup::decode(
+                bytes[1024..1088].try_into().map_err(|_| invalid())?,
+            )?,
             structure: if bytes[512..1024].iter().all(|byte| *byte == 0) {
                 None
             } else {
@@ -335,7 +493,7 @@ mod tests {
             (159, 1),
             (215, 7),
             (223, 8),
-            (231, 3),
+            (231, 5),
             (235, 1),
             (1099, 1),
             (1143, 1),
@@ -371,9 +529,22 @@ mod tests {
                 bytes[offset] = value;
             }
         }
+        normal_literal_binding(&mut bytes);
         bytes
     }
 
+    fn normal_literal_binding(bytes: &mut [u8; 4096]) {
+        for (offset, value) in [
+            (1355, 1),
+            (1367, 17),
+            (1375, 18),
+            (1383, 1),
+            (1391, 1),
+            (1399, 1),
+        ] {
+            bytes[offset] = value;
+        }
+    }
     fn assert_normal_literal(phase: Phase, wire_phase: u8) {
         let literal = normal_literal(wire_phase);
         let state = NormalState::decode(&literal, Identity([1, 2])).unwrap();
@@ -427,7 +598,7 @@ mod tests {
         // Goal: origin and structural padding remain closed persistent grammar.
         // Method: alter each reserved byte independently in a valid occupied literal.
         let literal = normal_literal(3);
-        for offset in (812..1024).chain(1352..2112) {
+        for offset in (812..1024).chain(1356..1360).chain(1400..2112) {
             let mut altered = literal;
             altered[offset] = 1;
             assert_eq!(
@@ -445,7 +616,7 @@ mod tests {
         // Goal: retained and live timing share the exact elapsed-window rule, including zero.
         // Method: exercise exact boundaries, absent times, underflow and incompatible profiles.
         let timing = SourceTiming {
-            layout: 3,
+            layout: 5,
             origin_continuous_ns: Some(0),
         };
         timing.validate(false).unwrap();
@@ -454,23 +625,112 @@ mod tests {
         assert_eq!(timing.window(120, None).unwrap(), 2);
         assert!(timing.validate(true).is_err());
         let shifted = SourceTiming {
-            layout: 3,
+            layout: 5,
             origin_continuous_ns: Some(60_000_000_000),
         };
         assert_eq!(shifted.window(999, Some(120_000_000_000)).unwrap(), 1);
         assert!(shifted.window(999, Some(59_999_999_999)).is_err());
         let missing = SourceTiming {
-            layout: 3,
+            layout: 5,
             origin_continuous_ns: None,
         };
         assert!(missing.validate(false).is_err());
         assert!(missing.window(120, None).is_err());
         let mut bytes = [0; 4096];
         timing.encode(&mut bytes, 224, 232, 240);
-        assert_eq!(&bytes[224..232], &3u64.to_be_bytes());
+        assert_eq!(&bytes[224..232], &5u64.to_be_bytes());
         assert_eq!(&bytes[232..236], &1u32.to_be_bytes());
         assert_eq!(SourceTiming::decode(&bytes, 224, 232, 240).unwrap(), timing);
         bytes[235] = 2;
         assert!(SourceTiming::decode(&bytes, 224, 232, 240).is_err());
+    }
+    fn count_zero_slot_literal() -> [u8; 4096] {
+        let mut literal = normal_literal(2);
+        for (offset, value) in [
+            (51, 6),
+            (143, 1),
+            (1207, 2),
+            (1351, 0),
+            (259, 1),
+            (271, 1),
+            (279, 1),
+            (287, 1),
+            (295, 1),
+            (303, 5),
+            (307, 2),
+            (311, 1),
+        ] {
+            literal[offset] = value;
+        }
+        literal
+    }
+    #[test]
+    fn count_zero_slot_and_cleanup_match_independent_literal_offsets() {
+        // Goal: pin executable count0 plan and cleanup bytes without changing normal literals.
+        // Method: hand-author the new fields, compare encoding and reject contradictory records.
+        let recording = Identity([1, 2]);
+        let mut state = NormalState::decode(&normal_literal(2), recording).unwrap();
+        state.phase = Phase::SalvagePlanned;
+        state.origin = 0;
+        state.loss.publications_new = 2;
+        state.salvage = Some(super::super::salvage::LossPlan {
+            first: 1,
+            end: 1,
+            snapshot_first: 1,
+            snapshot_end: 1,
+            layout: 5,
+            endpoint: 1,
+            terminal: false,
+        });
+        let literal = count_zero_slot_literal();
+        let mut actual = [0; 4096];
+        state.encode(&mut actual).unwrap();
+        assert_eq!(actual, literal);
+        assert_eq!(NormalState::decode(&literal, recording).unwrap(), state);
+    }
+    #[test]
+    fn count_zero_cleanup_matches_literal_and_closed_reserved_fields() {
+        // Goal: pin cleanup cursor bytes and reject unsupported count0 state extensions.
+        // Method: extend the independently hand-authored plan literal with explicit fields.
+        let recording = Identity([1, 2]);
+        let mut literal = count_zero_slot_literal();
+        let mut state = NormalState::decode(&literal, recording).unwrap();
+        let mut actual = [0; 4096];
+        state.phase = Phase::SalvageCommitted;
+        state.sequence = 9;
+        state.next = 1;
+        state.cleanup = super::super::salvage::Cleanup {
+            region: 1,
+            ordinal: 128,
+            table: 0,
+            directory: 0,
+        };
+        literal[51] = 7;
+        literal[199] = 9;
+        literal[207] = 1;
+        literal[1027] = 1;
+        literal[1031] = 128;
+        state.encode(&mut actual).unwrap();
+        assert_eq!(actual, literal);
+        for (offset, value) in [
+            (263, 1),
+            (315, 1),
+            (344, 1),
+            (348, 1),
+            (1031, 129),
+            (1040, 1),
+        ] {
+            let mut changed = literal;
+            changed[offset] = value;
+            // 129 is a legal cursor; every other alteration contradicts the typed count0 plan.
+            if offset == 1031 {
+                assert!(NormalState::decode(&changed, recording).is_ok());
+            } else {
+                assert!(
+                    NormalState::decode(&changed, recording).is_err(),
+                    "offset {offset}"
+                );
+            }
+        }
     }
 }

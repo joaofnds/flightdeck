@@ -628,17 +628,31 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     }
 
     let header = Mapping::new(&object, HEADER_WORDS, PROT_READ)?;
-    let header_words = if header.words()[super::layout::HEADER_LAYOUT_VERSION]
-        .load(Ordering::Relaxed)
-        == super::layout::LAYOUT_VERSION_IDENTITY
-    {
-        super::layout::HEADER_WORDS_IDENTITY
-    } else {
-        HEADER_WORDS
-    };
+    let magic = header.words()[super::layout::HEADER_MAGIC].load(Ordering::Acquire);
+    if magic != super::layout::MAGIC {
+        return Err(io::Error::from(if magic == 0 {
+            io::ErrorKind::WouldBlock
+        } else {
+            io::ErrorKind::InvalidData
+        }));
+    }
+    let version = header.words()[super::layout::HEADER_LAYOUT_VERSION].load(Ordering::Relaxed);
+    let header_words = super::layout::header_words(version);
     if size_bytes < header_words * size_of::<u64>() {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
+    let initial = if super::layout::bound(version) {
+        let extended = Mapping::new(&object, header_words, PROT_READ)?;
+        let mut snapshot = [0; 44];
+        for (index, value) in snapshot.iter_mut().enumerate() {
+            if !matches!(index, 4 | 7 | 29 | 34 | 35) {
+                *value = extended.words()[index].load(Ordering::Relaxed);
+            }
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
     let layout = if header_words == HEADER_WORDS {
         open_layout(header.words(), size_bytes)?
     } else {
@@ -651,6 +665,12 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     let layout = open_ring_system(&object, layout, size_bytes)?;
     let mapping = Mapping::new(&object, layout.word_count(), PROT_READ)?;
 
+    if let Some(initial) = initial {
+        let after = super::binding::snapshot(mapping.words(), &layout)?;
+        if after[..44] != initial {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+    }
     Ok((mapping, layout))
 }
 
@@ -659,7 +679,7 @@ fn open_ring_battery(
     mut layout: Layout,
     size_bytes: usize,
 ) -> io::Result<Layout> {
-    if layout.version != super::layout::LAYOUT_VERSION_IDENTITY {
+    if !super::layout::captured(layout.version) {
         return Ok(layout);
     }
     let start = layout.base_word_count();

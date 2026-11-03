@@ -35,9 +35,10 @@ pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::{require_numeric_source, tick_buffer};
 pub use store::{
     BatchFact, Begin, CommitBoundary, FileIdentity, IndexFact, InventoryStep, InventoryWork,
-    NormalProof, NormalPublication, OriginalFile, OriginalInventory, OriginalPlacement,
-    PendingWindow, ProofStep, PublicationStep, PublicationWork, RegisteredAttempt, RegisteredFile,
-    Store, list_committed, ownership_contended, read_committed, reread_committed,
+    LossPublication, NormalProof, NormalPublication, OriginalFile, OriginalInventory,
+    OriginalPlacement, PendingWindow, ProofStep, PublicationLedger, PublicationStep,
+    PublicationWork, RegisteredAttempt, RegisteredFile, Store, list_committed, ownership_contended,
+    read_committed, reread_committed,
 };
 
 pub use encoder::{

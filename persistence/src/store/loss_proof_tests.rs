@@ -239,6 +239,15 @@ fn publish_captured_exec(fixture: &mut Fixture) {
     publish_captured_pair_at(fixture, 2, 2);
 }
 fn publish_captured_pair_at(fixture: &mut Fixture, run_tick: u64, continuous_ns: u64) {
+    publish_captured_events_at(fixture, run_tick, continuous_ns, 2);
+}
+fn publish_captured_events_at(
+    fixture: &mut Fixture,
+    run_tick: u64,
+    continuous_ns: u64,
+    count: usize,
+) {
+    assert!(count <= 4);
     let mut reference = None;
     fixture
         .writer
@@ -261,6 +270,8 @@ fn publish_captured_pair_at(fixture: &mut Fixture, run_tick: u64, continuous_ns:
             program: reference.unwrap(),
         },
     };
+    let events = std::array::from_fn::<_, 4, _>(|_| collector::tracker::Event::Exec { pid: 41 });
+    let identities = [identity; 4];
     let memory = collector::machine::Memory::default();
     fixture
         .writer
@@ -276,10 +287,7 @@ fn publish_captured_pair_at(fixture: &mut Fixture, run_tick: u64, continuous_ns:
                 processes_refused: 0,
                 processes_gone: 0,
                 coalitions: &[],
-                events: &[
-                    collector::tracker::Event::Exec { pid: 41 },
-                    collector::tracker::Event::Exec { pid: 41 },
-                ],
+                events: &events[..count],
                 dropped: collector::ring::Dropped::default(),
             },
             Some(&collector::ring::ObservationTimes {
@@ -289,14 +297,17 @@ fn publish_captured_pair_at(fixture: &mut Fixture, run_tick: u64, continuous_ns:
             }),
             &collector::ring::IdentityPublication {
                 processes: &[],
-                events: &[identity, identity],
+                events: &identities[..count],
             },
         )
         .unwrap();
 }
 
 fn proof_fixture(captured: bool, slots: u64) -> Fixture {
-    let mut fixture = Fixture::new_profile(false, captured);
+    proof_fixture_in(Fixture::new_profile(false, captured), slots)
+}
+fn proof_fixture_in(mut fixture: Fixture, slots: u64) -> Fixture {
+    let captured = fixture.writer.dictionary_usage().unwrap().is_some();
     let place = collector::ring::Place {
         lock_path: fixture.base.join("proof-source.lock"),
         name_prefix: format!(
@@ -325,6 +336,7 @@ fn proof_fixture(captured: bool, slots: u64) -> Fixture {
     };
     let old = fixture.writer.name().to_owned();
     fixture.writer = writer;
+    fixture.binding = fixture.reader().object_binding().unwrap();
     collector::ring::unlink_generation(&old).unwrap();
     fixture.place = place;
     fixture.source = crate::transaction::SourceTiming::from_reader(&fixture.reader());
@@ -361,6 +373,16 @@ fn publish_numeric_event_pair(fixture: &mut Fixture) {
     publish_numeric_pair_at(fixture, 2, 2);
 }
 fn publish_numeric_pair_at(fixture: &mut Fixture, run_tick: u64, continuous_ns: u64) {
+    publish_numeric_events_at(fixture, run_tick, continuous_ns, 2);
+}
+fn publish_numeric_events_at(
+    fixture: &mut Fixture,
+    run_tick: u64,
+    continuous_ns: u64,
+    count: usize,
+) {
+    assert!(count <= 4);
+    let events = std::array::from_fn::<_, 4, _>(|_| collector::tracker::Event::Exec { pid: 41 });
     let memory = collector::machine::Memory::default();
     let readings = collector::ring::Readings {
         run_tick,
@@ -373,10 +395,7 @@ fn publish_numeric_pair_at(fixture: &mut Fixture, run_tick: u64, continuous_ns: 
         processes_refused: 0,
         processes_gone: 0,
         coalitions: &[],
-        events: &[
-            collector::tracker::Event::Exec { pid: 41 },
-            collector::tracker::Event::Exec { pid: 41 },
-        ],
+        events: &events[..count],
         dropped: collector::ring::Dropped::default(),
     };
     fixture.writer.publish_observed(
@@ -586,27 +605,17 @@ fn make_writer(fixture: &Fixture, place: &collector::ring::Place) -> collector::
         collector::ring::Writer::create_recording(place, reader.shape(), &fixture.run, 1).unwrap()
     }
 }
-fn replace_with_empty_generation(fixture: &mut Fixture) {
-    fixture.writer.finish();
-    let old_name = fixture.writer.name().to_owned();
-    let temporary = collector::ring::Place {
-        lock_path: fixture.base.join("temporary-empty.lock"),
-        name_prefix: format!(
-            "/fdq{:x}{:x}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ),
-    };
-    let writer = make_writer(fixture, &temporary);
-    let old = std::mem::replace(&mut fixture.writer, writer);
-    drop(old);
-    let next = make_writer(fixture, &fixture.place);
-    collector::ring::unlink_generation(fixture.writer.name()).unwrap();
-    fixture.writer = next;
-    collector::ring::unlink_generation(&old_name).unwrap();
-    fixture.source = crate::transaction::SourceTiming::from_reader(&fixture.reader());
-    fixture.writer.finish();
+fn overwrite_registered_source(fixture: &mut Fixture) {
+    let binding = fixture.reader().object_binding().unwrap();
+    publish_at(&mut fixture.writer, 1);
+    if fixture.reader().dictionary_capacity().is_some() {
+        publish_captured_events_at(fixture, 61, 61_000_000_001, 4);
+    } else {
+        publish_numeric_events_at(fixture, 61, 61_000_000_001, 4);
+    }
+    assert_eq!(fixture.reader().object_binding().unwrap(), binding);
 }
+
 fn copy_detached_rows(fixture: &Fixture) -> Vec<crate::event_recovery::batch::Row> {
     let mut reader = fixture.reader();
     reader.seek_event(1).unwrap();
@@ -642,9 +651,9 @@ fn copy_detached_rows(fixture: &Fixture) -> Vec<crate::event_recovery::batch::Ro
     rows
 }
 #[test]
-fn nonempty_terminal_preserves_actual_rows_and_inherited_missed_suffix_in_both_profiles() {
-    // Goal: actual generation rollover supplies nonempty terminal rows plus a proved loss suffix.
-    // Method: save1, retain events from unowned3, roll to empty4 and publish the copied exact rows.
+fn terminal_refuses_unowned_final_ticks_without_erasing_retained_original_rows() {
+    // Goal: acquired completion cannot abandon a retained final publication.
+    // Method: preserve real event bytes through overwrite and refuse terminal registration.
     for captured in [false, true] {
         terminal_rollover(captured);
     }
@@ -665,61 +674,22 @@ fn terminal_rollover(captured: bool) {
         publish_numeric_pair_at(&mut fixture, 61, 61_000_000_001);
     }
     let rows = copy_detached_rows(&fixture);
-    replace_with_empty_generation(&mut fixture);
+    overwrite_registered_source(&mut fixture);
+    fixture.writer.finish();
     let input = rollover_input(&fixture, &store, &budget);
-    let attempt = store
-        .register_attempt(&input, &mut fixture.reader(), &budget)
-        .unwrap();
+    let before = fixture.slot();
+    assert!(
+        store
+            .register_attempt(&input, &mut fixture.reader(), &budget)
+            .is_err()
+    );
+    assert_eq!(fixture.slot(), before);
     let mut frame = crate::event_recovery::batch::frame(&rows, captured).unwrap();
-    crate::encoder::encode_write(&mut frame, attempt.create_event_batch(0).unwrap()).unwrap();
-    let object = fixture
-        .root
-        .join("recovery-data")
-        .join(collector::recording::identity_text(attempt.transaction()).to_string());
-    let bytes = fs::read(object.join("pending/0000.parquet")).unwrap();
-    let recovery = crate::event_recovery::Recovery {
-        run: fixture.run,
-        events_first: 1,
-        events_end: 3,
-        rows: 2,
-        losses: crate::Losses {
-            publications: 2,
-            events: 0,
-            unknown: false,
-        },
-    };
-    let proof = attempt
-        .prove_terminal(
-            &recovery,
-            &[crate::event_recovery::Batch {
-                first: 1,
-                end: 3,
-                rows: 2,
-            }],
-            fixture.reader(),
-            &budget,
-        )
-        .unwrap();
-    drop(finish_owned_proof(proof).unwrap());
-    collector::ring::unlink_generation(fixture.writer.name()).unwrap();
-    fixture.transport_removed = true;
-    drop(store);
-    terminal_rollover_reopen(&fixture, &object, &bytes, &rows, &budget);
-}
-fn terminal_rollover_reopen(
-    fixture: &Fixture,
-    object: &Path,
-    bytes: &[u8],
-    rows: &[crate::event_recovery::batch::Row],
-    budget: &Arc<crate::resources::ByteBudget>,
-) {
-    let store = Store::open(&fixture.root).unwrap();
-    finish_publication(&mut store.resume_publication(budget).unwrap());
-    assert_eq!(fs::read(object.join("ready/0000.parquet")).unwrap(), bytes);
-    let directory = PrivateDirectory::open(&object.join("ready")).unwrap();
-    let captured = fixture.input(true).captured;
+    assert_eq!(frame.height(), 2);
+    let output = fixture.base.join("retained-original.parquet");
+    crate::encoder::encode_write(&mut frame, File::create(&output).unwrap()).unwrap();
     let actual = crate::event_recovery::read::read_batch_file(
-        directory.open_file("0000.parquet").unwrap(),
+        File::open(output).unwrap(),
         &crate::event_recovery::Batch {
             first: 1,
             end: 3,
@@ -727,31 +697,10 @@ fn terminal_rollover_reopen(
         },
         captured,
         true,
-        budget,
+        &budget,
     )
     .unwrap();
-    let expected = crate::event_recovery::batch::frame(rows, captured).unwrap();
-    assert!(actual.equals_missing(&expected));
-    let metadata =
-        crate::canonical::CanonicalMetadata::read(&mut directory.open_file("metadata").unwrap())
-            .unwrap();
-    assert_eq!(metadata.loss.inherited.publications, 2);
-    assert_eq!(metadata.loss.publications_new, 0);
-    assert_eq!(metadata.loss.inherited.events, 0);
-    assert_eq!(metadata.loss.events_new, 0);
-    assert_eq!(metadata.loss.publication_end, 4);
-    assert_eq!(metadata.loss.event_end, 3);
-    let frontier = store
-        .source_frontier(
-            &fixture.run,
-            budget,
-            &mut crate::canonical::ReadWork::default(),
-        )
-        .unwrap()
-        .unwrap();
-    assert_eq!(frontier.publication_end(), 4);
-    assert_eq!(frontier.event_end(), 3);
-    assert!(frontier.complete());
+    assert!(actual.equals_missing(&crate::event_recovery::batch::frame(&rows, captured).unwrap()));
 }
 
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -804,7 +753,7 @@ impl WritableHeader {
         }
     }
     fn word(&mut self, position: usize) -> &AtomicU64 {
-        assert!(position < 8);
+        assert!(position < 44);
         unsafe { &*self.pointer.add(position) }
     }
 }
@@ -1165,4 +1114,264 @@ fn consuming_proof_uses_the_existing_ledger_and_preserves_raw_on_exhaustion() {
     .unwrap();
     drop(publication);
     assert_eq!(budget.used(), 0);
+}
+
+#[path = "loss_only_tests.rs"]
+mod loss_only_tests;
+
+#[test]
+fn actual_object_header_changes_refuse_before_and_after_fallible_reads() {
+    // Goal: neither cached identity nor matching logical run grants replacement authority.
+    // Method: change each immutable binding field around a real source read in both profiles.
+    for captured in [false, true] {
+        for position in [
+            0, 1, 2, 3, 6, 23, 24, 25, 26, 27, 28, 30, 31, 40, 41, 42, 43,
+        ] {
+            let fixture = proof_fixture(captured, 4);
+            let budget = registration_budget();
+            let mut header = WritableHeader::open(&fixture);
+            let input = fixture.input(false);
+            let mut source = normal_proof::SourceProof::new(
+                fixture.reader(),
+                &input,
+                budget.reserve(64 * 1024).unwrap(),
+            )
+            .unwrap();
+            let previous = header.word(position).fetch_add(1, Ordering::Release);
+            assert!(
+                source
+                    .checked_read(&input, |reader| { reader.seek_publication(1) })
+                    .is_err()
+            );
+            assert_eq!(source.positions(), (1, 1));
+            header.word(position).store(previous, Ordering::Release);
+            let result = source.checked_read(&input, |reader| {
+                reader.seek_publication(1)?;
+                let found =
+                    reader.read_timing_into(&mut collector::ring::PublicationTiming::default());
+                header.word(position).fetch_add(1, Ordering::Release);
+                found
+            });
+            header.word(position).store(previous, Ordering::Release);
+            assert!(result.is_err());
+            assert_eq!(source.positions(), (1, 1));
+            source
+                .checked_read(&input, |reader| reader.seek_publication(1))
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn matching_run_generation_and_origins_at_another_place_never_replace_occupied_source() {
+    // Goal: logical identity, numbering and timing do not identify one object incarnation.
+    // Method: keep two generation1 producers live and use the other during resumed proof.
+    for captured in [false, true] {
+        let mut fixture = proof_fixture(captured, 4);
+        let place = collector::ring::Place {
+            lock_path: fixture.base.join("other.lock"),
+            name_prefix: format!(
+                "/fdo{:x}{:x}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
+        let mut other = make_writer(&fixture, &place);
+        publish_at(&mut other, 0);
+        let other_reader = || RingReader::open_generation(other.name()).unwrap();
+        let original = fixture.reader().object_binding().unwrap();
+        let replacement = other_reader().object_binding().unwrap();
+        assert_eq!(original.generation, replacement.generation);
+        assert_eq!(original.publication_first, replacement.publication_first);
+        assert_eq!(original.event_first, replacement.event_first);
+        assert_ne!(original.identity, replacement.identity);
+        let store = Store::open(&fixture.root).unwrap();
+        let budget = registration_budget();
+        let input = fixture.input(false);
+        assert!(
+            store
+                .register_attempt(&input, &mut other_reader(), &budget)
+                .is_err()
+        );
+        let attempt = store
+            .register_attempt(&input, &mut fixture.reader(), &budget)
+            .unwrap();
+        let manifest = encode_payload(&attempt, &fixture, 1, false);
+        drop(attempt);
+        let before = fixture.slot();
+        assert!(
+            store
+                .resume_attempt()
+                .unwrap()
+                .prove_ordinary(&manifest, other_reader(), &budget)
+                .is_err()
+        );
+        assert!(store.resume_loss_proof(other_reader(), &budget).is_err());
+        assert_eq!(fixture.slot(), before);
+        assert!(fixture.reader().object_binding().is_ok());
+        publish_at(&mut fixture.writer, 1);
+        finish_publication(
+            &mut issue(
+                store.resume_attempt().unwrap(),
+                &manifest,
+                fixture.reader(),
+                &budget,
+            )
+            .unwrap(),
+        );
+        collector::ring::unlink_generation(other.name()).unwrap();
+    }
+}
+
+#[test]
+fn terminal_empty_source_rejects_another_object_before_artifacts() {
+    // Goal: terminal completion from a matching logical run cannot replace the admitted object.
+    // Method: compare two completed empty generation1 sources, then register the original.
+    for captured in [false, true] {
+        let mut fixture = Fixture::new_source(false, captured, 1, false);
+        fixture.writer.finish();
+        let place = collector::ring::Place {
+            lock_path: fixture.base.join("other.lock"),
+            name_prefix: format!(
+                "/fdt{:x}{:x}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
+        let mut other = make_writer(&fixture, &place);
+        other.finish();
+        let store = Store::open(&fixture.root).unwrap();
+        let budget = registration_budget();
+        let input = fixture.input(true);
+        let before = fixture.slot();
+        let mut replacement = RingReader::open_generation(other.name()).unwrap();
+        assert_eq!(replacement.generation(), input.binding.generation);
+        assert!(
+            store
+                .register_attempt(&input, &mut replacement, &budget)
+                .is_err()
+        );
+        assert_eq!(fixture.slot(), before);
+        assert!(
+            fs::read_dir(fixture.root.join("data"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(
+            fs::read_dir(fixture.root.join("terminal"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        drop(
+            store
+                .register_attempt(&input, &mut fixture.reader(), &budget)
+                .unwrap(),
+        );
+        collector::ring::unlink_generation(other.name()).unwrap();
+    }
+}
+
+#[test]
+fn recreated_same_name_keeps_old_mapping_and_cannot_replace_registered_object() {
+    // Goal: name reuse cannot turn a new producer nonce into occupied-attempt authority.
+    // Method: retain the old mapping, recreate its owned name, compare both actual objects.
+    for captured in [false, true] {
+        let mut fixture = proof_fixture(captured, 4);
+        let original = fixture.reader();
+        let old_name = fixture.writer.name().to_owned();
+        let store = Store::open(&fixture.root).unwrap();
+        let budget = registration_budget();
+        let input = fixture.input(false);
+        let attempt = store
+            .register_attempt(&input, &mut fixture.reader(), &budget)
+            .unwrap();
+        let manifest = encode_payload(&attempt, &fixture, 1, false);
+        drop(attempt);
+        let place = collector::ring::Place {
+            lock_path: fixture.base.join("temporary.lock"),
+            name_prefix: format!(
+                "/fdr{:x}{:x}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        };
+        let temporary = make_writer(&fixture, &place);
+        fixture.writer = temporary;
+        collector::ring::unlink_generation(&old_name).unwrap();
+        let prefix = old_name.rsplit_once('.').unwrap().0;
+        // Deliberate isolated corruption restores the reservation, not a production operation.
+        fs::write(&fixture.place.lock_path, format!("{prefix}.0")).unwrap();
+        let mut replacement = make_writer(&fixture, &fixture.place);
+        assert_eq!(replacement.name(), old_name);
+        publish_at(&mut replacement, 0);
+        let actual = RingReader::open_generation(&old_name).unwrap();
+        assert_ne!(
+            actual.object_binding().unwrap(),
+            original.object_binding().unwrap()
+        );
+        assert_eq!(original.object_binding().unwrap(), input.binding);
+        let before = fixture.slot();
+        assert!(
+            store
+                .resume_attempt()
+                .unwrap()
+                .prove_ordinary(&manifest, actual, &budget)
+                .is_err()
+        );
+        assert_eq!(fixture.slot(), before);
+        collector::ring::unlink_generation(replacement.name()).unwrap();
+        assert_eq!(original.object_binding().unwrap(), input.binding);
+    }
+}
+
+#[test]
+fn unready_and_foreign_magic_refuse_actual_ring_admission() {
+    // Goal: admission observes readiness before interpreting current header fields.
+    // Method: change only owned header magic, check exact errors, restore the admitted object.
+    for captured in [false, true] {
+        let fixture = proof_fixture(captured, 4);
+        let mut header = WritableHeader::open(&fixture);
+        let original = header.word(0).load(Ordering::Acquire);
+        for (magic, expected) in [
+            (0, io::ErrorKind::WouldBlock),
+            (1, io::ErrorKind::InvalidData),
+        ] {
+            header.word(0).store(magic, Ordering::Release);
+            let error = RingReader::open_generation(fixture.writer.name())
+                .err()
+                .unwrap();
+            assert_eq!(error.kind(), expected);
+        }
+        header.word(0).store(original, Ordering::Release);
+        assert_eq!(fixture.reader().object_binding().unwrap(), fixture.binding);
+    }
+}
+
+#[test]
+fn prior_or_unknown_source_layout_cannot_acquire_registered_authority() {
+    // Goal: old wire layouts cannot reuse current binding bytes as new Store authority.
+    // Method: reject each unsupported layout at actual registration before any raw artifacts.
+    for captured in [false, true] {
+        let fixture = proof_fixture(captured, 1);
+        let store = Store::open(&fixture.root).unwrap();
+        let before = fixture.slot();
+        for layout in [2, 3, 4, 7] {
+            let mut input = fixture.input(false);
+            input.source.layout = layout;
+            assert!(
+                store
+                    .register_attempt(&input, &mut fixture.reader(), &registration_budget())
+                    .is_err()
+            );
+            assert_eq!(fixture.slot(), before);
+            assert!(
+                fs::read_dir(fixture.root.join("data"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+        }
+    }
 }

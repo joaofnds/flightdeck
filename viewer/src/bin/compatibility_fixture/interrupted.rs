@@ -68,7 +68,7 @@ pub fn prepare(store: &Store, source: &Source, interruption: Interruption) -> Re
 fn prepare_stage(source: &Source, output: &mut Option<Box<Window>>) -> Result<()> {
     assert!(output.is_none());
     let mut reader = RingReader::open_generation(&source.ring)?;
-    if reader.source_layout_version() != 4 {
+    if reader.dictionary_capacity().is_none() {
         return Err(Error::Bound("interrupted fixture requires layout4"));
     }
 

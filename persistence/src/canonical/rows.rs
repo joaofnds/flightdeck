@@ -261,20 +261,7 @@ fn tick_frame(
 ) -> io::Result<polars::prelude::DataFrame> {
     work.namespace_attempts += 1;
     work.raw_admissions += 1;
-    let limits = DecodeLimits {
-        compressed_bytes: 8 * 1024 * 1024,
-        expanded_bytes: 8 * 1024 * 1024,
-        rows: 61,
-        row_groups: 1,
-        columns: crate::schema::TICK_COLUMNS_MAX,
-    };
-    let table = AdmittedTable::from_file_budgeted_with_limits(
-        directory.open_file("ticks.parquet")?,
-        budget,
-        &limits,
-    )
-    .map_err(admission_error)?;
-    validate_tick_schema(&table)?;
+    let table = admit_tick_file(directory.open_file("ticks.parquet")?, budget)?;
     let count = manifest
         .tables
         .iter()
@@ -284,6 +271,22 @@ fn tick_frame(
     if table.row_count() != count {
         return Err(invalid());
     }
+    tick_columns(&table)
+}
+fn admit_tick_file(file: File, budget: &Arc<ByteBudget>) -> io::Result<AdmittedTable> {
+    let limits = DecodeLimits {
+        compressed_bytes: 8 * 1024 * 1024,
+        expanded_bytes: 8 * 1024 * 1024,
+        rows: 61,
+        row_groups: 1,
+        columns: crate::schema::TICK_COLUMNS_MAX,
+    };
+    let table = AdmittedTable::from_file_budgeted_with_limits(file, budget, &limits)
+        .map_err(admission_error)?;
+    validate_tick_schema(&table)?;
+    Ok(table)
+}
+fn tick_columns(table: &AdmittedTable) -> io::Result<polars::prelude::DataFrame> {
     table
         .read_metadata_budgeted(
             &[
@@ -299,6 +302,34 @@ fn tick_frame(
         )
         .map_err(read_error)
 }
+/// Footer admission can prove that a non-tick original contains no physical rows.
+pub(crate) fn zero_table_file(
+    file: File,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<bool> {
+    work.raw_admissions += 1;
+    let table = AdmittedTable::from_file_budgeted(file, budget).map_err(admission_error)?;
+    Ok(table.row_count() == 0)
+}
+/// Proves absence of tick rows using the same physical/schema admission as canonical reads.
+pub(crate) fn zero_tick_file(
+    file: File,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<bool> {
+    work.raw_admissions += 1;
+    let table = admit_tick_file(file, budget)?;
+    if table.row_count() != 0 {
+        return Ok(false);
+    }
+    let frame = tick_columns(&table)?;
+    if frame.height() != 0 {
+        return Err(invalid());
+    }
+    Ok(true)
+}
+
 fn verify_ticks_frame(
     frame: &polars::prelude::DataFrame,
     metadata: &CanonicalMetadata,

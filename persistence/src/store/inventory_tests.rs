@@ -1073,6 +1073,7 @@ fn native_prepared_child(root: &Path) {
     let input = AttemptInput {
         run,
         source: crate::transaction::SourceTiming::from_reader(&reader),
+        binding: reader.object_binding().unwrap(),
         operation: AttemptOperation::Ordinary {
             window: 0,
             attempted_origin: 1,

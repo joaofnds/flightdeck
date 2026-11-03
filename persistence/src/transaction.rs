@@ -5,6 +5,8 @@ use collector::recording::bootstrap::codec::{self, Operation, Phase, Slot, SlotK
 use collector::ring::{Identity, RunIdentity};
 
 pub(crate) mod normal;
+pub(crate) mod salvage;
+pub(crate) mod source_binding;
 
 const _: () = {
     assert!(codec::SLOT_BYTES == 4096);
@@ -19,6 +21,7 @@ pub struct AttemptInput {
     pub operation: AttemptOperation,
     pub captured: bool,
     pub source: SourceTiming,
+    pub binding: collector::ring::ObjectBinding,
     pub losses: LossTransfer,
 }
 
@@ -37,7 +40,7 @@ impl SourceTiming {
         }
     }
     pub(crate) fn validate(&self, captured: bool) -> io::Result<()> {
-        if self.layout != if captured { 4 } else { 3 } || self.origin_continuous_ns.is_none() {
+        if self.layout != if captured { 6 } else { 5 } || self.origin_continuous_ns.is_none() {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
 
@@ -139,6 +142,7 @@ pub enum UnknownReason {
 impl AttemptInput {
     pub fn validate(&self) -> io::Result<()> {
         self.source.validate(self.captured)?;
+        source_binding::validate(&self.binding)?;
         nonzero(self.run.recording)?;
         nonzero(self.run.run)?;
         nonzero(self.run.boot)?;
@@ -235,6 +239,7 @@ impl AttemptInput {
         put_identity(bytes, 208, transaction);
         self.source.encode(bytes, 224, 232, 240);
         self.losses.encode(&mut bytes[1088..1344]);
+        source_binding::encode(&self.binding, &mut bytes[1352..1400])?;
         Ok(())
     }
 
@@ -274,6 +279,7 @@ impl AttemptInput {
             operation,
             captured: get32(bytes, 124)? == 1,
             source: SourceTiming::decode(bytes, 224, 232, 240)?,
+            binding: source_binding::decode(&bytes[1352..1400])?,
             losses: LossTransfer::decode(&bytes[1088..1344])?,
         };
         // Exact reconstruction checks constants, every unused field and every reserved byte.
@@ -461,8 +467,14 @@ mod tests {
             (139, 255),
             (215, 7),
             (223, 8),
-            (231, 3),
+            (231, 5),
             (235, 1),
+            (1355, 1),
+            (1367, 17),
+            (1375, 18),
+            (1383, 1),
+            (1391, 1),
+            (1399, 1),
             (1099, 1),
             (1103, 1),
             (1143, 10),

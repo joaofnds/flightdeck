@@ -56,6 +56,7 @@ unsafe extern "C" fn route_fcntl(_descriptor: i32, _command: i32) -> i32 {
 
 unsafe extern "C" fn refuse_full_sync(descriptor: i32, command: i32) -> i32 {
     unsafe { trace_operation(b'S', descriptor) };
+    unsafe { trace_control_sync(descriptor) };
     let target = unsafe { getenv(c"FLIGHTDECK_PRIVATE_SYNC_TARGET".as_ptr()) };
     let sync_armed = unsafe { getenv(c"FLIGHTDECK_SYNC_ARMED".as_ptr()) };
     let armed = if sync_armed.is_null() {
@@ -255,6 +256,9 @@ unsafe fn observe_descriptors(root: *const c_char) {
             raw += 1;
         }
     }
+    if namespaces > 8 && !FD_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        unsafe { report_descriptors(root) };
+    }
     let log = unsafe { getenv(c"FLIGHTDECK_FD_LOG".as_ptr()) };
     assert!(!log.is_null());
     let fd = unsafe { open(log, 0x1 | 0x8 | 0x0100_0000) };
@@ -264,6 +268,25 @@ unsafe fn observe_descriptors(root: *const c_char) {
     let record = [n[0], n[1], r[0], r[1]];
     assert_eq!(unsafe { write(fd, record.as_ptr().cast(), 4) }, 4);
     assert_eq!(unsafe { close(fd) }, 0);
+}
+
+static FD_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+unsafe fn report_descriptors(root: *const c_char) {
+    let length = unsafe { strlen(root) };
+    for fd in 0..1024 {
+        let mut path = [0_u8; 1024];
+        if unsafe { fcntl(fd, 50, path.as_mut_ptr()) } != 0
+            || unsafe { strncmp(path.as_ptr().cast(), root, length) } != 0
+        {
+            continue;
+        }
+        let count = unsafe { strlen(path.as_ptr().cast()) };
+        assert_eq!(
+            unsafe { write(1, path.as_ptr().cast(), count) },
+            isize::try_from(count).unwrap()
+        );
+        assert_eq!(unsafe { write(1, c"\n".as_ptr().cast(), 1) }, 1);
+    }
 }
 
 static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -439,4 +462,282 @@ unsafe extern "C" fn unlink_effect(directory: i32, name: *const c_char, flags: i
         return -1;
     }
     result
+}
+
+#[repr(C)]
+struct OpenAtInterpose {
+    replacement: unsafe extern "C" fn(i32, *const c_char, i32) -> i32,
+    original: unsafe extern "C" fn(i32, *const c_char, i32, ...) -> i32,
+}
+unsafe extern "C" {
+    fn openat(directory: i32, name: *const c_char, flags: i32, ...) -> i32;
+}
+#[used]
+#[unsafe(link_section = "__DATA,__interpose")]
+static INTERPOSE_OPENAT: OpenAtInterpose = OpenAtInterpose {
+    replacement: route_openat,
+    original: openat,
+};
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+unsafe extern "C" fn route_openat(_directory: i32, _name: *const c_char, _flags: i32) -> i32 {
+    core::arch::naked_asm!(
+        "tbnz w2, #9, 2f",
+        "b {plain}",
+        "2:",
+        "ldr w3, [sp]",
+        "b {create}",
+        plain = sym observe_openat, create = sym observe_createat,
+    );
+}
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "C" fn route_openat(_directory: i32, _name: *const c_char, _flags: i32) -> i32 {
+    core::arch::naked_asm!(
+        "test edx, 0x200", "jnz 2f", "jmp {plain}", "2:", "jmp {create}",
+        plain = sym observe_openat, create = sym observe_createat,
+    );
+}
+unsafe extern "C" fn observe_openat(directory: i32, name: *const c_char, flags: i32) -> i32 {
+    unsafe { trace_control_name(b'O', directory, name) };
+    let open_arm = unsafe { getenv(c"FLIGHTDECK_CONTROL_OPEN_ARMED".as_ptr()) };
+    let enabled = open_arm.is_null() || unsafe { access(open_arm, 0) } == 0;
+    if enabled
+        && unsafe { mutation_fault(directory, name, c"open") }
+        && !unsafe { replace_cleanup_name(directory, name) }
+    {
+        unsafe {
+            record_refusal();
+            *__error() = 5;
+        }
+        return -1;
+    }
+    unsafe { openat(directory, name, flags) }
+}
+unsafe extern "C" fn observe_createat(
+    directory: i32,
+    name: *const c_char,
+    flags: i32,
+    mode: u32,
+) -> i32 {
+    unsafe { trace_control_name(b'C', directory, name) };
+    unsafe { openat(directory, name, flags, mode) }
+}
+unsafe fn control_component(name: *const c_char) -> bool {
+    [
+        c"foreground",
+        c"foreground.pending",
+        c"namespace-state",
+        c"namespace-state.pending",
+    ]
+    .iter()
+    .any(|expected| unsafe { strcmp(name, expected.as_ptr()) } == 0)
+}
+unsafe fn trace_control_name(kind: u8, directory: i32, name: *const c_char) {
+    if !unsafe { control_component(name) } {
+        return;
+    }
+    let root = unsafe { getenv(c"FLIGHTDECK_FD_ROOT".as_ptr()) };
+    if root.is_null() {
+        return;
+    }
+    let mut path = [0_u8; 1024];
+    if unsafe { fcntl(directory, 50, path.as_mut_ptr()) } != 0
+        || unsafe { strcmp(path.as_ptr().cast(), root) } != 0
+    {
+        return;
+    }
+    unsafe { trace_control_byte(kind) };
+}
+unsafe fn trace_control_sync(descriptor: i32) {
+    let root = unsafe { getenv(c"FLIGHTDECK_FD_ROOT".as_ptr()) };
+    if root.is_null() {
+        return;
+    }
+    let mut path = [0_u8; 1024];
+    if unsafe { fcntl(descriptor, 50, path.as_mut_ptr()) } != 0 {
+        return;
+    }
+    if unsafe { strcmp(path.as_ptr().cast(), root) } == 0 {
+        unsafe { trace_control_byte(b'D') };
+        return;
+    }
+    let length = unsafe { strlen(root) };
+    if length + 1 >= path.len()
+        || path[length] != b'/'
+        || unsafe { strncmp(path.as_ptr().cast(), root, length) } != 0
+    {
+        return;
+    }
+    if unsafe { control_component(path.as_ptr().add(length + 1).cast()) } {
+        unsafe { trace_control_byte(b'F') };
+    }
+}
+unsafe fn trace_control_byte(kind: u8) {
+    let log = unsafe { getenv(c"FLIGHTDECK_CONTROL_TRACE".as_ptr()) };
+    let armed = unsafe { getenv(c"FLIGHTDECK_CONTROL_ARMED".as_ptr()) };
+    if log.is_null() || armed.is_null() || unsafe { access(armed, 0) } != 0 {
+        return;
+    }
+    let error = unsafe { *__error() };
+    let fd = unsafe { open(log, 0x1 | 0x8 | 0x0100_0000) };
+    assert!(fd >= 0);
+    assert_eq!(unsafe { write(fd, (&raw const kind).cast(), 1) }, 1);
+    assert_eq!(unsafe { close(fd) }, 0);
+    unsafe { *__error() = error };
+}
+
+#[repr(C)]
+struct PwriteInterpose {
+    replacement: unsafe extern "C" fn(i32, *const c_void, usize, i64) -> isize,
+    original: unsafe extern "C" fn(i32, *const c_void, usize, i64) -> isize,
+}
+unsafe extern "C" {
+    fn pwrite(fd: i32, bytes: *const c_void, count: usize, offset: i64) -> isize;
+    fn shm_open(name: *const c_char, flags: i32, ...) -> i32;
+    fn mmap(
+        address: *mut c_void,
+        length: usize,
+        protection: i32,
+        flags: i32,
+        descriptor: i32,
+        offset: i64,
+    ) -> *mut c_void;
+    fn munmap(address: *mut c_void, length: usize) -> i32;
+}
+#[used]
+#[unsafe(link_section = "__DATA,__interpose")]
+static INTERPOSE_PWRITE: PwriteInterpose = PwriteInterpose {
+    replacement: inspect_source_announcement,
+    original: pwrite,
+};
+unsafe extern "C" fn inspect_source_announcement(
+    fd: i32,
+    bytes: *const c_void,
+    count: usize,
+    offset: i64,
+) -> isize {
+    let prefix = unsafe { getenv(c"FLIGHTDECK_SOURCE_INIT_PREFIX".as_ptr()) };
+    if !prefix.is_null() && offset == 0 {
+        let mut path = [0_u8; 1024];
+        let length = unsafe { strlen(prefix) };
+        if length + 6 < path.len()
+            && unsafe { fcntl(fd, 50, path.as_mut_ptr()) } == 0
+            && unsafe { strncmp(path.as_ptr().cast(), prefix, length) } == 0
+        {
+            let profile = path[length];
+            assert!((b'0'..=b'4').contains(&profile));
+            let name = unsafe { std::slice::from_raw_parts(bytes.cast::<u8>(), count) };
+            unsafe { inspect_source_name(profile, name) };
+        }
+    }
+    unsafe { pwrite(fd, bytes, count, offset) }
+}
+unsafe fn inspect_source_name(profile: u8, name: &[u8]) {
+    assert!(!name.is_empty());
+    assert!(name.len() < 32);
+    let mut terminated = [0_u8; 32];
+    terminated[..name.len()].copy_from_slice(name);
+    let object = unsafe { shm_open(terminated.as_ptr().cast(), 0, 0_u32) };
+    let sentinel = name.ends_with(b".0");
+    if sentinel {
+        assert_eq!(object, -1);
+        unsafe { source_init_record(c"FLIGHTDECK_SOURCE_INIT_LOG", &[profile, b'S']) };
+        return;
+    }
+    // Record this owned candidate name before assertions so the parent can clean an aborted child.
+    unsafe { source_init_record(c"FLIGHTDECK_SOURCE_INIT_OBJECTS", name) };
+    unsafe { source_init_record(c"FLIGHTDECK_SOURCE_INIT_OBJECTS", b"\n") };
+    assert!(object >= 0);
+    use std::os::fd::FromRawFd;
+    let file = unsafe { std::fs::File::from_raw_fd(object) };
+    let length = usize::try_from(file.metadata().unwrap().len()).unwrap();
+    assert!(length >= 352);
+    assert!(length < 1024 * 1024);
+    let address = unsafe { mmap(std::ptr::null_mut(), length, 1, 1, object, 0) };
+    assert_ne!(address as isize, -1);
+    let words = unsafe {
+        std::slice::from_raw_parts(address.cast::<std::sync::atomic::AtomicU64>(), length / 8)
+    };
+    inspect_source_header(words, profile);
+    assert_eq!(unsafe { munmap(address, length) }, 0);
+    drop(file);
+    unsafe { source_init_record(c"FLIGHTDECK_SOURCE_INIT_LOG", &[profile, b'R']) };
+}
+fn inspect_source_header(words: &[std::sync::atomic::AtomicU64], profile: u8) {
+    use std::sync::atomic::Ordering;
+    assert_eq!(
+        words[0].load(Ordering::Acquire),
+        u64::from_be_bytes(*b"FLTDRING")
+    );
+    let value = |index: usize| words[index].load(Ordering::Relaxed);
+    assert_eq!(value(1), if profile == b'0' { 5 } else { 6 });
+    assert!(value(40) != 0 || value(41) != 0);
+    assert_eq!(value(42), 1);
+    assert_eq!(value(43), 0);
+    assert_eq!(value(31), 1);
+    assert_eq!(value(30), 0);
+    for index in [2, 3, 6, 23, 25, 27] {
+        assert!(value(index) > 0);
+    }
+    let captured = profile != b'0';
+    let slot = value(17)
+        + value(9) * value(18)
+        + value(10) * value(19)
+        + value(12)
+        + value(11) * (1 + value(12))
+        + value(13)
+        + value(14) * value(20)
+        + value(15) * value(21)
+        + if captured { value(14) * value(36) } else { 0 };
+    let mut tail = 44
+        + value(8) * slot
+        + value(16) * value(22)
+        + if captured {
+            value(32) * value(37) + value(33) / 8
+        } else {
+            0
+        };
+    for (minimum, magic) in [
+        (b'2', *b"FDBATT01"),
+        (b'3', *b"FDDKTL01"),
+        (b'4', *b"FDSYTL01"),
+    ] {
+        if profile >= minimum {
+            let start = usize::try_from(tail).unwrap();
+            assert_eq!(value(start), u64::from_be_bytes(magic));
+            assert_eq!(value(start + 1), 1);
+            assert_eq!(value(start + 2), value(8));
+            if minimum != b'4' {
+                tail += 4 + value(8) * value(start + 3);
+            }
+        }
+    }
+}
+unsafe fn source_init_record(variable: &std::ffi::CStr, bytes: &[u8]) {
+    let path = unsafe { getenv(variable.as_ptr()) };
+    assert!(!path.is_null());
+    let fd = unsafe { open(path, 0x1 | 0x8 | 0x0100_0000) };
+    assert!(fd >= 0);
+    assert_eq!(
+        unsafe { write(fd, bytes.as_ptr().cast(), bytes.len()) },
+        isize::try_from(bytes.len()).unwrap()
+    );
+    assert_eq!(unsafe { close(fd) }, 0);
+}
+
+unsafe fn replace_cleanup_name(directory: i32, name: *const c_char) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+    let replacement = unsafe { getenv(c"FLIGHTDECK_CLEANUP_REPLACEMENT".as_ptr()) };
+    if replacement.is_null() {
+        return false;
+    }
+    let second = unsafe { getenv(c"FLIGHTDECK_CLEANUP_SECOND_OPEN".as_ptr()) };
+    let selected = if second.is_null() { 1 } else { 2 };
+    if ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1 == selected {
+        assert_eq!(unsafe { renameat(-2, replacement, directory, name) }, 0);
+        unsafe { record_refusal() };
+    }
+    true
 }

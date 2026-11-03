@@ -54,7 +54,7 @@ timing_parity!(reads_current_exact_clocks, 4, Some(&TIMES));
 fn warm_timing_reads_use_no_rust_allocator_calls() {
     // Goal: timing storage and reads stay independent of payload allocation.
     // Method: warm a real current reader, then measure a seek/read/empty-read cycle.
-    let mut source = Source::new(4);
+    let mut source = Source::new(6);
     source.publish(73, Some(&TIMES));
     let mut reader = RingReader::open(&source.place.lock_path).unwrap();
     let mut timing = PublicationTiming::default();
@@ -83,7 +83,7 @@ fn warm_timing_reads_use_no_rust_allocator_calls() {
 fn clears_clocks_when_the_next_publication_has_none() {
     // Goal: caller storage never retains earlier exact times for an unknown-clock reading.
     // Method: reuse the same timing output across observed and unobserved publications.
-    let mut source = Source::new(4);
+    let mut source = Source::new(6);
     source.publish(73, Some(&TIMES));
     source.publish(74, None);
     let mut reader = RingReader::open(&source.place.lock_path).unwrap();
@@ -107,7 +107,7 @@ macro_rules! sequence_result {
         fn $name() {
             // Goal: timing preserves the full reader's distinction between corruption and loss.
             // Method: change a real slot sequence under an advertised finished publication.
-            let mut source = Source::new(4);
+            let mut source = Source::new(6);
             source.publish(73, Some(&TIMES));
             source.slot(1)[SLOT_SEQUENCE].store($sequence, Ordering::Release);
             let mut timing_reader = RingReader::open(&source.place.lock_path).unwrap();
@@ -152,7 +152,7 @@ sequence_result!(
 fn misses_publications_that_fell_out_of_the_ring() {
     // Goal: timing shares the full reader's oldest-retained-publication cursor behavior.
     // Method: open both readers before wrapping a two-slot ring, then compare all outcomes.
-    let mut source = Source::new(3);
+    let mut source = Source::new(5);
     let mut timing_reader = RingReader::open(&source.place.lock_path).unwrap();
     let mut full_reader = RingReader::open(&source.place.lock_path).unwrap();
     source.publish(1, None);
@@ -181,7 +181,7 @@ fn misses_publications_that_fell_out_of_the_ring() {
 fn rejects_timing_rewritten_during_the_shared_sequence_check() {
     // Goal: the shared seqlock cannot accept copied timing from a changed publication.
     // Method: load timing in read_finished and advance the actual slot before its final fence.
-    let mut source = Source::new(4);
+    let mut source = Source::new(6);
     source.publish(73, Some(&TIMES));
     let mut timing = PublicationTiming::default();
     let slot = source.slot(1);
@@ -200,7 +200,7 @@ fn rejects_timing_rewritten_during_the_shared_sequence_check() {
 fn coherent_timing_does_not_validate_numeric_payload() {
     // Goal: readiness timing remains readable while malformed numeric data is refused.
     // Method: corrupt a published process count, then use timing and full public reads.
-    let mut source = Source::new(4);
+    let mut source = Source::new(6);
     source.publish(73, Some(&TIMES));
     source.slot(1)[layout::SLOT_PROCESS_COUNT].store(2, Ordering::Release);
     let mut reader = RingReader::open(&source.place.lock_path).unwrap();
@@ -229,7 +229,7 @@ fn coherent_timing_does_not_validate_numeric_payload() {
 fn coherent_timing_does_not_validate_identity_payload() {
     // Goal: captured identity validation remains the full decoder's responsibility.
     // Method: corrupt a coherent identity count and compare timing with an identity read.
-    let mut source = Source::new(4);
+    let mut source = Source::new(6);
     source.publish(73, Some(&TIMES));
     source.slot(1)[layout::SLOT_IDENTITY_COUNT].store(2, Ordering::Release);
     let mut reader = RingReader::open(&source.place.lock_path).unwrap();
@@ -259,7 +259,7 @@ fn coherent_timing_does_not_validate_identity_payload() {
 fn coherent_timing_does_not_validate_supplemental_payload() {
     // Goal: optional payload tails have no role in a timing-only observation.
     // Method: corrupt battery presence under a coherent parent sequence and compare reads.
-    let mut source = Source::new(4);
+    let mut source = Source::new(6);
     source.publish(73, Some(&TIMES));
     let record = source.writer.layout.battery.as_ref().unwrap().record(1);
     source.writer.mapping.words()[record.start].store(u64::MAX, Ordering::Release);
@@ -312,7 +312,7 @@ impl Source {
             coalition_capacity: 1,
             event_capacity: 1,
         };
-        let layout = if version == 4 {
+        let layout = if version == 6 {
             Layout::identity_system(
                 shape,
                 DictionaryCapacity {
@@ -356,10 +356,11 @@ impl Source {
             events: &[],
             dropped: Dropped::default(),
         };
-        let identities = (self.writer.layout.version == 4).then_some(IdentityPublication {
-            processes: &[],
-            events: &[],
-        });
+        let identities =
+            (layout::captured(self.writer.layout.version)).then_some(IdentityPublication {
+                processes: &[],
+                events: &[],
+            });
         self.writer.publish_inner(
             &readings,
             times,

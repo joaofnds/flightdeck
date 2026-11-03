@@ -37,7 +37,7 @@ fn publishes_scheduled_identity_in_warm_up_and_following_live_ticks() {
     let mut identities =
         Vec::with_capacity(usize::try_from(reader.shape().process_capacity).unwrap());
 
-    assert_eq!(reader.source_layout_version(), 4);
+    assert_eq!(reader.source_layout_version(), 6);
     assert_eq!(reader.dictionary_capacity().unwrap().entries, 65_536);
     assert_eq!(
         reader.dictionary_capacity().unwrap().arena_bytes,

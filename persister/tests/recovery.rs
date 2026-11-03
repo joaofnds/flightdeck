@@ -33,6 +33,10 @@ mod tests {
         SourceFault::Corrupt
     );
     unavailable_source!(
+        seals_healthy_history_after_an_unready_announced_source,
+        SourceFault::Unready
+    );
+    unavailable_source!(
         seals_healthy_history_after_a_refused_source,
         SourceFault::Permission
     );

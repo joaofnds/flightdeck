@@ -213,7 +213,7 @@ impl Limits {
         events: &[NumberedEvent<'_>],
         source: &IdentitySource<'_>,
     ) -> Result<()> {
-        if source.reader.source_layout_version() != 4 {
+        if source.reader.dictionary_capacity().is_none() {
             return Err(Error::Bound("identity source layout"));
         }
         if source.processes.len() > self.processes {
@@ -417,7 +417,7 @@ impl Window {
         events: &[NumberedEvent<'_>],
         source: &IdentitySource<'_>,
     ) -> Result<()> {
-        if source.reader.source_layout_version() != 4 {
+        if source.reader.dictionary_capacity().is_none() {
             return Err(Error::Bound("identity source layout"));
         }
 

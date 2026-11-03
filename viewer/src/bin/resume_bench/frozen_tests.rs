@@ -357,7 +357,7 @@ fn captures_real_identity_rows_and_restores_covered_and_overwritten_gaps() {
     let run = &registry.runs[0];
     let reader = RingReader::open_generation(&run.ring_name).unwrap();
     assert_eq!(reader.identity(), source.writer.identity());
-    assert_eq!(reader.source_layout_version(), 4);
+    assert_eq!(reader.source_layout_version(), 6);
     assert_ne!(run.ring_name, source.writer.name());
     assert_eq!(
         reader.dictionary_usage().unwrap(),
@@ -585,8 +585,8 @@ struct ForgedRing {
 
 impl ForgedRing {
     fn new(source: &Fixture, publication: u64, events_first: u64) -> Self {
-        // A version 4 header, then slots of one record of every kind with its identity.
-        const HEADER_WORDS: usize = 40;
+        // A version 6 header, then slots of one record of every kind with its identity.
+        const HEADER_WORDS: usize = 44;
         const SLOT_WORDS: usize = 43 + 2 + 10 + 1 + 2 + 1 + 18 + 10 + 6;
         const SLOT_SEQUENCE: usize = 0;
         const SLOT_EVENTS_FIRST: usize = 15;

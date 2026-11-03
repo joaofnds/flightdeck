@@ -42,6 +42,7 @@ const SEAL_LIMIT: Duration = Duration::from_secs(120);
 pub enum SourceFault {
     Unsupported,
     Corrupt,
+    Unready,
     Permission,
     Foreign,
     InterruptedOverwrite,
@@ -107,27 +108,28 @@ impl RecordingHarness {
         }
         forge_source(&source, &name, &layout, |_, words| match fault {
             SourceFault::Unsupported => words[1] = 999,
-            SourceFault::Corrupt => words[0] = 0,
+            SourceFault::Corrupt => words[0] ^= 1,
+            SourceFault::Unready => words[0] = 0,
             SourceFault::InterruptedOverwrite => {
-                assert_eq!(words[1], 3);
+                assert_eq!(words[1], 5);
                 // The header finished publication 2, but publication 3 began its only slot.
                 words[4] = 2;
                 words[8] = 1;
-                words[32] = 5;
+                words[44] = 5;
             }
             SourceFault::MalformedPublication => {
-                // The committed v3 slot claims two processes where its shape holds one.
-                assert_eq!(words[1], 3);
-                words[32 + 9] = 2;
+                // The committed v5 slot claims two processes where its shape holds one.
+                assert_eq!(words[1], 5);
+                words[44 + 9] = 2;
             }
             SourceFault::MalformedStagedPublication => {
-                // This fixture's v3 slot has fixed, CPU, interface, core, state, fan,
+                // This fixture's v5 slot has fixed, CPU, interface, core, state, fan,
                 // process and coalition words. Only the second publication is malformed.
                 const SLOT_WORDS: usize = 42 + 2 + 10 + 1 + 2 + 1 + 18 + 10;
-                assert_eq!(words[1], 3);
-                assert_eq!(words[32], 2);
-                assert_eq!(words[32 + SLOT_WORDS], 4);
-                words[32 + SLOT_WORDS + 9] = 2;
+                assert_eq!(words[1], 5);
+                assert_eq!(words[44], 2);
+                assert_eq!(words[44 + SLOT_WORDS], 4);
+                words[44 + SLOT_WORDS + 9] = 2;
             }
             SourceFault::Permission | SourceFault::Foreign => {}
         });
@@ -608,6 +610,7 @@ impl RecordingHarness {
             &name,
             &Forgery {
                 removed_slot_words: 3,
+                removed_header_words: 12,
                 ..Forgery::default()
             },
             forge_legacy_slots,
@@ -842,6 +845,7 @@ fn try_open_source_with_flags(name: &str, flags: c_int) -> std::io::Result<fs::F
 struct Forgery {
     mode: u16,
     removed_slot_words: usize,
+    removed_header_words: usize,
 }
 
 impl Default for Forgery {
@@ -849,6 +853,7 @@ impl Default for Forgery {
         Self {
             mode: 0o400,
             removed_slot_words: 0,
+            removed_header_words: 0,
         }
     }
 }
@@ -874,7 +879,8 @@ fn forge_source(
     }
     let length = usize::try_from(source.metadata().unwrap().len()).unwrap();
     let name = CString::new(name).unwrap();
-    let target_length = length - 120 * layout.removed_slot_words * 8;
+    let removed_words = 120 * layout.removed_slot_words + layout.removed_header_words;
+    let target_length = length - removed_words * 8;
     let descriptor = unsafe { shm_open(name.as_ptr(), 0x602, i32::from(layout.mode)) };
     assert!(descriptor >= 0, "{}", std::io::Error::last_os_error());
     let target = unsafe { fs::File::from_raw_fd(descriptor) };
@@ -908,15 +914,16 @@ fn forge_source(
 fn forge_legacy_slots(source: &[u64], target: &mut [u64]) {
     const LEGACY_WORDS: usize = 39 + 2 + 10 + 1 + 2 + 1 + 18 + 10;
     const CURRENT_WORDS: usize = LEGACY_WORDS + 3;
+    assert_eq!(source[1], 5);
     target[1] = 2;
     target[17] = 39;
     for slot in 0..120 {
-        let source = &source[32 + slot * CURRENT_WORDS..][..CURRENT_WORDS];
+        let source = &source[44 + slot * CURRENT_WORDS..][..CURRENT_WORDS];
         let target = &mut target[32 + slot * LEGACY_WORDS..][..LEGACY_WORDS];
         target[..39].copy_from_slice(&source[..39]);
         target[39..].copy_from_slice(&source[42..]);
     }
-    target[32 + 120 * LEGACY_WORDS..].copy_from_slice(&source[32 + 120 * CURRENT_WORDS..]);
+    target[32 + 120 * LEGACY_WORDS..].copy_from_slice(&source[44 + 120 * CURRENT_WORDS..]);
 }
 
 fn spawns() -> MutexGuard<'static, ()> {

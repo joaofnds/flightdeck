@@ -16,6 +16,10 @@ use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+#[path = "loss_only.rs"]
+mod loss_only;
+pub use loss_only::LossPublication;
+
 pub struct NormalPublication<'store> {
     inventory: Option<OriginalInventory<'store, 'store>>,
     attempt: Option<RegisteredAttempt<'store>>,
@@ -39,6 +43,7 @@ pub struct NormalPublication<'store> {
     draft: Option<CanonicalMetadata>,
     proof: Option<super::normal_proof::SourceProof>,
     work: PublicationWork,
+    ledger: Option<super::PublicationLedger>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Validation {
@@ -55,9 +60,24 @@ pub struct PublicationWork {
     pub control_reads: u64,
     pub full_syncs: u64,
     pub source_reads: u64,
+    pub source_observations: u64,
     pub proof_operations: u64,
     pub proof_publication_next: u64,
     pub proof_event_next: u64,
+    pub cleanup_positions: u64,
+    pub cleanup_file_attempts: u64,
+    pub cleanup_directory_attempts: u64,
+    pub cleanup_removals: u64,
+    pub control_file_opens: u64,
+    pub control_file_creates: u64,
+    pub control_read_operations: u64,
+    pub control_read_bytes: u64,
+    pub control_write_operations: u64,
+    pub control_write_requested_bytes: u64,
+    pub control_rename_attempts: u64,
+    pub control_remove_attempts: u64,
+    pub control_file_sync_attempts: u64,
+    pub control_directory_sync_attempts: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PublicationStep {
@@ -90,6 +110,7 @@ impl RegisteredAttempt<'_> {
             attempted_origin,
             canonical_origin: manifest.publication_first,
             original_end: manifest.publication_end,
+            binding: self.input.binding,
             source_layout: self.input.source.layout,
             source_origin: self.input.source.origin_continuous_ns,
             evidence: EndpointEvidence::ReadyManifest,
@@ -126,6 +147,7 @@ impl RegisteredAttempt<'_> {
             attempted_origin: 0,
             canonical_origin: 0,
             original_end: 0,
+            binding: self.input.binding,
             source_layout: self.input.source.layout,
             source_origin: self.input.source.origin_continuous_ns,
             evidence: EndpointEvidence::FixedSource,
@@ -195,7 +217,7 @@ impl<'store> RegisteredAttempt<'store> {
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
         let proof = super::normal_proof::SourceProof::new(reader, &self.input, scratch)?;
         let state = NormalState::registered(self.transaction, self.input.clone());
-        let mut inner = NormalPublication::new(self, state, budget, Some(reservation))?;
+        let mut inner = NormalPublication::new(self, state, budget, Some(reservation), None)?;
         inner.draft = Some(draft);
         inner.proof = Some(proof);
         Ok(NormalProof { inner })
@@ -218,7 +240,7 @@ impl<'store> RegisteredAttempt<'store> {
         budget: &Arc<ByteBudget>,
     ) -> io::Result<NormalPublication<'store>> {
         let state = NormalState::registered(self.transaction, self.input.clone());
-        NormalPublication::new(self, state, budget, None)
+        NormalPublication::new(self, state, budget, None, None)
     }
 }
 pub struct NormalProof<'store> {
@@ -293,7 +315,10 @@ impl Store {
             root: &self.directory,
             placement,
         };
-        NormalPublication::new(attempt, state, budget, Some(reservation))
+        if state.salvage.is_some() {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        NormalPublication::new(attempt, state, budget, Some(reservation), None)
     }
 }
 impl<'store> NormalPublication<'store> {
@@ -302,6 +327,7 @@ impl<'store> NormalPublication<'store> {
         state: NormalState,
         budget: &Arc<ByteBudget>,
         reservation: Option<ByteReservation>,
+        ledger: Option<super::PublicationLedger>,
     ) -> io::Result<Self> {
         let reservation = match reservation {
             Some(reservation) => reservation,
@@ -309,12 +335,35 @@ impl<'store> NormalPublication<'store> {
                 .reserve(256 * 1024)
                 .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?,
         };
-        normal_namespace(&attempt, &state)?;
-        normal_original_only(&attempt)?;
-        let inventory = OriginalInventory::owned(attempt, budget)?;
-        Ok(Self {
-            inventory: Some(inventory),
-            attempt: None,
+        normal_namespace(&attempt, &state, ledger.as_ref())?;
+        normal_original_only(&attempt, ledger.as_ref())?;
+        let mut owner = Self::blank(attempt, state, budget, reservation);
+        owner.ledger = ledger;
+        let inventory = OriginalInventory::owned_counted(
+            owner.attempt.take().ok_or_else(invalid)?,
+            budget,
+            &mut owner.work.inventory,
+        );
+        match inventory {
+            Ok(inventory) => owner.inventory = Some(inventory),
+            Err(error) => {
+                if let Some(ledger) = &owner.ledger {
+                    ledger.record(&owner.work, &mut PublicationWork::default());
+                }
+                return Err(error);
+            }
+        }
+        Ok(owner)
+    }
+    fn blank(
+        attempt: RegisteredAttempt<'store>,
+        state: NormalState,
+        budget: &Arc<ByteBudget>,
+        reservation: ByteReservation,
+    ) -> Self {
+        Self {
+            inventory: None,
+            attempt: Some(attempt),
             state,
             metadata: None,
             frontier: None,
@@ -335,13 +384,15 @@ impl<'store> NormalPublication<'store> {
             draft: None,
             proof: None,
             work: PublicationWork::default(),
-        })
+            ledger: None,
+        }
     }
     #[must_use]
     pub fn work(&self) -> PublicationWork {
         let mut work = self.work;
         if let Some(proof) = &self.proof {
             work.source_reads = proof.reads;
+            work.source_observations = proof.observations.get();
             work.proof_operations = proof.operations;
             (work.proof_publication_next, work.proof_event_next) = proof.positions();
         }
@@ -361,7 +412,13 @@ impl<'store> NormalPublication<'store> {
             self.attempt.as_ref().ok_or_else(invalid)?
         };
         self.work.control_reads += 1;
-        super::publication_control::visible(owner.root, &self.state)?;
+        super::publication_control::visible(
+            &super::publication_control::CountedControl {
+                root: owner.root,
+                ledger: self.ledger.as_ref(),
+            },
+            &self.state,
+        )?;
         if self.inventory.is_some() {
             self.step_inventory()?;
         } else if self.validation != Validation::Complete {
@@ -502,7 +559,13 @@ impl<'store> NormalPublication<'store> {
         let metadata = self.metadata.as_ref().ok_or_else(invalid)?;
         let witness = self.witness.as_ref().ok_or_else(invalid)?;
         if self.proof.is_some() {
-            write_metadata(attempt, metadata, &mut self.work)?;
+            write_metadata(
+                attempt,
+                metadata,
+                &mut self.work,
+                &self.state,
+                self.ledger.as_ref(),
+            )?;
         }
         let metadata_file = attempt.directory.open_file("metadata")?;
         if self.proof.is_none() {
@@ -512,10 +575,17 @@ impl<'store> NormalPublication<'store> {
         private::full_sync(&metadata_file)?;
         drop(metadata_file);
         sync_directory(&attempt.directory, &mut self.work)?;
-        validate_pending(attempt.root, &self.state, metadata, &self.links)?;
+        validate_pending(
+            attempt.root,
+            &self.state,
+            metadata,
+            &self.links,
+            self.ledger.as_ref(),
+        )?;
         self.witness = None;
         if let Some(proof) = self.proof.take() {
             self.work.source_reads = proof.reads;
+            self.work.source_observations = proof.observations.get();
             self.work.proof_operations = proof.operations;
             (self.work.proof_publication_next, self.work.proof_event_next) = proof.positions();
         }
@@ -632,7 +702,15 @@ impl<'store> NormalPublication<'store> {
         self.state.encode(&mut before)?;
         next.encode(&mut after)?;
         if self.state.phase == Phase::Registered {
-            super::publication_control::check(attempt.root, "foreground", &before, &after)?;
+            super::publication_control::check(
+                &super::publication_control::CountedControl {
+                    root: attempt.root,
+                    ledger: self.ledger.as_ref(),
+                },
+                "foreground",
+                &before,
+                &after,
+            )?;
         }
         let base = attempt.root.open_directory(base_name(&attempt.input))?;
         let object = base.open_directory(
@@ -665,7 +743,10 @@ impl<'store> NormalPublication<'store> {
         next.encode(&mut after)?;
         self.work.controls += 1;
         super::publication_control::replace(
-            attempt.root,
+            &super::publication_control::CountedControl {
+                root: attempt.root,
+                ledger: self.ledger.as_ref(),
+            },
             "foreground",
             &before,
             &after,
@@ -676,7 +757,7 @@ impl<'store> NormalPublication<'store> {
     }
     fn step_publication(&mut self) -> io::Result<()> {
         match self.state.phase {
-            Phase::Ready => self.acquire_busy(),
+            Phase::Ready | Phase::SalvagePlanned => self.acquire_busy(),
             Phase::Publishing => self.publish_link(),
             Phase::Published => self.finish_quiet(),
             Phase::Cleanup => self.finish_idle(),
@@ -685,7 +766,13 @@ impl<'store> NormalPublication<'store> {
     }
     fn acquire_busy(&mut self) -> io::Result<()> {
         let root = self.attempt.as_ref().ok_or_else(invalid)?.root;
-        let current = super::publication_control::read_state(root, self.state.input.run.recording)?;
+        let current = super::publication_control::read_state(
+            &super::publication_control::CountedControl {
+                root,
+                ledger: self.ledger.as_ref(),
+            },
+            self.state.input.run.recording,
+        )?;
         let sequence = match current {
             NamespaceState::Quiet { sequence } => {
                 if !self.acquire_busy_frontier()? {
@@ -706,11 +793,7 @@ impl<'store> NormalPublication<'store> {
         let mut next = self.state.clone();
         next.phase = Phase::Publishing;
         next.sequence = sequence;
-        let mut slot_old = [0; 4096];
-        let mut slot_new = [0; 4096];
-        self.state.encode(&mut slot_old)?;
-        next.encode(&mut slot_new)?;
-        super::publication_control::check(root, "foreground", &slot_old, &slot_new)?;
+        self.check_publishing_transition(&next)?;
         let mut old = [0; 256];
         let mut new = [0; 256];
         codec::encode_state(
@@ -730,13 +813,31 @@ impl<'store> NormalPublication<'store> {
         )?;
         self.work.controls += 1;
         super::publication_control::replace(
-            root,
+            &super::publication_control::CountedControl {
+                root,
+                ledger: self.ledger.as_ref(),
+            },
             "namespace-state",
             &old,
             &new,
             &mut self.work.full_syncs,
         )?;
         self.commit_state(next)
+    }
+    fn check_publishing_transition(&self, next: &NormalState) -> io::Result<()> {
+        let mut slot_old = [0; 4096];
+        let mut slot_new = [0; 4096];
+        self.state.encode(&mut slot_old)?;
+        next.encode(&mut slot_new)?;
+        super::publication_control::check(
+            &super::publication_control::CountedControl {
+                root: self.attempt.as_ref().ok_or_else(invalid)?.root,
+                ledger: self.ledger.as_ref(),
+            },
+            "foreground",
+            &slot_old,
+            &slot_new,
+        )
     }
     fn acquire_busy_frontier(&mut self) -> io::Result<bool> {
         let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
@@ -872,8 +973,13 @@ impl<'store> NormalPublication<'store> {
             sequence: self.state.sequence,
             transaction: self.state.transaction,
         };
-        if super::publication_control::read_state(attempt.root, self.state.input.run.recording)?
-            != expected
+        if super::publication_control::read_state(
+            &super::publication_control::CountedControl {
+                root: attempt.root,
+                ledger: self.ledger.as_ref(),
+            },
+            self.state.input.run.recording,
+        )? != expected
         {
             return Err(invalid());
         }
@@ -915,23 +1021,34 @@ impl<'store> NormalPublication<'store> {
         )?;
         self.work.controls += 1;
         super::publication_control::replace(
-            attempt.root,
+            &super::publication_control::CountedControl {
+                root: attempt.root,
+                ledger: self.ledger.as_ref(),
+            },
             "namespace-state",
             &before,
             &after,
             &mut self.work.full_syncs,
         )?;
         let mut next = self.state.clone();
-        next.phase = Phase::Cleanup;
+        next.phase = if self.state.salvage.is_some() {
+            Phase::SalvageCommitted
+        } else {
+            Phase::Cleanup
+        };
         self.commit_state(next)
     }
     fn finish_idle(&mut self) -> io::Result<()> {
         let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
-        if super::publication_control::read_state(attempt.root, self.state.input.run.recording)?
-            != (NamespaceState::Quiet {
-                sequence: self.state.sequence.checked_add(1).ok_or_else(invalid)?,
-            })
-        {
+        if super::publication_control::read_state(
+            &super::publication_control::CountedControl {
+                root: attempt.root,
+                ledger: self.ledger.as_ref(),
+            },
+            self.state.input.run.recording,
+        )? != (NamespaceState::Quiet {
+            sequence: self.state.sequence.checked_add(1).ok_or_else(invalid)?,
+        }) {
             return Err(invalid());
         }
 
@@ -954,7 +1071,7 @@ impl<'store> NormalPublication<'store> {
         let object = base.open_directory(
             &collector::recording::identity_text(attempt.transaction).to_string(),
         )?;
-        object.visit_names(1, |name| {
+        object.visit_names_counted(1, &mut self.work.inventory.directory, |name| {
             if name == "ready" {
                 Ok(())
             } else {
@@ -973,7 +1090,10 @@ impl<'store> NormalPublication<'store> {
         )?;
         self.work.controls += 1;
         super::publication_control::replace(
-            attempt.root,
+            &super::publication_control::CountedControl {
+                root: attempt.root,
+                ledger: self.ledger.as_ref(),
+            },
             "foreground",
             &before,
             &idle,
@@ -988,8 +1108,13 @@ fn validate_pending(
     state: &NormalState,
     metadata: &CanonicalMetadata,
     links: &[(Namespace, CanonicalKey)],
+    ledger: Option<&super::PublicationLedger>,
 ) -> io::Result<()> {
-    let Some(candidate) = super::publication_control::pending(root, state)? else {
+    let Some(candidate) = super::publication_control::pending(
+        &super::publication_control::CountedControl { root, ledger },
+        state,
+    )?
+    else {
         return Ok(());
     };
     if candidate.phase != Phase::Registered
@@ -1022,13 +1147,25 @@ fn validate_pending(
 
     Ok(())
 }
-fn normal_namespace(attempt: &RegisteredAttempt<'_>, state: &NormalState) -> io::Result<()> {
-    let namespace =
-        super::publication_control::read_state(attempt.root, state.input.run.recording)?;
+fn normal_namespace(
+    attempt: &RegisteredAttempt<'_>,
+    state: &NormalState,
+    ledger: Option<&super::PublicationLedger>,
+) -> io::Result<()> {
+    let namespace = super::publication_control::read_state(
+        &super::publication_control::CountedControl {
+            root: attempt.root,
+            ledger,
+        },
+        state.input.run.recording,
+    )?;
     match (state.phase, namespace) {
-        (Phase::Registered | Phase::Ready, NamespaceState::Quiet { .. }) => Ok(()),
         (
-            Phase::Ready,
+            Phase::Registered | Phase::Ready | Phase::SalvagePlanned,
+            NamespaceState::Quiet { .. },
+        ) => Ok(()),
+        (
+            Phase::Ready | Phase::SalvagePlanned,
             NamespaceState::Busy {
                 sequence,
                 transaction,
@@ -1041,29 +1178,42 @@ fn normal_namespace(attempt: &RegisteredAttempt<'_>, state: &NormalState) -> io:
                 transaction,
             },
         ) if transaction == state.transaction && sequence == state.sequence => Ok(()),
-        (Phase::Published | Phase::Cleanup, NamespaceState::Quiet { sequence })
-            if state.sequence.checked_add(1) == Some(sequence) =>
-        {
-            Ok(())
-        }
+        (
+            Phase::Published | Phase::Cleanup | Phase::SalvageCommitted,
+            NamespaceState::Quiet { sequence },
+        ) if state.sequence.checked_add(1) == Some(sequence) => Ok(()),
         _ => Err(invalid()),
     }
 }
-fn normal_original_only(attempt: &RegisteredAttempt<'_>) -> io::Result<()> {
+fn normal_original_only(
+    attempt: &RegisteredAttempt<'_>,
+    ledger: Option<&super::PublicationLedger>,
+) -> io::Result<()> {
+    if let Some(ledger) = ledger {
+        ledger.namespace_attempt();
+    }
     let base = attempt.root.open_directory(base_name(&attempt.input))?;
+    if let Some(ledger) = ledger {
+        ledger.namespace_attempt();
+    }
     let object =
         base.open_directory(&collector::recording::identity_text(attempt.transaction).to_string())?;
     let selected = match attempt.placement {
         OriginalPlacement::Pending => "pending",
         OriginalPlacement::Ready => "ready",
     };
-    object.visit_names(1, |name| {
+    let mut work = PublicationWork::default();
+    let result = object.visit_names_counted(1, &mut work.inventory.directory, |name| {
         if name == selected {
             Ok(())
         } else {
             Err(io::Error::from(io::ErrorKind::Unsupported))
         }
-    })
+    });
+    if let Some(ledger) = ledger {
+        ledger.record(&work, &mut PublicationWork::default());
+    }
+    result
 }
 fn final_loss(
     input: &AttemptInput,
@@ -1094,6 +1244,8 @@ fn write_metadata(
     attempt: &RegisteredAttempt<'_>,
     metadata: &CanonicalMetadata,
     work: &mut PublicationWork,
+    state: &NormalState,
+    ledger: Option<&super::PublicationLedger>,
 ) -> io::Result<()> {
     metadata.validate()?;
     let directory = &attempt.directory;
@@ -1113,7 +1265,7 @@ fn write_metadata(
             if before.len() < comparison.expected {
                 // Only this exact registered, unpublished owner may replace a matching
                 // torn prefix. A linked or contradictory file remains evidence and refuses.
-                write_metadata_validate_prefix(attempt, &before)?;
+                write_metadata_validate_prefix(attempt, &before, state, ledger)?;
 
                 work.full_syncs += 1;
                 private::full_sync(&attempt.root.open_file("foreground")?)?;
@@ -1129,7 +1281,10 @@ fn write_metadata(
                 private::full_sync(&file)?;
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && matches!(state.phase, Phase::Registered | Phase::SalvagePlanned) =>
+        {
             let mut file = directory.create_file("metadata")?;
             metadata.write(&mut file)?;
             work.full_syncs += 1;
@@ -1142,16 +1297,24 @@ fn write_metadata(
 fn write_metadata_validate_prefix(
     attempt: &RegisteredAttempt<'_>,
     before: &std::fs::Metadata,
+    state: &NormalState,
+    ledger: Option<&super::PublicationLedger>,
 ) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
-    let state = NormalState::registered(attempt.transaction, attempt.input.clone());
-    if super::publication_control::read_normal(attempt.root, attempt.input.run.recording)? != state
+    if !matches!(state.phase, Phase::Registered | Phase::SalvagePlanned)
+        || super::publication_control::read_normal(
+            &super::publication_control::CountedControl {
+                root: attempt.root,
+                ledger,
+            },
+            attempt.input.run.recording,
+        )? != *state
         || before.nlink() != 1
     {
         return Err(invalid());
     }
 
-    normal_namespace(attempt, &state)?;
+    normal_namespace(attempt, state, ledger)?;
     let current = attempt.directory.open_file("metadata")?.metadata()?;
     if before.dev() != current.dev()
         || before.ino() != current.ino()
@@ -1204,6 +1367,7 @@ fn validate_metadata(metadata: &CanonicalMetadata, state: &NormalState) -> io::R
         || metadata.transaction != state.transaction
         || metadata.captured != input.captured
         || metadata.timing() != input.source
+        || metadata.binding != input.binding
         || metadata.child != RawChild::Ready
         || metadata.loss.inherited != input.losses
         || metadata.trailing_unknown
