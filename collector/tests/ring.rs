@@ -2867,8 +2867,7 @@ mod tests {
                         }
                     }
                     Found::Missed { .. } => {}
-                    // A reader that spins on an empty ring can spend its attempts before a busy
-                    // machine schedules the writer at all.
+                    // Spinning could spend the attempts before a busy machine runs the writer.
                     Found::Nothing => std::thread::yield_now(),
                 }
             }
