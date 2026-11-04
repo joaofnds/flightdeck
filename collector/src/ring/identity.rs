@@ -1564,7 +1564,8 @@ mod tests {
     #[test]
     fn validate_refuses_each_forbidden_name_byte_at_every_offset_and_length() {
         // Goal: no offset of a name, in any length of its field, escapes the scans for its bytes.
-        // Method: place each forbidden byte at every offset of a maximum name and last in shorter ones.
+        // Method: place each forbidden byte at every offset of a maximum name and last in shorter
+        // ones.
         let clean = vec![b'n'; PROGRAM_PATH_BYTES_MAX];
         assert_eq!(validate_name(&clean), Ok(()));
         for offset in 0..PROGRAM_PATH_BYTES_MAX {
