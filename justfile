@@ -1,10 +1,13 @@
 # Recipes for working on Flightdeck, run from anywhere in the checkout. mise.toml pins the
-# tools they run. Each CI job runs one recipe here, check-root or check-desktop, so a step
-# added to either runs in CI and in just check alike.
+# tools they run. CI runs check-root and check-desktop, the root's tests divided by
+# test_packages among its jobs, so a step added to either runs in CI and in just check alike.
 
 # Arguments for the root workspace's test binaries, which CI sets on the command line to skip
 # the tests its runner lacks the hardware for: just test_arguments='--skip ::this_mac::' test
 test_arguments := ""
+
+# The packages the test recipe runs, which CI divides among its jobs to shorten the wait.
+test_packages := "--workspace"
 
 # List the recipes.
 default:
@@ -95,7 +98,7 @@ clippy:
 # Test the root workspace.
 test:
     cargo build --locked -p collector -p persister --bin collector --bin recorder --bin persister
-    cargo test --locked --workspace --no-fail-fast -- {{test_arguments}}
+    cargo test --locked {{test_packages}} --no-fail-fast -- {{test_arguments}}
 
 # Opt-in optimized maximum native event fidelity and worker resource observations.
 test-event-capacity:

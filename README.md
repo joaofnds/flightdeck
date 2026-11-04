@@ -192,13 +192,15 @@ collector's older code does not follow it yet.
 GitHub Actions runs the check on every push to `main` and every pull request, under the
 toolchain `.github/workflows/check.yml` names. Its check job runs
 `just check-root` and its desktop job `just check-desktop`, the two recipes `just check`
-runs, so a step added to either runs in CI and on your machine alike. `check-root` formats,
+runs, so a step added to either runs in CI and on your machine alike. The persistence
+package's tests, the slowest of the root workspace, run in a persistence job of their own
+through `test_packages`, so `check-root` in CI tests every other package. `check-root` formats,
 lints and tests the root workspace through `fmt`, `clippy` and `test`. `check-desktop` does
 the same for the desktop workspace through the recipes named `desktop-`, then runs
 `seal-bench`, which prints what sealing a minute costs, and last `bundle-check`, which
 packages the app and compares the bundle's executables with the ones the build made.
-CI also runs `just test-event-capacity`: feature-enabled lint and optimized maximum event
-fidelity checks. This workload is separate from `just check` and is opt-in locally.
+CI also runs `just test-event-capacity` in its capacity job: feature-enabled lint and
+optimized maximum event fidelity checks. This workload is separate from `just check` and is opt-in locally.
 
 CI adds only what its runner needs. It skips the tests in modules named `this_mac`, since
 its virtual Mac lacks the hardware they read, and runs the ignored tests that need a second
