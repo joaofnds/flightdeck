@@ -1414,6 +1414,7 @@ fn native_publication_target(fixture: &Fixture, transaction: &str, boundary: &st
                 &metadata,
                 &registration_budget(),
                 &mut ReadWork::default(),
+                None,
             )
             .unwrap();
             root.join(keys[0].0.name())
@@ -2235,6 +2236,7 @@ fn restarting_the_final_gate_plan_proves_prior_observation_links_before_mutation
         &metadata,
         &registration_budget(),
         &mut ReadWork::default(),
+        None,
     )
     .unwrap();
     let (namespace, key) = keys[0];

@@ -131,3 +131,38 @@ fn writes_every_column_without_a_dictionary() {
             .all(|column| column.dictionary_page_offset().is_none())
     );
 }
+
+#[test]
+fn bounded_frames_keep_the_production_row_group_bytes() {
+    // Goal: sequential frame writing preserves the existing Parquet codec and row ordering.
+    // Method: encode one table whole and in exact row-group slices, then compare complete bytes.
+    let mut frame = three_row_groups();
+    let mut whole = Cursor::new(Vec::new());
+    encode_write(&mut frame, &mut whole).unwrap();
+    let mut bounded = Cursor::new(Vec::new());
+    let mut writer = super::TableWriter::new(&frame, &mut bounded).unwrap();
+    for offset in (0..frame.height()).step_by(ROW_GROUP_ROWS) {
+        let length = (frame.height() - offset).min(ROW_GROUP_ROWS);
+        let mut slice = frame.slice(i64::try_from(offset).unwrap(), length);
+        writer.write(&mut slice).unwrap();
+    }
+    writer.finish().unwrap();
+    assert_eq!(whole.into_inner(), bounded.into_inner());
+}
+
+#[test]
+fn bounded_frames_refuse_schema_change_before_appending_rows() {
+    // Goal: a later frame cannot alter the schema established by the first frame.
+    // Method: change a column name between writes and require ordinary refusal.
+    let mut frame = three_row_groups().slice(0, 1);
+    let mut file = Cursor::new(Vec::new());
+    let mut writer = super::TableWriter::new(&frame, &mut file).unwrap();
+    writer.write(&mut frame).unwrap();
+    frame.rename("pid", "different".into()).unwrap();
+    assert!(matches!(
+        writer.write(&mut frame),
+        Err(crate::Error::Bound("table frame schema changed"))
+    ));
+    writer.finish().unwrap();
+    assert_eq!(read_metadata(&mut file).unwrap().num_rows, 1);
+}

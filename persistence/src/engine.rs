@@ -28,6 +28,7 @@ use crate::{Error, Result};
 pub use admission::COLUMNS_MAX as PARQUET_COLUMNS_MAX;
 pub use admission::EXPANDED_BYTES_MAX as PARQUET_EXPANDED_BYTES_MAX;
 pub use admitted_file::{AdmissionRefusal, AdmittedFile};
+pub(crate) use admitted_table::RawTableWork;
 pub use admitted_table::{AdmittedColumns, AdmittedReadRefusal, AdmittedTable, DecodeLimits};
 pub use cells::{Cells, FromCell, Row};
 pub use event_source::EventSourcePin;

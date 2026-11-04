@@ -3,10 +3,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use polars::prelude::*;
-use polars_parquet::write::{
-    CompressionOptions, Encoding, FileWriter, Version, WriteOptions, ZstdLevel, get_dtype_encoding,
-    row_group_iter,
-};
 
 use model::catalog;
 
@@ -15,7 +11,10 @@ use crate::{Error, Result, Window};
 
 mod bounds;
 mod machine;
+pub(crate) mod metric_projection;
+mod table_writer;
 mod ticks;
+pub(crate) use table_writer::TableWriter;
 #[cfg(test)]
 mod write_tests;
 
@@ -124,61 +123,9 @@ const DATA_PAGE_BYTES: u64 = 1024 * 1024;
 pub const WRITE_BUFFER_BYTES: u64 = DATA_PAGE_BYTES;
 
 pub(crate) fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> Result<()> {
-    frame.rechunk_mut();
-    // Parquet writes each header and page on its own, a system call apiece without a buffer.
-    let capacity = usize::try_from(WRITE_BUFFER_BYTES).map_err(|_| Error::Bound("write buffer"))?;
-    let buffer = std::io::BufWriter::with_capacity(capacity, file);
-    let schema = frame.schema().to_arrow(CompatLevel::newest());
-    // Polars' own writer gives every number and byte column a dictionary, which cost a fifth of
-    // a window's seal CPU and made the compressed files larger, as docs/collector.md measures.
-    // A plain page holds each value as it is.
-    let encodings: Vec<Vec<Encoding>> = schema
-        .iter_values()
-        .map(|field| {
-            get_dtype_encoding(&field.dtype)
-                .iter()
-                .map(|_leaf| Encoding::Plain)
-                .collect()
-        })
-        .collect();
-    let options = WriteOptions {
-        statistics: StatisticsOptions {
-            min_value: true,
-            max_value: true,
-            distinct_count: false,
-            null_count: true,
-            binary_statistics_truncate_length: None,
-        },
-        version: Version::V1,
-        compression: CompressionOptions::Zstd(Some(ZstdLevel::try_new(3)?)),
-        data_page_size: Some(
-            usize::try_from(DATA_PAGE_BYTES).map_err(|_| Error::Bound("data page size"))?,
-        ),
-    };
-    let mut writer = FileWriter::try_new(buffer, schema, options)?;
-    let fields = writer.parquet_schema().fields().to_vec();
-    // Each slice of the rechunked frame is one batch, which the writer makes one row group.
-    for offset in (0..frame.height()).step_by(ROW_GROUP_ROWS) {
-        let length = (frame.height() - offset).min(ROW_GROUP_ROWS);
-        let offset = i64::try_from(offset).map_err(|_| Error::Bound("parquet row offset"))?;
-        for batch in frame
-            .slice(offset, length)
-            .iter_chunks(CompatLevel::newest(), false)
-        {
-            let rows = collector::u64_from_usize(batch.len());
-            let group = row_group_iter(batch, encodings.clone().into(), fields.clone(), options);
-            writer.write(rows, group)?;
-        }
-    }
-    let bytes = writer.end(None)?;
-    assert!(bytes > 0);
-
-    // Dropping the buffer would flush its last bytes and discard a failed write.
-    writer
-        .into_inner()
-        .into_inner()
-        .map_err(std::io::IntoInnerError::into_error)?;
-    Ok(())
+    let mut writer = TableWriter::new(frame, file)?;
+    writer.write(frame)?;
+    writer.finish()
 }
 
 /// What `frame` may take of memory for `table`, or why it refuses to build that frame.

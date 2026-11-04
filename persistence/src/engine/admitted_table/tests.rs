@@ -13,9 +13,63 @@ use crate::resources::ByteBudget;
 fn underreported_expansion_is_refused_before_native_decode() {
     // Goal: a footer cannot understate the measured page expansion used by decode preflight.
     // Method: change only one real column's declared total while preserving its page bytes.
-    use polars_parquet_format::thrift::protocol::TCompactOutputProtocol;
+    let fixture = underreported_fixture();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let result =
+        AdmittedTable::from_file_budgeted_profiled(File::open(&fixture.path).unwrap(), &budget);
+
+    assert!(matches!(
+        result,
+        Err(AdmissionRefusal::Bound("parquet declared expanded bytes"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn streaming_underreported_expansion_is_refused_before_native_decode() {
+    // Goal: grouped admission retains exact declared-versus-measured page accounting.
+    // Method: understate a real column footer while keeping the same compressed page bytes.
+    let fixture = underreported_fixture();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let result = AdmittedTable::from_file_streaming(File::open(&fixture.path).unwrap(), &budget);
+
+    assert!(matches!(
+        result,
+        Err(AdmissionRefusal::Bound("parquet declared expanded bytes"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn streaming_refuses_an_oversized_group_before_native_decode() {
+    // Goal: grouped admission retains the per-group expansion ceiling.
+    // Method: exceed only the declared group size in a real, otherwise valid table.
     let fixture = Fixture::new();
-    let mut bytes = std::fs::read(&fixture.path).unwrap();
+    let bytes = std::fs::read(&fixture.path).unwrap();
+    let mut metadata = super::admission::validate_reader_metadata(
+        &mut std::io::Cursor::new(&bytes),
+        u64::try_from(bytes.len()).unwrap(),
+    )
+    .unwrap();
+    metadata.row_groups[0].total_byte_size =
+        i64::try_from(super::admission::EXPANDED_BYTES_MAX + 1).unwrap();
+    rewrite_footer(&fixture.path, bytes, &metadata);
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+
+    let result = AdmittedTable::from_file_streaming(File::open(&fixture.path).unwrap(), &budget);
+
+    assert!(matches!(
+        result,
+        Err(AdmissionRefusal::Bound("parquet group bytes"))
+    ));
+    assert_eq!(budget.used(), 0);
+}
+
+fn underreported_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let bytes = std::fs::read(&fixture.path).unwrap();
     let mut metadata = super::admission::validate_reader_metadata(
         &mut std::io::Cursor::new(&bytes),
         u64::try_from(bytes.len()).unwrap(),
@@ -26,6 +80,16 @@ fn underreported_expansion_is_refused_before_native_decode() {
         .as_mut()
         .unwrap()
         .total_uncompressed_size -= 1;
+    rewrite_footer(&fixture.path, bytes, &metadata);
+    fixture
+}
+
+fn rewrite_footer(
+    path: &std::path::Path,
+    mut bytes: Vec<u8>,
+    metadata: &polars_parquet::parquet::metadata::ThriftFileMetadata,
+) {
+    use polars_parquet_format::thrift::protocol::TCompactOutputProtocol;
     let mut footer = Vec::new();
     metadata
         .write_to_out_protocol(&mut TCompactOutputProtocol::new(&mut footer))
@@ -36,15 +100,7 @@ fn underreported_expansion_is_refused_before_native_decode() {
     bytes.extend_from_slice(&footer);
     bytes.extend_from_slice(&u32::try_from(footer.len()).unwrap().to_le_bytes());
     bytes.extend_from_slice(b"PAR1");
-    std::fs::write(&fixture.path, bytes).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
-    let result =
-        AdmittedTable::from_file_budgeted_profiled(File::open(&fixture.path).unwrap(), &budget);
-    assert!(matches!(
-        result,
-        Err(AdmissionRefusal::Bound("parquet declared expanded bytes"))
-    ));
-    assert_eq!(budget.used(), 0);
+    std::fs::write(path, bytes).unwrap();
 }
 
 #[test]
@@ -374,4 +430,128 @@ fn name_owner_denial_makes_no_backing_request_after_validated_metadata_setup() {
     assert_eq!(allowed.used(), 130);
     drop(names.unwrap());
     assert_eq!(allowed.used(), 0);
+}
+
+fn streaming_slice_boundary(offset: u64, expected: u32) {
+    use polars::prelude::{Column, DataFrame};
+    let fixture = Fixture::new();
+    let mut frame = DataFrame::new(
+        40_000,
+        vec![Column::new(
+            "publication".into(),
+            (0..40_000u64).collect::<Vec<_>>(),
+        )],
+    )
+    .unwrap();
+    crate::encoder::encode_write(&mut frame, File::create(&fixture.path).unwrap()).unwrap();
+    drop(frame);
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let table =
+        AdmittedTable::from_file_streaming(File::open(&fixture.path).unwrap(), &budget).unwrap();
+    let count = table.bounded_slice_count(offset, 64).unwrap();
+    assert_eq!(count, expected);
+    let _workspace = table
+        .reserve_column_work(offset, count, "publication")
+        .unwrap();
+    let frame = table
+        .read_slice_metadata_budgeted(&["publication"], offset, count)
+        .unwrap();
+    assert_eq!(frame.height(), usize::try_from(count).unwrap());
+    assert_eq!(
+        frame.column("publication").unwrap().u64().unwrap().get(0),
+        Some(offset)
+    );
+}
+
+#[test]
+fn streaming_slice_clips_at_real_row_group_boundaries() {
+    // Goal: a selected slice uses one admitted row group at the exact boundary.
+    // Method: encode three groups and verify the bounded count and first decoded value.
+    streaming_slice_boundary(16383, 1);
+}
+
+#[test]
+fn streaming_slice_starts_at_second_row_group() {
+    // Goal: a selected slice uses one admitted row group at the exact boundary.
+    // Method: encode three groups and verify the bounded count and first decoded value.
+    streaming_slice_boundary(16384, 64);
+}
+
+#[test]
+fn streaming_slice_clips_before_third_row_group() {
+    // Goal: a selected slice uses one admitted row group at the exact boundary.
+    // Method: encode three groups and verify the bounded count and first decoded value.
+    streaming_slice_boundary(32767, 1);
+}
+
+#[test]
+fn streaming_slice_starts_at_third_row_group() {
+    // Goal: a selected slice uses one admitted row group at the exact boundary.
+    // Method: encode three groups and verify the bounded count and first decoded value.
+    streaming_slice_boundary(32768, 64);
+}
+
+#[test]
+fn streaming_skips_damaged_preceding_dictionary() {
+    // Goal: unselected dictionaries cannot enter the native decoder under a later slice lease.
+    // Method: corrupt a large first dictionary but retain a valid second group and full admission.
+    use polars::prelude::*;
+    let fixture = Fixture::new();
+    let values: Vec<_> = (0..124)
+        .map(|row| {
+            if row < 62 {
+                format!("{row}{}", "x".repeat(32768))
+            } else {
+                "selected".into()
+            }
+        })
+        .collect();
+    let mut frame = DataFrame::new(124, vec![Column::new("native".into(), values)]).unwrap();
+    std::fs::remove_file(&fixture.path).unwrap();
+    write_groups(&fixture.path, &mut frame);
+    let mut bytes = std::fs::read(&fixture.path).unwrap();
+    let metadata =
+        polars_parquet::parquet::read::read_metadata(&mut std::io::Cursor::new(&bytes)).unwrap();
+    let extent = metadata.row_groups[0].parquet_columns()[0].byte_range();
+    let start = usize::try_from(extent.start).unwrap();
+    let mut cursor = std::io::Cursor::new(&bytes[start..]);
+    let header = polars_parquet_format::PageHeader::read_from_in_protocol(
+        &mut polars_parquet_format::thrift::protocol::TCompactInputProtocol::new(
+            &mut cursor,
+            65536,
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        header.type_,
+        polars_parquet_format::PageType::DICTIONARY_PAGE
+    );
+    let body = start + usize::try_from(cursor.position()).unwrap();
+    bytes[body..body + usize::try_from(header.compressed_page_size).unwrap()].fill(0);
+    std::fs::write(&fixture.path, bytes).unwrap();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let table =
+        AdmittedTable::from_file_streaming(File::open(&fixture.path).unwrap(), &budget).unwrap();
+    assert_eq!(
+        table
+            .read_slice_metadata_budgeted(&["native"], 0, 0)
+            .unwrap()
+            .height(),
+        0
+    );
+    let lease = table.reserve_slice_work(62, 1).unwrap();
+    let selected = table
+        .read_slice_metadata_budgeted(&["native"], 62, 1)
+        .unwrap();
+    assert_eq!(
+        selected.column("native").unwrap().str().unwrap().get(0),
+        Some("selected")
+    );
+    assert!(
+        table
+            .read_slice_metadata_budgeted(&["native"], 0, 1)
+            .is_err()
+    );
+    drop((selected, lease, table));
+    assert_eq!(budget.used(), 0);
 }

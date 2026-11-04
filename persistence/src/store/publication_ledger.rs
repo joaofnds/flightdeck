@@ -153,3 +153,21 @@ impl io::Write for LedgerWriter<'_> {
         io::Write::flush(self.file)
     }
 }
+
+impl crate::engine::RawTableWork for PublicationLedger {
+    fn read_attempt(&self, requested: usize) {
+        self.update(|work| {
+            work.raw_read_operations += 1;
+            work.raw_read_requested_bytes += collector::u64_from_usize(requested);
+        });
+    }
+    fn seek_attempt(&self) {
+        self.update(|work| work.proof_operations += 1);
+    }
+    fn decode_attempt(&self, mapped_bytes: u64) {
+        self.update(|work| {
+            work.proof_operations += 1;
+            work.decode_admission_bytes += mapped_bytes;
+        });
+    }
+}

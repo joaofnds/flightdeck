@@ -9,9 +9,15 @@ use collector::ring::{
 use crate::{Error, Result};
 
 pub(crate) const PROGRAMS_MAX: usize = 65_536;
-const PROGRAM_BYTES_MAX: usize = 64 * 1024 * 1024;
+pub(crate) const PROGRAM_BYTES_MAX: usize = 64 * 1024 * 1024;
 const LOOKUP_SLOTS: usize = PROGRAMS_MAX * 2;
 const COPY_BYTES: usize = collector::ring::PROGRAM_PATH_BYTES_MAX;
+
+/// Binds and charges each fallible native program copy for consuming recovery.
+pub(crate) trait ProgramReadWork {
+    fn before(&self, reader: &RingReader) -> Result<()>;
+    fn after(&self, reader: &RingReader) -> Result<()>;
+}
 
 /// The reader must be the exact handle that decoded both sets of references.
 pub struct IdentitySource<'source> {
@@ -182,19 +188,12 @@ impl Prepared {
             + size_of::<Option<Box<Self>>>()
     }
 
-    pub fn initialize(
-        output: &mut Option<Box<Self>>,
-        source: &IdentitySource<'_>,
-        programs: Option<&Programs>,
-    ) -> Result<()> {
-        Self::initialize_bounded(output, source, programs, PROGRAM_BYTES_MAX)
-    }
-
-    pub fn initialize_bounded(
+    pub(crate) fn initialize_observed(
         output: &mut Option<Box<Self>>,
         source: &IdentitySource<'_>,
         programs: Option<&Programs>,
         bytes_max: usize,
+        work: Option<&dyn ProgramReadWork>,
     ) -> Result<()> {
         assert!(output.is_none());
         assert!(bytes_max <= PROGRAM_BYTES_MAX);
@@ -224,10 +223,17 @@ impl Prepared {
                 programs,
                 identity,
                 IdentitySection::Processes,
+                work,
             )?;
         }
         for identity in source.events {
-            prepared.copy(source.reader, programs, identity, IdentitySection::Events)?;
+            prepared.copy(
+                source.reader,
+                programs,
+                identity,
+                IdentitySection::Events,
+                work,
+            )?;
         }
 
         Ok(())
@@ -239,9 +245,10 @@ impl Prepared {
         programs: Option<&Programs>,
         identity: &IdentityObservation,
         section: IdentitySection,
+        work: Option<&dyn ProgramReadWork>,
     ) -> Result<()> {
         let program = match identity.program() {
-            Some(reference) => Some(self.copy_program(reader, programs, reference)?),
+            Some(reference) => Some(self.copy_program(reader, programs, reference, work)?),
             None => None,
         };
         let rows = match section {
@@ -265,6 +272,7 @@ impl Prepared {
         reader: &RingReader,
         programs: Option<&Programs>,
         reference: &ProgramReference,
+        work: Option<&dyn ProgramReadWork>,
     ) -> Result<usize> {
         let first = slot_hash(reference, self.references.len());
 
@@ -275,7 +283,7 @@ impl Prepared {
                     return Ok(index);
                 }
             } else {
-                let index = self.copy_program_bytes(reader, programs, reference)?;
+                let index = self.copy_program_bytes(reader, programs, reference, work)?;
 
                 self.references[slot] = Some((*reference, index));
 
@@ -291,17 +299,25 @@ impl Prepared {
         reader: &RingReader,
         programs: Option<&Programs>,
         reference: &ProgramReference,
+        work: Option<&dyn ProgramReadWork>,
     ) -> Result<usize> {
         let mut name = [0; COPY_BYTES];
         let mut app = [0; COPY_BYTES];
 
-        let (name_length, app_length) = reader.copy_program(
+        if let Some(work) = work {
+            work.before(reader)?;
+        }
+        let copied = reader.copy_program(
             reference,
             &mut ProgramBuffers {
                 executable_name: &mut name,
                 app_path: &mut app,
             },
-        )?;
+        );
+        if let Some(work) = work {
+            work.after(reader)?;
+        }
+        let (name_length, app_length) = copied?;
         let bytes = ProgramBytes {
             executable_name: &name[..name_length],
             app_path: (app_length > 0).then_some(&app[..app_length]),

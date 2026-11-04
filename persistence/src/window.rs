@@ -5,6 +5,7 @@ use collector::processes::Usage;
 use collector::ring::{Dropped, RunIdentity, Shape, Tick};
 use collector::tracker::{Event, Noticed};
 
+use crate::encoder::metric_projection::ColumnGroups;
 use crate::owned_identity::{IdentitySource, OwnedIdentity, Prepared, Programs, usage_code};
 use crate::{Error, Result};
 
@@ -58,6 +59,7 @@ pub struct Window {
     pub(crate) limits: Limits,
     pub(crate) ticks: Vec<StagedTick>,
     bytes: u64,
+    pub(crate) projection_groups: Option<ColumnGroups>,
     pub(crate) programs: Option<Box<Programs>>,
     pub(crate) event_index: Option<crate::event_table::index::Index>,
 }
@@ -112,6 +114,16 @@ pub(crate) struct EventRecord {
     pub usage: Option<Usage>,
     pub availability: u8,
     pub noticed: Option<u8>,
+}
+
+pub(crate) fn tick_workspace_bytes(limits: &Limits) -> usize {
+    4096 + limits.cpus * size_of::<CPUTicks>()
+        + limits.interfaces * size_of::<Interface>()
+        + (limits.states + limits.cores * limits.states) * size_of::<u64>()
+        + limits.cores * size_of::<usize>()
+        + limits.fans * size_of::<f32>()
+        + limits.processes * size_of::<collector::processes::Process>()
+        + limits.coalitions * size_of::<Coalition>()
 }
 
 impl Limits {
@@ -257,6 +269,7 @@ impl Window {
             bytes: collector::u64_from_usize(
                 size_of::<Self>() + WINDOW_TICKS_MAX * size_of::<StagedTick>(),
             ),
+            projection_groups: None,
             programs: None,
             event_index: None,
         }
@@ -268,21 +281,27 @@ impl Window {
     }
 
     pub(crate) fn battery_captured(&self) -> bool {
-        self.ticks.iter().any(|tick| tick.battery.is_some())
+        self.projection_groups.is_some_and(ColumnGroups::battery)
+            || self.ticks.iter().any(|tick| tick.battery.is_some())
     }
 
     pub(crate) fn disks_captured(&self) -> bool {
-        self.ticks.iter().any(|tick| tick.disks.is_some())
+        self.projection_groups.is_some_and(ColumnGroups::disks)
+            || self.ticks.iter().any(|tick| tick.disks.is_some())
     }
 
     pub(crate) fn system_captured(&self) -> bool {
-        self.ticks.iter().any(|tick| tick.system.is_some())
+        self.projection_groups.is_some_and(ColumnGroups::system)
+            || self.ticks.iter().any(|tick| tick.system.is_some())
     }
 
     pub(crate) fn temperatures_captured(&self) -> bool {
-        self.ticks
-            .iter()
-            .any(|tick| tick.cpu_celsius.is_some() || tick.gpu_celsius.is_some())
+        self.projection_groups
+            .is_some_and(ColumnGroups::temperatures)
+            || self
+                .ticks
+                .iter()
+                .any(|tick| tick.cpu_celsius.is_some() || tick.gpu_celsius.is_some())
     }
 
     #[must_use]
@@ -362,6 +381,16 @@ impl Window {
         events: &[NumberedEvent<'_>],
         source: &IdentitySource<'_>,
     ) -> Result<()> {
+        self.push_tick_with_identity_observed(observation, tick, events, source, None)
+    }
+    pub(crate) fn push_tick_with_identity_observed(
+        &mut self,
+        observation: &Observation,
+        tick: &Tick,
+        events: &[NumberedEvent<'_>],
+        source: &IdentitySource<'_>,
+        work: Option<&dyn crate::owned_identity::ProgramReadWork>,
+    ) -> Result<()> {
         if self.programs.is_none() {
             if !self.ticks.is_empty() {
                 return Err(Error::Bound("mixed window identity mode"));
@@ -387,7 +416,13 @@ impl Window {
         }
 
         let mut prepared = None;
-        Prepared::initialize(&mut prepared, source, self.programs.as_deref())?;
+        Prepared::initialize_observed(
+            &mut prepared,
+            source,
+            self.programs.as_deref(),
+            crate::owned_identity::PROGRAM_BYTES_MAX,
+            work,
+        )?;
         let Some(prepared) = prepared else {
             unreachable!("successful identity preparation initializes output");
         };

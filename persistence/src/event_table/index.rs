@@ -29,23 +29,34 @@ impl Index {
 
     pub(crate) fn read_file(file: &mut std::fs::File, expected: &Manifest) -> Result<Self> {
         let index = Self::read_attempt_file(file, &expected.identity, None)?;
-        let count = index.batches.len();
+        index.validate_manifest(expected)?;
+        Ok(index)
+    }
+
+    pub(crate) fn validate_manifest(&self, expected: &Manifest) -> Result<()> {
+        let prefix = self
+            .first
+            .checked_sub(expected.events_first)
+            .ok_or(Error::Bound("event index origin"))?;
         let rows = expected
             .tables
             .iter()
             .find(|table| table.name == "events")
             .ok_or(Error::Bound("missing event table"))?
             .rows;
-        if index.identity != expected.identity
-            || index.first != expected.events_first
-            || index.end != expected.events_end
-            || index.rows != rows
+        if self.identity != expected.identity
+            || prefix > expected.losses.events
+            || self.end != expected.events_end
+            || self.rows != rows
             || expected.event_batches
-                != Some(u32::try_from(count).map_err(|_| Error::Bound("event index batches"))?)
+                != Some(
+                    u32::try_from(self.batches.len())
+                        .map_err(|_| Error::Bound("event index batches"))?,
+                )
         {
             return Err(Error::Bound("event index commitment"));
         }
-        Ok(index)
+        Ok(())
     }
 
     /// Reads finite attempted coverage without manufacturing a final ordinary manifest.

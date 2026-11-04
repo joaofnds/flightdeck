@@ -216,6 +216,9 @@ impl CanonicalMetadata {
     }
     pub(crate) fn read(file: &mut File) -> io::Result<Self> {
         let length = file.metadata()?.len();
+        Self::read_from(file, length)
+    }
+    pub(crate) fn read_from(file: &mut impl Read, length: u64) -> io::Result<Self> {
         let mut bytes = [0; 512];
         file.read_exact(&mut bytes)?;
         let inner_length = usize::try_from(small(&bytes, 188)?).map_err(|_| invalid())?;

@@ -633,6 +633,42 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn munmap(address: *mut c_void, length: usize) -> i32;
 }
+
+#[repr(C)]
+struct MappingInterpose {
+    replacement: unsafe extern "C" fn(*mut c_void, usize, i32, i32, i32, i64) -> *mut c_void,
+    original: unsafe extern "C" fn(*mut c_void, usize, i32, i32, i32, i64) -> *mut c_void,
+}
+#[used]
+#[unsafe(link_section = "__DATA,__interpose")]
+static INTERPOSE_MAPPING: MappingInterpose = MappingInterpose {
+    replacement: refuse_mapping,
+    original: mmap,
+};
+unsafe extern "C" fn refuse_mapping(
+    address: *mut c_void,
+    length: usize,
+    protection: i32,
+    flags: i32,
+    descriptor: i32,
+    offset: i64,
+) -> *mut c_void {
+    let target = unsafe { getenv(c"FLIGHTDECK_MAPPING_TARGET".as_ptr()) };
+    let armed = unsafe { getenv(c"FLIGHTDECK_REGISTRATION_ARMED".as_ptr()) };
+    if !target.is_null() && !armed.is_null() && unsafe { access(armed, 0) } == 0 {
+        let mut path = [0_u8; 1024];
+        if unsafe { fcntl(descriptor, 50, path.as_mut_ptr()) } == 0
+            && unsafe { strcmp(path.as_ptr().cast(), target) } == 0
+        {
+            unsafe { record_refusal() };
+            unsafe { *__error() = 12 };
+            return std::ptr::without_provenance_mut(usize::MAX);
+        }
+    }
+
+    unsafe { mmap(address, length, protection, flags, descriptor, offset) }
+}
+
 #[used]
 #[unsafe(link_section = "__DATA,__interpose")]
 static INTERPOSE_PWRITE: PwriteInterpose = PwriteInterpose {
@@ -795,10 +831,17 @@ unsafe extern "C" fn metadata_write_fault(file: i32, bytes: *const c_void, count
         return unsafe { write(file, bytes, count) };
     }
     let sequence = unsafe { metadata_sequence_byte() };
-    if (unsafe { strcmp(mode, c"inner".as_ptr()) } == 0 || sequence == Some(b'i')) && count == 512 {
+    if (unsafe { strcmp(mode, c"inner".as_ptr()) } == 0
+        || unsafe { strcmp(mode, c"complete-inner".as_ptr()) } == 0
+        || sequence == Some(b'i'))
+        && count == 512
+    {
         return unsafe { write(file, bytes, count) };
     }
-    let prefix = if unsafe { strcmp(mode, c"complete".as_ptr()) } == 0 || sequence == Some(b'p') {
+    let prefix = if unsafe { strcmp(mode, c"complete".as_ptr()) } == 0
+        || unsafe { strcmp(mode, c"complete-inner".as_ptr()) } == 0
+        || sequence == Some(b'p')
+    {
         count
     } else {
         count.min(137)

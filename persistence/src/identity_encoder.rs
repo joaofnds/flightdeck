@@ -27,6 +27,27 @@ pub(crate) fn processes(window: &Window) -> Result<DataFrame> {
 /// The processes frame in the order its file keeps, by pid, start and publication, which an
 /// integer sort of the rows reaches sooner than a sort of the frame's columns.
 pub(crate) fn processes_in_file_order(window: &Window) -> Result<DataFrame> {
+    let rows = processes_ordered_rows(window);
+    processes_frame(window, &rows)
+}
+
+/// Projects a bounded section of the production ordered process rows.
+pub(crate) fn processes_projection(
+    window: &Window,
+    offset: usize,
+    count: usize,
+) -> Result<DataFrame> {
+    let rows = processes_ordered_rows(window);
+    let end = offset
+        .checked_add(count)
+        .ok_or(crate::Error::Bound("process projection"))?;
+    let rows = rows
+        .get(offset..end)
+        .ok_or(crate::Error::Bound("process projection"))?;
+    processes_frame(window, rows)
+}
+
+fn processes_ordered_rows(window: &Window) -> Vec<ProcessRow<'_>> {
     let mut rows = processes_rows(window);
     rows.sort_by_key(|row| {
         let awake = row.process.map(|value| value.usage.awake_ns_at_start);
@@ -37,7 +58,7 @@ pub(crate) fn processes_in_file_order(window: &Window) -> Result<DataFrame> {
             row.tick.observation.publication,
         )
     });
-    processes_frame(window, &rows)
+    rows
 }
 
 fn processes_frame(window: &Window, rows: &[ProcessRow<'_>]) -> Result<DataFrame> {

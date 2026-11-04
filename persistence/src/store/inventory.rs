@@ -232,7 +232,7 @@ pub struct OriginalInventory<'attempt, 'store> {
     previous_first: u64,
     work: InventoryWork,
     budget: Arc<ByteBudget>,
-    _reservation: ByteReservation,
+    reservation: ByteReservation,
 }
 pub(super) struct NormalInventory {
     census_header: Option<census::CensusHeader>,
@@ -376,6 +376,10 @@ impl<'store> std::ops::Deref for InventoryOwner<'_, 'store> {
         }
     }
 }
+pub(super) struct NormalDirectoryInodes {
+    pub original: (u64, u64),
+    pub events: Option<(u64, u64)>,
+}
 impl<'store> OriginalInventory<'store, 'store> {
     pub(super) fn owned_counted(
         mut owner: RegisteredAttempt<'store>,
@@ -404,7 +408,7 @@ impl<'store> OriginalInventory<'store, 'store> {
             previous_first,
             work,
             budget,
-            _reservation: reservation,
+            reservation,
         } = owner.original_inventory_counted(budget, startup)?;
         Ok(Self {
             attempt: InventoryOwner::Owned(Box::new(owner)),
@@ -428,7 +432,7 @@ impl<'store> OriginalInventory<'store, 'store> {
             previous_first,
             work,
             budget,
-            _reservation: reservation,
+            reservation,
         })
     }
     pub(super) fn allow_candidates(&mut self) -> io::Result<()> {
@@ -448,6 +452,23 @@ impl<'store> OriginalInventory<'store, 'store> {
             .as_ref()
             .map(PrivateDirectory::device_inode)
             .transpose()?;
+        self.into_normal_prepared(cleanup_original_inode, cleanup_events_inode)
+    }
+    pub(super) fn normal_directory_inodes(&self) -> io::Result<NormalDirectoryInodes> {
+        Ok(NormalDirectoryInodes {
+            original: self.attempt.original_directory().device_inode()?,
+            events: self
+                .events
+                .as_ref()
+                .map(PrivateDirectory::device_inode)
+                .transpose()?,
+        })
+    }
+    pub(super) fn into_normal_prepared(
+        self,
+        cleanup_original_inode: (u64, u64),
+        cleanup_events_inode: Option<(u64, u64)>,
+    ) -> io::Result<(RegisteredAttempt<'store>, NormalInventory)> {
         let Self {
             attempt,
             files,
@@ -456,7 +477,7 @@ impl<'store> OriginalInventory<'store, 'store> {
             index_data,
             original_identity,
             events_identity,
-            _reservation: mut reservation,
+            mut reservation,
             ..
         } = self;
         drop(index_data);
@@ -540,7 +561,7 @@ impl<'store> RegisteredAttempt<'store> {
             previous_first: 0,
             work: *work,
             budget: Arc::clone(budget),
-            _reservation: reservation,
+            reservation,
         })
     }
 }
@@ -647,6 +668,24 @@ impl OriginalInventory<'_, '_> {
             crate::canonical::metadata::Body::LossOnly => Err(invalid()),
         }
     }
+    pub(super) fn release_decoder_workspace(&mut self) -> io::Result<()> {
+        if !self.enumerated() {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+
+        self.reservation
+            .shrink_to(SUMMARY_BYTES + crate::event_table::index::WORKING_BYTES);
+        Ok(())
+    }
+    pub(super) fn ordinary_index(&self) -> io::Result<&Index> {
+        if !self.enumerated() || self.index_conflict {
+            return Err(invalid());
+        }
+
+        self.index_data
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))
+    }
     pub(super) fn metadata_file(&self, file: &File) -> io::Result<()> {
         if self.files[11] != Some(FileIdentity::read(file)?) {
             return Err(invalid());
@@ -667,20 +706,9 @@ impl OriginalInventory<'_, '_> {
                     return Err(invalid());
                 }
                 let index = self.index_data.as_ref().ok_or_else(invalid)?;
-                if index.identity != manifest.identity
-                    || index.first != manifest.events_first
-                    || index.end != manifest.events_end
-                    || manifest.event_batches
-                        != Some(u32::try_from(index.batches.len()).map_err(|_| invalid())?)
-                    || manifest
-                        .tables
-                        .iter()
-                        .find(|table| table.name == "events")
-                        .map(|table| table.rows)
-                        != Some(index.rows)
-                {
-                    return Err(invalid());
-                }
+                index
+                    .validate_manifest(manifest)
+                    .map_err(crate::canonical::rows::source_error)?;
                 for (position, name) in TABLE_FILES.iter().enumerate() {
                     let stem = name.strip_suffix(".parquet").ok_or_else(invalid)?;
                     let present = self.files[position].is_some();

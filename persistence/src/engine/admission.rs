@@ -137,6 +137,36 @@ pub(super) fn validate_reader_metadata(
     reader: &mut (impl Read + Seek),
     size: u64,
 ) -> Result<ThriftFileMetadata> {
+    let (metadata, footer) = validate_reader_header(reader, size)?;
+    let mut totals = Totals::default();
+
+    for group in &metadata.row_groups {
+        validate_group(reader, group, &footer, &mut totals)?;
+    }
+
+    Ok(metadata)
+}
+
+/// Streaming callers reserve and decode only admitted intersecting groups. Page and file
+/// work remain cumulative; expansion limits apply to each group instead of a captured file.
+pub(super) fn validate_reader_grouped_metadata(
+    reader: &mut (impl Read + Seek),
+    size: u64,
+) -> Result<ThriftFileMetadata> {
+    let (metadata, footer) = validate_reader_header(reader, size)?;
+    let mut totals = Totals::default();
+    for group in &metadata.row_groups {
+        totals.expanded_bytes = 0;
+        totals.decoded_bytes = 0;
+        validate_group(reader, group, &footer, &mut totals)?;
+    }
+    Ok(metadata)
+}
+
+fn validate_reader_header(
+    reader: &mut (impl Read + Seek),
+    size: u64,
+) -> Result<(ThriftFileMetadata, Extent)> {
     if size > FILE_BYTES_MAX {
         return Err(Error::Bound("parquet file bytes"));
     }
@@ -149,13 +179,7 @@ pub(super) fn validate_reader_metadata(
     validate_schema(&metadata.schema)?;
     schema::validate_arrow(&metadata)?;
     validate_rows(&metadata)?;
-    let mut totals = Totals::default();
-
-    for group in &metadata.row_groups {
-        validate_group(reader, group, &footer, &mut totals)?;
-    }
-
-    Ok(metadata)
+    Ok((metadata, footer))
 }
 
 pub(super) fn validate_decode_limits(

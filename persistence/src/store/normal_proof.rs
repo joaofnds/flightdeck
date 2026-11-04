@@ -189,15 +189,27 @@ impl SourceProof {
     }
     pub fn check(&self, input: &AttemptInput) -> io::Result<()> {
         self.observations.set(self.observations.get() + 1);
-        if self.reader.object_binding()? != input.binding
-            || self.reader.generation() != self.generation
-            || self.reader.identity() != Some(input.run)
-            || SourceTiming::from_reader(&self.reader) != input.source
-            || self.reader.dictionary_capacity().is_some() != input.captured
-        {
-            return Err(invalid());
-        }
-        Ok(())
+        check_reader(&self.reader, input, self.generation)
+    }
+    pub(super) fn metric_tick(
+        &mut self,
+        input: &AttemptInput,
+        identity: &crate::WindowIdentity,
+        publication: u64,
+        budget: &std::sync::Arc<crate::resources::ByteBudget>,
+        ledger: &super::PublicationLedger,
+    ) -> io::Result<crate::encoder::metric_projection::MetricTick> {
+        let work = ProgramWork { input, ledger };
+        self.checked_read(input, |reader| {
+            crate::encoder::metric_projection::MetricTick::read(
+                reader,
+                identity,
+                publication,
+                budget,
+                Some(&work),
+            )
+            .map_err(crate::canonical::rows::source_error)
+        })
     }
     pub fn checked_read<T>(
         &mut self,
@@ -396,11 +408,37 @@ fn invalid_value(error: impl std::fmt::Display) -> io::Error {
 }
 
 pub(super) fn tick_workspace_bytes(limits: &crate::Limits) -> usize {
-    4096 + limits.cpus * size_of::<collector::machine::CPUTicks>()
-        + limits.interfaces * size_of::<collector::interfaces::Interface>()
-        + (limits.states + limits.cores * limits.states) * size_of::<u64>()
-        + limits.cores * size_of::<usize>()
-        + limits.fans * size_of::<f32>()
-        + limits.processes * size_of::<collector::processes::Process>()
-        + limits.coalitions * size_of::<collector::coalitions::Coalition>()
+    crate::window::tick_workspace_bytes(limits)
+}
+
+/// The same immutable-header comparison brackets tick and native program observations.
+fn check_reader(reader: &RingReader, input: &AttemptInput, generation: u64) -> io::Result<()> {
+    if reader.object_binding()? != input.binding
+        || reader.generation() != generation
+        || reader.identity() != Some(input.run)
+        || SourceTiming::from_reader(reader) != input.source
+        || reader.dictionary_capacity().is_some() != input.captured
+    {
+        return Err(invalid());
+    }
+
+    Ok(())
+}
+
+struct ProgramWork<'input> {
+    input: &'input AttemptInput,
+    ledger: &'input crate::PublicationLedger,
+}
+impl crate::owned_identity::ProgramReadWork for ProgramWork<'_> {
+    fn before(&self, reader: &RingReader) -> crate::Result<()> {
+        self.ledger.update(|work| work.source_observations += 1);
+        check_reader(reader, self.input, self.input.binding.generation)?;
+        self.ledger.update(|work| work.source_reads += 1);
+        Ok(())
+    }
+    fn after(&self, reader: &RingReader) -> crate::Result<()> {
+        self.ledger.update(|work| work.source_observations += 1);
+        check_reader(reader, self.input, self.input.binding.generation)?;
+        Ok(())
+    }
 }

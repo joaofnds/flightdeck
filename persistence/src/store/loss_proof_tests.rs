@@ -16,10 +16,7 @@ fn encode_payload(
         window,
     };
     let mut reader = fixture.reader();
-    let tick = encode_payload_tick(&mut reader, publication);
-    let observation = original_observation(publication, &tick);
-    let mut staged = Window::new(identity, Limits::from_shape(&reader.shape()).unwrap());
-    staged.push_tick(&observation, &tick, &[]).unwrap();
+    let (staged, tick, observation) = encode_payload_window(&mut reader, &identity, publication);
     let mut tables = encode_original_tables(attempt, &staged);
     let mut rows = encode_original_rows(attempt, &mut reader, &tick);
     if omit_event {
@@ -61,6 +58,47 @@ fn encode_payload(
         tables,
         event_batches: Some(u32::try_from(index.batches.len()).unwrap()),
     }
+}
+
+fn encode_payload_window(
+    reader: &mut RingReader,
+    identity: &WindowIdentity,
+    publication: u64,
+) -> (Window, collector::ring::Tick, Observation) {
+    reader.seek_publication(publication).unwrap();
+    let shape = reader.shape();
+    let captured = reader.dictionary_capacity().is_some();
+    let mut tick = crate::tick_buffer(&shape).unwrap();
+    let mut identities = Vec::with_capacity(usize::try_from(shape.process_capacity).unwrap());
+    let found = if captured {
+        reader
+            .read_identity_into(&mut tick, &mut identities)
+            .unwrap()
+    } else {
+        reader.read_into(&mut tick).unwrap()
+    };
+    assert!(matches!(found,
+        collector::ring::Found::Publication { publication: actual, .. }
+            if actual == publication));
+    let observation = original_observation(publication, &tick);
+    let mut staged = Window::new(*identity, Limits::from_shape(&shape).unwrap());
+    if captured {
+        staged
+            .push_tick_with_identity(
+                &observation,
+                &tick,
+                &[],
+                &crate::IdentitySource {
+                    reader,
+                    processes: &identities,
+                    events: &[],
+                },
+            )
+            .unwrap();
+    } else {
+        staged.push_tick(&observation, &tick, &[]).unwrap();
+    }
+    (staged, tick, observation)
 }
 
 fn encode_payload_tick(reader: &mut RingReader, publication: u64) -> collector::ring::Tick {
@@ -1381,3 +1419,6 @@ mod row_salvage_tests;
 
 #[path = "inherited_events_tests.rs"]
 mod inherited_events_tests;
+
+#[path = "ordinary_recovery_tests.rs"]
+mod ordinary_recovery_tests;

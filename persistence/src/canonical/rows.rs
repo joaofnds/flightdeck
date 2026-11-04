@@ -109,7 +109,7 @@ fn verify_rows_ordinary(
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
 ) -> io::Result<(u64, u64)> {
-    let ticks = verify_ticks(directory, metadata, manifest, budget, work)?;
+    let ticks = verify_ticks(directory, metadata, manifest, budget, work, None)?;
     work.namespace_attempts += 1;
     work.node_attempts += 1;
     let events = directory.open_directory("events")?;
@@ -188,7 +188,7 @@ pub(crate) fn verify_batch_file(
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
 ) -> io::Result<(u64, u64)> {
-    let (frame, counts) = admit_batch_file(file, metadata, batch, mode, budget, work)?;
+    let (frame, counts) = admit_batch_file(file, metadata, batch, mode, budget, work, None)?;
     drop(frame);
     Ok(counts)
 }
@@ -199,14 +199,17 @@ pub(crate) fn admit_batch_file(
     mode: &BatchMode<'_>,
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
+    raw_work: Option<&dyn crate::engine::RawTableWork>,
 ) -> io::Result<(polars::prelude::DataFrame, (u64, u64))> {
     work.raw_admissions += 1;
-    let frame = crate::event_recovery::read::read_batch_file(
+    let frame = crate::event_recovery::read::read_batch_file_with_work(
         file,
         batch,
         metadata.captured,
         mode.associated,
         budget,
+        &mut 0,
+        raw_work,
     )
     .map_err(source_error)?;
     let numbers = frame
@@ -249,8 +252,9 @@ pub(crate) fn verify_ticks(
     manifest: &crate::Manifest,
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
+    raw_work: Option<&dyn crate::engine::RawTableWork>,
 ) -> io::Result<Vec<TickSpan>> {
-    let frame = tick_frame(directory, manifest, budget, work)?;
+    let frame = tick_frame(directory, manifest, budget, work, raw_work)?;
     verify_ticks_frame(&frame, metadata, manifest)
 }
 fn tick_frame(
@@ -258,10 +262,11 @@ fn tick_frame(
     manifest: &crate::Manifest,
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
+    raw_work: Option<&dyn crate::engine::RawTableWork>,
 ) -> io::Result<polars::prelude::DataFrame> {
     work.namespace_attempts += 1;
     work.raw_admissions += 1;
-    let table = admit_tick_file(directory.open_file("ticks.parquet")?, budget)?;
+    let table = admit_tick_file(directory.open_file("ticks.parquet")?, budget, raw_work)?;
     let count = manifest
         .tables
         .iter()
@@ -271,9 +276,13 @@ fn tick_frame(
     if table.row_count() != count {
         return Err(invalid());
     }
-    tick_columns(&table)
+    tick_columns(&table, raw_work)
 }
-fn admit_tick_file(file: File, budget: &Arc<ByteBudget>) -> io::Result<AdmittedTable> {
+fn admit_tick_file(
+    file: File,
+    budget: &Arc<ByteBudget>,
+    work: Option<&dyn crate::engine::RawTableWork>,
+) -> io::Result<AdmittedTable> {
     let limits = DecodeLimits {
         compressed_bytes: 8 * 1024 * 1024,
         expanded_bytes: 8 * 1024 * 1024,
@@ -281,14 +290,17 @@ fn admit_tick_file(file: File, budget: &Arc<ByteBudget>) -> io::Result<AdmittedT
         row_groups: 1,
         columns: crate::schema::TICK_COLUMNS_MAX,
     };
-    let table = AdmittedTable::from_file_budgeted_with_limits(file, budget, &limits)
+    let table = AdmittedTable::from_file_limited_counted(file, budget, &limits, work)
         .map_err(admission_error)?;
     validate_tick_schema(&table)?;
     Ok(table)
 }
-fn tick_columns(table: &AdmittedTable) -> io::Result<polars::prelude::DataFrame> {
+fn tick_columns(
+    table: &AdmittedTable,
+    work: Option<&dyn crate::engine::RawTableWork>,
+) -> io::Result<polars::prelude::DataFrame> {
     table
-        .read_metadata_budgeted(
+        .read_metadata_counted(
             &[
                 "publication",
                 "run_tick",
@@ -299,6 +311,7 @@ fn tick_columns(table: &AdmittedTable) -> io::Result<polars::prelude::DataFrame>
                 "events_end",
             ],
             Some(61),
+            work,
         )
         .map_err(read_error)
 }
@@ -319,11 +332,11 @@ pub(crate) fn zero_tick_file(
     work: &mut ReadWork,
 ) -> io::Result<bool> {
     work.raw_admissions += 1;
-    let table = admit_tick_file(file, budget)?;
+    let table = admit_tick_file(file, budget, None)?;
     if table.row_count() != 0 {
         return Ok(false);
     }
-    let frame = tick_columns(&table)?;
+    let frame = tick_columns(&table, None)?;
     if frame.height() != 0 {
         return Err(invalid());
     }
@@ -459,11 +472,12 @@ pub(crate) fn observation_keys(
     metadata: &CanonicalMetadata,
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
+    raw_work: Option<&dyn crate::engine::RawTableWork>,
 ) -> io::Result<Vec<(Namespace, CanonicalKey)>> {
     let Body::Ordinary(manifest) = &metadata.body else {
         return Ok(Vec::new());
     };
-    let frame = tick_frame(directory, manifest, budget, work)?;
+    let frame = tick_frame(directory, manifest, budget, work, raw_work)?;
     verify_ticks_frame(&frame, metadata, manifest)?;
     let publications = tick_column(&frame, "publication")?;
     let clocks = tick_column(&frame, "wall_ns")?;

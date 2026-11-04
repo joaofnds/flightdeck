@@ -104,7 +104,26 @@ pub(crate) fn read_batch_file_counted(
     budget: &Arc<ByteBudget>,
     decoded_bytes: &mut u64,
 ) -> Result<DataFrame> {
-    let frame = decode_batch_file(file, identities, budget)?;
+    read_batch_file_with_work(
+        file,
+        batch,
+        identities,
+        associated,
+        budget,
+        decoded_bytes,
+        None,
+    )
+}
+pub(crate) fn read_batch_file_with_work(
+    file: std::fs::File,
+    batch: &super::Batch,
+    identities: bool,
+    associated: bool,
+    budget: &Arc<ByteBudget>,
+    decoded_bytes: &mut u64,
+    work: Option<&dyn crate::engine::RawTableWork>,
+) -> Result<DataFrame> {
+    let frame = decode_batch_file(file, identities, budget, work)?;
     *decoded_bytes += collector::u64_from_usize(frame.estimated_size(true));
     read_batch_validate(&frame, batch, identities, associated)?;
     Ok(frame)
@@ -114,6 +133,7 @@ fn decode_batch_file(
     file: std::fs::File,
     identities: bool,
     budget: &Arc<ByteBudget>,
+    work: Option<&dyn crate::engine::RawTableWork>,
 ) -> Result<DataFrame> {
     let limits = DecodeLimits {
         compressed_bytes: collector::u64_from_usize(COMPRESSED_BYTES_MAX),
@@ -122,7 +142,7 @@ fn decode_batch_file(
         row_groups: 1,
         columns: model::catalog::EVENTS.column_count(),
     };
-    let admitted = AdmittedTable::from_file_budgeted_with_limits(file, budget, &limits)
+    let admitted = AdmittedTable::from_file_limited_counted(file, budget, &limits, work)
         .map_err(admission_error)?;
     if admitted.row_count() == 0 {
         return Err(Error::Bound("empty physical event batch"));
@@ -146,9 +166,10 @@ fn decode_batch_file(
             .map(|column| column.name),
     );
     let frame = admitted
-        .read_metadata_budgeted(
+        .read_metadata_counted(
             &columns,
             Some(u32::try_from(BATCH_ROWS_MAX).map_err(|_| Error::Bound("terminal batch rows"))?),
+            work,
         )
         .map_err(|error| match error {
             AdmittedReadRefusal::Admission(error) => admission_error(error),
@@ -165,7 +186,7 @@ pub(crate) fn read_original_batch_file(
     budget: &Arc<ByteBudget>,
     decoded_bytes: &mut u64,
 ) -> Result<super::Batch> {
-    let frame = decode_batch_file(file, identities, budget)?;
+    let frame = decode_batch_file(file, identities, budget, None)?;
     *decoded_bytes += collector::u64_from_usize(frame.estimated_size(true));
     let events = frame.column("event")?.u64()?;
     let first = events.get(0).ok_or(Error::Bound("original first event"))?;

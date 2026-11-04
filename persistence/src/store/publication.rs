@@ -48,6 +48,7 @@ pub struct NormalPublication<'store> {
     proof: Option<super::normal_proof::SourceProof>,
     work: PublicationWork,
     ledger: Option<super::PublicationLedger>,
+    accounted: Option<PublicationWork>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Validation {
@@ -290,6 +291,22 @@ impl Store {
         &self,
         budget: &Arc<ByteBudget>,
     ) -> io::Result<NormalPublication<'_>> {
+        self.resume_publication_inner(budget, None)
+    }
+    /// Source-free normal resume with caller-retained accounting, including construction errors.
+    pub fn resume_publication_counted(
+        &self,
+        budget: &Arc<ByteBudget>,
+        ledger: &super::PublicationLedger,
+    ) -> io::Result<NormalPublication<'_>> {
+        ledger.require_budget(budget)?;
+        self.resume_publication_inner(budget, Some(ledger))
+    }
+    fn resume_publication_inner(
+        &self,
+        budget: &Arc<ByteBudget>,
+        ledger: Option<&super::PublicationLedger>,
+    ) -> io::Result<NormalPublication<'_>> {
         if !self.protocol_two {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
@@ -306,8 +323,27 @@ impl Store {
         let reservation = budget
             .reserve(256 * 1024)
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
-        let state = super::publication_control::read_normal(&self.directory, self.recording)?;
-        let (directory, placement) = if state.phase == Phase::Registered {
+        let state = super::publication_control::read_normal(
+            &super::publication_control::CountedControl {
+                root: &self.directory,
+                ledger,
+            },
+            self.recording,
+        )?;
+        if state.census.kind != 0
+            || state.row_plan.is_some()
+            || state.salvage.is_some()
+            || state.input.is_finite()
+        {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+
+        let (directory, placement) = if let Some(ledger) = ledger {
+            let mut work = PublicationWork::default();
+            let result = resume_publication_directory(self, &state, &mut work);
+            ledger.record(&work, &mut PublicationWork::default());
+            result?
+        } else if state.phase == Phase::Registered {
             self.register_attempt_directory(&state.input, state.transaction, true)?
         } else {
             let base = self.directory.open_directory(base_name(&state.input))?;
@@ -327,13 +363,61 @@ impl Store {
             root: &self.directory,
             placement,
         };
-        if state.salvage.is_some() {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        let mut owner =
+            NormalPublication::new(attempt, state, budget, Some(reservation), ledger.cloned())?;
+        if ledger.is_some() {
+            owner.accounted = Some(PublicationWork::default());
         }
-        NormalPublication::new(attempt, state, budget, Some(reservation), None)
+        Ok(owner)
     }
 }
+fn resume_publication_directory(
+    store: &Store,
+    state: &NormalState,
+    work: &mut PublicationWork,
+) -> io::Result<(PrivateDirectory, OriginalPlacement)> {
+    work.inventory.open_attempts += 1;
+    let base = store.directory.open_directory(base_name(&state.input))?;
+    work.inventory.open_attempts += 1;
+    let object =
+        base.open_directory(&collector::recording::identity_text(state.transaction).to_string())?;
+    drop(base);
+    super::inventory::select_original_counted(&object, &mut work.inventory.open_attempts)?
+        .ok_or_else(invalid)
+}
 impl<'store> NormalPublication<'store> {
+    pub(super) fn recovered(
+        retained: &mut Option<OriginalInventory<'store, 'store>>,
+        manifest: &crate::Manifest,
+        source: &mut Option<super::normal_proof::SourceProof>,
+        budget: &Arc<ByteBudget>,
+        ledger: &super::PublicationLedger,
+    ) -> io::Result<Self> {
+        let inventory = retained.as_ref().ok_or_else(invalid)?;
+        let metadata = inventory.owner().ordinary_draft(manifest)?;
+        inventory.validate_normal(&metadata)?;
+        let batches = inventory.normal_batches(&metadata)?;
+        let attempt = inventory.owner();
+        let state = NormalState::registered(attempt.transaction, attempt.input.clone());
+        normal_namespace(attempt, &state, Some(ledger))?;
+        normal_original_only(attempt, &state, Some(ledger))?;
+        let reservation = budget
+            .reserve(256 * 1024)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let directories = inventory.normal_directory_inodes()?;
+        let (attempt, witness) = retained
+            .take()
+            .ok_or_else(invalid)?
+            .into_normal_prepared(directories.original, directories.events)?;
+        let proof = source.take().ok_or_else(invalid)?;
+        let mut owner = Self::blank(attempt, state, budget, reservation);
+        owner.witness = Some(witness);
+        owner.batches = batches;
+        owner.metadata = Some(metadata);
+        owner.proof = Some(proof);
+        owner.ledger = Some(ledger.clone());
+        Ok(owner)
+    }
     fn new(
         attempt: RegisteredAttempt<'store>,
         state: NormalState,
@@ -398,6 +482,7 @@ impl<'store> NormalPublication<'store> {
             proof: None,
             work: PublicationWork::default(),
             ledger: None,
+            accounted: None,
         }
     }
     #[must_use]
@@ -412,6 +497,14 @@ impl<'store> NormalPublication<'store> {
         work
     }
     pub fn step(&mut self) -> io::Result<PublicationStep> {
+        let result = self.step_inner();
+        let work = self.work();
+        if let (Some(ledger), Some(accounted)) = (&self.ledger, &mut self.accounted) {
+            ledger.record(&work, accounted);
+        }
+        result
+    }
+    fn step_inner(&mut self) -> io::Result<PublicationStep> {
         if let Some(proof) = &mut self.proof {
             proof.begin_pass();
         }
@@ -461,9 +554,17 @@ impl<'store> NormalPublication<'store> {
         let metadata = if let Some(draft) = self.draft.take() {
             draft
         } else {
+            self.work.canonical.namespace_attempts += 1;
             let mut file = attempt.original_directory().open_file("metadata")?;
             inventory.metadata_file(&file)?;
-            let metadata = CanonicalMetadata::read(&mut file)?;
+            let length = file.metadata()?.len();
+            let metadata = CanonicalMetadata::read_from(
+                &mut WorkFile {
+                    file: &mut file,
+                    work: &mut self.work,
+                },
+                length,
+            )?;
             inventory.metadata_file(&file)?;
             metadata
         };
@@ -498,6 +599,7 @@ impl<'store> NormalPublication<'store> {
         let witness = self.witness.as_ref().ok_or_else(invalid)?;
         let ordinary = matches!(metadata.body, Body::Ordinary(_));
         let events = if ordinary {
+            self.work.canonical.namespace_attempts += 1;
             Some(attempt.directory.open_directory("events")?)
         } else {
             None
@@ -519,7 +621,11 @@ impl<'store> NormalPublication<'store> {
                 metadata,
                 &self.budget,
                 &mut self.work.canonical,
+                self.ledger
+                    .as_ref()
+                    .map(|ledger| -> &dyn crate::engine::RawTableWork { ledger }),
             )?;
+            self.work.canonical.namespace_attempts += 1;
             let index_file = directory.open_file("index")?;
             witness.index(&index_file)?;
             self.work.full_syncs += 1;
@@ -580,6 +686,7 @@ impl<'store> NormalPublication<'store> {
                 self.ledger.as_ref(),
             )?;
         }
+        self.work.canonical.namespace_attempts += 1;
         let metadata_file = attempt.directory.open_file("metadata")?;
         if self.proof.is_none() {
             witness.file("metadata", &metadata_file)?;
@@ -610,6 +717,7 @@ impl<'store> NormalPublication<'store> {
         let metadata = self.metadata.as_ref().ok_or_else(invalid)?;
         let witness = self.witness.as_ref().ok_or_else(invalid)?;
         let events_for_check = if matches!(metadata.body, Body::Ordinary(_)) {
+            self.work.canonical.namespace_attempts += 1;
             Some(attempt.directory.open_directory("events")?)
         } else {
             None
@@ -626,6 +734,7 @@ impl<'store> NormalPublication<'store> {
                         &self.budget,
                         witness,
                         &mut self.work,
+                        self.ledger.as_ref(),
                     )?;
                 }
                 self.tables_next += 1;
@@ -647,6 +756,9 @@ impl<'store> NormalPublication<'store> {
                     manifest,
                     &self.budget,
                     &mut self.work.canonical,
+                    self.ledger
+                        .as_ref()
+                        .map(|ledger| -> &dyn crate::engine::RawTableWork { ledger }),
                 )?);
             }
         }
@@ -657,6 +769,7 @@ impl<'store> NormalPublication<'store> {
             }
         }
         let events = if ordinary {
+            self.work.canonical.namespace_attempts += 1;
             Some(attempt.directory.open_directory("events")?)
         } else {
             None
@@ -684,6 +797,9 @@ impl<'store> NormalPublication<'store> {
                 },
                 &self.budget,
                 &mut self.work.canonical,
+                self.ledger
+                    .as_ref()
+                    .map(|ledger| -> &dyn crate::engine::RawTableWork { ledger }),
             )?;
             if let Some(proof) = self.proof.as_mut() {
                 proof.frame = Some(frame);
@@ -725,18 +841,24 @@ impl<'store> NormalPublication<'store> {
                 &after,
             )?;
         }
+        self.work.inventory.open_attempts += 1;
         let base = attempt.root.open_directory(base_name(&attempt.input))?;
+        self.work.inventory.open_attempts += 1;
         let object = base.open_directory(
             &collector::recording::identity_text(attempt.transaction).to_string(),
         )?;
-        let (selected, placement) =
-            super::inventory::select_original(&object)?.ok_or_else(invalid)?;
+        let (selected, placement) = super::inventory::select_original_counted(
+            &object,
+            &mut self.work.inventory.open_attempts,
+        )?
+        .ok_or_else(invalid)?;
         if !selected.same_inode(&attempt.directory)? {
             return Err(invalid());
         }
 
         drop(selected);
         if placement == OriginalPlacement::Pending {
+            self.work.canonical.renames += 1;
             object.rename("pending", "ready")?;
         }
         sync_directory(&attempt.directory, &mut self.work)?;
@@ -1124,7 +1246,9 @@ impl<'store> NormalPublication<'store> {
 
         // A normal original was renamed, never copied. Its sole ready source is canonical.
         // Refuse salvage/residual children instead of removing uncomposed ownership.
+        self.work.inventory.open_attempts += 1;
         let base = attempt.root.open_directory(base_name(&attempt.input))?;
+        self.work.inventory.open_attempts += 1;
         let object = base.open_directory(
             &collector::recording::identity_text(attempt.transaction).to_string(),
         )?;
@@ -1571,6 +1695,7 @@ fn validate_table(
     budget: &Arc<ByteBudget>,
     witness: &super::inventory::NormalInventory,
     work: &mut PublicationWork,
+    ledger: Option<&super::PublicationLedger>,
 ) -> io::Result<()> {
     let name = format!("{}.parquet", expected.name);
     work.canonical.raw_admissions += 1;
@@ -1590,8 +1715,12 @@ fn validate_table(
     witness.file(&name, &file)?;
     work.full_syncs += 1;
     private::full_sync(&file)?;
-    let table = crate::engine::AdmittedTable::from_file_budgeted(file, budget)
-        .map_err(rows::admission_error)?;
+    let table = if let Some(ledger) = ledger {
+        crate::engine::AdmittedTable::from_file_streaming_counted(file, budget, ledger)
+    } else {
+        crate::engine::AdmittedTable::from_file_streaming(file, budget)
+    }
+    .map_err(rows::admission_error)?;
     if table.row_count() != expected.rows {
         return Err(invalid());
     }
@@ -1636,4 +1765,13 @@ pub(super) fn base_name(input: &AttemptInput) -> &'static str {
 }
 fn invalid() -> io::Error {
     io::Error::from(io::ErrorKind::InvalidData)
+}
+
+impl Drop for NormalPublication<'_> {
+    fn drop(&mut self) {
+        let work = self.work();
+        if let (Some(ledger), Some(accounted)) = (&self.ledger, &mut self.accounted) {
+            ledger.record(&work, accounted);
+        }
+    }
 }
