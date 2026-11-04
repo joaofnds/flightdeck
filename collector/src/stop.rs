@@ -106,14 +106,17 @@ extern "C" fn request_stop(_signal: c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::process::{Command, Stdio};
 
     unsafe extern "C" {
         fn raise(signal: c_int) -> c_int;
     }
 
-    /// Held by each test that installs the handlers, since a signal's action belongs to the
-    /// whole process and these tests would otherwise change it under each other.
-    static HANDLERS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const ISOLATED_MARKER: &str = "FLIGHTDECK_STOP_REQUEST_ISOLATED";
+    const ISOLATED_COMPLETED: &str = "flightdeck-stop-request-proof completed";
+    /// The 10 ms waits the isolated process gets, 30 seconds, since it starts a whole test binary.
+    const ISOLATED_WAITS_MAX: usize = 3000;
 
     /// The function the process now runs on `signal`, or `None` for the default action.
     fn handler_of(signal: c_int) -> Option<extern "C" fn(c_int)> {
@@ -131,9 +134,6 @@ mod tests {
         // Method: give each signal a handler of the test's own, then read each signal's action
         // while installed and after drop. The process's own actions are not a known start,
         // since a shell starts a background job with SIGINT ignored.
-        let _handlers = HANDLERS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let originals = [replace(SIGINT, &found()), replace(SIGTERM, &found())];
 
         let stop = Stop::install().unwrap();
@@ -179,11 +179,17 @@ mod tests {
     fn a_stop_request_sets_the_deadline_once() {
         // Goal: the first stop request starts the deadline that ends a collector stuck in its
         // finish, and a later request does not push the deadline back.
-        // Method: raise SIGTERM in this process twice under the installed handler, and read the
-        // pending alarm after each, which also cancels it.
-        let _handlers = HANDLERS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Method: raise SIGTERM twice under the installed handler, and read the pending alarm
+        // after each, which also cancels it. This runs in a process of its own, since the request
+        // belongs to the whole process and any other test that reads it would stop.
+        if std::env::var_os(ISOLATED_MARKER).is_some() {
+            a_stop_request_sets_the_deadline_once_isolated();
+        } else {
+            a_stop_request_sets_the_deadline_once_launch();
+        }
+    }
+
+    fn a_stop_request_sets_the_deadline_once_isolated() {
         let stop = Stop::install().unwrap();
 
         assert_eq!(0, unsafe { raise(SIGTERM) });
@@ -195,5 +201,39 @@ mod tests {
         assert!(Stop::requested());
         assert_eq!(STOP_LIMIT_SECONDS, first);
         assert_eq!(0, second);
+        println!("\n{ISOLATED_COMPLETED}");
+    }
+
+    fn a_stop_request_sets_the_deadline_once_launch() {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "stop::tests::a_stop_request_sets_the_deadline_once",
+                "--no-capture",
+                "--test-threads=1",
+            ])
+            .env(ISOLATED_MARKER, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+
+        for _ in 0..ISOLATED_WAITS_MAX {
+            if let Some(status) = child.try_wait().unwrap() {
+                let mut text = String::new();
+                let mut stdout = child.stdout.take().unwrap();
+                stdout.read_to_string(&mut text).unwrap();
+                assert!(status.success());
+                // An exact name that matches no test exits successfully having run nothing.
+                let completed = text.lines().filter(|line| *line == ISOLATED_COMPLETED);
+                assert_eq!(1, completed.count());
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        panic!("isolated stop request test exceeded its bound");
     }
 }
