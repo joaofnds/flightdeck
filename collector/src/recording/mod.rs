@@ -32,7 +32,6 @@ const _: () = assert!(
 );
 
 use std::ffi::{c_char, c_int, c_void};
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -312,11 +311,11 @@ impl Registration {
         }
     }
 
-    fn start_ownership(root: &Path) -> io::Result<File> {
+    fn start_ownership(root: &Path) -> io::Result<FileLock> {
         create_private_dir(root)?;
         let ownership = FileLock::try_lock(&root.join("collector.lock"))?;
         holder::withdraw(root)?;
-        ownership.file().try_clone()
+        Ok(ownership)
     }
 
     fn start_unregistered(
@@ -324,7 +323,7 @@ impl Registration {
         shape: Shape,
         start_continuous_ns: u64,
         error: io::Error,
-        ownership: Option<File>,
+        ownership: Option<FileLock>,
         reclaim: bool,
     ) -> io::Result<StartedRecording> {
         let mut writer = locked.create_unregistered(shape, start_continuous_ns)?;

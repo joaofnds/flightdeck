@@ -42,6 +42,7 @@ const ATOMIC_WRITE_DESCRIPTORS_MAX: usize = 2;
 const _: () = assert!(ATOMIC_WRITE_DESCRIPTORS_MAX <= 8);
 const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
+const LOCK_UN: c_int = 8;
 const F_FULLFSYNC: c_int = 51;
 const F_GETLK: c_int = 7;
 const F_UNLCK: i16 = 2;
@@ -134,6 +135,18 @@ fn security_attributes() -> Attrlist {
         dirattr: 0,
         fileattr: 0,
         forkattr: 0,
+    }
+}
+
+/// Closing alone would leave the lock held for as long as any copy of the descriptor stays open,
+/// and a process starting on another thread holds a copy of every descriptor until its exec
+/// closes them, which would read as a surviving owner.
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        if unsafe { flock(self.file.as_raw_fd(), LOCK_UN) } != 0 {
+            let code = io::Error::last_os_error().raw_os_error();
+            crate::diagnostics::error(format_args!("lock: release refused: {code:?}"));
+        }
     }
 }
 
@@ -533,6 +546,28 @@ mod tests {
         release.join().unwrap();
         fs::remove_dir_all(root).unwrap();
         assert_eq!(0, calls);
+    }
+
+    #[test]
+    fn a_released_lock_is_free_while_a_copy_of_its_descriptor_stays_open() {
+        // Goal: a process starting on another thread never keeps a released lock held, though
+        // it holds a copy of every descriptor until its exec closes them.
+        // Method: keep such a copy open across the release and take the lock again.
+        let root = std::env::temp_dir().join(format!(
+            "flightdeck-released-lock-copy-{}",
+            std::process::id()
+        ));
+        create_private_dir(&root).unwrap();
+        let path = root.join("persister.lock");
+        let lock = FileLock::try_lock(&path).unwrap();
+        let copy = lock.file.try_clone().unwrap();
+
+        drop(lock);
+        let taken_again = FileLock::try_lock(&path);
+
+        drop(copy);
+        fs::remove_dir_all(root).unwrap();
+        drop(taken_again.unwrap());
     }
 
     #[test]

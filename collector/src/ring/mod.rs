@@ -175,7 +175,7 @@ pub enum FoundEvent {
 /// The writer of a ring, which holds the lock file for as long as it lives.
 pub struct Writer {
     _lock: File,
-    recording_ownership: Option<File>,
+    recording_ownership: Option<crate::recording::private::FileLock>,
     mapping: Mapping,
     layout: Layout,
     /// The newest publication written, or the previous ring's newest before the first.
@@ -692,7 +692,10 @@ impl Writer {
         })
     }
 
-    pub(crate) fn retain_recording_ownership(&mut self, ownership: File) {
+    pub(crate) fn retain_recording_ownership(
+        &mut self,
+        ownership: crate::recording::private::FileLock,
+    ) {
         assert!(self.recording_ownership.is_none());
         self.recording_ownership = Some(ownership);
     }
