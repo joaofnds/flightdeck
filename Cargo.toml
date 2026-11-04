@@ -54,6 +54,17 @@ opt-level = 1
 # library ten times its release size.
 debug = false
 
+# Their tests run native children that write the most rows a recording retains, which unoptimized
+# took minutes of one core each on a loaded CI runner. Assertions and overflow checks stay on.
+[profile.dev.package.collector]
+opt-level = 1
+
+[profile.dev.package.model]
+opt-level = 1
+
+[profile.dev.package.persistence]
+opt-level = 1
+
 # Trap overflow and abort on a panic in the build people use, so its checks run there.
 [profile.release]
 overflow-checks = true
