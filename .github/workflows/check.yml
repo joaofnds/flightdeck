@@ -64,11 +64,13 @@ jobs:
             fi
           done
           [ "$(rustup toolchain list --quiet)" = "$RUSTUP_TOOLCHAIN-aarch64-apple-darwin" ]
-      # Only main saves, so a branch starts from main's build and never evicts it.
+      # Only main saves, so a branch starts from main's build and never evicts it. A failed test
+      # keeps the build, since otherwise a red job makes every later run of it build cold.
       - &restore-root-cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       # Installs only just, at the version and the checksum mise.toml and mise.lock pin, so CI
       # runs the justfile's recipes with the just a contributor runs them with. The other jobs
       # repeat this step through its anchor.
@@ -134,6 +136,7 @@ jobs:
         with:
           workspaces: desktop -> ../target
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - *install-just
       - run: just check-desktop
       - *refuse-ring-locks
