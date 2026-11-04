@@ -950,7 +950,7 @@ was already fetched; no target artifact existed. This includes Arrow and bundled
 compilation. A fresh macos-26 CI run of 6e450cc took 6m 51s for the workspace
 dependency build and clippy, then 7m 39s to compile the test executables. These timings
 include Rust and native work, not an isolated C++ measurement. The 15-minute job limit
-canceled the run after tests began, so the job allows 30 minutes for cold builds and
+canceled the run after tests began, so the job's limit was raised for cold builds and
 the complete suite. The completed tests reported no assertion failure before that
 cutoff; recording-file privacy had not run yet. Source:
 [CI run 38787804116](https://github.com/joaofnds/flightdeck/actions/runs/38787804116).
