@@ -132,8 +132,13 @@ impl CanonicalLoss {
             } => {
                 nonzero(transaction)?;
                 if (kind == CanonicalKind::Terminal && origin != 0)
-                    || (matches!(kind, CanonicalKind::Ordinary | CanonicalKind::Fragment)
-                        && origin == 0)
+                    || (matches!(
+                        kind,
+                        CanonicalKind::Ordinary
+                            | CanonicalKind::Fragment
+                            | CanonicalKind::FiniteEvents
+                            | CanonicalKind::FiniteEventLoss
+                    ) && origin == 0)
                 {
                     return Err(invalid());
                 }
@@ -172,6 +177,9 @@ pub struct CanonicalMetadata {
 }
 impl CanonicalMetadata {
     pub(crate) fn loss_routes(&self) -> io::Result<[Option<Namespace>; 2]> {
+        if self.kind == CanonicalKind::FiniteEventLoss {
+            return Ok([Some(Namespace::Fragments), None]);
+        }
         if self.kind != CanonicalKind::LossOnly {
             return Err(invalid());
         }
@@ -253,6 +261,8 @@ impl CanonicalMetadata {
                 2 => CanonicalKind::Terminal,
                 3 => CanonicalKind::Fragment,
                 4 => CanonicalKind::LossOnly,
+                5 => CanonicalKind::FiniteEvents,
+                6 => CanonicalKind::FiniteEventLoss,
                 _ => return Err(invalid()),
             },
             base: match small(bytes, 80)? {
@@ -407,9 +417,19 @@ impl CanonicalMetadata {
             {
                 0
             }
-            (Namespace::Fragments, CanonicalKind::Fragment | CanonicalKind::LossOnly)
-                if self.loss.event_end > self.loss.inherited.event_start
-                    && (self.kind == CanonicalKind::Fragment || self.base == RawBase::Data) =>
+            (
+                Namespace::Fragments,
+                CanonicalKind::Fragment
+                | CanonicalKind::LossOnly
+                | CanonicalKind::FiniteEvents
+                | CanonicalKind::FiniteEventLoss,
+            ) if self.loss.event_end > self.loss.inherited.event_start
+                && (matches!(
+                    self.kind,
+                    CanonicalKind::Fragment
+                        | CanonicalKind::FiniteEvents
+                        | CanonicalKind::FiniteEventLoss
+                ) || self.base == RawBase::Data) =>
             {
                 self.loss.inherited.event_start
             }
@@ -437,7 +457,10 @@ impl CanonicalMetadata {
             {
                 self.attempted_origin
             }
-            CanonicalKind::Fragment | CanonicalKind::LossOnly => self.loss.inherited.event_start,
+            CanonicalKind::Fragment
+            | CanonicalKind::LossOnly
+            | CanonicalKind::FiniteEvents
+            | CanonicalKind::FiniteEventLoss => self.loss.inherited.event_start,
         };
         Predecessor::Canonical {
             transaction: self.transaction,
@@ -472,7 +495,10 @@ impl CanonicalMetadata {
             (Body::Ordinary(inner), CanonicalKind::Ordinary) => {
                 self.validate_ordinary(inner, loss)?;
             }
-            (Body::Events(inner), CanonicalKind::Terminal | CanonicalKind::Fragment) => {
+            (
+                Body::Events(inner),
+                CanonicalKind::Terminal | CanonicalKind::Fragment | CanonicalKind::FiniteEvents,
+            ) => {
                 inner.validate()?;
                 if inner.recovery.run != self.run
                     || inner.identities != self.captured
@@ -497,12 +523,45 @@ impl CanonicalMetadata {
                     return Err(invalid());
                 }
             }
-            (Body::LossOnly, CanonicalKind::LossOnly) => self.validate_loss_only(loss)?,
+            (Body::LossOnly, CanonicalKind::LossOnly | CanonicalKind::FiniteEventLoss) => {
+                self.validate_loss_only(loss)?;
+            }
             _ => return Err(invalid()),
+        }
+        if matches!(
+            self.kind,
+            CanonicalKind::FiniteEvents | CanonicalKind::FiniteEventLoss
+        ) {
+            self.validate_finite()?;
         }
         if self.has_terminal_lifecycle() && !self.certified_terminal() {
             return Err(invalid());
         }
+        Ok(())
+    }
+    fn validate_finite(&self) -> io::Result<()> {
+        let old = &self.loss.inherited;
+        if self.base != RawBase::Recovery
+            || self.attempted_origin != 0
+            || self.canonical_origin != 0
+            || self.original_end != 0
+            || self.evidence != EndpointEvidence::FixedSource
+            || self.lifecycle != Lifecycle::Active
+            || self.trailing_unknown
+            || old.publication_start != old.publication_inherited_end
+            || self.loss.publication_end != old.publication_start
+            || old.publications != 0
+            || self.loss.publications_new != 0
+            || old.event_start < self.binding.event_first
+            || old.event_inherited_end != old.event_start
+            || old.events != 0
+            || self.loss.event_end <= old.event_start
+            || (self.kind == CanonicalKind::FiniteEvents
+                && !matches!(&self.body, Body::Events(inner) if inner.recovery.rows > 0))
+        {
+            return Err(invalid());
+        }
+
         Ok(())
     }
     fn validate_provenance(&self) -> io::Result<()> {
@@ -518,7 +577,13 @@ impl CanonicalMetadata {
             return Err(invalid());
         }
         if self.base == RawBase::Recovery
-            && (self.window != 0 || self.attempted_origin != 0 || self.original_end != 0)
+            && ((self.window != 0
+                && !matches!(
+                    self.kind,
+                    CanonicalKind::FiniteEvents | CanonicalKind::FiniteEventLoss
+                ))
+                || self.attempted_origin != 0
+                || self.original_end != 0)
         {
             return Err(invalid());
         }
@@ -535,20 +600,14 @@ impl CanonicalMetadata {
     }
     fn validate_loss_only(&self, loss: crate::Losses) -> io::Result<()> {
         let domain = &self.loss.inherited;
-
         if (self.base == RawBase::Data && self.attempted_origin != domain.publication_inherited_end)
             || self.child != RawChild::Loss
             || self.canonical_origin != 0
             || self.trailing_unknown
-            || loss.unknown
+            || (loss.unknown && self.kind != CanonicalKind::FiniteEventLoss)
             || loss.publications != self.loss.publication_end - domain.publication_start
             || loss.events != self.loss.event_end - domain.event_start
             || (loss.publications == 0 && loss.events == 0)
-        {
-            return Err(invalid());
-        }
-        if self.base == RawBase::Recovery
-            && (self.window != 0 || self.attempted_origin != 0 || self.original_end != 0)
         {
             return Err(invalid());
         }
@@ -628,6 +687,8 @@ pub(crate) fn kind_number(kind: CanonicalKind) -> u32 {
         CanonicalKind::Terminal => 2,
         CanonicalKind::Fragment => 3,
         CanonicalKind::LossOnly => 4,
+        CanonicalKind::FiniteEvents => 5,
+        CanonicalKind::FiniteEventLoss => 6,
     }
 }
 fn nonzero(identity: Identity) -> io::Result<()> {

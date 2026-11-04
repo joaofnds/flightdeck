@@ -285,7 +285,8 @@ pub(in crate::store) fn object(
     ledger.update(|work| work.inventory.open_attempts += 1);
     let base = attempt.root.open_directory(match attempt.input.operation {
         crate::transaction::AttemptOperation::Ordinary { .. } => "data",
-        crate::transaction::AttemptOperation::Terminal { .. } => "recovery-data",
+        crate::transaction::AttemptOperation::Terminal { .. }
+        | crate::transaction::AttemptOperation::Finite { .. } => "recovery-data",
     })?;
     ledger.update(|work| work.inventory.open_attempts += 1);
     base.open_directory(&identity_text(attempt.transaction).to_string())
@@ -371,6 +372,7 @@ fn validate_current(
         && matches!(
             header.input.operation,
             crate::transaction::AttemptOperation::Ordinary { .. }
+                | crate::transaction::AttemptOperation::Finite { .. }
         )
     {
         if let Some(directory) = original.as_ref() {

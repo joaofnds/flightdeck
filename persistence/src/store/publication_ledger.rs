@@ -75,7 +75,10 @@ fn record_delta(
     current: &PublicationWork,
     previous: &PublicationWork,
 ) {
-    add_fields!(total, current, previous; census_write_operations, census_write_requested_bytes,
+    add_fields!(total, current, previous;
+        raw_read_operations, raw_read_requested_bytes,
+        raw_write_operations, raw_write_requested_bytes,
+        census_write_operations, census_write_requested_bytes,
         decode_admission_bytes, links, controls,
         control_reads, full_syncs,
         source_reads, source_observations, proof_operations, cleanup_positions,
@@ -132,4 +135,21 @@ fn record_control(
         control_read_operations, control_read_bytes, control_write_operations,
         control_write_requested_bytes, control_rename_attempts, control_remove_attempts,
         control_file_sync_attempts, control_directory_sync_attempts);
+}
+
+pub(super) struct LedgerWriter<'file> {
+    pub file: &'file mut std::fs::File,
+    pub ledger: &'file PublicationLedger,
+}
+impl io::Write for LedgerWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.ledger.update(|work| {
+            work.raw_write_operations += 1;
+            work.raw_write_requested_bytes += collector::u64_from_usize(bytes.len());
+        });
+        io::Write::write(self.file, bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        io::Write::flush(self.file)
+    }
 }

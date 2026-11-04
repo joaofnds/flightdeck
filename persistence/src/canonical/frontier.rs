@@ -47,6 +47,10 @@ impl SourceFrontier {
         self.unknown_provenance.as_ref()
     }
     #[must_use]
+    pub(crate) fn order_floor(&self) -> u64 {
+        self.ordered_window.unwrap_or(0)
+    }
+    #[must_use]
     pub fn complete(&self) -> bool {
         self.complete
     }
@@ -294,7 +298,15 @@ fn source_value(candidate: &AdmittedCanonical, ordered_window: Option<u64>) -> S
         publication_end: metadata.loss.publication_end,
         event_end: metadata.loss.event_end,
         prior_window: metadata.effective_window(),
-        ordered_window,
+        ordered_window: if matches!(
+            metadata.kind,
+            crate::transaction::CanonicalKind::FiniteEvents
+                | crate::transaction::CanonicalKind::FiniteEventLoss
+        ) {
+            Some(ordered_window.unwrap_or(0).max(metadata.window))
+        } else {
+            ordered_window
+        },
         captured: metadata.captured,
         timing: metadata.timing(),
         trailing_unknown: metadata.trailing_unknown,

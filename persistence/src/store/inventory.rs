@@ -504,7 +504,10 @@ impl<'store> RegisteredAttempt<'store> {
         let result = self.validate_original_placement(&mut work.open_attempts, &mut work.directory);
         work.reopens += work.open_attempts - before;
         result?;
-        let events = if matches!(self.input().operation, AttemptOperation::Ordinary { .. }) {
+        let events = if matches!(
+            self.input().operation,
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
+        ) {
             work.open_attempts += 1;
             optional_directory(self.original_directory(), "events")?
         } else {
@@ -733,7 +736,7 @@ impl OriginalInventory<'_, '_> {
         result?;
         if matches!(
             self.attempt.input().operation,
-            AttemptOperation::Ordinary { .. }
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
         ) {
             self.work.open_attempts += 1;
             self.work.reopens += 1;
@@ -764,11 +767,11 @@ impl OriginalInventory<'_, '_> {
             let Some(names) = self.names.as_mut() else {
                 return Err(invalid());
             };
-            let ordinary = matches!(
+            let uses_events_directory = matches!(
                 self.attempt.input().operation,
-                AttemptOperation::Ordinary { .. }
+                AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
             );
-            let limit = if self.names_phase == NamesPhase::Events || !ordinary {
+            let limit = if self.names_phase == NamesPhase::Events || !uses_events_directory {
                 BATCHES + 1
             } else {
                 TABLE_FILES.len() + 2
@@ -786,9 +789,14 @@ impl OriginalInventory<'_, '_> {
                 if self.name_count >= limit {
                     return Err(invalid());
                 }
-                let valid = if self.names_phase == NamesPhase::Events || !ordinary {
+                let valid = if self.names_phase == NamesPhase::Events || !uses_events_directory {
                     batch_number(name).is_ok()
-                        || name == if ordinary { "index" } else { "metadata" }
+                        || name
+                            == if uses_events_directory {
+                                "index"
+                            } else {
+                                "metadata"
+                            }
                 } else {
                     TABLE_FILES.contains(&name) || name == "metadata" || name == "events"
                 };
@@ -796,7 +804,10 @@ impl OriginalInventory<'_, '_> {
             })?;
             if !found {
                 self.names = None;
-                if self.names_phase == NamesPhase::Original && ordinary && self.events.is_some() {
+                if self.names_phase == NamesPhase::Original
+                    && uses_events_directory
+                    && self.events.is_some()
+                {
                     self.names = Some(
                         self.events
                             .as_ref()
@@ -846,11 +857,11 @@ impl OriginalInventory<'_, '_> {
     }
 
     fn probe_file(&mut self) -> Result<()> {
-        let ordinary = matches!(
+        let uses_events_directory = matches!(
             self.attempt.input().operation,
-            AttemptOperation::Ordinary { .. }
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
         );
-        if !ordinary && self.next < TABLE_FILES.len() {
+        if !uses_events_directory && self.next < TABLE_FILES.len() {
             return Ok(());
         }
         let name = TABLE_FILES.get(self.next).copied().unwrap_or("metadata");
@@ -877,6 +888,7 @@ impl OriginalInventory<'_, '_> {
         self.work.raw_admissions += 1;
         let window = match self.attempt.input().operation {
             AttemptOperation::Ordinary { window, .. } => window,
+            AttemptOperation::Finite { .. } => 0,
             AttemptOperation::Terminal { .. } => return Err(invalid().into()),
         };
         let expected = WindowIdentity {
@@ -910,11 +922,11 @@ impl OriginalInventory<'_, '_> {
     }
 
     fn probe_batch(&mut self, ordinal: usize) -> Result<()> {
-        let ordinary = matches!(
+        let uses_events_directory = matches!(
             self.attempt.input().operation,
-            AttemptOperation::Ordinary { .. }
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
         );
-        let directory = if ordinary {
+        let directory = if uses_events_directory {
             self.events.as_ref()
         } else {
             Some(self.attempt.original_directory())
@@ -946,7 +958,7 @@ impl OriginalInventory<'_, '_> {
         let result = crate::event_recovery::read::read_original_batch_file(
             file.try_clone()?,
             self.attempt.input().captured,
-            ordinary,
+            uses_events_directory,
             &self.budget,
             &mut self.work.decoded_bytes,
         );
@@ -1059,15 +1071,43 @@ pub(super) fn select_original_mode(
     opens: &mut u64,
     candidates: bool,
 ) -> io::Result<Option<(PrivateDirectory, OriginalPlacement)>> {
-    for name in ["fragment-0", "fragment-1", "loss"] {
-        *opens += 1;
-        if optional_directory(object, name)?.is_some() && (!candidates || name == "loss") {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "registered candidate/loss placements require fixed-plan reconciliation",
-            ));
-        }
+    let children = select_original_presence(object, opens)?;
+    if children[2] || (!candidates && (children[0] || children[1])) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "registered candidate/loss placements require fixed-plan reconciliation",
+        ));
     }
+
+    select_original_placement(object, opens)
+}
+pub(super) fn select_finite_original(
+    object: &PrivateDirectory,
+    opens: &mut u64,
+) -> io::Result<Option<(PrivateDirectory, OriginalPlacement)>> {
+    select_original_presence(object, opens)?;
+    let result = select_original_placement(object, opens)?;
+    if result
+        .as_ref()
+        .is_some_and(|(_, placement)| *placement != OriginalPlacement::Pending)
+    {
+        return Err(invalid());
+    }
+
+    Ok(result)
+}
+fn select_original_presence(object: &PrivateDirectory, opens: &mut u64) -> io::Result<[bool; 3]> {
+    let mut present = [false; 3];
+    for (index, name) in ["fragment-0", "fragment-1", "loss"].iter().enumerate() {
+        *opens += 1;
+        present[index] = optional_directory(object, name)?.is_some();
+    }
+    Ok(present)
+}
+fn select_original_placement(
+    object: &PrivateDirectory,
+    opens: &mut u64,
+) -> io::Result<Option<(PrivateDirectory, OriginalPlacement)>> {
     *opens += 1;
     let pending = optional_directory(object, "pending")?;
     let identity = pending

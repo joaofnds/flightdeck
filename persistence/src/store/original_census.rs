@@ -266,6 +266,14 @@ pub(in crate::store) struct CensusHeader {
 impl CensusHeader {
     pub(in crate::store) fn encode(&self, bytes: &mut [u8; 256]) -> io::Result<()> {
         bytes.fill(0);
+        if self.input.is_finite()
+            && self
+                .original
+                .is_some_and(|(placement, _)| placement != OriginalPlacement::Pending)
+        {
+            return Err(invalid());
+        }
+
         bytes[..8].copy_from_slice(b"FDCENS02");
         for (offset, value) in [
             (8, 1),
@@ -274,10 +282,10 @@ impl CensusHeader {
             (20, u32::from(self.input.captured)),
             (
                 24,
-                if matches!(self.input.operation, AttemptOperation::Ordinary { .. }) {
-                    1
-                } else {
-                    2
+                match self.input.operation {
+                    AttemptOperation::Ordinary { .. } => 1,
+                    AttemptOperation::Terminal { .. } => 2,
+                    AttemptOperation::Finite { .. } => 3,
                 },
             ),
         ] {
@@ -317,6 +325,9 @@ impl CensusHeader {
             224,
             self.input.source.origin_continuous_ns.ok_or_else(invalid)?,
         );
+        self.encode_operation(bytes)
+    }
+    fn encode_operation(&self, bytes: &mut [u8; 256]) -> io::Result<()> {
         match self.input.operation {
             AttemptOperation::Ordinary {
                 window,
@@ -325,6 +336,10 @@ impl CensusHeader {
                 put32(bytes, 208, 4095);
                 put64(bytes, 232, window);
                 put64(bytes, 240, attempted_origin);
+            }
+            AttemptOperation::Finite { order_floor, .. } => {
+                put32(bytes, 208, 512);
+                put64(bytes, 232, order_floor);
             }
             AttemptOperation::Terminal { .. } => {
                 if self.events.is_some() {
@@ -371,11 +386,14 @@ impl CensusHeader {
         record: &CensusRecord,
     ) -> io::Result<()> {
         if record.class != 0
-            && (self.original.is_none()
+            && ((self.input.is_finite() && position < 12)
+                || self.original.is_none()
                 || (matches!(self.input.operation, AttemptOperation::Terminal { .. })
                     && (position < 11 || position == 12))
-                || (matches!(self.input.operation, AttemptOperation::Ordinary { .. })
-                    && self.events.is_none()
+                || (matches!(
+                    self.input.operation,
+                    AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
+                ) && self.events.is_none()
                     && position >= 12))
         {
             return Err(invalid());

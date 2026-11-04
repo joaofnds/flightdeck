@@ -47,6 +47,31 @@ pub(super) fn read_optional_normal(
         read_normal(root, recording).map(Some)
     }
 }
+/// A complete fresh finite registration scratch keeps its endpoint even before rename.
+pub(super) fn pending_finite(
+    root: &impl ControlDirectory,
+    recording: Identity,
+) -> io::Result<Option<NormalState>> {
+    let Some(bytes) = optional_read(root, "foreground.pending", 4096)? else {
+        return Ok(None);
+    };
+    if bytes.len() != 4096 {
+        return Ok(None);
+    }
+    if matches!(
+        codec::decode_slot(&bytes, recording, codec::SlotKind::Foreground)?,
+        codec::Slot::Idle
+    ) {
+        return Ok(None);
+    }
+    let state = NormalState::decode(&bytes, recording)?;
+    if !state.input.is_finite()
+        || state != NormalState::registered(state.transaction, state.input.clone())
+    {
+        return Err(invalid());
+    }
+    Ok(Some(state))
+}
 pub(super) fn read_normal(
     root: &impl ControlDirectory,
     recording: Identity,
@@ -120,8 +145,11 @@ fn legal_next(old: &NormalState, new: &NormalState) -> bool {
     }
     if phases == (Phase::Registered, Phase::SalvagePlanned) {
         return old.salvage.is_none()
-            && old.row_plan.is_none()
+            && (old.row_plan.is_none() || (old.input.is_finite() && old.row_plan == new.row_plan))
             && (new.salvage.is_some() || new.row_plan.is_some());
+    }
+    if let Some(legal) = legal_next_finite(old, new) {
+        return legal;
     }
     if old.row_plan != new.row_plan && !legal_next_rows(old, new) {
         return false;
@@ -144,6 +172,62 @@ fn legal_next(old: &NormalState, new: &NormalState) -> bool {
     }
 
     legal_next_phase(old, new)
+}
+fn legal_next_finite(old: &NormalState, new: &NormalState) -> Option<bool> {
+    let phases = (old.phase, new.phase);
+    if old.input.is_finite()
+        && matches!(
+            phases,
+            (Phase::SalvagePlanned, Phase::SalvagePlanned)
+                | (Phase::UnresolvedExtent, Phase::UnresolvedExtent)
+        )
+        && old.row_plan.is_some()
+        && new.salvage.is_some()
+    {
+        return Some(
+            new.row_plan.is_none()
+                && old.row_plan.is_some_and(|plan| {
+                    plan.rows == [0, 0]
+                        && plan.split == 0
+                        && plan.committed == 0
+                        && new.salvage.is_some_and(|loss| {
+                            loss.first == plan.first
+                                && loss.end == plan.end
+                                && loss.snapshot_first == plan.source_first
+                                && loss.snapshot_end == plan.source_end
+                                && loss.layout == plan.layout
+                                && loss.endpoint == plan.endpoint
+                                && !loss.terminal
+                        })
+                }),
+        );
+    }
+    if old.input.is_finite()
+        && old.census.kind == 2
+        && new.census == old.census
+        && old.sequence == 0
+        && new.next == 0
+        && new.structure.is_none()
+    {
+        if matches!(
+            phases,
+            (
+                Phase::SalvagePlanned | Phase::UnresolvedExtent,
+                Phase::UnresolvedExtent
+            )
+        ) {
+            return Some(new.sequence == 0 && legal_next_rows(old, new));
+        }
+        if phases == (Phase::UnresolvedExtent, Phase::Publishing) {
+            return Some(
+                new.sequence > 0
+                    && old.row_plan == new.row_plan
+                    && old.salvage == new.salvage
+                    && old.loss == new.loss,
+            );
+        }
+    }
+    None
 }
 fn legal_next_phase(old: &NormalState, new: &NormalState) -> bool {
     match (old.phase, new.phase) {
@@ -352,7 +436,7 @@ pub(super) fn replace(
     root.rename(&pending_name, name)?;
     sync_directory(root, syncs)
 }
-fn read(root: &impl ControlDirectory, name: &str, size: usize) -> io::Result<Vec<u8>> {
+pub(super) fn read(root: &impl ControlDirectory, name: &str, size: usize) -> io::Result<Vec<u8>> {
     let bytes =
         optional_read(root, name, size)?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
     if bytes.len() != size {
@@ -361,7 +445,7 @@ fn read(root: &impl ControlDirectory, name: &str, size: usize) -> io::Result<Vec
 
     Ok(bytes)
 }
-fn optional_read(
+pub(super) fn optional_read(
     root: &impl ControlDirectory,
     name: &str,
     maximum: usize,

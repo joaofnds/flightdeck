@@ -131,11 +131,27 @@ impl<'store> RowMerge<'store> {
         budget: &Arc<ByteBudget>,
         ledger: &PublicationLedger,
     ) -> io::Result<Self> {
+        Self::new_optional(attempt, Some(reader), budget, ledger)
+    }
+    pub(super) fn has_source(&self) -> bool {
+        self.source.0.is_some()
+    }
+    pub(super) fn new_optional(
+        attempt: RegisteredAttempt<'store>,
+        reader: Option<RingReader>,
+        budget: &Arc<ByteBudget>,
+        ledger: &PublicationLedger,
+    ) -> io::Result<Self> {
         ledger.require_budget(budget)?;
-        let reservation = budget.reserve(batch::WORKING_BYTES).ok_or_else(memory)?;
-        let result = SourceProof::new(reader, attempt.input(), reservation);
-        ledger.update(|work| work.source_observations += 1);
-        let source = result?;
+        let observations = u64::from(reader.is_some());
+        let source = reader
+            .map(|reader| {
+                let reservation = budget.reserve(batch::WORKING_BYTES).ok_or_else(memory)?;
+                let result = SourceProof::new(reader, attempt.input(), reservation);
+                ledger.update(|work| work.source_observations += 1);
+                result
+            })
+            .transpose()?;
         let mut startup = super::InventoryWork::default();
         let result = OriginalInventory::owned_counted(attempt, budget, &mut startup);
         ledger.record(
@@ -148,12 +164,12 @@ impl<'store> RowMerge<'store> {
         let inventory = result?;
         Ok(Self {
             inventory: MergeInventory(Some(inventory)),
-            source: MergeSource(Some(source)),
+            source: MergeSource(source),
             budget: Arc::clone(budget),
             ledger: ledger.clone(),
             recorded: PublicationWork {
                 inventory: startup,
-                source_observations: 1,
+                source_observations: observations,
                 ..PublicationWork::default()
             },
             selected: None,
@@ -224,6 +240,26 @@ impl<'store> RowMerge<'store> {
             return Ok(0);
         }
         self.ledger.update(|work| work.proof_operations += 1);
+        let end = self
+            .next
+            .checked_add(collector::u64_from_usize(count))
+            .ok_or_else(invalid)?;
+        let relevant_first = self.next.max(self.source_first);
+        let relevant_end = end.min(self.source_end);
+        if relevant_first < relevant_end {
+            let input = self.inventory.owner().input();
+            let missing = self.source.checked_read(input, |reader| {
+                reader.seek_event(relevant_first)?;
+                Ok(
+                    matches!(reader.read_event()?, FoundEvent::Missed {first,end}
+                    if first == relevant_first && end >= relevant_end
+                        && first >= input.binding.event_first),
+                )
+            })?;
+            if !missing {
+                return Ok(0);
+            }
+        }
         let numbers = frame.column("event")?.u64()?;
         for (position, row) in rows[..count].iter().enumerate() {
             self.ledger.update(|work| work.proof_operations += 1);
@@ -233,7 +269,6 @@ impl<'store> RowMerge<'store> {
                     .checked_add(collector::u64_from_usize(position))
                     .ok_or_else(invalid)?
                 || numbers.get(self.row + position) != Some(row.event.number)
-                || (row.event.number >= self.source_first && row.event.number < self.source_end)
             {
                 return Ok(0);
             }
@@ -302,21 +337,27 @@ impl<'store> RowMerge<'store> {
         result
     }
     fn record(&mut self) {
-        if self.inventory.0.is_none() || self.source.0.is_none() {
+        if self.inventory.0.is_none() {
             return;
         }
         let work = PublicationWork {
             inventory: self.inventory.work(),
-            source_reads: self.source.reads,
-            source_observations: self.source.observations.get(),
-            proof_operations: self.source.operations,
+            source_reads: self.source.0.as_ref().map_or(0, |source| source.reads),
+            source_observations: self
+                .source
+                .0
+                .as_ref()
+                .map_or(0, |source| source.observations.get()),
+            proof_operations: self.source.0.as_ref().map_or(0, |source| source.operations),
             proof_event_next: self.next,
             ..PublicationWork::default()
         };
         self.ledger.record(&work, &mut self.recorded);
     }
     fn step_inner(&mut self) -> crate::Result<MergeStep> {
-        self.source.check(self.inventory.owner().input())?;
+        if let Some(source) = &self.source.0 {
+            source.check(self.inventory.owner().input())?;
+        }
         if self.ready {
             return Ok(MergeStep::Batch);
         }
@@ -324,6 +365,10 @@ impl<'store> RowMerge<'store> {
             self.inventory.step()?;
             return Ok(MergeStep::Continue);
         }
+        if self.source.0.is_none() {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock).into());
+        }
+
         if self.selected.is_none() {
             self.freeze()?;
             return Ok(MergeStep::Continue);

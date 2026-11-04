@@ -122,7 +122,10 @@ impl RegisteredAttempt<'_> {
                 "occupied event inventory requires salvage reconciliation",
             ));
         }
-        if !matches!(self.input.operation, AttemptOperation::Ordinary { .. }) {
+        if !matches!(
+            self.input.operation,
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
+        ) {
             return Err(invalid());
         }
         self.directory.create_directory("events")
@@ -136,10 +139,12 @@ impl RegisteredAttempt<'_> {
         let name =
             crate::event_recovery::batch_name(usize::try_from(ordinal).map_err(|_| invalid())?);
         match self.input.operation {
-            AttemptOperation::Ordinary { .. } => Ok(RegisteredFile {
-                file: self.events_directory()?.create_file(&name)?,
-                _owner: self.owner,
-            }),
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. } => {
+                Ok(RegisteredFile {
+                    file: self.events_directory()?.create_file(&name)?,
+                    _owner: self.owner,
+                })
+            }
             AttemptOperation::Terminal { .. } => self.create_file(&name),
         }
     }
@@ -156,6 +161,7 @@ impl RegisteredAttempt<'_> {
         let admitted = match self.input.operation {
             AttemptOperation::Ordinary { .. } => name == "metadata" || TABLE_FILES.contains(&name),
             AttemptOperation::Terminal { .. } => name == "metadata" || batch_number(name).is_ok(),
+            AttemptOperation::Finite { .. } => false,
         };
         if admitted { Ok(()) } else { Err(invalid()) }
     }
@@ -187,6 +193,9 @@ impl Store {
         reader: &mut RingReader,
         budget: &Arc<crate::resources::ByteBudget>,
     ) -> io::Result<RegisteredAttempt<'_>> {
+        if input.is_finite() {
+            return Err(invalid());
+        }
         self.register_attempt_inner(input, Some(reader), &mut [0; 4097], Some(budget), None)
     }
 
@@ -206,6 +215,9 @@ impl Store {
         reader: &mut RingReader,
         frontier: crate::canonical::SourceFrontierRead<'_, '_>,
     ) -> io::Result<RegisteredAttempt<'_>> {
+        if input.is_finite() {
+            return Err(invalid());
+        }
         let budget = Arc::clone(frontier.byte_budget());
         self.register_attempt_inner(
             input,
@@ -333,7 +345,7 @@ impl Store {
         let root = &self.directory;
         let base = root.open_directory(match input.operation {
             AttemptOperation::Ordinary { .. } => "data",
-            AttemptOperation::Terminal { .. } => "recovery-data",
+            AttemptOperation::Terminal { .. } | AttemptOperation::Finite { .. } => "recovery-data",
         })?;
         let name = collector::recording::identity_text(transaction).to_string();
         private::full_sync(&root.open_file("foreground")?)?;
@@ -425,7 +437,7 @@ impl Store {
         if input.losses.event_inherited_end != input.losses.event_start || input.losses.events != 0
         {
             return Err(unresolved(
-                "inherited event rows require registered inventory reconciliation",
+                "inherited event rows require durable retained-row completion",
             ));
         }
         validate_terminal_source(input, reader)?;
@@ -610,7 +622,7 @@ impl RegisteredAttempt<'_> {
         *opens += 1;
         let base = self.root.open_directory(match self.input.operation {
             AttemptOperation::Ordinary { .. } => "data",
-            AttemptOperation::Terminal { .. } => "recovery-data",
+            AttemptOperation::Terminal { .. } | AttemptOperation::Finite { .. } => "recovery-data",
         })?;
         *opens += 1;
         let object = base
@@ -632,9 +644,12 @@ impl RegisteredAttempt<'_> {
                 Err(invalid())
             }
         })?;
-        let (directory, placement) =
+        let (directory, placement) = if self.input.is_finite() && self.candidates {
+            super::inventory::select_finite_original(&object, opens)?
+        } else {
             super::inventory::select_original_mode(&object, opens, self.candidates)?
-                .ok_or_else(invalid)?;
+        }
+        .ok_or_else(invalid)?;
         if placement != self.placement || !directory.same_inode(&self.directory)? {
             return Err(invalid());
         }
@@ -686,35 +701,25 @@ fn reconcile_registered_scratch(
     root.full_sync()
 }
 
-fn registered_transaction(
-    root: &PrivateDirectory,
+pub(super) fn registered_transaction(
+    root: &impl super::publication_control::ControlDirectory,
     input: &AttemptInput,
     idle: &[u8],
 ) -> io::Result<Identity> {
-    let mut pending = match root.open_file("foreground.pending") {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return collector::recording::random_identity();
-        }
-        Err(error) => return Err(error),
+    let Some(bytes) = super::publication_control::optional_read(root, "foreground.pending", 4096)?
+    else {
+        return collector::recording::random_identity();
     };
-    let mut bytes = [0; 4097];
-    let length = pending.read(&mut bytes)?;
-    // A short syscall read is not EOF. Bounded fill keeps truncation distinct from read failure.
-    let mut length = length;
-    while length < bytes.len() {
-        let count = pending.read(&mut bytes[length..])?;
-        if count == 0 {
-            break;
-        }
-        length += count;
-    }
+    let length = bytes.len();
     if length == 4096 {
         if bytes[..length] == *idle {
             return collector::recording::random_identity();
         }
-        let (transaction, candidate) =
-            AttemptInput::decode_registered(&bytes[..length], input.run.recording)?;
+        let (transaction, candidate) = AttemptInput::decode_construction(
+            &bytes[..length],
+            input.run.recording,
+            input.is_finite(),
+        )?;
         if candidate != *input {
             return Err(invalid());
         }
@@ -740,4 +745,139 @@ fn registered_transaction(
         return Err(invalid());
     }
     Ok(transaction)
+}
+
+/// Paced source observation for an inherited domain; this alone grants no durable loss authority.
+/// Settle nonempty domains through `FiniteEvents` before ordinary registration.
+pub struct InheritedAttempt<'store> {
+    store: &'store Store,
+    input: AttemptInput,
+    proof: super::normal_proof::SourceProof,
+    next: u64,
+    losses: u64,
+    budget: Arc<crate::resources::ByteBudget>,
+    ledger: super::PublicationLedger,
+}
+impl Store {
+    pub fn prepare_inherited_attempt(
+        &self,
+        input: &AttemptInput,
+        reader: RingReader,
+        budget: &Arc<crate::resources::ByteBudget>,
+        ledger: &super::PublicationLedger,
+    ) -> io::Result<InheritedAttempt<'_>> {
+        input.validate()?;
+        if input.is_finite() {
+            return Err(invalid());
+        }
+
+        ledger.require_budget(budget)?;
+        if input.losses.event_start < input.binding.event_first {
+            return Err(invalid());
+        }
+
+        let reservation = budget
+            .reserve(64 * 1024)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        ledger.update(|work| work.source_observations += 1);
+        let proof = super::normal_proof::SourceProof::new(reader, input, reservation)?;
+        let mut work = super::PublicationWork::default();
+        let result = self.source_frontier(&input.run, budget, &mut work.canonical);
+        ledger.record(&work, &mut super::PublicationWork::default());
+        if let Some(frontier) = result? {
+            frontier.matches_input(input)?;
+        } else if input.losses.predecessor != Predecessor::Genesis
+            || input.losses.prior_window.is_some()
+            || input.losses.publication_start != input.binding.publication_first
+            || input.losses.event_start != input.binding.event_first
+        {
+            return Err(invalid());
+        }
+
+        ledger.update(|work| work.source_observations += 1);
+        proof.check(input)?;
+        Ok(InheritedAttempt {
+            store: self,
+            input: input.clone(),
+            proof,
+            next: input.losses.event_start,
+            losses: 0,
+            budget: Arc::clone(budget),
+            ledger: ledger.clone(),
+        })
+    }
+}
+impl<'store> InheritedAttempt<'store> {
+    #[must_use]
+    pub fn position(&self) -> u64 {
+        self.next
+    }
+    /// Performs at most128 observations; the failed observation does not advance its position.
+    pub fn step(&mut self) -> io::Result<bool> {
+        for _ in 0..128 {
+            if self.next == self.input.losses.event_inherited_end {
+                if self.losses != self.input.losses.events {
+                    return Err(invalid());
+                }
+
+                self.ledger.update(|work| work.source_observations += 1);
+                self.proof.check(&self.input)?;
+                return Ok(true);
+            }
+
+            let first = self.next;
+            let end = self.input.losses.event_inherited_end;
+            self.ledger.update(|work| {
+                work.source_reads += 1;
+                work.proof_operations += 1;
+            });
+            let observations = self.proof.observations.get();
+            let result = self.proof.checked_read(&self.input, |reader| {
+                reader.seek_event(first)?;
+                match reader.read_event()? {
+                    collector::ring::FoundEvent::Missed {
+                        first: observed,
+                        end: missed,
+                    } if observed == first && missed > first => {
+                        let next = missed.min(end);
+                        Ok((next, next - first))
+                    }
+                    collector::ring::FoundEvent::Event { number, .. } if number == first => {
+                        Ok((first.checked_add(1).ok_or_else(invalid)?, 0))
+                    }
+                    _ => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                }
+            });
+            self.ledger.update(|work| {
+                work.source_observations += self.proof.observations.get() - observations;
+            });
+            let (next, lost) = result?;
+            let losses = self.losses.checked_add(lost).ok_or_else(invalid)?;
+            if losses > self.input.losses.events {
+                return Err(invalid());
+            }
+
+            self.next = next;
+            self.losses = losses;
+        }
+        Ok(false)
+    }
+    pub fn register(self) -> io::Result<RegisteredAttempt<'store>> {
+        if self.next != self.input.losses.event_inherited_end
+            || self.losses != self.input.losses.events
+        {
+            return Err(invalid());
+        }
+
+        self.ledger.update(|work| work.source_observations += 1);
+        self.proof.check(&self.input)?;
+        if self.input.losses.event_inherited_end != self.input.losses.event_start {
+            return Err(unresolved(
+                "inherited event rows require durable retained-row completion",
+            ));
+        }
+        let mut reader = self.proof.into_reader();
+        self.store
+            .register_attempt(&self.input, &mut reader, &self.budget)
+    }
 }

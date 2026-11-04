@@ -521,6 +521,9 @@ fn row_candidates_finish(candidates: &mut row_candidates::RowCandidates<'_>) {
     let mut prepared = false;
     for _ in 0..20000 {
         match candidates.step().unwrap() {
+            row_candidates::CandidateStep::Unresolved => {
+                panic!("ordinary candidate unexpectedly unresolved")
+            }
             row_candidates::CandidateStep::Continue => {}
             row_candidates::CandidateStep::Prepared => {
                 prepared = true;
@@ -596,6 +599,9 @@ fn row_candidates_native_child(root: &Path) {
     let mut failed = false;
     for _ in 0..20000 {
         match candidates.step() {
+            Ok(row_candidates::CandidateStep::Unresolved) => {
+                panic!("ordinary candidate unexpectedly unresolved")
+            }
             Ok(row_candidates::CandidateStep::Continue) => {}
             Ok(row_candidates::CandidateStep::Prepared) => panic!("missing native failure"),
             Err(error) => {
@@ -1218,6 +1224,9 @@ fn row_candidates_split_child(root: &Path) {
             control_armed = true;
         }
         match owner.step() {
+            Ok(row_candidates::CandidateStep::Unresolved) => {
+                panic!("ordinary candidate unexpectedly unresolved")
+            }
             Ok(row_candidates::CandidateStep::Continue) => {}
             Ok(row_candidates::CandidateStep::Prepared) => {
                 prepared = true;

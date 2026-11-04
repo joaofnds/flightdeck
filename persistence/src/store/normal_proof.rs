@@ -26,6 +26,13 @@ pub(super) struct SourceProof {
 }
 const _: () = assert!(size_of::<SourceProof>() < 64 * 1024);
 impl SourceProof {
+    pub(super) fn shape(&self) -> collector::ring::Shape {
+        self.reader.shape()
+    }
+    pub(super) fn into_reader(self) -> RingReader {
+        self.reader
+    }
+
     pub fn new(
         reader: RingReader,
         input: &AttemptInput,
@@ -71,14 +78,7 @@ impl SourceProof {
             let shape = reader.shape();
             let limits = crate::Limits::from_shape(&shape)
                 .map_err(|error| io::Error::other(error.to_string()))?;
-            let bytes = 4096
-                + limits.cpus * size_of::<collector::machine::CPUTicks>()
-                + limits.interfaces * size_of::<collector::interfaces::Interface>()
-                + (limits.states + limits.cores * limits.states) * size_of::<u64>()
-                + limits.cores * size_of::<usize>()
-                + limits.fans * size_of::<f32>()
-                + limits.processes * size_of::<collector::processes::Process>()
-                + limits.coalitions * size_of::<collector::coalitions::Coalition>();
+            let bytes = tick_workspace_bytes(&limits);
             let _workspace = budget
                 .reserve(bytes)
                 .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
@@ -393,4 +393,14 @@ fn invalid() -> io::Error {
 }
 fn invalid_value(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
+}
+
+pub(super) fn tick_workspace_bytes(limits: &crate::Limits) -> usize {
+    4096 + limits.cpus * size_of::<collector::machine::CPUTicks>()
+        + limits.interfaces * size_of::<collector::interfaces::Interface>()
+        + (limits.states + limits.cores * limits.states) * size_of::<u64>()
+        + limits.cores * size_of::<usize>()
+        + limits.fans * size_of::<f32>()
+        + limits.processes * size_of::<collector::processes::Process>()
+        + limits.coalitions * size_of::<collector::coalitions::Coalition>()
 }

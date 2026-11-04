@@ -13,6 +13,9 @@ use crate::metadata::invalid;
 use crate::{Manifest, WindowIdentity};
 
 mod attempt;
+mod finite;
+mod finite_scratch;
+pub use finite::{FiniteEventRows, FiniteEvents};
 mod census_digest;
 mod inventory;
 mod normal_proof;
@@ -20,7 +23,7 @@ mod publication;
 mod publication_control;
 mod row_candidates;
 mod row_merge;
-pub use attempt::{RegisteredAttempt, RegisteredFile};
+pub use attempt::{InheritedAttempt, RegisteredAttempt, RegisteredFile};
 pub use inventory::{
     BatchFact, FileIdentity, IndexFact, InventoryStep, InventoryWork, OriginalFile,
     OriginalInventory, OriginalPlacement,

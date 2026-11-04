@@ -57,6 +57,10 @@ enum Validation {
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PublicationWork {
+    pub raw_read_operations: u64,
+    pub raw_read_requested_bytes: u64,
+    pub raw_write_operations: u64,
+    pub raw_write_requested_bytes: u64,
     pub census_write_operations: u64,
     pub census_write_requested_bytes: u64,
     pub decode_admission_bytes: u64,
@@ -770,6 +774,9 @@ impl<'store> NormalPublication<'store> {
     fn step_publication(&mut self) -> io::Result<()> {
         match self.state.phase {
             Phase::Ready | Phase::SalvagePlanned => self.acquire_busy(),
+            Phase::UnresolvedExtent if self.state.input.is_finite() && self.state.sequence == 0 => {
+                self.acquire_busy()
+            }
             Phase::Publishing => self.publish_link(),
             Phase::Published => self.finish_quiet(),
             Phase::Cleanup => self.finish_idle(),
@@ -903,7 +910,7 @@ impl<'store> NormalPublication<'store> {
         }
         let attempt = self.attempt.as_mut().ok_or_else(invalid)?;
         self.work.inventory.open_attempts += 1;
-        let base = attempt.root.open_directory("data")?;
+        let base = attempt.root.open_directory(base_name(&attempt.input))?;
         self.work.inventory.open_attempts += 1;
         let object = base.open_directory(
             &collector::recording::identity_text(attempt.transaction).to_string(),
@@ -1077,7 +1084,8 @@ impl<'store> NormalPublication<'store> {
         )?;
         let mut next = self.state.clone();
         next.phase = if self.state.row_plan.is_some()
-            && (self.state.original_end == 0 || self.row_unresolved)
+            && ((self.state.original_end == 0 && !self.state.input.is_finite())
+                || self.row_unresolved)
         {
             Phase::UnresolvedExtent
         } else if self.state.salvage.is_some() || self.state.row_plan.is_some() {
@@ -1209,6 +1217,24 @@ fn normal_namespace(
         state.input.run.recording,
     )?;
     match (state.phase, namespace) {
+        (Phase::UnresolvedExtent, NamespaceState::Quiet { .. })
+            if state.input.is_finite() && state.sequence == 0 =>
+        {
+            Ok(())
+        }
+        (
+            Phase::UnresolvedExtent,
+            NamespaceState::Busy {
+                sequence,
+                transaction,
+            },
+        ) if state.input.is_finite()
+            && state.sequence == 0
+            && sequence > 0
+            && transaction == state.transaction =>
+        {
+            Ok(())
+        }
         (
             Phase::Registered | Phase::Ready | Phase::SalvagePlanned,
             NamespaceState::Quiet { .. },
@@ -1308,37 +1334,54 @@ fn write_metadata_at(
     ledger: Option<&super::PublicationLedger>,
 ) -> io::Result<()> {
     metadata.validate()?;
+    write_matching_at(
+        attempt,
+        directory,
+        "metadata",
+        work,
+        state,
+        ledger,
+        |mut file| metadata.write(&mut file),
+    )
+}
+pub(super) fn write_matching_at(
+    attempt: &RegisteredAttempt<'_>,
+    directory: &PrivateDirectory,
+    name: &str,
+    work: &mut PublicationWork,
+    state: &NormalState,
+    ledger: Option<&super::PublicationLedger>,
+    mut emit: impl FnMut(&mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
     work.inventory.open_attempts += 1;
-    match directory.open_file("metadata") {
+    match directory.open_file(name) {
         Ok(mut file) => {
             let before = file.metadata()?;
-            let mut comparison = MetadataComparison {
-                file: &mut file,
-                retained: before.len(),
-                expected: 0,
+            let expected = {
+                let mut counted = WorkFile {
+                    file: &mut file,
+                    work,
+                };
+                let mut comparison = MetadataComparison {
+                    file: &mut counted,
+                    retained: before.len(),
+                    expected: 0,
+                };
+                emit(&mut comparison)?;
+                comparison.expected
             };
-            metadata.write(&mut comparison)?;
-            if before.len() > comparison.expected {
+            if before.len() > expected {
                 return Err(invalid());
             }
 
-            if before.len() < comparison.expected {
+            if before.len() < expected {
                 // Only this exact registered, unpublished owner may replace a matching
                 // torn prefix. A linked or contradictory file remains evidence and refuses.
-                write_metadata_validate_prefix(attempt, directory, &before, state, ledger)?;
+                write_metadata_validate_prefix(
+                    attempt, directory, name, &before, state, ledger, work,
+                )?;
 
-                work.full_syncs += 1;
-                work.inventory.open_attempts += 1;
-                private::full_sync(&attempt.root.open_file("foreground")?)?;
-                sync_directory(attempt.root, work)?;
-                work.canonical.removals += 1;
-                directory.remove_file("metadata")?;
-                sync_directory(directory, work)?;
-                work.canonical.creates += 1;
-                let mut replacement = directory.create_file("metadata")?;
-                metadata.write(&mut replacement)?;
-                work.full_syncs += 1;
-                private::full_sync(&replacement)?;
+                write_matching_replace(attempt, directory, name, work, &mut emit)?;
             } else {
                 work.full_syncs += 1;
                 private::full_sync(&file)?;
@@ -1346,11 +1389,17 @@ fn write_metadata_at(
         }
         Err(error)
             if error.kind() == io::ErrorKind::NotFound
-                && matches!(state.phase, Phase::Registered | Phase::SalvagePlanned) =>
+                && (matches!(state.phase, Phase::Registered | Phase::SalvagePlanned)
+                    || (state.input.is_finite()
+                        && state.phase == Phase::UnresolvedExtent
+                        && state.sequence == 0)) =>
         {
             work.canonical.creates += 1;
-            let mut file = directory.create_file("metadata")?;
-            metadata.write(&mut file)?;
+            let mut file = directory.create_file(name)?;
+            emit(&mut WorkFile {
+                file: &mut file,
+                work,
+            })?;
             work.full_syncs += 1;
             private::full_sync(&file)?;
         }
@@ -1358,15 +1407,43 @@ fn write_metadata_at(
     }
     sync_directory(directory, work)
 }
+fn write_matching_replace(
+    attempt: &RegisteredAttempt<'_>,
+    directory: &PrivateDirectory,
+    name: &str,
+    work: &mut PublicationWork,
+    emit: &mut impl FnMut(&mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
+    work.full_syncs += 1;
+    work.inventory.open_attempts += 1;
+    private::full_sync(&attempt.root.open_file("foreground")?)?;
+    sync_directory(attempt.root, work)?;
+    work.canonical.removals += 1;
+    directory.remove_file(name)?;
+    sync_directory(directory, work)?;
+    work.canonical.creates += 1;
+    let mut replacement = directory.create_file(name)?;
+    emit(&mut WorkFile {
+        file: &mut replacement,
+        work,
+    })?;
+    work.full_syncs += 1;
+    private::full_sync(&replacement)
+}
 fn write_metadata_validate_prefix(
     attempt: &RegisteredAttempt<'_>,
     directory: &PrivateDirectory,
+    name: &str,
     before: &std::fs::Metadata,
     state: &NormalState,
     ledger: Option<&super::PublicationLedger>,
+    work: &mut PublicationWork,
 ) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
-    if !matches!(state.phase, Phase::Registered | Phase::SalvagePlanned)
+    if !(matches!(state.phase, Phase::Registered | Phase::SalvagePlanned)
+        || (state.input.is_finite()
+            && state.phase == Phase::UnresolvedExtent
+            && state.sequence == 0))
         || super::publication_control::read_normal(
             &super::publication_control::CountedControl {
                 root: attempt.root,
@@ -1380,7 +1457,8 @@ fn write_metadata_validate_prefix(
     }
 
     normal_namespace(attempt, state, ledger)?;
-    let current = directory.open_file("metadata")?.metadata()?;
+    work.inventory.open_attempts += 1;
+    let current = directory.open_file(name)?.metadata()?;
     if before.dev() != current.dev()
         || before.ino() != current.ino()
         || before.len() != current.len()
@@ -1395,12 +1473,33 @@ fn write_metadata_validate_prefix(
 
     Ok(())
 }
-struct MetadataComparison<'file> {
+struct WorkFile<'file> {
     file: &'file mut std::fs::File,
+    work: &'file mut PublicationWork,
+}
+impl Read for WorkFile<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.work.raw_read_operations += 1;
+        self.work.raw_read_requested_bytes += collector::u64_from_usize(bytes.len());
+        self.file.read(bytes)
+    }
+}
+impl Write for WorkFile<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.work.raw_write_operations += 1;
+        self.work.raw_write_requested_bytes += collector::u64_from_usize(bytes.len());
+        self.file.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+struct MetadataComparison<'file, F> {
+    file: &'file mut F,
     retained: u64,
     expected: u64,
 }
-impl Write for MetadataComparison<'_> {
+impl<F: Read> Write for MetadataComparison<'_, F> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let mut scratch = [0; 4096];
         for chunk in bytes.chunks(scratch.len()) {
@@ -1529,10 +1628,10 @@ fn sync_directory(directory: &PrivateDirectory, work: &mut PublicationWork) -> i
     work.full_syncs += 1;
     directory.full_sync()
 }
-fn base_name(input: &AttemptInput) -> &'static str {
+pub(super) fn base_name(input: &AttemptInput) -> &'static str {
     match input.operation {
         AttemptOperation::Ordinary { .. } => "data",
-        AttemptOperation::Terminal { .. } => "recovery-data",
+        AttemptOperation::Terminal { .. } | AttemptOperation::Finite { .. } => "recovery-data",
     }
 }
 fn invalid() -> io::Error {

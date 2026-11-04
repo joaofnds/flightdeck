@@ -1378,3 +1378,6 @@ fn prior_or_unknown_source_layout_cannot_acquire_registered_authority() {
 
 #[path = "row_salvage_tests.rs"]
 mod row_salvage_tests;
+
+#[path = "inherited_events_tests.rs"]
+mod inherited_events_tests;

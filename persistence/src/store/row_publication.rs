@@ -19,8 +19,9 @@ enum CleanupNames {
     Final,
 }
 pub struct RowPublication<'store> {
+    loss: Option<Box<super::LossPublication<'store>>>,
     candidates: Option<RowCandidates<'store>>,
-    inner: Option<NormalPublication<'store>>,
+    inner: Option<Box<NormalPublication<'store>>>,
     metadata: Vec<CanonicalMetadata>,
     facts: Vec<crate::store::BatchFact>,
     counts: [[u64; 2]; 2],
@@ -83,8 +84,9 @@ impl<'store> RowPublication<'store> {
             .reserve(256 * 1024)
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
         Ok(Self {
+            loss: None,
             candidates,
-            inner,
+            inner: inner.map(Box::new),
             metadata: Vec::with_capacity(2),
             facts: Vec::new(),
             counts: [[0; 2]; 2],
@@ -119,6 +121,15 @@ impl<'store> RowPublication<'store> {
         })
     }
     pub fn step(&mut self) -> io::Result<RowPublicationStep> {
+        if let Some(loss) = &mut self.loss {
+            return loss.step().map(|step| {
+                if step == super::PublicationStep::Idle {
+                    RowPublicationStep::Idle
+                } else {
+                    RowPublicationStep::Continue
+                }
+            });
+        }
         let result = self.step_inner();
         if let Some(inner) = &mut self.inner {
             if let Some(source) = &self.source {
@@ -133,12 +144,8 @@ impl<'store> RowPublication<'store> {
         if self.inner.as_ref().is_some_and(|inner| inner.done) {
             return Ok(RowPublicationStep::Idle);
         }
-        if let Some(candidates) = &mut self.candidates {
-            if candidates.step().map_err(rows::source_error)? != CandidateStep::Prepared {
-                return Ok(RowPublicationStep::Continue);
-            }
-            self.adopt_candidates()?;
-            return Ok(RowPublicationStep::Continue);
+        if self.candidates.is_some() {
+            return self.step_inner_candidates();
         }
         if !self.adopted {
             self.adopt()?;
@@ -193,6 +200,29 @@ impl<'store> RowPublication<'store> {
         }
         self.step_phase()
     }
+    fn step_inner_candidates(&mut self) -> io::Result<RowPublicationStep> {
+        if let Some(candidates) = &mut self.candidates {
+            let step = match candidates.step().map_err(rows::source_error) {
+                Ok(step) => step,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && candidates.mark_unresolved()? =>
+                {
+                    return Ok(RowPublicationStep::Unresolved);
+                }
+                Err(error) => return Err(error),
+            };
+            if step == CandidateStep::Unresolved {
+                return Ok(RowPublicationStep::Unresolved);
+            }
+            if step != CandidateStep::Prepared {
+                return Ok(RowPublicationStep::Continue);
+            }
+            self.adopt_candidates()?;
+            return Ok(RowPublicationStep::Continue);
+        }
+        Err(invalid())
+    }
     fn step_inner_witness(&self) -> io::Result<()> {
         let inner = self.inner.as_ref().ok_or_else(invalid)?;
         super::super::inventory::census::io_owner::check_bound(
@@ -240,16 +270,29 @@ impl<'store> RowPublication<'store> {
         Ok(())
     }
     fn step_phase(&mut self) -> io::Result<RowPublicationStep> {
+        self.step_phase_metadata()?;
         let inner = self.inner.as_mut().ok_or_else(invalid)?;
         match inner.state.phase {
             Phase::SalvagePlanned => inner.acquire_busy()?,
+            Phase::UnresolvedExtent
+                if inner.state.input.is_finite()
+                    && inner.state.sequence == 0
+                    && self.proved == Some(true) =>
+            {
+                inner.acquire_busy()?;
+            }
             Phase::Publishing => inner.publish_link()?,
             Phase::Published => {
-                inner.row_unresolved = !self.transport || !self.proved.ok_or_else(invalid)?;
+                inner.row_unresolved = (!self.transport && !inner.state.input.is_finite())
+                    || !self.proved.ok_or_else(invalid)?;
                 inner.finish_quiet()?;
             }
             Phase::UnresolvedExtent => return Ok(RowPublicationStep::Unresolved),
-            Phase::SalvageCommitted if !self.transport && inner.state.cleanup.region != 8 => {
+            Phase::SalvageCommitted
+                if !self.transport
+                    && !inner.state.input.is_finite()
+                    && inner.state.cleanup.region != 8 =>
+            {
                 let mut state = inner.state.clone();
                 state.phase = Phase::UnresolvedExtent;
                 inner.commit_state(state)?;
@@ -262,6 +305,29 @@ impl<'store> RowPublication<'store> {
         } else {
             RowPublicationStep::Continue
         })
+    }
+    fn step_phase_metadata(&mut self) -> io::Result<()> {
+        let _admission = self
+            .budget
+            .reserve(256 * 1024)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let inner = self.inner.as_mut().ok_or_else(invalid)?;
+        let attempt = inner.attempt.as_ref().ok_or_else(invalid)?;
+        for expected in &self.metadata {
+            let directory = Self::object(attempt, &mut inner.work)?;
+            inner.work.inventory.open_attempts += 1;
+            let child = directory.open_directory(expected.child.name())?;
+            inner.work.inventory.open_attempts += 1;
+            let mut file = child.open_file("metadata")?;
+            inner.work.canonical.metadata_admissions += 1;
+            let before = crate::store::FileIdentity::read(&file)?;
+            if CanonicalMetadata::read(&mut file)? != *expected
+                || crate::store::FileIdentity::read(&file)? != before
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
     }
     fn adopt(&mut self) -> io::Result<()> {
         let inner = self.inner.as_mut().ok_or_else(invalid)?;
@@ -299,7 +365,21 @@ impl<'store> RowPublication<'store> {
         inner.ledger = Some(self.ledger.clone());
         inner.ready = true;
         inner.validation = Validation::Complete;
-        self.inner = Some(inner);
+        if inner.state.input.is_finite()
+            && !handoff
+                .facts
+                .iter()
+                .any(|fact| matches!(fact, crate::store::BatchFact::Complete { .. }))
+        {
+            inner.witness = Some(handoff.witness);
+            self.loss = Some(Box::new(super::LossPublication::finite_zero(
+                inner,
+                &self.ledger,
+                Some((handoff.facts, handoff.reservation)),
+            )?));
+            return Ok(());
+        }
+        self.inner = Some(Box::new(inner));
         self.adopted = true;
         self.candidate_names = 2;
         self.source = Some(source);
@@ -435,7 +515,9 @@ impl<'store> RowPublication<'store> {
         work: &mut PublicationWork,
     ) -> io::Result<PrivateDirectory> {
         work.inventory.open_attempts += 1;
-        let base = attempt.root.open_directory("data")?;
+        let base = attempt
+            .root
+            .open_directory(super::base_name(&attempt.input))?;
         work.inventory.open_attempts += 1;
         base.open_directory(&collector::recording::identity_text(attempt.transaction).to_string())
     }
@@ -475,7 +557,11 @@ impl<'store> RowPublication<'store> {
         let input = &inner.state.input;
         let plan = inner.state.row_plan.ok_or_else(invalid)?;
         let source = self.source.as_mut().ok_or_else(invalid)?;
-        let end = source.ordinary_end(input, plan.end, &self.budget);
+        let end = if input.is_finite() {
+            Ok(input.losses.publication_start)
+        } else {
+            source.ordinary_end(input, plan.end, &self.budget)
+        };
         inner.work.source_reads = source.reads;
         inner.work.source_observations = source.observations.get();
         let (publication_end, proved) = match end {
@@ -533,19 +619,27 @@ impl<'store> RowPublication<'store> {
         let plan = inner.state.row_plan.ok_or_else(invalid)?;
         let std::ops::Range { start: first, end } = plan.interval(candidate);
         let loss = self.partition_loss(candidate, first, end, publication_end)?;
-        let batches = self.metadata_batches(candidate);
-        let AttemptOperation::Ordinary {
-            window,
-            attempted_origin,
-        } = input.operation
-        else {
-            return Err(invalid());
+        let (window, attempted_origin) = match input.operation {
+            AttemptOperation::Ordinary {
+                window,
+                attempted_origin,
+            } => (window, attempted_origin),
+            AttemptOperation::Finite { order_floor, .. } => (order_floor, 0),
+            AttemptOperation::Terminal { .. } => return Err(invalid()),
         };
         let metadata = CanonicalMetadata {
             run: input.run,
             transaction: inner.state.transaction,
-            kind: CanonicalKind::Fragment,
-            base: RawBase::Data,
+            kind: if input.is_finite() {
+                CanonicalKind::FiniteEvents
+            } else {
+                CanonicalKind::Fragment
+            },
+            base: if input.is_finite() {
+                RawBase::Recovery
+            } else {
+                RawBase::Data
+            },
             child: if candidate == 0 {
                 RawChild::Fragment0
             } else {
@@ -554,29 +648,47 @@ impl<'store> RowPublication<'store> {
             window,
             attempted_origin,
             canonical_origin: 0,
-            original_end: if proved { publication_end } else { 0 },
+            original_end: if proved && !input.is_finite() {
+                publication_end
+            } else {
+                0
+            },
             binding: input.binding,
             source_layout: input.source.layout,
             source_origin: input.source.origin_continuous_ns,
-            evidence: EndpointEvidence::SurvivingRow,
+            evidence: if input.is_finite() {
+                EndpointEvidence::FixedSource
+            } else {
+                EndpointEvidence::SurvivingRow
+            },
             lifecycle: Lifecycle::Active,
             captured: input.captured,
             trailing_unknown: !proved,
             loss: loss.clone(),
-            body: Body::Events(EventManifest {
-                recovery: Recovery {
-                    run: input.run,
-                    events_first: first,
-                    events_end: end,
-                    rows: self.counts[candidate][0],
-                    losses: loss.totals()?,
-                },
-                identities: input.captured,
-                batches,
-            }),
+            body: self.build_metadata_events(candidate, first, end, &loss)?,
         };
         metadata.validate()?;
         Ok(metadata)
+    }
+    fn build_metadata_events(
+        &self,
+        candidate: usize,
+        first: u64,
+        end: u64,
+        loss: &CanonicalLoss,
+    ) -> io::Result<Body> {
+        let input = &self.inner.as_ref().ok_or_else(invalid)?.state.input;
+        Ok(Body::Events(EventManifest {
+            recovery: Recovery {
+                run: input.run,
+                events_first: first,
+                events_end: end,
+                rows: self.counts[candidate][0],
+                losses: loss.totals()?,
+            },
+            identities: input.captured,
+            batches: self.metadata_batches(candidate),
+        }))
     }
     fn metadata_batches(&self, candidate: usize) -> Vec<Batch> {
         self.facts[candidate * 4096..(candidate + 1) * 4096]
@@ -610,7 +722,11 @@ impl<'store> RowPublication<'store> {
         if candidate == 1 {
             inherited.predecessor = Predecessor::Canonical {
                 transaction: inner.state.transaction,
-                kind: CanonicalKind::Fragment,
+                kind: if input.is_finite() {
+                    CanonicalKind::FiniteEvents
+                } else {
+                    CanonicalKind::Fragment
+                },
                 origin: plan.first,
             };
             inherited.publication_start = publication_end;
@@ -776,8 +892,10 @@ impl<'store> RowPublication<'store> {
         if let Some(file) = Self::optional_file(&events, "index")? {
             let mut file = file;
             let identity = crate::store::FileIdentity::read(&file)?;
-            let AttemptOperation::Ordinary { window, .. } = attempt.input.operation else {
-                return Err(invalid());
+            let window = match attempt.input.operation {
+                AttemptOperation::Ordinary { window, .. } => window,
+                AttemptOperation::Finite { .. } => 0,
+                AttemptOperation::Terminal { .. } => return Err(invalid()),
             };
             let malformed = self
                 .original_witness
@@ -1186,7 +1304,9 @@ impl<'store> RowPublication<'store> {
         let object = Self::object(attempt, &mut inner.work)?;
         sync_directory(&object, &mut inner.work)?;
         inner.work.inventory.open_attempts += 1;
-        let base = attempt.root.open_directory("data")?;
+        let base = attempt
+            .root
+            .open_directory(super::base_name(&attempt.input))?;
         sync_directory(&base, &mut inner.work)?;
         sync_directory(attempt.root, &mut inner.work)?;
         if inner.state.cleanup.region != 8 {
@@ -1254,11 +1374,14 @@ impl Store {
             return Err(invalid());
         }
         let plan = state.row_plan;
-        ledger.update(|work| work.inventory.open_attempts += 1);
-        let base = self.directory.open_directory("data")?;
-        ledger.update(|work| work.inventory.open_attempts += 1);
-        let object = base
-            .open_directory(&collector::recording::identity_text(state.transaction).to_string())?;
+        let object = self.row_publication_object(&state, ledger)?;
+        if let Some(metadata) =
+            Self::row_finite_loss_metadata(&state, &object, reader.is_some(), ledger)?
+        {
+            return self
+                .row_finite_loss_effect(state, permit, (&object, &metadata), reader, budget, ledger)
+                .map(Some);
+        }
         let present = if let Some(plan) = plan {
             Self::row_metadata_present(&object, &plan, state.phase, ledger)?
         } else {
@@ -1268,22 +1391,86 @@ impl Store {
             self.row_publication_reopen(state, permit, &object, reader, budget, ledger)
                 .map(Some)
         } else {
-            self.row_publication_candidates(state, permit, &object, reader, budget, ledger)
+            self.row_publication_candidates(&state, permit, &object, reader, budget, ledger)
                 .map(Some)
         }
     }
-    fn row_publication_candidates<'a>(
+    fn row_publication_object(
+        &self,
+        state: &crate::transaction::normal::NormalState,
+        ledger: &super::super::PublicationLedger,
+    ) -> io::Result<PrivateDirectory> {
+        ledger.update(|work| work.inventory.open_attempts += 1);
+        let base = self
+            .directory
+            .open_directory(super::base_name(&state.input))?;
+        ledger.update(|work| work.inventory.open_attempts += 1);
+        let name = collector::recording::identity_text(state.transaction).to_string();
+        let object = if state.input.is_finite()
+            && state.phase == Phase::Registered
+            && state.census.kind == 0
+        {
+            let mut syncs = 0;
+            let result = base.create_directory_counted(&name, &mut syncs);
+            ledger.update(|work| work.full_syncs += syncs);
+            let object = result?;
+            ledger.update(|work| work.full_syncs += 1);
+            base.full_sync()?;
+            ledger.update(|work| work.inventory.open_attempts += 1);
+            let mut syncs = 0;
+            let result = object.create_directory_counted("pending", &mut syncs);
+            ledger.update(|work| work.full_syncs += syncs);
+            drop(result?);
+            ledger.update(|work| work.full_syncs += 1);
+            object.full_sync()?;
+            object
+        } else {
+            base.open_directory(&name)?
+        };
+        Ok(object)
+    }
+    fn row_finite_loss_metadata(
+        state: &crate::transaction::normal::NormalState,
+        object: &PrivateDirectory,
+        source_present: bool,
+        ledger: &super::super::PublicationLedger,
+    ) -> io::Result<Option<CanonicalMetadata>> {
+        if !(state.input.is_finite()
+            && state.row_plan.is_some_and(|plan| plan.rows == [0, 0])
+            && matches!(state.phase, Phase::SalvagePlanned | Phase::UnresolvedExtent))
+        {
+            return Ok(None);
+        }
+        ledger.update(|work| work.inventory.open_attempts += 1);
+        let loss = match object.open_directory("loss") {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        ledger.update(|work| work.inventory.open_attempts += 1);
+        let Some(mut file) = RowPublication::optional_file(&loss, "metadata")? else {
+            return Ok(None);
+        };
+        ledger.update(|work| work.canonical.metadata_admissions += 1);
+        match CanonicalMetadata::read(&mut file) {
+            Ok(metadata) => Ok(Some(metadata)),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::InvalidData && source_present => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    fn row_finite_loss_effect<'a>(
         &'a self,
         state: crate::transaction::normal::NormalState,
         permit: StagingPermit,
-        object: &PrivateDirectory,
+        effect: (&PrivateDirectory, &CanonicalMetadata),
         reader: Option<RingReader>,
         budget: &Arc<ByteBudget>,
         ledger: &super::super::PublicationLedger,
     ) -> io::Result<RowPublication<'a>> {
-        let reader = reader.ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
+        let (object, metadata) = effect;
         let mut opens = 0;
-        let result = super::super::inventory::select_original_mode(object, &mut opens, true);
+        let result = super::super::inventory::select_finite_original(object, &mut opens);
         ledger.update(|work| {
             work.inventory.open_attempts += opens;
             work.inventory.reopens += opens;
@@ -1291,7 +1478,7 @@ impl Store {
         let (directory, placement) = result?.ok_or_else(invalid)?;
         let attempt = RegisteredAttempt {
             transaction: state.transaction,
-            input: state.input,
+            input: state.input.clone(),
             directory,
             resumed: true,
             candidates: true,
@@ -1300,9 +1487,62 @@ impl Store {
             root: &self.directory,
             placement,
         };
-        let candidates = attempt
-            .row_candidates(reader, budget, ledger)?
-            .publication_metadata();
+        if let Some(reader) = reader {
+            let reservation = budget
+                .reserve(64 * 1024)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+            let proof =
+                super::super::normal_proof::SourceProof::new(reader, &state.input, reservation);
+            ledger.update(|work| work.source_observations += 1);
+            drop(proof?);
+        }
+        let reservation = budget
+            .reserve(256 * 1024)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let mut inner = NormalPublication::blank(attempt, state, budget, reservation);
+        inner.ledger = Some(ledger.clone());
+        let loss = super::LossPublication::finite_zero(inner, ledger, None)?;
+        loss.admit_finite_effect(metadata)?;
+        let mut owner = RowPublication::blank(None, None, budget, ledger)?;
+        owner.loss = Some(Box::new(loss));
+        Ok(owner)
+    }
+    fn row_publication_candidates<'a>(
+        &'a self,
+        state: &crate::transaction::normal::NormalState,
+        permit: StagingPermit,
+        object: &PrivateDirectory,
+        reader: Option<RingReader>,
+        budget: &Arc<ByteBudget>,
+        ledger: &super::super::PublicationLedger,
+    ) -> io::Result<RowPublication<'a>> {
+        if reader.is_none() && !state.input.is_finite() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let mut opens = 0;
+        let result = if state.input.is_finite() {
+            super::super::inventory::select_finite_original(object, &mut opens)
+        } else {
+            super::super::inventory::select_original_mode(object, &mut opens, true)
+        };
+        ledger.update(|work| {
+            work.inventory.open_attempts += opens;
+            work.inventory.reopens += opens;
+        });
+        let (directory, placement) = result?.ok_or_else(invalid)?;
+        let attempt = RegisteredAttempt {
+            transaction: state.transaction,
+            input: state.input.clone(),
+            directory,
+            resumed: true,
+            candidates: true,
+            _permit: permit,
+            owner: &self.owner,
+            root: &self.directory,
+            placement,
+        };
+        let candidates =
+            RowCandidates::new_optional(attempt, reader, budget, ledger)?.publication_metadata();
         RowPublication::blank(Some(candidates), None, budget, ledger)
     }
 
@@ -1374,7 +1614,7 @@ impl Store {
             match CanonicalMetadata::read(&mut file) {
                 Ok(_) => {}
                 Err(error)
-                    if phase == Phase::SalvagePlanned
+                    if matches!(phase, Phase::SalvagePlanned | Phase::UnresolvedExtent)
                         && matches!(
                             error.kind(),
                             io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData
@@ -1409,17 +1649,23 @@ impl RowPublication<'_> {
         end: u64,
     ) -> io::Result<()> {
         let input = &state.input;
-        let AttemptOperation::Ordinary {
-            window,
-            attempted_origin,
-        } = input.operation
-        else {
-            return Err(invalid());
+        let (window, attempted_origin) = match input.operation {
+            AttemptOperation::Ordinary {
+                window,
+                attempted_origin,
+            } => (window, attempted_origin),
+            AttemptOperation::Finite { order_floor, .. } => (order_floor, 0),
+            AttemptOperation::Terminal { .. } => return Err(invalid()),
         };
         if metadata.window != window
             || metadata.attempted_origin != attempted_origin
             || metadata.canonical_origin != 0
-            || metadata.evidence != EndpointEvidence::SurvivingRow
+            || metadata.evidence
+                != if input.is_finite() {
+                    EndpointEvidence::FixedSource
+                } else {
+                    EndpointEvidence::SurvivingRow
+                }
             || metadata.loss.unknown_flags != u32::from(input.losses.unknown.is_some())
             || metadata.loss.inherited.unknown != input.losses.unknown
             || metadata.loss.inherited.event_inherited_end
@@ -1429,8 +1675,18 @@ impl RowPublication<'_> {
             || metadata.binding != input.binding
             || metadata.source_layout != input.source.layout
             || metadata.source_origin != input.source.origin_continuous_ns
-            || metadata.kind != CanonicalKind::Fragment
-            || metadata.base != RawBase::Data
+            || metadata.kind
+                != if input.is_finite() {
+                    CanonicalKind::FiniteEvents
+                } else {
+                    CanonicalKind::Fragment
+                }
+            || metadata.base
+                != if input.is_finite() {
+                    RawBase::Recovery
+                } else {
+                    RawBase::Data
+                }
             || metadata.child
                 != if candidate == 0 {
                     RawChild::Fragment0
@@ -1562,7 +1818,17 @@ impl RowPublication<'_> {
             self.metadata.push(metadata);
         }
         self.validate_transfers()?;
-        self.proved = Some(self.metadata[0].original_end > 0 && !self.metadata[0].trailing_unknown);
+        self.proved = Some(
+            (self.metadata[0].original_end > 0
+                || self
+                    .inner
+                    .as_ref()
+                    .ok_or_else(invalid)?
+                    .state
+                    .input
+                    .is_finite())
+                && !self.metadata[0].trailing_unknown,
+        );
         Ok(())
     }
 }

@@ -24,6 +24,8 @@ pub struct LossPublication<'store> {
     adopted: bool,
     ledger: super::super::PublicationLedger,
     accounted: PublicationWork,
+    finite_target: Option<NormalState>,
+    finite_scratch: Option<super::super::finite_scratch::FiniteScratch>,
 }
 impl<'store> RegisteredAttempt<'store> {
     /// Consumes writable authority before reconciling exact zero-survivor loss.
@@ -89,6 +91,8 @@ impl<'store> RegisteredAttempt<'store> {
             adopted: false,
             ledger: ledger.clone(),
             accounted: PublicationWork::default(),
+            finite_target: None,
+            finite_scratch: None,
         })
     }
 }
@@ -206,10 +210,97 @@ impl<'store> LossPublication<'store> {
             return Err(invalid());
         }
 
+        let proof = if state.input.is_finite() {
+            let proof = reader
+                .map(|reader| {
+                    let scratch = budget
+                        .reserve(64 * 1024)
+                        .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
+                    source_proof(reader, &state.input, scratch, ledger)
+                })
+                .transpose()?;
+            // Refinement hints cannot recreate missing completed authority.
+            ledger.update(|work| work.inventory.open_attempts += 1);
+            let mut file = attempt.directory.open_file("metadata")?;
+            ledger.update(|work| work.canonical.metadata_admissions += 1);
+            if CanonicalMetadata::read(&mut file)? != state.loss_metadata()? {
+                return Err(invalid());
+            }
+            Some(proof)
+        } else {
+            None
+        }
+        .flatten();
         let mut inner = NormalPublication::blank(attempt, state, budget, reservation);
         inner.ledger = Some(ledger.clone());
         inner.metadata = Some(inner.state.loss_metadata()?);
+        let finite_scratch = if inner.state.input.is_finite() && inner.state.cleanup.region != 8 {
+            Some(super::super::finite_scratch::FiniteScratch::new(
+                budget, ledger, None,
+            )?)
+        } else {
+            None
+        };
         Ok(LossPublication {
+            inner,
+            census: None,
+            census_reader: None,
+            census_binding: None,
+            cleanup_admission: 0,
+            output_admission: 0,
+            proof,
+            endpoint: None,
+            snapshot: None,
+            evidence: 0,
+            intent: None,
+            adopted: false,
+            ledger: ledger.clone(),
+            accounted: PublicationWork::default(),
+            finite_target: None,
+            finite_scratch,
+        })
+    }
+}
+
+impl<'store> LossPublication<'store> {
+    pub(super) fn finite_zero(
+        mut inner: NormalPublication<'store>,
+        ledger: &super::super::PublicationLedger,
+        facts: Option<(Vec<super::super::BatchFact>, super::ByteReservation)>,
+    ) -> io::Result<Self> {
+        if !inner.state.input.is_finite()
+            || !matches!(
+                inner.state.phase,
+                Phase::SalvagePlanned | Phase::UnresolvedExtent
+            )
+        {
+            return Err(invalid());
+        }
+        let plan = inner.state.row_plan.ok_or_else(invalid)?;
+        if plan.rows != [0, 0] || plan.split != 0 || plan.committed != 0 {
+            return Err(invalid());
+        }
+        let mut target = inner.state.clone();
+        target.row_plan = None;
+        target.salvage = Some(LossPlan {
+            first: plan.first,
+            end: plan.end,
+            snapshot_first: plan.source_first,
+            snapshot_end: plan.source_end,
+            layout: plan.layout,
+            endpoint: plan.endpoint,
+            terminal: false,
+        });
+        target.loss.event_end = plan.end;
+        target.loss.events_new = plan.end - plan.first;
+        inner.metadata = Some(target.loss_metadata()?);
+        inner.ready = false;
+        let finite_scratch = Some(super::super::finite_scratch::FiniteScratch::new(
+            &inner.budget,
+            ledger,
+            facts,
+        )?);
+        Ok(Self {
             inner,
             census: None,
             census_reader: None,
@@ -221,14 +312,52 @@ impl<'store> LossPublication<'store> {
             snapshot: None,
             evidence: 0,
             intent: None,
-            adopted: false,
+            adopted: true,
             ledger: ledger.clone(),
             accounted: PublicationWork::default(),
+            finite_target: Some(target),
+            finite_scratch,
         })
     }
-}
-
-impl<'store> LossPublication<'store> {
+    pub(super) fn admit_finite_effect(&self, metadata: &CanonicalMetadata) -> io::Result<()> {
+        if self.inner.metadata.as_ref() != Some(metadata) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+    fn finite_refine(&mut self) -> io::Result<()> {
+        if self.inner.witness.is_none() {
+            self.load_census()?;
+            return Ok(());
+        }
+        if self.output_admission < 4109 {
+            self.output_admission = self.step_inner_admission()?;
+            return Ok(());
+        }
+        let attempt = self.inner.attempt.as_ref().ok_or_else(invalid)?;
+        self.inner.work.inventory.open_attempts += 1;
+        let base = attempt.root.open_directory(base_name(&attempt.input))?;
+        self.inner.work.inventory.open_attempts += 1;
+        let object = base.open_directory(
+            &collector::recording::identity_text(attempt.transaction).to_string(),
+        )?;
+        self.inner.work.inventory.open_attempts += 1;
+        let loss = object.create_directory_counted("loss", &mut self.inner.work.full_syncs)?;
+        super::write_metadata_at(
+            attempt,
+            &loss,
+            self.inner.metadata.as_ref().ok_or_else(invalid)?,
+            &mut self.inner.work,
+            &self.inner.state,
+            Some(&self.ledger),
+        )?;
+        sync_directory(&loss, &mut self.inner.work)?;
+        sync_directory(&object, &mut self.inner.work)?;
+        self.inner
+            .commit_state(self.finite_target.as_ref().ok_or_else(invalid)?.clone())?;
+        self.finite_target = None;
+        Ok(())
+    }
     fn local_work(&self) -> PublicationWork {
         let mut work = self.inner.work();
         if let Some(proof) = &self.proof {
@@ -294,6 +423,8 @@ impl<'store> LossPublication<'store> {
             adopted: false,
             ledger: ledger.clone(),
             accounted: PublicationWork::default(),
+            finite_target: None,
+            finite_scratch: None,
         })
     }
     fn step_inner(&mut self) -> io::Result<PublicationStep> {
@@ -301,10 +432,27 @@ impl<'store> LossPublication<'store> {
             return Ok(PublicationStep::Idle);
         }
 
+        if self.inner.state.input.is_finite() {
+            if let Some(proof) = &self.proof {
+                proof.check(&self.inner.state.input)?;
+            }
+        }
         if self.step_inner_visible()? {
             return Ok(PublicationStep::Continue);
         }
-        if self.inner.inventory.is_some() {
+        self.step_inner_finite_metadata()?;
+        if self
+            .finite_scratch
+            .as_ref()
+            .is_some_and(|scratch| !scratch.admitted())
+        {
+            self.finite_scratch
+                .as_mut()
+                .ok_or_else(invalid)?
+                .admit(self.inner.attempt.as_ref().ok_or_else(invalid)?)?;
+        } else if self.finite_target.is_some() {
+            self.finite_refine()?;
+        } else if self.inner.inventory.is_some() {
             self.census()?;
         } else if self.inner.state.salvage.is_some()
             && self.inner.witness.is_none()
@@ -335,6 +483,21 @@ impl<'store> LossPublication<'store> {
         } else {
             PublicationStep::Continue
         })
+    }
+    fn step_inner_finite_metadata(&mut self) -> io::Result<()> {
+        if self.inner.state.input.is_finite() && self.inner.ready {
+            let attempt = self.inner.attempt.as_ref().ok_or_else(invalid)?;
+            self.inner.work.inventory.open_attempts += 1;
+            let mut file = attempt.directory.open_file("metadata")?;
+            self.inner.work.canonical.metadata_admissions += 1;
+            let before = super::super::FileIdentity::read(&file)?;
+            if Some(CanonicalMetadata::read(&mut file)?) != self.inner.metadata
+                || super::super::FileIdentity::read(&file)? != before
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
     }
     fn step_inner_visible(&mut self) -> io::Result<bool> {
         let owner = if let Some(inventory) = &self.inner.inventory {
@@ -374,6 +537,16 @@ impl<'store> LossPublication<'store> {
         Ok(false)
     }
     fn step_inner_admission(&self) -> io::Result<usize> {
+        if self.inner.state.input.is_finite() {
+            use super::super::inventory::census::io_owner::CensusFacts;
+            let witness = self.inner.witness.as_ref().ok_or_else(invalid)?;
+            for position in self.output_admission..(self.output_admission + 128).min(4109) {
+                self.ledger.update(|work| work.proof_operations += 1);
+                if witness.record(position)?.rows != 0 {
+                    return Err(invalid());
+                }
+            }
+        }
         let next = self
             .inner
             .witness
@@ -640,7 +813,7 @@ impl<'store> LossPublication<'store> {
         let object = base.open_directory(
             &collector::recording::identity_text(attempt.transaction).to_string(),
         )?;
-        object.visit_names_counted(4, &mut self.inner.work.inventory.directory, loss_child)?;
+        loss_children(&object, &self.inner.state, &mut self.inner.work)?;
         let loss = object.create_directory_counted("loss", &mut self.inner.work.full_syncs)?;
         sync_directory(&loss, &mut self.inner.work)?;
         sync_directory(&object, &mut self.inner.work)?;
@@ -688,6 +861,16 @@ impl<'store> LossPublication<'store> {
                 )?;
             return Ok(());
         }
+        if let Some(scratch) = &mut self.finite_scratch {
+            cleanup_original_quiet(&self.inner)?;
+            if cleanup_original_gate(&mut self.inner)? {
+                return Ok(());
+            }
+            if !scratch.cleaned() {
+                scratch.cleanup(self.inner.attempt.as_ref().ok_or_else(invalid)?)?;
+                return Ok(());
+            }
+        }
         cleanup_original(&mut self.inner)
     }
 }
@@ -721,7 +904,9 @@ fn loss_census(inventory: &OriginalInventory<'_, '_>) -> io::Result<(Option<u64>
             }
             _ => return Err(io::Error::from(io::ErrorKind::WouldBlock)),
         },
-        AttemptOperation::Terminal { event_end } => (Some(event_end), 3),
+        AttemptOperation::Terminal { event_end } | AttemptOperation::Finite { event_end, .. } => {
+            (Some(event_end), 3)
+        }
     };
     Ok(end)
 }
@@ -777,7 +962,7 @@ fn cleanup_original(inner: &mut NormalPublication<'_>) -> io::Result<()> {
     let object =
         base.open_directory(&collector::recording::identity_text(attempt.transaction).to_string())?;
     drop(base);
-    object.visit_names_counted(4, &mut inner.work.inventory.directory, loss_child)?;
+    loss_children(&object, &inner.state, &mut inner.work)?;
     if inner.state.cleanup.region == 8 {
         super::super::inventory::census::io_owner::retire(
             attempt,
@@ -933,7 +1118,10 @@ fn cleanup_batches(
     admission: &CleanupAdmission<'_>,
 ) -> io::Result<Cleanup> {
     if let Some((directory, _)) = original {
-        let events = if matches!(admission.input.operation, AttemptOperation::Ordinary { .. }) {
+        let events = if matches!(
+            admission.input.operation,
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
+        ) {
             {
                 work.cleanup_directory_attempts += 1;
                 optional_directory(directory, "events")?
@@ -944,7 +1132,10 @@ fn cleanup_batches(
         if let Some(events) = &events {
             admission.witness.cleanup_directories(directory, events)?;
         }
-        let parent = if matches!(admission.input.operation, AttemptOperation::Ordinary { .. }) {
+        let parent = if matches!(
+            admission.input.operation,
+            AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
+        ) {
             events.as_ref()
         } else {
             Some(directory)
@@ -990,7 +1181,10 @@ fn cleanup_directories(
 ) -> io::Result<Cleanup> {
     if let Some((directory, name)) = original {
         if cursor.directory == 0 {
-            if matches!(admission.input.operation, AttemptOperation::Ordinary { .. }) {
+            if matches!(
+                admission.input.operation,
+                AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
+            ) {
                 work.cleanup_directory_attempts += 1;
                 if let Some(events) = optional_directory(directory, "events")? {
                     admission.witness.cleanup_directories(directory, &events)?;
@@ -1035,6 +1229,25 @@ fn optional_directory(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
+}
+fn loss_children(
+    object: &PrivateDirectory,
+    state: &NormalState,
+    work: &mut PublicationWork,
+) -> io::Result<()> {
+    object.visit_names_counted(6, &mut work.inventory.directory, |name| {
+        if state.input.is_finite() {
+            if name == "ready"
+                || (state.cleanup.region == 8 && !matches!(name, "loss" | "original-census"))
+            {
+                return Err(invalid());
+            }
+            if matches!(name, "fragment-0" | "fragment-1") {
+                return Ok(());
+            }
+        }
+        loss_child(name)
+    })
 }
 fn loss_child(name: &str) -> io::Result<()> {
     if matches!(name, "loss" | "pending" | "ready" | "original-census") {
@@ -1100,8 +1313,10 @@ fn cleanup_admit(
     }
     if name == "index" {
         let input = admission.input;
-        let AttemptOperation::Ordinary { window, .. } = input.operation else {
-            return Err(invalid());
+        let window = match input.operation {
+            AttemptOperation::Ordinary { window, .. } => window,
+            AttemptOperation::Finite { .. } => 0,
+            AttemptOperation::Terminal { .. } => return Err(invalid()),
         };
         let result = crate::event_table::index::Index::read_attempt_file(
             file,

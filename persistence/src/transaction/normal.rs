@@ -156,6 +156,7 @@ impl NormalState {
             unknown_flags: u32::from(input.losses.unknown.is_some()),
             inherited: input.losses.clone(),
         };
+        let row_plan = input.finite_plan();
         Self {
             transaction,
             input,
@@ -167,7 +168,7 @@ impl NormalState {
             next: 0,
             structure: None,
             salvage: None,
-            row_plan: None,
+            row_plan,
             cleanup: super::salvage::Cleanup::default(),
             census: super::census_binding::CensusBinding::default(),
         }
@@ -247,6 +248,7 @@ impl NormalState {
 
                 put32(bytes, 140, 4);
             }
+            AttemptOperation::Finite { .. } => return Err(invalid()),
             AttemptOperation::Terminal { event_end } => {
                 if self.origin != 0
                     || self.original_end != 0
@@ -268,7 +270,12 @@ impl NormalState {
             || plan.layout != self.input.source.layout
             || self.salvage.is_some()
             || self.origin != 0
-            || !matches!(self.input.operation, AttemptOperation::Ordinary { .. })
+            || !matches!(
+                self.input.operation,
+                AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }
+            )
+            || (self.input.is_finite() != (plan.endpoint == 3))
+            || (self.input.is_finite() && plan.source_end != plan.end)
         {
             return Err(invalid());
         }
@@ -291,7 +298,10 @@ impl NormalState {
         put32(
             bytes,
             188,
-            u32::from(self.original_end == 0 || self.phase == Phase::UnresolvedExtent),
+            u32::from(
+                (self.original_end == 0 && !self.input.is_finite())
+                    || self.phase == Phase::UnresolvedExtent,
+            ),
         );
         put64(bytes, 192, self.sequence);
         put64(bytes, 200, self.next);
@@ -308,12 +318,21 @@ impl NormalState {
         Ok(())
     }
     fn validate_row_state(&self, plan: &super::salvage::RowPlan, phase: u32) -> io::Result<()> {
+        let prepublication = self.input.is_finite() && phase == 8 && self.sequence == 0;
+        if prepublication
+            && (self.next != 0
+                || self.structure.is_some()
+                || plan.committed != 0
+                || self.cleanup != super::salvage::Cleanup::default())
+        {
+            return Err(invalid());
+        }
         if plan.rows == [0, 0] {
             let mut expected = Self::registered(self.transaction, self.input.clone());
             expected.phase = self.phase;
             expected.row_plan = Some(*plan);
             expected.census = self.census;
-            if *self != expected || phase != 6 {
+            if *self != expected || (phase != 6 && !prepublication) {
                 return Err(invalid());
             }
         } else {
@@ -335,13 +354,14 @@ impl NormalState {
         }
         let used = 1 + u64::from(plan.rows[1] != 0);
         if (phase == 6 && (self.sequence != 0 || self.next != 0 || plan.committed != 0))
-            || (phase == 8 && self.sequence == 0)
+            || (phase == 8 && self.sequence == 0 && !prepublication)
             || (matches!(phase, 4 | 7 | 8)
+                && !prepublication
                 && (self.next != used || plan.committed != (1 << used) - 1))
             || (self.cleanup.region > 1 && self.cleanup.region != 8)
             || (self.cleanup.region == 8
                 && (phase != 7
-                    || self.original_end == 0
+                    || (self.original_end == 0 && !self.input.is_finite())
                     || self.cleanup
                         != super::salvage::Cleanup {
                             region: 8,
@@ -373,6 +393,14 @@ impl NormalState {
             Phase::Publishing if self.sequence > 0 => 3,
             Phase::Published if self.sequence > 0 && self.structure.is_none() => 4,
             Phase::SalvageCommitted if self.sequence > 0 && self.structure.is_none() => 7,
+            Phase::UnresolvedExtent
+                if self.input.is_finite()
+                    && self.sequence == 0
+                    && self.next == 0
+                    && self.structure.is_none() =>
+            {
+                8
+            }
             _ => return Err(invalid()),
         };
         put32(bytes, 48, phase);
@@ -380,9 +408,13 @@ impl NormalState {
         put64(bytes, 144, self.original_end);
         put64(bytes, 152, self.loss.event_end);
         put32(bytes, 184, u32::from(plan.terminal));
+        put32(bytes, 188, u32::from(phase == 8));
         put64(bytes, 192, self.sequence);
         put64(bytes, 200, self.next);
-        plan.encode((&mut bytes[256..512]).try_into().map_err(|_| invalid())?)?;
+        plan.encode_context(
+            (&mut bytes[256..512]).try_into().map_err(|_| invalid())?,
+            self.input.is_finite(),
+        )?;
         self.cleanup
             .encode((&mut bytes[1024..1088]).try_into().map_err(|_| invalid())?)?;
         self.loss.encode(&mut bytes[1088..1344]);
@@ -447,12 +479,17 @@ impl NormalState {
             {
                 (RawBase::Recovery, 0, 0)
             }
+            AttemptOperation::Finite { order_floor, .. } => (RawBase::Recovery, order_floor, 0),
             AttemptOperation::Terminal { .. } => return Err(invalid()),
         };
         Ok(CanonicalMetadata {
             run: self.input.run,
             transaction: self.transaction,
-            kind: super::CanonicalKind::LossOnly,
+            kind: if self.input.is_finite() {
+                super::CanonicalKind::FiniteEventLoss
+            } else {
+                super::CanonicalKind::LossOnly
+            },
             base,
             child: RawChild::Loss,
             window,
@@ -502,7 +539,11 @@ impl NormalState {
                 Operation::Terminal => AttemptOperation::Terminal {
                     event_end: get64(bytes, 152)?,
                 },
-                Operation::ExceptionalFragment => return Err(invalid()),
+                Operation::ExceptionalFragment => AttemptOperation::Finite {
+                    event_end: get64(bytes, 152)?,
+                    order_floor: get64(bytes, 96)?,
+                    source_first: get64(bytes, 280)?,
+                },
             },
         })
     }
@@ -519,10 +560,36 @@ impl NormalState {
         }
         let mut registered = <[u8; 4096]>::try_from(bytes).map_err(|_| invalid())?;
         registered[1400..1496].fill(0);
-        let (_, input) = AttemptInput::decode_registered(&registered, recording)?;
+        let (_, input) = AttemptInput::decode_construction(&registered, recording, true)?;
         let mut state = Self::registered(transaction, input);
         state.census = census;
         Ok(state)
+    }
+    fn decode_plans(
+        bytes: &[u8],
+        operation: Operation,
+    ) -> io::Result<(
+        Option<super::salvage::RowPlan>,
+        Option<super::salvage::LossPlan>,
+    )> {
+        let row_plan = if matches!(get32(bytes, 260)?, 1 | 2) {
+            Some(super::salvage::RowPlan::decode(
+                bytes[256..512].try_into().map_err(|_| invalid())?,
+            )?)
+        } else {
+            None
+        };
+        let salvage = if matches!(get32(bytes, 260)?, 1 | 2)
+            || bytes[256..512].iter().all(|byte| *byte == 0)
+        {
+            None
+        } else {
+            Some(super::salvage::LossPlan::decode_context(
+                bytes[256..512].try_into().map_err(|_| invalid())?,
+                operation == Operation::ExceptionalFragment,
+            )?)
+        };
+        Ok((row_plan, salvage))
     }
     pub fn decode(bytes: &[u8], recording: Identity) -> io::Result<Self> {
         let Slot::Occupied {
@@ -550,6 +617,7 @@ impl NormalState {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
         let input = Self::decode_input(bytes, recording, operation)?;
+        let (row_plan, salvage) = Self::decode_plans(bytes, operation)?;
         let state = Self {
             transaction,
             input,
@@ -562,22 +630,8 @@ impl NormalState {
             loss: CanonicalLoss::decode(&bytes[1088..1344])?,
             sequence: get64(bytes, 192)?,
             next: get64(bytes, 200)?,
-            row_plan: if matches!(get32(bytes, 260)?, 1 | 2) {
-                Some(super::salvage::RowPlan::decode(
-                    bytes[256..512].try_into().map_err(|_| invalid())?,
-                )?)
-            } else {
-                None
-            },
-            salvage: if matches!(get32(bytes, 260)?, 1 | 2)
-                || bytes[256..512].iter().all(|byte| *byte == 0)
-            {
-                None
-            } else {
-                Some(super::salvage::LossPlan::decode(
-                    bytes[256..512].try_into().map_err(|_| invalid())?,
-                )?)
-            },
+            row_plan,
+            salvage,
             cleanup: super::salvage::Cleanup::decode(
                 bytes[1024..1088].try_into().map_err(|_| invalid())?,
             )?,

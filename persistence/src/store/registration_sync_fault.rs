@@ -73,7 +73,7 @@ unsafe extern "C" fn refuse_full_sync(descriptor: i32, command: i32) -> i32 {
         return -1;
     }
 
-    if unsafe { strcmp(path.as_ptr().cast(), target) } != 0 {
+    if !unsafe { matches_owned_target(path.as_ptr().cast(), target) } {
         return unsafe { fcntl(descriptor, command) };
     }
 
@@ -129,13 +129,13 @@ unsafe extern "C" fn refuse_read(descriptor: i32, bytes: *mut c_void, length: us
     if unsafe { fcntl(descriptor, 50, path.as_mut_ptr()) } != 0 {
         return -1;
     }
-    let selected = unsafe { strcmp(path.as_ptr().cast(), target) } == 0;
+    let selected = unsafe { matches_owned_target(path.as_ptr().cast(), target) };
     unsafe { pause_read(descriptor) };
     if !selected {
         return unsafe { read(descriptor, bytes, length) };
     }
     if unsafe { fcntl(descriptor, 50, path.as_mut_ptr()) } == 0
-        && unsafe { strcmp(path.as_ptr().cast(), target) } != 0
+        && !unsafe { matches_owned_target(path.as_ptr().cast(), target) }
     {
         let message = b"FD-READ-PATH-CHANGED\n";
         assert_eq!(
@@ -319,7 +319,7 @@ unsafe fn pause_read(fd: i32) {
     }
     let mut path = [0_u8; 1024];
     if unsafe { fcntl(fd, 50, path.as_mut_ptr()) } != 0
-        || unsafe { strcmp(path.as_ptr().cast(), target) } != 0
+        || !unsafe { matches_owned_target(path.as_ptr().cast(), target) }
     {
         return;
     }
@@ -385,7 +385,7 @@ unsafe fn mutation_fault(directory: i32, name: *const c_char, operation: &std::f
     for index in 0..length {
         path[prefix + 1 + index] = unsafe { *name.add(index).cast::<u8>() };
     }
-    unsafe { strcmp(path.as_ptr().cast(), expected) == 0 }
+    unsafe { matches_owned_target(path.as_ptr().cast(), expected) }
 }
 #[repr(C)]
 struct RenameInterpose {
@@ -790,7 +790,7 @@ unsafe extern "C" fn metadata_write_fault(file: i32, bytes: *const c_void, count
     }
     let mut path = [0_u8; 1024];
     if unsafe { fcntl(file, 50, path.as_mut_ptr()) } != 0
-        || unsafe { strcmp(path.as_ptr().cast(), target) } != 0
+        || !unsafe { matches_owned_target(path.as_ptr().cast(), target) }
     {
         return unsafe { write(file, bytes, count) };
     }
@@ -867,4 +867,43 @@ unsafe fn metadata_sequence_byte() -> Option<u8> {
     assert_eq!(unsafe { close(file) }, 0);
     assert_eq!(count, 1);
     Some(byte)
+}
+
+// A fresh finite transaction chooses its private object name after the child starts.
+// Suffix faults remain restricted to the explicitly owned fixture root.
+unsafe fn matches_owned_target(path: *const c_char, target: *const c_char) -> bool {
+    if unsafe { *target } != b'@' as c_char {
+        return unsafe { strcmp(path, target) == 0 };
+    }
+    let root = unsafe { getenv(c"FLIGHTDECK_FINITE_ROOT".as_ptr()) };
+    if root.is_null() {
+        return false;
+    }
+    let mut path_bytes = [0; 1024];
+    let mut root_bytes = [0; 1024];
+    let mut suffix = [0; 1024];
+    let Some(length) = (unsafe { bounded_target(path, &mut path_bytes) }) else {
+        return false;
+    };
+    let Some(root_length) = (unsafe { bounded_target(root, &mut root_bytes) }) else {
+        return false;
+    };
+    let Some(suffix_length) = (unsafe { bounded_target(target.add(1), &mut suffix) }) else {
+        return false;
+    };
+    root_length < length
+        && path_bytes[..root_length] == root_bytes[..root_length]
+        && path_bytes[root_length] == b'/'
+        && suffix_length > 0
+        && suffix[0] == b'/'
+        && path_bytes[..length].ends_with(&suffix[..suffix_length])
+}
+unsafe fn bounded_target(pointer: *const c_char, output: &mut [u8; 1024]) -> Option<usize> {
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = unsafe { *pointer.add(index) as u8 };
+        if *byte == 0 {
+            return Some(index);
+        }
+    }
+    None
 }

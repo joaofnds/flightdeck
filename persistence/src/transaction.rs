@@ -89,8 +89,18 @@ pub(crate) fn elapsed_window(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttemptOperation {
-    Ordinary { window: u64, attempted_origin: u64 },
-    Terminal { event_end: u64 },
+    Ordinary {
+        window: u64,
+        attempted_origin: u64,
+    },
+    Terminal {
+        event_end: u64,
+    },
+    Finite {
+        event_end: u64,
+        order_floor: u64,
+        source_first: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +133,8 @@ pub enum CanonicalKind {
     Terminal = 2,
     Fragment = 3,
     LossOnly = 4,
+    FiniteEvents = 5,
+    FiniteEventLoss = 6,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -141,6 +153,32 @@ pub enum UnknownReason {
 }
 
 impl AttemptInput {
+    pub(crate) fn is_finite(&self) -> bool {
+        matches!(self.operation, AttemptOperation::Finite { .. })
+    }
+    pub(crate) fn finite_plan(&self) -> Option<salvage::RowPlan> {
+        if let AttemptOperation::Finite {
+            event_end,
+            source_first,
+            ..
+        } = self.operation
+        {
+            Some(salvage::RowPlan {
+                count: 2,
+                first: self.losses.event_start,
+                end: event_end,
+                source_first,
+                source_end: event_end,
+                layout: self.source.layout,
+                endpoint: 3,
+                split: 0,
+                rows: [0; 2],
+                committed: 0,
+            })
+        } else {
+            None
+        }
+    }
     pub fn validate(&self) -> io::Result<()> {
         self.source.validate(self.captured)?;
         source_binding::validate(&self.binding)?;
@@ -170,8 +208,13 @@ impl AttemptInput {
             } => {
                 nonzero(*transaction)?;
                 if (*kind == CanonicalKind::Terminal && *origin != 0)
-                    || (matches!(kind, CanonicalKind::Ordinary | CanonicalKind::Fragment)
-                        && *origin == 0)
+                    || (matches!(
+                        kind,
+                        CanonicalKind::Ordinary
+                            | CanonicalKind::Fragment
+                            | CanonicalKind::FiniteEvents
+                            | CanonicalKind::FiniteEventLoss
+                    ) && *origin == 0)
                 {
                     return Err(invalid());
                 }
@@ -181,6 +224,11 @@ impl AttemptInput {
             nonzero(unknown.run)?;
             nonzero(unknown.boot)?;
         }
+        self.validate_operation()
+    }
+
+    fn validate_operation(&self) -> io::Result<()> {
+        let loss = &self.losses;
         match self.operation {
             AttemptOperation::Ordinary {
                 window,
@@ -190,6 +238,25 @@ impl AttemptInput {
                     return Err(invalid());
                 }
                 if loss.prior_window.is_some_and(|prior| window <= prior) {
+                    return Err(invalid());
+                }
+            }
+            AttemptOperation::Finite {
+                event_end,
+                source_first,
+                ..
+            } => {
+                if event_end <= loss.event_start
+                    || loss.event_start < self.binding.event_first
+                    || source_first < loss.event_start
+                    || source_first > event_end
+                    || event_end - source_first
+                        > collector::u64_from_usize(crate::event_observation::ROWS_MAX)
+                    || loss.event_inherited_end != loss.event_start
+                    || loss.events != 0
+                    || loss.publication_inherited_end != loss.publication_start
+                    || loss.publications != 0
+                {
                     return Err(invalid());
                 }
             }
@@ -225,6 +292,20 @@ impl AttemptInput {
                 put64(bytes, 104, attempted_origin);
                 put32(bytes, 136, 4095);
             }
+            AttemptOperation::Finite {
+                event_end,
+                order_floor,
+                ..
+            } => {
+                put32(bytes, 52, 3);
+                put64(bytes, 96, order_floor);
+                put32(bytes, 136, 512);
+                put32(bytes, 140, 3);
+                put64(bytes, 152, event_end);
+                self.finite_plan()
+                    .ok_or_else(invalid)?
+                    .encode((&mut bytes[256..512]).try_into().map_err(|_| invalid())?)?;
+            }
             AttemptOperation::Terminal { event_end } => {
                 put32(bytes, 52, 2);
                 put32(bytes, 140, 3);
@@ -246,6 +327,13 @@ impl AttemptInput {
 
     /// Only Registered is executable in this slice. Later phases remain an explicit boundary.
     pub fn decode_registered(bytes: &[u8], recording: Identity) -> io::Result<(Identity, Self)> {
+        Self::decode_construction(bytes, recording, false)
+    }
+    pub(crate) fn decode_construction(
+        bytes: &[u8],
+        recording: Identity,
+        finite: bool,
+    ) -> io::Result<(Identity, Self)> {
         let Slot::Occupied {
             transaction,
             phase,
@@ -255,13 +343,16 @@ impl AttemptInput {
         else {
             return Err(invalid());
         };
+        if operation == Operation::ExceptionalFragment && !finite {
+            return Err(invalid());
+        }
         if phase == Phase::SalvagePlanned {
             let state = normal::NormalState::decode(bytes, recording)?;
             if state.row_plan.is_some() {
                 return Ok((state.transaction, state.input));
             }
         }
-        if phase != Phase::Registered || operation == Operation::ExceptionalFragment {
+        if phase != Phase::Registered {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "transaction phase requires canonical recovery composition",
@@ -275,7 +366,11 @@ impl AttemptInput {
             Operation::Terminal => AttemptOperation::Terminal {
                 event_end: get64(bytes, 152)?,
             },
-            Operation::ExceptionalFragment => return Err(invalid()),
+            Operation::ExceptionalFragment => AttemptOperation::Finite {
+                event_end: get64(bytes, 152)?,
+                order_floor: get64(bytes, 96)?,
+                source_first: get64(bytes, 280)?,
+            },
         };
         let input = Self {
             run: RunIdentity {
@@ -333,6 +428,8 @@ impl LossTransfer {
                     CanonicalKind::Terminal => 2,
                     CanonicalKind::Fragment => 3,
                     CanonicalKind::LossOnly => 4,
+                    CanonicalKind::FiniteEvents => 5,
+                    CanonicalKind::FiniteEventLoss => 6,
                 },
             );
             put64(bytes, 40, *origin);
@@ -365,6 +462,8 @@ impl LossTransfer {
                     2 => CanonicalKind::Terminal,
                     3 => CanonicalKind::Fragment,
                     4 => CanonicalKind::LossOnly,
+                    5 => CanonicalKind::FiniteEvents,
+                    6 => CanonicalKind::FiniteEventLoss,
                     _ => return Err(invalid()),
                 },
                 origin: get64(bytes, 40)?,
@@ -560,5 +659,145 @@ mod tests {
         for length in [0, 63, 64, 2112, 4095] {
             assert!(AttemptInput::decode_registered(&bytes[..length], Identity([1, 2])).is_err());
         }
+    }
+    fn finite_literal() -> [u8; 4096] {
+        let ordinary = literal();
+        let mut bytes = [0; 4096];
+        for range in [0..48, 64..96, 120..136, 208..256, 1352..1400] {
+            bytes[range.clone()].copy_from_slice(&ordinary[range]);
+        }
+        bytes[1088..1096].copy_from_slice(b"FDLoss02");
+        for (offset, value) in [
+            (48, 1_u32),
+            (52, 3),
+            (56, 2048),
+            (136, 512),
+            (140, 3),
+            (256, 1),
+            (260, 2),
+            (304, 1),
+            (308, 3),
+            (1096, 1),
+        ] {
+            put32(&mut bytes, offset, value);
+        }
+        for (offset, value) in [
+            (96, 3_u64),
+            (112, 30),
+            (152, 35),
+            (264, 30),
+            (272, 35),
+            (280, 33),
+            (288, 35),
+            (296, 5),
+            (1136, 10),
+            (1144, 10),
+            (1152, 30),
+            (1160, 30),
+            (1184, 10),
+            (1192, 30),
+        ] {
+            put64(&mut bytes, offset, value);
+        }
+        bytes
+    }
+    #[test]
+    fn finite_registered_literal_pins_fixed_construction_without_writable_decode() {
+        // Goal: independently pin op3 intent and refuse ordinary writable/cross-operation aliases.
+        // Method: literal bytes, reserved-byte corruption and forbidden Ready/cleanup phases.
+        let bytes = finite_literal();
+        let state = normal::NormalState::decode(&bytes, Identity([1, 2])).unwrap();
+        assert!(state.input.is_finite());
+        assert_eq!(state.loss.event_end, 30);
+        assert_eq!(state.loss.events_new, 0);
+        assert_eq!(state.row_plan.unwrap().end, 35);
+        assert!(AttemptInput::decode_registered(&bytes, Identity([1, 2])).is_err());
+        let mut encoded = [0; 4096];
+        state.encode(&mut encoded).unwrap();
+        assert_eq!(encoded, bytes);
+        for offset in [
+            60, 104, 1400, 144, 160, 168, 184, 188, 192, 200, 336, 344, 348, 352, 511, 512, 1024,
+            1344, 1496, 2112, 4095,
+        ] {
+            let mut changed = bytes;
+            changed[offset] ^= 128;
+            assert!(
+                normal::NormalState::decode(&changed, Identity([1, 2])).is_err(),
+                "offset {offset}"
+            );
+        }
+        let mut pre_origin = bytes;
+        put64(&mut pre_origin, 1392, 31);
+        assert!(normal::NormalState::decode(&pre_origin, Identity([1, 2])).is_err());
+        for phase in [2, 5] {
+            let mut changed = bytes;
+            put32(&mut changed, 48, phase);
+            assert!(normal::NormalState::decode(&changed, Identity([1, 2])).is_err());
+        }
+        for operation in [1, 2] {
+            let mut changed = bytes;
+            put32(&mut changed, 52, operation);
+            assert!(normal::NormalState::decode(&changed, Identity([1, 2])).is_err());
+        }
+    }
+    #[test]
+    fn finite_count_zero_and_prepublication_extent_have_contextual_wire_rules() {
+        // Goal: op3 alone refines overlapping frozen source and prepublication uncertainty.
+        // Method: actual state codec plus operation/phase/progress/reserved mutations.
+        let mut state = normal::NormalState::decode(&finite_literal(), Identity([1, 2])).unwrap();
+        let mut identity = [0; 56];
+        for (offset, value) in [(0, 1_u64), (8, 2), (16, 394_720)] {
+            put64(&mut identity, offset, value);
+        }
+        state.census = census_binding::CensusBinding {
+            kind: 2,
+            digest: [17; 32],
+            file: Some(crate::store::FileIdentity::census_decode(&identity).unwrap()),
+        };
+        state.phase = Phase::SalvagePlanned;
+        let mut bytes = [0; 4096];
+        state.encode(&mut bytes).unwrap();
+        state.phase = Phase::UnresolvedExtent;
+        state.encode(&mut bytes).unwrap();
+        assert_eq!(get32(&bytes, 188).unwrap(), 1);
+        assert_eq!(get64(&bytes, 192).unwrap(), 0);
+        assert_eq!(
+            normal::NormalState::decode(&bytes, Identity([1, 2])).unwrap(),
+            state
+        );
+        let original = state.row_plan.take().unwrap();
+        state.salvage = Some(salvage::LossPlan {
+            first: original.first,
+            end: original.end,
+            snapshot_first: original.source_first,
+            snapshot_end: original.source_end,
+            layout: original.layout,
+            endpoint: 3,
+            terminal: false,
+        });
+        state.loss.event_end = 35;
+        state.loss.events_new = 5;
+        state.encode(&mut bytes).unwrap();
+        assert_eq!(get32(&bytes, 260).unwrap(), 0);
+        assert_eq!(get32(&bytes, 304).unwrap(), 2);
+        assert_eq!(
+            normal::NormalState::decode(&bytes, Identity([1, 2])).unwrap(),
+            state
+        );
+        assert_eq!(
+            state.loss_metadata().unwrap().kind,
+            CanonicalKind::FiniteEventLoss
+        );
+        let mut changed = bytes;
+        put32(&mut changed, 304, 1);
+        assert!(normal::NormalState::decode(&changed, Identity([1, 2])).is_err());
+        let mut ordinary = state.clone();
+        ordinary.input.operation = AttemptOperation::Ordinary {
+            window: 3,
+            attempted_origin: 10,
+        };
+        assert!(ordinary.encode(&mut changed).is_err());
+        state.next = 1;
+        assert!(state.encode(&mut changed).is_err());
     }
 }

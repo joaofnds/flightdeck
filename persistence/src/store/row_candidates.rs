@@ -53,6 +53,7 @@ pub(crate) struct RowCandidates<'store> {
 pub(crate) enum CandidateStep {
     Continue,
     Prepared,
+    Unresolved,
 }
 impl<'store> RegisteredAttempt<'store> {
     pub(crate) fn row_candidates(
@@ -93,10 +94,14 @@ impl super::Store {
             self.recording,
         )?;
         if state.salvage.is_some()
-            || !matches!(state.phase, Phase::Registered | Phase::SalvagePlanned)
+            || !matches!(
+                state.phase,
+                Phase::Registered | Phase::SalvagePlanned | Phase::UnresolvedExtent
+            )
             || !matches!(
                 state.input.operation,
                 crate::transaction::AttemptOperation::Ordinary { .. }
+                    | crate::transaction::AttemptOperation::Finite { .. }
             )
         {
             return Err(invalid());
@@ -124,7 +129,9 @@ impl super::Store {
         work: &mut super::PublicationWork,
     ) -> io::Result<(PrivateDirectory, super::OriginalPlacement)> {
         work.inventory.open_attempts += 1;
-        let base = self.directory.open_directory("data")?;
+        let base = self
+            .directory
+            .open_directory(super::publication::base_name(&state.input))?;
         work.inventory.open_attempts += 1;
         let object = base
             .open_directory(&collector::recording::identity_text(state.transaction).to_string())?;
@@ -146,19 +153,31 @@ impl super::Store {
             }
         })?;
         let before = work.inventory.open_attempts;
-        let result = super::inventory::select_original_mode(
-            &object,
-            &mut work.inventory.open_attempts,
-            state.row_plan.is_some(),
-        );
+        let result = if state.input.is_finite() {
+            super::inventory::select_finite_original(&object, &mut work.inventory.open_attempts)
+        } else {
+            super::inventory::select_original_mode(
+                &object,
+                &mut work.inventory.open_attempts,
+                state.row_plan.is_some(),
+            )
+        };
         work.inventory.reopens += work.inventory.open_attempts - before;
         result?.ok_or_else(invalid)
     }
 }
 impl<'store> RowCandidates<'store> {
     fn new(
-        mut attempt: RegisteredAttempt<'store>,
+        attempt: RegisteredAttempt<'store>,
         reader: RingReader,
+        budget: &Arc<ByteBudget>,
+        ledger: &PublicationLedger,
+    ) -> io::Result<Self> {
+        Self::new_optional(attempt, Some(reader), budget, ledger)
+    }
+    pub(super) fn new_optional(
+        mut attempt: RegisteredAttempt<'store>,
+        reader: Option<RingReader>,
         budget: &Arc<ByteBudget>,
         ledger: &PublicationLedger,
     ) -> io::Result<Self> {
@@ -171,7 +190,7 @@ impl<'store> RowCandidates<'store> {
         let fixed = state
             .row_plan
             .or_else(|| initial.as_ref().and_then(|pending| pending.row_plan));
-        let mut merge = RowMerge::new(attempt, reader, budget, ledger)?;
+        let mut merge = RowMerge::new_optional(attempt, reader, budget, ledger)?;
         if let Some(plan) = fixed {
             merge.fixed(plan);
         }
@@ -214,10 +233,19 @@ impl<'store> RowCandidates<'store> {
             },
             attempt.input.run.recording,
         )?;
+        if state.phase == Phase::UnresolvedExtent
+            && (!state.input.is_finite() || state.sequence != 0)
+        {
+            return Err(invalid());
+        }
+
         if state.transaction != attempt.transaction
             || state.input != attempt.input
             || state.salvage.is_some()
-            || !matches!(state.phase, Phase::Registered | Phase::SalvagePlanned)
+            || !matches!(
+                state.phase,
+                Phase::Registered | Phase::SalvagePlanned | Phase::UnresolvedExtent
+            )
         {
             return Err(invalid());
         }
@@ -278,9 +306,24 @@ impl<'store> RowCandidates<'store> {
             reservation: self.reservation,
         })
     }
+    pub(super) fn mark_unresolved(&mut self) -> io::Result<bool> {
+        if !self.state.input.is_finite() || self.state.census.kind != 2 {
+            return Ok(false);
+        }
+
+        let mut state = self.state.clone();
+        state.phase = Phase::UnresolvedExtent;
+        self.intent = Some(state);
+        self.commit()?;
+        Ok(true)
+    }
     pub(super) fn publication_metadata(mut self) -> Self {
         self.allow_metadata = true;
         self
+    }
+    #[cfg(test)]
+    pub(crate) fn pending_rows(&self) -> usize {
+        self.pending.as_ref().map_or(0, |batch| batch.rows().len())
     }
     pub(crate) fn rows(&self) -> [u64; 2] {
         self.rows
@@ -300,7 +343,9 @@ impl<'store> RowCandidates<'store> {
             work.inventory.open_attempts += 2;
             work.inventory.reopens += 2;
         });
-        let base = attempt.root.open_directory("data")?;
+        let base = attempt
+            .root
+            .open_directory(super::publication::base_name(&attempt.input))?;
         base.open_directory(&collector::recording::identity_text(attempt.transaction).to_string())
     }
     fn commit(&mut self) -> io::Result<()> {
@@ -346,6 +391,17 @@ impl<'store> RowCandidates<'store> {
             self.step_census()?;
             return Ok(CandidateStep::Continue);
         }
+        if !self.merge.has_source() {
+            if self.state.phase == Phase::Registered {
+                self.step_plan()?;
+                return Ok(CandidateStep::Continue);
+            }
+
+            if self.mark_unresolved()? {
+                return Ok(CandidateStep::Unresolved);
+            }
+            return Err(io::Error::from(io::ErrorKind::WouldBlock).into());
+        }
         if self.merge.range().is_none() {
             self.merge.step()?;
             return Ok(CandidateStep::Continue);
@@ -378,6 +434,9 @@ impl<'store> RowCandidates<'store> {
             self.write()?;
             return Ok(CandidateStep::Continue);
         }
+        self.step_merge()
+    }
+    fn step_merge(&mut self) -> crate::Result<CandidateStep> {
         let maximum = collector::u64_from_usize(crate::event_observation::ROWS_MAX);
         let remaining = maximum - self.rows[self.candidate];
         // A full candidate transitions before the next physical batch is formed.
@@ -390,7 +449,9 @@ impl<'store> RowCandidates<'store> {
                 self.offset = 0;
                 Ok(CandidateStep::Continue)
             }
-            MergeStep::Finished if self.rows != [0, 0] => Ok(CandidateStep::Prepared),
+            MergeStep::Finished if self.rows != [0, 0] || self.state.input.is_finite() => {
+                Ok(CandidateStep::Prepared)
+            }
             MergeStep::Finished => Err(io::Error::from(io::ErrorKind::WouldBlock).into()),
         }
     }
@@ -462,6 +523,14 @@ impl<'store> RowCandidates<'store> {
         Ok(())
     }
     fn step_plan(&mut self) -> crate::Result<bool> {
+        if self.state.phase == Phase::Registered && self.state.input.is_finite() {
+            let mut target = self.state.clone();
+            target.phase = Phase::SalvagePlanned;
+            target.census = self.census_binding.ok_or_else(invalid)?;
+            self.intent = Some(target);
+            return Ok(true);
+        }
+
         if self.state.row_plan.is_none() {
             let range = self.merge.range().ok_or_else(invalid)?;
             let source = self.merge.source_range().ok_or_else(invalid)?;
@@ -792,26 +861,6 @@ impl<'store> RowCandidates<'store> {
         }
         Ok(())
     }
-    fn remove_torn(&self, directory: &PrivateDirectory, name: &str) -> io::Result<()> {
-        self.ledger.update(|work| work.inventory.open_attempts += 1);
-        let mut file = match directory.open_file(name) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let identity = FileIdentity::read(&file)?;
-        if super::inventory::parquet_framing(&mut file, identity.bytes())? {
-            return Ok(());
-        }
-        self.ledger.update(|work| work.inventory.open_attempts += 1);
-        if FileIdentity::read(&directory.open_file(name)?)? != identity {
-            return Err(invalid());
-        }
-        self.ledger.update(|work| work.canonical.removals += 1);
-        directory.remove_file(name)?;
-        self.ledger.update(|work| work.full_syncs += 1);
-        directory.full_sync()
-    }
     fn write_batch(
         &self,
         directory: &PrivateDirectory,
@@ -819,50 +868,15 @@ impl<'store> RowCandidates<'store> {
         rows: &[batch::Row],
         expected: &mut polars::prelude::DataFrame,
     ) -> crate::Result<FileIdentity> {
-        let count = rows.len();
-        self.remove_torn(directory, name)?;
-        self.ledger.update(|work| work.inventory.open_attempts += 1);
-        let identity = match directory.open_file(name) {
-            Ok(file) => {
-                let identity = FileIdentity::read(&file)?;
-                let batch = Batch {
-                    first: rows[0].event.number,
-                    end: rows[count - 1].event.number + 1,
-                    rows: collector::u64_from_usize(count),
-                };
-                self.ledger
-                    .update(|work| work.inventory.raw_admissions += 1);
-                let mut decoded = 0;
-                self.ledger
-                    .update(|work| work.inventory.raw_file_clones += 1);
-                let result = read::read_batch_file_counted(
-                    file.try_clone()?,
-                    &batch,
-                    self.state.input.captured,
-                    true,
-                    &self.budget,
-                    &mut decoded,
-                );
-                self.ledger
-                    .update(|work| work.inventory.decoded_bytes += decoded);
-                let actual = result?;
-                if FileIdentity::read(&file)? != identity {
-                    return Err(invalid().into());
-                }
-                if !actual.equals_missing(expected) {
-                    return Err(crate::Error::Bound("conflicting retained candidate batch"));
-                }
-                identity
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.ledger.update(|work| work.canonical.creates += 1);
-                let mut file = directory.create_file(name)?;
-                crate::encoder::encode_write(expected, &mut file)?;
-                FileIdentity::read(&file)?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        Ok(identity)
+        write_batch(
+            directory,
+            name,
+            rows,
+            expected,
+            self.state.input.captured,
+            &self.budget,
+            &self.ledger,
+        )
     }
     fn write_split(&mut self) -> crate::Result<()> {
         let pending = self.pending.as_ref().ok_or_else(invalid)?;
@@ -949,4 +963,87 @@ fn invalid() -> io::Error {
 }
 fn memory() -> io::Error {
     io::Error::from(io::ErrorKind::OutOfMemory)
+}
+
+fn remove_torn(
+    directory: &PrivateDirectory,
+    name: &str,
+    ledger: &PublicationLedger,
+) -> io::Result<()> {
+    ledger.update(|work| work.inventory.open_attempts += 1);
+    let mut file = match directory.open_file(name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let identity = FileIdentity::read(&file)?;
+    if super::inventory::parquet_framing(&mut file, identity.bytes())? {
+        return Ok(());
+    }
+
+    ledger.update(|work| work.inventory.open_attempts += 1);
+    if FileIdentity::read(&directory.open_file(name)?)? != identity {
+        return Err(invalid());
+    }
+    ledger.update(|work| work.canonical.removals += 1);
+    directory.remove_file(name)?;
+    ledger.update(|work| work.full_syncs += 1);
+    directory.full_sync()
+}
+pub(super) fn write_batch(
+    directory: &PrivateDirectory,
+    name: &str,
+    rows: &[batch::Row],
+    expected: &mut polars::prelude::DataFrame,
+    captured: bool,
+    budget: &Arc<ByteBudget>,
+    ledger: &PublicationLedger,
+) -> crate::Result<FileIdentity> {
+    let count = rows.len();
+    remove_torn(directory, name, ledger)?;
+    ledger.update(|work| work.inventory.open_attempts += 1);
+    let identity = match directory.open_file(name) {
+        Ok(file) => {
+            let identity = FileIdentity::read(&file)?;
+            let batch = Batch {
+                first: rows[0].event.number,
+                end: rows[count - 1].event.number + 1,
+                rows: collector::u64_from_usize(count),
+            };
+            ledger.update(|work| work.inventory.raw_admissions += 1);
+            let mut decoded = 0;
+            ledger.update(|work| work.inventory.raw_file_clones += 1);
+            let result = read::read_batch_file_counted(
+                file.try_clone()?,
+                &batch,
+                captured,
+                true,
+                budget,
+                &mut decoded,
+            );
+            ledger.update(|work| work.inventory.decoded_bytes += decoded);
+            let actual = result?;
+            if FileIdentity::read(&file)? != identity {
+                return Err(invalid().into());
+            }
+            if !actual.equals_missing(expected) {
+                return Err(crate::Error::Bound("conflicting retained candidate batch"));
+            }
+            identity
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            ledger.update(|work| work.canonical.creates += 1);
+            let mut file = directory.create_file(name)?;
+            crate::encoder::encode_write(
+                expected,
+                &mut super::publication_ledger::LedgerWriter {
+                    file: &mut file,
+                    ledger,
+                },
+            )?;
+            FileIdentity::read(&file)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(identity)
 }

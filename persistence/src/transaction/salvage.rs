@@ -13,14 +13,23 @@ pub(crate) struct LossPlan {
     pub terminal: bool,
 }
 impl LossPlan {
+    #[cfg(test)]
     pub fn encode(&self, bytes: &mut [u8; 256]) -> io::Result<()> {
+        self.encode_context(bytes, false)
+    }
+    pub fn encode_context(&self, bytes: &mut [u8; 256], finite: bool) -> io::Result<()> {
         if self.first == 0
             || self.end < self.first
             || self.snapshot_first == 0
             || self.snapshot_end < self.snapshot_first
             || self.snapshot_end - self.snapshot_first
                 > collector::u64_from_usize(crate::event_observation::ROWS_MAX)
-            || (self.snapshot_first < self.end && self.snapshot_end > self.first)
+            || (!finite && self.snapshot_first < self.end && self.snapshot_end > self.first)
+            || (finite
+                && (self.endpoint != 3
+                    || self.terminal
+                    || self.snapshot_first < self.first
+                    || self.snapshot_end != self.end))
             || !matches!(self.layout, 5 | 6)
             || !matches!(self.endpoint, 1 | 3 | 4)
             || (self.terminal && self.endpoint != 3)
@@ -44,7 +53,11 @@ impl LossPlan {
         put32(bytes, 92, u32::from(self.terminal));
         Ok(())
     }
+    #[cfg(test)]
     pub fn decode(bytes: &[u8; 256]) -> io::Result<Self> {
+        Self::decode_context(bytes, false)
+    }
+    pub fn decode_context(bytes: &[u8; 256], finite: bool) -> io::Result<Self> {
         match get32(bytes, 4)? {
             0 => {}
             1 | 2 => return Err(io::Error::from(io::ErrorKind::Unsupported)),
@@ -64,7 +77,7 @@ impl LossPlan {
             },
         };
         let mut expected = [0; 256];
-        record.encode(&mut expected)?;
+        record.encode_context(&mut expected, finite)?;
         if expected != *bytes {
             return Err(invalid());
         }
@@ -228,7 +241,7 @@ impl RowPlan {
             || self.source_end - self.source_first
                 > collector::u64_from_usize(crate::event_observation::ROWS_MAX)
             || !matches!(self.layout, 5 | 6)
-            || !matches!(self.endpoint, 1 | 2)
+            || !matches!(self.endpoint, 1..=3)
             || (self.split != 0 && !(self.first < self.split && self.split < self.end))
         {
             return Err(invalid());
@@ -246,7 +259,7 @@ impl RowPlan {
         ] {
             put64(bytes, offset, value);
         }
-        put32(bytes, 48, 2);
+        put32(bytes, 48, if self.endpoint == 3 { 1 } else { 2 });
         put32(bytes, 52, self.endpoint);
         put64(bytes, 64, self.rows[0]);
         put64(bytes, 72, self.rows[1]);
