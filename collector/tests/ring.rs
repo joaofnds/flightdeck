@@ -2866,7 +2866,10 @@ mod tests {
                             assert_eq!(i64::from(process.pid), i64::try_from(tick).unwrap());
                         }
                     }
-                    Found::Missed { .. } | Found::Nothing => {}
+                    Found::Missed { .. } => {}
+                    // A reader that spins on an empty ring can spend its attempts before a busy
+                    // machine schedules the writer at all.
+                    Found::Nothing => std::thread::yield_now(),
                 }
             }
             read
