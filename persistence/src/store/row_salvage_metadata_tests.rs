@@ -53,7 +53,7 @@ fn second_case(captured: bool) {
             .spawn()
             .unwrap(),
     );
-    assert!(row_publication_split_wait(&mut child).success());
+    assert!(child.wait().success());
     assert_eq!(
         fs::metadata(object.join("fragment-1/metadata"))
             .unwrap()
@@ -65,7 +65,7 @@ fn second_case(captured: bool) {
             .spawn()
             .unwrap(),
     );
-    assert!(row_publication_split_wait(&mut child).success());
+    assert!(child.wait().success());
     assert!(object.join("pending/events/0119.parquet").exists());
     assert!(object.join("original-census").exists());
 }

@@ -1189,10 +1189,8 @@ fn row_candidates_split_launch(fixture: &Fixture, object: &Path) {
         .env("FLIGHTDECK_PRIVATE_SYNC_OBSERVED", observed)
         .env("FLIGHTDECK_MUTATION_TARGET", root.join("foreground"))
         .env("FLIGHTDECK_MUTATION_KIND", "rename");
-    // The child writes the maximum retained rows in a debug build, which takes a CI runner longer
-    // than OwnedChild's thirty seconds, so it takes the wait of the other maximum-row children.
     let mut child = OwnedChild(command.spawn().unwrap());
-    assert!(row_publication_split_wait(&mut child).success());
+    assert!(child.wait().success());
 }
 fn row_candidates_split_child(root: &Path) {
     let store = Store::open(root).unwrap();
@@ -2357,7 +2355,7 @@ fn row_publication_split_launch(fixture: &Fixture) {
         )
         .env("FLIGHTDECK_MUTATION_KIND", "link");
     let mut child = OwnedChild(command.spawn().unwrap());
-    assert!(row_publication_split_wait(&mut child).success());
+    assert!(child.wait().success());
     let bytes = fs::read(observed).unwrap();
     assert!(!bytes.is_empty());
     if let Some(evidence) = std::env::var_os("FLIGHTDECK_PUBLICATION_EVIDENCE") {
@@ -2367,15 +2365,6 @@ fn row_publication_split_launch(fixture: &Fixture) {
         )
         .unwrap();
     }
-}
-fn row_publication_split_wait(child: &mut OwnedChild) -> std::process::ExitStatus {
-    for _ in 0..18000 {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            return status;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    panic!("owned logical split child exceeded test harness wait");
 }
 fn row_publication_split_child(root: &Path) {
     let store = Store::open(root).unwrap();

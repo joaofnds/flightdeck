@@ -510,13 +510,16 @@ fn native_registration_build(fixture: &Fixture) -> PathBuf {
 struct OwnedChild(std::process::Child);
 
 impl OwnedChild {
+    /// This bound catches a child that hangs and measures nothing. It sits far above what a child
+    /// costs, since these debug children took over thirty seconds on a CI runner writing the
+    /// maximum retained rows and on a contributor's Mac running a test per core.
     fn wait(&mut self) -> std::process::ExitStatus {
         let started = std::time::Instant::now();
-        for _ in 0..3000 {
+        for _ in 0..18000 {
             if let Some(status) = self.0.try_wait().unwrap() {
                 return status;
             }
-            assert!(started.elapsed() < std::time::Duration::from_secs(30));
+            assert!(started.elapsed() < std::time::Duration::from_secs(180));
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("registration child exceeded wait bound");
