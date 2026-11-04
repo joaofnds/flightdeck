@@ -112,7 +112,7 @@ fn self_monitoring_preserves_the_paused_inspection_while_the_live_position_advan
     let mut harness = InputHarness::setup_source(cx, &recording.root);
     harness.driver.await_publication(1);
     harness.driver.pause_following();
-    harness.driver.await_publication(1);
+    harness.driver.await_held_publication(1);
     let requested = harness.driver.inspection_request();
     recording.publish();
 
@@ -135,7 +135,7 @@ fn computer_navigation_preserves_the_accepted_diagnostic_inspection(cx: &mut Tes
     let mut harness = InputHarness::setup_source(cx, &recording.root);
     harness.driver.await_publication(1);
     harness.driver.pause_following();
-    harness.driver.await_publication(1);
+    harness.driver.await_held_publication(1);
     let requested = harness.driver.inspection_request();
     recording.publish();
 
@@ -222,6 +222,27 @@ impl InputDriver {
             dashboard.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.selection["selected"]["publication"].as_u64() == Some(publication)
             })
+        });
+    }
+
+    /// Waits for the hold to have its reading of `publication` and for the page read a pause
+    /// may send to be answered. That read asks for the second the held window needs, which may
+    /// hold no reading, so the page's own selection cannot show what is held.
+    fn await_held_publication(&mut self, publication: u64) {
+        self.await_source_state(LiveDashboard::tick, |dashboard| {
+            !dashboard.reply_pending
+                && dashboard.hold.as_ref().is_some_and(|hold| {
+                    hold.reading.complete
+                        && hold.reading.failure.is_none()
+                        && hold
+                            .reading
+                            .target
+                            .identity
+                            .as_ref()
+                            .is_some_and(|identity| {
+                                identity["publication"].as_u64() == Some(publication)
+                            })
+                })
         });
     }
 
