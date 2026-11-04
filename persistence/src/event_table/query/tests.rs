@@ -162,6 +162,20 @@ fn budget() -> Arc<ByteBudget> {
     Arc::new(ByteBudget::new(256 * 1024 * 1024))
 }
 
+/// Polars sends a query's result before its worker drops the plan, and the plan's buffers stay
+/// charged until that drop, so a charge can outlive every value the test holds. The bound catches
+/// a charge that never returns and measures nothing, since the scheduler decides when the worker
+/// runs.
+fn assert_budget_drains(budget: &ByteBudget) {
+    for _ in 0..18000 {
+        if budget.used() == 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(budget.used(), 0);
+}
+
 #[test]
 fn preserves_predicate_projection_and_explicit_order_across_parts() {
     // Goal: physical event-number storage preserves the existing explicit presentation order.
@@ -330,7 +344,7 @@ fn keeps_result_buffers_charged_after_cache_eviction_and_rebinds_the_alias() {
     assert!(budget.used() > 0);
     assert_eq!(result.height(), 2);
     drop(result);
-    assert_eq!(budget.used(), 0);
+    assert_budget_drains(&budget);
 }
 
 #[test]
@@ -696,5 +710,5 @@ fn counts_more_than_the_output_cap_without_materializing_or_truncating() {
     drop(scan);
     drop(engine);
     drop(page);
-    assert_eq!(budget.used(), 0);
+    assert_budget_drains(&budget);
 }

@@ -151,7 +151,7 @@ fn preserves_exact_identity_across_eviction_and_detects_replacement_after_evicti
         Some(6)
     );
     drop(result);
-    assert_eq!(budget.used(), 0);
+    assert_budget_drains(&budget);
 }
 
 #[test]
@@ -332,5 +332,5 @@ fn observes_outer_sort_allocation_separately_from_source_leases() {
         budget.used()
     );
     drop(result);
-    assert_eq!(budget.used(), 0);
+    assert_budget_drains(&budget);
 }
