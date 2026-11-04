@@ -929,7 +929,9 @@ mod tests {
             unsafe {
                 pointer.cast::<u8>().write_bytes(0x7f, bytes);
             }
-            Self(pointer)
+            // Nothing reads the block, so an optimized build would remove its allocation, its
+            // write and its free, and the footprint these tests measure would never grow.
+            Self(std::hint::black_box(pointer))
         }
     }
     impl Drop for NativeBlock {
