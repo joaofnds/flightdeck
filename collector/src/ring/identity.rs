@@ -168,11 +168,11 @@ impl ProgramBytes<'_> {
             return Err(ProgramBytesError::ExecutableBytes);
         }
 
-        if self.executable_name.contains(&0) {
+        if validate_contains(self.executable_name, 0) {
             return Err(ProgramBytesError::ExecutableBytes);
         }
 
-        if self.executable_name.contains(&b'/') {
+        if validate_contains(self.executable_name, b'/') {
             return Err(ProgramBytesError::ExecutableBasename);
         }
 
@@ -189,19 +189,48 @@ impl ProgramBytes<'_> {
                 return Err(ProgramBytesError::AppPath);
             }
 
-            if path.contains(&0) {
+            if validate_contains(path, 0) {
                 return Err(ProgramBytesError::AppBytes);
             }
 
-            for component in path.rsplit(|byte| *byte == b'/').skip(1) {
-                if component.ends_with(b".app") {
-                    return Err(ProgramBytesError::AppOutermost);
-                }
+            if validate_nests_app(path) {
+                return Err(ProgramBytesError::AppOutermost);
             }
         }
 
         Ok(())
     }
+}
+
+/// How many bytes `validate` compares at once before it may stop at a refused one.
+const VALIDATE_CHUNK_BYTES: usize = 64;
+
+/// A chunk's comparisons have no exit between them, so the compiler makes them one wide comparison.
+/// Recovering the most rows a recording retains validates up to 8190 bytes three times for each
+/// row, and that recovery has a 30-second deadline.
+fn validate_contains(bytes: &[u8], wanted: u8) -> bool {
+    bytes.chunks(VALIDATE_CHUNK_BYTES).any(|chunk| {
+        chunk
+            .iter()
+            .fold(0, |found, byte| found | u8::from(*byte == wanted))
+            != 0
+    })
+}
+
+/// Whether a component other than the last ends in .app, which is to say a slash follows it.
+fn validate_nests_app(path: &[u8]) -> bool {
+    for (chunk_index, chunk) in path.chunks(VALIDATE_CHUNK_BYTES).enumerate() {
+        if validate_contains(chunk, b'/') {
+            let start = chunk_index * VALIDATE_CHUNK_BYTES;
+            for (index, byte) in chunk.iter().enumerate() {
+                if *byte == b'/' && path[..start + index].ends_with(b".app") {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Identity records are independent of numeric rows, including refused usage.
@@ -590,9 +619,15 @@ fn copy_program_bytes(words: &[AtomicU64], layout: &Layout, offset: usize, bytes
 
     // Floor to a word index; a nonempty suffix starts exactly at this boundary.
     let start = (offset + prefix) / 8;
-    for (index, chunk) in bytes[prefix..].chunks_mut(8).enumerate() {
-        let word = load(words, layout.arena_start + start + index).to_le_bytes();
-        chunk.copy_from_slice(&word[..chunk.len()]);
+    // Whole words first, so that each is one store rather than a memcpy call of unknown length.
+    let (whole_words, suffix) = bytes[prefix..].as_chunks_mut::<8>();
+    for (index, whole_word) in whole_words.iter_mut().enumerate() {
+        *whole_word = load(words, layout.arena_start + start + index).to_le_bytes();
+    }
+
+    if !suffix.is_empty() {
+        let word = load(words, layout.arena_start + start + whole_words.len()).to_le_bytes();
+        suffix.copy_from_slice(&word[..suffix.len()]);
     }
 }
 
@@ -1501,6 +1536,106 @@ mod tests {
         .unwrap();
 
         assert_eq!(value, loaded);
+    }
+
+    fn validate_name(executable_name: &[u8]) -> Result<(), ProgramBytesError> {
+        ProgramBytes {
+            executable_name,
+            app_path: None,
+        }
+        .validate()
+    }
+
+    fn validate_app(app_path: &[u8]) -> Result<(), ProgramBytesError> {
+        ProgramBytes {
+            executable_name: b"name",
+            app_path: Some(app_path),
+        }
+        .validate()
+    }
+
+    fn validate_app_fill(length: usize) -> Vec<u8> {
+        let mut path = vec![b'a'; length];
+        path[0] = b'/';
+        path[length - 4..].copy_from_slice(b".app");
+        path
+    }
+
+    #[test]
+    fn validate_refuses_each_forbidden_name_byte_at_every_offset_and_length() {
+        // Goal: no offset of a name, in any length of its field, escapes the scans for its bytes.
+        // Method: place each forbidden byte at every offset of a maximum name and last in shorter ones.
+        let clean = vec![b'n'; PROGRAM_PATH_BYTES_MAX];
+        assert_eq!(validate_name(&clean), Ok(()));
+        for offset in 0..PROGRAM_PATH_BYTES_MAX {
+            let mut name = clean.clone();
+            name[offset] = 0;
+            assert_eq!(
+                validate_name(&name),
+                Err(ProgramBytesError::ExecutableBytes)
+            );
+            name[offset] = b'/';
+            assert_eq!(
+                validate_name(&name),
+                Err(ProgramBytesError::ExecutableBasename)
+            );
+        }
+        for length in 1..=256 {
+            let mut name = clean[..length].to_vec();
+            assert_eq!(validate_name(&name), Ok(()));
+            name[length - 1] = 0;
+            assert_eq!(
+                validate_name(&name),
+                Err(ProgramBytesError::ExecutableBytes)
+            );
+            name[length - 1] = b'/';
+            assert_eq!(
+                validate_name(&name),
+                Err(ProgramBytesError::ExecutableBasename)
+            );
+        }
+        assert_eq!(
+            validate_name(b"/\0"),
+            Err(ProgramBytesError::ExecutableBytes)
+        );
+    }
+
+    #[test]
+    fn validate_refuses_each_forbidden_app_byte_at_every_offset_and_length() {
+        // Goal: no offset of an app path escapes the scans for a zero byte or a nested bundle.
+        // Method: place a zero and a nested .app component at every offset, and a plain slash too.
+        let clean = validate_app_fill(PROGRAM_PATH_BYTES_MAX);
+        assert_eq!(validate_app(&clean), Ok(()));
+        let nested_end = PROGRAM_PATH_BYTES_MAX - 4;
+        for offset in 1..nested_end {
+            let mut path = clean.clone();
+            path[offset] = 0;
+            assert_eq!(validate_app(&path), Err(ProgramBytesError::AppBytes));
+            path[offset] = b'/';
+            assert_eq!(validate_app(&path), Ok(()));
+        }
+        for offset in 1..=nested_end - 5 {
+            let mut path = clean.clone();
+            path[offset..offset + 5].copy_from_slice(b".app/");
+            assert_eq!(validate_app(&path), Err(ProgramBytesError::AppOutermost));
+            path[offset + 4] = b'x';
+            assert_eq!(validate_app(&path), Ok(()));
+            path[offset + 4] = 0;
+            assert_eq!(validate_app(&path), Err(ProgramBytesError::AppBytes));
+        }
+        for length in 5..=256 {
+            let path = validate_app_fill(length);
+            assert_eq!(validate_app(&path), Ok(()));
+        }
+        assert_eq!(
+            validate_app(b"/.app/.app"),
+            Err(ProgramBytesError::AppOutermost)
+        );
+        assert_eq!(
+            validate_app(b"/.app/\0.app"),
+            Err(ProgramBytesError::AppBytes)
+        );
+        assert_eq!(validate_app(b"/a.app.app"), Ok(()));
     }
 
     #[test]
