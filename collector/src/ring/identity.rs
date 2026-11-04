@@ -157,6 +157,15 @@ pub struct ProgramBuffers<'buffers> {
     pub app_path: &'buffers mut [u8; PROGRAM_PATH_BYTES_MAX],
 }
 
+/// How many bytes of `ProgramBuffers` hold the program a read validated, which come from the
+/// same descriptor as those bytes. Both are zero where the read named no program, since the
+/// buffers then still hold an earlier read's bytes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProgramLengths {
+    pub executable_name: usize,
+    pub app_path: usize,
+}
+
 impl ProgramBytes<'_> {
     /// Validates the retained byte contract shared by live and saved identity readers.
     pub fn validate(&self) -> Result<(), ProgramBytesError> {
@@ -555,19 +564,6 @@ pub(super) fn dictionary_usage(
     }))
 }
 
-/// The byte lengths of a program this reader's own reference names.
-pub(super) fn program_lengths(
-    words: &[AtomicU64],
-    layout: &Layout,
-    program: &ProgramReference,
-    owner: u64,
-) -> io::Result<(usize, usize)> {
-    let mut entry = Descriptor::EMPTY;
-    program_entry(words, layout, program, owner, &mut entry)?;
-
-    Ok((entry.executable_name_bytes, entry.app_path_bytes))
-}
-
 fn program_entry(
     words: &[AtomicU64],
     layout: &Layout,
@@ -704,7 +700,7 @@ pub(super) fn load_observation(
     owner: u64,
     buffers: &mut ProgramBuffers,
     output: &mut IdentityObservation,
-) -> io::Result<()> {
+) -> io::Result<ProgramLengths> {
     assert_eq!(source.record.len(), layout::PROCESS_IDENTITY_WORDS);
 
     let pid = load_observation_signed(load(source.record, 0))?;
@@ -726,6 +722,7 @@ pub(super) fn load_observation(
     };
     let number = load(source.record, 5);
     let availability = flags & 7;
+    let mut lengths = ProgramLengths::default();
 
     if availability == 0 {
         let Some(creation) = creation else {
@@ -738,7 +735,7 @@ pub(super) fn load_observation(
             &ReferencePosition { number, owner },
             &mut program,
         );
-        validate_program(source.words, layout, &program, owner, buffers)?;
+        lengths = validate_program(source.words, layout, &program, owner, buffers)?;
 
         output.identity = ProcessIdentity::Measured { creation, program };
     } else {
@@ -762,7 +759,7 @@ pub(super) fn load_observation(
     output.pid = pid;
     output.usage = usage;
 
-    Ok(())
+    Ok(lengths)
 }
 
 fn load_observation_signed(value: u64) -> io::Result<i32> {
@@ -808,10 +805,13 @@ fn validate_program(
     program: &ProgramReference,
     owner: u64,
     buffers: &mut ProgramBuffers,
-) -> io::Result<()> {
-    copy_program(words, layout, program, owner, buffers)?;
+) -> io::Result<ProgramLengths> {
+    let (executable_name, app_path) = copy_program(words, layout, program, owner, buffers)?;
 
-    Ok(())
+    Ok(ProgramLengths {
+        executable_name,
+        app_path,
+    })
 }
 
 pub(super) fn validate_observation(
@@ -889,10 +889,10 @@ pub(super) fn load_event_identity(
     owner: u64,
     buffers: &mut ProgramBuffers,
     output: &mut IdentityObservation,
-) -> io::Result<()> {
+) -> io::Result<ProgramLengths> {
     if !layout::captured(layout.version) {
         legacy(event_pid(event), event_usage(event), output);
-        return Ok(());
+        return Ok(ProgramLengths::default());
     }
 
     let packed = [const { AtomicU64::new(0) }; 6];
@@ -907,7 +907,7 @@ pub(super) fn load_event_identity(
         target.store(source.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
-    load_observation(
+    let lengths = load_observation(
         &IdentityRecord {
             words: source.words,
             record: &packed,
@@ -922,7 +922,7 @@ pub(super) fn load_event_identity(
         return invalid();
     }
 
-    Ok(())
+    Ok(lengths)
 }
 
 pub(super) fn store_processes(

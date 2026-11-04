@@ -2,7 +2,9 @@ use collector::recording::private::PrivateDirectory;
 use std::path::Path;
 use std::sync::Arc;
 
-use collector::ring::{FoundEvent, IdentityObservation, ProgramBuffers, RingReader};
+use collector::ring::{
+    FoundEvent, IdentityObservation, ProgramBuffers, ProgramLengths, RingReader,
+};
 
 use super::index::Index;
 use crate::event_observation::{BATCH_BYTES_MAX, BATCH_ROWS_MAX};
@@ -100,10 +102,10 @@ impl Writer {
             }
             self.room(reader)?;
             let mut identity = IdentityObservation::EMPTY;
-            let found = if self.index.identities {
+            let (found, lengths) = if self.index.identities {
                 reader.read_event_identity_bytes(&mut identity, &mut buffers)?
             } else {
-                reader.read_event()?
+                (reader.read_event()?, ProgramLengths::default())
             };
             match found {
                 FoundEvent::Event {
@@ -112,7 +114,6 @@ impl Writer {
                     event,
                 } => {
                     let row = batch::copy_row_read(
-                        reader,
                         &NumberedEvent {
                             number,
                             tick,
@@ -120,6 +121,7 @@ impl Writer {
                         },
                         self.index.identities.then_some(&identity),
                         &buffers,
+                        lengths,
                     )?;
                     self.push(row)?;
                 }

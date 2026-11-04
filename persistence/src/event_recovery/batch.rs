@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use collector::ring::{FoundEvent, IdentityObservation, ProgramBuffers, RingReader, RunIdentity};
+use collector::ring::{
+    FoundEvent, IdentityObservation, ProgramBuffers, ProgramLengths, RingReader, RunIdentity,
+};
 use polars::prelude::*;
 
 use super::{Batch, Manifest, Recovery};
@@ -127,10 +129,10 @@ fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<
         }
         let mut identity = IdentityObservation::EMPTY;
         let captured = reader.dictionary_capacity().is_some();
-        let found = if captured {
+        let (found, lengths) = if captured {
             reader.read_event_identity_bytes(&mut identity, &mut buffers)?
         } else {
-            reader.read_event()?
+            (reader.read_event()?, ProgramLengths::default())
         };
         match found {
             FoundEvent::Event {
@@ -139,7 +141,6 @@ fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<
                 event,
             } => {
                 let row = copy_row_read(
-                    reader,
                     &NumberedEvent {
                         number,
                         tick,
@@ -147,6 +148,7 @@ fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<
                     },
                     captured.then_some(&identity),
                     &buffers,
+                    lengths,
                 )?;
                 bytes +=
                     row.name.as_ref().map_or(0, Vec::len) + row.app.as_ref().map_or(0, Vec::len);
@@ -183,21 +185,21 @@ pub(crate) fn copy_row(
     Ok(row)
 }
 
-/// `copy_row` for an identity whose read already left its program bytes in `buffers`. Recovering
+/// `copy_row` for an identity whose read left its program bytes in `buffers` and returned their
+/// `lengths`. Recovering
 /// the most rows a recording retains has a 30-second deadline, and a second copy from the ring
 /// would cost it time and find nothing, since those bytes are immutable and that read validated
 /// them.
 pub(crate) fn copy_row_read(
-    reader: &RingReader,
     event: &NumberedEvent<'_>,
     identity: Option<&IdentityObservation>,
     buffers: &ProgramBuffers<'_>,
+    lengths: ProgramLengths,
 ) -> Result<Row> {
     let mut row = copy_row_fields(event, identity)?;
-    if let Some(reference) = identity.and_then(IdentityObservation::program) {
-        let (name_length, app_length) = reader.program_lengths(reference)?;
-        row.name = Some(buffers.executable_name[..name_length].to_vec());
-        row.app = (app_length > 0).then(|| buffers.app_path[..app_length].to_vec());
+    if identity.and_then(IdentityObservation::program).is_some() {
+        row.name = Some(buffers.executable_name[..lengths.executable_name].to_vec());
+        row.app = (lengths.app_path > 0).then(|| buffers.app_path[..lengths.app_path].to_vec());
     }
     Ok(row)
 }

@@ -19,9 +19,10 @@ mod tests {
     use collector::processes::{Process, Task, Usage};
     use collector::ring::{
         DictionaryCapacity, Dropped, Found, FoundEvent, Identity, IdentityAvailability,
-        IdentityObservation, IdentityPublication, ObservationTimes, Place, ProcessCreation,
-        ProcessIdentity, ProgramBuffers, ProgramBytes, ProgramReference, Reader, Readings,
-        RingReader, RunIdentity, Shape, Tick, TickBuffers, UsageAvailability, Writer,
+        IdentityObservation, IdentityPublication, IdentityUnavailable, ObservationTimes, Place,
+        ProcessCreation, ProcessIdentity, ProgramBuffers, ProgramBytes, ProgramLengths,
+        ProgramReference, Reader, Readings, RingReader, RunIdentity, Shape, Tick, TickBuffers,
+        UsageAvailability, Writer,
     };
     use collector::tracker::{Event, Noticed};
 
@@ -388,7 +389,7 @@ mod tests {
         let mut app = [0; 4095];
 
         let mut identity = IdentityObservation::EMPTY;
-        let found = reader
+        let (found, lengths) = reader
             .read_event_identity_bytes(
                 &mut identity,
                 &mut ProgramBuffers {
@@ -397,12 +398,113 @@ mod tests {
                 },
             )
             .unwrap();
-        let lengths = reader.program_lengths(identity.program().unwrap()).unwrap();
 
         assert!(matches!(found, FoundEvent::Event { number: 1, .. }));
-        assert_eq!((7, 6), lengths);
+        assert_eq!(
+            ProgramLengths {
+                executable_name: 7,
+                app_path: 6
+            },
+            lengths
+        );
         assert_eq!(b"helper\xff", &name[..7]);
         assert_eq!(b"/A.app", &app[..6]);
+    }
+
+    /// Publishes events that name a long program, a program with no app, and no program.
+    fn publish_programs_of_decreasing_length(writer: &mut Writer) {
+        let mut program_of = |executable_name: &[u8], app_path: Option<&[u8]>| {
+            let mut program = None;
+            writer
+                .intern_program(
+                    &ProgramBytes {
+                        executable_name,
+                        app_path,
+                    },
+                    &mut program,
+                )
+                .unwrap();
+            program.unwrap()
+        };
+        let long = program_of(b"long-helper-name", Some(b"/Applications/Long.app"));
+        let short = program_of(b"sh", None);
+        let event_of = |program: &ProgramReference| IdentityObservation {
+            usage: UsageAvailability::NotApplicable,
+            ..program_observation(program)
+        };
+        let unnamed = IdentityObservation {
+            pid: 1,
+            usage: UsageAvailability::NotApplicable,
+            identity: ProcessIdentity::Unavailable {
+                creation: None,
+                reason: IdentityUnavailable::Gone,
+            },
+        };
+        let memory = Memory::default();
+        let mut source = readings(1, &memory);
+        let events = [
+            start_identity_event(),
+            start_identity_event(),
+            start_identity_event(),
+        ];
+        source.events = &events;
+        writer
+            .publish_with_identity(
+                &source,
+                None,
+                &IdentityPublication {
+                    processes: &[],
+                    events: &[event_of(&long), event_of(&short), unnamed],
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_shorter_program_read_through_reused_buffers_keeps_none_of_the_longer_one() {
+        // Goal: recovery keeps one pair of buffers across rows, and a row must save only its own
+        // program's bytes, whatever the row before it left there.
+        // Method: read a long program, a program with no app, and an event naming no program
+        // through one pair of buffers, and compare what each read's lengths select.
+        let place = TestPlace::new("idreuse");
+        let mut writer = identity_writer(&place, SHAPE, 1);
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        publish_programs_of_decreasing_length(&mut writer);
+        let mut name = [0; 4095];
+        let mut app = [0; 4095];
+        let mut buffers = ProgramBuffers {
+            executable_name: &mut name,
+            app_path: &mut app,
+        };
+        let mut identity = IdentityObservation::EMPTY;
+
+        let (_, first) = reader
+            .read_event_identity_bytes(&mut identity, &mut buffers)
+            .unwrap();
+        assert_eq!(
+            b"long-helper-name",
+            &buffers.executable_name[..first.executable_name]
+        );
+        assert_eq!(
+            b"/Applications/Long.app",
+            &buffers.app_path[..first.app_path]
+        );
+        let (_, second) = reader
+            .read_event_identity_bytes(&mut identity, &mut buffers)
+            .unwrap();
+        let (_, third) = reader
+            .read_event_identity_bytes(&mut identity, &mut buffers)
+            .unwrap();
+
+        assert_eq!(b"sh", &buffers.executable_name[..2]);
+        assert_eq!(
+            ProgramLengths {
+                executable_name: 2,
+                app_path: 0
+            },
+            second
+        );
+        assert_eq!(ProgramLengths::default(), third);
     }
 
     #[test]

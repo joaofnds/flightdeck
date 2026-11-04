@@ -34,7 +34,7 @@ use event::{load_event, store_event};
 pub use identity::{
     DictionaryUsage, IdentityAvailability, IdentityObservation, IdentityPublication,
     IdentityUnavailable, PROGRAM_PATH_BYTES_MAX, ProcessCreation, ProcessIdentity, ProgramBuffers,
-    ProgramBytes, ProgramBytesError, ProgramReference, UsageAvailability,
+    ProgramBytes, ProgramBytesError, ProgramLengths, ProgramReference, UsageAvailability,
 };
 use layout::{
     EVENT_SEQUENCE, HEADER_EVENT_FIRST, HEADER_EVENT_NEWEST, HEADER_PUBLICATION_FIRST,

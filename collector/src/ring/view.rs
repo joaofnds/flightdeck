@@ -233,20 +233,6 @@ impl RingReader {
         )
     }
 
-    /// The byte lengths of a program, for a caller that already holds its bytes.
-    pub fn program_lengths(&self, program: &super::ProgramReference) -> io::Result<(usize, usize)> {
-        if !layout::captured(self.opened.layout.version) {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
-        }
-
-        super::identity::program_lengths(
-            self.opened.mapping.words(),
-            &self.opened.layout,
-            program,
-            self.opened.reference_owner,
-        )
-    }
-
     /// Reads event metadata under the event's own sequence, independent of slot lifetime.
     /// Only a returned event makes the caller's identity output valid.
     pub fn read_event_identity(
@@ -255,23 +241,25 @@ impl RingReader {
     ) -> io::Result<FoundEvent> {
         let mut executable_name = [0; super::PROGRAM_PATH_BYTES_MAX];
         let mut app_path = [0; super::PROGRAM_PATH_BYTES_MAX];
-        self.read_event_identity_bytes(
+        let (found, _lengths) = self.read_event_identity_bytes(
             identity,
             &mut super::ProgramBuffers {
                 executable_name: &mut executable_name,
                 app_path: &mut app_path,
             },
-        )
+        )?;
+
+        Ok(found)
     }
 
-    /// Reading an event's identity validates a copy of its program bytes, and this keeps that copy,
-    /// so a caller that wants the bytes reads them once. Only a returned event whose identity names
-    /// a program makes the buffers valid.
+    /// Reading an event's identity validates a copy of its program bytes, and this keeps that copy
+    /// with the lengths it validated, so a caller that wants the bytes reads them once. Only a
+    /// returned event whose identity names a program makes the buffers valid.
     pub fn read_event_identity_bytes(
         &mut self,
         identity: &mut super::IdentityObservation,
         buffers: &mut super::ProgramBuffers,
-    ) -> io::Result<FoundEvent> {
+    ) -> io::Result<(FoundEvent, super::ProgramLengths)> {
         let words = self.opened.mapping.words();
         let newest = read_newest(&words[layout::HEADER_EVENT_NEWEST])?;
         let number = match self
@@ -279,9 +267,14 @@ impl RingReader {
             .events
             .step(self.opened.layout.events_held(newest))
         {
-            super::Step::Nothing => return Ok(FoundEvent::Nothing),
+            super::Step::Nothing => {
+                return Ok((FoundEvent::Nothing, super::ProgramLengths::default()));
+            }
             super::Step::Missed { first, end } => {
-                return Ok(FoundEvent::Missed { first, end });
+                return Ok((
+                    FoundEvent::Missed { first, end },
+                    super::ProgramLengths::default(),
+                ));
             }
             super::Step::Read(number) => number,
         };
@@ -296,21 +289,27 @@ impl RingReader {
                 buffers,
                 identity,
             ) {
-                Ok(()) => Some((tick, event)),
+                Ok(lengths) => Some((tick, event, lengths)),
                 Err(_) => None,
             }
         })?;
 
         match loaded {
-            Some((tick, event)) => Ok(FoundEvent::Event {
-                number,
-                tick,
-                event,
-            }),
-            None => Ok(FoundEvent::Missed {
-                first: number,
-                end: number + 1,
-            }),
+            Some((tick, event, lengths)) => Ok((
+                FoundEvent::Event {
+                    number,
+                    tick,
+                    event,
+                },
+                lengths,
+            )),
+            None => Ok((
+                FoundEvent::Missed {
+                    first: number,
+                    end: number + 1,
+                },
+                super::ProgramLengths::default(),
+            )),
         }
     }
 
