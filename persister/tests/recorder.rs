@@ -11,8 +11,29 @@ mod tests {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use collector::recording::control::{Control, Role, State};
+    use collector::recording::control::{Control, Health, Role, State};
     use collector::ring::{Place, unlink_generation};
+
+    /// `Control::read` refuses a publication caught between its two sequence stores, and these
+    /// tests read beside live workers, whose publication the scheduler can pause there. The
+    /// recorder takes that refusal to mean the health is not known yet, and so do these tests. A
+    /// writer that never finishes its publication still fails at the bound.
+    trait SettledHealth {
+        fn settled(&self, role: Role) -> Health;
+    }
+
+    impl SettledHealth for Control {
+        fn settled(&self, role: Role) -> Health {
+            for _attempt in 0..3000 {
+                match self.read(role) {
+                    Ok(health) => return health,
+                    Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("a health publication stayed interrupted");
+        }
+    }
 
     struct Recording {
         root: PathBuf,
@@ -42,12 +63,12 @@ mod tests {
         let held = persistence::Store::open(&recording.root).unwrap();
         recording.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
         let control = recording.wait_for(|control| {
-            let health = control.read(Role::Controller).unwrap();
+            let health = control.settled(Role::Controller);
             health.heartbeat_ns > 0
         });
-        let began = control.read(Role::Controller).unwrap().heartbeat_ns;
+        let began = control.settled(Role::Controller).heartbeat_ns;
         recording.wait_for(|control| {
-            control.read(Role::Controller).unwrap().heartbeat_ns >= began + 2_000_000_000
+            control.settled(Role::Controller).heartbeat_ns >= began + 2_000_000_000
         });
         let blocked = Registry::read(&recording.root).unwrap();
         let unchanged = blocked
@@ -184,26 +205,23 @@ mod tests {
         // Method: kill the owned persister, observe replacement and drain a finite real run.
         let mut recording = Recording::start("replace", 8);
         let before = recording.wait_for(|control| {
-            control.read(Role::Collector).unwrap().state == State::Running
-                && control.read(Role::Persister).unwrap().alive().unwrap()
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
         });
-        let collector = before.read(Role::Collector).unwrap();
-        let persister = before.read(Role::Persister).unwrap();
+        let collector = before.settled(Role::Collector);
+        let persister = before.settled(Role::Persister);
 
         assert_eq!(0, unsafe { kill(persister.pid, 9) });
         let after = recording.wait_for(|control| {
-            let current = control.read(Role::Persister).unwrap();
+            let current = control.settled(Role::Persister);
             current.alive().unwrap() && current.creation != persister.creation
         });
 
-        assert_eq!(
-            collector.creation,
-            after.read(Role::Collector).unwrap().creation
-        );
+        assert_eq!(collector.creation, after.settled(Role::Collector).creation);
         recording.wait_for_exit();
-        recording.assert_saved_publications(after.read(Role::Collector).unwrap().publication);
-        assert_eq!(State::Stopped, after.read(Role::Controller).unwrap().state);
-        assert!(after.read(Role::Persister).unwrap().publication > 0);
+        recording.assert_saved_publications(after.settled(Role::Collector).publication);
+        assert_eq!(State::Stopped, after.settled(Role::Controller).state);
+        assert!(after.settled(Role::Persister).publication > 0);
     }
 
     #[test]
@@ -212,45 +230,36 @@ mod tests {
         // Method: kill it, verify advancing acquisition, then kill persistence and relaunch.
         let mut recording = Recording::start("adopt", 30);
         let before = recording.wait_for(|control| {
-            control.read(Role::Collector).unwrap().state == State::Running
-                && control.read(Role::Persister).unwrap().alive().unwrap()
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
         });
-        let collector = before.read(Role::Collector).unwrap();
-        let persister = before.read(Role::Persister).unwrap();
+        let collector = before.settled(Role::Collector);
+        let persister = before.settled(Role::Persister);
         let mut dead = recording.child.take().unwrap();
         dead.kill().unwrap();
         dead.wait().unwrap();
         recording.wait_for(|control| {
-            control.read(Role::Collector).unwrap().publication >= collector.publication + 2
+            control.settled(Role::Collector).publication >= collector.publication + 2
         });
-        assert_eq!(
-            before.read(Role::Persister).unwrap().creation,
-            persister.creation
-        );
-        assert!(before.read(Role::Persister).unwrap().alive().unwrap());
+        assert_eq!(before.settled(Role::Persister).creation, persister.creation);
+        assert!(before.settled(Role::Persister).alive().unwrap());
         assert_eq!(0, unsafe { kill(persister.pid, 9) });
-        recording.wait_for(|control| !control.read(Role::Persister).unwrap().alive().unwrap());
+        recording.wait_for(|control| !control.settled(Role::Persister).alive().unwrap());
         std::thread::sleep(Duration::from_secs(2));
-        assert_eq!(
-            before.read(Role::Persister).unwrap().creation,
-            persister.creation
-        );
+        assert_eq!(before.settled(Role::Persister).creation, persister.creation);
         recording.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
         let after = recording.wait_for(|control| {
-            let current = control.read(Role::Persister).unwrap();
+            let current = control.settled(Role::Persister);
             current.alive().unwrap() && current.creation != persister.creation
         });
         assert_eq!(before.authority(), after.authority());
-        assert_eq!(
-            collector.creation,
-            after.read(Role::Collector).unwrap().creation
-        );
+        assert_eq!(collector.creation, after.settled(Role::Collector).creation);
         Control::open_writable(&recording.root)
             .unwrap()
             .request_stop()
             .unwrap();
         recording.wait_for_exit();
-        recording.assert_saved_publications(after.read(Role::Collector).unwrap().publication);
+        recording.assert_saved_publications(after.settled(Role::Collector).publication);
     }
 
     #[test]
@@ -259,37 +268,37 @@ mod tests {
         // Method: relaunch around two live workers, then kill the adopted persister.
         let mut recording = Recording::start("adopt-exit", 30);
         let control = recording.wait_for(|control| {
-            control.read(Role::Collector).unwrap().state == State::Running
-                && control.read(Role::Persister).unwrap().alive().unwrap()
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
         });
-        let acquisition = control.read(Role::Collector).unwrap();
-        let persistence = control.read(Role::Persister).unwrap();
-        let original = control.read(Role::Controller).unwrap();
+        let acquisition = control.settled(Role::Collector);
+        let persistence = control.settled(Role::Persister);
+        let original = control.settled(Role::Controller);
         let mut dead = recording.child.take().unwrap();
         dead.kill().unwrap();
         dead.wait().unwrap();
         recording.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
         recording.wait_for(|control| {
-            let current = control.read(Role::Controller).unwrap();
+            let current = control.settled(Role::Controller);
             current.creation != original.creation && current.state == State::Running
         });
         assert_eq!(0, unsafe { kill(persistence.pid, 9) });
         let began = Instant::now();
         recording.wait_for(|control| {
-            let current = control.read(Role::Persister).unwrap();
+            let current = control.settled(Role::Persister);
             current.creation != persistence.creation && current.alive().unwrap()
         });
         assert!(began.elapsed() < Duration::from_secs(6));
         assert_eq!(
             acquisition.creation,
-            control.read(Role::Collector).unwrap().creation
+            control.settled(Role::Collector).creation
         );
         Control::open_writable(&recording.root)
             .unwrap()
             .request_stop()
             .unwrap();
         recording.wait_for_exit();
-        recording.assert_saved_publications(control.read(Role::Collector).unwrap().publication);
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
     }
 
     #[test]
@@ -298,11 +307,11 @@ mod tests {
         // Method: launch a second real controller, then verify native worker identities.
         let mut recording = Recording::start("contend", 8);
         let control = recording.wait_for(|control| {
-            control.read(Role::Collector).unwrap().state == State::Running
-                && control.read(Role::Persister).unwrap().alive().unwrap()
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
         });
-        let collector = control.read(Role::Collector).unwrap();
-        let persister = control.read(Role::Persister).unwrap();
+        let collector = control.settled(Role::Collector);
+        let persister = control.settled(Role::Persister);
         let result =
             Command::new(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"))
                 .arg("--recording")
@@ -314,16 +323,16 @@ mod tests {
         assert!(!result.success());
         assert_eq!(
             collector.creation,
-            control.read(Role::Collector).unwrap().creation
+            control.settled(Role::Collector).creation
         );
         assert_eq!(
             persister.creation,
-            control.read(Role::Persister).unwrap().creation
+            control.settled(Role::Persister).creation
         );
-        assert!(control.read(Role::Collector).unwrap().alive().unwrap());
-        assert!(control.read(Role::Persister).unwrap().alive().unwrap());
+        assert!(control.settled(Role::Collector).alive().unwrap());
+        assert!(control.settled(Role::Persister).alive().unwrap());
         recording.wait_for_exit();
-        recording.assert_saved_publications(control.read(Role::Collector).unwrap().publication);
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
     }
 
     #[test]
@@ -341,9 +350,8 @@ mod tests {
         )
         .unwrap();
         recording.launch(binaries.join("recorder"));
-        let control =
-            recording.wait_for(|control| control.read(Role::Controller).unwrap().retries >= 3);
-        let delayed = control.read(Role::Controller).unwrap();
+        let control = recording.wait_for(|control| control.settled(Role::Controller).retries >= 3);
+        let delayed = control.settled(Role::Controller);
         assert_eq!(
             delayed.failure,
             collector::recording::control::Failure::Launch
@@ -351,25 +359,25 @@ mod tests {
         assert_eq!(delayed.state, State::Retrying);
         assert!(delayed.next_attempt_ns > delayed.heartbeat_ns);
         assert!(delayed.next_attempt_ns - delayed.heartbeat_ns <= 5_000_000_000);
-        let acquisition = control.read(Role::Collector).unwrap();
+        let acquisition = control.settled(Role::Collector);
         std::thread::sleep(Duration::from_millis(2100));
-        let refreshed = control.read(Role::Controller).unwrap();
+        let refreshed = control.settled(Role::Controller);
         assert!(refreshed.heartbeat_ns > delayed.heartbeat_ns + 1_000_000_000);
         assert_eq!(refreshed.next_attempt_ns, delayed.next_attempt_ns);
         let cleared = Instant::now();
         symlink(&built, binaries.join("persister")).unwrap();
-        recording.wait_for(|control| control.read(Role::Persister).unwrap().alive().unwrap());
+        recording.wait_for(|control| control.settled(Role::Persister).alive().unwrap());
         assert!(cleared.elapsed() < Duration::from_secs(6));
         assert_eq!(
             acquisition.creation,
-            control.read(Role::Collector).unwrap().creation
+            control.settled(Role::Collector).creation
         );
         Control::open_writable(&recording.root)
             .unwrap()
             .request_stop()
             .unwrap();
         recording.wait_for_exit();
-        recording.assert_saved_publications(control.read(Role::Collector).unwrap().publication);
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
     }
 
     #[test]
@@ -378,18 +386,17 @@ mod tests {
         // Method: make the isolated data destination read-only until the first commit fails.
         let mut recording = Recording::start("write", 6);
         let control =
-            recording.wait_for(|control| control.read(Role::Persister).unwrap().alive().unwrap());
+            recording.wait_for(|control| control.settled(Role::Persister).alive().unwrap());
         let data = recording.root.join("data");
         fs::set_permissions(&data, fs::Permissions::from_mode(0o500)).unwrap();
-        let delayed =
-            recording.wait_for(|control| control.read(Role::Controller).unwrap().retries > 0);
-        assert_eq!(delayed.read(Role::Persister).unwrap().publication, 0);
-        assert_ne!(delayed.read(Role::Persister).unwrap().state, State::Running);
+        let delayed = recording.wait_for(|control| control.settled(Role::Controller).retries > 0);
+        assert_eq!(delayed.settled(Role::Persister).publication, 0);
+        assert_ne!(delayed.settled(Role::Persister).state, State::Running);
         let cleared = Instant::now();
         fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
         recording.wait_for_exit();
         assert!(cleared.elapsed() < Duration::from_secs(30));
-        recording.assert_saved_publications(control.read(Role::Collector).unwrap().publication);
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
     }
 
     #[test]
@@ -439,15 +446,15 @@ mod tests {
             Stdio::from(fs::File::create_new(&diagnostic).unwrap()),
         );
         let control =
-            recording.wait_for(|control| control.read(Role::Persister).unwrap().alive().unwrap());
+            recording.wait_for(|control| control.settled(Role::Persister).alive().unwrap());
         fs::write(recording.root.join("refuse-sync"), b"refuse").unwrap();
-        recording.wait_for(|control| control.read(Role::Controller).unwrap().retries > 0);
+        recording.wait_for(|control| control.settled(Role::Controller).retries > 0);
         let path = fs::read_to_string(recording.root.join("sync-observed")).unwrap();
         assert!(PathBuf::from(&path).starts_with(recording.root.canonicalize().unwrap()));
         assert!(path.ends_with(".parquet"));
         assert!(path.contains(".pending/"));
-        assert_eq!(control.read(Role::Persister).unwrap().publication, 0);
-        assert_ne!(control.read(Role::Persister).unwrap().state, State::Running);
+        assert_eq!(control.settled(Role::Persister).publication, 0);
+        assert_ne!(control.settled(Role::Persister).state, State::Running);
         let before = Instant::now();
         fs::remove_file(recording.root.join("refuse-sync")).unwrap();
         recording.wait_for_exit();
@@ -461,7 +468,7 @@ mod tests {
             "native_sync_eio path={path} recovery_ns={} diagnostics={output}",
             before.elapsed().as_nanos()
         );
-        recording.assert_saved_publications(control.read(Role::Collector).unwrap().publication);
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
     }
 
     #[repr(C)]
@@ -555,14 +562,12 @@ mod tests {
         let mut recording = Recording::new("pressure", 45);
         recording.memory = 1;
         recording.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
-        let control =
-            recording.wait_for(|control| control.read(Role::Controller).unwrap().retries > 0);
-        let acquisition = control.read(Role::Collector).unwrap();
+        let control = recording.wait_for(|control| control.settled(Role::Controller).retries > 0);
+        let acquisition = control.settled(Role::Collector);
         let began = Instant::now();
-        let initial = control.read(Role::Controller).unwrap().retries;
-        recording
-            .wait_for(|control| control.read(Role::Controller).unwrap().retries >= initial + 3);
-        let health = control.read(Role::Controller).unwrap();
+        let initial = control.settled(Role::Controller).retries;
+        recording.wait_for(|control| control.settled(Role::Controller).retries >= initial + 3);
+        let health = control.settled(Role::Controller);
         assert_eq!(
             health.failure,
             collector::recording::control::Failure::Resource
@@ -574,9 +579,9 @@ mod tests {
         );
         assert_eq!(
             acquisition.creation,
-            control.read(Role::Collector).unwrap().creation
+            control.settled(Role::Collector).creation
         );
-        assert!(control.read(Role::Collector).unwrap().publication > acquisition.publication + 5);
+        assert!(control.settled(Role::Collector).publication > acquisition.publication + 5);
         eprintln!(
             "resource_backoff retries={} elapsed_ns={} next_delay_ns={}",
             health.retries,
@@ -590,13 +595,13 @@ mod tests {
         controller.wait().unwrap();
         recording.memory = 256 * 1024 * 1024;
         recording.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
-        recording.wait_for(|control| control.read(Role::Persister).unwrap().alive().unwrap());
+        recording.wait_for(|control| control.settled(Role::Persister).alive().unwrap());
         Control::open_writable(&recording.root)
             .unwrap()
             .request_stop()
             .unwrap();
         recording.wait_for_exit();
-        recording.assert_saved_publications(control.read(Role::Collector).unwrap().publication);
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
     }
 
     #[test]
@@ -605,10 +610,10 @@ mod tests {
         // Method: kill acquisition, stop at replacement registration, and query both exact runs.
         let mut recording = Recording::start("collector-exit", 30);
         let control = recording.wait_for(|control| {
-            control.read(Role::Collector).unwrap().state == State::Running
-                && control.read(Role::Persister).unwrap().alive().unwrap()
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
         });
-        let first = control.read(Role::Collector).unwrap();
+        let first = control.settled(Role::Collector);
         let reader = collector::ring::RingReader::open(&recording.place.lock_path).unwrap();
         assert_eq!(0, unsafe { kill(first.pid, 9) });
         let root = recording.root.clone();
@@ -618,9 +623,9 @@ mod tests {
                 .runs
                 .len()
                 == 2
-                && control.read(Role::Persister).unwrap().state == State::Stopped
+                && control.settled(Role::Persister).state == State::Stopped
         });
-        let replacement = control.read(Role::Collector).unwrap();
+        let replacement = control.settled(Role::Collector);
         eprintln!("stop at replacement registration before timed tick: {replacement:?}");
         let first_newest = reader.publication_newest().unwrap();
         let registry = collector::recording::Registry::read(&recording.root).unwrap();
@@ -651,7 +656,7 @@ mod tests {
         recording.assert_saved_run(
             registry.runs[1].identity,
             replacement_first,
-            control.read(Role::Collector).unwrap().publication,
+            control.settled(Role::Collector).publication,
         );
     }
 
@@ -661,10 +666,10 @@ mod tests {
         // Method: abort only this owned collector, observe terminal control and exact old tail.
         let mut recording = Recording::start("invariant", 30);
         let control = recording.wait_for(|control| {
-            control.read(Role::Collector).unwrap().state == State::Running
-                && control.read(Role::Persister).unwrap().alive().unwrap()
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
         });
-        let acquisition = control.read(Role::Collector).unwrap();
+        let acquisition = control.settled(Role::Collector);
         let reader = collector::ring::RingReader::open(&recording.place.lock_path).unwrap();
         assert_eq!(0, unsafe { kill(acquisition.pid, 6) });
         let mut controller = recording.child.take().unwrap();
@@ -685,16 +690,15 @@ mod tests {
             exited,
             "controller did not classify invariant exit within ten steps"
         );
-        recording
-            .wait_for(|control| control.read(Role::Persister).unwrap().state == State::Stopped);
-        let terminal = control.read(Role::Controller).unwrap();
+        recording.wait_for(|control| control.settled(Role::Persister).state == State::Stopped);
+        let terminal = control.settled(Role::Controller);
         assert_eq!(terminal.state, State::Failed);
         assert_eq!(
             terminal.failure,
             collector::recording::control::Failure::Invariant
         );
         assert_eq!(
-            control.read(Role::Collector).unwrap().creation,
+            control.settled(Role::Collector).creation,
             acquisition.creation
         );
         assert_eq!(
@@ -735,14 +739,11 @@ mod tests {
             Stdio::from(OwnedFd::from(sink.try_clone().unwrap())),
             Stdio::from(OwnedFd::from(sink)),
         );
-        let control = recording
-            .wait_for(|control| control.read(Role::Collector).unwrap().state == State::Running);
+        let control =
+            recording.wait_for(|control| control.settled(Role::Collector).state == State::Running);
         recording.wait_for_exit();
-        assert_eq!(
-            control.read(Role::Controller).unwrap().state,
-            State::Stopped
-        );
-        recording.assert_saved_publications(control.read(Role::Collector).unwrap().publication);
+        assert_eq!(control.settled(Role::Controller).state, State::Stopped);
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
         assert!(
             !collector::recording::private::FileLock::held(&recording.root.join("recorder.lock"))
                 .unwrap()
@@ -781,21 +782,21 @@ mod tests {
             Stdio::from(fs::File::create_new(&output).unwrap()),
             Stdio::from(fs::File::create_new(recording.root.join("diagnostics")).unwrap()),
         );
-        let control = recording
-            .wait_for(|control| control.read(Role::Collector).unwrap().state == State::Running);
+        let control =
+            recording.wait_for(|control| control.settled(Role::Collector).state == State::Running);
         eprintln!(
             "resource_start pressure={pressure} root={} controller={:?} collector={:?} \
              persister={:?}",
             recording.root.display(),
-            control.read(Role::Controller).unwrap(),
-            control.read(Role::Collector).unwrap(),
-            control.read(Role::Persister).unwrap()
+            control.settled(Role::Controller),
+            control.settled(Role::Collector),
+            control.settled(Role::Persister)
         );
         let report = resource_minute_wait(&output);
         eprintln!("resource_report pressure={pressure}\n{report}");
         eprintln!(
             "resource_end controller={:?}",
-            control.read(Role::Controller).unwrap()
+            control.settled(Role::Controller)
         );
         if pressure {
             let mut controller = recording.child.take().unwrap();
@@ -810,8 +811,8 @@ mod tests {
             .request_stop()
             .unwrap();
         recording.wait_for_exit();
-        let newest = control.read(Role::Collector).unwrap().publication;
-        assert_eq!(control.read(Role::Persister).unwrap().publication, newest);
+        let newest = control.settled(Role::Collector).publication;
+        assert_eq!(control.settled(Role::Persister).publication, newest);
         let registry = collector::recording::Registry::read(&recording.root).unwrap();
         let store = persistence::Store::open(&recording.root).unwrap();
         assert_eq!(registry.runs.len(), 1);
