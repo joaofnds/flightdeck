@@ -1189,8 +1189,10 @@ fn row_candidates_split_launch(fixture: &Fixture, object: &Path) {
         .env("FLIGHTDECK_PRIVATE_SYNC_OBSERVED", observed)
         .env("FLIGHTDECK_MUTATION_TARGET", root.join("foreground"))
         .env("FLIGHTDECK_MUTATION_KIND", "rename");
+    // The child writes the maximum retained rows in a debug build, which takes a CI runner longer
+    // than OwnedChild's thirty seconds, so it takes the wait of the other maximum-row children.
     let mut child = OwnedChild(command.spawn().unwrap());
-    assert!(child.wait().success());
+    assert!(row_publication_split_wait(&mut child).success());
 }
 fn row_candidates_split_child(root: &Path) {
     let store = Store::open(root).unwrap();
