@@ -164,10 +164,11 @@ fn budget() -> Arc<ByteBudget> {
 
 /// Polars sends a query's result before its worker drops the plan, and the plan's buffers stay
 /// charged until that drop, so a charge can outlive every value the test holds. The bound catches
-/// a charge that never returns and measures nothing, since the scheduler decides when the worker
-/// runs.
+/// a charge that never returns, and thirty seconds leaves the scheduler time to run the worker.
 fn assert_budget_drains(budget: &ByteBudget) {
-    for _ in 0..18000 {
+    const POLLS_MAX: u32 = 3000;
+
+    for _ in 0..POLLS_MAX {
         if budget.used() == 0 {
             return;
         }
