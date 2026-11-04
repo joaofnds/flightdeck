@@ -210,7 +210,7 @@ const VALIDATE_CHUNK_BYTES: usize = 64;
 
 /// A chunk's comparisons have no exit between them, so the compiler makes them one wide comparison,
 /// and one pass looks for both bytes. Recovering the most rows a recording retains validates up to
-/// 8190 bytes three times for each row, and that recovery has a 30-second deadline.
+/// 8190 bytes for each row, and that recovery has a 30-second deadline.
 fn validate_contains_either(bytes: &[u8], first: u8, second: u8) -> bool {
     bytes.chunks(VALIDATE_CHUNK_BYTES).any(|chunk| {
         chunk.iter().fold(0, |found, byte| {
@@ -1629,29 +1629,49 @@ mod tests {
     #[test]
     fn validate_refuses_each_forbidden_app_byte_at_every_offset_and_length() {
         // Goal: no offset of an app path escapes the scans for a zero byte or a nested bundle.
-        // Method: place a zero and a nested .app component at every offset, and a plain slash too.
+        // Method: place a zero and a nested .app component at every offset, a plain slash too, and
+        // a zero before the .app of shorter paths.
         let clean = validate_app_fill(PROGRAM_PATH_BYTES_MAX);
         assert_eq!(validate_app(&clean), Ok(()));
         let nested_end = PROGRAM_PATH_BYTES_MAX - 4;
         for offset in 1..nested_end {
             let mut path = clean.clone();
             path[offset] = 0;
-            assert_eq!(validate_app(&path), Err(ProgramBytesError::AppBytes));
+            assert_eq!(
+                validate_app(&path),
+                Err(ProgramBytesError::AppBytes),
+                "a zero at {offset}"
+            );
             path[offset] = b'/';
-            assert_eq!(validate_app(&path), Ok(()));
+            assert_eq!(validate_app(&path), Ok(()), "a slash at {offset}");
         }
         for offset in 1..=nested_end - 5 {
             let mut path = clean.clone();
             path[offset..offset + 5].copy_from_slice(b".app/");
-            assert_eq!(validate_app(&path), Err(ProgramBytesError::AppOutermost));
+            assert_eq!(
+                validate_app(&path),
+                Err(ProgramBytesError::AppOutermost),
+                "a nested bundle at {offset}"
+            );
             path[offset + 4] = b'x';
-            assert_eq!(validate_app(&path), Ok(()));
+            assert_eq!(validate_app(&path), Ok(()), "a bundle's name at {offset}");
             path[offset + 4] = 0;
-            assert_eq!(validate_app(&path), Err(ProgramBytesError::AppBytes));
+            assert_eq!(
+                validate_app(&path),
+                Err(ProgramBytesError::AppBytes),
+                "a zero after .app at {offset}"
+            );
         }
-        for length in 5..=256 {
-            let path = validate_app_fill(length);
-            assert_eq!(validate_app(&path), Ok(()));
+        assert_eq!(validate_app(&validate_app_fill(5)), Ok(()));
+        for length in 6..=256 {
+            let mut path = validate_app_fill(length);
+            assert_eq!(validate_app(&path), Ok(()), "a path of {length} bytes");
+            path[length - 5] = 0;
+            assert_eq!(
+                validate_app(&path),
+                Err(ProgramBytesError::AppBytes),
+                "a zero before the .app of {length} bytes"
+            );
         }
         assert_eq!(
             validate_app(b"/.app/.app"),
@@ -1661,8 +1681,11 @@ mod tests {
             validate_app(b"/.app/\0.app"),
             Err(ProgramBytesError::AppBytes)
         );
+        let mut nested_then_zero = clean.clone();
+        nested_then_zero[1..6].copy_from_slice(b".app/");
+        nested_then_zero[VALIDATE_CHUNK_BYTES * 2] = 0;
         assert_eq!(
-            validate_app(b"/.app/\0.app"),
+            validate_app(&nested_then_zero),
             Err(ProgramBytesError::AppBytes)
         );
         assert_eq!(validate_app(b"/a.app.app"), Ok(()));
