@@ -233,11 +233,44 @@ impl RingReader {
         )
     }
 
+    /// The byte lengths of a program, for a caller that already holds its bytes.
+    pub fn program_lengths(&self, program: &super::ProgramReference) -> io::Result<(usize, usize)> {
+        if !layout::captured(self.opened.layout.version) {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+
+        super::identity::program_lengths(
+            self.opened.mapping.words(),
+            &self.opened.layout,
+            program,
+            self.opened.reference_owner,
+        )
+    }
+
     /// Reads event metadata under the event's own sequence, independent of slot lifetime.
     /// Only a returned event makes the caller's identity output valid.
     pub fn read_event_identity(
         &mut self,
         identity: &mut super::IdentityObservation,
+    ) -> io::Result<FoundEvent> {
+        let mut executable_name = [0; super::PROGRAM_PATH_BYTES_MAX];
+        let mut app_path = [0; super::PROGRAM_PATH_BYTES_MAX];
+        self.read_event_identity_bytes(
+            identity,
+            &mut super::ProgramBuffers {
+                executable_name: &mut executable_name,
+                app_path: &mut app_path,
+            },
+        )
+    }
+
+    /// Reading an event's identity validates a copy of its program bytes, and this keeps that copy,
+    /// so a caller that wants the bytes reads them once. Only a returned event whose identity names
+    /// a program makes the buffers valid.
+    pub fn read_event_identity_bytes(
+        &mut self,
+        identity: &mut super::IdentityObservation,
+        buffers: &mut super::ProgramBuffers,
     ) -> io::Result<FoundEvent> {
         let words = self.opened.mapping.words();
         let newest = read_newest(&words[layout::HEADER_EVENT_NEWEST])?;
@@ -260,6 +293,7 @@ impl RingReader {
                 &self.opened.layout,
                 &event,
                 self.opened.reference_owner,
+                buffers,
                 identity,
             ) {
                 Ok(()) => Some((tick, event)),

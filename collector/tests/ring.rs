@@ -353,6 +353,59 @@ mod tests {
     }
 
     #[test]
+    fn reading_an_event_leaves_its_program_bytes_in_the_buffers() {
+        // Goal: a reader that keeps the bytes of an identity read needs no second copy.
+        // Method: publish an event that names a program, and read its bytes and lengths once.
+        let place = TestPlace::new("idbytes");
+        let mut writer = identity_writer(&place, SHAPE, 1);
+        let bytes = ProgramBytes {
+            executable_name: b"helper\xff",
+            app_path: Some(b"/A.app"),
+        };
+        let mut program = None;
+        writer.intern_program(&bytes, &mut program).unwrap();
+        let process = program_observation(&program.unwrap());
+        let event = IdentityObservation {
+            usage: UsageAvailability::NotApplicable,
+            ..process
+        };
+        let memory = Memory::default();
+        let mut source = readings(1, &memory);
+        let events = [start_identity_event()];
+        source.events = &events;
+        let mut reader = RingReader::open(place.lock_path()).unwrap();
+        writer
+            .publish_with_identity(
+                &source,
+                None,
+                &IdentityPublication {
+                    processes: &[process],
+                    events: &[event],
+                },
+            )
+            .unwrap();
+        let mut name = [0; 4095];
+        let mut app = [0; 4095];
+
+        let mut identity = IdentityObservation::EMPTY;
+        let found = reader
+            .read_event_identity_bytes(
+                &mut identity,
+                &mut ProgramBuffers {
+                    executable_name: &mut name,
+                    app_path: &mut app,
+                },
+            )
+            .unwrap();
+        let lengths = reader.program_lengths(identity.program().unwrap()).unwrap();
+
+        assert!(matches!(found, FoundEvent::Event { number: 1, .. }));
+        assert_eq!((7, 6), lengths);
+        assert_eq!(b"helper\xff", &name[..7]);
+        assert_eq!(b"/A.app", &app[..6]);
+    }
+
+    #[test]
     fn dictionary_references_belong_to_the_generation_that_created_them() {
         // Goal: dictionary IDs never silently resolve in a successor generation.
         // Method: intern each generation's first entry and try the old reference in both.

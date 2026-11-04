@@ -112,6 +112,12 @@ pub(crate) fn write_tail(
 fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<Vec<Row>> {
     let mut rows = Vec::with_capacity(BATCH_ROWS_MAX);
     let mut bytes = ROWS_BYTES_MAX;
+    let mut name = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+    let mut buffers = ProgramBuffers {
+        executable_name: &mut name,
+        app_path: &mut app,
+    };
     for _step in 0..=reader.shape().event_capacity {
         if reader.next_event() >= end
             || rows.len() == BATCH_ROWS_MAX
@@ -122,7 +128,7 @@ fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<
         let mut identity = IdentityObservation::EMPTY;
         let captured = reader.dictionary_capacity().is_some();
         let found = if captured {
-            reader.read_event_identity(&mut identity)?
+            reader.read_event_identity_bytes(&mut identity, &mut buffers)?
         } else {
             reader.read_event()?
         };
@@ -132,7 +138,7 @@ fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<
                 tick,
                 event,
             } => {
-                let row = copy_row(
+                let row = copy_row_read(
                     reader,
                     &NumberedEvent {
                         number,
@@ -140,6 +146,7 @@ fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<
                         event: &event,
                     },
                     captured.then_some(&identity),
+                    &buffers,
                 )?;
                 bytes +=
                     row.name.as_ref().map_or(0, Vec::len) + row.app.as_ref().map_or(0, Vec::len);
@@ -156,6 +163,46 @@ fn read_batch(reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<
 
 pub(crate) fn copy_row(
     reader: &RingReader,
+    event: &NumberedEvent<'_>,
+    identity: Option<&IdentityObservation>,
+) -> Result<Row> {
+    let mut row = copy_row_fields(event, identity)?;
+    if let Some(reference) = identity.and_then(IdentityObservation::program) {
+        let mut name = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+        let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+        let (name_length, app_length) = reader.copy_program(
+            reference,
+            &mut ProgramBuffers {
+                executable_name: &mut name,
+                app_path: &mut app,
+            },
+        )?;
+        row.name = Some(name[..name_length].to_vec());
+        row.app = (app_length > 0).then(|| app[..app_length].to_vec());
+    }
+    Ok(row)
+}
+
+/// `copy_row` for an identity whose read already left its program bytes in `buffers`. Recovering
+/// the most rows a recording retains has a 30-second deadline, and a second copy from the ring
+/// would cost it time and find nothing, since those bytes are immutable and that read validated
+/// them.
+pub(crate) fn copy_row_read(
+    reader: &RingReader,
+    event: &NumberedEvent<'_>,
+    identity: Option<&IdentityObservation>,
+    buffers: &ProgramBuffers<'_>,
+) -> Result<Row> {
+    let mut row = copy_row_fields(event, identity)?;
+    if let Some(reference) = identity.and_then(IdentityObservation::program) {
+        let (name_length, app_length) = reader.program_lengths(reference)?;
+        row.name = Some(buffers.executable_name[..name_length].to_vec());
+        row.app = (app_length > 0).then(|| buffers.app_path[..app_length].to_vec());
+    }
+    Ok(row)
+}
+
+fn copy_row_fields(
     event: &NumberedEvent<'_>,
     identity: Option<&IdentityObservation>,
 ) -> Result<Row> {
@@ -178,19 +225,6 @@ pub(crate) fn copy_row(
             usage: usage_code(identity.usage),
             program: None,
         });
-        if let Some(reference) = identity.program() {
-            let mut name = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
-            let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
-            let (name_length, app_length) = reader.copy_program(
-                reference,
-                &mut ProgramBuffers {
-                    executable_name: &mut name,
-                    app_path: &mut app,
-                },
-            )?;
-            row.name = Some(name[..name_length].to_vec());
-            row.app = (app_length > 0).then(|| app[..app_length].to_vec());
-        }
     }
     Ok(row)
 }

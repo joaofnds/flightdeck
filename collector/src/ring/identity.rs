@@ -168,12 +168,12 @@ impl ProgramBytes<'_> {
             return Err(ProgramBytesError::ExecutableBytes);
         }
 
-        if validate_contains(self.executable_name, 0) {
-            return Err(ProgramBytesError::ExecutableBytes);
-        }
-
-        if validate_contains(self.executable_name, b'/') {
-            return Err(ProgramBytesError::ExecutableBasename);
+        if validate_contains_either(self.executable_name, 0, b'/') {
+            return Err(if self.executable_name.contains(&0) {
+                ProgramBytesError::ExecutableBytes
+            } else {
+                ProgramBytesError::ExecutableBasename
+            });
         }
 
         if let Some(path) = self.app_path {
@@ -189,13 +189,7 @@ impl ProgramBytes<'_> {
                 return Err(ProgramBytesError::AppPath);
             }
 
-            if validate_contains(path, 0) {
-                return Err(ProgramBytesError::AppBytes);
-            }
-
-            if validate_nests_app(path) {
-                return Err(ProgramBytesError::AppOutermost);
-            }
+            validate_app_bytes(path)?;
         }
 
         Ok(())
@@ -205,32 +199,41 @@ impl ProgramBytes<'_> {
 /// How many bytes `validate` compares at once before it may stop at a refused one.
 const VALIDATE_CHUNK_BYTES: usize = 64;
 
-/// A chunk's comparisons have no exit between them, so the compiler makes them one wide comparison.
-/// Recovering the most rows a recording retains validates up to 8190 bytes three times for each
-/// row, and that recovery has a 30-second deadline.
-fn validate_contains(bytes: &[u8], wanted: u8) -> bool {
+/// A chunk's comparisons have no exit between them, so the compiler makes them one wide comparison,
+/// and one pass looks for both bytes. Recovering the most rows a recording retains validates up to
+/// 8190 bytes three times for each row, and that recovery has a 30-second deadline.
+fn validate_contains_either(bytes: &[u8], first: u8, second: u8) -> bool {
     bytes.chunks(VALIDATE_CHUNK_BYTES).any(|chunk| {
-        chunk
-            .iter()
-            .fold(0, |found, byte| found | u8::from(*byte == wanted))
-            != 0
+        chunk.iter().fold(0, |found, byte| {
+            found | u8::from(*byte == first) | u8::from(*byte == second)
+        }) != 0
     })
 }
 
-/// Whether a component other than the last ends in .app, which is to say a slash follows it.
-fn validate_nests_app(path: &[u8]) -> bool {
+/// Refuses a zero byte, which outranks a nested bundle wherever each falls, and a component other
+/// than the last that ends in .app, which is to say a slash follows it.
+fn validate_app_bytes(path: &[u8]) -> Result<(), ProgramBytesError> {
+    let mut nested = false;
     for (chunk_index, chunk) in path.chunks(VALIDATE_CHUNK_BYTES).enumerate() {
-        if validate_contains(chunk, b'/') {
+        if validate_contains_either(chunk, 0, b'/') {
             let start = chunk_index * VALIDATE_CHUNK_BYTES;
             for (index, byte) in chunk.iter().enumerate() {
+                if *byte == 0 {
+                    return Err(ProgramBytesError::AppBytes);
+                }
+
                 if *byte == b'/' && path[..start + index].ends_with(b".app") {
-                    return true;
+                    nested = true;
                 }
             }
         }
     }
 
-    false
+    if nested {
+        return Err(ProgramBytesError::AppOutermost);
+    }
+
+    Ok(())
 }
 
 /// Identity records are independent of numeric rows, including refused usage.
@@ -552,13 +555,26 @@ pub(super) fn dictionary_usage(
     }))
 }
 
-pub(super) fn copy_program(
+/// The byte lengths of a program this reader's own reference names.
+pub(super) fn program_lengths(
     words: &[AtomicU64],
     layout: &Layout,
     program: &ProgramReference,
     owner: u64,
-    buffers: &mut ProgramBuffers,
 ) -> io::Result<(usize, usize)> {
+    let mut entry = Descriptor::EMPTY;
+    program_entry(words, layout, program, owner, &mut entry)?;
+
+    Ok((entry.executable_name_bytes, entry.app_path_bytes))
+}
+
+fn program_entry(
+    words: &[AtomicU64],
+    layout: &Layout,
+    program: &ProgramReference,
+    owner: u64,
+    entry: &mut Descriptor,
+) -> io::Result<()> {
     let mut expected = ProgramReference::EMPTY;
     reference(
         words,
@@ -573,8 +589,18 @@ pub(super) fn copy_program(
         return invalid();
     }
 
+    descriptor(words, layout, program.number, entry)
+}
+
+pub(super) fn copy_program(
+    words: &[AtomicU64],
+    layout: &Layout,
+    program: &ProgramReference,
+    owner: u64,
+    buffers: &mut ProgramBuffers,
+) -> io::Result<(usize, usize)> {
     let mut entry = Descriptor::EMPTY;
-    descriptor(words, layout, program.number, &mut entry)?;
+    program_entry(words, layout, program, owner, &mut entry)?;
 
     copy_program_bytes(
         words,
@@ -621,8 +647,11 @@ fn copy_program_bytes(words: &[AtomicU64], layout: &Layout, offset: usize, bytes
     let start = (offset + prefix) / 8;
     // Whole words first, so that each is one store rather than a memcpy call of unknown length.
     let (whole_words, suffix) = bytes[prefix..].as_chunks_mut::<8>();
-    for (index, whole_word) in whole_words.iter_mut().enumerate() {
-        *whole_word = load(words, layout.arena_start + start + index).to_le_bytes();
+    for (whole_word, word) in whole_words
+        .iter_mut()
+        .zip(&words[layout.arena_start + start..])
+    {
+        *whole_word = word.load(Ordering::Relaxed).to_le_bytes();
     }
 
     if !suffix.is_empty() {
@@ -858,6 +887,7 @@ pub(super) fn load_event_identity(
     layout: &Layout,
     event: &crate::tracker::Event,
     owner: u64,
+    buffers: &mut ProgramBuffers,
     output: &mut IdentityObservation,
 ) -> io::Result<()> {
     if !layout::captured(layout.version) {
@@ -877,8 +907,6 @@ pub(super) fn load_event_identity(
         target.store(source.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
-    let mut executable_name = [0; PROGRAM_PATH_BYTES_MAX];
-    let mut app_path = [0; PROGRAM_PATH_BYTES_MAX];
     load_observation(
         &IdentityRecord {
             words: source.words,
@@ -886,10 +914,7 @@ pub(super) fn load_event_identity(
         },
         layout,
         owner,
-        &mut ProgramBuffers {
-            executable_name: &mut executable_name,
-            app_path: &mut app_path,
-        },
+        buffers,
         output,
     )?;
 
@@ -1631,6 +1656,10 @@ mod tests {
         assert_eq!(
             validate_app(b"/.app/.app"),
             Err(ProgramBytesError::AppOutermost)
+        );
+        assert_eq!(
+            validate_app(b"/.app/\0.app"),
+            Err(ProgramBytesError::AppBytes)
         );
         assert_eq!(
             validate_app(b"/.app/\0.app"),

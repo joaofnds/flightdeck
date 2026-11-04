@@ -2,7 +2,7 @@ use collector::recording::private::PrivateDirectory;
 use std::path::Path;
 use std::sync::Arc;
 
-use collector::ring::{FoundEvent, IdentityObservation, RingReader};
+use collector::ring::{FoundEvent, IdentityObservation, ProgramBuffers, RingReader};
 
 use super::index::Index;
 use crate::event_observation::{BATCH_BYTES_MAX, BATCH_ROWS_MAX};
@@ -88,6 +88,12 @@ impl Writer {
 
     fn prefix(&mut self, reader: &mut RingReader, end: u64, losses: &mut Losses) -> Result<()> {
         reader.seek_event(self.next_event)?;
+        let mut name = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+        let mut app = [0; collector::ring::PROGRAM_PATH_BYTES_MAX];
+        let mut buffers = ProgramBuffers {
+            executable_name: &mut name,
+            app_path: &mut app,
+        };
         for _step in 0..=reader.shape().event_capacity {
             if reader.next_event() >= end {
                 return Ok(());
@@ -95,7 +101,7 @@ impl Writer {
             self.room(reader)?;
             let mut identity = IdentityObservation::EMPTY;
             let found = if self.index.identities {
-                reader.read_event_identity(&mut identity)?
+                reader.read_event_identity_bytes(&mut identity, &mut buffers)?
             } else {
                 reader.read_event()?
             };
@@ -105,7 +111,7 @@ impl Writer {
                     tick,
                     event,
                 } => {
-                    let row = batch::copy_row(
+                    let row = batch::copy_row_read(
                         reader,
                         &NumberedEvent {
                             number,
@@ -113,6 +119,7 @@ impl Writer {
                             event: &event,
                         },
                         self.index.identities.then_some(&identity),
+                        &buffers,
                     )?;
                     self.push(row)?;
                 }
