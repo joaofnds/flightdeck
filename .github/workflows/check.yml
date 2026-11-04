@@ -106,8 +106,8 @@ jobs:
       - *refuse-ring-locks
   capacity:
     runs-on: macos-26
-    # See the check job's limit. The cold release build has not been measured on a runner, so this
-    # takes the desktop job's limit, which also covers a cold release build of Polars.
+    # Cold, this job spends 38 minutes on clippy and two release builds of Polars before its
+    # tests. See the check job's limit.
     timeout-minutes: 120
     steps:
       - *checkout
