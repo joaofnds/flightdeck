@@ -590,11 +590,7 @@ mod tests {
         );
         // Restore the fixture's explicit configuration through a controller relaunch so it
         // can drain and prove bounded cleanup; this is not an automatic pressure-clear claim.
-        let mut controller = recording.child.take().unwrap();
-        controller.kill().unwrap();
-        controller.wait().unwrap();
-        recording.memory = 256 * 1024 * 1024;
-        recording.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
+        recording.relaunch_controller_with_room();
         recording.wait_for(|control| control.settled(Role::Persister).alive().unwrap());
         Control::open_writable(&recording.root)
             .unwrap()
@@ -799,12 +795,7 @@ mod tests {
             control.settled(Role::Controller)
         );
         if pressure {
-            let mut controller = recording.child.take().unwrap();
-            controller.kill().unwrap();
-            controller.wait().unwrap();
-            recording.memory = 256 * 1024 * 1024;
-            recording
-                .launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
+            recording.relaunch_controller_with_room();
         }
         Control::open_writable(&recording.root)
             .unwrap()
@@ -973,6 +964,22 @@ mod tests {
                 .spawn()
                 .unwrap();
             self.child = Some(child);
+        }
+
+        /// Returns once the replacement controller holds the control file. A stop requested
+        /// sooner can reach the old cohort after its workers exit, which `Control::create` takes
+        /// for that cohort's finished stop, so the new cohort it starts never sees the request.
+        fn relaunch_controller_with_room(&mut self) {
+            let original = Control::open(&self.root)
+                .unwrap()
+                .settled(Role::Controller)
+                .creation;
+            let mut controller = self.child.take().unwrap();
+            controller.kill().unwrap();
+            controller.wait().unwrap();
+            self.memory = 256 * 1024 * 1024;
+            self.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
+            self.wait_for(|control| control.settled(Role::Controller).creation != original);
         }
 
         fn wait_for(&mut self, predicate: impl Fn(&Control) -> bool) -> Control {
