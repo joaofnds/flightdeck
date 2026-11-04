@@ -112,8 +112,9 @@ fn self_monitoring_preserves_the_paused_inspection_while_the_live_position_advan
     let mut harness = InputHarness::setup_source(cx, &recording.root);
     harness.driver.await_publication(1);
     harness.driver.pause_following();
-    harness.driver.await_held_publication(1);
     let requested = harness.driver.inspection_request();
+    harness.driver.await_held_publication(1);
+    assert_eq!(harness.driver.inspection_request(), requested);
     recording.publish();
 
     harness.driver.click_source_control("navigation:self");
@@ -135,8 +136,9 @@ fn computer_navigation_preserves_the_accepted_diagnostic_inspection(cx: &mut Tes
     let mut harness = InputHarness::setup_source(cx, &recording.root);
     harness.driver.await_publication(1);
     harness.driver.pause_following();
-    harness.driver.await_held_publication(1);
     let requested = harness.driver.inspection_request();
+    harness.driver.await_held_publication(1);
+    assert_eq!(harness.driver.inspection_request(), requested);
     recording.publish();
 
     for _visit in 0..2 {
@@ -279,6 +281,12 @@ impl InputDriver {
             serde_json::json!({"route":dashboard.request.route,
                 "second":dashboard.request.second,"identity":dashboard.request.identity,
                 "generation":dashboard.generation,"error":dashboard.error,
+                "reply_pending":dashboard.reply_pending,
+                "hold":dashboard.hold.as_ref().map(|hold| serde_json::json!({
+                    "second":hold.reading.target.second,
+                    "identity":hold.reading.target.identity,
+                    "complete":hold.reading.complete,
+                    "failure":hold.reading.failure})),
                 "notice":dashboard.native.notice,
                 "snapshot_generation":dashboard.snapshot.as_ref().map(|s|s.generation),
                 "latest":dashboard.snapshot.as_ref().map(|s|&s.catalog["latest_observation"]),
