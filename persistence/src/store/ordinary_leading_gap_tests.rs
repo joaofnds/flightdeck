@@ -117,7 +117,10 @@ fn leading_gap_payload(
     );
     let mut losses = crate::Losses::default();
     let mut events = crate::event_table::writer::Writer::new(
-        pending,
+        PrivateDirectory::open(pending)
+            .unwrap()
+            .create_directory("events")
+            .unwrap(),
         window.identity,
         if overwritten { 1 } else { 3 },
         attempt.input().captured,

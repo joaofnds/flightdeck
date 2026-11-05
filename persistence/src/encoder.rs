@@ -2,6 +2,8 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use collector::recording::private::PrivateDirectory;
+
 use polars::prelude::*;
 
 use model::catalog;
@@ -40,6 +42,15 @@ pub(crate) use columns;
 impl Encoder {
     /// Writes typed files into a private directory. The caller synchronizes and publishes them.
     pub fn encode(&self, window: &Window, pending: &Path) -> Result<Vec<TableManifest>> {
+        self.encode_into(window, &PrivateDirectory::open(pending)?)
+    }
+
+    /// Writes typed files through the directory its caller already holds open.
+    pub fn encode_into(
+        &self,
+        window: &Window,
+        pending: &PrivateDirectory,
+    ) -> Result<Vec<TableManifest>> {
         if window.ticks.is_empty() {
             return Err(Error::Bound("empty window"));
         }
@@ -67,9 +78,7 @@ impl Encoder {
             )?;
             let name = table.name();
             let rows = collector::u64_from_usize(frame.height());
-            let path = pending.join(format!("{name}.parquet"));
-
-            let file = encode_open(&path)?;
+            let file = encode_create(pending, &format!("{name}.parquet"))?;
 
             encode_write(&mut frame, file)?;
             tables.push(TableManifest { name, rows });
@@ -84,16 +93,25 @@ impl Encoder {
 pub fn encode_derived(
     name: &'static str,
     frame: &mut DataFrame,
-    pending: &Path,
+    pending: &PrivateDirectory,
 ) -> Result<TableManifest> {
     assert!(crate::schema::DERIVED_TABLES.contains(&name));
     let rows = collector::u64_from_usize(frame.height());
-    let path = pending.join(format!("{name}.parquet"));
 
-    let file = encode_open(&path)?;
+    let file = encode_create(pending, &format!("{name}.parquet"))?;
 
     encode_write(frame, file)?;
     Ok(TableManifest { name, rows })
+}
+
+fn encode_create(pending: &PrivateDirectory, name: &str) -> Result<std::fs::File> {
+    match pending.create_file(name) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(Error::Bound("existing table"))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn encode_open(path: &Path) -> Result<std::fs::File> {

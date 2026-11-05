@@ -380,7 +380,7 @@ impl Fixture {
             derive
                 .derive(&persistence::worker::Derivation {
                     window: &window,
-                    pending: pending.path(),
+                    pending: &private::PrivateDirectory::open(pending.path()).unwrap(),
                 })
                 .unwrap(),
         );

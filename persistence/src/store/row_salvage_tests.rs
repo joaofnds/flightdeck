@@ -1507,7 +1507,7 @@ fn row_publication_make_derivatives(fixture: &Fixture) {
     let tables = crate::sealed_apps::SealedApps::default()
         .derive(&crate::worker::Derivation {
             window: &window,
-            pending: &directory,
+            pending: &PrivateDirectory::open(&directory).unwrap(),
         })
         .unwrap();
     assert_eq!(tables.len(), crate::schema::DERIVED_TABLES.len());

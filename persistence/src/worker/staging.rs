@@ -3,7 +3,6 @@ use super::{ReadEvents, Tick, Window, WindowIdentity};
 
 pub(super) struct Staging {
     window: Window,
-    pending: crate::PendingWindow,
     events: crate::event_table::writer::Writer,
     identities: Vec<IdentityObservation>,
     captured: bool,
@@ -15,12 +14,12 @@ impl Staging {
         reader: &RingReader,
         identity: WindowIdentity,
         limits: Limits,
-        pending: crate::PendingWindow,
+        events: collector::recording::private::PrivateDirectory,
         memory_limit: u64,
     ) -> Result<Self> {
         let captured = reader.dictionary_capacity().is_some();
         let events = crate::event_table::writer::Writer::new(
-            pending.path(),
+            events,
             identity,
             reader.next_event(),
             captured,
@@ -28,7 +27,6 @@ impl Staging {
         )?;
         Ok(Self {
             window: Window::new(identity, limits),
-            pending,
             events,
             identities: Vec::with_capacity(if captured { limits.processes } else { 0 }),
             captured,
@@ -115,11 +113,7 @@ impl Staging {
         Ok(())
     }
 
-    pub(super) fn finish(
-        mut self,
-        reader: &mut RingReader,
-        losses: &mut Losses,
-    ) -> Result<super::StagedWindow> {
+    pub(super) fn finish(mut self, reader: &mut RingReader, losses: &mut Losses) -> Result<Window> {
         if self.window.tick_count() == 0 {
             losses.publications += self.publications_pending;
         }
@@ -128,9 +122,6 @@ impl Staging {
             let first = self.window.ticks[0].events_first;
             self.window.event_index = Some(self.events.finish(reader, first)?);
         }
-        Ok(super::StagedWindow {
-            window: self.window,
-            pending: self.pending,
-        })
+        Ok(self.window)
     }
 }

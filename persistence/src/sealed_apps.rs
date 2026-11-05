@@ -74,7 +74,7 @@ impl Default for SealedApps {
 impl Derive for SealedApps {
     fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
         let mut state = self.state.borrow_mut();
-        state.read(derivation)?;
+        state.read(derivation.window)?;
 
         let mut tables = vec![ranks::encode(
             &state.window,
@@ -102,8 +102,8 @@ struct State {
 impl State {
     /// Derives the Apps of each tick of the derivation's window. A refused window starts the
     /// index again, so a full index refuses one window and not every one after it.
-    fn read(&mut self, derivation: &Derivation<'_>) -> Result<()> {
-        if derivation.window.ticks.is_empty() {
+    fn read(&mut self, sealing: &crate::Window) -> Result<()> {
+        if sealing.ticks.is_empty() {
             return Err(Error::Bound("sealed Apps ticks"));
         }
 
@@ -115,7 +115,7 @@ impl State {
             ranks,
             window,
         } = self;
-        let read = ticks.read(derivation.window, programs, |tick| {
+        let read = ticks.read(sealing, programs, |tick| {
             apps.derive(tick.programs, &tick.previous, &tick.selected);
             ranks.rank(tick.programs, apps.totals(), apps.elapsed_ns());
             window.push(tick, apps, ranks);
@@ -143,8 +143,10 @@ fn derive_parts(
                 "persister derived no App parts window={}: {error}",
                 derivation.window.identity.window
             ));
-            let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
-            match std::fs::remove_file(path) {
+            match derivation
+                .pending
+                .remove_file(&format!("{APP_PARTS}.parquet"))
+            {
                 Ok(()) => Ok(None),
                 Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(problem) => Err(problem.into()),

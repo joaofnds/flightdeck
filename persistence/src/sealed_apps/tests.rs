@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use collector::ring::UsageAvailability;
 use model::ranks::{METRICS, Metric};
@@ -133,7 +133,7 @@ fn derives_the_ranks_and_the_parts_of_a_window() {
     let pending = Pending::new();
 
     let tables = SealedApps::default()
-        .derive(&derivation(&window, &pending.0))
+        .derive(&derivation(&window, &pending.directory()))
         .unwrap();
 
     let names: Vec<&str> = tables.iter().map(|table| table.name).collect();
@@ -152,7 +152,7 @@ fn removes_the_parts_a_window_failed_to_write() {
 
     let parts = derive_parts(
         Err(Error::Bound("sealed parts rows")),
-        &derivation(&window, &pending.0),
+        &derivation(&window, &pending.directory()),
     )
     .unwrap();
 
@@ -165,10 +165,13 @@ fn state() -> State {
 }
 
 fn read(state: &mut State, window: &Window) -> crate::Result<()> {
-    state.read(&derivation(window, Path::new("/nonexistent")))
+    state.read(window)
 }
 
-fn derivation<'seal>(window: &'seal Window, pending: &'seal Path) -> Derivation<'seal> {
+fn derivation<'seal>(
+    window: &'seal Window,
+    pending: &'seal collector::recording::private::PrivateDirectory,
+) -> Derivation<'seal> {
     Derivation { window, pending }
 }
 
@@ -181,8 +184,12 @@ impl Pending {
         let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let directory =
             std::env::temp_dir().join(format!("sealed-apps-{}-{number}", std::process::id()));
-        std::fs::create_dir(&directory).unwrap();
+        collector::recording::private::create_private_dir(&directory).unwrap();
         Self(directory)
+    }
+
+    fn directory(&self) -> collector::recording::private::PrivateDirectory {
+        collector::recording::private::PrivateDirectory::open(&self.0).unwrap()
     }
 }
 

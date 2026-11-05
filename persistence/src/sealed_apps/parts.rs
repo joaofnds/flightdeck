@@ -1,7 +1,6 @@
 //! Every App's part of each tick of a sealed window: its row, its processes, and the facts of
 //! the tick every page shows, so the viewer shows a saved second's App without replaying its
 //! minute.
-use std::path::Path;
 
 use polars::prelude::{Column, DataFrame};
 
@@ -35,7 +34,7 @@ const _: () = {
 pub(super) fn encode(
     window: &WindowApps,
     programs: &Programs,
-    pending: &Path,
+    pending: &collector::recording::private::PrivateDirectory,
 ) -> Result<TableManifest> {
     let mut frame = encode_frame(window, programs)?;
 

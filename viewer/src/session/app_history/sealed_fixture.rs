@@ -25,9 +25,11 @@ pub fn rewrite(session: &Session, name: &'static str, mut change: impl FnMut(&mu
             let mut frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
             change(&mut frame);
             let staging = session.root.with_extension("rewrite");
-            std::fs::create_dir(&staging).unwrap();
+            collector::recording::private::create_private_dir(&staging).unwrap();
+            let directory =
+                collector::recording::private::PrivateDirectory::open(&staging).unwrap();
 
-            persistence::encode_derived(name, &mut frame, &staging).unwrap();
+            persistence::encode_derived(name, &mut frame, &directory).unwrap();
 
             // Writing into the sealed file keeps the private mode a session checks on open.
             let encoded = std::fs::read(staging.join(format!("{name}.parquet"))).unwrap();

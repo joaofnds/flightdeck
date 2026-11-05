@@ -36,7 +36,7 @@ pub struct Derivation<'seal> {
     /// The window as the persister staged it, which the tables it wrote hold.
     pub window: &'seal Window,
     /// The directory of the tables the persister wrote for the window.
-    pub pending: &'seal Path,
+    pub pending: &'seal collector::recording::private::PrivateDirectory,
 }
 
 /// What writes a window's tables: the persister's own and those derived from them.
@@ -540,17 +540,19 @@ fn persist_one_stage_selected(
     } else {
         state.memory_limit
     };
-    let staged = stage_window(
+    let events = collector::recording::private::PrivateDirectory::open(pending.path())?
+        .create_directory("events")?;
+    let window = stage_window(
         reader,
         tick,
         identity,
         limits,
         &mut state.losses,
-        pending,
+        events,
         memory_limit,
     )?;
-    if staged.window.tick_count() > 0 {
-        return Ok(Some(staged));
+    if window.tick_count() > 0 {
+        return Ok(Some(StagedWindow { window, pending }));
     }
 
     let next = reader.next_publication();
@@ -621,10 +623,10 @@ fn stage_window(
     identity: WindowIdentity,
     limits: Limits,
     losses: &mut Losses,
-    pending: crate::PendingWindow,
+    events: collector::recording::private::PrivateDirectory,
     memory_limit: u64,
-) -> Result<StagedWindow> {
-    let mut staged = staging::Staging::new(reader, identity, limits, pending, memory_limit)?;
+) -> Result<Window> {
+    let mut staged = staging::Staging::new(reader, identity, limits, events, memory_limit)?;
 
     for _step in 0..=reader.shape().slot_count {
         if !staged.read(reader, tick, losses)? {
@@ -735,14 +737,16 @@ fn seal_pending(
 ) -> Result<()> {
     let started = std::time::Instant::now();
 
-    let mut tables = writers.encoder.encode(window, pending.path())?;
+    let directory = collector::recording::private::PrivateDirectory::open(pending.path())?;
+    let mut tables = writers.encoder.encode_into(window, &directory)?;
     tables.extend(seal_derived(
         writers.derive,
         &Derivation {
             window,
-            pending: pending.path(),
+            pending: &directory,
         },
     )?);
+    drop(directory);
 
     let manifest = seal_manifest(window, tables, state.losses)?;
     let committed = store.commit(pending, manifest)?;
@@ -812,7 +816,7 @@ fn seal_derived(derive: &dyn Derive, derivation: &Derivation<'_>) -> Result<Vec<
                 derivation.window.identity.window
             ));
             for name in crate::schema::DERIVED_TABLES {
-                match std::fs::remove_file(derivation.pending.join(format!("{name}.parquet"))) {
+                match derivation.pending.remove_file(&format!("{name}.parquet")) {
                     Ok(()) => {}
                     Err(problem) if problem.kind() == io::ErrorKind::NotFound => {}
                     Err(problem) => return Err(problem.into()),
@@ -1399,7 +1403,8 @@ mod tests {
 
     impl Derive for RanksStub {
         fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
-            std::fs::write(derivation.pending.join("app_ranks.parquet"), b"ranks")?;
+            let mut ranks = derivation.pending.create_file("app_ranks.parquet")?;
+            io::Write::write_all(&mut ranks, b"ranks")?;
             if self.fails {
                 return Err(crate::Error::Bound("derivation test"));
             }

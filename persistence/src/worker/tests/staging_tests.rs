@@ -196,8 +196,12 @@ fn leaves_a_missed_suffix_for_the_next_minute() {
     let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
         panic!("new window")
     };
+    let events = collector::recording::private::PrivateDirectory::open(pending.path())
+        .unwrap()
+        .create_directory("events")
+        .unwrap();
     let mut staged =
-        staging::Staging::new(&reader, identity, limits, pending, WORKING_BYTES_MAX).unwrap();
+        staging::Staging::new(&reader, identity, limits, events, WORKING_BYTES_MAX).unwrap();
     let mut losses = Losses::default();
     assert!(staged.read(&mut reader, &mut tick, &mut losses).unwrap());
     ring.publish(61);
@@ -205,8 +209,7 @@ fn leaves_a_missed_suffix_for_the_next_minute() {
 
     assert!(staged.read(&mut reader, &mut tick, &mut losses).unwrap());
     assert!(!staged.read(&mut reader, &mut tick, &mut losses).unwrap());
-    let staged = staged.finish(&mut reader, &mut losses).unwrap();
-    let window = staged.window;
+    let window = staged.finish(&mut reader, &mut losses).unwrap();
 
     assert_eq!(window.publication_range(), 1..2);
     assert_eq!(losses.publications, 0);
@@ -224,7 +227,7 @@ fn leaves_a_missed_suffix_for_the_next_minute() {
             losses,
             ..RunState::default()
         },
-        staged.pending,
+        pending,
     )
     .unwrap();
     drop(store);

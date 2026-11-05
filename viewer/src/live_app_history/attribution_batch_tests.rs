@@ -1044,7 +1044,9 @@ impl persistence::worker::Derive for Unkept<'_> {
         derivation: &persistence::worker::Derivation<'_>,
     ) -> Result<Vec<persistence::TableManifest>> {
         for table in self.0.derive(derivation)? {
-            std::fs::remove_file(derivation.pending.join(format!("{}.parquet", table.name)))?;
+            derivation
+                .pending
+                .remove_file(&format!("{}.parquet", table.name))?;
         }
 
         Ok(Vec::new())

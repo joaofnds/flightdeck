@@ -1,5 +1,4 @@
 use collector::recording::private::PrivateDirectory;
-use std::path::Path;
 use std::sync::Arc;
 
 use collector::ring::{
@@ -25,7 +24,7 @@ pub(crate) struct Writer {
 
 impl Writer {
     pub(crate) fn new(
-        pending: &Path,
+        directory: PrivateDirectory,
         identity: WindowIdentity,
         first: u64,
         identities: bool,
@@ -37,7 +36,6 @@ impl Writer {
         let reservation = budget
             .reserve(batch::WORKING_BYTES)
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
-        let directory = PrivateDirectory::open(pending)?.create_directory("events")?;
         Ok(Self {
             directory,
             index: Index {

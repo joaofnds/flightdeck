@@ -195,8 +195,14 @@ struct Occupied;
 
 impl Derive for Occupied {
     fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
-        let path = derivation.pending.join(format!("{APP_PARTS}.parquet"));
-        std::fs::write(path, b"occupied").unwrap();
+        std::io::Write::write_all(
+            &mut derivation
+                .pending
+                .create_file(&format!("{APP_PARTS}.parquet"))
+                .unwrap(),
+            b"occupied",
+        )
+        .unwrap();
 
         persistence::sealed_apps::SealedApps::default().derive(derivation)
     }

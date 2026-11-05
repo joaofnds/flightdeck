@@ -406,7 +406,8 @@ fn seal_window(
         derive
             .derive(&persistence::worker::Derivation {
                 window,
-                pending: pending.path(),
+                pending: &collector::recording::private::PrivateDirectory::open(pending.path())
+                    .unwrap(),
             })
             .unwrap(),
     );

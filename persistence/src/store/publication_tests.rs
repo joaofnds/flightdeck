@@ -970,7 +970,7 @@ fn write_derivatives(attempt: &RegisteredAttempt<'_>, fixture: &Fixture, manifes
     let tables = crate::sealed_apps::SealedApps::default()
         .derive(&crate::worker::Derivation {
             window: &window,
-            pending: &derived,
+            pending: &PrivateDirectory::open(&derived).unwrap(),
         })
         .unwrap();
     for table in &tables {
