@@ -23,6 +23,7 @@ mod ordinary_recovery;
 mod publication;
 pub use ordinary_recovery::OrdinaryRecovery;
 mod publication_control;
+mod restage;
 mod row_candidates;
 mod row_merge;
 pub use attempt::{InheritedAttempt, RegisteredAttempt, RegisteredFile};
@@ -30,6 +31,7 @@ pub use inventory::{
     BatchFact, FileIdentity, IndexFact, InventoryStep, InventoryWork, OriginalFile,
     OriginalInventory, OriginalPlacement,
 };
+pub(crate) use restage::Interrupted;
 mod publication_ledger;
 pub use publication::{
     LossPublication, NormalProof, NormalPublication, ProofStep, PublicationStep, PublicationWork,

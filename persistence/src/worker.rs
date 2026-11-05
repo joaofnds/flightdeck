@@ -260,6 +260,7 @@ fn run_pass(
                 return Ok(Pass::Sealed);
             }
             Progress::Waiting => return Ok(Pass::Waiting),
+            Progress::Deferred => {}
             Progress::Complete => Registry::retire(root, &registered.identity)?,
             Progress::Unavailable => {
                 if !unavailable {
@@ -287,6 +288,8 @@ enum Pass {
 enum Progress {
     Sealed,
     Waiting,
+    /// Another run's interrupted attempt holds the store's slot, so that run goes first.
+    Deferred,
     Complete,
     Unavailable,
 }
@@ -544,17 +547,15 @@ fn persist_one_stage_selected(
     } else {
         state.memory_limit
     };
-    let events = collector::recording::private::PrivateDirectory::open(pending.path())?
-        .create_directory("events")?;
-    let window = stage_window(
-        reader,
-        tick,
+    let events = crate::event_table::writer::Writer::new(
+        collector::recording::private::PrivateDirectory::open(pending.path())?
+            .create_directory("events")?,
         identity,
-        limits,
-        &mut state.losses,
-        events,
+        reader.next_event(),
+        reader.dictionary_capacity().is_some(),
         memory_limit,
     )?;
+    let window = stage_window(reader, tick, identity, limits, &mut state.losses, events)?;
     if window.tick_count() > 0 {
         return Ok(Some(StagedWindow { window, pending }));
     }
@@ -627,10 +628,9 @@ fn stage_window(
     identity: WindowIdentity,
     limits: Limits,
     losses: &mut Losses,
-    events: collector::recording::private::PrivateDirectory,
-    memory_limit: u64,
+    events: crate::event_table::writer::Writer,
 ) -> Result<Window> {
-    let mut staged = staging::Staging::new(reader, identity, limits, events, memory_limit)?;
+    let mut staged = staging::Staging::new(reader, identity, limits, events);
 
     for _step in 0..=reader.shape().slot_count {
         if !staged.read(reader, tick, losses)? {

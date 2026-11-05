@@ -122,6 +122,10 @@ impl RegisteredAttempt<'_> {
                 "occupied event inventory requires salvage reconciliation",
             ));
         }
+        self.events_directory_resumed()
+    }
+
+    pub(super) fn events_directory_resumed(&self) -> io::Result<PrivateDirectory> {
         if !matches!(
             self.input.operation,
             AttemptOperation::Ordinary { .. } | AttemptOperation::Finite { .. }

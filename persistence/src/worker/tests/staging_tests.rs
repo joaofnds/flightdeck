@@ -196,12 +196,12 @@ fn leaves_a_missed_suffix_for_the_next_minute() {
     let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
         panic!("new window")
     };
-    let events = collector::recording::private::PrivateDirectory::open(pending.path())
-        .unwrap()
-        .create_directory("events")
-        .unwrap();
-    let mut staged =
-        staging::Staging::new(&reader, identity, limits, events, WORKING_BYTES_MAX).unwrap();
+    let mut staged = staging::Staging::new(
+        &reader,
+        identity,
+        limits,
+        event_writer(&pending, &reader, identity),
+    );
     let mut losses = Losses::default();
     assert!(staged.read(&mut reader, &mut tick, &mut losses).unwrap());
     ring.publish(61);
@@ -474,4 +474,22 @@ impl Drop for Ring {
     fn drop(&mut self) {
         collector::ring::unlink_generation(self.0.name()).unwrap();
     }
+}
+
+fn event_writer(
+    pending: &crate::store::PendingWindow,
+    reader: &RingReader,
+    identity: WindowIdentity,
+) -> crate::event_table::writer::Writer {
+    crate::event_table::writer::Writer::new(
+        collector::recording::private::PrivateDirectory::open(pending.path())
+            .unwrap()
+            .create_directory("events")
+            .unwrap(),
+        identity,
+        reader.next_event(),
+        reader.dictionary_capacity().is_some(),
+        WORKING_BYTES_MAX,
+    )
+    .unwrap()
 }

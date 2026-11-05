@@ -9,8 +9,9 @@ use super::{
     Window, WindowIdentity, Writers,
 };
 use crate::canonical::ReadWork;
+use crate::event_recovery::Batch;
 use crate::resources::{ByteBudget, WORKING_BYTES_MAX};
-use crate::store::{ProofStep, PublicationStep, RegisteredAttempt};
+use crate::store::{Interrupted, ProofStep, PublicationLedger, PublicationStep, RegisteredAttempt};
 use crate::transaction::{AttemptInput, AttemptOperation, LossTransfer, Predecessor, SourceTiming};
 
 /// More steps than the largest publication takes, so a publication that stops moving fails.
@@ -33,16 +34,45 @@ pub(super) fn persist_one(
     if state.source == SourceState::Complete {
         return Ok(Progress::Complete);
     }
-    let Some(mut reader) = super::persist_one_open(registered, state)? else {
-        return Ok(Progress::Unavailable);
-    };
     let budget = Arc::new(ByteBudget::new(
         usize::try_from(memory_limit(state)).map_err(|_| crate::Error::Bound("memory limit"))?,
     ));
+    let interrupted = if state.loaded {
+        None
+    } else {
+        store.interrupted()?
+    };
+    if interrupted == Some(Interrupted::Publication) {
+        finish_publication(store.resume_publication(&budget)?)?;
+        return Ok(Progress::Sealed);
+    }
+    if interrupted.is_some_and(|attempt| attempt != Interrupted::Staging(registered.identity)) {
+        return Ok(Progress::Deferred);
+    }
+    let Some(mut reader) = super::persist_one_open(registered, state)? else {
+        return Ok(Progress::Unavailable);
+    };
+    if interrupted.is_some() {
+        recover_staging(store, writers, registered, reader, state, &budget)?;
+        return Ok(Progress::Sealed);
+    }
     if !state.loaded {
         persist_one_load(store, registered, &mut reader, state, &budget)?;
     }
 
+    persist_one_scan(store, writers, registered, reader, closed, state, &budget)
+}
+
+/// Looks past lost publications for the next ready window of the run, and seals it.
+fn persist_one_scan(
+    store: &Store,
+    writers: &Writers<'_>,
+    registered: &RegisteredRun,
+    mut reader: RingReader,
+    closed: bool,
+    state: &mut RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<Progress> {
     let mut newest = None;
     let closed =
         super::persist_one_closed(&mut reader, &mut newest, registered.collector_pid, closed)?;
@@ -72,15 +102,7 @@ pub(super) fn persist_one(
                     return Ok(Progress::Waiting);
                 }
 
-                seal(
-                    store,
-                    writers,
-                    reader,
-                    identity,
-                    publication,
-                    state,
-                    &budget,
-                )?;
+                seal(store, writers, reader, identity, publication, state, budget)?;
                 return Ok(Progress::Sealed);
             }
         }
@@ -134,29 +156,129 @@ fn seal(
 
     reader.seek_publication(publication)?;
     reader.seek_event(input.losses.event_start)?;
-    let window = seal_stage(&attempt, &mut reader, identity, state)?;
+    let window = seal_stage(&attempt, &mut reader, identity, &[], state)?;
     let manifest = seal_write(&attempt, writers, &window, state)?;
     let staged_bytes = window.staged_bytes();
     drop(window);
 
-    let mut proof = attempt.prove_ordinary(&manifest, reader, budget)?;
+    seal_publish(attempt, &manifest, reader, budget)?;
+    seal_report(&manifest, started, staged_bytes, state);
+
+    Ok(())
+}
+
+fn seal_publish(
+    attempt: RegisteredAttempt<'_>,
+    manifest: &crate::Manifest,
+    reader: RingReader,
+    budget: &Arc<ByteBudget>,
+) -> Result<()> {
+    let mut proof = attempt.prove_ordinary(manifest, reader, budget)?;
     for _step in 0..PUBLICATION_STEPS_MAX {
         if proof.step()? == ProofStep::Complete {
             break;
         }
     }
-    let mut publishing = proof.into_publication()?;
-    let mut idle = false;
+
+    finish_publication(proof.into_publication()?)
+}
+
+fn finish_publication(mut publishing: crate::store::NormalPublication<'_>) -> Result<()> {
     for _step in 0..PUBLICATION_STEPS_MAX {
         if publishing.step()? == PublicationStep::Idle {
-            idle = true;
-            break;
+            return Ok(());
         }
     }
-    if !idle {
-        return Err(crate::Error::Bound("registered publication steps"));
+
+    Err(crate::Error::Bound("registered publication steps"))
+}
+
+/// Finishes the attempt a process left with no durable proof. Complete originals are proved
+/// against the source, since saved rows outrank a fresh reading of them. Failing that, the
+/// window is staged again from the source, which must still hold all of it.
+fn recover_staging(
+    store: &Store,
+    writers: &Writers<'_>,
+    registered: &RegisteredRun,
+    reader: RingReader,
+    state: &mut RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<()> {
+    let ledger = PublicationLedger::new(budget)?;
+    let proved = store
+        .resume_ordinary_proof(reader, budget, &ledger)
+        .and_then(|mut recovery| {
+            for _step in 0..PUBLICATION_STEPS_MAX {
+                if recovery.step()? == PublicationStep::Idle {
+                    return Ok(());
+                }
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+        });
+    let Err(refusal) = proved else {
+        return Ok(());
+    };
+    collector::diagnostics::error(format_args!(
+        "persister interrupted window staged again after {refusal}"
+    ));
+
+    let Some(reader) = super::persist_one_open(registered, state)? else {
+        return Err(crate::Error::Bound("interrupted attempt lost its source"));
+    };
+    recover_staging_again(store, writers, reader, state, budget)
+}
+
+fn recover_staging_again(
+    store: &Store,
+    writers: &Writers<'_>,
+    mut reader: RingReader,
+    state: &mut RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<()> {
+    let started = std::time::Instant::now();
+    let mut attempt = store.resume_attempt()?;
+    let input = attempt.input().clone();
+    let AttemptOperation::Ordinary {
+        window,
+        attempted_origin,
+    } = input.operation
+    else {
+        return Err(crate::Error::Bound("interrupted attempt operation"));
+    };
+    let saved = attempt.restage(budget)?;
+    let registered = crate::Losses {
+        publications: input.losses.publications,
+        events: input.losses.events,
+        unknown: input.losses.unknown.is_some(),
+    };
+    state.losses = registered;
+    reader.seek_publication(attempted_origin)?;
+    reader.seek_event(input.losses.event_start)?;
+    let identity = WindowIdentity {
+        run: input.run,
+        window,
+    };
+    let window = seal_stage(&attempt, &mut reader, identity, &saved, state)?;
+    if state.losses != registered {
+        return Err(crate::Error::Bound("interrupted window overwritten"));
     }
 
+    attempt.restage_tables()?;
+    let manifest = seal_write(&attempt, writers, &window, state)?;
+    let staged_bytes = window.staged_bytes();
+    drop(window);
+    seal_publish(attempt, &manifest, reader, budget)?;
+    seal_report(&manifest, started, staged_bytes, state);
+
+    Ok(())
+}
+
+fn seal_report(
+    manifest: &crate::Manifest,
+    started: std::time::Instant,
+    staged_bytes: u64,
+    state: &mut RunState,
+) {
     state.committed = manifest.publication_end - 1;
     state.next_publication = manifest.publication_end;
     state.next_event = manifest.events_end;
@@ -172,8 +294,6 @@ fn seal(
         started.elapsed().as_nanos(),
         manifest.tables.len()
     ));
-
-    Ok(())
 }
 
 fn seal_input(
@@ -227,11 +347,19 @@ fn seal_stage(
     attempt: &RegisteredAttempt<'_>,
     reader: &mut RingReader,
     identity: WindowIdentity,
+    saved: &[Batch],
     state: &mut RunState,
 ) -> Result<Window> {
     let limits = Limits::from_shape(&reader.shape())?;
     let mut tick = crate::tick_buffer(&reader.shape())?;
-    let memory_limit = memory_limit(state);
+    let events = crate::event_table::writer::Writer::new(
+        attempt.events_directory()?,
+        identity,
+        reader.next_event(),
+        reader.dictionary_capacity().is_some(),
+        memory_limit(state),
+    )?
+    .resume(saved);
 
     super::stage_window(
         reader,
@@ -239,8 +367,7 @@ fn seal_stage(
         identity,
         limits,
         &mut state.losses,
-        attempt.events_directory()?,
-        memory_limit,
+        events,
     )
 }
 

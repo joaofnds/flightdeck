@@ -53,6 +53,20 @@ impl Writer {
         })
     }
 
+    /// Continues after the batches an interrupted attempt saved, so their rows stay as they
+    /// are and the same events read again are not written twice.
+    pub(crate) fn resume(mut self, saved: &[Batch]) -> Self {
+        assert_eq!(self.index.rows, 0);
+        if let (Some(first), Some(last)) = (saved.first(), saved.last()) {
+            self.index.first = first.first;
+            self.index.end = last.end;
+            self.index.rows = saved.iter().map(|batch| batch.rows).sum();
+            self.index.batches.extend_from_slice(saved);
+            self.next_event = last.end;
+        }
+        self
+    }
+
     pub(crate) fn publication(
         &mut self,
         reader: &mut RingReader,
@@ -61,7 +75,11 @@ impl Writer {
         losses: &mut Losses,
     ) -> Result<()> {
         self.prefix(reader, tick.events_first, losses)?;
+        let saved_end = self.next_event;
         for (index, event) in tick.events.iter().enumerate() {
+            if event.number < saved_end {
+                continue;
+            }
             self.room(reader)?;
             let identity = tick.identities.as_ref().map(|rows| rows.events[index]);
             let (name, app) = if let Some(program) = identity.and_then(|value| value.program) {
@@ -81,8 +99,8 @@ impl Writer {
                 app,
             })?;
         }
-        self.next_event = tick.events_end;
-        self.index.end = tick.events_end;
+        self.next_event = self.next_event.max(tick.events_end);
+        self.index.end = self.next_event;
         Ok(())
     }
 

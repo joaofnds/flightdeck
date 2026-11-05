@@ -14,24 +14,16 @@ impl Staging {
         reader: &RingReader,
         identity: WindowIdentity,
         limits: Limits,
-        events: collector::recording::private::PrivateDirectory,
-        memory_limit: u64,
-    ) -> Result<Self> {
+        events: crate::event_table::writer::Writer,
+    ) -> Self {
         let captured = reader.dictionary_capacity().is_some();
-        let events = crate::event_table::writer::Writer::new(
-            events,
-            identity,
-            reader.next_event(),
-            captured,
-            memory_limit,
-        )?;
-        Ok(Self {
+        Self {
             window: Window::new(identity, limits),
             events,
             identities: Vec::with_capacity(if captured { limits.processes } else { 0 }),
             captured,
             publications_pending: 0,
-        })
+        }
     }
 
     pub(super) fn read(
