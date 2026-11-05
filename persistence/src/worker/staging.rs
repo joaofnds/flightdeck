@@ -59,6 +59,11 @@ impl Staging {
         }
     }
 
+    /// Whether the ring overwrote where the window starts before any of it was read.
+    pub(super) fn lost_its_start(&self) -> bool {
+        self.window.tick_count() == 0 && self.publications_pending > 0
+    }
+
     fn read_publication(
         &mut self,
         reader: &mut RingReader,

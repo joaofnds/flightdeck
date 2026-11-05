@@ -128,7 +128,11 @@ fn persist_one_scan(
                     return Ok(Progress::Waiting);
                 }
 
-                seal(store, writers, reader, identity, publication, state, budget)?;
+                let selection = Selection {
+                    identity,
+                    publication,
+                };
+                seal(store, writers, reader, selection, state, budget)?;
                 return Ok(Progress::Sealed);
             }
         }
@@ -167,22 +171,78 @@ fn persist_one_load(
     Ok(())
 }
 
+/// The window a scan selected and the publication it starts at.
+#[derive(Clone, Copy)]
+struct Selection {
+    identity: WindowIdentity,
+    publication: u64,
+}
+
 fn seal(
     store: &Store,
     writers: &Writers<'_>,
     mut reader: RingReader,
-    identity: WindowIdentity,
-    publication: u64,
+    selection: Selection,
+    state: &mut RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<()> {
+    let input = seal_input(
+        store,
+        &reader,
+        &selection.identity,
+        selection.publication,
+        state,
+        budget,
+    )?;
+    let attempt = match store.register_attempt(&input, &mut reader, budget) {
+        Ok(attempt) => attempt,
+        Err(refusal) => {
+            return if seal_selection_lost(&mut reader, selection.publication)? {
+                Ok(())
+            } else {
+                Err(refusal.into())
+            };
+        }
+    };
+
+    seal_registered(store, writers, attempt, reader, selection, state, budget)
+}
+
+/// Whether the ring has overwritten the selected publication, which is what a scan selecting the
+/// oldest retained publication of a full ring meets. The next scan counts it, so it stays unsaid.
+fn seal_selection_lost(reader: &mut RingReader, publication: u64) -> Result<bool> {
+    reader.seek_publication(publication)?;
+    let found = reader.read_timing_into(&mut PublicationTiming::default())?;
+
+    Ok(matches!(found, Found::Missed { .. }))
+}
+
+fn seal_registered(
+    store: &Store,
+    writers: &Writers<'_>,
+    attempt: RegisteredAttempt<'_>,
+    mut reader: RingReader,
+    selection: Selection,
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<()> {
     let started = std::time::Instant::now();
-    let input = seal_input(store, &reader, &identity, publication, state, budget)?;
-    let attempt = store.register_attempt(&input, &mut reader, budget)?;
-
-    reader.seek_publication(publication)?;
-    reader.seek_event(input.losses.event_start)?;
-    let window = seal_stage(&attempt, &mut reader, identity, &[], state)?;
+    let losses_before = state.losses;
+    reader.seek_publication(selection.publication)?;
+    reader.seek_event(attempt.input().losses.event_start)?;
+    let window = seal_stage(&attempt, &mut reader, selection.identity, &[], state)?;
+    if window.tick_count() == 0 {
+        // The attempt names a publication the ring no longer holds, and an ordinary publication
+        // starts at the publication it names. Nothing is saved, so the next scan selects again.
+        drop(window);
+        drop(attempt);
+        state.losses = losses_before;
+        return if store.abandon_empty_attempt(budget)? {
+            Ok(())
+        } else {
+            Err(crate::Error::Bound("overwritten selection saved rows"))
+        };
+    }
     let manifest = seal_write(&attempt, writers, &window, state)?;
     let staged_bytes = window.staged_bytes();
     drop(window);
@@ -498,15 +558,14 @@ fn seal_stage(
         memory_limit(state),
     )?
     .resume(saved);
+    let mut staged = super::staging::Staging::new(reader, identity, limits, events);
+    for _step in 0..=reader.shape().slot_count {
+        if !staged.read(reader, &mut tick, &mut state.losses)? || staged.lost_its_start() {
+            break;
+        }
+    }
 
-    super::stage_window(
-        reader,
-        &mut tick,
-        identity,
-        limits,
-        &mut state.losses,
-        events,
-    )
+    staged.finish(reader, &mut state.losses)
 }
 
 fn seal_write(

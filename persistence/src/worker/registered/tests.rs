@@ -1629,6 +1629,257 @@ fn whole_worker_of(root: &Path, registry: &Registry, pause: &mut dyn FnMut(Durat
     .unwrap()
 }
 
+/// Takes a worker step for every saved minute until the worker has nothing ready, and says how
+/// many it saved. A finished source ends in its terminal step, which saves no window.
+fn persist_until_quiet(recording: &Recording, store: &Store, state: &mut RunState) -> usize {
+    let mut steps = 0;
+    while matches!(recording.persist(store, state), Progress::Sealed) {
+        steps += 1;
+        assert!(steps < 32, "the worker kept finding work");
+    }
+
+    steps
+}
+
+#[test]
+fn a_selection_overwritten_before_registering_is_counted_once_by_the_next_scan() {
+    // Goal: a worker catching up on a full ring selects the oldest retained publication, which the
+    // collector can overwrite before the attempt registers. That costs the minute, never the
+    // worker, and the loss is counted once (P02.3).
+    // Method: seal a selection the ring has already overwritten, as that race leaves it, then run
+    // the worker to the end and read each saved minute's losses.
+    let mut recording = Recording::new();
+    recording.publish_minutes(0..10);
+    recording.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+    let derive = SealedApps::default();
+    let writers = Writers {
+        encoder: Encoder,
+        derive: &derive,
+    };
+    let mut state = RunState {
+        next_publication: 1,
+        loaded: true,
+        ..RunState::default()
+    };
+    let selection = super::Selection {
+        identity: WindowIdentity {
+            run: recording.run,
+            window: 0,
+        },
+        publication: 1,
+    };
+    let reader = RingReader::open_generation(recording.writer.name()).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+
+    super::seal(&store, &writers, reader, selection, &mut state, &budget).unwrap();
+
+    assert_eq!(state.losses, crate::Losses::default());
+    assert!(store.interrupted().unwrap().is_none());
+    persist_until_quiet(&recording, &store, &mut state);
+    let lost: Vec<_> = recording
+        .saved_losses()
+        .iter()
+        .map(|l| l.publications)
+        .collect();
+    assert_eq!(lost, [2, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn a_selection_overwritten_after_registering_is_counted_once_by_the_next_scan() {
+    // Goal: the same race a moment later leaves an attempt that names a publication the ring no
+    // longer holds, with nothing saved, so it clears at once rather than holding the slot (P02.3).
+    // Method: register the first minute, overwrite it, stage through the worker, then run the
+    // worker to the end and read the losses.
+    let mut recording = Recording::new();
+    recording.publish_minutes(0..2);
+    let store = Store::open(&recording.root).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let derive = SealedApps::default();
+    let writers = Writers {
+        encoder: Encoder,
+        derive: &derive,
+    };
+    let mut state = RunState {
+        next_publication: 1,
+        loaded: true,
+        ..RunState::default()
+    };
+    let selection = super::Selection {
+        identity: WindowIdentity {
+            run: recording.run,
+            window: 0,
+        },
+        publication: 1,
+    };
+    let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
+    let input =
+        super::seal_input(&store, &reader, &selection.identity, 1, &state, &budget).unwrap();
+    let attempt = store
+        .register_attempt(&input, &mut reader, &budget)
+        .unwrap();
+    recording.publish_minutes(2..10);
+    recording.writer.finish();
+
+    super::seal_registered(
+        &store, &writers, attempt, reader, selection, &mut state, &budget,
+    )
+    .unwrap();
+
+    assert_eq!(state.losses, crate::Losses::default());
+    assert!(store.interrupted().unwrap().is_none());
+    persist_until_quiet(&recording, &store, &mut state);
+    let lost: Vec<_> = recording
+        .saved_losses()
+        .iter()
+        .map(|l| l.publications)
+        .collect();
+    assert_eq!(lost, [2, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn a_selection_whose_start_was_overwritten_is_selected_again_from_what_remains() {
+    // Goal: when the ring overwrites only the start of the selected minute, the rest of it is
+    // still saved, as a minute starting where the ring now starts, and every event is either
+    // saved or counted lost, once (P02.3).
+    // Method: register a minute of eight ticks with events, publish four more into that minute
+    // and one past it, stage through the worker, then run it to the end and account for events.
+    let mut recording = Recording::new();
+    let mut events = 0;
+    for _tick in 0..8 {
+        let count = recording.writer.event_room().min(1);
+        recording.publish_events_in_minute(0, count);
+        events += u64::try_from(count).unwrap();
+    }
+    let store = Store::open(&recording.root).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let derive = SealedApps::default();
+    let writers = Writers {
+        encoder: Encoder,
+        derive: &derive,
+    };
+    let mut state = RunState {
+        next_publication: 1,
+        loaded: true,
+        ..RunState::default()
+    };
+    let selection = super::Selection {
+        identity: WindowIdentity {
+            run: recording.run,
+            window: 0,
+        },
+        publication: 1,
+    };
+    let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
+    let input =
+        super::seal_input(&store, &reader, &selection.identity, 1, &state, &budget).unwrap();
+    let attempt = store
+        .register_attempt(&input, &mut reader, &budget)
+        .unwrap();
+    for _tick in 0..4 {
+        let count = recording.writer.event_room().min(1);
+        recording.publish_events_in_minute(0, count);
+        events += u64::try_from(count).unwrap();
+    }
+    recording.publish_in_minute(1);
+    recording.writer.finish();
+
+    super::seal_registered(
+        &store, &writers, attempt, reader, selection, &mut state, &budget,
+    )
+    .unwrap();
+
+    assert!(store.interrupted().unwrap().is_none());
+    persist_until_quiet(&recording, &store, &mut state);
+    let losses = recording.saved_losses();
+    assert_eq!(losses.iter().map(|l| l.publications).sum::<u64>(), 5);
+    let rows: u64 = recording.saved_event_rows().iter().sum();
+    let lost: u64 = losses.iter().map(|l| l.events).sum();
+    assert_eq!(rows + lost, events);
+}
+
+#[test]
+fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
+    // Goal: when the ring overwrites the middle of a minute while it is read, the minute keeps
+    // what was read before and after, and counts the gap, since the attempt's start still holds
+    // (P02.3).
+    // Method: step the worker's staging by hand, publishing past the unread ticks between two
+    // reads, then write and publish what it read and read the minute back.
+    let mut recording = Recording::new();
+    for _tick in 0..4 {
+        recording.publish_in_minute(0);
+    }
+    let store = Store::open(&recording.root).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let derive = SealedApps::default();
+    let writers = Writers {
+        encoder: Encoder,
+        derive: &derive,
+    };
+    let mut state = RunState {
+        next_publication: 1,
+        loaded: true,
+        ..RunState::default()
+    };
+    let identity = WindowIdentity {
+        run: recording.run,
+        window: 0,
+    };
+    let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
+    let input = super::seal_input(&store, &reader, &identity, 1, &state, &budget).unwrap();
+    let attempt = store
+        .register_attempt(&input, &mut reader, &budget)
+        .unwrap();
+    reader.seek_publication(1).unwrap();
+    reader.seek_event(input.losses.event_start).unwrap();
+    let shape = reader.shape();
+    let mut tick = crate::tick_buffer(&shape).unwrap();
+    let events = crate::event_table::writer::Writer::new(
+        attempt.events_directory().unwrap(),
+        identity,
+        reader.next_event(),
+        false,
+        256 * 1024 * 1024,
+    )
+    .unwrap();
+    let mut staged = super::super::staging::Staging::new(
+        &reader,
+        identity,
+        super::super::Limits::from_shape(&shape).unwrap(),
+        events,
+    );
+
+    assert!(
+        staged
+            .read(&mut reader, &mut tick, &mut state.losses)
+            .unwrap()
+    );
+    for _tick in 0..8 {
+        recording.publish_in_minute(0);
+    }
+    recording.publish_in_minute(1);
+    recording.writer.finish();
+    for _step in 0..=shape.slot_count {
+        if !staged
+            .read(&mut reader, &mut tick, &mut state.losses)
+            .unwrap()
+        {
+            break;
+        }
+    }
+    let window = staged.finish(&mut reader, &mut state.losses).unwrap();
+    let manifest = super::seal_write(&attempt, &writers, &window, &state).unwrap();
+    drop(window);
+    super::seal_publish(attempt, &manifest, reader, &budget).unwrap();
+
+    // Thirteen publications with eight retained leaves 6 to 13, so 2 to 5 are the gap.
+    assert_eq!(manifest.publication_first, 1);
+    assert_eq!(manifest.losses.publications, 4);
+    drop(store);
+    let reopened = Store::open(&recording.root).unwrap();
+    assert_eq!(recording.frontier(&reopened).unwrap().publication_end(), 13);
+}
+
 #[test]
 fn the_whole_worker_saves_a_finished_run_retires_it_and_exits() {
     // Goal: the worker's own loop drives a registered recording to a certified end and lets go of
