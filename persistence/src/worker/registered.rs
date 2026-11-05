@@ -577,7 +577,7 @@ fn seal_input_of<'store>(
     state: &RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<SealInput<'store>> {
-    let mut frontier = store.source_frontier_read(run, budget)?;
+    let mut frontier = store.source_frontier_rows_held(run, budget)?;
     let (predecessor, publication_start, event_start, prior_window) = match frontier.result()? {
         Some(frontier) => (
             frontier.predecessor().clone(),

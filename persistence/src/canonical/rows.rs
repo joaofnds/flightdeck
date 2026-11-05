@@ -20,13 +20,27 @@ pub(crate) struct AdmittedCanonical {
 }
 pub(crate) fn admit(
     root: &PrivateDirectory,
-    mut gate: File,
+    gate: File,
     namespace: Namespace,
     key: &CanonicalKey,
     run: &RunIdentity,
     budget: &Arc<ByteBudget>,
     work: &mut ReadWork,
 ) -> io::Result<AdmittedCanonical> {
+    let (admitted, directory) = admit_proof(root, gate, namespace, key, run, budget, work)?;
+    verify_rows(&directory, &admitted.metadata, budget, work)?;
+    Ok(admitted)
+}
+/// The proof behind `gate` and the directory of the rows it names, which stay unread.
+pub(crate) fn admit_proof(
+    root: &PrivateDirectory,
+    mut gate: File,
+    namespace: Namespace,
+    key: &CanonicalKey,
+    run: &RunIdentity,
+    budget: &Arc<ByteBudget>,
+    work: &mut ReadWork,
+) -> io::Result<(AdmittedCanonical, PrivateDirectory)> {
     let reservation = budget
         .reserve(256 * 1024)
         .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
@@ -44,13 +58,13 @@ pub(crate) fn admit(
     if before.dev() != after.dev() || before.ino() != after.ino() {
         return Err(invalid());
     }
-    verify_rows(&directory, &metadata, budget, work)?;
-    Ok(AdmittedCanonical {
+    let admitted = AdmittedCanonical {
         metadata,
         device: before.dev(),
         inode: before.ino(),
         _metadata_reservation: reservation,
-    })
+    };
+    Ok((admitted, directory))
 }
 fn raw_directory(
     root: &PrivateDirectory,

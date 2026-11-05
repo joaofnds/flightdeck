@@ -814,6 +814,67 @@ fn an_unavailable_frontier_table_stops_the_next_minute_with_its_error() {
     assert!(matches!(refusal, crate::Error::Io(error) if error.kind() == ErrorKind::NotFound));
 }
 
+#[test]
+fn a_worker_saves_its_next_minute_without_reading_the_minute_it_just_saved() {
+    // Goal: a minute costs what it saves and not the rows of the one before, which this process
+    // proved before it published them (P02.4).
+    // Method: seal a minute, remove its tables, and seal the next with the same Store and state.
+    let mut recording = Recording::new();
+    for minute in 0..3 {
+        recording.publish_in_minute(minute);
+    }
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    recording.persist(&store, &mut state);
+    assert!(Recording::remove_tables(&recording.saved_windows()) > 0);
+
+    let progress = recording.persist(&store, &mut state);
+
+    assert!(matches!(progress, Progress::Sealed));
+    assert_eq!(recording.frontier(&store).unwrap().publication_end(), 3);
+}
+
+#[test]
+fn a_worker_finishes_a_run_without_reading_the_minute_it_just_saved() {
+    // Goal: a run's end costs what its tail holds and not the rows of its last minute (P02.4).
+    // Method: seal a finished run's only minute, remove its tables, and take the last step.
+    let mut recording = Recording::new();
+    recording.publish_in_minute(0);
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    assert!(matches!(
+        recording.persist(&store, &mut state),
+        Progress::Sealed
+    ));
+    assert!(Recording::remove_tables(&recording.saved_windows()) > 0);
+
+    let progress = recording.persist(&store, &mut state);
+
+    assert!(matches!(progress, Progress::Complete));
+}
+
+#[test]
+fn a_worker_refuses_a_saved_minute_whose_proof_another_file_replaced() {
+    // Goal: leaving a saved minute's rows unread leaves the identity of its proof checked (P02.5).
+    // Method: seal a minute, swap its proof for a private copy of the same bytes, and take a step.
+    let mut recording = Recording::new();
+    for minute in 0..3 {
+        recording.publish_in_minute(minute);
+    }
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    recording.persist(&store, &mut state);
+    let proof = recording.saved_windows()[0].join("ready/metadata");
+    let bytes = std::fs::read(&proof).unwrap();
+    std::fs::remove_file(&proof).unwrap();
+    let mut copy = private::open_private_file(&proof, true).unwrap();
+    std::io::Write::write_all(&mut copy, &bytes).unwrap();
+
+    let refusal = recording.persist_result(&store, &mut state).err().unwrap();
+
+    assert!(matches!(refusal, crate::Error::Io(error) if error.kind() == ErrorKind::InvalidData));
+}
+
 /// Two ticks with events in the first minute, one in the second, and a third minute that closes
 /// the second.
 fn publish_three_minutes(recording: &mut Recording) {

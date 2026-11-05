@@ -116,6 +116,8 @@ pub struct SourceFrontierRead<'root, 'state> {
     ordinary_tail: Option<(u64, Option<u64>)>,
     result: Option<SourceFrontier>,
     failed: bool,
+    /// Whether it reads each proof it finds and leaves the rows the proof names.
+    rows_held: bool,
 }
 impl<'root, 'state> SourceFrontierRead<'root, 'state> {
     pub fn begin(
@@ -151,6 +153,7 @@ impl<'root, 'state> SourceFrontierRead<'root, 'state> {
             ordinary_tail: None,
             result: None,
             failed: false,
+            rows_held: false,
         })
     }
     pub(crate) fn byte_budget(&self) -> &Arc<ByteBudget> {
@@ -193,19 +196,7 @@ impl<'root, 'state> SourceFrontierRead<'root, 'state> {
             ReadStep::Continue => return Ok(FrontierStep::Continue),
             ReadStep::End => {}
             ReadStep::Found(key) => {
-                let gate = self.cursor.open_gate(&key)?;
-                let mut work = ReadWork::default();
-                let candidate = super::rows::admit(
-                    self.cursor.root(),
-                    gate,
-                    namespace,
-                    &key,
-                    &self.run,
-                    &self.budget,
-                    &mut work,
-                );
-                self.cursor.add_work(work);
-                let candidate = candidate?;
+                let candidate = self.step_inner_admit(namespace, &key)?;
                 if namespace == Namespace::Ordinary {
                     self.ordinary_tail = Some((
                         candidate.metadata.window,
@@ -237,6 +228,40 @@ impl<'root, 'state> SourceFrontierRead<'root, 'state> {
                 .reset(namespace, SeekRange::source_tail(namespace, &self.run)?)?;
             Ok(FrontierStep::Continue)
         }
+    }
+    fn step_inner_admit(
+        &mut self,
+        namespace: Namespace,
+        key: &super::tree::CanonicalKey,
+    ) -> io::Result<AdmittedCanonical> {
+        let gate = self.cursor.open_gate(key)?;
+        let root = self.cursor.root();
+        let mut work = ReadWork::default();
+        let candidate = if self.rows_held {
+            super::rows::admit_proof(
+                root,
+                gate,
+                namespace,
+                key,
+                &self.run,
+                &self.budget,
+                &mut work,
+            )
+            .map(|(candidate, _rows)| candidate)
+        } else {
+            super::rows::admit(
+                root,
+                gate,
+                namespace,
+                key,
+                &self.run,
+                &self.budget,
+                &mut work,
+            )
+        };
+        self.cursor.add_work(work);
+
+        candidate
     }
     /// Takes every step a lookup may, one for each namespace, within one lookup's nodes.
     fn step_to_end(&mut self) -> io::Result<()> {
@@ -292,16 +317,24 @@ impl<'root> SourceFrontierRead<'root, 'static> {
             ordinary_tail: None,
             result: None,
             failed: false,
+            rows_held: false,
         })
     }
+    /// A read that takes the rows of what it finds as already read, so it costs each proof and not
+    /// every event batch of the newest window. Only an owner of the source's frontier may ask,
+    /// since it read those rows when it took the frontier or proved them when it published them.
+    pub(crate) fn rows_held(mut self) -> Self {
+        self.rows_held = true;
+        self
+    }
     /// A read taken to its end, whose result a registration can take over instead of reading the
-    /// frontier again. Each read costs every event batch of the newest window.
-    pub(crate) fn begin_finished(
+    /// frontier again, for a worker that has read this source's frontier whole.
+    pub(crate) fn begin_finished_rows_held(
         root: &'root PrivateDirectory,
         run: RunIdentity,
         budget: &Arc<ByteBudget>,
     ) -> io::Result<Self> {
-        let mut query = Self::begin_owned(root, run, budget)?;
+        let mut query = Self::begin_owned(root, run, budget)?.rows_held();
         query.step_to_end()?;
 
         Ok(query)

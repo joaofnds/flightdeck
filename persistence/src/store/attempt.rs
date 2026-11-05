@@ -406,14 +406,20 @@ impl Store {
         crate::canonical::SourceFrontier::read(&self.directory, run, budget, work)
     }
 
-    /// The frontier as a finished read, for `register_attempt_from_frontier`.
-    pub(crate) fn source_frontier_read(
+    /// The frontier as a finished read of proofs alone, for `register_attempt_from_frontier`. The
+    /// caller has read this source's frontier whole through `source_frontier` since it took the
+    /// recording, and has proved the rows of everything it published since.
+    pub(crate) fn source_frontier_rows_held(
         &self,
         run: &collector::ring::RunIdentity,
         budget: &Arc<crate::resources::ByteBudget>,
     ) -> io::Result<crate::canonical::SourceFrontierRead<'_, 'static>> {
         self.source_frontier_admit(run)?;
-        crate::canonical::SourceFrontierRead::begin_finished(&self.directory, *run, budget)
+        crate::canonical::SourceFrontierRead::begin_finished_rows_held(
+            &self.directory,
+            *run,
+            budget,
+        )
     }
 
     fn source_frontier_admit(&self, run: &collector::ring::RunIdentity) -> io::Result<()> {

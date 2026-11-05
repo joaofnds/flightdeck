@@ -990,11 +990,14 @@ impl<'store> NormalPublication<'store> {
         let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
         if self.frontier.is_none() {
             insert::validate_roots(attempt.root, &mut self.work.canonical)?;
+            // The frontier's rows were read before the attempt registered against it, and all this
+            // asks is whether it has moved since, so the proofs say enough.
             let query = crate::canonical::SourceFrontierRead::begin_owned(
                 attempt.root,
                 self.state.input.run,
                 &self.budget,
-            )?;
+            )?
+            .rows_held();
             self.work.canonical.add(query.work());
             self.frontier = Some(query);
             return Ok(false);
