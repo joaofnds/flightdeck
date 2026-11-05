@@ -45,10 +45,15 @@ struct Options {
     parent: Option<i32>,
 }
 
+/// How long a worker must stay up for its next failure to begin a new backoff.
+const FAILURE_EPISODE_NS: u64 = 60_000_000_000;
+const _: () = assert!(FAILURE_EPISODE_NS > 5_000_000_000);
+
 struct Worker {
     child: Option<Child>,
     attempts: u64,
     due: u64,
+    started_ns: u64,
     cost: resources::WorkerCost,
     adopted: Option<recording::exit_watch::ExitWatch>,
 }
@@ -335,6 +340,7 @@ impl Worker {
             child: None,
             attempts: 0,
             due: 0,
+            started_ns: 0,
             cost: resources::WorkerCost::default(),
             adopted: None,
         }
@@ -409,6 +415,10 @@ impl Worker {
     }
 
     fn failed(&mut self, now: u64) {
+        // A worker that stayed up was not failing, so its failure does not extend an old count.
+        if now.saturating_sub(self.started_ns) >= FAILURE_EPISODE_NS {
+            self.attempts = 0;
+        }
         self.attempts = self.attempts.saturating_add(1);
         let delay = match self.attempts {
             0 | 1 => 1,
@@ -430,6 +440,7 @@ impl Worker {
         if now < self.due {
             return Ok(());
         }
+        self.started_ns = now;
         let executable = std::env::current_exe()?.canonicalize()?;
         let name = match role {
             Role::Collector => "collector",

@@ -312,6 +312,8 @@ GUI quit detaches. An explicit CLI `--parent-pid` binding still stops when that 
 
 The recorder checks worker state once a second. Operating failures retry after 1, 2, 4 and
 then 5 seconds, with the failure class, retry count and next attempt in the control mapping.
+A failure a minute or more after the worker's last start begins again at 1 second and a count
+of one.
 A configuration failure or invariant abort stops supervision visibly. The persister reports
 Running only after a canonical seal has synchronized; a live encoder awaiting its first
 window remains Starting. If the recorder dies, workers continue but cannot restart each

@@ -426,3 +426,63 @@ fn adoption_disappearance_does_not_hide_unrelated_kernel_failures() {
         assert!(worker.idle());
     }
 }
+
+#[test]
+fn failures_soon_after_each_start_keep_backing_off() {
+    // Goal: a worker that keeps failing waits longer each time, up to the longest delay.
+    // Method: fail a worker a second after each start and read the delay each failure leaves.
+    let mut worker = Worker::new();
+    let mut delays = Vec::new();
+    let mut now = 1_000_000_000_000;
+
+    for _failure in 0..5 {
+        worker.started_ns = now;
+        now += 1_000_000_000;
+        worker.failed(now);
+        delays.push((worker.due - now) / 1_000_000_000);
+    }
+
+    assert_eq!(delays, [1, 2, 4, 5, 5]);
+    assert_eq!(worker.attempts, 5);
+}
+
+#[test]
+fn a_failure_after_a_long_run_begins_a_new_backoff() {
+    // Goal: failures long past do not lengthen the wait or the count of a new failure.
+    // Method: leave a worker at the longest delay, let it run past an episode, and fail it.
+    let mut worker = Worker::new();
+    worker.attempts = 4;
+    let started = 1_000_000_000_000;
+    worker.started_ns = started;
+    let now = started + FAILURE_EPISODE_NS;
+
+    worker.failed(now);
+
+    assert_eq!(worker.attempts, 1);
+    assert_eq!(worker.due, now + 1_000_000_000);
+}
+
+#[test]
+fn a_refused_launch_keeps_backing_off_long_after_the_last_run() {
+    // Goal: a launch the system keeps refusing backs off, since no worker came up to end it.
+    // Method: start a worker with two failures behind it, an episode after its last start, from
+    // a test binary with no worker executable beside it, so the launch itself is refused.
+    let root = DrainRoot::new("refused-launch");
+    let mut supervisor = root.supervisor();
+    supervisor.persistence.attempts = 2;
+    supervisor.persistence.due = 0;
+    let authority = supervisor.reporter.control().authority();
+
+    supervisor
+        .persistence
+        .start(
+            &supervisor.options,
+            Role::Persister,
+            authority,
+            FAILURE_EPISODE_NS,
+            &mut supervisor.reporter,
+        )
+        .unwrap();
+
+    assert_eq!(supervisor.persistence.attempts, 3);
+}

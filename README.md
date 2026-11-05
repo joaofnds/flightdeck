@@ -63,7 +63,8 @@ and format. The recording registry retains at most the active and one earlier ri
 Disk recordings survive the
 rings' removal or a reboot; unsealed data may be lost. A missing, refused or failed
 persister leaves acquisition running into the bounded ring. The recorder retries operating
-failures with delays of 1, 2, 4, then 5 seconds. A fixed private control mapping reports
+failures with delays of 1, 2, 4, then 5 seconds, starting over once a worker has stayed up
+for a minute. A fixed private control mapping reports
 acquisition and durable recording separately; durable progress advances only after a
 canonical seal commits. Finite runs, Ctrl-C and SIGTERM ask acquisition to stop and drain
 the saved tail. GUI quit detaches while recording continues.
