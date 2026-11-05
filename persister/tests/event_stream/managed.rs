@@ -340,6 +340,7 @@ impl Recorder {
                 .transpose()?
                 .unwrap_or(false);
         if !cooperative || !self.wait_stopped(500)? {
+            self.stop_boundary();
             self.stop_forced()?;
         }
         if !self.wait_stopped(1000)? {
@@ -398,6 +399,16 @@ impl Recorder {
         self.inventories += 1;
         self.inventoried += u64::try_from(count).map_err(io::Error::other)?;
         Ok(())
+    }
+
+    /// Reports what kept the stop waiting, which the forced stop's SIGKILL otherwise hides. A
+    /// read that fails is reported too, since cleanup must go on past corrupt control.
+    fn stop_boundary(&self) {
+        let roles = Control::open(&self.root).map(|control| {
+            [Role::Controller, Role::Collector, Role::Persister]
+                .map(|role| read_role(&control, role))
+        });
+        eprintln!("managed_forced_stop controller_collector_persister={roles:?}");
     }
 
     fn stop_forced(&mut self) -> io::Result<()> {

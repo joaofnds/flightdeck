@@ -75,8 +75,9 @@ fn observe_managed(rows: u64, terminal: bool) {
     }
     let recovery = result.unwrap();
     recorder.stop().unwrap();
-    assert!(recorder.exit_status().unwrap().unwrap().success());
+    // Reported before the assertion, since its panic removes the root that holds this log.
     recorder.report().unwrap();
+    assert!(recorder.exit_status().unwrap().unwrap().success());
     eprintln!(
         "managed_recovery rows={rows} terminal={terminal} clear_ns={} restored_ns={} due_ns={} \
         worker_seen_ns={} canonical_ns={} elapsed_ns={} worker_previous_poll_ns={} \
