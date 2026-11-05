@@ -154,8 +154,10 @@ impl Supervisor {
             )?;
         }
         // A relaunch may find the last finite collector already exited without its
-        // controller having seen the success status. Its terminal role record carries it.
-        self.finished |= !collecting
+        // controller having seen the success status. Its terminal role record carries it. A
+        // recorder with no end of its own, as the app starts, records again instead.
+        self.finished |= self.options.seconds.is_some()
+            && !collecting
             && collector
                 .as_ref()
                 .is_some_and(|health| health.state == State::Stopped);

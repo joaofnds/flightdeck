@@ -201,6 +201,46 @@ mod tests {
     }
 
     #[test]
+    fn an_endless_recorder_records_again_over_a_run_that_ended_by_itself() {
+        // Goal: a recorder with no end of its own starts acquisition when the last collector left
+        // a stopped record that no stop request explains, as one outliving its controller does.
+        // Method: leave that record, launch a recorder without --seconds, and see readings advance.
+        use collector::recording::control::Reporter;
+        let mut recording = Recording::new("ended-by-itself", 30);
+        Control::create(&recording.root).unwrap();
+        let mut reporter = Reporter::new(
+            Control::open_writable(&recording.root).unwrap(),
+            Role::Collector,
+        )
+        .unwrap();
+        reporter
+            .update(State::Stopped, collector::ring::Identity([1, 2]), 0)
+            .unwrap();
+        recording.child = Some(
+            Command::new(Recording::recorder_executable())
+                .arg("--recording")
+                .arg(&recording.root)
+                .args(["--ring", &recording.ring])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+
+        let control = recording.wait_for(|control| {
+            let collector = control.settled(Role::Collector);
+            collector.state == State::Running && collector.publication >= 2
+        });
+
+        assert!(!control.stopping());
+        Control::open_writable(&recording.root)
+            .unwrap()
+            .request_stop()
+            .unwrap();
+        recording.wait_for_exit();
+    }
+
+    #[test]
     fn replaces_a_failed_persister_without_replacing_acquisition() {
         // Goal: a worker death cannot permanently stop saving a healthy collector's tail.
         // Method: kill the owned persister, observe replacement and drain a finite real run.
