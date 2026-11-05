@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender};
 
 use collector::ring::{
     FoundEvent, IdentityObservation, ProgramBuffers, ProgramLengths, RingReader, RunIdentity,
@@ -36,6 +37,8 @@ pub(crate) const BATCHES_MAX: usize = ROWS_MAX.div_ceil(BATCH_ROWS_MIN);
 // writer buffer, bounded batch descriptors and per-file/footer bookkeeping coexist here.
 pub(crate) const WORKING_BYTES: usize =
     BATCH_BYTES_MAX * 8 + 1024 * 1024 + BATCHES_MAX * size_of::<Batch>() + 1024 * 1024;
+/// What `read_ahead` holds beside the batch being written, the rows of one batch and its frame.
+pub(crate) const READ_AHEAD_BYTES: usize = BATCH_BYTES_MAX * 2;
 const _: () = {
     assert!(ROWS_BYTES_MAX < BATCH_BYTES_MAX);
     assert!(BATCH_ROWS_MIN > 0);
@@ -44,6 +47,9 @@ const _: () = {
     assert!(BATCHES_MAX == 4096);
     assert!(crate::WRITE_BUFFER_BYTES == 1024 * 1024);
 };
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) fn write_tail(
     pending: &Path,
@@ -60,6 +66,65 @@ pub(crate) fn write_tail(
     })
 }
 
+/// A batch's rows as the frame its file takes, checked before anything writes it, and what the
+/// index says of it.
+pub(crate) struct FramedBatch {
+    pub frame: DataFrame,
+    pub batch: Batch,
+}
+
+pub(crate) fn framed(rows: &[Row], identities: bool) -> Result<FramedBatch> {
+    let frame = frame(rows, identities)?;
+    validate_frame(&frame, identities)?;
+    Ok(FramedBatch {
+        frame,
+        batch: Batch {
+            first: rows[0].event.number,
+            end: rows[rows.len() - 1].event.number + 1,
+            rows: collector::u64_from_usize(rows.len()),
+        },
+    })
+}
+
+/// Runs `read` on a thread of its own and `write` on this one, for each batch `read` sends, so
+/// the batch being written has the next one coming. The channel holds nothing, so `read` waits
+/// with one batch in hand until `write` takes it, and the files change on this thread in the order
+/// they would with no second thread. An error from `write` stops `read` at its next send, and one
+/// from `read` arrives after `write` has seen every batch sent before it.
+pub(crate) fn read_ahead<Item: Send>(
+    read: impl FnOnce(&SyncSender<Item>) -> Result<()> + Send,
+    write: impl FnMut(Item) -> Result<()>,
+) -> Result<()> {
+    std::thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(0);
+        let reading = std::thread::Builder::new()
+            .name("event-read-ahead".to_owned())
+            .spawn_scoped(scope, move || read(&sender))?;
+        let written = read_ahead_write(&receiver, write);
+        drop(receiver);
+        let read = reading
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        written.and(read)
+    })
+}
+
+fn read_ahead_write<Item>(
+    receiver: &Receiver<Item>,
+    mut write: impl FnMut(Item) -> Result<()>,
+) -> Result<()> {
+    for _batch in 0..BATCHES_MAX {
+        let Ok(item) = receiver.recv() else {
+            return Ok(());
+        };
+        write(item)?;
+    }
+    match receiver.recv() {
+        Ok(_) => Err(Error::Bound("event batches read ahead")),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Writes the tail into the file `create` gives for each batch, by its position among them.
 pub(crate) fn write_tail_into<File: std::io::Write>(
     reader: RingReader,
@@ -70,12 +135,11 @@ pub(crate) fn write_tail_into<File: std::io::Write>(
     mut create: impl FnMut(usize) -> Result<File>,
 ) -> Result<Manifest> {
     let _reservation = budget
-        .reserve(WORKING_BYTES)
+        .reserve(WORKING_BYTES + READ_AHEAD_BYTES)
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
     let captured = reader.dictionary_capacity().is_some();
     let name = reader.name().to_owned();
-    let mut next = coverage.start;
-    let mut source = Some(reader);
+    drop(reader);
     let mut manifest = Manifest {
         recovery: Recovery {
             run: *run,
@@ -87,37 +151,62 @@ pub(crate) fn write_tail_into<File: std::io::Write>(
         identities: captured,
         batches: Vec::with_capacity(BATCHES_MAX),
     };
-    for index in 0..BATCHES_MAX {
-        let mut reader = match source.take() {
-            Some(reader) => reader,
-            None => RingReader::open_generation(&name)?,
-        };
-        if reader.identity().is_some_and(|identity| identity != *run)
-            || reader.dictionary_capacity().is_some() != captured
-            || reader.event_newest()? + 1 != coverage.end
+    let source = TailSource {
+        name: &name,
+        run,
+        coverage: &coverage,
+        captured,
+    };
+    read_ahead(
+        |batches| write_tail_read(&source, &mut losses, batches),
+        |mut framed: FramedBatch| {
+            let file = create(manifest.batches.len())?;
+            crate::encoder::encode_write_event_batch(&mut framed.frame, file)?;
+            manifest.recovery.rows += framed.batch.rows;
+            manifest.batches.push(framed.batch);
+            Ok(())
+        },
+    )?;
+    manifest.recovery.losses = losses;
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+struct TailSource<'tail> {
+    name: &'tail str,
+    run: &'tail RunIdentity,
+    coverage: &'tail std::ops::Range<u64>,
+    captured: bool,
+}
+
+/// `write_tail_into`'s reading, which opens the ring for each batch so the pages one batch touched
+/// stop counting against the process.
+fn write_tail_read(
+    source: &TailSource<'_>,
+    losses: &mut Losses,
+    batches: &SyncSender<FramedBatch>,
+) -> Result<()> {
+    let mut next = source.coverage.start;
+    for _batch in 0..=BATCHES_MAX {
+        let mut reader = RingReader::open_generation(source.name)?;
+        if reader
+            .identity()
+            .is_some_and(|identity| identity != *source.run)
+            || reader.dictionary_capacity().is_some() != source.captured
+            || reader.event_newest()? + 1 != source.coverage.end
         {
             return Err(Error::Bound("terminal source changed"));
         }
         reader.seek_event(next)?;
-        let rows = read_batch(&mut reader, coverage.end, &mut losses)?;
+        let rows = read_batch(&mut reader, source.coverage.end, losses)?;
         next = reader.next_event();
         drop(reader);
-        if !rows.is_empty() {
-            let mut frame = frame(&rows, captured)?;
-            validate_frame(&frame, captured)?;
-            crate::encoder::encode_write_event_batch(&mut frame, create(index)?)?;
-            let batch = Batch {
-                first: rows[0].event.number,
-                end: rows[rows.len() - 1].event.number + 1,
-                rows: collector::u64_from_usize(rows.len()),
-            };
-            manifest.recovery.rows += batch.rows;
-            manifest.batches.push(batch);
+        if rows.is_empty() {
+            assert!(next >= source.coverage.end);
+            return Ok(());
         }
-        if next >= coverage.end {
-            manifest.recovery.losses = losses;
-            manifest.validate()?;
-            return Ok(manifest);
+        if batches.send(framed(&rows, source.captured)?).is_err() || next >= source.coverage.end {
+            return Ok(());
         }
     }
     Err(Error::Bound("terminal event batches"))
@@ -302,6 +391,23 @@ pub(super) fn empty(identities: bool) -> Result<DataFrame> {
     frame(&[], identities)
 }
 
+const USAGE_COLUMNS: [&str; 14] = [
+    "awake_ns_at_start",
+    "user_ns",
+    "system_ns",
+    "energy_nj",
+    "instructions",
+    "super_instructions",
+    "cycles",
+    "idle_wakeups",
+    "interrupt_wakeups",
+    "pageins",
+    "resident_bytes",
+    "footprint_bytes",
+    "disk_read_bytes",
+    "disk_written_bytes",
+];
+
 fn validate_numeric_frame(frame: &DataFrame) -> Result<()> {
     use crate::schema::{availability, event_kind, noticed};
     if frame.height() > BATCH_ROWS_MAX {
@@ -315,6 +421,10 @@ fn validate_numeric_frame(frame: &DataFrame) -> Result<()> {
         if frame.column(name)?.null_count() != 0 {
             return Err(Error::Bound("event required numeric value"));
         }
+    }
+    let mut usage = Vec::with_capacity(USAGE_COLUMNS.len());
+    for name in USAGE_COLUMNS {
+        usage.push(frame.column(name)?.u64()?);
     }
     for row in 0..frame.height() {
         let kind = kinds.get(row).ok_or(Error::Bound("event kind"))?;
@@ -340,29 +450,14 @@ fn validate_numeric_frame(frame: &DataFrame) -> Result<()> {
         if !valid || (kind != event_kind::START && coalition.get(row).is_some()) {
             return Err(Error::Bound("event numeric semantics"));
         }
-        validate_numeric_usage(frame, row, exit && code == availability::MEASURED)?;
+        validate_numeric_usage(&usage, row, exit && code == availability::MEASURED)?;
     }
     Ok(())
 }
 
-fn validate_numeric_usage(frame: &DataFrame, row: usize, present: bool) -> Result<()> {
-    for name in [
-        "awake_ns_at_start",
-        "user_ns",
-        "system_ns",
-        "energy_nj",
-        "instructions",
-        "super_instructions",
-        "cycles",
-        "idle_wakeups",
-        "interrupt_wakeups",
-        "pageins",
-        "resident_bytes",
-        "footprint_bytes",
-        "disk_read_bytes",
-        "disk_written_bytes",
-    ] {
-        if frame.column(name)?.u64()?.get(row).is_some() != present {
+fn validate_numeric_usage(usage: &[&UInt64Chunked], row: usize, present: bool) -> Result<()> {
+    for column in usage {
+        if column.get(row).is_some() != present {
             return Err(Error::Bound("event usage payload"));
         }
     }

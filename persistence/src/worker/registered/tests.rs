@@ -156,6 +156,27 @@ impl Recording {
         )
     }
 
+    /// A recording whose ring holds this many events, and whether it captures their identities.
+    fn with_event_capacity_captured(event_capacity: u64, captured: bool) -> Self {
+        Self::create(
+            captured,
+            Shape {
+                event_capacity,
+                ..shape()
+            },
+        )
+    }
+
+    /// Fills the ring with more events than a batch holds, then publishes until the slots hold none
+    /// of those events' publications and the five newest events overwrite the five oldest.
+    fn publish_past_several_batches(&mut self, event_capacity: usize) {
+        self.publish_events_in_minute(0, event_capacity);
+        for _publication in 0..8 {
+            self.publish_in_minute(0);
+        }
+        self.publish_events_in_minute(0, 5);
+    }
+
     fn create(captured: bool, shape: Shape) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("fd-worker-{}-{serial}", std::process::id()));
@@ -437,6 +458,65 @@ impl Recording {
             events.unwrap().rows
         });
         rows.collect()
+    }
+
+    /// Where the event index of each saved window says its rows start, in publication order.
+    fn saved_event_firsts(&self) -> Vec<(u64, u64)> {
+        let mut firsts: Vec<_> = self
+            .saved_windows()
+            .iter()
+            .map(|window| {
+                let mut file = std::fs::File::open(window.join("ready/metadata")).unwrap();
+                let Body::Ordinary(manifest) = CanonicalMetadata::read(&mut file).unwrap().body
+                else {
+                    panic!("an ordinary window holds an ordinary body");
+                };
+                let mut index = std::fs::File::open(window.join("ready/events/index")).unwrap();
+                let index =
+                    crate::event_table::index::Index::read_file(&mut index, &manifest).unwrap();
+                (manifest.publication_first, index.first)
+            })
+            .collect();
+        firsts.sort_unstable();
+        firsts
+    }
+
+    /// The number of every event a saved window holds, in the order of its batch files.
+    fn saved_event_numbers(&self, captured: bool) -> Vec<u64> {
+        let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+        let mut numbers = Vec::new();
+        for window in self.saved_windows() {
+            let events = window.join("ready/events");
+            let mut file = std::fs::File::open(window.join("ready/metadata")).unwrap();
+            let Body::Ordinary(manifest) = CanonicalMetadata::read(&mut file).unwrap().body else {
+                panic!("an ordinary window holds an ordinary body");
+            };
+            let mut index = std::fs::File::open(events.join("index")).unwrap();
+            let index = crate::event_table::index::Index::read_file(&mut index, &manifest).unwrap();
+            for (position, batch) in index.batches.iter().enumerate() {
+                let name = crate::event_recovery::batch_name(position);
+                let file = std::fs::File::open(events.join(name)).unwrap();
+                numbers.extend(batch_event_numbers(file, batch, captured, true, &budget));
+            }
+        }
+        numbers
+    }
+
+    /// The number of every event the terminal holds, in the order of its batch files.
+    fn saved_terminal_event_numbers(&self, captured: bool) -> Vec<u64> {
+        let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+        let mut objects = std::fs::read_dir(self.root.join("recovery-data")).unwrap();
+        let ready = objects.next().unwrap().unwrap().path().join("ready");
+        let Body::Events(events) = self.saved_terminal().body else {
+            panic!("a terminal holds events");
+        };
+        let mut numbers = Vec::new();
+        for (position, batch) in events.batches.iter().enumerate() {
+            let name = crate::event_recovery::batch_name(position);
+            let file = std::fs::File::open(ready.join(name)).unwrap();
+            numbers.extend(batch_event_numbers(file, batch, captured, false, &budget));
+        }
+        numbers
     }
 
     /// Every saved window's manifest, in the order of its publications.
@@ -1921,6 +2001,236 @@ fn a_selection_whose_start_was_overwritten_is_selected_again_from_what_remains()
     assert_eq!(rows + lost, events);
 }
 
+fn batch_event_numbers(
+    file: std::fs::File,
+    batch: &crate::event_recovery::Batch,
+    captured: bool,
+    associated: bool,
+    budget: &Arc<ByteBudget>,
+) -> Vec<u64> {
+    let rows =
+        crate::event_recovery::read::read_batch_file(file, batch, captured, associated, budget)
+            .unwrap();
+    let numbers = rows.column("event").unwrap().u64().unwrap();
+    numbers.into_no_null_iter().collect()
+}
+
+/// More events than two batches hold, so the saved rows span three files.
+const EVENTS_PAST_TWO_BATCHES: usize = 2 * crate::event_observation::BATCH_ROWS_MAX + 3;
+
+/// Seals a minute whose first kept publication comes after every event of a full ring, and
+/// expects each event saved in order or counted lost.
+fn events_before_the_kept_publications_are_saved(captured: bool) {
+    let capacity = u64::try_from(EVENTS_PAST_TWO_BATCHES).unwrap();
+    let mut recording = Recording::with_event_capacity_captured(capacity, captured);
+    recording.publish_past_several_batches(EVENTS_PAST_TWO_BATCHES);
+    recording.publish_in_minute(1);
+    recording.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+
+    persist_until_quiet(&recording, &store, &mut state);
+
+    assert_eq!(
+        recording.saved_event_numbers(captured),
+        (6..=capacity + 5).collect::<Vec<u64>>()
+    );
+    assert_eq!(
+        recording
+            .saved_losses()
+            .iter()
+            .map(|l| l.events)
+            .sum::<u64>(),
+        5
+    );
+}
+
+#[test]
+fn events_of_overwritten_publications_fill_several_batches_each_saved_once() {
+    // Goal: events older than the kept publications, more than a batch of them and read ahead of
+    // the thread writing them, are each saved once and in order, and missed ones are counted.
+    // Method: overwrite the publications of a full ring and its five oldest events, seal, and read
+    // every batch back.
+    events_before_the_kept_publications_are_saved(false);
+}
+
+#[test]
+fn captured_events_of_overwritten_publications_fill_several_batches_each_saved_once() {
+    // Goal: the same holds where each row carries the identity of its process.
+    // Method: as for a recording without identities, on a captured ring.
+    events_before_the_kept_publications_are_saved(true);
+}
+
+/// Seals the terminal of a ring whose writer published nothing readable, and expects each event
+/// saved in order or counted lost.
+fn events_of_a_dead_writer_are_saved(captured: bool) {
+    let capacity = u64::try_from(EVENTS_PAST_TWO_BATCHES).unwrap();
+    let mut recording = Recording::with_event_capacity_captured(capacity, captured);
+    recording.publish_past_several_batches(EVENTS_PAST_TWO_BATCHES);
+    recording.withhold_publications_past(0);
+    let store = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&store, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Complete));
+    assert_eq!(
+        recording.saved_terminal_event_numbers(captured),
+        (6..=capacity + 5).collect::<Vec<u64>>()
+    );
+    let Body::Events(events) = recording.saved_terminal().body else {
+        panic!("a terminal holds events");
+    };
+    assert_eq!(events.batches.len(), 3);
+    assert_eq!(events.recovery.rows, capacity);
+    assert_eq!(events.recovery.losses.events, 5);
+}
+
+#[test]
+fn a_terminal_of_several_batches_saves_each_event_once_and_counts_the_missed() {
+    // Goal: a tail read ahead of the thread writing it saves each event once and in order, and
+    // the losses counted on the reading thread reach the terminal's manifest.
+    // Method: overwrite a full ring's five oldest events, withhold every publication, seal, and
+    // read every batch back.
+    events_of_a_dead_writer_are_saved(false);
+}
+
+#[test]
+fn a_captured_terminal_of_several_batches_saves_each_event_once_and_counts_the_missed() {
+    // Goal: the same holds where each row carries the identity of its process.
+    // Method: as for a recording without identities, on a captured ring.
+    events_of_a_dead_writer_are_saved(true);
+}
+
+#[test]
+fn a_minute_whose_earlier_events_were_all_overwritten_saves_none_and_counts_them() {
+    // Goal: with no row to say where it starts, a minute's events start where its publications
+    // do, and every event before them is counted lost.
+    // Method: overwrite all of a ring's events from a publication the slots dropped, with the new
+    // events in the next minute, and seal both minutes.
+    let mut recording = Recording::new();
+    recording.publish_events_in_minute(0, 8);
+    for _publication in 0..8 {
+        recording.publish_in_minute(0);
+    }
+    recording.publish_events_in_minute(1, 8);
+    recording.publish_in_minute(2);
+    recording.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+
+    persist_until_quiet(&recording, &store, &mut RunState::default());
+
+    assert_eq!(recording.saved_event_rows(), [0, 8, 0]);
+    assert_eq!(recording.saved_losses()[0].events, 8);
+    assert_eq!(recording.saved_event_firsts()[0].1, 9);
+}
+
+#[test]
+fn a_seal_interrupted_after_a_leading_loss_keeps_where_its_saved_rows_start() {
+    // Goal: a restart finds its first saved row where the first attempt left it, past the events
+    // the ring had overwritten, rather than where the minute's coverage starts.
+    // Method: overwrite a ring's two oldest events, interrupt the seal before the event index,
+    // restart, and read the saved numbers and the losses.
+    let mut recording = Recording::new();
+    recording.publish_events_in_minute(0, 8);
+    for _publication in 0..8 {
+        recording.publish_in_minute(0);
+    }
+    recording.publish_events_in_minute(0, 2);
+    recording.publish_in_minute(1);
+    recording.writer.finish();
+    let attempted = InterruptedWindow {
+        number: 0,
+        publication: 4,
+        publications_lost: 3,
+        unknown: false,
+    };
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal_of(&first, &attempted, Interruption::EventIndexAbsent);
+    drop(first);
+    let restarted = Store::open(&recording.root).unwrap();
+
+    recording.persist(&restarted, &mut RunState::default());
+
+    assert_eq!(
+        recording.saved_event_numbers(false),
+        (3..=10).collect::<Vec<u64>>()
+    );
+    assert_eq!(recording.saved_losses()[0].events, 2);
+    assert_eq!(recording.saved_event_firsts()[0].1, 3);
+}
+
+/// Writes the tail of a ring whose every publication is withheld, in files that keep nothing.
+fn tail_written(
+    recording: &Recording,
+    run: &RunIdentity,
+    coverage: std::ops::Range<u64>,
+    budget: &Arc<ByteBudget>,
+) -> crate::Result<crate::event_recovery::Manifest> {
+    let reader = RingReader::open_generation(recording.ring_name()).unwrap();
+    crate::event_recovery::write_tail_into(
+        reader,
+        run,
+        coverage,
+        crate::Losses::default(),
+        budget,
+        |_index| Ok(std::io::sink()),
+    )
+}
+
+#[test]
+fn a_terminal_charges_what_it_reads_ahead_to_the_one_budget_it_was_given() {
+    // Goal: the worker's memory limit covers the batch the reading thread holds too.
+    // Method: write the same tail with one byte too few and with just enough.
+    let recording = recording_with_withheld_events();
+    let working = crate::event_recovery::batch::WORKING_BYTES
+        + crate::event_recovery::batch::READ_AHEAD_BYTES;
+    let short = Arc::new(ByteBudget::new(working - 1));
+    let enough = Arc::new(ByteBudget::new(working));
+
+    let refused = tail_written(&recording, &recording.run, 1..3, &short);
+    let written = tail_written(&recording, &recording.run, 1..3, &enough);
+
+    assert!(matches!(
+        refused,
+        Err(crate::Error::Io(error)) if error.kind() == ErrorKind::OutOfMemory
+    ));
+    assert!(written.is_ok());
+}
+
+#[test]
+fn a_terminal_of_a_source_past_its_coverage_is_refused() {
+    // Goal: a tail covers up to the newest event its source holds, or it says the source changed.
+    // Method: write a tail whose coverage ends one event short of the ring's newest.
+    let recording = recording_with_withheld_events();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+
+    let result = tail_written(&recording, &recording.run, 1..2, &budget);
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Bound("terminal source changed"))
+    ));
+}
+
+#[test]
+fn a_terminal_of_another_runs_source_is_refused() {
+    // Goal: a tail's rows always belong to the run it names.
+    // Method: write a tail naming another run than the ring's.
+    let recording = recording_with_withheld_events();
+    let other = RunIdentity {
+        run: Identity([18, 19]),
+        ..recording.run
+    };
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+
+    let result = tail_written(&recording, &other, 1..3, &budget);
+
+    assert!(matches!(
+        result,
+        Err(crate::Error::Bound("terminal source changed"))
+    ));
+}
+
 /// The staging a seal runs, for a test that takes its reads one at a time.
 #[test]
 fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
@@ -2115,7 +2425,8 @@ fn a_seal_charges_its_event_writer_to_the_one_budget_it_was_given() {
     let attempt = store
         .register_attempt(&input, &mut reader, &budget)
         .unwrap();
-    let working = crate::event_recovery::batch::WORKING_BYTES;
+    let working = crate::event_recovery::batch::WORKING_BYTES
+        + crate::event_recovery::batch::READ_AHEAD_BYTES;
     let short = Arc::new(ByteBudget::new(working - 1));
     let enough = Arc::new(ByteBudget::new(working));
     reader.seek_publication(1).unwrap();
