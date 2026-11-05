@@ -1,9 +1,11 @@
+use super::super::tests::forged_source::{ForgedWord, WritableSource};
 use super::super::{Progress, RunState, WindowIdentity, Writers, persist_one};
-use crate::canonical::metadata::Body;
+use crate::canonical::metadata::{Body, Lifecycle};
 use crate::canonical::{CanonicalMetadata, ReadWork, SourceFrontier};
 use crate::resources::ByteBudget;
 use crate::sealed_apps::SealedApps;
 use crate::store::{ProofStep, PublicationStep};
+use crate::transaction::AttemptOperation;
 use crate::{Encoder, Store};
 use collector::recording::private::{self, FileLock, PrivateDirectory};
 use collector::recording::{RegisteredRun, bootstrap};
@@ -19,6 +21,10 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 /// The steps a publication takes from a complete proof to an idle slot.
 const PUBLICATION_STEPS: u32 = 8;
 
+/// A minute whose clocks run past any start of this test process, so its pid reads as the
+/// collector that published it.
+const LIVE_MINUTE: u64 = 1 << 20;
+
 /// How far a seal got before its process ended.
 #[derive(Clone, Copy)]
 enum Interruption {
@@ -32,6 +38,9 @@ enum Interruption {
     Proved,
     PublicationSteps(u32),
 }
+
+/// The header word that holds the newest publication's number, in every ring layout.
+const HEADER_PUBLICATION_NEWEST: usize = 4;
 
 /// The window a seal was interrupted on, and what scanning to it found lost.
 struct InterruptedWindow {
@@ -120,6 +129,7 @@ struct Recording {
     tick: u64,
     captured: bool,
     source_lost: bool,
+    withheld: Option<WritableSource>,
 }
 
 impl Recording {
@@ -169,6 +179,30 @@ impl Recording {
             tick: 0,
             captured,
             source_lost: false,
+            withheld: None,
+        }
+    }
+
+    /// Replaces the source with a copy that hides every publication past `visible`, as a writer
+    /// that died after writing its tick's events and before publishing the tick leaves it.
+    fn withhold_publications_past(&mut self, visible: u64) {
+        let reader = RingReader::open_generation(self.writer.name()).unwrap();
+        self.withheld = Some(WritableSource::new(
+            self.writer.name(),
+            reader.mapped_size_bytes(),
+            ForgedWord {
+                watched: HEADER_PUBLICATION_NEWEST,
+                expected: reader.publication_newest().unwrap(),
+                index: HEADER_PUBLICATION_NEWEST,
+                value: visible,
+            },
+        ));
+    }
+
+    fn ring_name(&self) -> &str {
+        match &self.withheld {
+            Some(copy) => &copy.name,
+            None => self.writer.name(),
         }
     }
 
@@ -248,13 +282,27 @@ impl Recording {
     fn registered(&self) -> RegisteredRun {
         RegisteredRun {
             identity: self.run,
-            ring_name: self.writer.name().to_owned(),
+            ring_name: self.ring_name().to_owned(),
             collector_pid: 0,
         }
     }
 
     fn persist(&self, store: &Store, state: &mut RunState) -> Progress {
         self.persist_result(store, state).unwrap()
+    }
+
+    /// Takes a worker step with this test process standing in for a collector that still runs.
+    fn persist_live(&self, store: &Store, state: &mut RunState) -> Progress {
+        let derive = SealedApps::default();
+        let writers = Writers {
+            encoder: Encoder,
+            derive: &derive,
+        };
+        let registered = RegisteredRun {
+            collector_pid: std::process::id(),
+            ..self.registered()
+        };
+        persist_one(store, &writers, &registered, false, state).unwrap()
     }
 
     /// A second collector run of the same recording, with a ring of its own.
@@ -351,6 +399,7 @@ impl Recording {
     /// Removes the source as a reboot does, so no reader can open it again.
     fn lose_source(&mut self) {
         collector::ring::unlink_generation(self.writer.name()).unwrap();
+        self.withheld = None;
         self.source_lost = true;
     }
 
@@ -454,7 +503,15 @@ impl Recording {
             return;
         }
 
-        let mut proof = attempt.prove_ordinary(&manifest, reader, &budget).unwrap();
+        let proof = attempt.prove_ordinary(&manifest, reader, &budget).unwrap();
+        Self::interrupted_publication(proof, interruption);
+    }
+
+    /// Takes the proof as far as the interruption, then stops as a process that ended there would.
+    fn interrupted_publication(
+        mut proof: crate::store::NormalProof<'_>,
+        interruption: Interruption,
+    ) {
         for _step in 0..1 << 20 {
             if proof.step().unwrap() == ProofStep::Complete {
                 break;
@@ -468,6 +525,65 @@ impl Recording {
                 }
             }
         }
+    }
+
+    /// Takes the worker's own terminal seal as far as the interruption, then stops the same way.
+    fn interrupted_terminal(&self, store: &Store, interruption: Interruption) {
+        let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+        let state = RunState::default();
+        let registered = self.registered();
+        let mut reader = RingReader::open_generation(&registered.ring_name).unwrap();
+        reader.set_writer_gone();
+        let input =
+            super::seal_terminal_input(store, &registered, &reader, &state, &budget).unwrap();
+        let AttemptOperation::Terminal { event_end } = input.operation else {
+            panic!("a terminal seal has a terminal operation");
+        };
+        let attempt = store
+            .register_attempt(&input, &mut reader, &budget)
+            .unwrap();
+        if matches!(interruption, Interruption::Registered) {
+            return;
+        }
+
+        let manifest = crate::event_recovery::write_tail_into(
+            reader,
+            &registered.identity,
+            input.losses.event_start..event_end,
+            state.losses,
+            256 * 1024 * 1024,
+            |index| Ok(attempt.create_event_batch(u32::try_from(index).unwrap())?),
+        )
+        .unwrap();
+        let pending = self
+            .root
+            .join("recovery-data")
+            .join(collector::recording::identity_text(attempt.transaction()).to_string())
+            .join("pending");
+        match interruption {
+            Interruption::EventsStaged => return,
+            Interruption::EventBatchTorn => {
+                Self::tear(&pending.join(crate::event_recovery::batch_name(0)));
+                return;
+            }
+            _ => {}
+        }
+
+        let mut reader = RingReader::open_generation(&registered.ring_name).unwrap();
+        reader.set_writer_gone();
+        let proof = attempt
+            .prove_terminal(&manifest.recovery, &manifest.batches, reader, &budget)
+            .unwrap();
+        Self::interrupted_publication(proof, interruption);
+    }
+
+    /// The only terminal publication's metadata, read back through the canonical codec.
+    fn saved_terminal(&self) -> CanonicalMetadata {
+        let mut objects = std::fs::read_dir(self.root.join("recovery-data")).unwrap();
+        let object = objects.next().unwrap().unwrap().path();
+        assert!(objects.next().is_none());
+        let mut file = std::fs::File::open(object.join("ready/metadata")).unwrap();
+        CanonicalMetadata::read(&mut file).unwrap()
     }
 
     /// Leaves the events as the interruption does, and says whether the seal ends here.
@@ -1169,6 +1285,291 @@ fn a_seal_with_rows_saved_refuses_when_the_ring_overwrote_its_window() {
         refusal,
         crate::Error::Bound("interrupted window overwritten")
     ));
+}
+
+#[test]
+fn a_finished_run_certifies_its_end_after_its_last_minute() {
+    // Goal: a finished run ends in a canonical terminal publication, so whichever process comes
+    // next knows it is complete rather than rereading its source (P01.5, P02.3).
+    // Method: finish the writer after three minutes, step the worker past them, read the frontier
+    // through a new Store, then step a new worker, which must find nothing to do.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    recording.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    for _minute in 0..3 {
+        assert!(matches!(
+            recording.persist(&store, &mut state),
+            Progress::Sealed
+        ));
+    }
+
+    let progress = recording.persist(&store, &mut state);
+
+    assert!(matches!(progress, Progress::Complete));
+    drop(store);
+    let reopened = Store::open(&recording.root).unwrap();
+    let frontier = recording.frontier(&reopened).unwrap();
+    assert!(frontier.complete());
+    assert_eq!(frontier.publication_end(), 5);
+    assert_eq!(frontier.event_end(), 5);
+    let next = recording.persist(&reopened, &mut RunState::default());
+    assert!(matches!(next, Progress::Complete));
+    let again = recording.persist(&reopened, &mut state);
+    assert!(matches!(again, Progress::Complete));
+}
+
+#[test]
+fn a_run_finished_before_its_first_publication_certifies_its_end() {
+    // Goal: an empty run is complete too, with no invented window (P02.3).
+    // Method: finish the writer with nothing published, step the worker, read the frontier.
+    let mut recording = Recording::new();
+    recording.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&store, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Complete));
+    let frontier = recording.frontier(&store).unwrap();
+    assert!(frontier.complete());
+    assert_eq!(frontier.publication_end(), 1);
+    assert_eq!(frontier.event_end(), 1);
+    assert!(recording.saved_windows().is_empty());
+    assert_eq!(
+        recording.saved_terminal().lifecycle,
+        Lifecycle::AcquiredCompletion
+    );
+}
+
+#[test]
+fn a_live_run_waits_at_its_newest_minute_until_it_finishes() {
+    // Goal: the last minute of a running collector stays open, and so does its end (P01.2).
+    // Method: with a live pid and clocks past this process's start, step over an empty ring,
+    // then two minutes, then finish the writer and step to the end.
+    let mut recording = Recording::new();
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    assert!(matches!(
+        recording.persist_live(&store, &mut state),
+        Progress::Waiting
+    ));
+    recording.publish_minutes(LIVE_MINUTE..LIVE_MINUTE + 2);
+
+    let sealed = recording.persist_live(&store, &mut state);
+    let waiting = recording.persist_live(&store, &mut state);
+    recording.writer.finish();
+    let last = recording.persist_live(&store, &mut state);
+    let complete = recording.persist_live(&store, &mut state);
+
+    assert!(matches!(sealed, Progress::Sealed));
+    assert!(matches!(waiting, Progress::Waiting));
+    assert!(matches!(last, Progress::Sealed));
+    assert!(matches!(complete, Progress::Complete));
+    assert_eq!(
+        recording.saved_terminal().lifecycle,
+        Lifecycle::AcquiredCompletion
+    );
+}
+
+#[test]
+fn a_run_whose_writer_died_saves_its_last_minute_and_certifies_its_end() {
+    // Goal: a crashed collector costs nothing the ring holds, and its run still ends (P01.2).
+    // Method: publish without finishing, step with a pid that is gone until the run completes,
+    // and read that the terminal names a dead generation rather than a completion.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    for _minute in 0..3 {
+        assert!(matches!(
+            recording.persist(&store, &mut state),
+            Progress::Sealed
+        ));
+    }
+
+    let progress = recording.persist(&store, &mut state);
+
+    assert!(matches!(progress, Progress::Complete));
+    let frontier = recording.frontier(&store).unwrap();
+    assert!(frontier.complete());
+    assert_eq!(frontier.publication_end(), 5);
+    assert_eq!(frontier.event_end(), 5);
+    assert_eq!(
+        recording.saved_terminal().lifecycle,
+        Lifecycle::DeadGeneration
+    );
+}
+
+#[test]
+fn a_certified_run_stays_complete_when_its_source_is_gone() {
+    // Goal: a certified end needs no source, so a reboot before retiring the run stops nothing.
+    // Method: finish a run, certify it, remove its source, and step a new worker.
+    let mut recording = Recording::new();
+    recording.writer.finish();
+    let first = Store::open(&recording.root).unwrap();
+    recording.persist(&first, &mut RunState::default());
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Complete));
+}
+
+/// A writer that died after writing two events of its first tick, before publishing the tick.
+fn recording_with_withheld_events() -> Recording {
+    let mut recording = Recording::new();
+    recording.publish_events_in_minute(0, 2);
+    recording.withhold_publications_past(0);
+    recording
+}
+
+#[test]
+fn a_captured_run_keeps_the_identities_of_events_its_writer_never_published() {
+    // Goal: the terminal of a captured run saves each event's identity with its row (P02.5).
+    // Method: withhold the only publication of a captured ring, step once, read the terminal.
+    let mut recording = Recording::captured();
+    recording.publish_events_in_minute(0, 2);
+    recording.withhold_publications_past(0);
+    let store = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&store, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Complete));
+    let terminal = recording.saved_terminal();
+    let Body::Events(events) = terminal.body else {
+        panic!("a terminal holds events");
+    };
+    assert!(events.identities);
+    assert_eq!(events.recovery.rows, 2);
+}
+
+#[test]
+fn a_terminal_with_rows_saved_and_no_source_holds_the_slot() {
+    // Goal: rows no proof covers are neither published nor dropped once the source is gone.
+    // Method: stop with the batch whole and no proof, remove the source, restart, and step this
+    // run and another, which both wait.
+    let mut recording = recording_with_withheld_events();
+    let mut other = recording.another_run();
+    other.publish_in_minute(0);
+    other.publish_in_minute(1);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_terminal(&first, Interruption::EventsStaged);
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let own = recording.persist(&restarted, &mut RunState::default());
+    let next = other.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(own, Progress::Unavailable));
+    assert!(matches!(next, Progress::Deferred));
+}
+
+/// Stops the terminal seal of two withheld events at the interruption, restarts, and expects the
+/// same end as a seal nothing interrupted.
+fn interrupted_terminal_converges(interruption: Interruption) {
+    let recording = recording_with_withheld_events();
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_terminal(&first, interruption);
+    drop(first);
+    let restarted = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+
+    let mut progress = recording.persist(&restarted, &mut state);
+    if matches!(progress, Progress::Sealed) {
+        progress = recording.persist(&restarted, &mut state);
+    }
+
+    assert!(matches!(progress, Progress::Complete));
+    let frontier = recording.frontier(&restarted).unwrap();
+    assert!(frontier.complete());
+    assert_eq!(frontier.event_end(), 3);
+    let terminal = recording.saved_terminal();
+    let Body::Events(events) = terminal.body else {
+        panic!("a terminal holds events");
+    };
+    assert_eq!(events.recovery.rows, 2);
+    assert_eq!(events.recovery.losses, crate::Losses::default());
+}
+
+#[test]
+fn events_a_dying_writer_never_published_are_saved_in_the_terminal() {
+    // Goal: the worker saves events past the last publication and certifies them (P02.3).
+    // Method: withhold the only publication, step once, and read the terminal's rows.
+    let recording = recording_with_withheld_events();
+    let store = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&store, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Complete));
+    let terminal = recording.saved_terminal();
+    assert_eq!(terminal.lifecycle, Lifecycle::DeadGeneration);
+    let Body::Events(events) = terminal.body else {
+        panic!("a terminal holds events");
+    };
+    assert_eq!(events.recovery.rows, 2);
+    assert_eq!(recording.frontier(&store).unwrap().event_end(), 3);
+}
+
+#[test]
+fn a_terminal_seal_interrupted_after_registering_converges() {
+    // Goal: a process ending before any terminal row costs nothing (P02.3).
+    // Method: stop after registering, restart, and read the terminal.
+    interrupted_terminal_converges(Interruption::Registered);
+}
+
+#[test]
+fn a_terminal_seal_interrupted_inside_its_rows_converges() {
+    // Goal: a torn terminal batch is written again from the finished source (P02.3).
+    // Method: tear the only batch, restart, and read the terminal.
+    interrupted_terminal_converges(Interruption::EventBatchTorn);
+}
+
+#[test]
+fn a_terminal_seal_interrupted_with_its_rows_saved_converges() {
+    // Goal: rows with no proof are written again rather than trusted (P02.3).
+    // Method: stop with the batch whole and no proof, restart, and read the terminal.
+    interrupted_terminal_converges(Interruption::EventsStaged);
+}
+
+#[test]
+fn a_terminal_seal_interrupted_after_its_proof_converges() {
+    // Goal: durable terminal metadata finishes publishing at restart (P02.3).
+    // Method: stop after the proof, restart, and read the terminal.
+    interrupted_terminal_converges(Interruption::Proved);
+}
+
+#[test]
+fn a_terminal_seal_interrupted_at_each_publication_step_converges() {
+    // Goal: every durable step of a terminal publication goes on to the same end (P02.3).
+    // Method: stop after each step count, restart, and read the terminal. The helper stops at
+    // Idle, so the last count covers a publication that has finished.
+    for steps in 1..=PUBLICATION_STEPS {
+        interrupted_terminal_converges(Interruption::PublicationSteps(steps));
+    }
+}
+
+#[test]
+fn a_proved_terminal_publishes_when_its_source_is_gone() {
+    // Goal: durable terminal metadata needs no source, so a reboot after it loses nothing.
+    // Method: stop after the proof, remove the source, restart, and read the frontier.
+    let mut recording = recording_with_withheld_events();
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_terminal(&first, Interruption::Proved);
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+
+    let finished = recording.persist(&restarted, &mut state);
+    let progress = recording.persist(&restarted, &mut state);
+
+    assert!(matches!(finished, Progress::Sealed));
+    assert!(matches!(progress, Progress::Complete));
+    assert_eq!(recording.frontier(&restarted).unwrap().event_end(), 3);
 }
 
 #[test]

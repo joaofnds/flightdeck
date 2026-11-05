@@ -227,6 +227,9 @@ fn remap(reader: &mut RingReader) -> Result<()> {
     }
     replacement.seek_publication(publication)?;
     replacement.seek_event(event)?;
+    if reader.ended() {
+        replacement.set_writer_gone();
+    }
     *reader = replacement;
     Ok(())
 }

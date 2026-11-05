@@ -54,7 +54,6 @@ impl Store {
             || state.row_plan.is_some()
             || state.salvage.is_some()
             || state.input.is_finite()
-            || !matches!(state.input.operation, AttemptOperation::Ordinary { .. })
         {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -119,6 +118,19 @@ impl Store {
         attempt.abandon(&saved)?;
         Ok(true)
     }
+
+    /// Clears the slot of a terminal attempt that has rows but no proof, with its source held and
+    /// says whether it did. A finished source reads the same again, so the next scan writes them.
+    pub(crate) fn abandon_terminal_attempt(&self, budget: &Arc<ByteBudget>) -> crate::Result<bool> {
+        let mut attempt = self.resume_attempt()?;
+        if !matches!(attempt.input.operation, AttemptOperation::Terminal { .. }) {
+            return Ok(false);
+        }
+
+        let saved = attempt.saved(budget)?;
+        attempt.abandon(&saved)?;
+        Ok(true)
+    }
 }
 
 impl RegisteredAttempt<'_> {
@@ -174,20 +186,30 @@ impl RegisteredAttempt<'_> {
         Ok(())
     }
 
-    /// Removes the attempt's empty directories before its slot, so a process that ends between
-    /// the two finds the same empty attempt again rather than a directory nothing names.
+    /// Removes the attempt's files and directories before its slot, so a process that ends between
+    /// the two finds the same attempt again rather than a directory nothing names. An ordinary
+    /// attempt comes here with nothing saved, and a terminal one with what it reads again.
     fn abandon(self, saved: &Saved) -> io::Result<()> {
-        assert!(saved.nothing());
-        let events = self.events_directory_resumed()?;
-        restage_remove(&events, "index")?;
-        if let Some(ordinal) = saved.torn {
-            restage_remove(&events, &batch_name(ordinal))?;
+        let terminal = matches!(self.input.operation, AttemptOperation::Terminal { .. });
+        if terminal {
+            for ordinal in 0..saved.batches.len() + usize::from(saved.torn.is_some()) {
+                restage_remove(self.original_directory(), &batch_name(ordinal))?;
+            }
+        } else {
+            assert!(saved.nothing());
+            let events = self.events_directory_resumed()?;
+            restage_remove(&events, "index")?;
+            if let Some(ordinal) = saved.torn {
+                restage_remove(&events, &batch_name(ordinal))?;
+            }
+            events.full_sync()?;
+            drop(events);
+            self.original_directory().remove_directory("events")?;
         }
-        events.full_sync()?;
-        drop(events);
-        self.original_directory().remove_directory("events")?;
         self.original_directory().full_sync()?;
-        let base = self.root.open_directory("data")?;
+        let base = self
+            .root
+            .open_directory(if terminal { "recovery-data" } else { "data" })?;
         let name = collector::recording::identity_text(self.transaction).to_string();
         let object = base.open_directory(&name)?;
         object.remove_directory("pending")?;

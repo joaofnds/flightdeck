@@ -2,29 +2,29 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The header word that holds the newest event's number, in every ring layout.
-pub(super) const HEADER_EVENT_NEWEST: usize = 7;
+pub const HEADER_EVENT_NEWEST: usize = 7;
 
 /// A copy of a ring under a generation of its own, with one word changed, as another program
 /// writing the shared memory, or a writer before the event room guard, could leave it.
-pub(super) struct WritableSource {
+pub struct WritableSource {
     address: *mut std::ffi::c_void,
     original: *mut std::ffi::c_void,
     bytes: usize,
-    pub(super) name: String,
+    pub name: String,
     fault: ForgedWord,
 }
 
 /// The word at `index` changed to `value` while the word at `watched` holds `expected`, so the
 /// copy follows the real writer once it moves past the state the change forges.
-pub(super) struct ForgedWord {
-    pub(super) watched: usize,
-    pub(super) expected: u64,
-    pub(super) index: usize,
-    pub(super) value: u64,
+pub struct ForgedWord {
+    pub watched: usize,
+    pub expected: u64,
+    pub index: usize,
+    pub value: u64,
 }
 
 impl WritableSource {
-    pub(super) fn new(name: &str, bytes: usize, fault: ForgedWord) -> Self {
+    pub fn new(name: &str, bytes: usize, fault: ForgedWord) -> Self {
         let target = format!("{}.99", name.rsplit_once('.').unwrap().0);
         let name = std::ffi::CString::new(name).unwrap();
         let descriptor = unsafe { shm_open(name.as_ptr(), 0) };
@@ -53,7 +53,7 @@ impl WritableSource {
         snapshot
     }
 
-    pub(super) fn refresh(&self) {
+    pub fn refresh(&self) {
         // A forged state follows the real writer until the watched word moves on. There is no
         // concurrent writer during this bounded copy or the following worker pass.
         let original = unsafe {

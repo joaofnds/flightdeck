@@ -139,6 +139,7 @@ impl RegisteredAttempt<'_> {
         &self,
         recovery: &crate::event_recovery::Recovery,
         batches: &[crate::event_recovery::Batch],
+        lifecycle: Lifecycle,
     ) -> io::Result<CanonicalMetadata> {
         let AttemptOperation::Terminal { event_end } = self.input.operation else {
             return Err(invalid());
@@ -163,7 +164,7 @@ impl RegisteredAttempt<'_> {
             source_layout: self.input.source.layout,
             source_origin: self.input.source.origin_continuous_ns,
             evidence: EndpointEvidence::FixedSource,
-            lifecycle: Lifecycle::AcquiredCompletion,
+            lifecycle,
             captured: self.input.captured,
             trailing_unknown: false,
             loss,
@@ -214,7 +215,12 @@ impl<'store> RegisteredAttempt<'store> {
         let reservation = budget
             .reserve(256 * 1024)
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
-        let draft = self.terminal_draft(recovery, batches)?;
+        let lifecycle = if reader.completed() {
+            Lifecycle::AcquiredCompletion
+        } else {
+            Lifecycle::DeadGeneration
+        };
+        let draft = self.terminal_draft(recovery, batches, lifecycle)?;
         self.begin_proof(draft, reader, budget, reservation)
     }
     fn begin_proof(
@@ -1675,7 +1681,7 @@ fn validate_metadata(metadata: &CanonicalMetadata, state: &NormalState) -> io::R
         AttemptOperation::Terminal { event_end }
             if metadata.kind == CanonicalKind::Terminal
                 && metadata.loss.event_end == event_end
-                && metadata.lifecycle == Lifecycle::AcquiredCompletion
+                && metadata.certified_terminal()
                 && metadata.evidence == EndpointEvidence::FixedSource
                 && metadata.loss.publication_end == input.losses.publication_inherited_end => {}
         _ => return Err(invalid()),

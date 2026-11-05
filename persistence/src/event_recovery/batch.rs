@@ -50,8 +50,22 @@ pub(crate) fn write_tail(
     reader: RingReader,
     run: &RunIdentity,
     coverage: std::ops::Range<u64>,
+    losses: Losses,
+    memory_limit: usize,
+) -> Result<Manifest> {
+    write_tail_into(reader, run, coverage, losses, memory_limit, |index| {
+        crate::encoder::encode_open(&pending.join(super::batch_name(index)))
+    })
+}
+
+/// Writes the tail into the file `create` gives for each batch, by its position among them.
+pub(crate) fn write_tail_into<File: std::io::Write>(
+    reader: RingReader,
+    run: &RunIdentity,
+    coverage: std::ops::Range<u64>,
     mut losses: Losses,
     memory_limit: usize,
+    mut create: impl FnMut(usize) -> Result<File>,
 ) -> Result<Manifest> {
     let budget = Arc::new(ByteBudget::new(memory_limit));
     let _reservation = budget
@@ -90,10 +104,7 @@ pub(crate) fn write_tail(
         if !rows.is_empty() {
             let mut frame = frame(&rows, captured)?;
             validate_frame(&frame, captured)?;
-            crate::encoder::encode_write(
-                &mut frame,
-                crate::encoder::encode_open(&pending.join(super::batch_name(index)))?,
-            )?;
+            crate::encoder::encode_write(&mut frame, create(index)?)?;
             let batch = Batch {
                 first: rows[0].event.number,
                 end: rows[rows.len() - 1].event.number + 1,

@@ -12,7 +12,7 @@ mod discovery;
 pub(crate) mod metadata;
 pub(crate) mod read;
 
-pub(crate) use batch::write_tail;
+pub(crate) use batch::{write_tail, write_tail_into};
 pub use discovery::{Discovery, DiscoveryPage};
 pub(crate) use metadata::Manifest;
 pub use read::read_page;

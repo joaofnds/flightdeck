@@ -2,16 +2,18 @@
 
 use std::sync::Arc;
 
-use collector::ring::{Found, PublicationTiming, RingReader};
+use collector::ring::{Found, PublicationTiming, RingReader, RunIdentity};
 
 use super::{
-    Derivation, Limits, Progress, RegisteredRun, Result, RunState, SourceState, Staged, Store,
-    Window, WindowIdentity, Writers,
+    Derivation, Limits, Progress, RegisteredRun, Result, RunState, SourceState, Store, Window,
+    WindowIdentity, Writers,
 };
 use crate::canonical::ReadWork;
 use crate::event_recovery::Batch;
 use crate::resources::{ByteBudget, WORKING_BYTES_MAX};
-use crate::store::{Interrupted, ProofStep, PublicationLedger, PublicationStep, RegisteredAttempt};
+use crate::store::{
+    Interrupted, NormalProof, ProofStep, PublicationLedger, PublicationStep, RegisteredAttempt,
+};
 use crate::transaction::{AttemptInput, AttemptOperation, LossTransfer, Predecessor, SourceTiming};
 
 /// More steps than the largest publication takes, so a publication that stops moving fails.
@@ -52,18 +54,40 @@ pub(super) fn persist_one(
     if interrupted.is_some_and(|attempt| attempt != Interrupted::Staging(registered.identity)) {
         return Ok(Progress::Deferred);
     }
+    if interrupted.is_none() && !state.loaded && persist_one_certified(store, registered, &budget)?
+    {
+        state.source = SourceState::Complete;
+        return Ok(Progress::Complete);
+    }
     let Some(mut reader) = super::persist_one_open(registered, state)? else {
         return Ok(Progress::Unavailable);
     };
+    let mut newest = None;
+    if super::persist_one_closed(&mut reader, &mut newest, registered.collector_pid, closed)? {
+        reader.set_writer_gone();
+    }
     if interrupted.is_some() {
-        recover_staging(store, writers, registered, reader, state, &budget)?;
+        if !store.abandon_terminal_attempt(&budget)? {
+            recover_staging(store, writers, registered, reader, state, &budget)?;
+        }
         return Ok(Progress::Sealed);
     }
     if !state.loaded {
         persist_one_load(store, registered, &mut reader, state, &budget)?;
     }
 
-    persist_one_scan(store, writers, registered, reader, closed, state, &budget)
+    persist_one_scan(store, writers, registered, reader, newest, state, &budget)
+}
+
+/// Whether a terminal publication already certifies the run's end, which takes no source.
+fn persist_one_certified(
+    store: &Store,
+    registered: &RegisteredRun,
+    budget: &Arc<ByteBudget>,
+) -> Result<bool> {
+    let frontier = store.source_frontier(&registered.identity, budget, &mut ReadWork::default())?;
+
+    Ok(frontier.is_some_and(|frontier| frontier.complete()))
 }
 
 /// Looks past lost publications for the next ready window of the run, and seals it.
@@ -72,24 +96,20 @@ fn persist_one_scan(
     writers: &Writers<'_>,
     registered: &RegisteredRun,
     mut reader: RingReader,
-    closed: bool,
+    newest: Option<PublicationTiming>,
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<Progress> {
-    let mut newest = None;
-    let closed =
-        super::persist_one_closed(&mut reader, &mut newest, registered.collector_pid, closed)?;
     let mut timing = PublicationTiming::default();
     for _step in 0..reader.shape().slot_count + 2 {
         match reader.read_timing_into(&mut timing)? {
             Found::Nothing => {
-                return match super::persist_one_stage_end(&reader, registered, closed, state)? {
-                    Staged::Window(_) | Staged::Terminal => {
-                        Err(crate::Error::Bound("registered terminal source"))
-                    }
-                    Staged::Waiting => Ok(Progress::Waiting),
-                    Staged::Complete => Ok(Progress::Complete),
-                };
+                if !reader.ended() || reader.next_publication() <= reader.publication_newest()? {
+                    return Ok(Progress::Waiting);
+                }
+
+                seal_terminal(store, registered, reader, state, budget)?;
+                return Ok(Progress::Complete);
             }
             Found::Missed { first, end } => {
                 state.losses.publications += end - first;
@@ -100,7 +120,7 @@ fn persist_one_scan(
                     run: registered.identity,
                     window: super::timing_window_number(&reader, &timing)?,
                 };
-                if !super::window_ready(&reader, newest.as_ref(), &identity, closed)? {
+                if !super::window_ready(&reader, newest.as_ref(), &identity, reader.ended())? {
                     state.next_publication = publication;
                     return Ok(Progress::Waiting);
                 }
@@ -170,13 +190,80 @@ fn seal(
     Ok(())
 }
 
+/// Saves what the finished source holds past the last window, and certifies the run's end.
+fn seal_terminal(
+    store: &Store,
+    registered: &RegisteredRun,
+    mut reader: RingReader,
+    state: &mut RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<()> {
+    let input = seal_terminal_input(store, registered, &reader, state, budget)?;
+    let AttemptOperation::Terminal { event_end } = input.operation else {
+        return Err(crate::Error::Bound("terminal attempt operation"));
+    };
+    let attempt = store.register_attempt(&input, &mut reader, budget)?;
+    let manifest = crate::event_recovery::write_tail_into(
+        reader,
+        &registered.identity,
+        input.losses.event_start..event_end,
+        state.losses,
+        usize::try_from(memory_limit(state)).map_err(|_| crate::Error::Bound("memory limit"))?,
+        |index| {
+            let ordinal = u32::try_from(index).map_err(|_| crate::Error::Bound("event batch"))?;
+            Ok(attempt.create_event_batch(ordinal)?)
+        },
+    )?;
+
+    let mut reader = RingReader::open_generation(&registered.ring_name)?;
+    reader.set_writer_gone();
+    let proof = attempt.prove_terminal(&manifest.recovery, &manifest.batches, reader, budget)?;
+    seal_publish_proof(proof)?;
+    state.next_publication = input.losses.publication_inherited_end;
+    state.next_event = manifest.recovery.events_end;
+    state.losses = crate::Losses::default();
+    state.source = SourceState::Complete;
+
+    Ok(())
+}
+
+fn seal_terminal_input(
+    store: &Store,
+    registered: &RegisteredRun,
+    reader: &RingReader,
+    state: &RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<AttemptInput> {
+    let event_end = reader
+        .event_newest()?
+        .checked_add(1)
+        .ok_or(crate::Error::Bound("terminal event end"))?;
+    let publication_end = reader
+        .publication_newest()?
+        .checked_add(1)
+        .ok_or(crate::Error::Bound("terminal publication end"))?;
+
+    seal_input_of(
+        store,
+        reader,
+        &registered.identity,
+        AttemptOperation::Terminal { event_end },
+        publication_end,
+        state,
+        budget,
+    )
+}
+
 fn seal_publish(
     attempt: RegisteredAttempt<'_>,
     manifest: &crate::Manifest,
     reader: RingReader,
     budget: &Arc<ByteBudget>,
 ) -> Result<()> {
-    let mut proof = attempt.prove_ordinary(manifest, reader, budget)?;
+    seal_publish_proof(attempt.prove_ordinary(manifest, reader, budget)?)
+}
+
+fn seal_publish_proof(mut proof: NormalProof<'_>) -> Result<()> {
     for _step in 0..PUBLICATION_STEPS_MAX {
         if proof.step()? == ProofStep::Complete {
             break;
@@ -207,6 +294,7 @@ fn recover_staging(
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<()> {
+    let writer_gone = reader.ended();
     let ledger = PublicationLedger::new(budget)?;
     let proved = store
         .resume_ordinary_proof(reader, budget, &ledger)
@@ -225,9 +313,12 @@ fn recover_staging(
         "persister interrupted window staged again after {refusal}"
     ));
 
-    let Some(reader) = super::persist_one_open(registered, state)? else {
+    let Some(mut reader) = super::persist_one_open(registered, state)? else {
         return Err(crate::Error::Bound("interrupted attempt lost its source"));
     };
+    if writer_gone {
+        reader.set_writer_gone();
+    }
     recover_staging_again(store, writers, reader, state, budget)
 }
 
@@ -309,7 +400,34 @@ fn seal_input(
     state: &RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<AttemptInput> {
-    let frontier = store.source_frontier(&identity.run, budget, &mut ReadWork::default())?;
+    let operation = AttemptOperation::Ordinary {
+        window: identity.window,
+        attempted_origin: publication,
+    };
+
+    seal_input_of(
+        store,
+        reader,
+        &identity.run,
+        operation,
+        publication,
+        state,
+        budget,
+    )
+}
+
+/// The attempt that takes the source from its frontier, charging the publications the scan found
+/// lost up to `publication_end`.
+fn seal_input_of(
+    store: &Store,
+    reader: &RingReader,
+    run: &RunIdentity,
+    operation: AttemptOperation,
+    publication_end: u64,
+    state: &RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<AttemptInput> {
+    let frontier = store.source_frontier(run, budget, &mut ReadWork::default())?;
     let (predecessor, publication_start, event_start, prior_window) = match &frontier {
         Some(frontier) => (
             frontier.predecessor().clone(),
@@ -326,18 +444,15 @@ fn seal_input(
     };
 
     Ok(AttemptInput {
-        run: identity.run,
-        operation: AttemptOperation::Ordinary {
-            window: identity.window,
-            attempted_origin: publication,
-        },
+        run: *run,
+        operation,
         captured: reader.dictionary_capacity().is_some(),
         source: SourceTiming::from_reader(reader),
         binding: reader.object_binding()?,
         losses: LossTransfer {
             predecessor,
             publication_start,
-            publication_inherited_end: publication,
+            publication_inherited_end: publication_end,
             event_start,
             event_inherited_end: event_start,
             publications: state.losses.publications,

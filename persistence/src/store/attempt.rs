@@ -475,7 +475,7 @@ pub(super) fn validate_terminal_source(
     let generation = reader.generation();
     // Completion acquire precedes the final header reads, including when a previous
     // read returned Nothing just before the producer's last publication.
-    if !reader.completed() {
+    if !reader.ended() {
         return Err(unresolved("terminal source is not complete"));
     }
     let publication_end = reader

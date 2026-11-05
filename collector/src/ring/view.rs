@@ -31,6 +31,7 @@ pub struct TickBuffers {
 /// A mapping and cursors, without owned reading buffers.
 pub struct RingReader {
     opened: Opened,
+    writer_gone: bool,
 }
 
 /// Publication timing alone; a coherent value does not validate the reading's payload.
@@ -106,6 +107,7 @@ impl RingReader {
     pub fn open(lock_path: &Path) -> io::Result<Self> {
         Ok(Self {
             opened: Opened::open_named(lock_path)?,
+            writer_gone: false,
         })
     }
 
@@ -113,6 +115,7 @@ impl RingReader {
     pub fn open_generation(name: &str) -> io::Result<Self> {
         Ok(Self {
             opened: Opened::open_name(LockedName::from_str(name)?)?,
+            writer_gone: false,
         })
     }
 
@@ -189,6 +192,18 @@ impl RingReader {
             return false;
         }
         self.opened.mapping.words()[layout::HEADER_COMPLETED].load(Ordering::Acquire) == 1
+    }
+
+    /// Takes this source as one nothing can extend, on the caller's own evidence that its writer
+    /// is gone, since a writer that crashed never marks it completed.
+    pub fn set_writer_gone(&mut self) {
+        self.writer_gone = true;
+    }
+
+    /// Whether nothing can extend the source, because its writer said so or is gone.
+    #[must_use]
+    pub fn ended(&self) -> bool {
+        self.writer_gone || self.completed()
     }
 
     /// Reads into caller storage. Only a returned publication makes its contents valid.
