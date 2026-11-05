@@ -330,7 +330,7 @@ mod tests {
             let number = NEXT.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir()
                 .join(format!("disk-persistence-{}-{number}", std::process::id()));
-            std::fs::create_dir(&path).unwrap();
+            collector::recording::private::create_private_dir(&path).unwrap();
             Self(path)
         }
     }

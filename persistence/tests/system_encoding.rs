@@ -254,7 +254,7 @@ mod tests {
             let number = NEXT.fetch_add(1, Ordering::Relaxed);
             let directory = std::env::temp_dir()
                 .join(format!("system-encoding-{}-{number}", std::process::id()));
-            std::fs::create_dir(&directory).unwrap();
+            collector::recording::private::create_private_dir(&directory).unwrap();
             let place = Place {
                 lock_path: directory.join("lock"),
                 name_prefix: "fdsysenc".into(),
@@ -355,7 +355,7 @@ mod tests {
         /// The window's `table`, sealed to Parquet and read back as a recording is read.
         fn encoded(&self, window: &Window, table: Table) -> Normalized {
             let pending = self.directory.join("encoded");
-            std::fs::create_dir(&pending).unwrap();
+            collector::recording::private::create_private_dir(&pending).unwrap();
             Encoder.encode(window, &pending).unwrap();
             let path = pending.join(format!("{}.parquet", table.name()));
             normalize(&Engine::new(), table, TableSource::Parquet(&path)).unwrap()

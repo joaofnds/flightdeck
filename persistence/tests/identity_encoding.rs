@@ -50,7 +50,7 @@ mod tests {
             let number = NEXT.fetch_add(1, Ordering::Relaxed);
             let directory = std::env::temp_dir()
                 .join(format!("identity-encoder-{}-{number}", std::process::id()));
-            std::fs::create_dir(&directory).unwrap();
+            collector::recording::private::create_private_dir(&directory).unwrap();
             let place = Place {
                 lock_path: directory.join("lock"),
                 name_prefix: "fdidenc".into(),
@@ -376,7 +376,7 @@ mod tests {
         let pending = fixture
             .directory
             .join(format!("encoded-{}", window.identity.window));
-        std::fs::create_dir(&pending).unwrap();
+        collector::recording::private::create_private_dir(&pending).unwrap();
         Encoder.encode(window, &pending).unwrap();
         let engine = persistence::engine::Engine::new();
         let source = |table: persistence::schema::Table| {

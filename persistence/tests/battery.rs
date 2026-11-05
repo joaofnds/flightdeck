@@ -490,7 +490,7 @@ mod tests {
                 "battery-persistence-{}-{number}",
                 std::process::id()
             ));
-            std::fs::create_dir(&path).unwrap();
+            collector::recording::private::create_private_dir(&path).unwrap();
             Self(path)
         }
     }
