@@ -33,6 +33,18 @@ impl Writer {
         let budget = Arc::new(crate::resources::ByteBudget::new(
             usize::try_from(memory_limit).map_err(|_| Error::Bound("event stream memory"))?,
         ));
+
+        Self::charged(directory, identity, first, identities, &budget)
+    }
+
+    /// A writer whose working memory comes out of a budget it shares with the rest of the seal.
+    pub(crate) fn charged(
+        directory: PrivateDirectory,
+        identity: WindowIdentity,
+        first: u64,
+        identities: bool,
+        budget: &Arc<crate::resources::ByteBudget>,
+    ) -> Result<Self> {
         let reservation = budget
             .reserve(batch::WORKING_BYTES)
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;

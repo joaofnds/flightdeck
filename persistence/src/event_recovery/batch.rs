@@ -53,7 +53,9 @@ pub(crate) fn write_tail(
     losses: Losses,
     memory_limit: usize,
 ) -> Result<Manifest> {
-    write_tail_into(reader, run, coverage, losses, memory_limit, |index| {
+    let budget = Arc::new(ByteBudget::new(memory_limit));
+
+    write_tail_into(reader, run, coverage, losses, &budget, |index| {
         crate::encoder::encode_open(&pending.join(super::batch_name(index)))
     })
 }
@@ -64,10 +66,9 @@ pub(crate) fn write_tail_into<File: std::io::Write>(
     run: &RunIdentity,
     coverage: std::ops::Range<u64>,
     mut losses: Losses,
-    memory_limit: usize,
+    budget: &Arc<ByteBudget>,
     mut create: impl FnMut(usize) -> Result<File>,
 ) -> Result<Manifest> {
-    let budget = Arc::new(ByteBudget::new(memory_limit));
     let _reservation = budget
         .reserve(WORKING_BYTES)
         .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;

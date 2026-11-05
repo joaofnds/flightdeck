@@ -230,7 +230,14 @@ fn seal_registered(
     let losses_before = state.losses;
     reader.seek_publication(selection.publication)?;
     reader.seek_event(attempt.input().losses.event_start)?;
-    let window = seal_stage(&attempt, &mut reader, selection.identity, &[], state)?;
+    let window = seal_stage(
+        &attempt,
+        &mut reader,
+        selection.identity,
+        &[],
+        state,
+        budget,
+    )?;
     if window.tick_count() == 0 {
         // The attempt names a publication the ring no longer holds, and an ordinary publication
         // starts at the publication it names. Nothing is saved, so the next scan selects again.
@@ -271,7 +278,7 @@ fn seal_terminal(
         &registered.identity,
         input.losses.event_start..event_end,
         state.losses,
-        usize::try_from(memory_limit(state)).map_err(|_| crate::Error::Bound("memory limit"))?,
+        budget,
         |index| {
             let ordinal = u32::try_from(index).map_err(|_| crate::Error::Bound("event batch"))?;
             Ok(attempt.create_event_batch(ordinal)?)
@@ -415,7 +422,14 @@ fn recover_staging_again(
         run: input.run,
         window,
     };
-    let window = seal_stage(&attempt, &mut reader, identity, &saved.batches, state)?;
+    let window = seal_stage(
+        &attempt,
+        &mut reader,
+        identity,
+        &saved.batches,
+        state,
+        budget,
+    )?;
     // Events the ring lost since are the window's to count, but a lost publication would change
     // what the window holds, and the proof needs that unchanged.
     if state.losses.publications != input.losses.publications {
@@ -547,15 +561,16 @@ fn seal_stage(
     identity: WindowIdentity,
     saved: &[Batch],
     state: &mut RunState,
+    budget: &Arc<ByteBudget>,
 ) -> Result<Window> {
     let limits = Limits::from_shape(&reader.shape())?;
     let mut tick = crate::tick_buffer(&reader.shape())?;
-    let events = crate::event_table::writer::Writer::new(
+    let events = crate::event_table::writer::Writer::charged(
         attempt.events_directory()?,
         identity,
         reader.next_event(),
         reader.dictionary_capacity().is_some(),
-        memory_limit(state),
+        budget,
     )?
     .resume(saved);
     let mut staged = super::staging::Staging::new(reader, identity, limits, events);

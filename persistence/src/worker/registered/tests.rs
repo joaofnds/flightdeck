@@ -501,7 +501,8 @@ impl Recording {
 
         reader.seek_publication(publication).unwrap();
         reader.seek_event(input.losses.event_start).unwrap();
-        let window = super::seal_stage(&attempt, &mut reader, identity, &[], &mut state).unwrap();
+        let window =
+            super::seal_stage(&attempt, &mut reader, identity, &[], &mut state, &budget).unwrap();
         let pending = self
             .root
             .join("data")
@@ -570,7 +571,7 @@ impl Recording {
             &registered.identity,
             input.losses.event_start..event_end,
             state.losses,
-            256 * 1024 * 1024,
+            &budget,
             |index| Ok(attempt.create_event_batch(u32::try_from(index).unwrap())?),
         )
         .unwrap();
@@ -653,7 +654,15 @@ impl Recording {
 
         reader.seek_publication(reader.publication_first()).unwrap();
         reader.seek_event(reader.event_first()).unwrap();
-        super::seal_stage(&attempt, &mut reader, identity, &saved.batches, &mut state).unwrap();
+        super::seal_stage(
+            &attempt,
+            &mut reader,
+            identity,
+            &saved.batches,
+            &mut state,
+            &budget,
+        )
+        .unwrap();
     }
 
     fn only_event_batch(pending: &Path) -> PathBuf {
@@ -1881,6 +1890,42 @@ fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
 }
 
 #[test]
+fn a_seal_charges_its_event_writer_to_the_one_budget_it_was_given() {
+    // Goal: the worker's memory limit covers the event writer too, so a seal cannot reserve that
+    // limit twice (P02.4).
+    // Method: stage a registered attempt with a budget one byte short of the writer's working
+    // memory, which must refuse, then with exactly that much, which must stage.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let store = Store::open(&recording.root).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut state = RunState::default();
+    let identity = WindowIdentity {
+        run: recording.run,
+        window: 0,
+    };
+    let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
+    let input = super::seal_input(&store, &reader, &identity, 1, &state, &budget).unwrap();
+    let attempt = store
+        .register_attempt(&input, &mut reader, &budget)
+        .unwrap();
+    let working = crate::event_recovery::batch::WORKING_BYTES;
+    let short = Arc::new(ByteBudget::new(working - 1));
+    let enough = Arc::new(ByteBudget::new(working));
+    reader.seek_publication(1).unwrap();
+    reader.seek_event(input.losses.event_start).unwrap();
+
+    let refused = super::seal_stage(&attempt, &mut reader, identity, &[], &mut state, &short);
+    let staged = super::seal_stage(&attempt, &mut reader, identity, &[], &mut state, &enough);
+
+    assert!(matches!(
+        refused,
+        Err(crate::Error::Io(error)) if error.kind() == ErrorKind::OutOfMemory
+    ));
+    assert!(staged.is_ok());
+}
+
+#[test]
 fn the_whole_worker_saves_a_finished_run_retires_it_and_exits() {
     // Goal: the worker's own loop drives a registered recording to a certified end and lets go of
     // the run, and a later worker finds nothing left to do (P01.5, P02.3).
@@ -1909,6 +1954,31 @@ fn the_whole_worker_saves_a_finished_run_retires_it_and_exits() {
 
     assert!(matches!(again, Outcome::Complete));
     assert_eq!(recording.saved_windows().len(), 3);
+}
+
+#[test]
+fn the_whole_worker_retires_a_run_certified_before_it_could_retire_it() {
+    // Goal: a process that ended between certifying a run and retiring it leaves work a later
+    // worker finishes from what is durable, so that worker still lets go and exits (P01.5).
+    // Method: certify the run by stepping the worker, without retiring it, lose the ring, then
+    // run the whole worker and read the retirement.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    recording.writer.finish();
+    let run = recording.registered();
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    assert_eq!(persist_until_quiet(&recording, &store, &mut state), 3);
+    drop(store);
+    assert!(!Registry::completed(&recording.root, &run.identity, &run.ring_name).unwrap());
+    recording.lose_source();
+
+    let outcome = whole_worker(&recording.root, vec![run.clone()], &mut |_pause| {
+        panic!("a certified run gives the worker nothing to wait for")
+    });
+
+    assert!(matches!(outcome, Outcome::Complete));
+    assert!(Registry::completed(&recording.root, &run.identity, &run.ring_name).unwrap());
 }
 
 #[test]
