@@ -166,3 +166,22 @@ fn bounded_frames_refuse_schema_change_before_appending_rows() {
     writer.finish().unwrap();
     assert_eq!(read_metadata(&mut file).unwrap().num_rows, 1);
 }
+
+#[test]
+fn an_event_batch_keeps_no_bounds_of_its_values() {
+    // Goal: a batch pays for no statistics, since each row can hold two paths of 8 KiB and its
+    // table finds it through an index. Method: write a batch and read its file's metadata.
+    let mut frame = three_row_groups();
+    let mut file = Cursor::new(Vec::new());
+
+    super::encode_write_event_batch(&mut frame, &mut file).unwrap();
+
+    let metadata = read_metadata(&mut file).unwrap();
+    let column = metadata.row_groups[0].parquet_columns().first().unwrap();
+    let statistics = column.statistics(&metadata.footer_buf).unwrap().unwrap();
+    let polars_parquet::parquet::statistics::Statistics::Int64(values) = statistics else {
+        panic!("a fixture of integers has statistics of integers");
+    };
+    assert_eq!(values.min_value, None);
+    assert_eq!(values.max_value, None);
+}

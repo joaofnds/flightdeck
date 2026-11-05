@@ -105,7 +105,7 @@ pub(crate) fn write_tail_into<File: std::io::Write>(
         if !rows.is_empty() {
             let mut frame = frame(&rows, captured)?;
             validate_frame(&frame, captured)?;
-            crate::encoder::encode_write(&mut frame, create(index)?)?;
+            crate::encoder::encode_write_event_batch(&mut frame, create(index)?)?;
             let batch = Batch {
                 first: rows[0].event.number,
                 end: rows[rows.len() - 1].event.number + 1,

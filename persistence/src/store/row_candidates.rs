@@ -1034,7 +1034,7 @@ pub(super) fn write_batch(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             ledger.update(|work| work.canonical.creates += 1);
             let mut file = directory.create_file(name)?;
-            crate::encoder::encode_write(
+            crate::encoder::encode_write_event_batch(
                 expected,
                 &mut super::publication_ledger::LedgerWriter {
                     file: &mut file,

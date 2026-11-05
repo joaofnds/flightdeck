@@ -146,6 +146,16 @@ pub(crate) fn encode_write(frame: &mut DataFrame, file: impl std::io::Write) -> 
     writer.finish()
 }
 
+/// Writes one batch of a window's events, however many of them the window holds.
+pub(crate) fn encode_write_event_batch(
+    frame: &mut DataFrame,
+    file: impl std::io::Write,
+) -> Result<()> {
+    let mut writer = TableWriter::event_batch(frame, file)?;
+    writer.write(frame)?;
+    writer.finish()
+}
+
 /// What `frame` may take of memory for `table`, or why it refuses to build that frame.
 pub fn frame_bytes(table: Table, window: &Window) -> Result<u64> {
     Ok(collector::u64_from_usize(bounds::frame_bytes(

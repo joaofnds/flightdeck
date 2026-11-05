@@ -204,7 +204,7 @@ impl Writer {
         let file = self
             .directory
             .create_file(&crate::event_recovery::batch_name(self.index.batches.len()))?;
-        crate::encoder::encode_write(&mut frame, file)?;
+        crate::encoder::encode_write_event_batch(&mut frame, file)?;
         self.index.batches.push(Batch {
             first: self.rows[0].event.number,
             end: self.rows[self.rows.len() - 1].event.number + 1,
