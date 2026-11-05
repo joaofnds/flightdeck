@@ -440,16 +440,34 @@ mod tests {
             ..WorkerCost::default()
         };
         let mut persister = WorkerCost::default();
+        let mut clocks = ResourceClocks {
+            awake_ns: accounting.since + 60_000_000_000,
+            continuous_ns: accounting.since_continuous + 60_000_000_000,
+        };
         let mut affected = Vec::new();
         accounting
-            .report_to("minute", &mut collector, &mut persister, &mut affected)
+            .report_to_at(
+                "minute",
+                &clocks,
+                &mut collector,
+                &mut persister,
+                &mut affected,
+            )
             .unwrap();
         let affected = String::from_utf8(affected).unwrap();
         assert!(affected.contains("combined_percent=unavailable"));
         assert!(affected.contains("collector_cpu_complete=false"));
+        clocks.awake_ns += 60_000_000_000;
+        clocks.continuous_ns += 60_000_000_000;
         let mut recovered = Vec::new();
         accounting
-            .report_to("minute", &mut collector, &mut persister, &mut recovered)
+            .report_to_at(
+                "minute",
+                &clocks,
+                &mut collector,
+                &mut persister,
+                &mut recovered,
+            )
             .unwrap();
         let recovered = String::from_utf8(recovered).unwrap();
         assert!(!recovered.contains("combined_percent=unavailable"));
