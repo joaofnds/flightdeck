@@ -18,7 +18,7 @@ pub const ROWS_MAX: usize = 1_966_080;
 /// One independently decoded and validated event batch.
 pub const BATCH_ROWS_MAX: usize = 16_384;
 /// Owned numeric, identity and raw program payload before encoding overhead.
-pub const BATCH_BYTES_MAX: usize = 8 * 1024 * 1024;
+pub const BATCH_BYTES_MAX: usize = 16 * 1024 * 1024;
 
 /// Projects the actual complete group or a strict legacy associated group of the same types.
 #[must_use]

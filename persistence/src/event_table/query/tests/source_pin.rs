@@ -4,11 +4,14 @@ use crate::engine::EventSourcePin;
 #[test]
 fn multipart_capture_refuses_oversized_inputs_before_the_forwarding_factory() {
     // Goal: permanent physical-part oversize cannot become retryable budget pressure.
-    // Method: pin a private30MiBpart and compare capture with direct read at two ledger sizes.
+    // Method: pin a private part one byte over the decoder's limit and compare capture with direct
+    // read at two ledger sizes.
     let fixture = Fixture::new(1, 1);
     private::open_private_file_writable(&fixture.part(0))
         .unwrap()
-        .set_len(30 * 1024 * 1024)
+        .set_len(collector::u64_from_usize(
+            crate::event_observation::BATCH_BYTES_MAX * 3 + 1,
+        ))
         .unwrap();
     for maximum in [64 * 1024 * 1024, 256 * 1024 * 1024] {
         let budget = Arc::new(ByteBudget::new(maximum));

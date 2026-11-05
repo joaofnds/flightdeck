@@ -717,7 +717,8 @@ fn detached_event_inputs_are_collected_in_bounded_batches() {
 #[test]
 fn multipart_event_oversize_is_a_permanent_input_refusal_before_capture() {
     // Goal: a malformed physical part cannot appear as recoverable capacity blockage.
-    // Method: resize a real committed part to30MiBbefore pinning and trace the typed caller.
+    // Method: resize a real committed part past the decoder's limit before pinning and trace the
+    // typed caller.
     let fixture = sealed_recovered_events_minute();
     let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
@@ -727,7 +728,9 @@ fn multipart_event_oversize_is_a_permanent_input_refusal_before_capture() {
     drop((part, table));
     collector::recording::private::open_private_file_writable(&path)
         .unwrap()
-        .set_len(30 * 1024 * 1024)
+        .set_len(collector::u64_from_usize(
+            persistence::event_observation::BATCH_BYTES_MAX * 3 + 1,
+        ))
         .unwrap();
     let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();

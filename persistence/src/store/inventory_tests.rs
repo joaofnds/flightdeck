@@ -956,7 +956,8 @@ fn unknown_numeric_kind_never_becomes_complete() {
 
 #[test]
 fn canonical_decoder_and_census_share_the_exact_owned_payload_boundary() {
-    // Goal: a valid encoded batch at8MiB passes both admission paths; one extra byte fails both.
+    // Goal: a valid encoded batch at the byte bound passes both admission paths; one extra byte
+    // fails both.
     // Method: retain identical registered files for canonical's File decoder and census.
     for extra in [0, 1] {
         let fixture = Fixture::new_profile(false, true);

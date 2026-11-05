@@ -31,12 +31,13 @@ struct RowIdentity {
 
 pub(crate) const PROGRAM_BYTES_MAX: usize = 2 * collector::ring::PROGRAM_PATH_BYTES_MAX;
 pub(crate) const ROWS_BYTES_MAX: usize = BATCH_ROWS_MAX * size_of::<Row>();
-const BATCH_ROWS_MIN: usize = (BATCH_BYTES_MAX - ROWS_BYTES_MAX) / PROGRAM_BYTES_MAX;
-pub(crate) const BATCHES_MAX: usize = ROWS_MAX.div_ceil(BATCH_ROWS_MIN);
+pub(crate) const BATCH_ROWS_MIN: usize = (BATCH_BYTES_MAX - ROWS_BYTES_MAX) / PROGRAM_BYTES_MAX;
+// The census and the index are sized to this count, which a tail in batches of 8 MiB reached.
+pub(crate) const BATCHES_MAX: usize = 4096;
 // Payload, Arrow/Polars columns and rechunking, compressed pages and codec workspace,
 // writer buffer, bounded batch descriptors and per-file/footer bookkeeping coexist here.
 pub(crate) const WORKING_BYTES: usize =
-    BATCH_BYTES_MAX * 8 + 1024 * 1024 + BATCHES_MAX * size_of::<Batch>() + 1024 * 1024;
+    BATCH_BYTES_MAX * 4 + 1024 * 1024 + BATCHES_MAX * size_of::<Batch>() + 1024 * 1024;
 /// What `read_ahead` holds beside the batch being written, the rows of one batch and its frame.
 pub(crate) const READ_AHEAD_BYTES: usize = BATCH_BYTES_MAX * 2;
 const _: () = {
@@ -44,7 +45,7 @@ const _: () = {
     assert!(BATCH_ROWS_MIN > 0);
     assert!(BATCH_ROWS_MIN <= BATCH_ROWS_MAX);
     assert!(BATCHES_MAX < 10_000);
-    assert!(BATCHES_MAX == 4096);
+    assert!(ROWS_MAX.div_ceil(BATCH_ROWS_MIN) <= BATCHES_MAX);
     assert!(crate::WRITE_BUFFER_BYTES == 1024 * 1024);
 };
 

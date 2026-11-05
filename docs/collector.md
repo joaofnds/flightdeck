@@ -223,7 +223,7 @@ frontier before the source is retired, so completion cannot hide a final publica
 The persister seals each window of 60 elapsed seconds into immutable Parquet tables,
 compressed with Zstandard. Most tables occupy one file sorted by series. Events occupies
 bounded files in event-number order under one index, while its query presentation retains
-the process order. Each event file holds at most 16,384 rows and 8 MiB of owned input payload;
+the process order. Each event file holds at most 16,384 rows and 16 MiB of owned input payload;
 encoding workspace is charged separately. Two tables, the per-App ranks and parts, are
 derived from the others as the window seals. A window becomes visible through commit markers
 written only once every table of it is synced to disk, so a reader never sees half a minute.

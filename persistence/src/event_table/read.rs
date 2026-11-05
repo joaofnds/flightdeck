@@ -172,7 +172,7 @@ fn slice_workspace(
     budget: &Arc<ByteBudget>,
 ) -> std::result::Result<crate::resources::ByteReservation, AdmittedReadRefusal> {
     let bytes = if part.limits.is_some() {
-        BATCH_BYTES_MAX * 8
+        BATCH_BYTES_MAX * 4
     } else {
         let (_, chunks) = table
             .slice_work_shape(offset, count)

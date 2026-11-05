@@ -347,9 +347,12 @@ fn admission_error(error: AdmissionRefusal) -> Error {
 
 #[cfg(test)]
 pub(crate) fn physical_captured_frame(extra: usize) -> DataFrame {
-    let rows: Vec<_> = (0..16_384)
+    const PAYLOAD_BYTES: usize = BATCH_BYTES_MAX - super::batch::ROWS_BYTES_MAX;
+    const NAME_BYTES: usize = PAYLOAD_BYTES / BATCH_ROWS_MAX;
+    const _: () = assert!(NAME_BYTES * BATCH_ROWS_MAX == PAYLOAD_BYTES);
+    let rows: Vec<_> = (0..BATCH_ROWS_MAX)
         .map(|index| {
-            let mut name = vec![b'x'; 240 + if index == 0 { extra } else { 0 }];
+            let mut name = vec![b'x'; NAME_BYTES + if index == 0 { extra } else { 0 }];
             name[..16].copy_from_slice(format!("{index:016x}").as_bytes());
             crate::event_recovery::batch::Row {
                 publication: None,

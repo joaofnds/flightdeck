@@ -2969,7 +2969,8 @@ fn row_publication_admitted_torn_originals_converge() {
 #[test]
 fn row_merge_captured_physical_packing_ends_at_logical_remainder() {
     // Goal: an M boundary cannot strand a one-row physical prefix in candidate1.
-    // Method: execute production packing with M-480 retained and a 481-row native-width batch.
+    // Method: execute production packing with one batch's rows left before M and an original
+    // batch of one row more, which fits because one of its rows is short.
     let mut fixture = proof_fixture(true, 1);
     let store = Store::open(&fixture.root).unwrap();
     let budget = registration_budget();
@@ -2979,7 +2980,11 @@ fn row_merge_captured_physical_packing_ends_at_logical_remainder() {
     publish_captured_events_at(&mut fixture, 2, 2, 4);
     let templates = row_merge_read_four(&fixture, true);
     let expected = row_merge_packing_expected(&templates);
-    for (ordinal, rows) in [(1023, &expected[..481]), (4095, &expected[481..])] {
+    let capacity = crate::event_recovery::batch::BATCH_ROWS_MIN;
+    for (ordinal, rows) in [
+        (1023, &expected[..=capacity]),
+        (4095, &expected[capacity + 1..]),
+    ] {
         let mut frame = crate::event_recovery::batch::frame(rows, true).unwrap();
         crate::encoder::encode_write(&mut frame, attempt.create_event_batch(ordinal).unwrap())
             .unwrap();
@@ -2999,15 +3004,24 @@ fn row_merge_captured_physical_packing_ends_at_logical_remainder() {
         crate::event_recovery::read::read_original_batch_file(file, true, true, &budget, &mut 0)
             .unwrap();
     }
-    for _ in 0..242 {
+    for _ in 0..=expected.len().div_ceil(4) {
         publish_captured_events_at(&mut fixture, 2, 2, 0);
         publish_captured_events_at(&mut fixture, 2, 2, 4);
     }
     let ledger = PublicationLedger::new(&budget).unwrap();
     let mut merge = row_merge::RowMerge::new(attempt, fixture.reader(), &budget, &ledger).unwrap();
     let maximum = collector::u64_from_usize(crate::event_observation::ROWS_MAX);
-    let retained = maximum - 480;
+    let retained = maximum - collector::u64_from_usize(capacity);
     merge.output_rows_limit(maximum - retained).unwrap();
+    let lengths = row_merge_captured_physical_packing_lengths(&mut merge, &expected, maximum);
+    assert_eq!(lengths, [capacity, capacity, 1]);
+}
+
+fn row_merge_captured_physical_packing_lengths(
+    merge: &mut row_merge::RowMerge<'_>,
+    expected: &[crate::event_recovery::batch::Row],
+    maximum: u64,
+) -> Vec<usize> {
     let mut lengths = Vec::new();
     let mut offset = 0;
     for _ in 0..10000 {
@@ -3035,7 +3049,7 @@ fn row_merge_captured_physical_packing_ends_at_logical_remainder() {
         }
     }
     assert_eq!(offset, expected.len());
-    assert_eq!(lengths, [480, 480, 1]);
+    lengths
 }
 
 #[path = "row_salvage_paced_tests.rs"]
@@ -3062,8 +3076,9 @@ fn row_merge_packing_expected(
     templates: &[crate::event_recovery::batch::Row],
 ) -> Vec<crate::event_recovery::batch::Row> {
     let template = crate::event_recovery::batch::frame(templates, true).unwrap();
+    let capacity = crate::event_recovery::batch::BATCH_ROWS_MIN;
     let mut expected = Vec::new();
-    for position in 0..961 {
+    for position in 0..=2 * capacity {
         let mut row =
             crate::event_recovery::batch::owned_row(&template, position % 4, true).unwrap();
         row.event.number = collector::u64_from_usize(position) + 1;
@@ -3073,7 +3088,7 @@ fn row_merge_packing_expected(
         let suffix = app.len() - 4;
         app[suffix..].copy_from_slice(b".app");
         row.app = Some(app);
-        if position == 479 {
+        if position == capacity - 1 {
             row.name = Some(b"short".to_vec());
             row.app = Some(b"/s.app".to_vec());
         }
