@@ -28,10 +28,17 @@ env:
   # Captured output grows a buffer the allocation tests count against the collector, so
   # --no-capture writes it to stderr as the collector does in production.
   TEST_ARGUMENTS: '--include-ignored --no-capture --skip ::this_mac::'
+  # The persistence library's tests that the store-recovery job runs and the persistence job
+  # skips, one name a space, so a test runs in exactly one of them whatever these names are.
+  STORE_RECOVERY_TESTS: >-
+    store::registration_tests::loss_proof_tests::inherited_events_tests
+    store::registration_tests::loss_proof_tests::loss_only_tests
+    store::registration_tests::loss_proof_tests::ordinary_recovery_tests
 
-# The root workspace's checks run as three jobs at once, so a push learns its verdict from the
+# The root workspace's checks run as four jobs at once, so a push learns its verdict from the
 # slowest of them rather than from their sum. The test packages of check and persistence add up to
-# the whole workspace by construction, so a new package lands in check.
+# the whole workspace by construction, so a new package lands in check, and a new persistence test
+# outside the modules store-recovery names lands in persistence.
 jobs:
   check:
     # The collector reads macOS kernel interfaces and frameworks, so it builds only on macOS.
@@ -91,8 +98,9 @@ jobs:
         name: Refuse ring lock files left in Application Support
         run: '! find "$HOME/Library/Application Support/Flightdeck" -name "*.lock" | grep .'
   persistence:
-    # This package's tests start native children that write the most rows the recording retains,
-    # and they took over 11 minutes on a runner, more than the rest of the workspace together.
+    # This package's tests start native children that write the most rows the recording retains.
+    # Together they took 7.4 and 16.6 minutes on runners a push cannot choose between, on the same
+    # code, so they run as this job and store-recovery, which took 3.6 and 7.9 minutes of those.
     runs-on: macos-26
     # Cold, this job builds 13 minutes before its tests. See the check job's limit.
     timeout-minutes: 60
@@ -102,7 +110,29 @@ jobs:
       - *keep-only-the-pinned-toolchain
       - *restore-root-cache
       - *install-just
-      - run: just test_packages='--package persistence' test_arguments="$TEST_ARGUMENTS" test
+      - run: >-
+          just test_packages='--package persistence'
+          test_arguments="$TEST_ARGUMENTS --skip ${STORE_RECOVERY_TESTS// / --skip }" test
+      - *refuse-ring-locks
+  store-recovery:
+    runs-on: macos-26
+    # Cold, this job builds 13 minutes before its tests. See the check job's limit.
+    timeout-minutes: 60
+    steps:
+      - *checkout
+      - *install-toolchain
+      - *keep-only-the-pinned-toolchain
+      # The persistence job's cache, by the key that job gets from its name, since both build the
+      # same package and a cache of this job's own would keep another 555 MB for the same build.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: persistence
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - *install-just
+      - run: >-
+          just test_packages='--package persistence --lib'
+          test_arguments="$TEST_ARGUMENTS $STORE_RECOVERY_TESTS" test
       - *refuse-ring-locks
   capacity:
     runs-on: macos-26

@@ -195,8 +195,9 @@ GitHub Actions runs the check on every push to `main` and every pull request, un
 toolchain `.github/workflows/check.yml` names. Its check job runs
 `just check-root` and its desktop job `just check-desktop`, the two recipes `just check`
 runs, so a step added to either runs in CI and on your machine alike. The persistence
-package's tests, the slowest of the root workspace, run in a persistence job of their own
-through `test_packages`, so `check-root` in CI tests every other package. `check-root` formats,
+package's tests, the slowest of the root workspace, run in persistence and store-recovery jobs
+of their own through `test_packages` and `test_arguments`, so `check-root` in CI tests every
+other package. `check-root` formats,
 lints and tests the root workspace through `fmt`, `clippy` and `test`. `check-desktop` does
 the same for the desktop workspace through the recipes named `desktop-`, then runs
 `seal-bench`, which prints what sealing a minute costs, and last `bundle-check`, which

@@ -75,7 +75,7 @@ release level="patch":
 # Run the CI check on this Mac, with no test skipped for lack of hardware.
 check: check-root check-desktop
 
-# Check the root workspace as CI's check and persistence jobs do between them.
+# Check the root workspace as CI's check, persistence and store-recovery jobs do between them.
 check-root: fmt clippy test
 
 # The bundle-check comes last, after every other cargo run, so the bundle CI hands to a
