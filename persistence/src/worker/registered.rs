@@ -289,9 +289,6 @@ fn seal_terminal(
     reader.set_writer_gone();
     let proof = attempt.prove_terminal(&manifest.recovery, &manifest.batches, reader, budget)?;
     seal_publish_proof(proof)?;
-    state.next_publication = input.losses.publication_inherited_end;
-    state.next_event = manifest.recovery.events_end;
-    state.losses = crate::Losses::default();
     state.source = SourceState::Complete;
 
     Ok(())
