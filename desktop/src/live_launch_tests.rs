@@ -8,32 +8,47 @@ use crate::time_range::Range;
 #[test]
 fn a_default_launch_deletes_an_older_recording() {
     // Goal: the default launch clears the path its recorder needs for a new recording.
-    // Method: launch on an older root with no --recording, and look for the root afterwards.
-    let parent = older_recording_parent();
-    let root = parent.join("flightdeck.recording");
-    let options = Options::parse_arguments(&[]).unwrap();
+    // Method: launch on an older root with no other argument, and look for it afterwards.
+    assert!(!older_recording_outlives(&[]));
+}
 
-    delete_older_recording(&root, &options);
+#[test]
+fn a_window_under_the_control_socket_leaves_an_older_recording() {
+    // Goal: driving a build by its control socket never costs the user their recording.
+    // Method: launch on an older root with --control, and look for it afterwards.
+    assert!(older_recording_outlives(&["--control", "/tmp/unused.sock"]));
+}
 
-    let exists = root.exists();
-    std::fs::remove_dir_all(parent).unwrap();
-    assert!(!exists);
+#[test]
+fn a_timed_window_leaves_an_older_recording() {
+    // Goal: observing a build for a set time never costs the user their recording.
+    // Method: launch on an older root with --seconds, and look for it afterwards.
+    assert!(older_recording_outlives(&["--seconds", "900"]));
 }
 
 #[test]
 fn a_named_recording_stays_where_the_launch_named_it() {
     // Goal: a recording the user names is theirs to keep, so no launch deletes it.
     // Method: launch on an older root that --recording names, and look for it afterwards.
+    assert!(older_recording_outlives(&["--recording", "/tmp/unused"]));
+}
+
+/// Whether an older recording at the root the launch is given is still there after a launch with
+/// these `arguments`.
+fn older_recording_outlives(arguments: &[&str]) -> bool {
     let parent = older_recording_parent();
     let root = parent.join("flightdeck.recording");
-    let arguments = ["--recording".to_owned(), root.display().to_string()];
+    let arguments: Vec<_> = arguments
+        .iter()
+        .map(|&argument| argument.to_owned())
+        .collect();
     let options = Options::parse_arguments(&arguments).unwrap();
 
     delete_older_recording(&root, &options);
 
     let exists = root.exists();
     std::fs::remove_dir_all(parent).unwrap();
-    assert!(exists);
+    exists
 }
 
 /// A new directory holding an older version's recording, named `flightdeck.recording`.

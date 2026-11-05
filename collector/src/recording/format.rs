@@ -55,6 +55,11 @@ fn read(root: &Path) -> io::Result<Format> {
         length += count;
     }
     let format = parse(&bytes[..length])?;
+    // No writer chooses this identity, so it is damage in any form, and bootstrap says the same.
+    if format.identity == Identity([0, 0]) {
+        return Err(invalid());
+    }
+
     if format.reader > READER_PROTOCOL_MAX {
         return Err(io::Error::from(io::ErrorKind::Unsupported));
     }

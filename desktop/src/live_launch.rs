@@ -384,12 +384,18 @@ pub fn recording(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error
     Ok(application_support()?.join("flightdeck.recording"))
 }
 
-/// Deletes an older version's recording at the default path, so the launch starts a new one
-/// there, since no recorder of this version appends to it. A recording the launch names stays,
-/// and its recorder's refusal reaches the status line. One that fails to go here is named on the
-/// status line when the session would start a recorder over it.
+/// Deletes an older version's recording at the default path when the user opens their own window,
+/// so the launch starts a new one there, since no recorder of this version appends to it. A
+/// recording the launch names stays, and so does the one a timed window or a window under the
+/// control socket finds, since observing a build must not cost the user their recording. The
+/// recorder's refusal reaches the status line in each of those, as it does for a recording that
+/// fails to go here when the session would start a recorder over it.
 fn delete_older_recording(root: &std::path::Path, options: &Options) {
     if options.source.recording.is_some() {
+        return;
+    }
+
+    if !personal(options, options.control.is_some()) {
         return;
     }
 
@@ -397,7 +403,7 @@ fn delete_older_recording(root: &std::path::Path, options: &Options) {
         Ok(true) => eprintln!("Deleted the older recording at {}", root.display()),
         Ok(false) => {}
         Err(error) => eprintln!(
-            "Could not delete the older recording at {}: {error}",
+            "Could not check for an older recording to delete at {}: {error}",
             root.display()
         ),
     }

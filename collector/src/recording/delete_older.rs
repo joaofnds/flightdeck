@@ -24,10 +24,9 @@ pub fn delete_older(root: &Path) -> io::Result<bool> {
 
     {
         let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
-        for lock in LIFETIME_LOCKS {
-            if private::FileLock::held(&root.join(lock))? {
-                return Ok(false);
-            }
+        // Another launch may have deleted it and started a new recording here during the wait.
+        if delete_older_held(root)? || !is_older(root)? {
+            return Ok(false);
         }
         std::fs::rename(root, &deleting)?;
         private::sync_parent(&deleting)?;
@@ -37,12 +36,30 @@ pub fn delete_older(root: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-fn delete_older_finish(deleting: &Path) -> io::Result<()> {
-    delete_older_finish_rings(deleting);
-    match std::fs::remove_dir_all(deleting) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        result => result,
+fn delete_older_held(root: &Path) -> io::Result<bool> {
+    for lock in LIFETIME_LOCKS {
+        if private::FileLock::held(&root.join(lock))? {
+            return Ok(true);
+        }
     }
+
+    Ok(false)
+}
+
+/// Removes what the deleting name holds. A launch may name any path as its recording, so this name
+/// may hold one in use, which stays, or a link, whose target's rings are not this call's to remove.
+fn delete_older_finish(deleting: &Path) -> io::Result<()> {
+    match private::PrivateDirectory::open(deleting) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    if delete_older_held(deleting)? {
+        return Ok(());
+    }
+
+    delete_older_finish_rings(deleting);
+    std::fs::remove_dir_all(deleting)
 }
 
 /// Removes the rings the recording's run list names, since each holds its memory until the Mac
@@ -64,9 +81,9 @@ fn delete_older_finish_rings(deleting: &Path) {
         match unlink_generation(&run.ring_name) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            // A ring's name may hold a token, which other users must not learn from the log.
             Err(error) => diagnostics::error(format_args!(
-                "Could not remove the older recording's ring {}: {error}",
-                run.ring_name
+                "Could not remove a ring of the older recording: {error}"
             )),
         }
     }
@@ -227,7 +244,7 @@ mod tests {
         // Goal: the root the previous writer protocol left, which a real Mac holds, is older too.
         // Method: delete a root in the full envelope that names the previous protocol.
         let fixture = Fixture::with_identity(&identity_requiring(
-            format::READER_PROTOCOL,
+            format::WRITER_PROTOCOL - 1,
             format::WRITER_PROTOCOL - 1,
         ));
 
@@ -286,6 +303,40 @@ mod tests {
         // the deletion cannot be undone.
         // Method: ask for a root whose identity file holds other text to be deleted.
         let fixture = Fixture::with_identity(b"not a recording\n");
+
+        let refusal = delete_older(&fixture.root);
+
+        assert_eq!(
+            refusal.map_err(|error| error.kind()),
+            Err(io::ErrorKind::InvalidData)
+        );
+        assert!(fixture.root.join("identity").exists());
+    }
+
+    #[test]
+    fn keeps_a_root_in_the_previous_envelope_that_names_no_recording() {
+        // Goal: an identity no writer ever chose is damage and not an older recording, since the
+        // deletion cannot be undone.
+        // Method: ask for a root in the previous protocol's envelope whose identity is all zero.
+        let fixture = Fixture::with_identity(
+            b"flightdeck-recording-1\n00000001\n00000001\n\
+              00000000000000000000000000000000\n",
+        );
+
+        let refusal = delete_older(&fixture.root);
+
+        assert_eq!(
+            refusal.map_err(|error| error.kind()),
+            Err(io::ErrorKind::InvalidData)
+        );
+        assert!(fixture.root.join("identity").exists());
+    }
+
+    #[test]
+    fn keeps_a_root_in_the_oldest_form_that_names_no_recording() {
+        // Goal: the bare identity of the oldest recordings is held to the same rule.
+        // Method: ask for a root whose 33-byte identity is all zero.
+        let fixture = Fixture::with_identity(b"00000000000000000000000000000000\n");
 
         let refusal = delete_older(&fixture.root);
 
@@ -421,6 +472,37 @@ mod tests {
 
         assert!(!deleted);
         assert!(!fixture.deleting().exists());
+    }
+
+    #[test]
+    fn keeps_what_a_process_holds_under_the_deleting_name() {
+        // Goal: a launch may name any path, so a recording in use at the deleting name stays.
+        // Method: hold a controller's lifetime lock in a directory of that name and ask again.
+        let fixture = Fixture::empty();
+        private::create_private_dir(&fixture.deleting()).unwrap();
+        private::atomic_write(&fixture.deleting(), "saved", b"saved").unwrap();
+        let _recorder =
+            private::FileLock::try_lock(&fixture.deleting().join("recorder.lock")).unwrap();
+
+        delete_older(&fixture.root).unwrap();
+
+        assert!(fixture.deleting().join("saved").exists());
+    }
+
+    #[test]
+    fn leaves_the_rings_of_what_a_link_at_the_deleting_name_points_to() {
+        // Goal: a link at the deleting name costs the directory it points to nothing.
+        // Method: link that name to a recording naming a real ring, ask again, and open the ring.
+        let fixture = Fixture::with_identity(OLDER_IDENTITY);
+        let ring_name = fixture.with_retained_ring();
+        std::os::unix::fs::symlink(&fixture.root, fixture.deleting()).unwrap();
+
+        let refusal = delete_older(&fixture.root);
+
+        assert!(refusal.is_err());
+        assert!(RingReader::open_generation(&ring_name).is_ok());
+        assert!(fixture.root.join("identity").exists());
+        unlink_generation(&ring_name).unwrap();
     }
 
     #[test]

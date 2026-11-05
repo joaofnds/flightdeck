@@ -4,6 +4,7 @@ use super::codec::{
 };
 use crate::{
     recording::{
+        format::{READER_PROTOCOL, WRITER_PROTOCOL},
         private::{self, FileLock, PrivateDirectory},
         random_identity,
     },
@@ -515,7 +516,7 @@ fn encode_envelope(identity: Identity, bytes: &mut [u8; 74]) -> io::Result<()> {
     let mut destination = &mut bytes[..];
     write!(
         destination,
-        "flightdeck-recording-1\n00000002\n00000002\n{:016x}{:016x}\n",
+        "flightdeck-recording-1\n{READER_PROTOCOL:08x}\n{WRITER_PROTOCOL:08x}\n{:016x}{:016x}\n",
         identity.0[0], identity.0[1]
     )
 }
@@ -552,7 +553,7 @@ fn parse_envelope(bytes: &[u8]) -> io::Result<Identity> {
         return Err(invalid());
     }
 
-    if reader != 2 || writer != 2 {
+    if reader != READER_PROTOCOL || writer != WRITER_PROTOCOL {
         return Err(io::Error::from(io::ErrorKind::Unsupported));
     }
 
