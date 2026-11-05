@@ -1444,7 +1444,7 @@ fn a_run_whose_writer_died_saves_its_last_minute_and_certifies_its_end() {
 #[test]
 fn a_crashed_runs_last_minute_finds_its_end_when_staged_again() {
     // Goal: an interrupted last minute of a crashed collector still ends the run (P01.2).
-    // Method: save two minutes, stop the third after registering, and restart with the pid gone,
+    // Method: save two minutes, stop the third with a table torn, and restart with the pid gone,
     // which takes reopening the ring, then read the run through to its certified end.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);

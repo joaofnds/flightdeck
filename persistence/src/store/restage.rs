@@ -165,7 +165,10 @@ impl RegisteredAttempt<'_> {
             if inventory.step()? != InventoryStep::Enumerated {
                 continue;
             }
-            if inventory.has_overlaps() || inventory.has_unordered_extents() {
+            if inventory.has_overlaps()
+                || inventory.has_unordered_extents()
+                || inventory.index_conflicts()
+            {
                 return Err(restage_refused().into());
             }
             let (batches, torn) = saved_batches(inventory.batches())?;
@@ -298,6 +301,6 @@ fn restage_remove(directory: &PrivateDirectory, name: &str) -> io::Result<()> {
 fn restage_refused() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        "saved event batches are not the writer's own order",
+        "saved event batches are not what the writer leaves",
     )
 }

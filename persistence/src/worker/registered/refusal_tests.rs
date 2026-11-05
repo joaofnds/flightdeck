@@ -61,6 +61,27 @@ fn a_saved_batch_that_reads_as_no_batch_stops_the_worker() {
 }
 
 #[test]
+fn a_batch_its_index_names_that_is_gone_stops_the_worker() {
+    // Goal: the writer finishes every batch before their index, so an index that names a batch no
+    // longer there is damage, which stays to be read rather than being staged over (P02.3).
+    // Method: stop with the index and tables written, remove the batch, restart with the source
+    // still holding the minute, and read the refusal and the index.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::TablesWritten);
+    drop(first);
+    let pending = attempt_directory(&recording.root, "data", "pending");
+    std::fs::remove_file(Recording::only_event_batch(&pending)).unwrap();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let result = recording.persist_result(&restarted, &mut RunState::default());
+
+    assert!(result.is_err());
+    assert!(pending.join("events/index").exists());
+}
+
+#[test]
 fn a_whole_proof_that_does_not_read_stops_the_worker_with_its_tables_in_place() {
     // Goal: a proof file of its full length that does not decode is damage, not a short write, so
     // recovery neither rewrites nor removes anything around it (P02.3).
