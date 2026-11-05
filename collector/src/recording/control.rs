@@ -20,6 +20,7 @@ const RECORD_START: usize = 16;
 const STOP_WORD: usize = 5;
 const STOP_BOOT_WORDS: [usize; 2] = [7, 8];
 const _: () = assert!(RECORD_START + 3 * RECORD_WORDS <= WORDS);
+const _: () = assert!(STOP_BOOT_WORDS[1] < RECORD_START);
 
 /// The mapping never owns any worker's lifetime lock and never unlinks its backing.
 pub struct Control {
@@ -98,9 +99,10 @@ impl Control {
     /// Called under the controller lifetime lock before any managed worker is launched.
     pub fn create(root: &Path) -> io::Result<Self> {
         super::check_writer(root)?;
-        let registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
+        // Held until the file is settled, so `request_recording_stop` cannot land on a file this
+        // has judged and is about to replace.
+        let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
         let identity = recording_identity(root)?;
-        drop(registration);
         let path = root.join("recorder.control");
         let previous = match Self::open_writable(root) {
             Ok(control) => Some(control),
@@ -218,38 +220,55 @@ impl Control {
         self.word(STOP_WORD).load(Ordering::SeqCst) != 0
     }
 
+    /// Asks a recording to stop from outside its controller. Holding the registration lock orders
+    /// the request with `create`, so it lands on the file `create` is about to judge or on the one
+    /// that replaced it, never on a file already judged and about to be replaced.
+    pub fn request_recording_stop(root: &Path) -> io::Result<()> {
+        // A root with no control file refuses here, before the lock could be created inside it.
+        drop(Self::open_writable(root)?);
+        let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
+        Self::open_writable(root)?.request_stop()
+    }
+
     pub fn request_stop(&self) -> io::Result<()> {
         if !self.writable {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
         let boot = super::boot_identity()?;
-        for (word, value) in STOP_BOOT_WORDS.into_iter().zip(boot.0) {
-            self.word(word).store(value, Ordering::SeqCst);
-        }
         let requested_ns =
             crate::clock::Timebase::read()?.nanoseconds(unsafe { mach_absolute_time() })?;
-        assert!(requested_ns > 0);
-        self.word(STOP_WORD).store(requested_ns, Ordering::SeqCst);
+        if !self.stop_names_boot(boot) {
+            // Clearing first keeps a death between these stores from pairing the other boot's time
+            // with this boot's words. No cohort can be reading it, since a boot ends every cohort.
+            self.word(STOP_WORD).store(0, Ordering::SeqCst);
+            for (word, value) in STOP_BOOT_WORDS.into_iter().zip(boot.0) {
+                self.word(word).store(value, Ordering::SeqCst);
+            }
+        }
+        // Zero means no stop, so a clock reading zero still has to read as a request.
+        self.word(STOP_WORD)
+            .store(requested_ns.max(1), Ordering::SeqCst);
         Ok(())
+    }
+
+    fn stop_names_boot(&self, boot: Identity) -> bool {
+        STOP_BOOT_WORDS
+            .into_iter()
+            .zip(boot.0)
+            .all(|(word, value)| self.word(word).load(Ordering::SeqCst) == value)
     }
 
     /// Whether the stop on this file came after this process started. A start that began first
     /// still has to serve it, however far it has got, while a start that began after it comes from
     /// someone who asked for recording again, so the finished stop must not reach the new cohort.
+    /// The start is the process's, and an `exec` keeps it.
     fn stop_follows_this_process(&self) -> io::Result<bool> {
-        let boot = super::boot_identity()?;
-        let same_boot = STOP_BOOT_WORDS
-            .into_iter()
-            .zip(boot.0)
-            .all(|(word, value)| self.word(word).load(Ordering::SeqCst) == value);
-        if !same_boot {
+        if !self.stop_names_boot(super::boot_identity()?) {
             return Ok(false);
         }
-        let mut exited = false;
         let timebase = crate::clock::Timebase::read()?;
-        let own =
-            crate::processes::read_exit_usage(timebase, crate::processes::own_pid()?, &mut exited)?
-                .map_err(|_| io::Error::from(io::ErrorKind::NotFound))?;
+        let own = crate::processes::read_usage(timebase, crate::processes::own_pid()?)?
+            .map_err(own_start_error)?;
         Ok(self.word(STOP_WORD).load(Ordering::SeqCst) >= own.awake_ns_at_start)
     }
 
@@ -445,6 +464,13 @@ pub fn now() -> io::Result<u64> {
     crate::clock::Timebase::read()?.nanoseconds(unsafe { mach_continuous_time() })
 }
 
+fn own_start_error(unreadable: crate::processes::Unreadable) -> io::Error {
+    io::Error::from(match unreadable {
+        crate::processes::Unreadable::Refused => io::ErrorKind::PermissionDenied,
+        crate::processes::Unreadable::Gone => io::ErrorKind::NotFound,
+    })
+}
+
 fn creation(pid: i32) -> io::Result<Option<ProcessCreation>> {
     let mut result = Err(CreationError::NotRead);
     programs::read_creation(pid, false, &mut result);
@@ -623,6 +649,49 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_racing_a_renewal_reaches_the_file_that_survives() {
+        // Goal: a stop after this process started is not stored on a file about to be replaced.
+        // Method: leave a finished stop, then race a renewal against a stop at stepped delays that
+        // land before, inside and after the renewal's sync, and read whichever file survives.
+        let directory = Directory::new();
+        let root = directory.0.as_path();
+        drop(Control::create(root).unwrap());
+        for delay_us in (0..2_400).step_by(100) {
+            let previous = Control::open_writable(root).unwrap();
+            previous.request_stop().unwrap();
+            age_stop(&previous);
+
+            std::thread::scope(|scope| {
+                let renewal = scope.spawn(|| drop(Control::create(root).unwrap()));
+                std::thread::sleep(std::time::Duration::from_micros(delay_us));
+                Control::request_recording_stop(root).unwrap();
+                renewal.join().unwrap();
+            });
+
+            assert!(
+                Control::open(root).unwrap().stopping(),
+                "a stop {delay_us} us after the renewal began was lost"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stop_on_a_file_stopped_in_another_boot_reaches_the_next_cohort_this_boot() {
+        // Goal: a stop names this boot even on a file whose previous stop named another.
+        // Method: leave a stop from another boot, stop again, then create as a relaunch would.
+        let directory = Directory::new();
+        let old = Control::create(&directory.0).unwrap();
+        old.request_stop().unwrap();
+        old.word(STOP_BOOT_WORDS[0]).fetch_xor(1, Ordering::SeqCst);
+        old.request_stop().unwrap();
+
+        let next = Control::create(&directory.0).unwrap();
+
+        assert_eq!(next.authority(), old.authority());
+        assert!(next.stopping());
+    }
+
+    #[test]
     fn a_stop_after_this_process_started_reaches_the_cohort_it_starts() {
         // Goal: a stop landing while a relaunch is still starting is not taken for a finished one.
         // Method: stop on the old file after this process began, with no worker lock held, then
@@ -640,7 +709,8 @@ mod tests {
 
     #[test]
     fn a_stop_from_another_boot_cannot_reach_the_cohort_this_process_starts() {
-        // Goal: the awake clock restarts at boot, so an old stop can read later than this start.
+        // Goal: a stop from another boot is discarded, though its time can read later than this
+        // start because the awake clock restarts at boot.
         // Method: leave the stop's time ahead of this process and change only its boot words.
         let directory = Directory::new();
         let old = Control::create(&directory.0).unwrap();

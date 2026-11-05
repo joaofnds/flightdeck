@@ -57,7 +57,7 @@ fn run() -> io::Result<()> {
     let options = options()?;
     let owner = owner::Owner::bind(options.parent)?;
     if options.stop {
-        return Control::open_writable(&options.root)?.request_stop();
+        return Control::request_recording_stop(&options.root);
     }
     recording::check_writer(&options.root)?;
     private::create_private_dir(&options.root)?;

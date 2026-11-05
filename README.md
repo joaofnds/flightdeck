@@ -71,8 +71,10 @@ the saved tail. GUI quit detaches while recording continues.
 If the recorder dies, healthy workers continue. Automatic recovery then needs an explicit
 recorder start; no installed service restarts it. Repeating the same command adopts workers
 only when their native creation identity, authority and build protocol match. To request
-shutdown from another terminal, run `recorder --recording PATH --stop yes`. A stale mapped
-stop request cannot target a later cohort. The recorder measures all three processes; a
+shutdown from another terminal, run `recorder --recording PATH --stop yes`. A stop requested
+after a recorder process started stops the cohort it starts, however far that start has got,
+while a stop from before it, or a stale mapped request, cannot target that later cohort.
+The recorder measures all three processes; a
 final CPU total for an adopted worker it cannot reap is reported as unavailable. Recording directories are created with
 owner-only access; files use mode 0600 and inherited access-control entries are removed.
 

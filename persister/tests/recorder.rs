@@ -616,10 +616,7 @@ mod tests {
         controller.wait().unwrap();
         recording.launch_held();
 
-        Control::open_writable(&recording.root)
-            .unwrap()
-            .request_stop()
-            .unwrap();
+        recording.stop_from_another_terminal();
         recording.wait_for_old_workers();
         let newest = control.settled(Role::Collector).publication;
         recording.release_held();
@@ -964,26 +961,34 @@ mod tests {
             self.launch_with(executable, Stdio::null(), Stdio::null());
         }
 
+        fn recorder_executable() -> PathBuf {
+            PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder")
+        }
+
+        fn recorder_arguments(&self) -> [String; 8] {
+            [
+                "--recording".into(),
+                self.root.to_str().unwrap().into(),
+                "--ring".into(),
+                self.ring.clone(),
+                "--seconds".into(),
+                self.seconds.to_string(),
+                "--memory-bytes".into(),
+                self.memory.to_string(),
+            ]
+        }
+
         /// Starts the recorder stopped before its first instruction, so its process start is
         /// fixed while the test decides what happens before it runs.
         fn launch_held(&mut self) {
-            const WNOHANG_WUNTRACED: i32 = 1 | 2;
+            const WNOHANG: i32 = 1;
+            const WUNTRACED: i32 = 2;
+            const STOPPED_STATUS: i32 = 0x7f;
             assert!(self.child.is_none());
-            let executable =
-                PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder");
             let child = Command::new("/bin/sh")
                 .args(["-c", r#"kill -STOP $$; exec "$0" "$@""#])
-                .arg(executable)
-                .args([
-                    "--recording",
-                    self.root.to_str().unwrap(),
-                    "--ring",
-                    &self.ring,
-                    "--seconds",
-                    &self.seconds.to_string(),
-                    "--memory-bytes",
-                    &self.memory.to_string(),
-                ])
+                .arg(Self::recorder_executable())
+                .args(self.recorder_arguments())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -992,7 +997,8 @@ mod tests {
             self.child = Some(child);
             for _attempt in 0..3000 {
                 let mut status = 0;
-                if unsafe { waitpid(pid, &raw mut status, WNOHANG_WUNTRACED) } == pid {
+                if unsafe { waitpid(pid, &raw mut status, WNOHANG | WUNTRACED) } == pid {
+                    assert_eq!(status & 0xff, STOPPED_STATUS, "the held shell exited");
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -1000,10 +1006,19 @@ mod tests {
             panic!("the held recorder never stopped");
         }
 
-        fn release_held(&mut self) {
+        fn release_held(&self) {
             const SIGCONT: i32 = 19;
             let pid = i32::try_from(self.child.as_ref().unwrap().id()).unwrap();
             assert_eq!(0, unsafe { kill(pid, SIGCONT) });
+        }
+
+        /// Requests a stop the way a user does, by a second run of the recorder's own command.
+        fn stop_from_another_terminal(&self) {
+            let status = Command::new(Self::recorder_executable())
+                .args(["--recording", self.root.to_str().unwrap(), "--stop", "yes"])
+                .status()
+                .unwrap();
+            assert!(status.success());
         }
 
         fn wait_for_old_workers(&self) {
@@ -1032,16 +1047,7 @@ mod tests {
                     );
             }
             let child = command
-                .args([
-                    "--recording",
-                    self.root.to_str().unwrap(),
-                    "--ring",
-                    &self.ring,
-                    "--seconds",
-                    &self.seconds.to_string(),
-                    "--memory-bytes",
-                    &self.memory.to_string(),
-                ])
+                .args(self.recorder_arguments())
                 .stdout(stdout)
                 .stderr(stderr)
                 .spawn()
@@ -1049,9 +1055,8 @@ mod tests {
             self.child = Some(child);
         }
 
-        /// Returns once the replacement controller holds the control file. A stop requested
-        /// sooner can reach the old cohort after its workers exit, which `Control::create` takes
-        /// for that cohort's finished stop, so the new cohort it starts never sees the request.
+        /// Returns once the replacement controller holds the control file and reports its health,
+        /// so the caller's next step runs against the replacement.
         fn relaunch_controller_with_room(&mut self) {
             let original = Control::open(&self.root)
                 .unwrap()
@@ -1061,7 +1066,7 @@ mod tests {
             controller.kill().unwrap();
             controller.wait().unwrap();
             self.memory = 256 * 1024 * 1024;
-            self.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
+            self.launch(Self::recorder_executable());
             self.wait_for(|control| control.settled(Role::Controller).creation != original);
         }
 
