@@ -4,17 +4,17 @@ pub mod bootstrap;
 
 pub mod child;
 pub mod control;
+mod delete_older;
 pub mod discovery;
 pub mod exit_watch;
 pub mod format;
 mod holder;
 pub mod private;
 mod registry;
-mod set_aside;
 
+pub use delete_older::{delete_older, is_older};
 pub use holder::{Holder, holder};
 pub use registry::{RegisteredRun, Registry, RegistryBuffer};
-pub use set_aside::{is_older, set_aside_older};
 
 /// The fingerprint of the code this collector is built from.
 pub const BUILD: u64 = include!(concat!(env!("OUT_DIR"), "/build"));

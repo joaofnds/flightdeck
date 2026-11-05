@@ -240,10 +240,9 @@ New recording roots carry a 74-byte identity envelope with separate required rea
 writer versions. Readers accept supported legacy roots, but new writers refuse them before
 taking ownership or changing their files. Older binaries reject the new envelope, so they
 cannot append an incompatible run. The transition requires a new recording root. The app's
-default launch makes one by renaming an older recording that no process holds to
-`flightdeck.<identity>.recording` beside it, where `--recording PATH` on the app opens it
-read-only, and nothing expires its readings or removes it. A recorder or collector refuses an
-older root wherever it lies, including the default one before the app's next launch moves it.
+default launch makes one by deleting an older recording that no process holds, with the rings
+it kept. A recording `--recording PATH` names stays. A recorder or collector refuses an older
+root wherever it lies, including the default one before the app's next launch deletes it.
 
 The persister checks its current and kernel lifetime-peak physical footprint every 100 ms
 against the limit passed by the recorder, 256 MiB, and exits if either exceeds it. The

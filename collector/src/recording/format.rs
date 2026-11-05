@@ -12,7 +12,7 @@ const BYTES: usize = HEADER.len() + 2 * REQUIREMENT_BYTES + IDENTITY_BYTES;
 pub const READER_PROTOCOL: u32 = 1;
 pub const WRITER_PROTOCOL: u32 = 1;
 /// The newest reader requirement this version reads, which a registered recording names.
-const READER_PROTOCOL_MAX: u32 = 2;
+pub(super) const READER_PROTOCOL_MAX: u32 = 2;
 const _: () = assert!(READER_PROTOCOL <= READER_PROTOCOL_MAX);
 const _: () = assert!(BYTES <= 128);
 
@@ -38,14 +38,9 @@ pub(super) fn read_writer_identity(root: &Path) -> io::Result<Identity> {
     Ok(format.identity)
 }
 
-/// The identity of a root that requires a writer older than this one, or `None` for any other.
-pub(super) fn older_writer_identity(root: &Path) -> io::Result<Option<Identity>> {
-    let format = read(root)?;
-    if format.writer < WRITER_PROTOCOL {
-        Ok(Some(format.identity))
-    } else {
-        Ok(None)
-    }
+/// Whether a root requires a writer older than this one.
+pub(super) fn requires_older_writer(root: &Path) -> io::Result<bool> {
+    Ok(read(root)?.writer < WRITER_PROTOCOL)
 }
 
 pub(super) fn create(root: &Path, identity: Identity) -> io::Result<()> {

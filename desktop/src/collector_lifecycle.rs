@@ -51,10 +51,10 @@ struct SessionState {
 }
 
 const OUTPUT_BYTES_MAX: usize = 16_384;
-/// The store holds what the path named at launch, so only a launch can set a recording aside and
+/// The store holds what the path named at launch, so only a launch can delete a recording and
 /// follow the new one, which a recording its holder kept in place until now still needs.
 const OLDER_RECORDING_FAILURE: &str = "This recording comes from an older Flightdeck. Quit \
-     Flightdeck from its menu bar item and open it again to set it aside and start a new one.";
+     Flightdeck from its menu bar item and open it again to delete it and start a new one.";
 const STOP_INTERVAL: Duration = Duration::from_millis(25);
 const STOP_ATTEMPTS_MAX: u128 = 5082;
 const _: () = {

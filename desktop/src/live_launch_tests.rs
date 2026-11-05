@@ -1,19 +1,19 @@
 use collector::recording::private::{atomic_write, create_private_dir};
 use collector::recording::{identity_text, random_identity};
 
-use super::{set_aside_older_recording, start};
+use super::{delete_older_recording, start};
 use crate::performance::Options;
 use crate::time_range::Range;
 
 #[test]
-fn a_default_launch_sets_an_older_recording_aside() {
+fn a_default_launch_deletes_an_older_recording() {
     // Goal: the default launch clears the path its recorder needs for a new recording.
     // Method: launch on an older root with no --recording, and look for the root afterwards.
     let parent = older_recording_parent();
     let root = parent.join("flightdeck.recording");
     let options = Options::parse_arguments(&[]).unwrap();
 
-    set_aside_older_recording(&root, &options);
+    delete_older_recording(&root, &options);
 
     let exists = root.exists();
     std::fs::remove_dir_all(parent).unwrap();
@@ -22,14 +22,14 @@ fn a_default_launch_sets_an_older_recording_aside() {
 
 #[test]
 fn a_named_recording_stays_where_the_launch_named_it() {
-    // Goal: a recording the user names is theirs to place, so no launch moves it.
+    // Goal: a recording the user names is theirs to keep, so no launch deletes it.
     // Method: launch on an older root that --recording names, and look for it afterwards.
     let parent = older_recording_parent();
     let root = parent.join("flightdeck.recording");
     let arguments = ["--recording".to_owned(), root.display().to_string()];
     let options = Options::parse_arguments(&arguments).unwrap();
 
-    set_aside_older_recording(&root, &options);
+    delete_older_recording(&root, &options);
 
     let exists = root.exists();
     std::fs::remove_dir_all(parent).unwrap();

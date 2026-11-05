@@ -89,7 +89,7 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
 
     let control = control(options)?;
     let root = recording(options)?;
-    set_aside_older_recording(&root, options);
+    delete_older_recording(&root, options);
     let collector = collector_session(&root, options)?;
     // A recording opened read-only has no ring to follow, so the store does not hold it yet.
     let mode = if options.source.read_only() {
@@ -384,20 +384,20 @@ pub fn recording(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error
     Ok(application_support()?.join("flightdeck.recording"))
 }
 
-/// Moves an older version's recording away from the default path, so the launch starts a new one
+/// Deletes an older version's recording at the default path, so the launch starts a new one
 /// there, since no recorder of this version appends to it. A recording the launch names stays,
-/// and its recorder's refusal reaches the status line. One that fails to move here is named on
-/// the status line when the session would start a recorder over it.
-fn set_aside_older_recording(root: &std::path::Path, options: &Options) {
+/// and its recorder's refusal reaches the status line. One that fails to go here is named on the
+/// status line when the session would start a recorder over it.
+fn delete_older_recording(root: &std::path::Path, options: &Options) {
     if options.source.recording.is_some() {
         return;
     }
 
-    match collector::recording::set_aside_older(root) {
-        Ok(Some(moved)) => eprintln!("Set the older recording aside at {}", moved.display()),
-        Ok(None) => {}
+    match collector::recording::delete_older(root) {
+        Ok(true) => eprintln!("Deleted the older recording at {}", root.display()),
+        Ok(false) => {}
         Err(error) => eprintln!(
-            "Could not set the older recording at {} aside: {error}",
+            "Could not delete the older recording at {}: {error}",
             root.display()
         ),
     }

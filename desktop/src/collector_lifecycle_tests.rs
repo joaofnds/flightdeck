@@ -131,8 +131,8 @@ fn a_launch_waits_for_a_controller_that_is_stopping() {
 
 #[test]
 fn a_retry_on_a_recording_older_than_this_version_starts_nothing_and_says_how_to_recover() {
-    // Goal: a recording that could not move at launch, which only a new launch can set aside,
-    // never leaves the user retrying a recorder that refuses it.
+    // Goal: a recording that could not go at launch, which only a new launch can delete, never
+    // leaves the user retrying a recorder that refuses it.
     // Method: discover an older root that nothing holds, as a retry finds it once its holder quit.
     let parent = std::env::temp_dir().join(format!(
         "flightdeck-lifecycle-{}",
