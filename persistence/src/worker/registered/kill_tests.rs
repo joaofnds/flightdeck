@@ -52,10 +52,12 @@ fn one_kill_test() -> MutexGuard<'static, ()> {
 }
 
 /// How a test ends a worker's process, at the numbered change.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Fault {
     Nothing,
     Kill(u64),
+    /// Ends the worker just before it creates a file of this name for this many-th time.
+    KillCreating(&'static str, u64),
     /// Refuses this change and every one after it, as a full disk does.
     Refuse(u64),
 }
@@ -334,6 +336,12 @@ fn killed_worker_run(
             command.env("FLIGHTDECK_KILL_AT", number.to_string());
             Some(KILLED)
         }
+        Fault::KillCreating(name, number) => {
+            command
+                .env("FLIGHTDECK_KILL_AT", number.to_string())
+                .env("FLIGHTDECK_KILL_CREATING", name);
+            Some(KILLED)
+        }
         Fault::Refuse(number) => {
             command
                 .env("FLIGHTDECK_KILL_AT", number.to_string())
@@ -462,6 +470,34 @@ fn a_worker_killed_again_while_it_gives_up_a_terminal_comes_to_the_same_end() {
 }
 
 #[test]
+fn a_worker_killed_again_while_it_removes_a_terminals_batches_comes_to_the_same_end() {
+    // Goal: a terminal's batches go newest first, so a process that ends between two removals
+    // leaves the order the writer leaves, which the sampled kills above seldom reach (P02.3).
+    // Method: end a worker just before it creates the terminal's proof, the only time both its
+    // batches are whole with nothing after them, then end its restart at each of the first
+    // changes, which take in both removals.
+    let _one = one_kill_test();
+    let interposer = Interposer::build();
+    let uninterrupted = {
+        let recording = killed_worker_crashed_run();
+        killed_worker_finish(&recording, &interposer, "never ended");
+        converged(&recording)
+    };
+    let pair = KilledTwice {
+        recording_new: killed_worker_crashed_run,
+        first: Fault::KillCreating("metadata", 2),
+        seconds: 6,
+        second: Fault::Kill,
+        interposer: &interposer,
+        uninterrupted: &uninterrupted,
+    };
+
+    let ended = pair.converges();
+
+    assert_eq!(ended, Some(6));
+}
+
+#[test]
 fn a_worker_refused_a_change_while_it_recovers_comes_to_the_same_end() {
     // Goal: a failure during recovery removes nothing a later restart needs, so it finishes once
     // the disk has room (P02.3).
@@ -514,7 +550,7 @@ fn killed_twice_converges(
                     let first = next_first.fetch_add(first_stride, Ordering::Relaxed);
                     let pair = KilledTwice {
                         recording_new,
-                        first,
+                        first: Fault::Kill(first),
                         seconds,
                         second,
                         interposer: &interposer,
@@ -535,7 +571,7 @@ fn killed_twice_converges(
 /// One first kill and the faults of the restart after it.
 struct KilledTwice<'test> {
     recording_new: fn() -> Recording,
-    first: u64,
+    first: Fault,
     seconds: u64,
     second: fn(u64) -> Fault,
     interposer: &'test Interposer,
@@ -549,11 +585,10 @@ impl KilledTwice<'_> {
         let mut ended = 0;
         for second in 1..=self.seconds {
             let recording = (self.recording_new)();
-            let first = Fault::Kill(self.first);
-            if !killed_worker_run(&recording, self.interposer, first, "first") {
+            if !killed_worker_run(&recording, self.interposer, self.first, "first") {
                 return None;
             }
-            let after = format!("killed at change {}", self.first);
+            let after = format!("ended by {:?}", self.first);
             let faulted = (self.second)(second);
             let reached = killed_worker_run(&recording, self.interposer, faulted, &after);
             let after = format!("{after}, then at change {second}");

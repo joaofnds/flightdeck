@@ -3,7 +3,8 @@
 //! a full disk does, so the worker reports an error and goes on running until it stops. A full sync
 //! changes nothing the next process can see, so it has no number and returns at once, since a kill
 //! loses nothing a sync would have kept and a run's time is mostly its syncs. Nothing outside the
-//! directory the test names has a number either.
+//! directory the test names has a number either. Told a file's name as well, it numbers only the
+//! creations of that file, for a test that needs the state just before one of them.
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,6 +19,7 @@ const KILLED: i32 = 137;
 const KILL_NUMBER_DIGITS_MAX: usize = 19;
 
 static CHANGES: AtomicU64 = AtomicU64::new(0);
+static CREATIONS: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "C" {
     fn __error() -> *mut i32;
@@ -36,6 +38,7 @@ unsafe extern "C" {
     fn openat(directory: i32, name: *const c_char, flags: i32, ...) -> i32;
     fn pwrite(file: i32, bytes: *const c_void, count: usize, offset: i64) -> isize;
     fn renameat(source: i32, name: *const c_char, target: i32, destination: *const c_char) -> i32;
+    fn strcmp(left: *const c_char, right: *const c_char) -> i32;
     fn strlen(text: *const c_char) -> usize;
     fn strncmp(left: *const c_char, right: *const c_char, count: usize) -> i32;
     fn unlinkat(directory: i32, name: *const c_char, flags: i32) -> i32;
@@ -77,8 +80,16 @@ unsafe fn inside_recording(descriptor: i32) -> bool {
     same_start && (path[length] == 0 || path[length] == b'/')
 }
 
+/// The name of the file whose creations the test numbers, if it named one.
+unsafe fn counted_creation() -> *const c_char {
+    unsafe { getenv(c"FLIGHTDECK_KILL_CREATING".as_ptr()) }
+}
+
 /// Ends the process if the test named this change, and says whether to refuse it otherwise.
 unsafe fn at_change(number: u64) -> bool {
+    if !unsafe { counted_creation() }.is_null() {
+        return false;
+    }
     let named = unsafe { kill_number() };
     if named == 0 || number < named {
         return false;
@@ -128,7 +139,7 @@ unsafe fn before_write(file: i32, at_start: bool) -> WriteStep {
     }
     let number = CHANGES.fetch_add(1, Ordering::Relaxed) + 1;
     let named = unsafe { kill_number() };
-    if named == 0 || number < named {
+    if named == 0 || number < named || !unsafe { counted_creation() }.is_null() {
         return WriteStep::Whole;
     }
     if unsafe { refusing() } {
@@ -370,6 +381,14 @@ unsafe extern "C" fn killed_create(
     flags: i32,
     mode: u32,
 ) -> i32 {
+    let counted = unsafe { counted_creation() };
+    if !counted.is_null()
+        && unsafe { strcmp(name, counted) } == 0
+        && unsafe { inside_recording(directory) }
+        && CREATIONS.fetch_add(1, Ordering::Relaxed) + 1 == unsafe { kill_number() }
+    {
+        unsafe { _exit(KILLED) };
+    }
     if unsafe { before_change(directory) } {
         return unsafe { refused() };
     }
