@@ -288,7 +288,7 @@ impl LiveDashboard {
                 .flex()
                 .gap(gpui::px(12.0))
                 .text_color(gpui::rgb(crate::charts::MUTED))
-                .child(status);
+                .child(gpui::div().flex_1().min_w_0().child(status));
             if retry {
                 collector = collector.child(
                     crate::dashboard::control("Retry recording")
