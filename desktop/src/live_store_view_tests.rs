@@ -261,6 +261,34 @@ fn a_run_that_ended_at_the_view_s_newest_second_stops_the_status() {
 }
 
 #[test]
+fn a_run_that_ended_with_no_view_stops_the_status() {
+    // Goal: a page drawn from the worker's answer alone reads a completed run as stopped.
+    // Method: readings with their run completed and no View taken.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    dashboard.snapshot.as_mut().unwrap().catalog["collector_completed"] = json!(true);
+
+    assert_eq!(
+        dashboard.status_at(UNIX_EPOCH + Duration::from_secs(10_001)),
+        "Collector stopped"
+    );
+}
+
+#[test]
+fn a_run_that_ended_with_no_seconds_anywhere_stops_the_status() {
+    // Goal: a run that completed before saving any second reads as stopped, not as no readings.
+    // Method: a completed run whose answer names no last second, and no View taken.
+    let mut dashboard = dashboard(&[reading_at(10_000, 0)]);
+    let catalog = &mut dashboard.snapshot.as_mut().unwrap().catalog;
+    catalog["collector_completed"] = json!(true);
+    catalog["last_second"] = json!(null);
+
+    assert_eq!(
+        dashboard.status_at(UNIX_EPOCH + Duration::from_secs(10_001)),
+        "Collector stopped"
+    );
+}
+
+#[test]
 fn the_cpu_chart_names_the_levels_of_the_views_newest_second() {
     // Goal: the View's own seconds name the CPU chart's levels, so the chart takes nothing from
     // the worker's readings. Method: a View whose newest second names performance and
