@@ -13,7 +13,7 @@ fn sealed_predecessor_at_tick(run_tick: u64) -> (Fixture, recording::Terminal) {
     fixture.start_at_run_tick(run_tick);
     fixture.publish_with_usage(100, &usage(0));
     fixture.seal_minute(0);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -26,7 +26,7 @@ fn sealed_predecessor_at_tick(run_tick: u64) -> (Fixture, recording::Terminal) {
 
 fn observe_next(mut fixture: Fixture, mut ring: Ring) -> (MachineSecond, AppsSecond) {
     fixture.publish_with_usage(101, &usage(1));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut observed = Vec::new();
     ring.read(|_, machine, apps| {
         let mut payload = AppsSecond::with_room();
@@ -62,11 +62,7 @@ fn changed_clocks(
     };
     change(&mut observation);
     fixture.seal_with_observations(&[observation]);
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
+    let marker = fixture.marker(0);
     let sealed = crate::recording::SealedMinute::open(&fixture.root, &marker).unwrap();
     let mut machine = crate::recording::MachineMinute::default();
     crate::recording::read_machine(&sealed, &mut machine).unwrap();
@@ -225,7 +221,7 @@ fn an_overwritten_successor_does_not_resurrect_the_terminal_baseline() {
     let mut ring = Ring::new(fixture.root.clone());
     ring.accept(Some(terminal));
     ring.follow().unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut observed = Vec::new();
 
     ring.read(|_, machine, apps| {
@@ -305,8 +301,8 @@ fn a_refused_terminal_presentation_preserves_the_valid_input_predecessor() {
     crate::store::tests::expand_program_dictionary(&mut fixture);
     crate::store::tests::publish_named_processes(&mut fixture, 58, &[b"small"], 1);
     crate::store::tests::publish_named_processes(&mut fixture, 59, &[&vec![b'x'; 1_000]], 2_000);
-    crate::live::app_process_groups_history_tests::named::seal_selected(&fixture, &[1, 2]);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();

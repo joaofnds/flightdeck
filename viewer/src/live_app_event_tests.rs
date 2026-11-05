@@ -251,9 +251,9 @@ fn gap_exit_saved(fixture: &identity_fixture::Fixture, output: &mut [Value; 4]) 
     gap_exit_sealed(fixture, &saved, &mut output[2]);
     gap_exit_histories(&saved, &selected, &output[1]);
     let prior =
-        persistence::layout::WindowKey::from(&saved.windows[0].identity).marker(&fixture.root);
+        fixture.marker(saved.windows[0].identity.window);
     let current =
-        persistence::layout::WindowKey::from(&saved.windows[1].identity).marker(&fixture.root);
+        fixture.marker(saved.windows[1].identity.window);
     assert!(!std::fs::read(&prior).unwrap().is_empty());
     std::fs::remove_file(prior).unwrap();
     let refused = saved.with_app_sample(&selected, gap_exit_sample);
@@ -352,9 +352,9 @@ fn gap_exit_sample(sample: &Sample) -> Result<Value> {
 fn gap_exit_sealed(fixture: &identity_fixture::Fixture, saved: &Session, output: &mut Value) {
     let mut before = None;
     let prior =
-        persistence::layout::WindowKey::from(&saved.windows[0].identity).marker(&fixture.root);
+        fixture.marker(saved.windows[0].identity.window);
     let current =
-        persistence::layout::WindowKey::from(&saved.windows[1].identity).marker(&fixture.root);
+        fixture.marker(saved.windows[1].identity.window);
     let prior = crate::recording::SealedMinute::open(&fixture.root, &prior).unwrap();
     prior
         .visit_samples(&mut before, |_, sample| sample.map(|_| ()))

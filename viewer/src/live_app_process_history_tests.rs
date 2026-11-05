@@ -436,10 +436,7 @@ fn refuses_a_warm_group_trace_after_its_commitment_disappears() {
     fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     selected(&mut session);
-    let marker = persistence::layout::WindowKey::from(
-        &session.history.as_ref().unwrap().windows[0].identity,
-    )
-    .marker(&fixture.root);
+    let marker = fixture.marker(session.history.as_ref().unwrap().windows[0].identity.window);
     std::fs::remove_file(marker).unwrap();
 
     let result = session.app_process_history(KeyKind::Bundle, b"/Apps/Current.app", b"current");

@@ -65,7 +65,7 @@ fn assert_finite_saved_load(reader: SavedReader) {
     let marker = saved_marker(&fixture);
     let frame = replace_saved_load(&fixture.root, &marker, 0.5);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let connection = crate::data::connection();
     connection.register("changed_ticks", frame).unwrap();
     let old = crate::data::query(
@@ -127,7 +127,7 @@ fn assert_invalid_saved_load(one: f64, reader: SavedReader) {
         old,
         Err(persistence::Error::Bound("unsupported or nonfinite cell"))
     ));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
 
     let machine = read_saved_load(&fixture.root, &marker, &budget, &operation, reader);
     assert_eq!(budget.used(), 0);

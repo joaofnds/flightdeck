@@ -1,6 +1,7 @@
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::KeyKind;
+use collector::ring::ObservationTimes;
 use serde_json::json;
 
 pub(super) fn selected(session: &Session, second: u64) -> Observation {
@@ -281,8 +282,7 @@ fn rejects_a_warm_trace_when_its_committed_marker_disappears() {
     session
         .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
-    let marker =
-        persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
+    let marker = fixture.marker(session.windows[0].identity.window);
     assert!(!std::fs::read(&marker).unwrap().is_empty());
     std::fs::remove_file(&marker).unwrap();
 
@@ -385,14 +385,14 @@ fn leaves_rates_unavailable_when_saved_awake_time_decreases() {
     // Goal: increasing continuous time cannot conceal invalid awake ordering in a saved trace.
     // Method: commit predecessor awake two seconds and selected awake one second.
     let mut fixture = Fixture::new();
+    fixture.set_next_clocks(Some(ObservationTimes {
+        wall_ns: 1_001_000_000_000,
+        continuous_ns: 0,
+        awake_ns: 2_000_000_000,
+    }));
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_with_observations(&[persistence::Observation {
-        publication: 1,
-        wall_ns: Some(1_001_000_000_000),
-        continuous_ns: Some(0),
-        awake_ns: Some(2_000_000_000),
-    }]);
+    fixture.seal();
     let session = Session::open(&fixture.root).unwrap();
     let selected = selected(&session, 1002);
     let target = Target {
@@ -431,10 +431,8 @@ fn rejects_a_warm_cross_minute_trace_after_only_the_predecessor_marker_disappear
     session
         .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
         .unwrap();
-    let predecessor =
-        persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
-    let current =
-        persistence::layout::WindowKey::from(&session.windows[1].identity).marker(&fixture.root);
+    let predecessor = fixture.marker(session.windows[0].identity.window);
+    let current = fixture.marker(session.windows[1].identity.window);
     assert!(!std::fs::read(&predecessor).unwrap().is_empty());
     std::fs::remove_file(&predecessor).unwrap();
 
@@ -461,8 +459,7 @@ fn revalidates_commitments_after_projection_before_installing_a_trace() {
         kind: KeyKind::Bundle,
         bytes: b"/Apps/Current.app",
     };
-    let marker =
-        persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
+    let marker = fixture.marker(session.windows[0].identity.window);
     assert!(!std::fs::read(&marker).unwrap().is_empty());
     *session.before_app_history_install.borrow_mut() = Some(Box::new(move || {
         std::fs::remove_file(&marker).unwrap();

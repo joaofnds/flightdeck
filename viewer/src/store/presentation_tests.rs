@@ -85,7 +85,7 @@ fn borrowed_pages_preserve_the_same_json_from_native_and_saved_samples() {
             window: 0,
         });
     let minute = crate::recording::SealedMinute::open(&fixture.root, &marker).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut saved = AppsSecond::with_room();
     let mut before = None;
     let mut legacy_saved = Vec::new();
@@ -314,7 +314,7 @@ fn native_second(identity: bool, count: u64) -> (AppsSecond, Vec<Value>) {
 
 fn retained_fixture(fixture: &Fixture) -> (AppsSecond, Vec<Value>) {
     let mut ring = crate::store::ring::Ring::new(fixture.root.clone());
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut second = AppsSecond::with_room();
     let mut expected = Vec::new();
     ring.follow().unwrap();

@@ -14,7 +14,7 @@ fn staged_machine_work_counts_the_refused_projection_and_its_compatibility_reduc
     let fixture = crate::recording::sealed_system_minute();
     refuse_saved_load(&fixture);
     let (found, machine) = machine_source(&fixture);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let trace = persistence::work::ingestion::Trace::new(found.run.recording);
     let scope = trace.enter();
 
@@ -63,11 +63,7 @@ fn machine_work(trace: &persistence::work::ingestion::Trace) -> usize {
 }
 
 fn machine_source(fixture: &crate::live::identity_fixture::Fixture) -> (Found, MachineMinute) {
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let sealed = ScopedSealedMinute::open(&fixture.root, &marker).unwrap();
     let mut machine = MachineMinute::default();
@@ -89,11 +85,7 @@ fn refuse_saved_load(fixture: &crate::live::identity_fixture::Fixture) {
     use polars::prelude::{
         DataType, Null, ParquetCompression, ParquetWriter, StatisticsOptions, lit,
     };
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let path = fixture
         .root
@@ -137,7 +129,7 @@ fn a_changed_manifest_after_machine_loading_refuses_the_process_upgrade() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = Held::with_payload(Arc::clone(&budget));
     held.startup = crate::store::StartupState::Loading;
     let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, Some(&budget));
@@ -197,7 +189,7 @@ fn sealed_candidate_survives_pool_denial_without_repeating_accepted_app_work() {
     // Goal: an admitted sealed result survives a real retained pool owner until installation.
     // Method: pin the selected placeholder, stall history twice, then release and finish.
     let fixture = crate::store::startup_tests::primary_fixture();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
@@ -282,7 +274,7 @@ fn sealed_candidate_rejects_a_changed_witness_before_installation() {
     // Goal: a pending admitted sealed result cannot certify a changed source.
     // Method: stall history with a real pool owner, change its seal, then release the owner.
     let fixture = crate::store::startup_tests::primary_fixture();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut stage = GuardStage::new(&fixture, &budget);
     let pinned = stage.primary_with_no_spare(&fixture, &budget);
     stage.advance(&fixture, &budget).unwrap();
@@ -292,11 +284,7 @@ fn sealed_candidate_rejects_a_changed_witness_before_installation() {
     ));
     let accepted = stage.accepted();
     let source_generation = stage.held.source_generation;
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
+    let marker = fixture.marker(0);
     change_loss_word(&fixture.root, &marker);
     drop(pinned);
 
@@ -428,7 +416,7 @@ fn endpoint_stage_accepts_the_legal_61_endpoint_control() {
     // Goal: early header validation admits the full legal boundary.
     // Method: supply 61 ordered saved ticks with otherwise valid machine and header columns.
     let fixture = endpoint_fixture(61, false);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut stage = GuardStage::new(&fixture, &budget);
     stage.advance(&fixture, &budget).unwrap();
 
@@ -465,7 +453,7 @@ fn assert_endpoint_refusal(
     native_ticks_decodes: usize,
 ) {
     let fixture = endpoint_fixture(count, reversed);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
@@ -503,11 +491,7 @@ fn endpoint_fixture(count: u64, reversed: bool) -> crate::live::identity_fixture
     let mut fixture = crate::live::identity_fixture::Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.seal();
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let path = fixture
         .root
@@ -578,7 +562,7 @@ fn selected_startup_payloads_share_one_input_name_owner_after_startup_retires() 
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let observer = Arc::new(ByteBudget::new(64 * 1024));
     let trace = crate::store::payload::NameTrace::new(4, &observer);
     let mut held = Held::with_payload(Arc::clone(&budget));

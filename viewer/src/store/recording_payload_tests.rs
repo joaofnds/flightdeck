@@ -12,7 +12,7 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
     // Goal: preserve the exact terminal. Method: compare three real steps with its own reader.
     let fixture = catch_up_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     found.reverse();
@@ -85,7 +85,7 @@ fn cursor_steps_preserve_the_first_live_successor() {
     // Method: seed real ring readers with a stepped cursor and the independent terminal reader.
     let mut fixture = catch_up_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     found.reverse();
@@ -127,7 +127,7 @@ fn cursor_refuses_a_terminal_handoff_before_all_minutes_are_consumed() {
     // Method: consume the oldest real sealed minute and attempt to finish with two still pending.
     let fixture = catch_up_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     found.reverse();
@@ -158,7 +158,7 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
     let fixture = catch_up_fixture();
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     found.reverse();
@@ -203,7 +203,7 @@ fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
     // Method: damage the middle real marker, advance each minute, and inspect the recovered tail.
     let fixture = catch_up_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     found.reverse();
@@ -263,7 +263,7 @@ fn saved_origin_carries_the_admitted_manifests_actual_losses() {
         unknown: true,
     };
     change_committed_losses(&fixture.root, &found[0].marker, &losses);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut origins = Vec::new();
 
@@ -334,7 +334,7 @@ fn saved_computer_labels_keep_the_legacy_text_domain_through_the_store_loader() 
     let replacement = fixture.root.join("changed-ticks.parquet");
     events_loader_write(&replacement, &mut changed);
     std::fs::rename(replacement, path).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut summaries = Vec::new();
 
@@ -365,7 +365,7 @@ fn terminal_only_load_preserves_exact_source_without_deriving_apps() {
     fixture.seal_minute(0);
     let identity = fixture.writer.identity().unwrap();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     assert_eq!(found.len(), 1);
@@ -434,7 +434,7 @@ fn terminal_only_load_preserves_the_full_decoders_first_successor() {
     fixture.publish_with_system_rows(101);
     fixture.seal_minute(0);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let mut decoder = Decoder::default();
@@ -505,7 +505,7 @@ fn terminal_only_load_refuses_a_changed_consumed_file() {
         .join(manifest.data_directory)
         .join("processes.parquet");
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
 
     let result = super::terminal(
         &fixture.root,
@@ -540,7 +540,7 @@ fn terminal_only_load_honors_cancellation_after_the_last_table_capture() {
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
 
     let result = super::terminal(
         &fixture.root,
@@ -594,7 +594,7 @@ fn terminal_only_load_refuses_a_malformed_earlier_frame_even_with_a_valid_last_f
     events_loader_write(&replacement, &mut damaged);
     std::fs::rename(replacement, processes).unwrap();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
 
     let result = super::terminal(
         &fixture.root,
@@ -622,7 +622,7 @@ fn terminal_admission_preserves_presentation_refusal_and_recovery() {
         let mut found = Vec::new();
         super::super::find(&fixture.root, &mut found, None).unwrap();
         let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-        let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+        let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
         let mut decoder = Decoder::default();
         let full = decoder.decode(
             &fixture.root,
@@ -738,7 +738,7 @@ fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
         root: &fixture.root,
         marker: &found[0].marker,
     });
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();
     let captures = AtomicU64::new(0);
@@ -887,7 +887,7 @@ fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitme
         .root
         .join(&manifest.data_directory)
         .join("ticks.parquet");
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();
     let mut consumed = Vec::new();
@@ -978,7 +978,7 @@ fn a_sealed_boot_mismatch_cannot_seed_machine_rates_under_the_registry_identity(
     for second in 101..109 {
         fixture.publish_with_system_rows(second);
     }
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut accepted = Vec::new();
 
@@ -1082,7 +1082,7 @@ fn cancellation_in_one_minute_accepts_only_its_first_observation() {
     fixture.seal();
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut accepted = Vec::new();
 
     let result = crate::store::recording::load_payload(
@@ -1117,7 +1117,7 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
     fixture.seal_minute(1);
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     found.reverse();
@@ -1169,7 +1169,7 @@ fn terminal_projection_keeps_only_the_last_raw_tick_and_all_its_tables() {
     fixture.publish_with_system_rows(101);
     fixture.seal();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let mut decoder = Decoder::default();
@@ -1245,7 +1245,7 @@ fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
         .root
         .join(&manifest.data_directory)
         .join("events.parquet");
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let expected = events_loader_legacy(&source, &budget, &operation);
     let expected_captures = events_loader_consumed_inodes(&source);
@@ -1570,7 +1570,7 @@ fn events_capture_budget_denial_remains_typed_without_legacy_retry() {
         .join(manifest.data_directory)
         .join("events.parquet");
     let inode = std::fs::metadata(events).unwrap().ino();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let held = Mutex::new(None);
     let attempts = AtomicU64::new(0);
@@ -1614,7 +1614,7 @@ fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
     let fixture = events_loader_fixture();
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();
@@ -1672,7 +1672,7 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
         .root
         .join(&manifest.data_directory)
         .join("events.parquet");
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();
     let mut consumed = Vec::new();
@@ -1737,7 +1737,7 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
         segment: 0,
         apps_publication: 3,
     };
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut selected = None;
 
@@ -1798,8 +1798,8 @@ fn a_sealed_name_namespace_from_another_budget_refuses_without_transferring_char
     fixture.seal();
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
-    let original = Arc::new(ByteBudget::new(64 * 1024 * 1024));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let original = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut names = Some(crate::store::payload::ProcessNames::new(4, &original).unwrap());
     let original_charge = original.used();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -1847,7 +1847,7 @@ fn a_sealed_index_admission_refusal_preserves_apps_and_the_next_exact_interval()
     fixture.seal();
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();
     let mut names = None;
@@ -1907,7 +1907,7 @@ fn late_full_decoder_refusal_releases_its_index_and_preserves_an_earlier_reader(
     // Method: change consumed ticks privacy during real events admission, then restore and retry.
     use std::os::unix::fs::PermissionsExt;
     let fixture = catch_up_fixture();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let observer = Arc::new(ByteBudget::new(64 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut found = Vec::new();
@@ -1977,7 +1977,7 @@ fn assert_retry_matches_original_minute(
     found: &crate::store::recording::Found,
     retry: &crate::store::recording::Batch,
 ) {
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let source = crate::recording::SealedSource {
         root: &fixture.root,
@@ -2004,7 +2004,7 @@ fn a_full_minute_shares_captured_names_between_its_exact_observations() {
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
     fixture.seal();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
@@ -2057,7 +2057,7 @@ fn saved_frame_budget_denial_precedes_construction_and_preserves_retry() {
     let identity = fixture.writer.identity().unwrap();
     let expected = frame_retry_observations(&identity);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let found = frame_retry_found(&fixture);
     let mut decoder = frame_retry_seed(&fixture, &found[1], &budget, &operation);
     assert_frame_retry_before(&decoder, &expected[0]);

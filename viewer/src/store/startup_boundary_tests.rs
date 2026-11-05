@@ -18,7 +18,7 @@ fn rollback_selection_follows_source_order_through_complete() {
     fixture.publish_with_usage(900, &usage(60));
     fixture.publish_with_usage(901, &usage(61));
     fixture.seal_minute(1);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut stage = GuardStage::new(&fixture, &budget);
 
     primary(&mut stage, &fixture, &budget);
@@ -54,23 +54,12 @@ fn all_clockless_saved_ticks_complete_with_no_displayable_readings() {
     // Goal: a real source certificate cannot invent displayable clocked readings.
     // Method: save two actual ticks with absent wall clocks and complete every staged phase.
     let mut fixture = Fixture::new();
+    fixture.set_next_clocks(None);
     fixture.publish_with_usage(1000, &usage(0));
+    fixture.set_next_clocks(None);
     fixture.publish_with_usage(1001, &usage(1));
-    fixture.seal_with_observations(&[
-        persistence::Observation {
-            publication: 1,
-            wall_ns: None,
-            continuous_ns: Some(0),
-            awake_ns: Some(0),
-        },
-        persistence::Observation {
-            publication: 2,
-            wall_ns: None,
-            continuous_ns: Some(1_000_000_000),
-            awake_ns: Some(1_000_000_000),
-        },
-    ]);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut stage = GuardStage::new(&fixture, &budget);
 
     primary(&mut stage, &fixture, &budget);
@@ -94,7 +83,7 @@ fn an_empty_registered_source_completes_with_a_truthful_empty_certificate() {
     // Goal: an empty schedule finishes without a fabricated selection or unchecked source.
     // Method: drive a real registered empty ring through staged discovery and completion.
     let fixture = Fixture::new();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut stage = GuardStage::new(&fixture, &budget);
 
     primary(&mut stage, &fixture, &budget);
@@ -116,7 +105,7 @@ fn selected_boundary_cancellation_accepts_no_apps_or_source_certificate() {
     // Goal: cancellation at selected acceptance cannot turn machine progress into readiness.
     // Method: stop after the real selected predecessor step, cancel, then try acceptance/View.
     let fixture = crate::store::startup_tests::primary_fixture();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let cancellation = Arc::new(crate::Cancellation::default());
     let mut stage = GuardStage::new(&fixture, &budget);
     stage.operation = Arc::clone(&cancellation).operation(0).unwrap();
@@ -154,7 +143,7 @@ fn complete_boundary_cancellation_preserves_primary_without_publishing_complete(
     // Goal: complete App progress cannot bypass the final cancellation/readiness boundary.
     // Method: finish real history, cancel before its final completion step, then query/publish.
     let fixture = crate::store::startup_tests::primary_fixture();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let cancellation = Arc::new(crate::Cancellation::default());
     let mut stage = GuardStage::new(&fixture, &budget);
     stage.operation = Arc::clone(&cancellation).operation(0).unwrap();
@@ -269,7 +258,7 @@ fn full_staged_retention_reuses_sample_spares_and_keeps_a_detached_primary_immut
     // Goal: full real retention progresses past both spare bounds while a Primary stays immutable.
     // Method: seal 2375 ticks, replace 12 older targets in one minute, then append 65 native ticks.
     let mut fixture = large_fixture();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();

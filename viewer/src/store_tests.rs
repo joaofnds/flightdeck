@@ -18,7 +18,7 @@ fn a_sealed_sample_refusal_preserves_machine_observations_and_valid_input() {
     publish_named_processes(&mut fixture, 2, &[b"small"], 1);
     let refused =
         super::Missing::Refused(persistence::Error::Bound("live App sample bytes").to_string());
-    crate::live::app_process_groups_history_tests::named::seal_selected(&fixture, &[1, 2, 3]);
+    fixture.seal();
 
     let actual = sealed_payload_view(&fixture);
 
@@ -66,7 +66,7 @@ fn both_adapters_preserve_the_exact_observation_when_apps_exceed_the_bound() {
     .unwrap();
     let store = Store::start_with_payload(&fixture.root, COMPLETE_CAPTURE_BYTES_MAX).unwrap();
     let expected = view_where(&store, |view| view.seconds.len() == 1);
-    crate::live::app_process_groups_history_tests::named::seal_selected(&fixture, &[1]);
+    fixture.seal();
 
     let actual = sealed_payload_view(&fixture);
 
@@ -113,7 +113,7 @@ pub(super) fn expand_program_dictionary(fixture: &mut Fixture) {
 }
 
 fn sealed_payload_view(fixture: &Fixture) -> Arc<View> {
-    let budget = Arc::new(super::ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::new();
     held.enable_payload(Arc::clone(&budget));
     let operation = Arc::new(crate::cancellation::Cancellation::default())
@@ -748,11 +748,7 @@ fn publish_unavailable_processes(fixture: &mut Fixture, tick: u64) {
 
 /// Empties the ticks table of the fixture's sealed minute `minute`.
 pub(super) fn empty_ticks_file(fixture: &Fixture, minute: u64) {
-    let store = persistence::Store::open(&fixture.root).unwrap();
-    let marker = store.marker_path(&persistence::WindowIdentity {
-        run: fixture.writer.identity().unwrap(),
-        window: minute,
-    });
+    let marker = fixture.marker(minute);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let ticks = fixture
         .root

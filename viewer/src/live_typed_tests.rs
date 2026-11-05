@@ -285,7 +285,7 @@ fn keeps_core_validation_scratch_charged_only_while_building_the_candidate() {
     let mut fixture = RingFixture::new_with_shape(&TYPED_CORE_SHAPE);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     typed_core_read(&mut fixture, &mut session);
-    let budget = Arc::new(crate::byte_budget::ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(crate::byte_budget::ByteBudget::new(256 * 1024 * 1024));
     let mut raw = None;
 
     typed_raw_capture(&session.sources[0], Some(&budget), &mut raw).unwrap();

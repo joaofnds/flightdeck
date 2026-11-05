@@ -44,7 +44,7 @@ fn captured_two_second_rates_and_current_threads_survive_saved_reopen() {
     let all = session
         .app_process_groups_history(KeyKind::Bundle, b"/A.app")
         .unwrap();
-    named::seal_selected(&fixture, &[1, 2]);
+    fixture.seal();
     drop(session);
     collector::recording::Registry {
         runs: Vec::new(),
@@ -131,7 +131,7 @@ macro_rules! current_threads {
             let actual = session
                 .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
                 .unwrap();
-            named::seal_selected(&fixture, &[1]);
+            fixture.seal();
             drop(session);
             collector::recording::Registry {
                 runs: Vec::new(),
@@ -399,7 +399,7 @@ fn ordinary_app_shape_stays_compact_while_process_groups_keep_ten_measures() {
         ["0", "0", "0", "0", "0", "1024", "2048", "6", "4", "8"]
     );
     assert_eq!(all.points[1].readings[0].measures.len(), 10);
-    named::seal_selected(&fixture, &[1, 2]);
+    fixture.seal();
     drop(session);
     collector::recording::Registry {
         runs: Vec::new(),

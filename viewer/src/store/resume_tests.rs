@@ -455,11 +455,7 @@ fn take_minute_offline(fixture: &Fixture, minute: u64) {
 }
 
 fn minute_ticks(fixture: &Fixture, minute: u64) -> std::path::PathBuf {
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: minute,
-    }
-    .marker(&fixture.root);
+    let marker = fixture.marker(minute);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     fixture
         .root

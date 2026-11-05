@@ -18,7 +18,7 @@ fn a_native_partial_name_refusal_keeps_its_stage_predecessor_and_accepted_names(
         1,
         &super::Many::new(1, 50, b"prior", b"/Prior.app"),
     );
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let observer = Arc::new(ByteBudget::new(64 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let first = Captured::read(&fixture, 1);

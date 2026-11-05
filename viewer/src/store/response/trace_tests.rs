@@ -140,7 +140,7 @@ fn missing_process_payloads_do_not_erase_independent_resident_history() {
 }
 
 fn missing_payload_context(fixture: &Fixture) -> Arc<QueryContext> {
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = Held::new();
     held.enable_payload(Arc::clone(&budget));
     let mut ring = crate::store::ring::Ring::new(fixture.root.clone());

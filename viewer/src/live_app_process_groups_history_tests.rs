@@ -60,7 +60,7 @@ fn retains_two_names_and_exact_directional_measures_after_cold_reopen() {
         .unwrap();
     assert_eq!(values(&live, b"worker", 1), expected);
 
-    named::seal_selected(&fixture, &[1, 2]);
+    fixture.seal();
     drop(session);
     retire(&fixture);
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
@@ -477,7 +477,7 @@ fn switching_selected_raw_app_or_key_kind_never_reuses_another_cohort() {
     ];
     named::publish(&mut fixture, 1, &rows);
     named::publish(&mut fixture, 2, &rows);
-    named::seal_selected(&fixture, &[1, 2]);
+    fixture.seal();
     retire(&fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1002, 0).unwrap();
@@ -588,7 +588,7 @@ fn cold(cancellation: Arc<Cancellation>) -> Box<Cold> {
     ];
     named::publish(&mut fixture, 1, &rows);
     named::publish(&mut fixture, 2, &rows);
-    named::seal_selected(&fixture, &[1, 2]);
+    fixture.seal();
     retire(&fixture);
     let mut session = LiveSession::open_with(&fixture.root, cancellation, 0).unwrap();
     session.select(1002, 0).unwrap();

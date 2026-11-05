@@ -46,12 +46,14 @@ struct Writers<'derive> {
     derive: &'derive dyn Derive,
 }
 
-/// Saves every window of a registered run its ring holds past what is saved, whether or not a later
-/// window has begun, and leaves the run open, as the minutes going by would.
+/// Saves the windows of a registered run its ring holds past what is saved, through `window_last`
+/// if it names one, whether or not a later window has begun, and leaves the run open, as the
+/// minutes going by would.
 #[cfg(feature = "fixtures")]
 pub fn seal_held_windows(
     store: &Store,
     registered: &RegisteredRun,
+    window_last: Option<u64>,
     derive: &dyn Derive,
 ) -> Result<()> {
     let writers = Writers {
@@ -59,7 +61,7 @@ pub fn seal_held_windows(
         derive,
     };
     let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1 << 28));
-    let reader = RingReader::open_generation(&registered.ring_name)?;
+    let mut reader = RingReader::open_generation(&registered.ring_name)?;
     let newest = reader.publication_newest()?;
     let frontier = store.source_frontier(
         &registered.identity,
@@ -69,7 +71,7 @@ pub fn seal_held_windows(
     let mut state = RunState::default();
     let mut next = frontier.map_or(reader.publication_first(), |saved| saved.publication_end());
     for _window in 0..=reader.shape().slot_count {
-        if next > newest {
+        if next > newest || seal_held_windows_past(&mut reader, next, window_last)? {
             return Ok(());
         }
         persist_one(store, &writers, registered, true, &mut state)?;
@@ -77,6 +79,24 @@ pub fn seal_held_windows(
     }
 
     Err(crate::Error::Bound("held windows"))
+}
+
+/// Whether `publication` falls in a window after `window_last`.
+#[cfg(feature = "fixtures")]
+fn seal_held_windows_past(
+    reader: &mut RingReader,
+    publication: u64,
+    window_last: Option<u64>,
+) -> Result<bool> {
+    let Some(window_last) = window_last else {
+        return Ok(false);
+    };
+    reader.seek_publication(publication)?;
+    let mut timing = PublicationTiming::default();
+    Ok(match reader.read_timing_into(&mut timing)? {
+        Found::Publication { .. } => timing_window_number(reader, &timing)? > window_last,
+        Found::Nothing | Found::Missed { .. } => false,
+    })
 }
 
 pub fn run(root: &Path, memory_limit: u64, derive: &dyn Derive) -> Result<Outcome> {

@@ -15,7 +15,7 @@ fn sampled_ranking_admission_precedes_native_eviction_during_staged_history() {
     let trace = Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let input = crate::store::recording::staged::Input {
         root: &fixture.root,
         budget: &budget,
@@ -90,7 +90,7 @@ fn retired_private_apps_release_budget_before_the_next_real_source_capture() {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = Held::with_payload(Arc::clone(&budget));
     held.span = crate::store::Span::new(
         1,
@@ -149,11 +149,7 @@ fn capture_ticks(
     fixture: &Fixture,
     budget: &Arc<ByteBudget>,
 ) -> Result<persistence::engine::AdmittedTable, persistence::engine::AdmissionRefusal> {
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let file = collector::recording::private::open_private_file(
         &fixture
@@ -212,7 +208,7 @@ fn the_primary_barrier_records_native_retention_backpressure_before_retrying() {
     // Method: deny a real departing saved rank, then drive the actual Store startup turn.
     let mut fixture = crate::store::startup_tests::primary_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let input = crate::store::recording::staged::Input {
         root: &fixture.root,
         budget: &budget,
@@ -277,7 +273,7 @@ fn a_blocked_primary_barrier_rechecks_the_existing_source_without_discarding_its
     // Method: keep old B pending across a newer registration and corrupt/restore root identity.
     let mut fixture = crate::store::startup_tests::primary_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let input = crate::store::recording::staged::Input {
         root: &fixture.root,
         budget: &budget,
@@ -392,7 +388,7 @@ fn accepted_app_rows_keep_the_capacity_their_reservation_admitted() {
     // Method: ingest one real publication and compare the accepted rows with its admission.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut held = Held::new();
     held.enable_payload(Arc::clone(&budget));
@@ -414,7 +410,7 @@ fn cleared_native_app_storage_remains_charged_until_its_capacity_is_freed() {
     // Method: capture native rows, clear them, and compare retained capacity with its budget.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut second = AppsSecond::with_room();
     capture_native_rows(&fixture, &budget, &mut second, 1);
     assert!(!second.apps.is_empty());
@@ -443,7 +439,7 @@ fn a_native_app_pool_slot_accepts_the_rows_of_a_saved_observation() {
     // Method: capture native rows, seal that tick, and load its saved facts into the same slot.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut second = AppsSecond::with_room();
     capture_native_rows(&fixture, &budget, &mut second, 1);
     let expected_count = second.apps.len();
@@ -491,7 +487,7 @@ fn refused_app_row_growth_preserves_the_previous_allocation_and_can_retry() {
     // Method: capture real rows, exhaust growth room, then free pressure and retry admission.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut second = AppsSecond::with_room();
     capture_native_rows(&fixture, &budget, &mut second, 1);
     let pointer = second.apps.as_ptr();
@@ -526,7 +522,7 @@ fn resetting_the_store_preserves_charges_for_retained_app_row_capacity() {
     // Method: ingest real rows, reset, and inspect every released slot's physical row owner.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut held = Held::new();
     held.enable_payload(Arc::clone(&budget));

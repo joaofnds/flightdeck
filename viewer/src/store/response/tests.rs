@@ -202,7 +202,7 @@ fn missing_middle_app_ranks_preserve_complete_sibling_observations() {
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
     fixture.publish_with_system_rows(102);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = Held::new();
     held.enable_payload(Arc::clone(&budget));
     let mut ring = crate::store::ring::Ring::new(fixture.root.clone());
@@ -250,7 +250,7 @@ fn assert_window_ranks(
 }
 
 pub(super) fn saved_context(fixture: &Fixture) -> Arc<QueryContext> {
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();

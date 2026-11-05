@@ -1,6 +1,7 @@
 use super::*;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::Page;
+use collector::ring::ObservationTimes;
 use std::sync::Arc;
 
 fn page(sample: &Sample) -> Result<Value> {
@@ -264,8 +265,7 @@ fn refuses_a_warm_sample_after_its_committed_marker_disappears() {
     let mut session = Session::open(&fixture.root).unwrap();
     let selected = session.select(1001, 0).unwrap()["selected"].clone();
     session.with_app_sample(&selected, page).unwrap();
-    let marker =
-        persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
+    let marker = fixture.marker(session.windows[0].identity.window);
     assert!(!std::fs::read(&marker).unwrap().is_empty());
     std::fs::remove_file(&marker).unwrap();
 
@@ -321,14 +321,14 @@ fn retains_predecessor_evidence_without_rates_when_its_saved_awake_clock_decreas
     // Goal: decreasing awake time prevents a committed interval from becoming measured.
     // Method: commit an increasing continuous pair with predecessor awake two seconds.
     let mut fixture = Fixture::new();
+    fixture.set_next_clocks(Some(ObservationTimes {
+        wall_ns: 1_001_000_000_000,
+        continuous_ns: 0,
+        awake_ns: 2_000_000_000,
+    }));
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_with_observations(&[persistence::Observation {
-        publication: 1,
-        wall_ns: Some(1_001_000_000_000),
-        continuous_ns: Some(0),
-        awake_ns: Some(2_000_000_000),
-    }]);
+    fixture.seal();
     let mut session = Session::open(&fixture.root).unwrap();
     let selected = session.select(1002, 0).unwrap()["selected"].clone();
 
@@ -363,14 +363,14 @@ fn retains_a_measured_interval_when_the_saved_awake_clocks_are_equal() {
     // Goal: equal awake clocks remain compatible when continuous time advances.
     // Method: commit both awake clocks at one second and retain the ordinary counter delta.
     let mut fixture = Fixture::new();
+    fixture.set_next_clocks(Some(ObservationTimes {
+        wall_ns: 1_001_000_000_000,
+        continuous_ns: 0,
+        awake_ns: 1_000_000_000,
+    }));
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_with_observations(&[persistence::Observation {
-        publication: 1,
-        wall_ns: Some(1_001_000_000_000),
-        continuous_ns: Some(0),
-        awake_ns: Some(1_000_000_000),
-    }]);
+    fixture.seal();
     let mut session = Session::open(&fixture.root).unwrap();
     let selected = session.select(1002, 0).unwrap()["selected"].clone();
 
@@ -384,14 +384,14 @@ fn retains_a_measured_interval_when_the_saved_awake_clocks_are_equal() {
 
 fn assert_saved_wall_rates(previous_wall: u64, alternative: usize) {
     let mut fixture = Fixture::new();
+    fixture.set_next_clocks(Some(ObservationTimes {
+        wall_ns: previous_wall,
+        continuous_ns: 0,
+        awake_ns: 0,
+    }));
     fixture.publish_with_system_rows(1001);
     fixture.publish_with_system_rows(1002);
-    fixture.seal_with_observations(&[persistence::Observation {
-        publication: 1,
-        wall_ns: Some(previous_wall),
-        continuous_ns: Some(0),
-        awake_ns: Some(0),
-    }]);
+    fixture.seal();
     let mut session = Session::open(&fixture.root).unwrap();
     let selected = session.select(1002, alternative).unwrap()["selected"].clone();
     let restored = session.with_app_sample(&selected, page).unwrap();
@@ -447,10 +447,8 @@ fn refuses_a_warm_cross_minute_sample_when_only_its_predecessor_marker_disappear
     let restored = session.with_app_sample(&selected, page).unwrap();
     assert_eq!(restored["previous"]["publication"], "1");
     assert_eq!(restored["apps"][0]["cpu_ns"]["measured_members"], 1);
-    let predecessor =
-        persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
-    let current =
-        persistence::layout::WindowKey::from(&session.windows[1].identity).marker(&fixture.root);
+    let predecessor = fixture.marker(session.windows[0].identity.window);
+    let current = fixture.marker(session.windows[1].identity.window);
     assert!(!std::fs::read(&predecessor).unwrap().is_empty());
     std::fs::remove_file(&predecessor).unwrap();
 

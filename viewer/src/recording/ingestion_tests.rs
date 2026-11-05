@@ -10,9 +10,9 @@ fn attributes_retained_ticks_projection_after_open_returns() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let marker = marker(&fixture);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
-    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(64 * 1024 * 1024));
+    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let operation = std::sync::Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -66,7 +66,7 @@ fn attributes_deferred_tables_to_their_sources_and_current_purpose() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let trace = Trace::new(minute.manifest.identity.run.recording);
     let scope = trace.enter();
     let cpus = minute.scan("cpus").unwrap();
@@ -110,14 +110,6 @@ fn attributes_deferred_tables_to_their_sources_and_current_purpose() {
     assert_eq!(restored.purpose, Purpose::Predecessor);
 }
 
-fn marker(fixture: &Fixture) -> std::path::PathBuf {
-    persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root)
-}
-
 #[test]
 fn filters_foreign_deferred_table_collection() {
     // Goal: a deferred foreign table cannot inherit the observer's recording identity.
@@ -125,7 +117,7 @@ fn filters_foreign_deferred_table_collection() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let recording = minute.manifest.identity.run.recording.0;
     let trace = Trace::new(collector::ring::Identity([recording[0] ^ 1, recording[1]]));
     let scope = trace.enter();
@@ -147,8 +139,8 @@ fn filters_foreign_retained_ticks_projection() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let marker = marker(&fixture);
-    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(64 * 1024 * 1024));
+    let marker = fixture.marker(0);
+    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let operation = std::sync::Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();

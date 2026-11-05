@@ -10,7 +10,7 @@ fn an_empty_completed_catalog_keeps_checked_absence_without_inventing_a_clock() 
     // Goal: a recording with no sealed windows has checked absence, not unchecked history.
     // Method: load a real registered recording before its first publication or commit.
     let fixture = Fixture::new();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
     let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {
@@ -42,7 +42,7 @@ fn a_successful_load_reports_the_actual_catalog_pruning_floor() {
     let mut fixture = Fixture::new();
     fixture.publish_with_events(10_000, &[]);
     fixture.seal();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
     let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {}).unwrap();
@@ -72,7 +72,7 @@ fn a_registered_recording_loads_its_minutes_through_its_catalog() {
     fixture.skip_run_ticks(59);
     fixture.publish_with_events(100_000, &[]);
     fixture.seal();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
     let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {}).unwrap();
@@ -96,7 +96,7 @@ fn a_rollback_before_the_catalog_floor_does_not_certify_omitted_readings() {
     fixture.publish_with_events(5_000, &[]);
     fixture.publish_with_events(100, &[]);
     fixture.seal_minute(1);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut publications = Vec::new();
 
@@ -119,7 +119,7 @@ fn a_registry_change_during_loading_revokes_the_checked_catalog() {
     let mut fixture = Fixture::new();
     fixture.publish_with_events(100, &[]);
     fixture.seal();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let changed = std::sync::atomic::AtomicBool::new(false);
 
@@ -184,7 +184,7 @@ fn an_unread_checkpoint_load_does_not_certify_skipped_old_windows() {
         segment: 0,
         apps_publication: 2,
     };
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut publications = Vec::new();
 
@@ -329,23 +329,12 @@ fn clockless_payload_history_preserves_its_raw_terminal_without_inventing_readin
     // Goal: a wholly clockless minute retains its rate predecessor without fake chart times.
     // Method: decode a real two-tick minute with both stored wall clocks absent.
     let mut fixture = Fixture::new();
+    fixture.set_next_clocks(None);
     fixture.publish_with_events(10_000, &[]);
+    fixture.set_next_clocks(None);
     fixture.publish_with_events(10_001, &[]);
-    fixture.seal_with_observations(&[
-        persistence::Observation {
-            publication: 1,
-            wall_ns: None,
-            continuous_ns: Some(0),
-            awake_ns: Some(0),
-        },
-        persistence::Observation {
-            publication: 2,
-            wall_ns: None,
-            continuous_ns: Some(1_000_000_000),
-            awake_ns: Some(1_000_000_000),
-        },
-    ]);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut accepted = 0;
 
@@ -412,7 +401,7 @@ fn a_capacity_stop_reports_incomplete_history_before_decoding() {
 
     assert_eq!(left_out, Some(Failure::Commits(ErrorKind::InvalidData)));
     assert_eq!(accepted, 0);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
     let outcome =
@@ -532,7 +521,7 @@ fn payload_discovery_refuses_an_unknown_checkpoint_run() {
         segment: 0,
         apps_publication: 1,
     };
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut accepted = 0;
 
@@ -564,7 +553,7 @@ fn payload_discovery_anchors_and_finishes_at_the_registered_run() {
     current.seal_minute(0);
     let current_run = current.writer.identity().unwrap();
     let archived_run = archived.writer.identity().unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut accepted = Vec::new();
 
@@ -611,7 +600,7 @@ fn register_lower_run<'a>(
 }
 
 fn payload_publications(fixture: &Fixture) -> Vec<u64> {
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut publications = Vec::new();
     let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, second, _| {

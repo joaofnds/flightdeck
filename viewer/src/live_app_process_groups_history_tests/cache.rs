@@ -394,7 +394,7 @@ fn cold() -> Box<Cold> {
     let mut fixture = named::dense();
     publish(&mut fixture, 1);
     publish(&mut fixture, 2);
-    named::seal_selected(&fixture, &[1, 2]);
+    fixture.seal();
     let cancellation = Arc::new(Cancellation::default());
     let saved = Session::open_with(&fixture.root, Arc::clone(&cancellation), 0).unwrap();
     Box::new(Cold {

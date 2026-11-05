@@ -260,7 +260,7 @@ const OLDER_TICKS: &[[u64; 3]] = &[
 
 impl PendingStage {
     fn new(fixture: Fixture, recent_capacity: usize, ticks: &'static [[u64; 3]]) -> Self {
-        let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+        let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
         let mut stage = GuardStage::new(&fixture, &budget);
         stage.held.span = Span::new(
             recent_capacity,

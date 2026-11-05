@@ -21,7 +21,7 @@ fn prepared_retries_keep_exact_cumulative_reader_losses() {
     // before the event room guard could, then retry the same prepared tick.
     let mut fixture = Fixture::new();
     let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
@@ -91,7 +91,7 @@ fn detachment_retains_native_origin_and_the_original_metadata_reservation() {
     // Method: detach a prepared native second and drop the source and all original retainers.
     let mut fixture = Fixture::new();
     publish(&mut fixture, 1, Some(3.0), true);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -140,7 +140,7 @@ fn a_terminal_workspace_admission_retry_keeps_the_saved_predecessor() {
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
     fixture.seal();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let outcome =
         crate::store::recording::load_payload(&fixture.root, &budget, &operation, |_, _, _| {})
@@ -604,7 +604,7 @@ fn a_clockless_native_tick_keeps_raw_input_without_inventing_a_chart_second() {
     publish(&mut fixture, 1, None, true);
     publish(&mut fixture, 2, None, false);
     publish(&mut fixture, 3, None, true);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -643,7 +643,7 @@ fn an_unadmitted_frame_does_not_let_duplicate_legacy_pids_escape_as_valid_raw() 
     let count = crate::apps::PROCESS_INTERVALS_MAX + 1;
     let mut fixture = Fixture::new_mode(false, u64::try_from(count).unwrap(), None);
     publish_legacy_duplicates(&mut fixture, count);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -763,7 +763,7 @@ fn nan_fans_stay_missing_channels_without_refusing_native_raw_or_summary() {
     // Method: publish NaN fan speed beside valid power and inspect both owned facets.
     let mut fixture = Fixture::new();
     publish_smc(&mut fixture, 1, Some(12.0), true, f32::NAN);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();

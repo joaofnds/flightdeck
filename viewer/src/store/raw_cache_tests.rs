@@ -9,7 +9,7 @@ use collector::ring::{Found, RingReader};
 fn an_evicted_raw_reading_keeps_its_owned_facts_and_reservation() {
     // Goal: cache pressure cannot invalidate a raw page already handed to a reader.
     // Method: evict one native publication while retaining a reader for its exact identity.
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
@@ -37,7 +37,7 @@ fn an_evicted_raw_reading_keeps_its_owned_facts_and_reservation() {
 fn a_refused_raw_candidate_preserves_the_previously_accepted_cache() {
     // Goal: an inadmissible identity cannot evict or replace an accepted observation.
     // Method: relabel a native publication's clock and attempt admission at a full limit.
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
@@ -60,7 +60,7 @@ fn a_refused_raw_candidate_preserves_the_previously_accepted_cache() {
 fn clearing_raw_retention_releases_its_entries_but_keeps_fixed_storage() {
     // Goal: reconciliation discards facts while retaining only the allocated bounded slots.
     // Method: accept one native reading and clear its recording retention.
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     let (observation, raw) = capture(&fixture, 1, &budget);

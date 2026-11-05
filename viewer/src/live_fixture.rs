@@ -40,8 +40,10 @@ pub struct Fixture {
 
 /// What the fixture's next reading says of its clocks.
 enum Clocks {
+    /// Those of its second and run tick.
     Known,
     Unknown,
+    Exactly(ObservationTimes),
 }
 
 impl Fixture {
@@ -52,6 +54,10 @@ impl Fixture {
     /// A fixture whose run records into a registered recording, whose minutes it saves through the
     /// persister's own worker.
     pub fn registered() -> Self {
+        Self::registered_of(2)
+    }
+
+    fn registered_of(process_capacity: u64) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "flightdeck-live-registered-{}-{serial}",
@@ -66,8 +72,13 @@ impl Fixture {
             lock_path: root.join("identity.lock"),
             name_prefix: format!("/fdvr{}x{serial}", std::process::id()),
         };
+        let slot_count = if process_capacity == 2 { 8 } else { 64 };
         let shape = Shape {
-            event_capacity: SHAPE.event_capacity.max(SHAPE.slot_count + 1),
+            slot_count,
+            process_capacity,
+            // Room for the one event `publish` gives each tick the ring holds and the tick the
+            // writer logs.
+            event_capacity: SHAPE.event_capacity.max(slot_count + 1),
             ..SHAPE
         };
         let run = collector::recording::new_run_identity(recording).unwrap();
@@ -94,7 +105,7 @@ impl Fixture {
             awake_step_ns: 0,
             usage_override: None,
             identity: true,
-            process_capacity: 2,
+            process_capacity,
             owns_root: true,
             registered: true,
             clocks: Clocks::Known,
@@ -282,9 +293,14 @@ impl Fixture {
 
     /// Publishes a reading whose clocks are unknown, as a source with no clocks leaves it.
     pub fn publish_without_clock(&mut self) {
-        self.clocks = Clocks::Unknown;
+        self.set_next_clocks(None);
         self.publish_with_system_rows(0);
-        self.clocks = Clocks::Known;
+    }
+
+    /// Gives the next reading exactly `times`, or no clocks if there are none, rather than those of
+    /// its second and run tick.
+    pub fn set_next_clocks(&mut self, times: Option<ObservationTimes>) {
+        self.clocks = times.map_or(Clocks::Unknown, Clocks::Exactly);
     }
 
     pub fn publish_with_system_rows(&mut self, second: u64) {
@@ -353,17 +369,18 @@ impl Fixture {
             events,
             dropped: Dropped::default(),
         };
-        let times = ObservationTimes {
-            wall_ns: second * 1_000_000_000,
-            continuous_ns: self.elapsed * self.continuous_step_ns,
-            awake_ns: self.elapsed * self.awake_step_ns,
+        let times = match std::mem::replace(&mut self.clocks, Clocks::Known) {
+            Clocks::Known => Some(ObservationTimes {
+                wall_ns: second * 1_000_000_000,
+                continuous_ns: self.elapsed * self.continuous_step_ns,
+                awake_ns: self.elapsed * self.awake_step_ns,
+            }),
+            Clocks::Unknown => None,
+            Clocks::Exactly(times) => Some(times),
         };
-        if matches!(self.clocks, Clocks::Unknown) {
-            self.publish_identity(&mut readings, None);
-        } else if self.identity {
-            self.publish_identity(&mut readings, Some(&times));
-        } else {
-            self.writer.publish_observed(&readings, &times);
+        match times {
+            Some(times) if !self.identity => self.writer.publish_observed(&readings, &times),
+            times => self.publish_identity(&mut readings, times.as_ref()),
         }
         self.elapsed += 1;
     }
@@ -442,8 +459,10 @@ impl Fixture {
     ) {
         assert!(observations.len() <= 8);
         if self.registered {
-            assert!(observations.is_empty());
-            self.seal_registered(derive);
+            self.seal_registered(minute, derive);
+            if !observations.is_empty() {
+                self.seal_registered_change_clocks(minute.unwrap_or_default(), observations);
+            }
             return;
         }
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
@@ -494,14 +513,90 @@ impl Fixture {
             .unwrap();
     }
 
-    fn seal_registered(&self, derive: &dyn persistence::worker::Derive) {
+    fn seal_registered(&self, window_last: Option<u64>, derive: &dyn persistence::worker::Derive) {
         let store = persistence::Store::open(&self.root).unwrap();
         let run = RegisteredRun {
             identity: self.writer.identity().unwrap(),
             ring_name: self.writer.name().to_owned(),
             collector_pid: 0,
         };
-        persistence::worker::seal_held_windows(&store, &run, derive).unwrap();
+        persistence::worker::seal_held_windows(&store, &run, window_last, derive).unwrap();
+    }
+
+    /// Rewrites the clocks of `observations` in the ticks table saved for `window`, which the
+    /// persister never writes, so that a reader's refusal of such a table can be seen.
+    fn seal_registered_change_clocks(
+        &self,
+        window: u64,
+        observations: &[persistence::Observation],
+    ) {
+        type Clock = fn(&persistence::Observation) -> Option<u64>;
+        let manifest = persistence::read_committed(&self.root, &self.marker(window)).unwrap();
+        let path = self
+            .root
+            .join(manifest.data_directory)
+            .join("ticks.parquet");
+        let mut ticks = persistence::engine::scan(&path).unwrap().collect().unwrap();
+        let publications: Vec<u64> = ticks
+            .column("publication")
+            .unwrap()
+            .u64()
+            .unwrap()
+            .into_no_null_iter()
+            .collect();
+        let clocks: [(&str, Clock); 3] = [
+            ("wall_ns", |observation| observation.wall_ns),
+            ("continuous_ns", |observation| observation.continuous_ns),
+            ("awake_ns", |observation| observation.awake_ns),
+        ];
+        for (name, clock) in clocks {
+            let saved: Vec<Option<u64>> =
+                ticks.column(name).unwrap().u64().unwrap().iter().collect();
+            let changed: Vec<Option<u64>> = publications
+                .iter()
+                .zip(saved)
+                .map(|(publication, saved)| {
+                    observations
+                        .iter()
+                        .find(|observation| observation.publication == *publication)
+                        .map_or(saved, clock)
+                })
+                .collect();
+            ticks
+                .with_column(polars::prelude::Column::new(name.into(), changed))
+                .unwrap();
+        }
+        std::fs::remove_file(&path).unwrap();
+        polars::prelude::ParquetWriter::new(private::open_private_file(&path, true).unwrap())
+            .finish(&mut ticks)
+            .unwrap();
+    }
+
+    /// The file that commits this run's saved window `window`.
+    pub fn marker(&self, window: u64) -> PathBuf {
+        let run = self.writer.identity().unwrap();
+        if !self.registered {
+            return persistence::layout::WindowKey::from(&persistence::WindowIdentity {
+                run,
+                window,
+            })
+            .marker(&self.root);
+        }
+        let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(1 << 28));
+        let catalog = persistence::canonical::catalog::Catalog::open(&self.root, &budget).unwrap();
+        let mut work = persistence::canonical::ReadWork::default();
+        let mut publication = u64::MAX;
+        for _saved in 0..=window + 1 {
+            let saved = catalog
+                .window_at_or_before(&run, publication, &mut work)
+                .unwrap()
+                .unwrap();
+            if saved.identity.window == window {
+                return persistence::commitment_path(&self.root, &saved);
+            }
+            publication = saved.publication_first - 1;
+        }
+        panic!("the run saved no window {window}");
     }
 
     fn seal_read(
@@ -512,7 +607,7 @@ impl Fixture {
     ) -> persistence::Window {
         let shape = reader.shape();
         let mut tick = persistence::tick_buffer(&shape).unwrap();
-        let mut identities = Vec::with_capacity(2);
+        let mut identities = Vec::with_capacity(usize::try_from(shape.process_capacity).unwrap());
         let mut window = self.seal_read_window(minute, &shape);
         for _index in 0..8 {
             let found = if self.identity {
@@ -619,12 +714,11 @@ fn seal_read_observation(
     {
         return *observation;
     }
-    let times = tick.times.unwrap();
     persistence::Observation {
         publication,
-        wall_ns: Some(times.wall_ns),
-        continuous_ns: Some(times.continuous_ns),
-        awake_ns: Some(times.awake_ns),
+        wall_ns: tick.times.map(|times| times.wall_ns),
+        continuous_ns: tick.times.map(|times| times.continuous_ns),
+        awake_ns: tick.times.map(|times| times.awake_ns),
     }
 }
 

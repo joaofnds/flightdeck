@@ -154,8 +154,7 @@ fn resident_history_refuses_parts_whose_window_marker_disappeared() {
     let fixture = sealed_minutes([true; 4]);
     let session = resident_at(&fixture, 1005);
     let saved = session.history.as_ref().unwrap();
-    let marker =
-        persistence::layout::WindowKey::from(&saved.windows[0].identity).marker(&fixture.root);
+    let marker = fixture.marker(saved.windows[0].identity.window);
     std::fs::remove_file(&marker).unwrap();
 
     let result = session.app_resident_history();

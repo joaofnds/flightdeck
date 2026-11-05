@@ -26,7 +26,7 @@ fn captured_optional_columns_override_an_incomplete_replacement_schema() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let marker = marker(&fixture);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let ticks = fixture
         .root
@@ -52,7 +52,7 @@ fn captured_optional_columns_override_an_incomplete_replacement_schema() {
     write_ticks(&ticks, frame.clone());
     let replacement = fixture.root.join("replacement.parquet");
     write_ticks(&replacement, frame.drop("cpu_celsius").unwrap());
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = SealedMinute::open_with_ticks(
         &SealedSource {
@@ -90,13 +90,13 @@ fn cancellation_between_consumers_prevents_any_second_native_allocation() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let minute = SealedMinute::open_with_ticks(
         &SealedSource {
             root: &fixture.root,
-            marker: &marker(&fixture),
+            marker: &fixture.marker(0),
         },
         &budget,
         &operation,
@@ -125,7 +125,7 @@ fn process_endpoints_reuse_the_machine_ticks_after_the_source_path_is_replaced()
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(100);
     fixture.seal_minute(0);
-    let marker = marker(&fixture);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let ticks = fixture
         .root
@@ -133,7 +133,7 @@ fn process_endpoints_reuse_the_machine_ticks_after_the_source_path_is_replaced()
         .join("ticks.parquet");
     let replacement = prepare_replacement(&fixture.root, &ticks);
     let original_size = std::fs::metadata(&ticks).unwrap().len();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let captures = CountedCapture::default();
     let minute = SealedMinute::open_with_ticks_using(
@@ -234,9 +234,9 @@ fn assert_admitted_endpoint_count_refused(count: u64) {
     fixture.publish_with_system_rows(100);
     fixture.seal();
     replace_ticks_count(&fixture, count);
-    let marker = marker(&fixture);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = SealedMinute::open_with_ticks(
         &SealedSource {
@@ -280,12 +280,12 @@ fn assert_admitted_endpoint_count_readable(count: u64) {
     fixture.publish_with_system_rows(100);
     fixture.seal();
     replace_ticks_count(&fixture, count);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = SealedMinute::open_with_ticks(
         &SealedSource {
             root: &fixture.root,
-            marker: &marker(&fixture),
+            marker: &fixture.marker(0),
         },
         &budget,
         &operation,
@@ -314,7 +314,7 @@ fn endpoint_decode_entries(trace: &persistence::work::ingestion::Trace) -> usize
 
 fn replace_ticks_count(fixture: &Fixture, count: u64) {
     assert!(count <= 124);
-    let manifest = persistence::read_committed(&fixture.root, &marker(fixture)).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &fixture.marker(0)).unwrap();
     let ticks = fixture
         .root
         .join(manifest.data_directory)
@@ -365,7 +365,7 @@ fn assert_captured_group(count: u8) {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let marker = marker(&fixture);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let ticks = fixture
         .root
@@ -394,7 +394,7 @@ fn assert_captured_group(count: u8) {
     write_ticks(&ticks, original);
     let replacement = fixture.root.join("complete-ticks.parquet");
     write_ticks(&replacement, complete);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = SealedMinute::open_with_ticks(
         &SealedSource {
@@ -438,7 +438,7 @@ fn input_budget_denial_completes_no_capture_and_preserves_existing_usage() {
     let result = SealedMinute::open_with_ticks_using(
         &SealedSource {
             root: &fixture.root,
-            marker: &marker(&fixture),
+            marker: &fixture.marker(0),
         },
         &budget,
         &operation,
@@ -462,8 +462,8 @@ fn changed_marker_after_both_consumers_refuses_final_acceptance() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
-    let marker = marker(&fixture);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let marker = fixture.marker(0);
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = SealedMinute::open_with_ticks(
         &SealedSource {
@@ -515,14 +515,6 @@ impl CountedCapture {
             .stream_position()
             .unwrap()
     }
-}
-
-fn marker(fixture: &Fixture) -> PathBuf {
-    persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root)
 }
 
 fn prepare_replacement(root: &Path, ticks: &Path) -> PathBuf {

@@ -56,7 +56,7 @@ fn complete_machine_projection_matches_native_and_sealed_groups() {
         native.push_tick(publication, &tick);
     }
     fixture.seal_minute(0);
-    let sealed = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let sealed = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut saved = MachineMinute::default();
     read_machine(&sealed, &mut saved).unwrap();
     let budget = Arc::new(crate::byte_budget::ByteBudget::new(32 * 1024 * 1024));
@@ -174,7 +174,7 @@ fn a_sealed_minute_holds_the_machine_readings_the_ring_held() {
         expected.push_tick(publication, &tick);
     }
     fixture.seal_minute(0);
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut decoded = MachineMinute::default();
 
     read_machine(&minute, &mut decoded).unwrap();
@@ -207,7 +207,7 @@ fn a_sealed_minute_holds_the_system_battery_and_disk_readings_the_ring_held() {
         expected.push_tick(publication, &tick);
     }
     fixture.seal_minute(0);
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut decoded = MachineMinute::default();
 
     read_machine(&minute, &mut decoded).unwrap();
@@ -263,7 +263,7 @@ fn admitted_machine_keeps_present_and_null_core_frequencies() {
         expected.push_tick(publication, &tick);
     }
     fixture.seal_minute(0);
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut legacy = MachineMinute::default();
 
     read_machine(&minute, &mut legacy).unwrap();
@@ -293,12 +293,12 @@ fn admitted_machine_keeps_present_and_null_core_frequencies() {
 }
 
 fn read_admitted_machine(fixture: &Fixture) -> MachineMinute {
-    let marker = marker(fixture, 0);
+    let marker = fixture.marker(0);
     let source = super::SealedSource {
         root: &fixture.root,
         marker: &marker,
     };
-    let budget = Arc::new(crate::store::ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(crate::store::ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = super::ScopedSealedMinute::open_with_inputs_using(
         &source,
@@ -327,7 +327,7 @@ macro_rules! refuses_a_damaged_table {
             // tables with a copy the case damages, and decode it.
             let fixture = sealed_system_minute();
             damage_table(&fixture, $table.name(), $damage);
-            let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+            let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
             let refused = read_machine(&minute, &mut MachineMinute::default());
 
@@ -386,7 +386,7 @@ fn refuses_the_processes_of_two_ticks_of_one_publication() {
     damage_table(&fixture, Table::Ticks.name(), |frame| {
         with_column(frame, col("publication").min().alias("publication"))
     });
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
     let refused = decoded_frames(&minute);
 
@@ -406,7 +406,7 @@ fn a_sealed_minute_holds_a_row_for_every_app_its_seal_derived() {
     // Method: seal three observations of several Apps with their App parts, and read the
     // minute's Apps.
     let fixture = sealed_apps_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut apps = AppMinute::default();
 
     let parts = read_apps(&minute, &mut apps).unwrap();
@@ -428,7 +428,7 @@ fn a_minute_sealed_without_app_parts_gives_no_apps() {
         fixture.publish_with_system_rows(second);
     }
     fixture.seal_minute(0);
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut apps = AppMinute::default();
 
     let parts = read_apps(&minute, &mut apps).unwrap();
@@ -450,7 +450,7 @@ fn a_minute_whose_app_parts_are_of_another_version_gives_no_apps() {
                 .alias("version"),
         )
     });
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut apps = AppMinute::default();
 
     let parts = read_apps(&minute, &mut apps).unwrap();
@@ -471,7 +471,7 @@ macro_rules! refuses_damaged_app_parts {
             // with a copy the case damages, and read the minute's Apps.
             let fixture = sealed_apps_minute();
             damage_table(&fixture, APP_PARTS, $damage);
-            let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+            let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
             let refused = read_apps(&minute, &mut AppMinute::default());
 
@@ -535,7 +535,7 @@ fn a_sealed_minute_gives_the_frames_the_replay_of_its_files_gives() {
     // measured, refused and gone usage among them, and compare the decoded frames with the
     // replay's over the same files.
     let fixture = sealed_events_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let frames = decoded_frames(&minute).unwrap();
 
     assert_eq!((frames.len(), minute.rows("events")), (3, Some(6)));
@@ -547,8 +547,8 @@ fn recovered_events_without_observations_remain_raw_without_entering_app_frames(
     // Goal: retained events outlive observation slots without inventing App samples.
     // Method: wrap eight observation slots while 32 events survive, recover, then read both paths.
     let fixture = sealed_recovered_events_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
-    let manifest = persistence::read_committed(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &fixture.marker(0)).unwrap();
     let engine = Engine::new();
     let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let source = engine
@@ -594,7 +594,7 @@ fn detached_events_pass_native_identity_validation_before_app_filtering() {
                 .alias("identity_version"),
         )
     });
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
     let result = decoded_frames(&minute);
 
@@ -635,7 +635,7 @@ fn multipart_event_source_pin_detects_replacement_after_cache_rebinding() {
     // Goal: a cached App result cannot validate against a different physical event source.
     // Method: replace a part, check the retained pin, then compare a fresh registration's pin.
     let fixture = sealed_recovered_events_minute();
-    let manifest = persistence::read_committed(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &fixture.marker(0)).unwrap();
     let engine = Engine::new();
     let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let (before, pin) = engine
@@ -673,7 +673,7 @@ fn multipart_resident_cache_rejects_replaced_event_parts() {
     let mut session = crate::live::LiveSession::open(&fixture.root).unwrap();
     session.select(1_040, 0).unwrap();
     session.app_resident_history().unwrap();
-    let manifest = persistence::read_committed(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &fixture.marker(0)).unwrap();
     let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
     let part = table.part(0).unwrap();
     let retained = fixture.root.join("original-resident-part.parquet");
@@ -693,7 +693,7 @@ fn detached_event_inputs_are_collected_in_bounded_batches() {
     // Goal: an event prefix cannot force a whole-tail frame into App reconstruction.
     // Method: recover three full event batches plus eight associated rows and trace real reads.
     let fixture = sealed_batched_events_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
@@ -719,7 +719,7 @@ fn multipart_event_oversize_is_a_permanent_input_refusal_before_capture() {
     // Goal: a malformed physical part cannot appear as recoverable capacity blockage.
     // Method: resize a real committed part to30MiBbefore pinning and trace the typed caller.
     let fixture = sealed_recovered_events_minute();
-    let marker = marker(&fixture, 0);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
     let part = table.part(0).unwrap();
@@ -729,7 +729,7 @@ fn multipart_event_oversize_is_a_permanent_input_refusal_before_capture() {
         .unwrap()
         .set_len(30 * 1024 * 1024)
         .unwrap();
-    let budget = Arc::new(persistence::resources::ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = super::ScopedSealedMinute::open_processes_using(
         &super::SealedSource {
@@ -770,7 +770,7 @@ fn multipart_event_admission_refuses_before_decode_and_retries_after_release() {
     // Goal: App event reconstruction shares the caller's ledger and retains output charges.
     // Method: exhaust its budget, trace the refusal, then release and read the same real seal.
     let fixture = sealed_recovered_events_minute();
-    let marker = marker(&fixture, 0);
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -836,7 +836,7 @@ fn an_empty_multipart_event_table_keeps_the_normalized_app_schema() {
     )
     .unwrap();
     assert!(matches!(outcome, persistence::worker::Outcome::Complete));
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     assert_eq!(minute.manifest.event_batches, Some(0));
 
     let events = super::events::associated(&minute).unwrap();
@@ -861,7 +861,7 @@ fn corruption_in_a_later_detached_batch_refuses_the_app_frames() {
                 .alias("identity_version"),
         )
     });
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
     let result = decoded_frames(&minute);
 
@@ -880,7 +880,7 @@ fn a_minute_sealed_before_process_identity_gives_the_frames_its_replay_gives() {
     // Method: seal three observations of a ring without identity, and compare the decoded
     // frames with the replay's over the same files.
     let fixture = sealed_system_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let frames = decoded_frames(&minute).unwrap();
 
     assert_eq!(frames.len(), 3);
@@ -894,7 +894,7 @@ fn a_minute_sealed_before_process_identity_keeps_the_usage_its_events_held() {
     // Method: seal exits of measured, refused and gone usage from a ring without identity, and
     // compare the decoded frames with the replay's over the same files.
     let fixture = sealed_events_minute_of(Fixture::new_mode(false, 2, None));
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let frames = decoded_frames(&minute).unwrap();
 
     assert_eq!(frames.len(), 3);
@@ -908,7 +908,7 @@ fn a_minute_of_gpu_time_gives_the_frames_its_replay_gives() {
     // Method: seal three observations of one process with GPU time and one without, and
     // compare the decoded frames with the replay's over the same files.
     let fixture = sealed_gpu_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let frames = decoded_frames(&minute).unwrap();
 
     assert_eq!(frames.len(), 3);
@@ -923,7 +923,7 @@ fn a_minute_sealed_without_gpu_time_gives_the_frames_its_replay_gives() {
     // decoded frames with the replay's over the same files.
     let fixture = sealed_gpu_minute();
     damage_table(&fixture, "processes", |frame| frame.drop("gpu_ns").unwrap());
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let frames = decoded_frames(&minute).unwrap();
 
     assert_eq!(frames.len(), 3);
@@ -938,7 +938,7 @@ fn a_minute_derives_the_apps_its_app_parts_keep() {
     // minute's Apps from its processes and events, and compare them with the Apps its parts
     // keep.
     let fixture = sealed_apps_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut kept = AppMinute::default();
     read_apps(&minute, &mut kept).unwrap();
     let mut derived = AppMinute::default();
@@ -956,8 +956,8 @@ fn a_minute_takes_its_first_rates_from_the_minute_before_it() {
     // minute's Apps and then the second's from what the first left, and compare the second's
     // with the Apps its parts keep.
     let fixture = sealed_adjacent_apps_minutes();
-    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
-    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let first = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &fixture.marker(1)).unwrap();
     let mut kept = AppMinute::default();
     read_apps(&second, &mut kept).unwrap();
     let mut before = None;
@@ -976,7 +976,7 @@ fn a_minute_derived_without_the_one_before_it_gives_its_first_sample_no_rates() 
     // the observation they would come from is not at hand.
     // Method: seal two adjacent minutes of a run, and derive the second minute's Apps alone.
     let fixture = sealed_adjacent_apps_minutes();
-    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &fixture.marker(1)).unwrap();
     let mut derived = AppMinute::default();
 
     derive_apps(&second, &mut None, &mut derived).unwrap();
@@ -990,13 +990,13 @@ fn a_refused_minute_leaves_no_observation_to_take_rates_from() {
     // rates from, and no Apps.
     // Method: derive one minute's Apps, then those of a minute whose processes name no tick.
     let fixture = sealed_adjacent_apps_minutes();
-    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &fixture.marker(1)).unwrap();
     let mut before = None;
     derive_apps(&second, &mut before, &mut AppMinute::default()).unwrap();
     damage_table(&fixture, "processes", |frame| {
         with_column(frame, (col("publication") + lit(100)).alias("publication"))
     });
-    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let first = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let mut derived = AppMinute::default();
 
     let refused = derive_apps(&first, &mut before, &mut derived);
@@ -1021,7 +1021,7 @@ macro_rules! refuses_damaged_processes {
             // and read the minute's frames.
             let fixture = sealed_events_minute();
             damage_table(&fixture, $table, $damage);
-            let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+            let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
             let refused = decoded_frames(&minute);
 
@@ -1056,7 +1056,7 @@ fn a_sealed_minute_gives_the_rule_each_tick_of_its_processes() {
     // Method: seal three ticks of a refused process and a measured one, and read the minute's
     // ticks into a fresh index.
     let fixture = sealed_events_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
     let ticks = minute_ticks(&mut MinuteTicks::default(), &minute).unwrap();
 
@@ -1092,7 +1092,7 @@ fn a_sealed_minute_gives_the_rule_each_tick_of_its_events() {
     // Method: seal a start and an exec, then two exits in reverse pid order, then a gone exit
     // and an exec, and read the minute's ticks.
     let fixture = sealed_events_minute();
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
     let departed = Ok(b"/Old.app".to_vec());
 
     let ticks = minute_ticks(&mut MinuteTicks::default(), &minute).unwrap();
@@ -1120,7 +1120,7 @@ fn a_minute_sealed_before_process_identity_gives_the_rule_no_programs() {
     // Method: seal three ticks of a measured process from a ring without identity, a start
     // among their events, and read the minute's ticks.
     let fixture = sealed_events_minute_of(Fixture::new_mode(false, 2, None));
-    let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+    let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
     let ticks = minute_ticks(&mut MinuteTicks::default(), &minute).unwrap();
 
@@ -1141,8 +1141,8 @@ fn a_minute_gives_its_first_tick_the_last_tick_of_the_minute_before_it() {
     // Method: seal two adjacent minutes of a run, a second apart, read the first and then the
     // second through the same buffers, and derive each tick's Apps.
     let fixture = sealed_adjacent_apps_minutes();
-    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
-    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let first = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &fixture.marker(1)).unwrap();
     let mut ticks = MinuteTicks::default();
     minute_ticks(&mut ticks, &first).unwrap();
 
@@ -1162,7 +1162,7 @@ fn a_minute_read_without_the_one_before_it_gives_its_first_tick_no_rates() {
     // come from is not at hand.
     // Method: seal two adjacent minutes of a run, and read the second alone.
     let fixture = sealed_adjacent_apps_minutes();
-    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &fixture.marker(1)).unwrap();
 
     let read = minute_ticks(&mut MinuteTicks::default(), &second).unwrap();
 
@@ -1175,8 +1175,8 @@ fn a_refused_minute_leaves_no_tick_to_take_rates_from() {
     // take rates from.
     // Method: refuse the first of two adjacent minutes at its last tick, then read the second.
     let fixture = sealed_adjacent_apps_minutes();
-    let first = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
-    let second = SealedMinute::open(&fixture.root, &marker(&fixture, 1)).unwrap();
+    let first = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
+    let second = SealedMinute::open(&fixture.root, &fixture.marker(1)).unwrap();
     let mut ticks = MinuteTicks::default();
     let mut programs = minute_programs();
     let refused = ticks.read(&first, &mut programs, |tick| {
@@ -1205,7 +1205,7 @@ macro_rules! refuses_damaged_ticks {
             // and read the minute's ticks.
             let fixture = sealed_events_minute();
             damage_table(&fixture, $table, $damage);
-            let minute = SealedMinute::open(&fixture.root, &marker(&fixture, 0)).unwrap();
+            let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
 
             let refused = minute_ticks(&mut MinuteTicks::default(), &minute);
 
@@ -1565,7 +1565,7 @@ fn decoded_frames(minute: &SealedMinute) -> Result<Vec<Frame>, Refused> {
 
 /// The frames the SQL replay of `fixture`'s sealed minute 0 builds from the minute's files.
 fn replayed_frames(fixture: &Fixture) -> Vec<Frame> {
-    let manifest = persistence::read_committed(&fixture.root, &marker(fixture, 0)).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &fixture.marker(0)).unwrap();
     let directory = fixture.root.join(&manifest.data_directory);
     let connection = Engine::new();
     let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
@@ -1676,7 +1676,7 @@ pub(crate) fn sealed_system_minute() -> Fixture {
 
 /// Replaces table `name` of `fixture`'s sealed minute 0 with the copy `damage` makes of it.
 fn damage_table(fixture: &Fixture, name: &str, damage: fn(DataFrame) -> DataFrame) {
-    let manifest = persistence::read_committed(&fixture.root, &marker(fixture, 0)).unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &fixture.marker(0)).unwrap();
     if name == "events" && manifest.event_batches.is_some() {
         let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
         for index in 0..table.len() {
@@ -1919,15 +1919,6 @@ pub(super) fn ring_ticks(fixture: &Fixture) -> Vec<(u64, Tick)> {
         }
     }
     ticks
-}
-
-/// The marker of the sealed window of run minute `minute`.
-fn marker(fixture: &Fixture, minute: u64) -> std::path::PathBuf {
-    let store = persistence::Store::open(&fixture.root).unwrap();
-    store.marker_path(&persistence::WindowIdentity {
-        run: fixture.writer.identity().unwrap(),
-        window: minute,
-    })
 }
 
 /// The machine readings of the `step`th tick, of two CPUs and two interfaces, each counter

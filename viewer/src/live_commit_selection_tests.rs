@@ -31,11 +31,7 @@ fn a_commit_before_the_selection_loads_no_selected_tick_or_scalar_context() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.seal();
-    let marker = persistence::layout::WindowKey::from(&WindowIdentity {
-        run: fixture.writer.identity().unwrap(),
-        window: 0,
-    })
-    .marker(&fixture.root);
+    let marker = fixture.marker(0);
     let hidden = fixture.root.join("withheld.seal");
     std::fs::rename(&marker, &hidden).unwrap();
     let mut live = LiveSession::open(&fixture.root).unwrap();
@@ -269,11 +265,7 @@ impl CommitHandoff {
     }
 
     fn manifest(&self) -> persistence::Manifest {
-        let marker = persistence::layout::WindowKey::from(&WindowIdentity {
-            run: self.fixture.writer.identity().unwrap(),
-            window: 0,
-        })
-        .marker(&self.fixture.root);
+        let marker = self.fixture.marker(0);
         persistence::read_committed(&self.fixture.root, &marker).unwrap()
     }
 

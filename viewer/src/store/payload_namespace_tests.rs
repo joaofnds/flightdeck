@@ -15,7 +15,7 @@ fn three_cohorts_and_temporary_absence_keep_the_original_name_owner() {
     // Goal: reuse follows the input namespace rather than adjacent process snapshots.
     // Method: retain A/B/C, publish an empty snapshot, and return to A through the real producer.
     let mut fixture = Fixture::new();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -65,7 +65,7 @@ fn duplicate_long_escaped_names_share_one_admitted_owner_after_source_retirement
     let mut fixture = Fixture::new();
     let name = vec![0xff; collector::ring::PROGRAM_PATH_BYTES_MAX];
     publish(&mut fixture, 1, &[&name, &name]);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -93,7 +93,7 @@ fn a_ready_blocked_candidate_keeps_names_private_and_reuses_its_allocation() {
     // Method: reject the same prepared observation twice, then accept it without recapture.
     let mut fixture = Fixture::new();
     publish(&mut fixture, 1, &[b"alpha"]);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -134,7 +134,7 @@ fn a_new_reader_namespace_preserves_old_readers_and_uses_owned_values() {
     // Method: replace the source with a new-run dictionary while an old payload stays owned.
     let mut fixture = Fixture::new();
     publish(&mut fixture, 1, &[b"alpha"]);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -177,7 +177,7 @@ fn sealed_exit_names_survive_when_only_the_inherited_before_has_the_value() {
     publish_exit(&mut fixture);
     fixture.seal_minute(0);
     fixture.seal_minute(1);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut seconds = Vec::new();
 
@@ -309,7 +309,7 @@ fn a_same_run_reader_epoch_retires_its_index_but_preserves_owned_names_and_rates
     generations.0.push(writer.name().to_owned());
     publish_writer(&mut writer, 1, &[b"alpha"]);
     register_generation(&fixture, writer.name());
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -356,7 +356,7 @@ fn a_finite_source_keeps_one_owner_per_seen_value_until_its_retirement() {
     // Goal: the chosen input-lifetime tradeoff has an observable finite retained cost.
     // Method: fill four names while releasing previous payloads, then retire the source.
     let mut fixture = Fixture::new();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();

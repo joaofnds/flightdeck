@@ -113,7 +113,7 @@ fn a_verified_window_stops_being_readable_once_its_marker_is_gone() {
     let mut session = Session::open(&fixture.root).unwrap();
     session.select(1001, 0).unwrap();
     let identity = &session.windows[0].identity;
-    let marker = persistence::layout::WindowKey::from(identity).marker(&fixture.root);
+    let marker = fixture.marker(identity.window);
     std::fs::remove_file(marker).unwrap();
 
     let read = session.select(1001, 0);
@@ -169,7 +169,7 @@ fn opening_refuses_a_broken_marker_after_many_sound_ones() {
     // Method: seal more minutes than there are reader threads, break the last marker, open.
     let fixture = sealed_minutes(u64::try_from(MINUTES).unwrap());
     let last = Session::open(&fixture.root).unwrap().windows.pop().unwrap();
-    let marker = persistence::layout::WindowKey::from(&last.identity).marker(&fixture.root);
+    let marker = fixture.marker(last.identity.window);
     std::fs::write(marker, b"broken").unwrap();
 
     let opened = Session::open(&fixture.root);
@@ -276,7 +276,7 @@ fn a_select_again_stops_reading_once_the_window_before_its_context_loses_its_mar
                 .is_some_and(|bounds| bounds.max < CONTEXT_FIRST * NS)
         })
         .unwrap();
-    let marker = persistence::layout::WindowKey::from(&before.identity).marker(&fixture.root);
+    let marker = fixture.marker(before.identity.window);
     std::fs::remove_file(marker).unwrap();
 
     let read = session.select(SELECTED, 0);

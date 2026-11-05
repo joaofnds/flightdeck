@@ -56,7 +56,7 @@ fn admitted_app_parts_reuse_one_source_for_version_and_payload_after_replacement
         .unwrap();
     let replacement = fixture.root.join("parts-replacement.parquet");
     parts_write(&replacement, &mut changed);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let captures = AtomicUsize::new(0);
     let capture = |file, budget: &Arc<ByteBudget>| {
@@ -112,7 +112,7 @@ fn incompatible_app_parts_version_skips_a_key_page_that_cannot_decode() {
     std::fs::remove_file(&path).unwrap();
     parts_write(&path, &mut changed);
     parts_damage_key(&path, key);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let input =
         AdmittedTable::from_file_budgeted(std::fs::File::open(&path).unwrap(), &budget).unwrap();
     let (plan, names) = input.into_scan().unwrap();
@@ -143,7 +143,7 @@ fn cancellation_inside_native_collection_discards_its_successful_result() {
         root: &fixture.root,
         marker: &marker,
     };
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let cancellation = Arc::new(Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let capture = AdmittedTable::from_file_budgeted;
@@ -179,11 +179,7 @@ pub(super) fn parts_fixture() -> Fixture {
 }
 
 fn parts_marker(fixture: &Fixture) -> std::path::PathBuf {
-    persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root)
+    fixture.marker(0)
 }
 
 fn parts_path(source: &SealedSource<'_>) -> std::path::PathBuf {

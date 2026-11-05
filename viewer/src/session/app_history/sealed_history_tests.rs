@@ -181,8 +181,7 @@ fn rejects_a_warm_history_from_kept_parts_once_their_window_marker_disappears() 
     session
         .with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points)
         .unwrap();
-    let marker =
-        persistence::layout::WindowKey::from(&session.windows[0].identity).marker(&fixture.root);
+    let marker = fixture.marker(session.windows[0].identity.window);
     std::fs::remove_file(&marker).unwrap();
 
     let result =

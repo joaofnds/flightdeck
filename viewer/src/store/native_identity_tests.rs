@@ -15,7 +15,7 @@ fn an_event_count_refusal_accepts_machine_facts_and_allows_the_next_publication(
     publish_events(&mut fixture, 0, collector::tracker::EVENTS_PER_TICK_MAX + 1);
     publish_events(&mut fixture, 1, 0);
     let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
@@ -141,7 +141,7 @@ fn a_native_identity_keeps_its_charge_without_the_source_or_metadata_owner() {
     // Method: retain a name from the real prepared producer, then drop source and row owners.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();

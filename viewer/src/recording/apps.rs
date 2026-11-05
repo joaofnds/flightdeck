@@ -615,16 +615,12 @@ mod input_tests {
         // Goal: cancellation between App-parts consumers cannot start a second native call.
         // Method: cancel from the first native query over a real admitted App-parts plan.
         let fixture = super::super::table_input_tests::parts_fixture();
-        let marker = persistence::layout::WindowKey {
-            run: fixture.writer.identity().unwrap().run,
-            window: 0,
-        }
-        .marker(&fixture.root);
+        let marker = fixture.marker(0);
         let source = super::super::SealedSource {
             root: &fixture.root,
             marker: &marker,
         };
-        let budget = Arc::new(crate::store::ByteBudget::new(64 * 1024 * 1024));
+        let budget = Arc::new(crate::store::ByteBudget::new(256 * 1024 * 1024));
         let cancellation = Arc::new(crate::cancellation::Cancellation::default());
         let operation = Arc::clone(&cancellation).operation(0).unwrap();
         let minute = SealedMinute::open_with_inputs_using(

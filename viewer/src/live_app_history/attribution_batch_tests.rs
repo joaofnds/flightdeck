@@ -1084,25 +1084,16 @@ fn kept_fixture(kept: [bool; 4]) -> Fixture {
 fn unbounded_fixture(second: u64) -> Fixture {
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(58);
+    fixture.set_next_clocks(None);
     fixture.publish_with_usage(1, &kept_usage(0));
     fixture.publish_with_usage(second, &kept_usage(1));
-    fixture.seal_with_observations(&[no_wall_time(1)]);
+    fixture.seal();
     fixture.publish_with_usage(2500, &kept_usage(2));
     fixture.skip_run_ticks(58);
     fixture.publish_with_usage(3000, &kept_usage(3));
     fixture.publish_with_usage(3001, &kept_usage(4));
 
     fixture
-}
-
-/// The observation of `publication` as a collector that knew none of its times sealed it.
-fn no_wall_time(publication: u64) -> persistence::Observation {
-    persistence::Observation {
-        publication,
-        wall_ns: None,
-        continuous_ns: None,
-        awake_ns: None,
-    }
 }
 
 /// The measured process's usage at the observation of a fixture whose index is `index`, which

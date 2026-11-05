@@ -571,7 +571,7 @@ fn take(held: &mut Held, fixture: &Fixture, publication: u64, second: u64) {
 }
 
 fn load(fixture: &Fixture) -> (Held, Arc<ByteBudget>) {
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();

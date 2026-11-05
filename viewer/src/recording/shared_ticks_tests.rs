@@ -18,7 +18,7 @@ fn exhausted_native_metadata_budget_defers_the_machine_union_without_losing_its_
     let original = ScopedSealedMinute::open(&fixture.root, &marker).unwrap();
     let mut expected = MachineMinute::default();
     super::read_machine(&original, &mut expected).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = ScopedSealedMinute::open_with_inputs_using(
         &SealedSource {
@@ -70,7 +70,7 @@ fn one_projection_preserves_complete_machine_rows_and_exact_endpoint_fields() {
     let mut expected = MachineMinute::default();
     super::read_machine(&original, &mut expected).unwrap();
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let trace = persistence::work::ingestion::Trace::new(manifest.identity.run.recording);
     let scope = trace.enter();
@@ -105,12 +105,8 @@ fn shared_projection_matches_the_ring_for_all_populated_machine_groups() {
     for (publication, tick) in super::tests::ring_ticks(&fixture) {
         expected.push_tick(publication, &tick);
     }
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let marker = fixture.marker(0);
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let minute = ScopedSealedMinute::open_with_inputs_using(
         &SealedSource {
@@ -217,32 +213,9 @@ fn shared_fixture() -> (Fixture, PathBuf) {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(100);
-    fixture.publish_with_system_rows(101);
-    fixture.seal_with_observations(&[
-        persistence::Observation {
-            publication: 1,
-            wall_ns: Some(100_000_000_000),
-            continuous_ns: Some(0),
-            awake_ns: Some(0),
-        },
-        persistence::Observation {
-            publication: 2,
-            wall_ns: Some(100_000_000_000),
-            continuous_ns: Some(1_000_000_000),
-            awake_ns: Some(1_000_000_000),
-        },
-        persistence::Observation {
-            publication: 3,
-            wall_ns: None,
-            continuous_ns: None,
-            awake_ns: None,
-        },
-    ]);
-    let marker = persistence::layout::WindowKey {
-        run: fixture.writer.identity().unwrap().run,
-        window: 0,
-    }
-    .marker(&fixture.root);
+    fixture.publish_without_clock();
+    fixture.seal();
+    let marker = fixture.marker(0);
     let manifest = persistence::read_committed(&fixture.root, &marker).unwrap();
     let path = fixture
         .root

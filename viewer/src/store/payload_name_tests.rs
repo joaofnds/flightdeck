@@ -282,7 +282,7 @@ pub(super) fn native_sample() -> Box<Sample> {
 fn native_pair() -> (Arc<ByteBudget>, AppsSecond, AppsSecond) {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
