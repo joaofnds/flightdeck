@@ -26,7 +26,17 @@ impl Recorder {
     pub fn read(root: &Path, previous: Option<&Self>) -> io::Result<Option<Self>> {
         let control = match Control::open(root) {
             Ok(control) => control,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // A control file this build cannot read, such as one a release before an upgrade left,
+            // tells nothing of its workers, and a new recorder replaces it. What holds the
+            // recording's locks still says whether a worker of that build runs.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+                ) =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         let now_ns = control::now()?;

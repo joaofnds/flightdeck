@@ -81,6 +81,37 @@ fn surviving_acquisition_without_controller_starts_a_recorder() {
 }
 
 #[test]
+fn a_launch_starts_a_recorder_that_stopped_under_another_build() {
+    // Goal: a launch after an upgrade starts the recorder the older version left stopped.
+    // Method: end the run, stamp the control file with another build, take the first step.
+    let mut fixture = Recording::managed();
+    fixture.finish();
+    fixture.stamp_control(OTHER_BUILD);
+    let mut session = fixture.session(Mode::Auto);
+
+    session.tick();
+
+    let mut child = session.0.child.take().unwrap();
+    assert_eq!(session.owned_pid(), Some(child.id()));
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn a_recorder_running_under_another_build_is_reported_by_its_build() {
+    // Goal: a launch after an upgrade names the older collector still running, and starts nothing.
+    // Method: keep the run going, and stamp its control file and announcement with another build.
+    let fixture = Recording::managed();
+    fixture.stamp_control(OTHER_BUILD);
+    fixture.announce(fixture.run(), OTHER_BUILD);
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert_eq!(policy::Build::Other(OTHER_BUILD), source.build);
+    assert!(!source.controller_missing);
+}
+
+#[test]
 fn an_interrupted_controller_health_write_preserves_independent_worker_health() {
     // Goal: a controller dying during publication cannot hide healthy acquisition status.
     // Method: leave its real mapped sequence odd while another role publishes a complete record.
@@ -706,6 +737,15 @@ impl Recording {
 
     fn run(&self) -> Identity {
         self.writer.as_ref().unwrap().identity().unwrap().run
+    }
+
+    fn stamp_control(&self, build: u64) {
+        use std::os::unix::fs::FileExt;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(self.root.join("recorder.control"))
+            .unwrap();
+        file.write_all_at(&build.to_ne_bytes(), 6 * 8).unwrap();
     }
 
     fn announce(&self, run: Identity, build: u64) {
