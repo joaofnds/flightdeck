@@ -4,7 +4,7 @@ use crate::canonical::metadata::{Body, Lifecycle};
 use crate::canonical::{CanonicalMetadata, ReadWork, SourceFrontier};
 use crate::resources::ByteBudget;
 use crate::sealed_apps::SealedApps;
-use crate::store::{ProofStep, PublicationStep};
+use crate::store::{ProofStep, PublicationStep, RegisteredAttempt};
 use crate::transaction::{AttemptOperation, UnknownProvenance, UnknownReason};
 use crate::{Encoder, Store};
 use collector::recording::private::{self, FileLock, PrivateDirectory};
@@ -1839,6 +1839,29 @@ fn a_selection_whose_start_was_overwritten_is_selected_again_from_what_remains()
     assert_eq!(rows + lost, events);
 }
 
+/// The staging a seal runs, for a test that takes its reads one at a time.
+fn staging_by_hand(
+    attempt: &RegisteredAttempt<'_>,
+    reader: &RingReader,
+    identity: WindowIdentity,
+) -> super::super::staging::Staging {
+    let events = crate::event_table::writer::Writer::new(
+        attempt.events_directory().unwrap(),
+        identity,
+        reader.next_event(),
+        false,
+        256 * 1024 * 1024,
+    )
+    .unwrap();
+
+    super::super::staging::Staging::new(
+        reader,
+        identity,
+        super::super::Limits::from_shape(&reader.shape()).unwrap(),
+        events,
+    )
+}
+
 #[test]
 fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
     // Goal: when the ring overwrites the middle of a minute while it is read, the minute keeps
@@ -1875,20 +1898,7 @@ fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
     reader.seek_event(input.losses.event_start).unwrap();
     let shape = reader.shape();
     let mut tick = crate::tick_buffer(&shape).unwrap();
-    let events = crate::event_table::writer::Writer::new(
-        attempt.events_directory().unwrap(),
-        identity,
-        reader.next_event(),
-        false,
-        256 * 1024 * 1024,
-    )
-    .unwrap();
-    let mut staged = super::super::staging::Staging::new(
-        &reader,
-        identity,
-        super::super::Limits::from_shape(&shape).unwrap(),
-        events,
-    );
+    let mut staged = staging_by_hand(&attempt, &reader, identity);
 
     assert!(
         staged
