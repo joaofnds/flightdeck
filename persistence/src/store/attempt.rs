@@ -116,7 +116,7 @@ impl RegisteredAttempt<'_> {
         })
     }
 
-    fn events_directory(&self) -> io::Result<PrivateDirectory> {
+    pub(crate) fn events_directory(&self) -> io::Result<PrivateDirectory> {
         if self.resumed {
             return Err(unresolved(
                 "occupied event inventory requires salvage reconciliation",
@@ -611,7 +611,7 @@ fn validate_controls(root: &PrivateDirectory, recording: Identity) -> io::Result
 }
 
 impl RegisteredAttempt<'_> {
-    pub(super) fn original_directory(&self) -> &PrivateDirectory {
+    pub(crate) fn original_directory(&self) -> &PrivateDirectory {
         &self.directory
     }
     pub(super) fn validate_original_placement(

@@ -165,6 +165,12 @@ impl Store {
         })
     }
 
+    /// Whether this recording keeps its progress in registered canonical transactions.
+    #[must_use]
+    pub(crate) fn registered(&self) -> bool {
+        self.protocol_two
+    }
+
     pub(crate) fn require_composed_catalog(&self) -> io::Result<()> {
         if self.protocol_two {
             return Err(io::Error::new(

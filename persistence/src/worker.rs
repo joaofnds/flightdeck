@@ -18,6 +18,7 @@ use crate::{
     TableManifest, Window, WindowIdentity,
 };
 
+mod registered;
 mod scanning;
 mod staging;
 
@@ -358,6 +359,9 @@ fn persist_one(
     closed: bool,
     state: &mut RunState,
 ) -> Result<Progress> {
+    if store.registered() {
+        return registered::persist_one(store, writers, registered, closed, state);
+    }
     if state.source == SourceState::Unavailable {
         return Ok(Progress::Unavailable);
     }
