@@ -15,7 +15,10 @@ const BYTES: usize = WORDS * size_of::<AtomicU64>();
 const MAGIC: u64 = 0x6664_6374_726c_0002;
 const RECORD_WORDS: usize = 16;
 const RECORD_START: usize = 16;
+/// Zero until a stop is requested, then the awake clock at the request. A process compares it with
+/// its own start, so the words beside it name the boot that clock belongs to.
 const STOP_WORD: usize = 5;
+const STOP_BOOT_WORDS: [usize; 2] = [7, 8];
 const _: () = assert!(RECORD_START + 3 * RECORD_WORDS <= WORDS);
 
 /// The mapping never owns any worker's lifetime lock and never unlinks its backing.
@@ -87,6 +90,7 @@ unsafe extern "C" {
         offset: i64,
     ) -> *mut c_void;
     fn munmap(address: *mut c_void, length: usize) -> c_int;
+    fn mach_absolute_time() -> u64;
     fn mach_continuous_time() -> u64;
 }
 
@@ -116,6 +120,7 @@ impl Control {
             if !control.stopping()
                 || private::FileLock::held(&root.join("collector.lock"))?
                 || private::FileLock::held(&root.join("persister.lock"))?
+                || control.stop_follows_this_process()?
             {
                 return Ok(control);
             }
@@ -217,8 +222,35 @@ impl Control {
         if !self.writable {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
-        self.word(STOP_WORD).store(1, Ordering::SeqCst);
+        let boot = super::boot_identity()?;
+        for (word, value) in STOP_BOOT_WORDS.into_iter().zip(boot.0) {
+            self.word(word).store(value, Ordering::SeqCst);
+        }
+        let requested_ns =
+            crate::clock::Timebase::read()?.nanoseconds(unsafe { mach_absolute_time() })?;
+        assert!(requested_ns > 0);
+        self.word(STOP_WORD).store(requested_ns, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Whether the stop on this file came after this process started. A start that began first
+    /// still has to serve it, however far it has got, while a start that began after it comes from
+    /// someone who asked for recording again, so the finished stop must not reach the new cohort.
+    fn stop_follows_this_process(&self) -> io::Result<bool> {
+        let boot = super::boot_identity()?;
+        let same_boot = STOP_BOOT_WORDS
+            .into_iter()
+            .zip(boot.0)
+            .all(|(word, value)| self.word(word).load(Ordering::SeqCst) == value);
+        if !same_boot {
+            return Ok(false);
+        }
+        let mut exited = false;
+        let timebase = crate::clock::Timebase::read()?;
+        let own =
+            crate::processes::read_exit_usage(timebase, crate::processes::own_pid()?, &mut exited)?
+                .map_err(|_| io::Error::from(io::ErrorKind::NotFound))?;
+        Ok(self.word(STOP_WORD).load(Ordering::SeqCst) >= own.awake_ns_at_start)
     }
 
     pub fn read(&self, role: Role) -> io::Result<Health> {
@@ -584,13 +616,52 @@ mod tests {
         assert_eq!(control.read(Role::Collector).unwrap().state, State::Absent);
     }
 
+    /// Moves a requested stop to before this process started, as a stop that had finished long
+    /// before this start would be.
+    fn age_stop(control: &Control) {
+        control.word(STOP_WORD).store(1, Ordering::SeqCst);
+    }
+
     #[test]
-    fn an_old_stop_cannot_target_a_replacement_cohort() {
-        // Goal: a stale client's mapped stop request cannot stop the next recording cohort.
-        // Method: stop an empty cohort, renew it, then issue another stop on the old mapping.
+    fn a_stop_after_this_process_started_reaches_the_cohort_it_starts() {
+        // Goal: a stop landing while a relaunch is still starting is not taken for a finished one.
+        // Method: stop on the old file after this process began, with no worker lock held, then
+        // create as the relaunch would.
+        let directory = Directory::new();
+        let old = Control::create(&directory.0).unwrap();
+        let authority = old.authority();
+        old.request_stop().unwrap();
+
+        let next = Control::create(&directory.0).unwrap();
+
+        assert_eq!(next.authority(), authority);
+        assert!(next.stopping());
+    }
+
+    #[test]
+    fn a_stop_from_another_boot_cannot_reach_the_cohort_this_process_starts() {
+        // Goal: the awake clock restarts at boot, so an old stop can read later than this start.
+        // Method: leave the stop's time ahead of this process and change only its boot words.
         let directory = Directory::new();
         let old = Control::create(&directory.0).unwrap();
         old.request_stop().unwrap();
+        old.word(STOP_BOOT_WORDS[0]).fetch_xor(1, Ordering::SeqCst);
+
+        let next = Control::create(&directory.0).unwrap();
+
+        assert_ne!(next.authority(), old.authority());
+        assert!(!next.stopping());
+    }
+
+    #[test]
+    fn an_old_stop_cannot_target_a_replacement_cohort() {
+        // Goal: a stale client's mapped stop request cannot stop the next recording cohort.
+        // Method: stop an empty cohort before this process began, renew it, then issue another
+        // stop on the old mapping.
+        let directory = Directory::new();
+        let old = Control::create(&directory.0).unwrap();
+        old.request_stop().unwrap();
+        age_stop(&old);
         let next = Control::create(&directory.0).unwrap();
         old.request_stop().unwrap();
         assert_ne!(old.authority(), next.authority());

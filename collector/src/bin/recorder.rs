@@ -112,7 +112,8 @@ impl Supervisor {
     fn step(&mut self) -> io::Result<bool> {
         let now = control::now()?;
         self.reporter.refresh()?;
-        if stop::Stop::requested() || self.owner.departed() {
+        if (stop::Stop::requested() || self.owner.departed()) && !self.reporter.control().stopping()
+        {
             self.reporter.control().request_stop()?;
         }
         let persister_finished = self.step_reap(now)?;

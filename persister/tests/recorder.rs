@@ -47,6 +47,7 @@ mod tests {
 
     unsafe extern "C" {
         fn kill(pid: i32, signal: i32) -> i32;
+        fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     }
 
     #[test]
@@ -601,6 +602,33 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_during_a_controller_relaunch_stops_the_replacement() {
+        // Goal: a stop that lands while a relaunch is on its way to the control file is served.
+        // Method: kill the controller, start the real replacement held by SIGSTOP before its first
+        // instruction, stop, wait for the old workers to exit on that stop, then release it.
+        let mut recording = Recording::start("stop-relaunch", 120);
+        let control = recording.wait_for(|control| {
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
+        });
+        let mut controller = recording.child.take().unwrap();
+        controller.kill().unwrap();
+        controller.wait().unwrap();
+        recording.launch_held();
+
+        Control::open_writable(&recording.root)
+            .unwrap()
+            .request_stop()
+            .unwrap();
+        recording.wait_for_old_workers();
+        let newest = control.settled(Role::Collector).publication;
+        recording.release_held();
+        recording.wait_for_exit();
+
+        recording.assert_saved_publications(newest);
+    }
+
+    #[test]
     fn stopping_a_replacement_before_its_first_timed_tick_drains_both_exact_tails() {
         // Goal: stopping before the replacement persister launches cannot skip the new tail.
         // Method: kill acquisition, stop at replacement registration, and query both exact runs.
@@ -934,6 +962,61 @@ mod tests {
 
         fn launch(&mut self, executable: PathBuf) {
             self.launch_with(executable, Stdio::null(), Stdio::null());
+        }
+
+        /// Starts the recorder stopped before its first instruction, so its process start is
+        /// fixed while the test decides what happens before it runs.
+        fn launch_held(&mut self) {
+            const WNOHANG_WUNTRACED: i32 = 1 | 2;
+            assert!(self.child.is_none());
+            let executable =
+                PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder");
+            let child = Command::new("/bin/sh")
+                .args(["-c", r#"kill -STOP $$; exec "$0" "$@""#])
+                .arg(executable)
+                .args([
+                    "--recording",
+                    self.root.to_str().unwrap(),
+                    "--ring",
+                    &self.ring,
+                    "--seconds",
+                    &self.seconds.to_string(),
+                    "--memory-bytes",
+                    &self.memory.to_string(),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = i32::try_from(child.id()).unwrap();
+            self.child = Some(child);
+            for _attempt in 0..3000 {
+                let mut status = 0;
+                if unsafe { waitpid(pid, &raw mut status, WNOHANG_WUNTRACED) } == pid {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the held recorder never stopped");
+        }
+
+        fn release_held(&mut self) {
+            const SIGCONT: i32 = 19;
+            let pid = i32::try_from(self.child.as_ref().unwrap().id()).unwrap();
+            assert_eq!(0, unsafe { kill(pid, SIGCONT) });
+        }
+
+        fn wait_for_old_workers(&self) {
+            for _attempt in 0..3000 {
+                let held = ["collector.lock", "persister.lock"].iter().any(|name| {
+                    collector::recording::private::FileLock::held(&self.root.join(name)).unwrap()
+                });
+                if !held {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            panic!("the old workers never exited on the stop");
         }
 
         fn launch_with(&mut self, executable: PathBuf, stdout: Stdio, stderr: Stdio) {
