@@ -89,7 +89,8 @@ Its memory watchdog stays active between operations, including while the main wo
 
 New recording roots declare separate reader and writer protocol requirements. The reader
 can inspect legacy roots; the writer requires a new root instead of converting legacy data
-in place, and the app's default launch moves an older recording aside to make one. Within one sealed window, Events is one logical table backed by bounded physical
+in place, and the app's default launch moves an older recording that no process holds aside to
+make one. Within one sealed window, Events is one logical table backed by bounded physical
 parts and an index under the same canonical commit. Readers bind each opened part to the
 captured file identity before decoding, then validate row identity and provenance before
 exposing a budgeted frame.

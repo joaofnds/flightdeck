@@ -241,9 +241,9 @@ writer versions. Readers accept supported legacy roots, but new writers refuse t
 taking ownership or changing their files. Older binaries reject the new envelope, so they
 cannot append an incompatible run. The transition requires a new recording root. The app's
 default launch makes one by renaming an older recording that no process holds to
-`flightdeck.<identity>.recording` beside it, where `--recording PATH` still opens it and nothing
-expires its readings or removes it. A recording that `--recording PATH` names stays where it is,
-so its recorder refuses it.
+`flightdeck.<identity>.recording` beside it, where `--recording PATH` on the app opens it
+read-only, and nothing expires its readings or removes it. A recorder or collector refuses an
+older root wherever it lies, including the default one before the app's next launch moves it.
 
 The persister checks its current and kernel lifetime-peak physical footprint every 100 ms
 against the limit passed by the recorder, 256 MiB, and exits if either exceeds it. The
@@ -317,7 +317,8 @@ of one.
 A configuration failure or invariant abort stops supervision visibly. The persister reports
 Running only after a canonical seal has synchronized; a live encoder awaiting its first
 window remains Starting. If the recorder dies, workers continue but cannot restart each
-other. An explicit start verifies authority, protocol, build and native creation identity
+other. A new recorder, which the app's next launch starts on its default recording, verifies
+authority, protocol, build and native creation identity
 before adopting a surviving cohort. Worker locks prevent competing writers.
 
 A source that fails to open at startup, such as an SMC or IOReport a Mac does not have, is left
@@ -333,7 +334,8 @@ return still blocks collection.
 A failed read of the machine, the interfaces, the processes or the coalitions ends the run,
 as does a metering failure or a failed assertion, since the release build aborts on a panic.
 The recorder retries an operating exit after preserving the old run's recoverable tail.
-An invariant abort leaves supervision visibly failed and requires an explicit restart.
+An invariant abort leaves supervision visibly failed until a new recorder starts, which the
+app's next launch does on its default recording.
 Running as a launch agent is planned but not built.
 
 ## Why it is built this way

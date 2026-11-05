@@ -70,11 +70,12 @@ canonical seal commits. Finite runs, Ctrl-C and SIGTERM ask acquisition to stop 
 the saved tail. GUI quit detaches while recording continues.
 
 If the recorder dies, healthy workers continue. Automatic recovery then needs a recorder
-start, which the app's next launch makes; no installed service restarts it. Repeating the same
-command adopts workers only when their native creation identity, authority and build protocol
-match. To request shutdown from another terminal, run `recorder --recording PATH --stop yes`.
-A stop requested after a recorder process started stops the cohort it starts, however far that start has got,
-while a stop from before it, or a stale mapped request, cannot target that later cohort.
+start, which the app's next launch makes on its default recording; no installed service
+restarts it. A new recorder adopts workers only when their native creation identity, authority
+and build protocol match. To request shutdown from another terminal, run
+`recorder --recording PATH --stop yes` with the build that started it. A stop requested after a
+recorder process started stops the cohort it starts, however far that start has got, while a
+stop from before it, or a stale mapped request, cannot target that later cohort.
 The recorder measures all three processes; a
 final CPU total for an adopted worker it cannot reap is reported as unavailable. Recording directories are created with
 owner-only access; files use mode 0600 and inherited access-control entries are removed.
@@ -114,11 +115,13 @@ Mise acts only for a contributor who trusts the file, and without it the recipes
 The movable bundle contains four executables—the app, recorder, collector and persister—and
 schematic artwork.
 Default launch follows the last fifteen minutes of live readings, attaching to an
-existing recording or starting a recorder when collection is absent. Quitting detaches the
-app while the recorder and its workers continue. Stop them explicitly with
+existing recording or starting a recorder when none is running, and it sets a recording an
+older version wrote aside for a new one, as the
+[desktop guide](desktop/README.md) describes. Quitting detaches the
+app while the recorder and its workers continue. Stop them with
 `Flightdeck.app/Contents/Helpers/recorder --recording PATH --stop yes`, using the recording's
-path. `--recording PATH` on the app opens a recording
-read-only; `--reference` opens captured prototype data.
+path, until the app's next launch starts them again. `--recording PATH` on the app opens a
+recording read-only; `--reference` opens captured prototype data.
 
 The UI uses GPUI's Metal rendering without a browser runtime. Its separate Cargo
 workspace and lockfile keep UI dependencies apart from the recording core.

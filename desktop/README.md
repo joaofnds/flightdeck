@@ -17,10 +17,8 @@ the app, required recorder, collector and persister executables, and artwork; mi
 packaging. It can be moved outside the checkout.
 
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
-It first renames a recording an older version wrote there, unless a process still holds it, to
-`flightdeck.<identity>.recording` beside it and starts a new recording, and the charts then begin
-empty. It attaches to an advancing existing recording or starts a recorder controller when no controller
-is running. It attaches only to a compatible worker build, and
+It attaches to an advancing existing recording or starts a recorder controller when no
+controller is running. It attaches only to a compatible worker build, and
 otherwise fails with both builds named. A ring states its own layout, which every reader
 checks, so an app opening a recording another build wrote reads it only where the
 layouts agree. A collector counts as running only while it holds the recording's lifetime
@@ -94,7 +92,15 @@ locks. The status line reports acquisition and durable-recording health separate
 bounded shared records, even when diagnostic output is unavailable. If the controller
 exits, surviving workers continue and the status says automatic recovery is unavailable.
 Retry, or the next launch on the default recording, starts a controller that verifies surviving
-worker identities before adoption.
+worker identities before adoption. Closing the window leaves the app running, so opening it
+then only shows the window, and a new launch takes Quit from the menu bar first.
+
+A launch on a default recording an older version wrote renames it to
+`flightdeck.<identity>.recording` beside it and starts a new recording, so the charts begin
+empty. `--recording PATH` opens the old readings, which stay on disk until you delete that
+directory. A recording a process still uses stays where it is and fails the launch. Stop that
+process, Quit from the menu bar and open the app again, since Retry cannot move it.
+
 Opening a recording read-only grants no start or shutdown authority.
 
 A live launch keeps running
@@ -114,7 +120,10 @@ the table retains sampled maxima as separate lower bounds.
 
 To stop a candidate recording explicitly, run the matching build's
 `target/release/recorder --recording /absolute/path/to/session.recording --stop yes`
-from the repository root. The controller stops acquisition and drains eligible tail.
+from the repository root. The controller stops acquisition and drains eligible tail, and
+recording stays stopped until a Retry or the next launch on that recording. Another build's
+controller refuses this request, so a recorder that outlived an upgrade stops with
+`pkill -x 'recorder|collector'`, which drains the same way.
 Headless `--live-check` and `--live-soak` runs still explicitly stop a recorder they start
 when their measurement ends. An attaching GUI never signals another owner's processes.
 Xcode and its command-line tools are required. GPUI and its macOS backend come from a
