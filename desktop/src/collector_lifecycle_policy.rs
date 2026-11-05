@@ -219,17 +219,14 @@ impl Policy {
         if self.expired(now, DISCOVERY_LIMIT) {
             if source.build == Build::Unannounced {
                 self.fail(UNANNOUNCED_FAILURE);
+            } else if source.producer_alive {
+                self.fail(
+                    "Existing collector is alive but readings did not advance within 20 seconds",
+                );
             } else {
-                if source.producer_alive {
-                    self.fail(
-                        "Existing collector is alive but readings did not advance within \
-                         20 seconds",
-                    );
-                } else {
-                    self.fail(
-                        "Recording discovery did not finish within 20 seconds; retry to reconnect",
-                    );
-                }
+                self.fail(
+                    "Recording discovery did not finish within 20 seconds; retry to reconnect",
+                );
             }
             return Action::None;
         }
@@ -243,12 +240,10 @@ impl Policy {
             return Action::None;
         }
 
-        if source.recording == RecordingStatus::Missing {
-            self.state = State::Starting;
-            return Action::Spawn;
-        }
-
-        if source.recording == RecordingStatus::Ready {
+        if matches!(
+            source.recording,
+            RecordingStatus::Missing | RecordingStatus::Ready
+        ) {
             self.state = State::Starting;
             return Action::Spawn;
         }
