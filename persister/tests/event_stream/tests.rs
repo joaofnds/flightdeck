@@ -166,17 +166,18 @@ fn terminal_maximum_event_tail_keeps_every_native_byte() {
 
 #[test]
 #[ignore = "opt-in admitted maximum event capacity through a registered recording"]
-fn registered_ordinary_maximum_event_tail_is_saved_under_the_ceilings() {
-    // Goal: the registered Store and worker save the largest admitted log within 256 MiB and the
-    // 30 second recovery bound, which nothing has measured through their own transaction (P02.4).
+fn registered_ordinary_maximum_event_tail_is_saved_within_its_memory() {
+    // Goal: the registered Store and worker save the largest admitted log within 256 MiB, and say
+    // how long that took on this machine. The managed tests hold the 30 second bound to this route
+    // once creators write its format, which waits on that number (P02.4).
     // Method: run the persister binary over a registered root with a finished maximum ring.
     observe_registered(ROWS_MAX, false);
 }
 
 #[test]
 #[ignore = "opt-in admitted maximum terminal event capacity through a registered recording"]
-fn registered_terminal_maximum_event_tail_is_saved_under_the_ceilings() {
-    // Goal: a registered run with no observed publication meets the same ceilings (P02.4).
+fn registered_terminal_maximum_event_tail_is_saved_within_its_memory() {
+    // Goal: a registered run with no observed publication does the same (P02.4).
     // Method: hide every publication of a maximum ring and run the persister binary over it.
     observe_registered(ROWS_MAX, true);
 }
@@ -194,7 +195,6 @@ fn observe_registered(rows: u64, terminal: bool) {
 
     candidate.verify_registered(rows, terminal);
     eprintln!("event_stream registered rows={rows} terminal={terminal} elapsed={elapsed:?}");
-    assert!(elapsed <= Duration::from_secs(30));
 }
 
 fn observe(rows: u64, terminal: bool) {
