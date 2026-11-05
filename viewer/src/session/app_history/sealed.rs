@@ -30,6 +30,7 @@ impl Session {
         mut consume: impl FnMut(usize, T) -> Result<()>,
     ) -> Result<()> {
         self.operation.attach(&self.connection)?;
+        self.span_check(range)?;
         assert!(self.windows.len() <= super::super::WINDOWS_MAX);
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;

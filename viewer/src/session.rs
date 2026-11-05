@@ -590,6 +590,7 @@ impl Session {
         assert!(range.first_ns < range.end_ns);
         assert!(output.is_empty());
         assert_eq!(self.context_connections.len(), CONTEXT_READERS);
+        self.span_check(range)?;
 
         let windows = self.context_windows(range);
         let chunk = context_chunk(windows.len());
@@ -948,6 +949,7 @@ impl Session {
     }
 
     fn observations(&self, range: ContextRange) -> Result<Vec<Observation>> {
+        self.span_check(range)?;
         let reader = self.reader();
         let mut observations = Vec::new();
         for window in self.context_windows(range) {

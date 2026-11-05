@@ -249,6 +249,21 @@ impl Session {
             .is_some_and(|span| span_covers(span.loaded, needed)))
     }
 
+    /// Refuses a read of `range` that reaches past the windows the session lists, since finding no
+    /// readings there would say the recording has none.
+    pub(super) fn span_check(&self, range: ContextRange) -> Result<()> {
+        let span = self
+            .registered
+            .as_ref()
+            .and_then(|registered| registered.span);
+        match span {
+            Some(span) if !span_covers(span.loaded, range) => {
+                Err(Error::Bound("read past the session's span"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn load_span_install(
         &mut self,
         needed: ContextRange,

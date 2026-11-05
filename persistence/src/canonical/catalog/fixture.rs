@@ -85,8 +85,9 @@ fn link_unread_windows_set_aside(base: &Path, held: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Links `sources`, sorted by name, under `base` as nodes of the writer's grammar: a leaf of at most
-/// 128 links, or a branch of at most 16 children that differ in the nibble after their shared prefix.
+/// Links `sources`, sorted by name, under `base` as nodes of the writer's grammar: a leaf of at
+/// most 128 links, or a branch of at most 16 children that differ in the nibble after their shared
+/// prefix.
 fn link_unread_windows_tree(base: &Path, sources: &[(String, PathBuf)]) -> io::Result<()> {
     let mut branches = vec![(base.to_owned(), 0, sources)];
     while let Some((directory, nibbles, names)) = branches.pop() {

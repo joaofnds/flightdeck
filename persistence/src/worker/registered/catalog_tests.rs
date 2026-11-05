@@ -327,3 +327,70 @@ fn a_commitment_refuses_a_stray_file_in_its_window() {
 
     assert_eq!(read.unwrap_err().kind(), ErrorKind::InvalidData);
 }
+
+/// What `read` found, none where a publication told it to wait. Anything else is a failure, since a
+/// reader that meets a publication may only wait or read what is saved.
+fn catalog_tests_found_or_waited<T>(read: crate::Result<T>) -> Option<T> {
+    match read {
+        Err(crate::Error::Io(error)) if error.kind() == ErrorKind::WouldBlock => None,
+        result => Some(result.unwrap()),
+    }
+}
+
+#[test]
+fn a_read_during_a_publication_waits_or_finds_each_window_whole() {
+    // Goal: a reader that meets a publication at any of its steps learns nothing false, and finds
+    // the minute once the publication ends (P02.3, P02.5).
+    // Method: save a minute, stop the next one's publication before its first step, and read the
+    // windows of every clock between its steps.
+    let recording = catalog_tests_two_saved_minutes_and_one_publishing();
+    let budget = catalog_tests_budget();
+    let store = Store::open(&recording.root).unwrap();
+    let catalog = Catalog::open(&recording.root, &budget).unwrap();
+    let mut publishing = store.resume_publication(&budget).unwrap();
+    let mut seen = Vec::new();
+
+    for _step in 0..1 << 10 {
+        let read = catalog.windows_in(0, u64::MAX, &mut ReadWork::default());
+        seen.push(catalog_tests_found_or_waited(read).map(|windows| {
+            windows
+                .iter()
+                .map(|window| window.identity.window)
+                .collect::<Vec<u64>>()
+        }));
+        if publishing.step().unwrap() == PublicationStep::Idle {
+            break;
+        }
+    }
+    let after = catalog
+        .windows_in(0, u64::MAX, &mut ReadWork::default())
+        .unwrap();
+
+    let found: Vec<&Vec<u64>> = seen.iter().flatten().collect();
+    let first_whole = found.iter().position(|windows| windows.len() == 2);
+    let before_it = &found[..first_whole.unwrap_or(found.len())];
+    assert!(before_it.iter().all(|windows| **windows == [0]), "{seen:?}");
+    assert!(
+        found[before_it.len()..]
+            .iter()
+            .all(|windows| **windows == [0, 1]),
+        "{seen:?}"
+    );
+    assert_eq!(after.len(), 2);
+}
+
+/// One minute saved and the publication of the next stopped before its first step.
+fn catalog_tests_two_saved_minutes_and_one_publishing() -> Recording {
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let store = Store::open(&recording.root).unwrap();
+    recording.persist(&store, &mut RunState::default());
+    let second = InterruptedWindow {
+        number: 1,
+        publication: 3,
+        publications_lost: 0,
+        unknown: false,
+    };
+    recording.interrupted_seal_of(&store, &second, Interruption::PublicationSteps(0));
+    recording
+}

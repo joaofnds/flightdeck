@@ -9,6 +9,7 @@ use persistence::resources::ByteBudget;
 
 use super::Session;
 use crate::live::identity_fixture::Fixture;
+use crate::live_app_response::KeyKind;
 
 /// The entries a boundary lookup of the canonical tree examines at most.
 const ENTRIES_OF_A_BOUNDARY_MAX: u64 = 4_224;
@@ -54,6 +55,33 @@ fn a_selection_reads_a_registered_window_with_its_rates() {
     assert_eq!(selected["selected"]["publication"], 3);
     assert_eq!(selected["trends"].as_array().unwrap().len(), 4);
     assert!(selected["summary"]["cpu_percent"].is_number());
+}
+
+#[test]
+fn runs_sharing_a_second_both_stay_selectable() {
+    // Goal: two runs on one wall second are two readings, neither hiding the other, as with a clock
+    // set back between runs (P02.1, P02.5).
+    // Method: save a run of the recording and then a second run over the same seconds, open a
+    // session, and select the second of each.
+    let first = registered_two_minutes();
+    let mut second = Fixture::new_mode(true, 2, Some(&first));
+    second.start_at_run_tick(58);
+    for offset in 0..4 {
+        second.publish_with_system_rows(SECOND_FIRST + offset);
+    }
+    second.seal();
+    let mut session = Session::open(&first.root).unwrap();
+
+    let one = session.select(SECOND_FIRST + 1, 0).unwrap();
+    let other = session.select(SECOND_FIRST + 1, 1).unwrap();
+
+    assert_eq!(session.windows.len(), 4);
+    assert_eq!(one["alternatives"].as_array().unwrap().len(), 2);
+    assert_ne!(one["selected"]["run"], other["selected"]["run"]);
+    assert_eq!(
+        one["selected"]["publication"],
+        other["selected"]["publication"]
+    );
 }
 
 /// Three minutes saved, the first a long way before the others on the clock and out of reach of
@@ -116,9 +144,36 @@ fn a_session_lists_only_the_windows_of_the_span_it_reads() {
 }
 
 #[test]
+fn a_read_past_the_listed_span_fails_rather_than_finding_nothing() {
+    // Goal: a session lists one span, and a read outside it that found no readings would draw a gap
+    // in the recording where there is none (P02.5).
+    // Method: save minutes far apart, open a session at the newest, and read a range of the oldest.
+    let fixture = registered_far_apart();
+    let session = Session::open(&fixture.root).unwrap();
+    let range = super::ContextRange::ending_at(SECOND_FIRST).unwrap();
+
+    let read = session.context(range, &mut Vec::new());
+
+    assert!(matches!(read, Err(persistence::Error::Bound(_))));
+}
+
+#[test]
+fn a_read_of_kept_parts_past_the_listed_span_fails_rather_than_finding_nothing() {
+    // Goal: the tables a minute keeps for the App histories answer for the same span (P02.5).
+    // Method: save minutes far apart, open a session at the newest, and read parts of the oldest.
+    let fixture = registered_far_apart();
+    let session = Session::open(&fixture.root).unwrap();
+    let range = super::ContextRange::ending_at(SECOND_FIRST).unwrap();
+
+    let read = session.visit_sealed_parts(range, KeyKind::Executable, b"app", |_part| Ok(()));
+
+    assert!(matches!(read, Err(persistence::Error::Bound(_))));
+}
+
+#[test]
 fn an_unavailable_old_window_stops_no_reader_of_a_newer_one() {
-    // Goal: damage outside what a reader asks for cannot stop it, and damage it asks for is explicit
-    // (P02.3).
+    // Goal: damage outside what a reader asks for cannot stop it, and damage it asks for is
+    // explicit (P02.3).
     // Method: save three minutes far apart, damage the oldest one's proof, then open a session and
     // select a second of the newest and of the oldest.
     let fixture = registered_far_apart();

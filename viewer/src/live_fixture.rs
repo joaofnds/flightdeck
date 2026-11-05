@@ -231,7 +231,7 @@ impl Fixture {
             identity,
             process_capacity: 2,
             owns_root: false,
-            registered: false,
+            registered: self.registered,
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
