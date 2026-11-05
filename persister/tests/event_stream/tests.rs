@@ -393,11 +393,10 @@ impl Candidate {
     fn verify_terminal(&self, rows: u64) {
         let store = persistence::Store::open(&self.root).unwrap();
         assert!(store.progress(&self.run).unwrap().is_none());
+        let pages = persistence::event_recovery::Pages::open(&self.root, &self.run).unwrap();
         let mut expected = 1;
         for _page in 0..ROWS_MAX {
-            let page =
-                persistence::event_recovery::read_page(&self.root, &self.run, expected, 16_384)
-                    .unwrap();
+            let page = pages.read(expected, 16_384).unwrap();
             assert_eq!(
                 page.rows.column("publication").unwrap().null_count(),
                 page.rows.height()

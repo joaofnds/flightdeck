@@ -16,24 +16,53 @@ const EXPANDED_BYTES_MAX: usize = BATCH_BYTES_MAX * 2;
 const COMPRESSED_BYTES_MAX: usize = EXPANDED_BYTES_MAX + 8 * 1024 * 1024;
 const READ_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
-/// Reads at most one physical batch, validates all its rows, then selects ascending events.
-/// `next` resumes after returned rows or at the next batch, including gaps in event numbers.
+/// Reads one page of a run's saved tail. A walk of the whole tail uses `Pages`, which checks the
+/// tail's files once rather than once a page.
 pub fn read_page(
     root: &Path,
     run: &RunIdentity,
     first_event: u64,
     limit: usize,
 ) -> Result<EventPage> {
+    Pages::open(root, run)?.read(first_event, limit)
+}
+
+/// A run's saved tail, whose every file was checked on opening it. A tail can hold 4,096 batches,
+/// so checking each file again for each page took four minutes of a walk on a CI runner.
+pub struct Pages<'root> {
+    root: &'root Path,
+    manifest: Manifest,
+}
+
+impl<'root> Pages<'root> {
+    pub fn open(root: &'root Path, run: &RunIdentity) -> Result<Self> {
+        super::validate_run(root, run)?;
+        let manifest = crate::store::events::read_committed(root, run)?
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+
+        Ok(Self { root, manifest })
+    }
+
+    /// Reads at most one physical batch, validates all its rows, then selects ascending events.
+    /// `next` resumes after returned rows or at the next batch, including gaps in event numbers.
+    pub fn read(&self, first_event: u64, limit: usize) -> Result<EventPage> {
+        read_page_of(self.root, &self.manifest, first_event, limit)
+    }
+}
+
+fn read_page_of(
+    root: &Path,
+    manifest: &Manifest,
+    first_event: u64,
+    limit: usize,
+) -> Result<EventPage> {
     if first_event == 0 || limit == 0 || limit > BATCH_ROWS_MAX {
         return Err(Error::Bound("terminal event page"));
     }
-    super::validate_run(root, run)?;
     let budget = Arc::new(ByteBudget::new(READ_BUDGET_BYTES));
     let _reservation = budget
         .reserve(super::batch::WORKING_BYTES)
         .ok_or(Error::Bound("terminal decode bytes"))?;
-    let manifest = crate::store::events::read_committed(root, run)?
-        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
     let selected = manifest
         .batches
         .iter()
@@ -41,7 +70,7 @@ pub fn read_page(
     let mut rows = super::batch::empty(manifest.identities)?;
     let mut next = None;
     if let Some(index) = selected {
-        rows = read_batch(root, &manifest, index, &budget)?;
+        rows = read_batch(root, manifest, index, &budget)?;
         let event = rows.column("event")?.u64()?;
         let offset = event
             .into_no_null_iter()
