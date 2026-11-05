@@ -587,14 +587,18 @@ fn seal_write(
     state: &RunState,
 ) -> Result<crate::Manifest> {
     let directory = attempt.original_directory();
-    let mut tables = writers.encoder.encode_into(window, directory)?;
-    tables.extend(super::seal_derived(
+    // Recovery accepts a minute with no derived tables, since deriving may fail, and it finishes
+    // one whose required tables are complete. Writing these first means a process that ends
+    // part way has written some required table last, so its restart derives them all again.
+    let derived = super::seal_derived(
         writers.derive,
         &Derivation {
             window,
             pending: directory,
         },
-    )?);
+    )?;
+    let mut tables = writers.encoder.encode_into(window, directory)?;
+    tables.extend(derived);
 
     let mut manifest = super::seal_manifest(window, tables, state.losses)?;
     // The window's event coverage starts where the frontier ended, before any events it lost.

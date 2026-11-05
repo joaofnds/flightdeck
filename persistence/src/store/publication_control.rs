@@ -87,7 +87,7 @@ pub(super) fn read_normal(
             if matches!(
                 codec::decode_slot(&candidate, recording, codec::SlotKind::Foreground)?,
                 codec::Slot::Idle
-            ) && matches!(current.phase, Phase::Cleanup | Phase::SalvageCommitted)
+            ) && clears_to_idle(&current)
             {
                 if current.census.kind == 2 && current.cleanup.region != 8 {
                     return Err(invalid());
@@ -126,6 +126,15 @@ pub(super) fn read_normal(
         // A short write is not authority. Retain it until a fully validated owner recomputes
         // the exact next target, so arbitrary bytes cannot authorize a transition.
         Err(error) => Err(error),
+    }
+}
+/// Whether a whole Idle state may wait beside this one: the end of cleanup, or the end of an
+/// ordinary or terminal attempt given up before any proof, which has chosen no census.
+fn clears_to_idle(state: &NormalState) -> bool {
+    match state.phase {
+        Phase::Cleanup | Phase::SalvageCommitted => true,
+        Phase::Registered => state.census.kind == 0 && !state.input.is_finite(),
+        _ => false,
     }
 }
 fn legal_next(old: &NormalState, new: &NormalState) -> bool {
@@ -346,7 +355,7 @@ pub(super) fn pending(
             codec::SlotKind::Foreground
         )?,
         codec::Slot::Idle
-    ) && matches!(state.phase, Phase::Cleanup | Phase::SalvageCommitted)
+    ) && clears_to_idle(state)
     {
         return Ok(None);
     }

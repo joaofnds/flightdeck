@@ -2114,3 +2114,6 @@ fn the_whole_worker_marks_what_an_evicted_ring_may_have_held() {
         [Some(named), None, None]
     );
 }
+
+#[path = "kill_tests.rs"]
+mod kill_tests;

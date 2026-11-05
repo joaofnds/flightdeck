@@ -34,6 +34,7 @@ env:
     store::registration_tests::loss_proof_tests::inherited_events_tests
     store::registration_tests::loss_proof_tests::loss_only_tests
     store::registration_tests::loss_proof_tests::ordinary_recovery_tests
+    worker::registered::tests::kill_tests
 
 # The root workspace's checks run as four jobs at once, so a push learns its verdict from the
 # slowest of them rather than from their sum. The test packages of check and persistence add up to

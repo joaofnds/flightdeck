@@ -3,6 +3,7 @@
 use super::attempt::TABLE_FILES;
 use super::inventory::{BatchFact, InventoryStep, OriginalFile};
 use super::{RegisteredAttempt, Store, publication_control};
+use crate::canonical::CanonicalMetadata;
 use crate::event_recovery::{Batch, batch_name};
 use crate::resources::ByteBudget;
 use crate::transaction::AttemptOperation;
@@ -64,10 +65,22 @@ impl Store {
             return Ok(Some(Interrupted::Publication));
         }
 
-        match self.resume_attempt()?.open_file("metadata") {
+        let staging = Some(Interrupted::Staging(state.input.run));
+        let mut file = match self.resume_attempt()?.open_file("metadata") {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(staging),
+            Err(error) => return Err(error),
+        };
+        match CanonicalMetadata::read(&mut file) {
             Ok(_) => Ok(Some(Interrupted::Publication)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Ok(Some(Interrupted::Staging(state.input.run)))
+            // A process that ended while writing its proof left it short, so it proves nothing.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData
+                ) =>
+            {
+                Ok(staging)
             }
             Err(error) => Err(error),
         }
@@ -195,6 +208,8 @@ impl RegisteredAttempt<'_> {
             for ordinal in 0..saved.batches.len() + usize::from(saved.torn.is_some()) {
                 restage_remove(self.original_directory(), &batch_name(ordinal))?;
             }
+            // A process that ended while writing its proof left it short.
+            restage_remove(self.original_directory(), "metadata")?;
         } else {
             assert!(saved.nothing());
             let events = self.events_directory_resumed()?;

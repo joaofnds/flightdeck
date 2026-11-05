@@ -9,6 +9,7 @@ use collector::recording::private::{self, FileLock, PrivateDirectory};
 use collector::ring::{Found, Identity, PublicationTiming, RingReader};
 
 use super::{StagingPermit, Store};
+use crate::transaction::normal::NormalState;
 use crate::transaction::{AttemptInput, AttemptOperation, Predecessor};
 
 /// The persister owner must remain held while the registered capability is usable.
@@ -679,14 +680,32 @@ fn reconcile_registered_scratch(
         }
         candidate_length += count;
     }
-    if candidate_length != 4096 {
-        return Err(unresolved(
-            "short slot scratch retains unresolved authority",
-        ));
+    if candidate_length < 4096 {
+        // A write that never reached its rename, so it holds no authority. The slot's next
+        // replacement discards it only if it is a prefix of the state that replacement writes.
+        return Ok(());
     }
-    AttemptInput::decode_registered(&candidate[..candidate_length], recording)?;
+    if candidate_length > 4096 {
+        return Err(invalid());
+    }
     let mut current = [0; 4097];
     let length = read_slot(root, &mut current)?;
+    let next_slot = codec::decode_slot(
+        &candidate[..candidate_length],
+        recording,
+        SlotKind::Foreground,
+    )?;
+    if matches!(next_slot, codec::Slot::Idle)
+        || NormalState::decode(&candidate[..candidate_length], recording)?.phase
+            != codec::Phase::Registered
+    {
+        // The same for a whole next state, which is intent until its owner recomputes it. Only a
+        // state that may follow the visible one stays beside it.
+        let state = NormalState::decode(&current[..length], recording)?;
+        super::publication_control::pending(root, &state)?;
+        return Ok(());
+    }
+    AttemptInput::decode_registered(&candidate[..candidate_length], recording)?;
     AttemptInput::decode_registered(&current[..length], recording)?;
     if current[..length] != candidate[..candidate_length] {
         return Err(unresolved(
