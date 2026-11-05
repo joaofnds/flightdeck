@@ -386,7 +386,8 @@ pub fn recording(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error
 
 /// Moves an older version's recording away from the default path, so the launch starts a new one
 /// there, since no recorder of this version appends to it. A recording the launch names stays,
-/// and its recorder's refusal reaches the status line, as one that fails to move does here.
+/// and its recorder's refusal reaches the status line. One that fails to move here is named on
+/// the status line when the session would start a recorder over it.
 fn set_aside_older_recording(root: &std::path::Path, options: &Options) {
     if options.source.recording.is_some() {
         return;
@@ -395,7 +396,10 @@ fn set_aside_older_recording(root: &std::path::Path, options: &Options) {
     match collector::recording::set_aside_older(root) {
         Ok(Some(moved)) => eprintln!("Set the older recording aside at {}", moved.display()),
         Ok(None) => {}
-        Err(error) => eprintln!("Older recording stays at {}: {error}", root.display()),
+        Err(error) => eprintln!(
+            "Could not set the older recording at {} aside: {error}",
+            root.display()
+        ),
     }
 }
 

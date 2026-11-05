@@ -3,41 +3,52 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{format, identity_text, private};
+use crate::ring::Identity;
+
+/// Every process that may go on using a recording's path holds one of these for its lifetime.
+const LIFETIME_LOCKS: [&str; 3] = ["recorder.lock", "collector.lock", "persister.lock"];
 
 /// Renames a recording an older version wrote, which no writer of this version may append to,
 /// so that the next recorder starts a new one at `root`. Returns where the older recording went.
-/// A rename keeps every file as it was, and the name carries the recording's identity, so no
-/// other recording set aside here can be in the way. A recording a process still writes stays,
-/// since that process goes on using its path.
+/// The rename keeps the saved files, and the name carries the recording's identity, so only a
+/// copy of this same recording can be in the way, which the rename refuses. A recording a process
+/// still uses stays, since that process goes on using its path.
 pub fn set_aside_older(root: &Path) -> io::Result<Option<PathBuf>> {
-    let identity = match format::older_writer_identity(root) {
-        Ok(Some(identity)) => identity,
-        Ok(None) => return Ok(None),
+    let Some(identity) = older_identity(root)? else {
+        return Ok(None);
+    };
+
+    let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
+    for lock in LIFETIME_LOCKS {
+        if private::FileLock::held(&root.join(lock))? {
+            return Ok(None);
+        }
+    }
+
+    let destination = root.with_extension(format!("{}.recording", identity_text(identity)));
+    std::fs::rename(root, &destination)?;
+    private::sync_parent(&destination)?;
+    Ok(Some(destination))
+}
+
+/// Whether `root` holds a recording an older version wrote, which no writer of this version may
+/// append to.
+pub fn is_older(root: &Path) -> io::Result<bool> {
+    Ok(older_identity(root)?.is_some())
+}
+
+fn older_identity(root: &Path) -> io::Result<Option<Identity>> {
+    match format::older_writer_identity(root) {
         Err(error)
             if matches!(
                 error.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::Unsupported
             ) =>
         {
-            return Ok(None);
+            Ok(None)
         }
-        Err(error) => return Err(error),
-    };
-
-    let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
-    if private::FileLock::held(&root.join("collector.lock"))? {
-        return Ok(None);
+        result => result,
     }
-    if private::FileLock::held(&root.join("persister.lock"))? {
-        return Ok(None);
-    }
-
-    let destination = root.with_extension(format!("{}.recording", identity_text(identity)));
-    std::fs::rename(root, &destination)?;
-    if let Some(parent) = destination.parent() {
-        private::sync_directory(parent)?;
-    }
-    Ok(Some(destination))
 }
 
 #[cfg(test)]
@@ -142,6 +153,49 @@ mod tests {
         let fixture = Fixture::empty();
 
         assert_eq!(set_aside_older(&fixture.root).unwrap(), None);
+    }
+
+    #[test]
+    fn moves_an_older_recording_whose_parent_is_a_link() {
+        // Goal: a linked application support directory still reports where the recording went.
+        // Method: reach the older root through a symbolic link to its parent.
+        let fixture = Fixture::with_identity(OLDER_IDENTITY);
+        let link = fixture.parent.join("link");
+        std::os::unix::fs::symlink(&fixture.parent, &link).unwrap();
+
+        let moved = set_aside_older(&link.join("flightdeck.recording"))
+            .unwrap()
+            .unwrap();
+
+        assert!(moved.join("identity").exists());
+    }
+
+    #[test]
+    fn reports_a_recording_as_older_only_when_a_writer_here_refuses_it_for_its_age() {
+        // Goal: a launch tells the recording it must set aside from every other it may find.
+        // Method: ask of an older root, a current one, and a root that does not exist.
+        let older = Fixture::with_identity(OLDER_IDENTITY);
+        let current = Fixture::empty();
+        private::create_private_dir(&current.root).unwrap();
+        format::create(&current.root, Identity([1, 2])).unwrap();
+        let missing = Fixture::empty();
+
+        assert!(is_older(&older.root).unwrap());
+        assert!(!is_older(&current.root).unwrap());
+        assert!(!is_older(&missing.root).unwrap());
+    }
+
+    #[test]
+    fn keeps_an_older_recording_its_controller_still_holds() {
+        // Goal: a controller between two worker starts goes on using the path it was given.
+        // Method: hold the controller's lifetime lock while asking for the root to be set aside.
+        let fixture = Fixture::with_identity(OLDER_IDENTITY);
+        let _recorder = private::FileLock::try_lock(&fixture.root.join("recorder.lock")).unwrap();
+
+        let moved = set_aside_older(&fixture.root).unwrap();
+
+        assert_eq!(moved, None);
+        assert!(fixture.root.join("identity").exists());
     }
 
     #[test]

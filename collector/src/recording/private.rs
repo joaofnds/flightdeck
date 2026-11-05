@@ -224,6 +224,13 @@ impl FileLock {
     }
 }
 
+/// Syncs the directory that holds `path`, which may be a link to it, as an application support
+/// directory moved elsewhere is.
+pub fn sync_parent(path: &Path) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(invalid)?;
+    full_sync(&open_directory_flags(parent, O_RDONLY)?)
+}
+
 pub fn create_private_dir(path: &Path) -> io::Result<()> {
     match create_directory(path) {
         Ok(()) => {
@@ -231,8 +238,7 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
             clear_acl(&directory)?;
             verify_open(&directory, true)?;
             full_sync(&directory)?;
-            let parent = path.parent().ok_or_else(invalid)?;
-            full_sync(&open_directory_flags(parent, O_RDONLY)?)?;
+            sync_parent(path)?;
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => verify_directory(path)?,
         Err(error) => return Err(error),
