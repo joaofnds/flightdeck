@@ -250,12 +250,11 @@ fn recover_staging_again(
     };
     let saved = attempt.saved(budget)?;
     attempt.restage(&saved)?;
-    let registered = crate::Losses {
+    state.losses = crate::Losses {
         publications: input.losses.publications,
-        events: input.losses.events,
+        events: saved.events_lost(input.losses.event_start)?,
         unknown: input.losses.unknown.is_some(),
     };
-    state.losses = registered;
     reader.seek_publication(attempted_origin)?;
     reader.seek_event(input.losses.event_start)?;
     let identity = WindowIdentity {
@@ -263,7 +262,9 @@ fn recover_staging_again(
         window,
     };
     let window = seal_stage(&attempt, &mut reader, identity, &saved.batches, state)?;
-    if state.losses != registered {
+    // Events the ring lost since are the window's to count, but a lost publication would change
+    // what the window holds, and the proof needs that unchanged.
+    if state.losses.publications != input.losses.publications {
         return Err(crate::Error::Bound("interrupted window overwritten"));
     }
 
@@ -392,6 +393,8 @@ fn seal_write(
     )?);
 
     let mut manifest = super::seal_manifest(window, tables, state.losses)?;
+    // The window's event coverage starts where the frontier ended, before any events it lost.
+    manifest.events_first = attempt.input().losses.event_start;
     manifest.data_directory = format!(
         "data/{}/ready",
         collector::recording::identity_text(attempt.transaction())

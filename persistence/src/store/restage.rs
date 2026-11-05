@@ -89,6 +89,19 @@ impl Saved {
     fn nothing(&self) -> bool {
         self.batches.is_empty() && !self.tables
     }
+
+    /// The events from `first` to the end of the saved batches that no batch holds. Those are the
+    /// ones the writer counted as lost before the process ended, and it will not read them again.
+    pub(crate) fn events_lost(&self, first: u64) -> io::Result<u64> {
+        let Some(last) = self.batches.last() else {
+            return Ok(0);
+        };
+        let rows: u64 = self.batches.iter().map(|batch| batch.rows).sum();
+        last.end
+            .checked_sub(first)
+            .and_then(|covered| covered.checked_sub(rows))
+            .ok_or_else(restage_refused)
+    }
 }
 
 impl Store {

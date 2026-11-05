@@ -33,6 +33,13 @@ enum Interruption {
     PublicationSteps(u32),
 }
 
+/// The window a seal was interrupted on, and what scanning to it found lost.
+struct InterruptedWindow {
+    number: u64,
+    publication: u64,
+    publications_lost: u64,
+}
+
 fn shape() -> Shape {
     Shape {
         slot_count: 8,
@@ -356,6 +363,22 @@ impl Recording {
 
     /// The counts of lost publications and events in each saved window's manifest, in order.
     fn saved_losses(&self) -> Vec<crate::Losses> {
+        let manifests = self.saved_manifests();
+        manifests.iter().map(|manifest| manifest.losses).collect()
+    }
+
+    /// The event rows each saved window holds, in order.
+    fn saved_event_rows(&self) -> Vec<u64> {
+        let manifests = self.saved_manifests();
+        let rows = manifests.iter().map(|manifest| {
+            let events = manifest.tables.iter().find(|table| table.name == "events");
+            events.unwrap().rows
+        });
+        rows.collect()
+    }
+
+    /// Every saved window's manifest, in the order of its publications.
+    fn saved_manifests(&self) -> Vec<crate::Manifest> {
         let mut manifests: Vec<_> = self
             .saved_windows()
             .iter()
@@ -369,20 +392,36 @@ impl Recording {
             })
             .collect();
         manifests.sort_by_key(|manifest| manifest.publication_first);
-        manifests.iter().map(|manifest| manifest.losses).collect()
+        manifests
     }
 
     /// Takes the worker's own seal of the first window as far as the interruption, then stops
     /// as a process that ended there would, leaving what a torn write leaves.
     fn interrupted_seal(&self, store: &Store, interruption: Interruption) {
+        let attempted = InterruptedWindow {
+            number: 0,
+            publication: 1,
+            publications_lost: 0,
+        };
+        self.interrupted_seal_of(store, &attempted, interruption);
+    }
+
+    /// The same for the named window, whose seal the worker reached past those lost publications.
+    fn interrupted_seal_of(
+        &self,
+        store: &Store,
+        attempted: &InterruptedWindow,
+        interruption: Interruption,
+    ) {
         let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
         let mut state = RunState::default();
+        state.losses.publications = attempted.publications_lost;
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
         let identity = WindowIdentity {
             run: self.run,
-            window: 0,
+            window: attempted.number,
         };
-        let publication = reader.publication_first();
+        let publication = attempted.publication;
         let input =
             super::seal_input(store, &reader, &identity, publication, &state, &budget).unwrap();
         let attempt = store
@@ -960,6 +999,176 @@ fn a_torn_event_batch_counts_as_nothing_saved_when_its_source_is_gone() {
     let progress = other.persist(&restarted, &mut RunState::default());
 
     assert!(matches!(progress, Progress::Sealed));
+}
+
+/// One minute saved, then published past the ring's eight ticks and eight events with as many
+/// events as the ring lets a tick carry, up to three. The ring ends with publications 7 to 14 and
+/// events 8 to 15, so publications 3 to 6 and events 4 to 7 are gone, and event 8 outlived its
+/// publication.
+fn lagging_recording() -> Recording {
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.persist(&first, &mut RunState::default());
+    drop(first);
+    for minute in 3..13 {
+        let count = recording.writer.event_room().min(3);
+        recording.publish_events_in_minute(minute, count);
+    }
+    let reader = RingReader::open_generation(recording.writer.name()).unwrap();
+    assert_eq!(reader.publication_newest().unwrap(), 14);
+    assert_eq!(reader.event_newest().unwrap(), 15);
+
+    recording
+}
+
+#[test]
+fn what_the_ring_overwrote_past_the_frontier_is_counted_once_across_restarts() {
+    // Goal: publications and events overwritten while the worker lagged are counted as lost
+    // exactly once, whichever process saves them, and every other event is saved (P02.3).
+    // Method: save each ready minute of a lagging recording with a new Store and state, as
+    // restarts do. Publication 14 has no later one to end its minute, so events 1 to 12 end up
+    // accounted for across eight windows.
+    let recording = lagging_recording();
+
+    for _window in 0..7 {
+        let restarted = Store::open(&recording.root).unwrap();
+        let progress = recording.persist(&restarted, &mut RunState::default());
+        assert!(matches!(progress, Progress::Sealed));
+    }
+
+    let losses = recording.saved_losses();
+    let publications: Vec<u64> = losses.iter().map(|loss| loss.publications).collect();
+    let events: Vec<u64> = losses.iter().map(|loss| loss.events).collect();
+    assert_eq!(publications, [0, 4, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(events, [0, 4, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(recording.saved_event_rows(), [3, 1, 0, 0, 2, 1, 1, 0]);
+    let reopened = Store::open(&recording.root).unwrap();
+    let frontier = recording.frontier(&reopened).unwrap();
+    assert_eq!(frontier.publication_end(), 14);
+    assert_eq!(frontier.event_end(), 13);
+}
+
+/// Stops the seal of a lagging recording's next window at the interruption, restarts, and expects
+/// the same counts and rows as a seal nothing interrupted.
+fn interrupted_lagging_seal_counts_its_losses_once(interruption: Interruption) {
+    let recording = lagging_recording();
+    let attempted = InterruptedWindow {
+        number: 5,
+        publication: 7,
+        publications_lost: 4,
+    };
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal_of(&first, &attempted, interruption);
+    drop(first);
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+    let lagging = crate::Losses {
+        publications: 4,
+        events: 4,
+        unknown: false,
+    };
+    assert_eq!(
+        recording.saved_losses(),
+        [crate::Losses::default(), lagging]
+    );
+    assert_eq!(recording.saved_event_rows(), [3, 1]);
+    assert_eq!(recording.frontier(&restarted).unwrap().event_end(), 9);
+}
+
+#[test]
+fn a_seal_past_lost_events_interrupted_before_its_event_index_counts_them_once() {
+    // Goal: events lost before a batch that was saved stay counted after a restart (P02.3).
+    // Method: stop with the batch saved and no index, restart, and compare the counts.
+    interrupted_lagging_seal_counts_its_losses_once(Interruption::EventIndexAbsent);
+}
+
+#[test]
+fn a_seal_past_lost_events_interrupted_with_a_table_missing_counts_them_once() {
+    // Goal: staging such a window again keeps its batch and its counts (P02.3).
+    // Method: stop with all but one table written, restart, and compare the counts.
+    interrupted_lagging_seal_counts_its_losses_once(Interruption::TableMissing);
+}
+
+#[test]
+fn a_seal_past_lost_events_interrupted_after_its_tables_counts_them_once() {
+    // Goal: proving such a window from what it saved finds the same counts (P02.3).
+    // Method: stop with every table written, restart, and compare the counts.
+    interrupted_lagging_seal_counts_its_losses_once(Interruption::TablesWritten);
+}
+
+#[test]
+fn a_seal_past_lost_events_abandoned_with_a_torn_batch_counts_them_once() {
+    // Goal: an attempt that saved no row is abandoned and the next scan counts the same (P02.3).
+    // Method: tear the only batch, restart, and compare the counts.
+    interrupted_lagging_seal_counts_its_losses_once(Interruption::EventBatchTorn);
+}
+
+#[test]
+fn a_seal_past_lost_events_interrupted_after_its_proof_counts_them_once() {
+    // Goal: durable metadata carries the counts through publication (P02.3).
+    // Method: stop after the proof, restart, and compare the counts.
+    interrupted_lagging_seal_counts_its_losses_once(Interruption::Proved);
+}
+
+#[test]
+fn a_seal_with_no_rows_past_lost_events_counts_them_when_staged_again() {
+    // Goal: events lost before a window that saved no row are counted, not taken for the window
+    // being overwritten, when the window is staged again (P02.3).
+    // Method: push event 8 out of the ring too, so the next window, publication 8, saves no row
+    // and loses publications 3 to 7 and events 4 to 8, then stop with a table missing and restart.
+    let mut recording = lagging_recording();
+    let count = recording.writer.event_room();
+    recording.publish_events_in_minute(13, count);
+    let attempted = InterruptedWindow {
+        number: 6,
+        publication: 8,
+        publications_lost: 5,
+    };
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal_of(&first, &attempted, Interruption::TableMissing);
+    drop(first);
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+    let lagging = crate::Losses {
+        publications: 5,
+        events: 5,
+        unknown: false,
+    };
+    assert_eq!(
+        recording.saved_losses(),
+        [crate::Losses::default(), lagging]
+    );
+    assert_eq!(recording.saved_event_rows(), [3, 0]);
+    assert_eq!(recording.frontier(&restarted).unwrap().event_end(), 9);
+}
+
+#[test]
+fn a_seal_with_rows_saved_refuses_when_the_ring_overwrote_its_window() {
+    // Goal: rows no boundary can be proved for stop the run rather than publish a wrong window.
+    // Method: stop with the batch saved and no index, publish past the ring's eight ticks with
+    // no events, restart, and read the refusal.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::EventIndexAbsent);
+    drop(first);
+    recording.publish_minutes(3..13);
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let result = recording.persist_result(&restarted, &mut RunState::default());
+
+    let refusal = result.err().unwrap();
+    assert!(matches!(
+        refusal,
+        crate::Error::Bound("interrupted window overwritten")
+    ));
 }
 
 #[test]
