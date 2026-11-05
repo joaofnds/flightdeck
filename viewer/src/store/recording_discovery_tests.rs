@@ -36,6 +36,25 @@ fn an_empty_completed_catalog_keeps_checked_absence_without_inventing_a_clock() 
 }
 
 #[test]
+fn a_damaged_recording_reports_a_failure_instead_of_no_minutes() {
+    // Goal: a recording missing what every recording holds does not read as one with no minutes.
+    // Method: seal a window, remove a directory the recording's format requires, and load it.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(10_000, &[]);
+    fixture.seal();
+    std::fs::remove_dir(fixture.root.join("event-fragments")).unwrap();
+
+    let left_out = super::load_since(
+        &fixture.root,
+        None,
+        &mut super::LoadBuffers::default(),
+        |_, _, _, _| {},
+    );
+
+    assert_eq!(left_out, Some(Failure::Commits(ErrorKind::InvalidData)));
+}
+
+#[test]
 fn a_successful_load_reports_the_actual_catalog_pruning_floor() {
     // Goal: a catalog certificate reports what discovery selected rather than held timestamps.
     // Method: load a real sealed window and compare its certificate with the pruning threshold.

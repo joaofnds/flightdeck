@@ -304,6 +304,17 @@ fn exact_source_absence_ignores_unavailable_other_source_payload() {
     assert_eq!(work.raw_admissions, 0);
 }
 #[test]
+fn a_damaged_recording_is_explicit_corruption_and_not_another_format() {
+    // Goal: a reader that takes `Unsupported` for an older format cannot read damage as no minutes.
+    // Method: remove a directory every initialized recording holds, then open its catalog.
+    let (fixture, _) = loss_fixture();
+    fs::remove_dir(fixture.root.join("event-fragments")).unwrap();
+
+    let opened = catalog::Catalog::open(&fixture.root, &budget());
+
+    assert_eq!(opened.err().unwrap().kind(), io::ErrorKind::InvalidData);
+}
+#[test]
 fn raw_metadata_substitution_is_explicit_corruption() {
     // Goal: a path with equal bytes cannot replace the exact gate source inode.
     // Method: replace raw metadata with a private identical copy after linking its gate.

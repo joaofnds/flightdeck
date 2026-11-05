@@ -173,11 +173,18 @@ impl UnknownReading {
 }
 
 impl Catalog {
-    /// Opens the recording at `path`. A recording of another format is `Unsupported`.
+    /// Opens the recording at `path`. A recording of another format, or one still being set up, is
+    /// `Unsupported`, and a damaged one is `InvalidData`.
     pub fn open(path: &Path, budget: &Arc<ByteBudget>) -> io::Result<Self> {
         let root = PrivateDirectory::open(path)?;
-        let Classification::Initialized(recording) = classify(&root, &mut [0; 4097])? else {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        let recording = match classify(&root, &mut [0; 4097])? {
+            Classification::Initialized(recording) => recording,
+            Classification::Corrupt => return Err(io::Error::from(io::ErrorKind::InvalidData)),
+            Classification::Fresh
+            | Classification::Initializing(_)
+            | Classification::Unsupported => {
+                return Err(io::Error::from(io::ErrorKind::Unsupported));
+            }
         };
 
         Ok(Self {
