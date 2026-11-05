@@ -2,9 +2,9 @@
 
 use super::super::WriterLock;
 use super::{LOCK_MODE, create_lock};
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{self, Read};
+use std::io::{self, PipeWriter, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -14,12 +14,8 @@ use std::time::Duration;
 
 const FD_CLOEXEC: c_int = 1;
 const F_GETFD: c_int = 1;
-const SIGSTOP: c_int = 17;
-const SIGCONT: c_int = 19;
 const SIGKILL: c_int = 9;
 const WNOHANG: c_int = 1;
-const WUNTRACED: c_int = 2;
-const STOPPED_STATUS: c_int = 0x7f;
 const WAIT_ATTEMPTS_MAX: usize = 200;
 /// The 10 ms waits the isolated probe gets, 30 seconds, longer than `WAIT_ATTEMPTS_MAX`
 /// because it starts a whole test binary, which took over 2 seconds on a machine running
@@ -35,54 +31,57 @@ const ECHILD: i32 = 10;
 
 unsafe extern "C" {
     fn fork() -> c_int;
-    fn getpid() -> c_int;
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn close(file: c_int) -> c_int;
     fn fcntl(file: c_int, operation: c_int, ...) -> c_int;
+    fn read(file: c_int, buffer: *mut c_void, bytes: usize) -> isize;
+    fn write(file: c_int, buffer: *const c_void, bytes: usize) -> isize;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn _exit(status: c_int) -> !;
 }
 
+/// A forked child that waits on a pipe, not yet executing anything, with a copy of a file's
+/// descriptor. It waits on a pipe rather than stopping itself, since macOS left about one in a
+/// hundred self-stopped children stopped for good when the continue followed the stop closely.
 struct PausedChild {
     pid: i32,
+    release: PipeWriter,
     reaped: bool,
 }
 
 impl PausedChild {
     fn start(file: &File, close_copy: bool) -> io::Result<Self> {
-        let descriptor = file.as_raw_fd();
+        let (mut ready_reader, ready_writer) = io::pipe()?;
+        let (release_reader, release) = io::pipe()?;
         let pid = unsafe { fork() };
         if pid == 0 {
-            // After fork only async-signal-safe native calls run before this child's exit.
-            if close_copy {
-                if unsafe { close(descriptor) } != 0 {
-                    unsafe { _exit(1) };
-                }
-            }
-            if unsafe { kill(getpid(), SIGSTOP) } != 0 {
-                unsafe { _exit(2) };
-            }
-            unsafe { _exit(0) };
+            start_child(
+                close_copy.then_some(file.as_raw_fd()),
+                ready_writer.as_raw_fd(),
+                release_reader.as_raw_fd(),
+            );
         }
         if pid < 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut child = Self { pid, reaped: false };
-        let status = child.wait(WNOHANG | WUNTRACED)?;
-        if status & 0xff != STOPPED_STATUS {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        }
+        drop(ready_writer);
+        drop(release_reader);
+        let child = Self {
+            pid,
+            release,
+            reaped: false,
+        };
+        ready_reader.read_exact(&mut [0])?;
+
         Ok(child)
     }
 
-    fn wait(&mut self, options: c_int) -> io::Result<c_int> {
+    fn wait(&mut self) -> io::Result<c_int> {
         for _attempt in 0..WAIT_ATTEMPTS_MAX {
             let mut status = 0;
-            let pid = unsafe { waitpid(self.pid, &raw mut status, options) };
+            let pid = unsafe { waitpid(self.pid, &raw mut status, WNOHANG) };
             if pid == self.pid {
-                if status & 0xff != STOPPED_STATUS {
-                    self.reaped = true;
-                }
+                self.reaped = true;
                 return Ok(status);
             }
             if pid < 0 {
@@ -101,11 +100,26 @@ impl PausedChild {
     }
 
     fn finish(mut self) -> io::Result<c_int> {
-        if unsafe { kill(self.pid, SIGCONT) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        self.wait(WNOHANG)
+        self.release.write_all(&[0])?;
+        self.wait()
     }
+}
+
+/// The child's whole life after fork, so only async-signal-safe native calls run in it.
+fn start_child(descriptor_to_close: Option<c_int>, ready: c_int, release: c_int) -> ! {
+    if let Some(descriptor) = descriptor_to_close {
+        if unsafe { close(descriptor) } != 0 {
+            unsafe { _exit(1) };
+        }
+    }
+    let mut byte = 0_u8;
+    if unsafe { write(ready, (&raw const byte).cast(), 1) } != 1 {
+        unsafe { _exit(2) };
+    }
+    if unsafe { read(release, (&raw mut byte).cast(), 1) } != 1 {
+        unsafe { _exit(3) };
+    }
+    unsafe { _exit(0) };
 }
 
 impl Drop for PausedChild {
@@ -117,7 +131,7 @@ impl Drop for PausedChild {
                     io::Error::last_os_error()
                 );
             }
-            if let Err(error) = self.wait(WNOHANG) {
+            if let Err(error) = self.wait() {
                 eprintln!("lock-probe cleanup wait refused: {error}");
             }
         }
@@ -141,8 +155,8 @@ fn open_probe(path: &Path) -> File {
 fn a_writers_lock_is_free_once_dropped_though_a_paused_child_holds_a_copy() {
     // Goal: a writer that has gone leaves its ring free while a child still starting holds a copy
     // of the lock's descriptor.
-    // Method: fork a child that stops holding the copy, drop the writer's lock, then take the lock
-    // through a fresh open while the child is still stopped.
+    // Method: fork a child that waits holding the copy, drop the writer's lock, then take the lock
+    // through a fresh open while the child still waits.
     let path = std::env::temp_dir().join(format!("flightdeck-writer-lock-{}", std::process::id()));
     let lock = WriterLock(create_lock(&path).unwrap());
     let child = PausedChild::start(&lock.0, false).unwrap();
