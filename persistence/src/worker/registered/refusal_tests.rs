@@ -122,6 +122,37 @@ fn a_whole_proof_that_does_not_read_stops_the_worker_with_its_tables_in_place() 
 }
 
 #[test]
+fn a_recovery_that_fails_while_it_publishes_stages_nothing_again() {
+    // Goal: a recovery that has begun to publish needs every original it proved, so a failure from
+    // there on stops the worker with them in place, whatever kind of failure it is (P02.3).
+    // Method: stop with the tables written and no proof, put a file in the known namespace, which
+    // only publication reads, restart, and read the refusal and that the table is the same file.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::TablesWritten);
+    drop(first);
+    let pending = attempt_directory(&recording.root, "data", "pending");
+    let table = pending.join("processes.parquet");
+    let before = std::fs::metadata(&table).unwrap().ino();
+    let damage = recording.root.join("observations-known/damage");
+    std::fs::write(&damage, []).unwrap();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let result = recording.persist_result(&restarted, &mut RunState::default());
+
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == ErrorKind::InvalidData));
+    let saved = attempt_directory(&recording.root, "data", "ready");
+    assert_eq!(
+        std::fs::metadata(saved.join("processes.parquet"))
+            .unwrap()
+            .ino(),
+        before
+    );
+    assert!(saved.join("metadata").exists());
+}
+
+#[test]
 fn a_refused_seal_keeps_what_it_saved_and_refuses_the_same_way_again() {
     // Goal: the refusal of a window the ring overwrote changes nothing on disk, so the slot still
     // holds every piece of evidence a later route could use (P02.3).
