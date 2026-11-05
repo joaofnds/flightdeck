@@ -134,7 +134,7 @@ impl SourceProof {
             return Ok(None);
         }
         self.checked_read(input, |reader| {
-            if !reader.completed() {
+            if !reader.ended() {
                 return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }
             let publication_end = reader

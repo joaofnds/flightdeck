@@ -117,52 +117,24 @@ const _: () = {
 
 impl Store {
     pub fn open(root: &Path) -> io::Result<Self> {
-        if let Err(error) = collector::recording::check_writer(root) {
-            if error.kind() != io::ErrorKind::Unsupported {
-                return Err(error);
-            }
-            let directory = private::PrivateDirectory::open(root)?;
-            let mut scratch = [0; 4097];
-            if let collector::recording::bootstrap::Classification::Initialized(recording) =
-                collector::recording::bootstrap::classify(&directory, &mut scratch)?
-            {
-                let owner = match FileLock::try_lock_in(&directory, "persister.lock") {
-                    Ok(owner) => owner,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        return Err(io::Error::new(io::ErrorKind::WouldBlock, OwnershipBusy));
-                    }
-                    Err(error) => return Err(error),
-                };
-                directory.full_sync()?;
-                return Ok(Self {
-                    root: root.to_owned(),
-                    directory,
-                    protocol_two: true,
-                    recording,
-                    owner,
-                    staging: Arc::new(AtomicBool::new(false)),
-                });
-            }
-            return Err(error);
-        }
+        collector::recording::check_writer(root)?;
         private::create_private_dir(root)?;
-        let registration = FileLock::wait_short(&root.join("registration.lock"))?;
-        let recording = collector::recording::recording_identity(root)?;
+        let directory = private::PrivateDirectory::open(root)?;
+        let registration = FileLock::wait_short_in(&directory, "registration.lock")?;
+        let recording = collector::recording::recording_identity(root, &registration)?;
         drop(registration);
-        let owner = match FileLock::try_lock(&root.join("persister.lock")) {
+        let owner = match FileLock::try_lock_in(&directory, "persister.lock") {
             Ok(owner) => owner,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(io::Error::new(io::ErrorKind::WouldBlock, OwnershipBusy));
             }
             Err(error) => return Err(error),
         };
-        let directory = private::PrivateDirectory::open(root)?;
-        drop(directory.create_directory("data")?);
-        drop(directory.create_directory("commits")?);
+        directory.full_sync()?;
         Ok(Self {
             root: root.to_owned(),
             directory,
-            protocol_two: false,
+            protocol_two: true,
             recording,
             owner,
             staging: Arc::new(AtomicBool::new(false)),
@@ -183,6 +155,11 @@ impl Store {
             ));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     #[must_use]

@@ -9,22 +9,24 @@ use std::time::{Duration, Instant};
 
 use collector::machine::Memory;
 use collector::processes::{Process, Task, Usage};
-use collector::recording::{Registration, Registry, identity_text};
-use collector::ring::{Dropped, ObservationTimes, Place, Readings, Shape, Writer};
+use collector::recording::{Registration, Registry};
+use collector::ring::{Dropped, ObservationTimes, Place, Readings, RunIdentity, Shape, Writer};
 use collector::tracker::{Event, Noticed};
+
+use crate::saved_windows::saved_manifests;
 
 pub struct RecordingHarness {
     root: PathBuf,
     place: Place,
     writer: Option<Writer>,
     worker: Option<Child>,
-    old_run: String,
-    new_run: String,
+    old_run: RunIdentity,
+    new_run: Option<RunIdentity>,
     refused: bool,
     awake_origin_ns: u64,
     old_source: String,
     sources: Vec<String>,
-    legacy_identity: Option<collector::ring::RunIdentity>,
+    untimed_run: Option<RunIdentity>,
     process_birth_ns: u64,
 }
 
@@ -56,7 +58,7 @@ impl RecordingHarness {
         let root =
             std::env::temp_dir().join(format!("fd-recovery-{}-{ordinal}", std::process::id()));
         assert!(!root.exists(), "{} already exists", root.display());
-        collector::recording::private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let place = Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdr{}{ordinal}", std::process::id()),
@@ -66,7 +68,7 @@ impl RecordingHarness {
             .unwrap()
             .into_parts();
         registered.unwrap();
-        let old_run = identity_text(writer.identity().unwrap().run).to_string();
+        let old_run = writer.identity().unwrap();
         let old_source = writer.name().to_owned();
         drop(spawns);
         let awake_origin_ns =
@@ -79,12 +81,12 @@ impl RecordingHarness {
             writer: Some(writer),
             worker: None,
             old_run,
-            new_run: String::new(),
+            new_run: None,
             refused: false,
             awake_origin_ns,
             sources: vec![old_source.clone()],
             old_source,
-            legacy_identity: None,
+            untimed_run: None,
             process_birth_ns: 7,
         }
     }
@@ -180,17 +182,13 @@ impl RecordingHarness {
             .unwrap();
         assert!(Registry::completed(&self.root, &old.identity, &old.ring_name).unwrap());
         self.assert_old_source_retained();
-        let mut buffer: Box<[_; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]> =
-            vec![0; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap();
-        let mut discovery =
-            persistence::event_recovery::Discovery::open(&self.root, &mut buffer).unwrap();
-        let page = discovery.next_page(2).unwrap();
-        assert!(page.complete);
-        assert_eq!(page.runs.len(), 1);
-        let recovered = page.runs[0];
+        let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(1 << 28));
+        let catalog = persistence::canonical::catalog::Catalog::open(&self.root, &budget).unwrap();
+        let page = catalog
+            .event_objects_page(None, 2, &mut persistence::canonical::ReadWork::default())
+            .unwrap();
+        assert_eq!(page.objects.len(), 1);
+        let recovered = page.objects[0].recovery;
         assert_eq!(recovered.run, old.identity);
         assert_eq!(recovered.rows, 0);
         let events =
@@ -202,18 +200,13 @@ impl RecordingHarness {
             events.coverage,
             recovered.events_first..recovered.events_end
         );
-        assert_eq!(
-            persistence::read_committed(&self.root, &self.marker(&self.old_run, 0))
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::NotFound
-        );
+        assert!(self.saved(&self.old_run, 0).is_none());
         eprintln!("canonical loss-only recovery={recovered:?}");
         recovered
     }
 
     pub fn new_window_prior_loss_unknown(&self) -> bool {
-        persistence::read_committed(&self.root, &self.marker(&self.new_run, 0))
+        self.saved(&self.new_run.unwrap(), 0)
             .unwrap()
             .losses
             .unknown
@@ -227,14 +220,12 @@ impl RecordingHarness {
         // nothing. Paused, it leaves the old run unsealed until both restarts have registered.
         self.pause_worker();
         self.restart_collection_with_new_window();
-        let retained = self.new_run.clone();
+        let retained = self.new_run.unwrap();
         self.restart_collection_with_new_window();
         self.resume_worker();
         self.wait_for_marker(&retained, 0);
         self.wait_for_new_window();
-        persistence::read_committed(&self.root, &self.marker(&retained, 0))
-            .unwrap()
-            .losses
+        self.saved(&retained, 0).unwrap().losses
     }
 
     pub fn record_old_window_and_tail(&mut self) {
@@ -252,8 +243,7 @@ impl RecordingHarness {
     }
 
     pub fn old_process_identities(&self) -> Vec<(i32, u64, u64)> {
-        let manifest =
-            persistence::read_committed(&self.root, &self.marker(&self.old_run, 0)).unwrap();
+        let manifest = self.saved(&self.old_run, 0).unwrap();
         let path = self
             .root
             .join(manifest.data_directory)
@@ -283,8 +273,7 @@ impl RecordingHarness {
     }
 
     pub fn assert_exact_publication_loss(&self, publications: u64) {
-        let manifest =
-            persistence::read_committed(&self.root, &self.marker(&self.old_run, 1)).unwrap();
+        let manifest = self.saved(&self.old_run, 1).unwrap();
         assert_eq!(manifest.losses.publications, publications);
         assert_eq!(manifest.losses.events, 0);
         assert!(!manifest.losses.unknown);
@@ -297,14 +286,18 @@ impl RecordingHarness {
         self.publish(59, 1_059, 59, true);
         self.publish(60, 1_060, 60, false);
         self.restart_collection_with_new_window();
-        collector::recording::private::open_private_file(&self.root.join("data"), true).unwrap();
+        let data = self.root.join("data");
+        let held = self.root.with_extension("held-data");
+        fs::rename(&data, &held).unwrap();
+        collector::recording::private::open_private_file(&data, true).unwrap();
         self.restart_worker();
         let status = wait_status(self.worker.as_mut().unwrap());
         assert_eq!(status.code(), Some(1));
         self.worker = None;
-        assert!(!self.marker(&self.new_run, 0).exists());
+        fs::remove_file(&data).unwrap();
+        fs::rename(&held, &data).unwrap();
+        assert!(self.saved(&self.new_run.unwrap(), 0).is_none());
         assert!(self.current_publication() >= 6);
-        fs::remove_file(self.root.join("data")).unwrap();
         self.restart_worker();
         self.wait_for_recovered_tail_and_new_window();
     }
@@ -350,8 +343,7 @@ impl RecordingHarness {
     }
 
     pub fn old_window_tick_count(&self, window: u64) -> u64 {
-        let manifest =
-            persistence::read_committed(&self.root, &self.marker(&self.old_run, window)).unwrap();
+        let manifest = self.saved(&self.old_run, window).unwrap();
         manifest
             .tables
             .iter()
@@ -361,8 +353,7 @@ impl RecordingHarness {
     }
 
     pub fn old_window_tables(&self, window: u64) -> Vec<&'static str> {
-        let manifest =
-            persistence::read_committed(&self.root, &self.marker(&self.old_run, window)).unwrap();
+        let manifest = self.saved(&self.old_run, window).unwrap();
         manifest.tables.iter().map(|table| table.name).collect()
     }
 
@@ -419,7 +410,7 @@ impl RecordingHarness {
         self.worker = None;
 
         assert_eq!(status.code(), Some(1));
-        assert!(!self.marker(&self.old_run, 0).exists());
+        assert!(self.saved(&self.old_run, 0).is_none());
         self.assert_old_source_unretired();
     }
 
@@ -475,7 +466,7 @@ impl RecordingHarness {
             .unwrap()
             .into_parts();
         registered.unwrap();
-        self.new_run = identity_text(writer.identity().unwrap().run).to_string();
+        self.new_run = Some(writer.identity().unwrap());
         self.sources.push(writer.name().to_owned());
         self.writer = Some(writer);
         drop(spawns);
@@ -486,7 +477,7 @@ impl RecordingHarness {
     pub fn restart_worker(&mut self) {
         self.start_worker(persistence::resources::WORKING_BYTES_MAX);
         // Publishing after the recovery worker starts cannot wait for its disk commits.
-        if !self.new_run.is_empty() {
+        if self.new_run.is_some() {
             self.publish(61, 2_061, 103, false);
         }
     }
@@ -530,23 +521,9 @@ impl RecordingHarness {
     }
 
     pub fn assert_old_windows(&self, expected: &[u64]) {
-        let day = self
-            .root
-            .join("commits")
-            .join(&self.old_run)
-            .join(format!("{:020}", 0));
-        let mut actual: Vec<u64> = fs::read_dir(day)
-            .unwrap()
-            .map(|entry| {
-                entry
-                    .unwrap()
-                    .file_name()
-                    .to_str()
-                    .unwrap()
-                    .trim_end_matches(".seal")
-                    .parse()
-                    .unwrap()
-            })
+        let mut actual: Vec<u64> = saved_manifests(&self.root, &self.old_run)
+            .iter()
+            .map(|manifest| manifest.identity.window)
             .collect();
         actual.sort_unstable();
         assert_eq!(actual, expected);
@@ -564,7 +541,7 @@ impl RecordingHarness {
 
     pub fn assert_worker_refused_without_a_commit(&self) {
         assert!(self.refused);
-        assert!(!self.marker(&self.old_run, 0).exists());
+        assert!(self.saved(&self.old_run, 0).is_none());
     }
 
     pub fn current_publication(&self) -> u64 {
@@ -575,15 +552,15 @@ impl RecordingHarness {
     }
 
     pub fn wait_for_recovered_tail_and_new_window(&self) {
-        self.wait_for_marker(&self.new_run, 0);
+        self.wait_for_marker(&self.new_run.unwrap(), 0);
         assert!(
-            self.marker(&self.old_run, 1).try_exists().unwrap(),
+            self.saved(&self.old_run, 1).is_some(),
             "new window became visible before the recoverable old tail"
         );
     }
 
     pub fn wait_for_new_window(&self) {
-        self.wait_for_marker(&self.new_run, 0);
+        self.wait_for_marker(&self.new_run.unwrap(), 0);
     }
 
     pub fn continue_new_collection(&mut self) {
@@ -603,27 +580,13 @@ impl RecordingHarness {
     pub fn record_and_recover_untimed_tail(&mut self) {
         let spawns = spawns();
         drop(self.writer.take());
-        let original = record_legacy_tail(&self.place);
-        let name = format!("{}.99", original.rsplit_once('.').unwrap().0);
-        forge_source(
-            &open_source(&original),
-            &name,
-            &Forgery {
-                removed_slot_words: 3,
-                removed_header_words: 12,
-                ..Forgery::default()
-            },
-            forge_legacy_slots,
-        );
-        remove_source(&original);
-        fs::write(&self.place.lock_path, &name).unwrap();
-        self.sources.push(name);
         let (mut writer, registered) = Registration::start(&self.root, &self.place, shape(), 0)
             .unwrap()
             .into_parts();
         registered.unwrap();
+        record_untimed_reading(&mut writer);
         self.sources.push(writer.name().to_owned());
-        self.legacy_identity = Some(Registry::read(&self.root).unwrap().runs[0].identity);
+        self.untimed_run = Some(writer.identity().unwrap());
         writer.finish();
         drop(writer);
         drop(spawns);
@@ -635,10 +598,7 @@ impl RecordingHarness {
     pub fn assert_one_untimed_window_with_its_original_reading(&self) {
         let second = persistence::query::processes_at_second(&self.root, 1_059).unwrap();
         assert_eq!(second.unavailable_time_windows, 1);
-        let legacy = self.legacy_identity.unwrap();
-        assert_eq!(legacy.boot.0, [0, 0]);
-        let store = persistence::Store::open(&self.root).unwrap();
-        let manifest = store.progress(&legacy).unwrap().unwrap();
+        let manifest = saved_manifests(&self.root, &self.untimed_run.unwrap()).swap_remove(0);
         assert_eq!(manifest.wall_ns, None);
         let path = self
             .root
@@ -719,24 +679,16 @@ impl RecordingHarness {
         );
     }
 
-    fn marker(&self, run: &str, window: u64) -> PathBuf {
-        self.root
-            .join("commits")
-            .join(run)
-            .join(format!("{:020}", window / 1440))
-            .join(format!("{window:020}.seal"))
+    fn saved(&self, run: &RunIdentity, window: u64) -> Option<persistence::Manifest> {
+        saved_manifests(&self.root, run)
+            .into_iter()
+            .find(|manifest| manifest.identity.window == window)
     }
 
-    fn wait_for_marker(&self, run: &str, window: u64) {
-        let marker = self.marker(run, window);
+    fn wait_for_marker(&self, run: &RunIdentity, window: u64) {
+        let sealed = wait_until(SEAL_LIMIT, || self.saved(run, window).is_some());
 
-        let sealed = wait_until(SEAL_LIMIT, || marker.try_exists().unwrap());
-
-        assert!(
-            sealed,
-            "seal missing after {SEAL_LIMIT:?}: {}",
-            marker.display()
-        );
+        assert!(sealed, "seal missing after {SEAL_LIMIT:?}: {window}");
     }
 }
 
@@ -911,21 +863,6 @@ fn forge_source(
     assert_eq!(unsafe { munmap(to, target_length) }, 0);
 }
 
-fn forge_legacy_slots(source: &[u64], target: &mut [u64]) {
-    const LEGACY_WORDS: usize = 39 + 2 + 10 + 1 + 2 + 1 + 18 + 10;
-    const CURRENT_WORDS: usize = LEGACY_WORDS + 3;
-    assert_eq!(source[1], 5);
-    target[1] = 2;
-    target[17] = 39;
-    for slot in 0..120 {
-        let source = &source[44 + slot * CURRENT_WORDS..][..CURRENT_WORDS];
-        let target = &mut target[32 + slot * LEGACY_WORDS..][..LEGACY_WORDS];
-        target[..39].copy_from_slice(&source[..39]);
-        target[39..].copy_from_slice(&source[42..]);
-    }
-    target[32 + 120 * LEGACY_WORDS..].copy_from_slice(&source[44 + 120 * CURRENT_WORDS..]);
-}
-
 fn spawns() -> MutexGuard<'static, ()> {
     // The lock protects fork/exec descriptor ownership, not mutable fixture data.
     match SPAWNS.lock() {
@@ -969,8 +906,8 @@ fn wait_until(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
     false
 }
 
-fn record_legacy_tail(place: &Place) -> String {
-    let mut legacy = Writer::create(place, shape()).unwrap();
+/// Publishes one reading with no clocks, as a source with no clocks leaves it.
+fn record_untimed_reading(writer: &mut Writer) {
     let memory = Memory::default();
     let process = Process {
         pid: 41,
@@ -983,7 +920,7 @@ fn record_legacy_tail(place: &Place) -> String {
             unix_syscalls: 5,
         },
     };
-    legacy.publish(&Readings {
+    writer.publish(&Readings {
         run_tick: 0,
         cpus: &[],
         memory: &memory,
@@ -997,9 +934,6 @@ fn record_legacy_tail(place: &Place) -> String {
         events: &[],
         dropped: Dropped::default(),
     });
-    let original = legacy.name().to_owned();
-    drop(legacy);
-    original
 }
 
 fn saved_query(path: &std::path::Path, sql: &str) -> polars::prelude::DataFrame {

@@ -835,7 +835,7 @@ impl AppPopulation {
             collector::recording::identity_text(collector::recording::random_identity().unwrap())
                 .to_string();
         let root = std::env::temp_dir().join(format!("flightdeck-app-history-{token}"));
-        collector::recording::private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let place = collector::ring::Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdah{}", std::process::id()),

@@ -192,8 +192,15 @@ fn history_assert_full(history: &Value, selection: &Value) {
 }
 
 fn history_publish_committed(fixture: &mut RingFixture) {
-    let mut missing = None;
-    history_publish_withheld(fixture, None, &mut missing);
+    for minute in 0..14 {
+        for offset in 1..=60 {
+            history_publish(fixture, minute * 60 + offset, false);
+        }
+        fixture.seal_through(u64::from(minute));
+    }
+    for publication in 841..=901 {
+        history_publish(fixture, publication, false);
+    }
 }
 
 fn history_publish(fixture: &mut RingFixture, tick: u32, process_pressure: bool) {
@@ -272,43 +279,6 @@ fn history_processes(tick: u32) -> Vec<collector::processes::Process> {
 }
 
 #[test]
-fn restores_cpu_intervals_from_an_older_late_commit_without_advancing_selection() {
-    // Goal: CPU history repairs an actual old gap even when no new live publication arrives.
-    // Method: withhold minute12 outside the120-slot ring, then seal it and poll256 times.
-    let mut fixture = RingFixture::new_following();
-    let mut missing = None;
-    history_publish_withheld(&mut fixture, Some(12), &mut missing);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let selection = session.follow_latest().unwrap();
-    let initial = session.cpu_history(0).unwrap();
-    assert_eq!(initial["observations"].as_array().unwrap().len(), 840);
-    let boundary = initial["observations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|point| point["observation"]["publication"] == 781)
-        .unwrap();
-    assert_eq!(boundary["interval_available"], false);
-    let cursor = session.sources[0].reader.next_publication();
-    let losses = session.sources[0].losses;
-    seal_window(&fixture.root, missing.as_ref().unwrap());
-
-    for _poll in 0..256 {
-        assert!(!session.poll().unwrap());
-    }
-    let recovered_selection = session.follow_latest().unwrap();
-    let recovered = session.cpu_history(0).unwrap();
-
-    assert_eq!(recovered_selection["selected"], selection["selected"]);
-    history_assert_full(&recovered, &recovered_selection);
-    assert_eq!(session.sources[0].reader.next_publication(), cursor);
-    assert_eq!(session.sources[0].losses, losses);
-    let reads = session.history.as_ref().unwrap().source_reads.get();
-    assert_eq!(session.cpu_history(0).unwrap(), recovered);
-    assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
-}
-
-#[test]
 fn refuses_canceled_cpu_restoration_without_installing_its_cache_or_changing_selection() {
     // Goal: cancellation cannot install a complete-looking CPU cache or move live selection.
     // Method: cancel after genuine window queries, then retry through a new public generation.
@@ -344,37 +314,6 @@ fn refuses_canceled_cpu_restoration_without_installing_its_cache_or_changing_sel
     let retried = session.cpu_history(0).unwrap();
     assert_eq!(retried_selection["selected"], selection["selected"]);
     history_assert_full(&retried, &retried_selection);
-}
-
-fn history_publish_withheld(
-    fixture: &mut RingFixture,
-    withheld_window: Option<u64>,
-    missing: &mut Option<Window>,
-) {
-    let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
-    let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-    for minute in 0..14 {
-        let mut window = Window::new(
-            WindowIdentity {
-                run: reader.identity().unwrap(),
-                window: minute,
-            },
-            Limits::from_shape(&reader.shape()).unwrap(),
-        );
-        for offset in 1..=60 {
-            let publication = minute * 60 + offset;
-            history_publish(fixture, u32::try_from(publication).unwrap(), false);
-            follow_restoration_stage(&mut reader, &mut tick, &mut window, publication);
-        }
-        if Some(minute) == withheld_window {
-            *missing = Some(window);
-        } else {
-            seal_window(&fixture.root, &window);
-        }
-    }
-    for publication in 841..=901 {
-        history_publish(fixture, publication, false);
-    }
 }
 
 #[test]

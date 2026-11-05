@@ -2,7 +2,7 @@
 use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use collector::ring::{Found, FoundEvent, IdentityObservation, ProgramBuffers, RingReader};
 use serde_json::{Value, json};
@@ -338,15 +338,34 @@ fn export_windows(
             .manifest
             .tables
             .iter()
-            .map(|table| {
-                let path = directory.join(format!("{}.parquet", table.name));
-                Ok(json!({"path": path, "sha256": file_hash(&path)?}))
-            })
+            .flat_map(|table| export_table_files(&directory, &window.manifest, table))
+            .map(|path| Ok(json!({"path": path, "sha256": file_hash(&path)?})))
             .collect::<io::Result<Vec<_>>>()?;
         windows.push(json!({"manifest": format!("{:?}", window.manifest),
             "marker": window.marker, "sha256": file_hash(&window.marker)?, "tables": tables}));
     }
     Ok(windows)
+}
+
+/// The files that hold one table of a saved window. Events keep an index and their batches in a
+/// directory of their own, and every other table is one file.
+fn export_table_files(
+    directory: &Path,
+    manifest: &persistence::Manifest,
+    table: &persistence::TableManifest,
+) -> Vec<PathBuf> {
+    if table.name != persistence::schema::Table::Events.name() {
+        return vec![directory.join(format!("{}.parquet", table.name))];
+    }
+    let events = directory.join("events");
+    let batches = manifest.event_batches.unwrap_or(0);
+    std::iter::once(events.join("index"))
+        .chain((0..batches).map(|batch| {
+            events.join(persistence::event_recovery::batch_name(
+                collector::usize_from_u32(batch),
+            ))
+        }))
+        .collect()
 }
 
 fn file_hash(path: &Path) -> io::Result<String> {

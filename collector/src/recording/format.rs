@@ -2,15 +2,15 @@
 use std::io::{self, Read};
 use std::path::Path;
 
-use super::{identity_text, parse_identity, private};
+use super::{parse_identity, private};
 use crate::ring::Identity;
 
 const HEADER: &[u8] = b"flightdeck-recording-1\n";
 const REQUIREMENT_BYTES: usize = 9;
 const IDENTITY_BYTES: usize = 33;
 const BYTES: usize = HEADER.len() + 2 * REQUIREMENT_BYTES + IDENTITY_BYTES;
-pub const READER_PROTOCOL: u32 = 1;
-pub const WRITER_PROTOCOL: u32 = 1;
+pub const READER_PROTOCOL: u32 = 2;
+pub const WRITER_PROTOCOL: u32 = 2;
 /// The newest reader requirement this version reads, which a registered recording names.
 pub(super) const READER_PROTOCOL_MAX: u32 = 2;
 const _: () = assert!(READER_PROTOCOL <= READER_PROTOCOL_MAX);
@@ -26,28 +26,17 @@ pub(super) fn read_identity(root: &Path) -> io::Result<Identity> {
     Ok(read(root)?.identity)
 }
 
-pub(super) fn read_writer_identity(root: &Path) -> io::Result<Identity> {
-    let format = read(root)?;
-    if format.writer != WRITER_PROTOCOL {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "recording requires a different writer protocol; use a new recording root",
-        ));
-    }
-
-    Ok(format.identity)
-}
-
 /// Whether a root requires a writer older than this one.
 pub(super) fn requires_older_writer(root: &Path) -> io::Result<bool> {
     Ok(read(root)?.writer < WRITER_PROTOCOL)
 }
 
+#[cfg(test)]
 pub(super) fn create(root: &Path, identity: Identity) -> io::Result<()> {
     let header = std::str::from_utf8(HEADER).map_err(|_| invalid())?;
     let text = format!(
         "{header}{READER_PROTOCOL:08x}\n{WRITER_PROTOCOL:08x}\n{}\n",
-        identity_text(identity)
+        super::identity_text(identity)
     );
     assert_eq!(text.len(), BYTES);
     private::atomic_write(root, "identity", text.as_bytes())
@@ -133,6 +122,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use super::super::bootstrap::Classification;
     use super::*;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -172,8 +162,10 @@ mod tests {
         }
         assert_eq!(root.as_os_str().len(), 1023);
         assert!(root.join("identity").as_os_str().len() >= private::PATH_MAX);
-        create(&root, Identity([1, 2])).unwrap();
         let directory = private::PrivateDirectory::open(&root).unwrap();
+        let registration = private::FileLock::try_lock_in(&directory, "registration.lock").unwrap();
+        let recording =
+            super::super::bootstrap::initialize(&directory, &registration, &mut [0; 4097]).unwrap();
         let mut before = Vec::new();
         directory
             .open_file("identity")
@@ -181,16 +173,12 @@ mod tests {
             .read_to_end(&mut before)
             .unwrap();
         let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
-            assert_eq!(read_identity(&root).unwrap(), Identity([1, 2]));
-            assert_eq!(read_writer_identity(&root).unwrap(), Identity([1, 2]));
-            assert_eq!(
-                crate::recording::read_identity(&root).unwrap(),
-                Identity([1, 2])
-            );
+            assert_eq!(read_identity(&root).unwrap(), recording);
+            assert_eq!(crate::recording::read_identity(&root).unwrap(), recording);
             crate::recording::check_writer(&root).unwrap();
             assert_eq!(
-                crate::recording::recording_identity(&root).unwrap(),
-                Identity([1, 2])
+                crate::recording::recording_identity(&root, &registration).unwrap(),
+                recording
             );
         });
         assert_eq!(calls, 0);
@@ -245,6 +233,10 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
         let root = Root::new();
+        // The lock of another root, so that a refusal leaves this root's inventory exact.
+        let elsewhere = Root::new();
+        let registration =
+            private::FileLock::try_lock(&elsewhere.0.join("registration.lock")).unwrap();
         let identity = root.0.join("identity");
         for bytes in [
             b"malformed".as_slice(),
@@ -256,7 +248,7 @@ mod tests {
             let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
                 assert!(read_identity(&root.0).is_err());
                 assert!(crate::recording::check_writer(&root.0).is_err());
-                assert!(crate::recording::recording_identity(&root.0).is_err());
+                assert!(crate::recording::recording_identity(&root.0, &registration).is_err());
             });
             assert_eq!(calls, 0);
             assert_eq!(std::fs::read(&identity).unwrap(), bytes);
@@ -270,7 +262,7 @@ mod tests {
         symlink("target", &identity).unwrap();
         let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
             assert!(read_identity(&root.0).is_err());
-            assert!(crate::recording::recording_identity(&root.0).is_err());
+            assert!(crate::recording::recording_identity(&root.0, &registration).is_err());
         });
         assert_eq!(calls, 0);
         assert_eq!(std::fs::read_link(&identity).unwrap(), Path::new("target"));
@@ -302,21 +294,27 @@ mod tests {
         // Goal: a compatible reader may inspect a future writer's root without acquiring it.
         // Method: validate each required-version pair and malformed fixed envelope in place.
         let root = Root::new();
+        let registration =
+            private::FileLock::wait_short(&root.0.join("registration.lock")).unwrap();
+        let identity = crate::recording::recording_identity(&root.0, &registration).unwrap();
         for (reader, writer, read_ok, write_ok) in [
-            (1, 1, true, true),
+            (1, 1, true, false),
             (1, 2, true, false),
-            (2, 2, true, false),
+            (2, 1, true, false),
+            (2, 2, true, true),
+            (2, 3, true, false),
             (3, 1, false, false),
+            (3, 2, false, false),
             (0, 1, false, false),
             (1, 0, false, false),
         ] {
             let text = format!(
-                "flightdeck-recording-1\n{reader:08x}\n{writer:08x}\n\
-                 00000000000000010000000000000002\n"
+                "flightdeck-recording-1\n{reader:08x}\n{writer:08x}\n{}\n",
+                crate::recording::identity_text(identity)
             );
             private::atomic_write(&root.0, "identity", text.as_bytes()).unwrap();
             assert_eq!(read_identity(&root.0).is_ok(), read_ok);
-            assert_eq!(read_writer_identity(&root.0).is_ok(), write_ok);
+            assert_eq!(crate::recording::check_writer(&root.0).is_ok(), write_ok);
             assert_eq!(
                 std::fs::read(root.0.join("identity")).unwrap(),
                 text.as_bytes()
@@ -348,9 +346,9 @@ mod tests {
             for _writer in 0..2 {
                 children.push(scope.spawn(|| {
                     barrier.wait();
-                    let _registration =
+                    let registration =
                         private::FileLock::wait_short(&root.0.join("registration.lock")).unwrap();
-                    crate::recording::recording_identity(&root.0).unwrap()
+                    crate::recording::recording_identity(&root.0, &registration).unwrap()
                 }));
             }
             children
@@ -359,7 +357,13 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(identities[0], identities[1]);
-        assert_eq!(read_writer_identity(&root.0).unwrap(), identities[0]);
-        assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 2);
+        assert_eq!(
+            classify(&root.0).unwrap(),
+            Classification::Initialized(identities[0])
+        );
+    }
+
+    fn classify(root: &Path) -> io::Result<Classification> {
+        super::super::bootstrap::classify(&private::PrivateDirectory::open(root)?, &mut [0; 4097])
     }
 }

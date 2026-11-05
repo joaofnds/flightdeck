@@ -41,6 +41,8 @@ pub(crate) enum Interrupted {
     Staging(RunIdentity),
     /// The proof is durable, so it publishes without the source.
     Publication,
+    /// A run's end with nothing but what it lost, which its source may still have to prove.
+    Loss(RunIdentity),
 }
 
 impl Store {
@@ -62,15 +64,15 @@ impl Store {
         else {
             return Ok(None);
         };
-        if state.census.kind != 0
-            || state.row_plan.is_some()
-            || state.salvage.is_some()
-            || state.input.is_finite()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "interrupted attempt has no worker route",
-            ));
+        if state.row_plan.is_some() || state.input.is_finite() {
+            return Err(interrupted_without_route());
+        }
+        if state.census.kind != 0 || state.salvage.is_some() {
+            return if matches!(state.input.operation, AttemptOperation::Terminal { .. }) {
+                Ok(Some(Interrupted::Loss(state.input.run)))
+            } else {
+                Err(interrupted_without_route())
+            };
         }
         if state.phase != Phase::Registered {
             return Ok(Some(Interrupted::Publication));
@@ -91,6 +93,13 @@ impl Store {
 
         Ok(Some(Interrupted::Publication))
     }
+}
+
+fn interrupted_without_route() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "interrupted attempt has no worker route",
+    )
 }
 
 /// What an interrupted ordinary attempt left in its registered directories.

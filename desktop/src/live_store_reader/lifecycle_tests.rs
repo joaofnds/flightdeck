@@ -248,14 +248,15 @@ impl Harness {
 }
 
 fn denied_history_check(root: &std::path::Path, budget: &Arc<viewer::store::ByteBudget>) {
-    let path = persistence::layout::WindowKey {
-        run: collector::recording::Registry::read(root).unwrap().runs[0]
-            .identity
-            .run,
-        window: 0,
-    }
-    .marker(root);
-    let manifest = persistence::read_committed(root, &path).unwrap();
+    let run = collector::recording::Registry::read(root).unwrap().runs[0].identity;
+    let catalog_budget = Arc::new(persistence::resources::ByteBudget::new(1 << 28));
+    let manifest = persistence::canonical::catalog::Catalog::open(root, &catalog_budget)
+        .unwrap()
+        .windows_of(&run, &mut persistence::canonical::ReadWork::default())
+        .unwrap()
+        .into_iter()
+        .find(|manifest| manifest.identity.window == 0)
+        .unwrap();
     let processes = root.join(manifest.data_directory).join("processes.parquet");
     assert!(matches!(
         persistence::engine::AdmittedTable::from_file_budgeted(

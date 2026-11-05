@@ -622,72 +622,30 @@ impl Harness {
     }
 }
 
-fn seal_recording(recording: &LiveRecording, minute: u64) {
-    use collector::ring::{Found, RingReader};
-    let registry = collector::recording::Registry::read(&recording.root).unwrap();
-    let registered = registry.runs.last().unwrap();
-    let mut reader = RingReader::open_generation(&registered.ring_name).unwrap();
-    let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-    let mut window = persistence::Window::new(
-        persistence::WindowIdentity {
-            run: registered.identity,
-            window: minute,
-        },
-        persistence::Limits::from_shape(&reader.shape()).unwrap(),
-    );
-    for _ in 0..4 {
-        let publication = match reader.read_into(&mut tick).unwrap() {
-            Found::Publication { publication, .. } => publication,
-            Found::Nothing => break,
-            Found::Missed { .. } => panic!("seal fixture overwritten"),
-        };
-        assert!(tick.events.is_empty());
-        let times = tick.times.unwrap();
-        window
-            .push_tick(
-                &persistence::Observation {
-                    publication,
-                    wall_ns: Some(times.wall_ns),
-                    continuous_ns: Some(times.continuous_ns),
-                    awake_ns: Some(times.awake_ns),
-                },
-                &tick,
-                &[],
-            )
-            .unwrap();
+/// Derives no table, as a window saved before derived tables holds none.
+struct SealUnderived;
+
+impl persistence::worker::Derive for SealUnderived {
+    fn derive(
+        &self,
+        _derivation: &persistence::worker::Derivation<'_>,
+    ) -> persistence::Result<Vec<persistence::TableManifest>> {
+        Ok(Vec::new())
     }
+}
+
+/// Saves what the ring holds of the run through `minute`, with the persister's own worker.
+fn seal_recording(recording: &LiveRecording, minute: u64) {
+    let registry = collector::recording::Registry::read(&recording.root).unwrap();
     let store = persistence::Store::open(&recording.root).unwrap();
-    let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-        panic!("new seal");
-    };
-    let tables = persistence::Encoder
-        .encode(&window, pending.path())
-        .unwrap();
-    let publications = window.publication_range();
-    let first = window.observations().next().unwrap().wall_ns.unwrap();
-    let last = window.observations().last().unwrap().wall_ns.unwrap();
-    store
-        .commit(
-            pending,
-            persistence::Manifest {
-                event_batches: None,
-                identity: window.identity,
-                publication_first: publications.start,
-                publication_end: publications.end,
-                events_first: 0,
-                events_end: 0,
-                wall_ns: Some(persistence::TimeBounds {
-                    min: first,
-                    max: last,
-                }),
-                continuous_ns: None,
-                awake_ns: None,
-                losses: persistence::Losses::default(),
-                data_directory: String::new(),
-                tables,
-            },
-        )
-        .unwrap();
+    persistence::worker::seal_held_windows(
+        &store,
+        registry.runs.last().unwrap(),
+        Some(minute),
+        &mut persistence::worker::HeldWindows::default(),
+        &SealUnderived,
+    )
+    .unwrap();
 }
 
 impl Drop for Harness {

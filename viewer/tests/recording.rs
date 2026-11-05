@@ -10,9 +10,7 @@ mod tests {
     use collector::tracker::{Event, Noticed};
     use persistence::engine::{Engine, scan};
     use persistence::schema::Table;
-    use persistence::{
-        Begin, Encoder, Limits, NumberedEvent, Observation, Store, Window, WindowIdentity,
-    };
+    use persistence::{Limits, NumberedEvent, Observation, Store, Window, WindowIdentity};
     use polars::polars_utils::compression::ZstdLevel;
     use polars::prelude::{
         DataFrame, IntoColumn, NamedFrom, ParquetCompression, ParquetWriter, Series,
@@ -98,7 +96,8 @@ mod tests {
 
         fn write_file(directory: &Path, captured: &mut DataFrame) {
             let target = directory.join("captured.parquet");
-            let bytes = ParquetWriter::new(std::fs::File::create_new(&target).unwrap())
+            let file = collector::recording::private::open_private_file(&target, true).unwrap();
+            let bytes = ParquetWriter::new(file)
                 .with_compression(ParquetCompression::Zstd(Some(
                     ZstdLevel::try_new(3).unwrap(),
                 )))
@@ -125,15 +124,19 @@ mod tests {
             )
         }
 
-        fn write(&self) {
-            self.write_processes(40);
+        fn write(&self) -> persistence::Manifest {
+            self.write_processes(40)
         }
 
-        fn write_processes(&self, processes: u64) {
-            self.write_processes_with(processes, |_| {});
+        fn write_processes(&self, processes: u64) -> persistence::Manifest {
+            self.write_processes_with(processes, |_| {})
         }
 
-        fn write_processes_with(&self, processes: u64, extend: impl FnOnce(&Path)) {
+        fn write_processes_with(
+            &self,
+            processes: u64,
+            extend: impl FnOnce(&Path),
+        ) -> persistence::Manifest {
             let store = Store::open(&self.0).unwrap();
             let mut shape = fixture::profile(false);
             shape.process_capacity = processes;
@@ -147,26 +150,14 @@ mod tests {
             };
             let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
             Self::write_ticks(&mut window, &shape);
-            let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-                panic!("new fixture")
-            };
-            let tables = Encoder.encode(&window, pending.path()).unwrap();
-            extend(pending.path());
-            let manifest = persistence::Manifest {
-                event_batches: None,
-                identity,
-                publication_first: 1,
-                publication_end: 5,
-                events_first: 0,
-                events_end: 20,
-                wall_ns: None,
-                continuous_ns: None,
-                awake_ns: None,
-                losses: persistence::Losses::default(),
-                data_directory: String::new(),
-                tables,
-            };
-            store.commit(pending, manifest).unwrap();
+            persistence::canonical::ready_fixture::publish_window(
+                &self.0,
+                &window,
+                |path, _tables| {
+                    extend(path);
+                },
+            )
+            .unwrap()
         }
 
         fn write_ticks(window: &mut Window, shape: &collector::ring::Shape) {
@@ -199,7 +190,7 @@ mod tests {
                 let number = u64::try_from(index).unwrap();
                 let mut tick = fixture::tick(shape);
                 tick.run_tick = number;
-                tick.events = number * 5..number * 5 + 5;
+                tick.events = number * 5 + 1..number * 5 + 6;
                 tick.processes[0].usage.user_ns = 9_007_199_254_740_993;
                 tick.processes[0].usage.awake_ns_at_start = 1 + number * 1_000_000;
                 tick.power_watts = 0.0;
@@ -217,7 +208,7 @@ mod tests {
                     .iter()
                     .enumerate()
                     .map(|(offset, event)| NumberedEvent {
-                        number: number * 5 + u64::try_from(offset).unwrap(),
+                        number: number * 5 + u64::try_from(offset).unwrap() + 1,
                         tick: number,
                         event,
                     })
@@ -227,8 +218,8 @@ mod tests {
                         &Observation {
                             publication: number + 1,
                             wall_ns: second.map(|s| s * 1_000_000_000),
-                            continuous_ns: Some((number + 1) * 2_000_000_000),
-                            awake_ns: Some((number + 1) * 1_000_000_000),
+                            continuous_ns: second.map(|_| (number + 1) * 2_000_000_000),
+                            awake_ns: second.map(|_| (number + 1) * 1_000_000_000),
                         },
                         &tick,
                         &numbered,
@@ -246,30 +237,14 @@ mod tests {
             let mut window = fixture::window(false);
             window.identity.run.recording = store.recording();
             window.identity.run.run = Identity(run);
-            let identity = window.identity;
-            let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-                panic!("new run");
-            };
-            let tables = Encoder.encode(&window, pending.path()).unwrap();
-            extend(pending.path());
-            let manifest = persistence::Manifest {
-                event_batches: None,
-                identity,
-                publication_first: 1,
-                publication_end: 62,
-                events_first: 0,
-                events_end: 3904,
-                wall_ns: Some(persistence::TimeBounds {
-                    min: 1_000_000_000_000,
-                    max: 1_060_000_000_000,
-                }),
-                continuous_ns: None,
-                awake_ns: None,
-                losses: persistence::Losses::default(),
-                data_directory: String::new(),
-                tables,
-            };
-            store.commit(pending, manifest).unwrap();
+            persistence::canonical::ready_fixture::publish_window(
+                &self.0,
+                &window,
+                |path, _tables| {
+                    extend(path);
+                },
+            )
+            .unwrap();
         }
     }
 
@@ -465,17 +440,8 @@ mod tests {
         // Goal: corrupt history is a read failure, never a measured empty selection.
         // Method: damage the committed ticks file in place and observe a nonmutating refusal.
         let recording = Recording::new();
-        recording.write();
-        let ticks = recording
-            .0
-            .join(
-                persistence::layout::WindowKey {
-                    run: Identity([3, 4]),
-                    window: 0,
-                }
-                .ready_relative(None),
-            )
-            .join("ticks.parquet");
+        let saved = recording.write();
+        let ticks = recording.0.join(saved.data_directory).join("ticks.parquet");
         std::fs::write(&ticks, b"damaged").unwrap();
 
         assert!(Session::open(&recording.0).is_err());
@@ -580,7 +546,7 @@ mod tests {
         assert_eq!(
             events["rows"][0],
             serde_json::json!([
-                "2", "5", "1", "42", "3", null, "0", "0", "101", "102", "103", "104", "105", "106",
+                "2", "6", "1", "42", "3", null, "0", "0", "101", "102", "103", "104", "105", "106",
                 "107", "108", "109", "110", "111", "112", "113", "114", null, "3", "0", null, null,
                 null, null, "1", "0"
             ])

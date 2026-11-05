@@ -194,20 +194,6 @@ fn a_covering_commit_with_a_changed_subsecond_clock_preserves_the_previous_histo
 }
 
 #[test]
-fn duplicate_covering_commits_preserve_the_previous_history() {
-    // Goal: two saved windows covering the same publication cannot pick one by directory order.
-    // Method: commit a second table set covering that publication, then compare public state. Only
-    // the format before registered recordings can hold this state, since the first window to cover
-    // a publication of a registered recording ends the attempts to save it.
-    let mut handoff = CommitHandoff::over(Fixture::legacy_of(true, 2));
-    handoff.duplicate_commit();
-
-    assert!(!handoff.live.poll().unwrap());
-
-    handoff.assert_previous_history();
-}
-
-#[test]
 fn selecting_a_dropped_second_reads_a_minute_sealed_since_the_listing() {
     // Goal: a selection whose context reaches past the listed minutes reads the minutes sealed
     // since, though its own second is in a listed one and the ring has dropped both.
@@ -288,7 +274,8 @@ impl CommitHandoff {
         corrupt(&mut ticks);
         assert!(ticks.height() <= 3);
         let replacement = directory.join("corrupt-ticks.parquet");
-        let bytes = ParquetWriter::new(private::open_private_file(&replacement, true).unwrap())
+        let file = collector::recording::private::open_private_file(&replacement, true).unwrap();
+        let bytes = ParquetWriter::new(file)
             .with_compression(ParquetCompression::Uncompressed)
             .with_statistics(StatisticsOptions {
                 min_value: true,
@@ -307,22 +294,6 @@ impl CommitHandoff {
         assert!(bytes > 0);
         std::fs::rename(replacement, path).unwrap();
         assert_eq!(self.manifest(), manifest);
-    }
-
-    fn duplicate_commit(&self) {
-        let mut manifest = self.manifest();
-        let directory = self.fixture.root.join(&manifest.data_directory);
-        manifest.identity.window = 1;
-        let store = persistence::Store::open(&self.fixture.root).unwrap();
-        let persistence::Begin::Pending(pending) = store.begin(&manifest.identity).unwrap() else {
-            panic!("second fixture window already committed");
-        };
-        assert_eq!(manifest.tables.len(), persistence::schema::TABLES.len());
-        for table in &manifest.tables {
-            let name = format!("{}.parquet", table.name);
-            std::fs::copy(directory.join(&name), pending.path().join(name)).unwrap();
-        }
-        store.commit(pending, manifest).unwrap();
     }
 
     fn assert_previous_history(&self) {

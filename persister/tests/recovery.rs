@@ -5,6 +5,9 @@
 mod support;
 
 #[cfg(test)]
+mod saved_windows;
+
+#[cfg(test)]
 mod tests {
     use super::support::{RecordingHarness, SourceFault};
 

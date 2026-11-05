@@ -31,7 +31,7 @@ fn follows_and_reopens_battery_gauges_with_unavailable_publications() {
     battery_publish(&mut fixture, 4, Some(&battery));
     assert!(session.poll().unwrap());
     let last = session.follow_latest().unwrap();
-    fan_history_tests::fan_seal(&fixture);
+    fixture.seal_held();
     let mut saved = Session::open(&fixture.root).unwrap();
     let sealed = saved.select(1004, 0).unwrap();
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
@@ -50,7 +50,7 @@ fn battery_fixture() -> RingFixture {
     let serial = NEXT.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir()
         .join(format!("flightdeck-live-battery-{}-{serial}", std::process::id()));
-    private::create_private_dir(&root).unwrap();
+    drop(persistence::Store::open(&root).unwrap());
     let place = Place {
         lock_path: root.join("ring.lock"),
         name_prefix: format!("/fdbv{}x{serial}", std::process::id()),
@@ -75,7 +75,13 @@ fn battery_fixture() -> RingFixture {
     ).unwrap().into_parts();
     registered.unwrap();
 
-    RingFixture { root, writer, following_fans: 2 }
+    RingFixture {
+        root,
+        writer,
+        following_fans: 2,
+        owns_root: true,
+        persister: std::sync::Mutex::default(),
+    }
 }
 
 fn battery_publish(fixture: &mut RingFixture, tick: u64, battery: Option<&BatteryReading>) {

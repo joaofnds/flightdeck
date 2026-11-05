@@ -126,7 +126,7 @@ impl Index {
         Ok(index)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixtures"))]
     pub(crate) fn write(&self, path: &Path) -> Result<()> {
         self.write_file(&mut private::open_private_file(path, true)?)
     }

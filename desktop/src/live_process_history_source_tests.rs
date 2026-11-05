@@ -235,7 +235,7 @@ fn named_recording_with_members(members: u32) -> SealedRecording {
             publication,
         );
     }
-    SealedRecording::commit(&store, identity, &window);
+    SealedRecording::commit(&recording.root, &window);
     drop(reader);
     drop(generation);
     drop(store);

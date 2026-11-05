@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use collector::machine::Memory;
 use collector::processes::{Process, Task, Unreadable, Usage};
-use collector::recording::private;
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, FoundEvent, Identity, IdentityObservation,
     IdentityPublication, IdentityUnavailable, ObservationTimes, Place, ProcessCreation,
@@ -309,7 +308,7 @@ impl Ring {
             "flightdeck-ring-tick-{}-{serial}",
             std::process::id(),
         ));
-        private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let place = Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdrt{}x{serial}", std::process::id()),

@@ -34,6 +34,7 @@ const ARTIFACTS: [&str; 5] = [
 ];
 const LOCKS: [&str; 3] = ["registration.lock", "collector.lock", "recorder.lock"];
 const INVENTORY_MAX: usize = 20;
+const CLASSIFY_ATTEMPTS_MAX: usize = 16;
 const _: () = assert!(INVENTORY_MAX == 7 + 3 + 1 + 1 + 5 + 3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +55,21 @@ pub fn classify(root: &PrivateDirectory, scratch: &mut [u8; 4097]) -> io::Result
         Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(Classification::Corrupt),
         result => result,
     }
+}
+
+/// Classifies through a change under way, which a read lands on only for the moment a publication
+/// replaces a control file, so the writer starting beside that publication is not turned away.
+pub fn classify_settled(
+    root: &PrivateDirectory,
+    scratch: &mut [u8; 4097],
+) -> io::Result<Classification> {
+    for _attempt in 0..CLASSIFY_ATTEMPTS_MAX {
+        match classify(root, scratch) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            result => return result,
+        }
+    }
+    Err(pending())
 }
 
 fn classify_inner(root: &PrivateDirectory, scratch: &mut [u8; 4097]) -> io::Result<Classification> {
@@ -134,7 +150,7 @@ pub fn initialize(
     registration: &FileLock,
     scratch: &mut [u8; 4097],
 ) -> io::Result<Identity> {
-    let classification = classify(root, scratch)?;
+    let classification = classify_settled(root, scratch)?;
     match classification {
         Classification::Unsupported => return Err(io::Error::from(io::ErrorKind::Unsupported)),
         Classification::Corrupt => return Err(invalid()),

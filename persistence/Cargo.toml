@@ -15,6 +15,10 @@ polars-arrow-format = { version = "=0.2.1", default-features = false, features =
 polars-parquet = { workspace = true }
 polars-parquet-format = { version = "=0.1.0", default-features = false }
 
+[dev-dependencies]
+# The integration tests save windows through what other crates' tests use.
+persistence = { path = ".", features = ["fixtures"] }
+
 [features]
 # A test of every pair of kills, which takes about an hour and so stays out of the checks.
 kill-every-pair = []

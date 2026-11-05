@@ -133,34 +133,6 @@ fn new_saved_endpoint_and_replacement_session_keep_old_validated_facts() {
 }
 
 #[test]
-fn late_predecessor_replaces_a_cached_unavailable_interval() {
-    // Capture publication 3 before 2 is sealed, then add its real predecessor in a new window.
-    // Only the format before registered recordings can hold this state, since a registered
-    // recording saves its windows in order.
-    let mut cold = cold_of(named::dense_legacy());
-    cold.history = History::new();
-    let manifest = &cold.saved.windows[0];
-    let marker = store_marker(&cold.fixture, manifest);
-    std::fs::remove_file(marker).unwrap();
-    publish(&mut cold.fixture, 3);
-    commit(&cold.fixture, 3, 2);
-    cold.saved = Session::open(&cold.fixture.root).unwrap();
-    let absent = call(&cold, 3, BYTES_MAX).unwrap();
-    assert_eq!(absent.points.len(), 1);
-    assert_eq!(absent.points[0].elapsed_ns, None);
-    assert_eq!(absent.points[0].readings[0].measures[2].measured_members, 0);
-    commit(&cold.fixture, 2, 1);
-    cold.saved = Session::open(&cold.fixture.root).unwrap();
-
-    let repaired = call(&cold, 3, BYTES_MAX).unwrap();
-
-    assert_eq!(repaired.points.len(), 2);
-    assert_eq!(repaired.points[1].elapsed_ns, Some(1_000_000_000));
-    assert_eq!(repaired.points[1].readings[0].measures[2].known, 1440);
-    assert_eq!(repaired.points[1].readings[0].measures[3].known, 720);
-}
-
-#[test]
 fn warm_replaced_source_is_refused_and_unrelated_owners_survive() {
     // Identical bytes in a new inode invalidate retained facts before any stale response escapes.
     let cold = cold();
@@ -534,91 +506,6 @@ fn other_owners(cold: &Cold) {
     assert!(rates.cpu.is_ok());
     assert!(rates.power.is_ok());
     assert!(rates.disk.is_ok());
-}
-
-fn commit(fixture: &Fixture, publication: u64, window: u64) {
-    let mut reader = collector::ring::RingReader::open_generation(fixture.writer.name()).unwrap();
-    let shape = reader.shape();
-    let mut tick = persistence::tick_buffer(&shape).unwrap();
-    let mut identities = Vec::with_capacity(usize::try_from(shape.process_capacity).unwrap());
-    for _attempt in 0..8 {
-        let collector::ring::Found::Publication {
-            publication: found, ..
-        } = reader
-            .read_identity_into(&mut tick, &mut identities)
-            .unwrap()
-        else {
-            continue;
-        };
-        if found != publication {
-            continue;
-        }
-        let mut selected = persistence::Window::new(
-            persistence::WindowIdentity {
-                run: fixture.writer.identity().unwrap(),
-                window,
-            },
-            persistence::Limits::from_shape(&shape).unwrap(),
-        );
-        selected
-            .push_tick_with_identity(
-                &persistence::Observation {
-                    publication,
-                    wall_ns: Some((1000 + publication) * 1_000_000_000),
-                    continuous_ns: Some(publication * 1_000_000_000),
-                    awake_ns: Some(publication * 1_000_000_000),
-                },
-                &tick,
-                &[],
-                &persistence::IdentitySource {
-                    reader: &reader,
-                    processes: &identities,
-                    events: &[],
-                },
-            )
-            .unwrap();
-        seal(fixture, &selected, publication);
-        return;
-    }
-    panic!("missing fixture publication");
-}
-
-fn seal(fixture: &Fixture, selected: &persistence::Window, publication: u64) {
-    let store = persistence::Store::open(&fixture.root).unwrap();
-    let persistence::Begin::Pending(pending) = store.begin(&selected.identity).unwrap() else {
-        panic!("fixture window already committed");
-    };
-    let tables = persistence::Encoder
-        .encode(selected, pending.path())
-        .unwrap();
-    store
-        .commit(
-            pending,
-            persistence::Manifest {
-                event_batches: None,
-                identity: selected.identity,
-                publication_first: publication,
-                publication_end: publication + 1,
-                events_first: 0,
-                events_end: 0,
-                wall_ns: Some(persistence::TimeBounds {
-                    min: (1000 + publication) * 1_000_000_000,
-                    max: (1000 + publication) * 1_000_000_000,
-                }),
-                continuous_ns: None,
-                awake_ns: None,
-                losses: persistence::Losses::default(),
-                data_directory: String::new(),
-                tables,
-            },
-        )
-        .unwrap();
-}
-
-fn store_marker(fixture: &Fixture, manifest: &persistence::Manifest) -> std::path::PathBuf {
-    persistence::Store::open(&fixture.root)
-        .unwrap()
-        .marker_path(&manifest.identity)
 }
 
 #[test]

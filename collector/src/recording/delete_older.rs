@@ -223,6 +223,19 @@ mod tests {
     }
 
     #[test]
+    fn deletes_a_recording_that_requires_the_previous_writer() {
+        // Goal: the root the previous writer protocol left, which a real Mac holds, is older too.
+        // Method: delete a root in the full envelope that names the previous protocol.
+        let fixture = Fixture::with_identity(&identity_requiring(
+            format::READER_PROTOCOL,
+            format::WRITER_PROTOCOL - 1,
+        ));
+
+        assert!(delete_older(&fixture.root).unwrap());
+        assert!(!fixture.root.exists());
+    }
+
+    #[test]
     fn keeps_a_recording_this_version_writes() {
         // Goal: an ordinary launch never deletes the recording it is about to continue.
         // Method: create the current format, then ask for it to be deleted.

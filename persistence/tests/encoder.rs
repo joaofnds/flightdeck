@@ -748,7 +748,17 @@ mod tests {
         let store = persistence::Store::open(&run.directory.0).unwrap();
         let mut identity = fixture::window(false).identity;
         identity.run.recording = store.recording();
-        assert!(store.existing(&identity).unwrap().is_none());
+        let saved = persistence::canonical::catalog::Catalog::open(
+            &run.directory.0,
+            &std::sync::Arc::new(persistence::resources::ByteBudget::new(1 << 28)),
+        )
+        .unwrap()
+        .windows_of(
+            &identity.run,
+            &mut persistence::canonical::ReadWork::default(),
+        )
+        .unwrap();
+        assert!(saved.is_empty());
     }
 
     struct ResourceRun {
@@ -837,9 +847,7 @@ mod tests {
         let store = persistence::Store::open(&root).unwrap();
         let mut window = fixture::window(true);
         window.identity.run.recording = store.recording();
-        let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-            panic!("fresh resource window already committed");
-        };
+        let pending = persistence::canonical::ready_fixture::ReadyWindow::create(&root).unwrap();
         println!("pending_path={}", pending.path().display());
         std::io::stdout().flush().unwrap();
         let baseline = Footprint::read().unwrap();

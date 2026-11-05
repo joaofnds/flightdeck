@@ -6,8 +6,6 @@ use std::sync::Arc;
 use collector::recording::{Registry, identity_text};
 use collector::ring::{Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Tick};
 use persistence::{Error, Losses, NumberedEvent, Result, WindowIdentity};
-#[cfg(test)]
-use persistence::{Limits, Window};
 use serde_json::{Value, json};
 
 use crate::cancellation::Operation;
@@ -543,9 +541,9 @@ impl LiveSession {
 
         if let Some(history) = &mut self.history {
             history.begin(self.operation.epoch())?;
-            history.load_span(context_last_second)?;
-            self.earlier
-                .fill(history, TailRange::of_context(context_last_second))?;
+            let range = TailRange::of_context(context_last_second);
+            history.load_span(range.context_last_second())?;
+            self.earlier.fill(history, range)?;
         }
         self.earlier_context_kept(context_last_second)?
             .ok_or(Error::Bound("older tail"))
@@ -2406,7 +2404,7 @@ mod app_process_history_tests;
 mod tests {
     use super::forged_source::ForgedSource;
     use super::*;
-    use collector::recording::{Registration, private};
+    use collector::recording::{RegisteredRun, Registration};
     use collector::ring::{Dropped, ObservationTimes, Place, Readings, Shape, Writer};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -2456,6 +2454,8 @@ mod tests {
         root: PathBuf,
         writer: Writer,
         following_fans: u16,
+        owns_root: bool,
+        persister: std::sync::Mutex<persistence::worker::HeldWindows>,
     }
 
     mod typed_tests {
@@ -2494,7 +2494,7 @@ mod tests {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir()
                 .join(format!("flightdeck-retry-{}-{serial}", std::process::id()));
-            private::create_private_dir(&root).unwrap();
+            drop(persistence::Store::open(&root).unwrap());
             let place = Place {
                 lock_path: root.join("ring.lock"),
                 name_prefix: format!("/fdretry{}x{serial}", std::process::id()),
@@ -2508,7 +2508,73 @@ mod tests {
                 root,
                 writer,
                 following_fans: 2,
+                owns_root: true,
+                persister: std::sync::Mutex::default(),
             }
+        }
+
+        /// The run after `self`'s in the same recording, as after a collector restart, whose ring
+        /// has `self`'s shape and which the registry lists after the runs already there.
+        fn next_run(&self) -> Self {
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let place = Place {
+                lock_path: self.root.join(format!("run-{serial}.lock")),
+                name_prefix: format!("/fdrerun{}x{serial}", std::process::id()),
+            };
+            let recording = self.writer.identity().unwrap().recording;
+            let identity = collector::recording::new_run_identity(recording).unwrap();
+            let shape = RingReader::open_generation(self.writer.name())
+                .unwrap()
+                .shape();
+            let writer = Writer::create_recording(&place, shape, &identity, 0).unwrap();
+            let mut registry = Registry::read(&self.root).unwrap();
+            // The registry holds two runs, so a third retires the first, whose readings are saved.
+            if registry.runs.len() == 2 {
+                registry.runs.remove(0);
+            }
+            registry.runs.push(RegisteredRun {
+                identity,
+                ring_name: writer.name().to_owned(),
+                collector_pid: 0,
+            });
+            registry.write(&self.root).unwrap();
+
+            Self {
+                root: self.root.clone(),
+                writer,
+                following_fans: self.following_fans,
+                owns_root: false,
+                persister: std::sync::Mutex::default(),
+            }
+        }
+
+        /// Saves every window the ring holds past what is saved, with the persister's own worker.
+        fn seal_held(&self) {
+            self.seal_held_through(None);
+        }
+
+        /// Saves the windows the ring holds past what is saved through `window_last`, as the
+        /// minutes going by would, whether or not a later window has begun.
+        fn seal_through(&self, window_last: u64) {
+            self.seal_held_through(Some(window_last));
+        }
+
+        fn seal_held_through(&self, window_last: Option<u64>) {
+            let store = persistence::Store::open(&self.root).unwrap();
+            let run = RegisteredRun {
+                identity: self.writer.identity().unwrap(),
+                ring_name: self.writer.name().to_owned(),
+                collector_pid: 0,
+            };
+            let mut held = self.persister.lock().unwrap();
+            persistence::worker::seal_held_windows(
+                &store,
+                &run,
+                window_last,
+                &mut held,
+                &identity_fixture::Underived,
+            )
+            .unwrap();
         }
 
         fn new_following() -> Self {
@@ -2534,6 +2600,14 @@ mod tests {
 
         fn publish_following(&mut self, tick: u32) {
             self.publish_following_wall(tick, 1000 + u64::from(tick));
+        }
+
+        /// Publishes `tick`'s reading with no clocks, as a source with no clocks leaves it.
+        fn publish_following_without_clocks(&mut self, tick: u32) {
+            let cpus = [collector::machine::CPUTicks::default(); 18];
+            let memory = collector::machine::Memory::default();
+            self.writer
+                .publish(&ring_fixture_cpu_readings(tick, &cpus, &memory));
         }
 
         fn publish_following_wall(&mut self, tick: u32, wall_second: u64) {
@@ -2602,22 +2676,27 @@ mod tests {
             self.publish_cpu_readings(tick, &cpus);
         }
 
-        fn publish_cpu_readings(&mut self, tick: u32, cpus: &[collector::machine::CPUTicks]) {
-            self.writer.publish_observed(
-                &Readings {
-                    run_tick: u64::from(tick),
-                    cpus,
-                    memory: &collector::machine::Memory::default(),
-                    interfaces: &[],
-                    ioreport: None,
-                    smc: None,
-                    processes: &[],
-                    processes_refused: 0,
-                    processes_gone: 0,
-                    coalitions: &[],
-                    events: &[],
-                    dropped: Dropped::default(),
+        fn publish_cpu_without_clocks(&mut self, tick: u32) {
+            let cpus = [
+                collector::machine::CPUTicks {
+                    user: tick * 25,
+                    idle: tick * 75,
+                    ..collector::machine::CPUTicks::default()
                 },
+                collector::machine::CPUTicks {
+                    user: tick * 75,
+                    idle: tick * 25,
+                    ..collector::machine::CPUTicks::default()
+                },
+            ];
+            let memory = collector::machine::Memory::default();
+            self.writer
+                .publish(&ring_fixture_cpu_readings(tick, &cpus, &memory));
+        }
+        fn publish_cpu_readings(&mut self, tick: u32, cpus: &[collector::machine::CPUTicks]) {
+            let memory = collector::machine::Memory::default();
+            self.writer.publish_observed(
+                &ring_fixture_cpu_readings(tick, cpus, &memory),
                 &ObservationTimes {
                     wall_ns: (1000 + u64::from(tick)) * NANOSECONDS_PER_SECOND,
                     continuous_ns: u64::from(tick) * NANOSECONDS_PER_SECOND,
@@ -2660,10 +2739,33 @@ mod tests {
         }
     }
 
+    fn ring_fixture_cpu_readings<'a>(
+        tick: u32,
+        cpus: &'a [collector::machine::CPUTicks],
+        memory: &'a collector::machine::Memory,
+    ) -> Readings<'a> {
+        Readings {
+            run_tick: u64::from(tick),
+            cpus,
+            memory,
+            interfaces: &[],
+            ioreport: None,
+            smc: None,
+            processes: &[],
+            processes_refused: 0,
+            processes_gone: 0,
+            coalitions: &[],
+            events: &[],
+            dropped: Dropped::default(),
+        }
+    }
+
     impl Drop for RingFixture {
         fn drop(&mut self) {
             collector::ring::unlink_generation(self.writer.name()).unwrap();
-            std::fs::remove_dir_all(&self.root).unwrap();
+            if self.owns_root {
+                std::fs::remove_dir_all(&self.root).unwrap();
+            }
         }
     }
 
@@ -2724,11 +2826,10 @@ mod tests {
         // Method: follow fourteen sealed minutes, seal the fifteenth, then compare the follow
         // and its saved-source reads with those of a newly opened session.
         let mut fixture = RingFixture::new_following();
-        let mut pending = None;
-        follow_restoration_publish_pending(&mut fixture, &mut pending);
+        follow_restoration_publish(&mut fixture);
         let mut session = LiveSession::open(&fixture.root).unwrap();
         session.follow_latest().unwrap();
-        seal_window(&fixture.root, pending.as_ref().unwrap());
+        fixture.seal_through(14);
         assert!(!session.poll().unwrap());
         let before = session.history.as_ref().unwrap().source_reads.get();
 
@@ -2842,22 +2943,16 @@ mod tests {
     #[test]
     fn following_retains_live_interval_values_when_a_commit_has_no_predecessor() {
         // Goal: incomplete committed intervals cannot erase valid live metric fields.
-        // Method: commit only the second of two genuinely captured live CPU readings.
+        // Method: acquire three readings live and let the two-slot ring drop the first before the
+        // persister saves the rest, so the saved minute starts at the second.
         let mut fixture = RingFixture::new_with_cpu_capacity(2);
         fixture.publish_cpu_activity(1);
         let mut session = LiveSession::open(&fixture.root).unwrap();
         fixture.publish_cpu_activity(2);
         session.poll().unwrap();
-        let source = &session.sources[0];
-        let mut window = Window::new(
-            WindowIdentity {
-                run: source.identity,
-                window: 0,
-            },
-            Limits::from_shape(&source.reader.shape()).unwrap(),
-        );
-        cpu_detail_stage(&mut window, source, 2);
-        seal_window(&fixture.root, &window);
+        fixture.publish_cpu_activity(3);
+        session.poll().unwrap();
+        fixture.seal_held();
         session.refresh_history().unwrap();
 
         let response = session.follow_latest().unwrap();
@@ -3009,194 +3104,37 @@ mod tests {
         assert_eq!(session.sources[0].losses, losses);
     }
 
-    #[test]
-    fn following_discovers_an_older_late_commit_outside_the_retained_ring() {
-        // Goal: a late minute absent from the cold ring restores the real historical gap.
-        // Method: withhold minute12, then seal it and poll256 times without another publication.
-        let mut fixture = RingFixture::new_following();
-        let mut missing = None;
-        follow_restoration_publish_omitting(&mut fixture, &mut missing);
-        let mut session = LiveSession::open(&fixture.root).unwrap();
-        let initial = session.follow_latest().unwrap();
-        assert_eq!(initial["trends"].as_array().unwrap().len(), 841);
-        assert!(!session.sources[0].pending_windows.contains(&12));
-        let cursor = session.sources[0].reader.next_publication();
-        let losses = session.sources[0].losses;
-        seal_window(&fixture.root, missing.as_ref().unwrap());
-
-        for _poll in 0..256 {
-            assert!(!session.poll().unwrap());
-        }
-        let response = session.follow_latest().unwrap();
-
-        assert_eq!(response["selected"], initial["selected"]);
-        assert_eq!(session.sources[0].reader.next_publication(), cursor);
-        assert_eq!(session.sources[0].losses, losses);
-        println!(
-            "{}",
-            json!({"phase":"older_late_commit",
-            "points":response["trends"].as_array().unwrap().len(),
-            "windows":session.catalog()["windows"],"cursor":cursor,"polls":256})
-        );
-        follow_restoration_assert_window(&response);
-        assert_eq!(response["trends"][720]["publication"], 721);
-        assert_eq!(response["trends"][720]["cpu_percent"], 50.0);
-        assert_eq!(response["trends"][720]["fan_rpm"], json!([721.0, 0.0]));
-        assert_eq!(response["trends"][780]["publication"], 781);
-        assert_eq!(response["trends"][780]["cpu_percent"], 50.0);
-        assert_eq!(response["trends"][780]["fan_rpm"], json!([781.0, 0.0]));
-    }
-
-    fn follow_restoration_publish_omitting(
-        fixture: &mut RingFixture,
-        missing: &mut Option<Window>,
-    ) {
-        assert!(missing.is_none());
-
-        let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
-        let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-        let identity = reader.identity().unwrap();
-        let limits = Limits::from_shape(&reader.shape()).unwrap();
-        for minute in 0..14 {
-            let mut window = Window::new(
-                WindowIdentity {
-                    run: identity,
-                    window: minute,
-                },
-                limits,
-            );
-            for offset in 1..=60 {
-                let publication = minute * 60 + offset;
-                fixture.publish_following(u32::try_from(publication).unwrap());
-                follow_restoration_stage(&mut reader, &mut tick, &mut window, publication);
-            }
-            if minute == 12 {
-                *missing = Some(window);
-            } else {
-                seal_window(&fixture.root, &window);
-            }
-        }
-        for publication in 841..=901 {
-            fixture.publish_following(publication);
-        }
-    }
-
     fn follow_restoration_short(fixture: &mut RingFixture) {
-        let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
-        let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-        let mut window = Window::new(
-            WindowIdentity {
-                run: reader.identity().unwrap(),
-                window: 0,
-            },
-            Limits::from_shape(&reader.shape()).unwrap(),
-        );
         for publication in 1..=60 {
             fixture.publish_following(publication);
-            assert!(matches!(
-                reader.read_into(&mut tick).unwrap(),
-                Found::Publication { .. }
-            ));
-            let times = tick.times.unwrap();
-            window
-                .push_tick(
-                    &persistence::Observation {
-                        publication: u64::from(publication),
-                        wall_ns: Some(times.wall_ns),
-                        continuous_ns: Some(times.continuous_ns),
-                        awake_ns: Some(times.awake_ns),
-                    },
-                    &tick,
-                    &[],
-                )
-                .unwrap();
         }
-        seal_window(&fixture.root, &window);
+        fixture.seal_through(0);
         fixture.publish_following(61);
         fixture.publish_following(62);
     }
 
     fn follow_restoration_publish(fixture: &mut RingFixture) {
-        let mut pending = None;
-        follow_restoration_publish_pending(fixture, &mut pending);
+        follow_restoration_publish_observing(fixture, |_fixture| {});
     }
 
-    fn follow_restoration_publish_pending(fixture: &mut RingFixture, pending: &mut Option<Window>) {
-        follow_restoration_publish_observing(fixture, pending, |_fixture| {});
-    }
-
+    /// Publishes 901 readings and saves the first fourteen of their minutes, which leaves the
+    /// fifteenth in the ring for a test to save.
     fn follow_restoration_publish_observing(
         fixture: &mut RingFixture,
-        pending: &mut Option<Window>,
         mut observe: impl FnMut(&RingFixture),
     ) {
-        assert!(pending.is_none());
-        let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
-        let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-        let identity = reader.identity().unwrap();
-        let limits = Limits::from_shape(&reader.shape()).unwrap();
         for minute in 0..14 {
-            let mut window = Window::new(
-                WindowIdentity {
-                    run: identity,
-                    window: minute,
-                },
-                limits,
-            );
             for offset in 1..=60 {
                 let publication = minute * 60 + offset;
                 fixture.publish_following(u32::try_from(publication).unwrap());
                 observe(fixture);
-                follow_restoration_stage(&mut reader, &mut tick, &mut window, publication);
             }
-            seal_window(&fixture.root, &window);
+            fixture.seal_through(minute);
         }
-        let window = pending.insert(Window::new(
-            WindowIdentity {
-                run: identity,
-                window: 14,
-            },
-            limits,
-        ));
-        for publication in 841..=900 {
+        for publication in 841..=901 {
             fixture.publish_following(publication);
             observe(fixture);
-            follow_restoration_stage(&mut reader, &mut tick, window, u64::from(publication));
         }
-        fixture.publish_following(901);
-        observe(fixture);
-    }
-
-    fn follow_restoration_stage(
-        reader: &mut RingReader,
-        tick: &mut Tick,
-        window: &mut Window,
-        publication: u64,
-    ) {
-        assert_eq!(
-            reader.read_into(tick).unwrap(),
-            Found::Publication {
-                publication,
-                tick: publication
-            }
-        );
-        let times = tick.times.unwrap();
-        assert_eq!(
-            times.continuous_ns / (60 * NANOSECONDS_PER_SECOND),
-            window.identity.window
-        );
-        window
-            .push_tick(
-                &persistence::Observation {
-                    publication,
-                    wall_ns: Some(times.wall_ns),
-                    continuous_ns: Some(times.continuous_ns),
-                    awake_ns: Some(times.awake_ns),
-                },
-                tick,
-                &[],
-            )
-            .unwrap();
     }
 
     #[test]
@@ -3215,8 +3153,7 @@ mod tests {
 
     fn follow_restoration_measure_fans(fan_count: u16) {
         let mut fixture = RingFixture::new_following_fans(fan_count);
-        let mut pending = None;
-        follow_restoration_publish_pending(&mut fixture, &mut pending);
+        follow_restoration_publish(&mut fixture);
         let mut session_slot = None;
         follow_restoration_measure("cold_open", 0, || {
             session_slot = Some(LiveSession::open(&fixture.root).unwrap());
@@ -3239,7 +3176,7 @@ mod tests {
         assert_eq!(session.restored.as_ref().unwrap().points.len(), 840);
         let selected = session.selected.clone();
         let cursor = session.sources[0].reader.next_publication();
-        seal_window(&fixture.root, pending.as_ref().unwrap());
+        fixture.seal_through(14);
 
         follow_restoration_measure("post_commit_poll", 0, || {
             assert!(!session.poll().unwrap());
@@ -3268,9 +3205,8 @@ mod tests {
         // Goal: measure warm merging after 901 genuine ticks have filled the live context.
         // Method: poll each publication, retain 14 sealed minutes, then repeat 900-point follows.
         let mut fixture = RingFixture::new_following();
-        let mut pending = None;
         let mut live_slot: Option<LiveSession> = None;
-        follow_restoration_publish_observing(&mut fixture, &mut pending, |fixture| {
+        follow_restoration_publish_observing(&mut fixture, |fixture| {
             if let Some(live) = &mut live_slot {
                 live.poll().unwrap();
             } else {
@@ -3548,27 +3484,6 @@ mod tests {
         let mut fixture = RingFixture::new();
         fixture.publish(1);
         let mut session = LiveSession::open(&fixture.root).unwrap();
-        let source = &session.sources[0];
-        let identity = WindowIdentity {
-            run: source.identity,
-            window: 0,
-        };
-        let mut window = Window::new(
-            identity,
-            Limits::from_shape(&source.reader.shape()).unwrap(),
-        );
-        window
-            .push_tick(
-                &persistence::Observation {
-                    publication: 1,
-                    wall_ns: Some(1001 * NANOSECONDS_PER_SECOND),
-                    continuous_ns: Some(NANOSECONDS_PER_SECOND),
-                    awake_ns: Some(NANOSECONDS_PER_SECOND),
-                },
-                &source.tick,
-                &[],
-            )
-            .unwrap();
         session.sources[0].pending_windows =
             (0..u64::try_from(PENDING_WINDOWS_MAX).unwrap()).collect();
         fixture.publish(u64::try_from(PENDING_WINDOWS_MAX).unwrap() * 60);
@@ -3578,7 +3493,7 @@ mod tests {
             PENDING_WINDOWS_MAX
         );
         assert!(!session.sources[0].pending_windows.contains(&0));
-        assert!(session.select_refresh_due(0).unwrap());
+        assert!(!session.select_refresh_due(0).unwrap());
         assert_eq!(
             session.catalog()["commit_discovery"][0]["history_refresh_polls_max"],
             256
@@ -3590,7 +3505,8 @@ mod tests {
         }
         assert!(poll_commit_history_due(source));
         assert!(!poll_commit_history_due(source));
-        seal_window(&fixture.root, &window);
+        fixture.seal_through(0);
+        assert!(session.select_refresh_due(0).unwrap());
         session.sources[0].pending_refresh_polls = HISTORY_REFRESH_POLLS_MAX - 1;
         assert_eq!(session.catalog()["windows"], 0);
         assert!(!session.poll().unwrap());
@@ -3673,18 +3589,8 @@ mod tests {
         let mut fixture = RingFixture::new_with_cpu_capacity(2);
         fixture.publish_cpu_activity(1);
         let mut live = LiveSession::open(&fixture.root).unwrap();
-        let source = &live.sources[0];
-        let mut window = Window::new(
-            WindowIdentity {
-                run: source.identity,
-                window: 0,
-            },
-            Limits::from_shape(&source.reader.shape()).unwrap(),
-        );
-        cpu_detail_stage(&mut window, source, 1);
         fixture.publish_cpu_activity(2);
         live.poll().unwrap();
-        cpu_detail_stage(&mut window, &live.sources[0], 2);
         let selection = live.select(1002, 0).unwrap();
         let cursor = live.sources[0].reader.next_publication();
         let event_cursor = live.sources[0].reader.next_event();
@@ -3692,7 +3598,7 @@ mod tests {
 
         let first = live.cpu_detail().unwrap();
         let repeated = live.cpu_detail().unwrap();
-        seal_window(&fixture.root, &window);
+        fixture.seal_through(0);
         let mut saved = Session::open(&fixture.root).unwrap();
         saved.select(1002, 0).unwrap();
         let sealed = saved.cpu_detail().unwrap();
@@ -3754,20 +3660,10 @@ mod tests {
         let mut fixture = RingFixture::new_with_cpu_capacity(2);
         fixture.publish_cpu_activity(1);
         let mut live = LiveSession::open(&fixture.root).unwrap();
-        let source = &live.sources[0];
-        let mut window = Window::new(
-            WindowIdentity {
-                run: source.identity,
-                window: 0,
-            },
-            Limits::from_shape(&source.reader.shape()).unwrap(),
-        );
-        cpu_detail_stage(&mut window, source, 1);
         fixture.publish_cpu_activity(2);
         live.poll().unwrap();
-        cpu_detail_stage(&mut window, &live.sources[0], 2);
         live.select(1002, 0).unwrap();
-        seal_window(&fixture.root, &window);
+        fixture.seal_through(0);
         live.refresh_history().unwrap();
         live.poll_evict(1002 * NANOSECONDS_PER_SECOND).unwrap();
         let selected = live.selected.clone();
@@ -3791,20 +3687,10 @@ mod tests {
         let mut fixture = RingFixture::new_with_cpu_capacity(2);
         fixture.publish_cpu_activity(1);
         let mut live = LiveSession::open(&fixture.root).unwrap();
-        let source = &live.sources[0];
-        let mut window = Window::new(
-            WindowIdentity {
-                run: source.identity,
-                window: 0,
-            },
-            Limits::from_shape(&source.reader.shape()).unwrap(),
-        );
-        cpu_detail_stage(&mut window, source, 1);
         fixture.publish_cpu_activity(2);
         live.poll().unwrap();
-        cpu_detail_stage(&mut window, &live.sources[0], 2);
         live.select(1002, 0).unwrap();
-        seal_window(&fixture.root, &window);
+        fixture.seal_through(0);
         live.refresh_history().unwrap();
         live.history.as_mut().unwrap().select(1001, 0).unwrap();
         live.poll_evict(1003 * NANOSECONDS_PER_SECOND).unwrap();
@@ -3831,36 +3717,15 @@ mod tests {
     #[test]
     fn gaps_cpu_detail_when_its_committed_predecessor_has_no_wall_clock() {
         // Goal: a clockless committed predecessor leaves selected CPU values unavailable.
-        // Method: seal a clockless first row, evict it from live cache, then query its successor.
+        // Method: publish a first row with no clocks and a timed successor, save the minute that
+        // holds both, evict the first from the live cache, then query its successor.
         let mut fixture = RingFixture::new_with_cpu_capacity(2);
-        fixture.publish_cpu_activity(1);
+        fixture.publish_cpu_without_clocks(1);
         let mut live = LiveSession::open(&fixture.root).unwrap();
-        let source = &live.sources[0];
-        let mut window = Window::new(
-            WindowIdentity {
-                run: source.identity,
-                window: 0,
-            },
-            Limits::from_shape(&source.reader.shape()).unwrap(),
-        );
-        let times = source.tick.times.unwrap();
-        window
-            .push_tick(
-                &persistence::Observation {
-                    publication: 1,
-                    wall_ns: None,
-                    continuous_ns: Some(times.continuous_ns),
-                    awake_ns: Some(times.awake_ns),
-                },
-                &source.tick,
-                &[],
-            )
-            .unwrap();
         fixture.publish_cpu_activity(2);
         live.poll().unwrap();
-        cpu_detail_stage(&mut window, &live.sources[0], 2);
         live.select(1002, 0).unwrap();
-        seal_window(&fixture.root, &window);
+        fixture.seal_through(0);
         live.refresh_history().unwrap();
         live.poll_evict(1002 * NANOSECONDS_PER_SECOND).unwrap();
         let selected = live.selected.clone();
@@ -3897,84 +3762,6 @@ mod tests {
         assert_eq!(live.selected, selected);
         assert_eq!(live.sources[0].reader.next_publication(), cursor);
         assert_eq!(live.sources[0].losses, losses);
-    }
-
-    fn cpu_detail_stage(window: &mut Window, source: &Source, publication: u64) {
-        let times = source.tick.times.unwrap();
-        window
-            .push_tick(
-                &persistence::Observation {
-                    publication,
-                    wall_ns: Some(times.wall_ns),
-                    continuous_ns: Some(times.continuous_ns),
-                    awake_ns: Some(times.awake_ns),
-                },
-                &source.tick,
-                &[],
-            )
-            .unwrap();
-    }
-
-    fn seal_window(root: &Path, window: &Window) {
-        seal_window_with(
-            root,
-            window,
-            seal_window_bounds(window, |value| value.wall_ns),
-        );
-    }
-
-    /// Seals `window` with `wall_ns` as its manifest's wall-clock bounds, as the persister seals a
-    /// minute with none when one of its ticks has no wall time.
-    fn seal_window_with(root: &Path, window: &Window, wall_ns: Option<persistence::TimeBounds>) {
-        let store = persistence::Store::open(root).unwrap();
-        let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-            panic!("fixture window already committed");
-        };
-        let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
-        let publications = window.publication_range();
-        let events = window.event_range();
-        store
-            .commit(
-                pending,
-                persistence::Manifest {
-                    event_batches: None,
-                    identity: window.identity,
-                    publication_first: publications.start,
-                    publication_end: publications.end,
-                    events_first: events.start,
-                    events_end: events.end,
-                    wall_ns,
-                    continuous_ns: seal_window_bounds(window, |value| value.continuous_ns),
-                    awake_ns: seal_window_bounds(window, |value| value.awake_ns),
-                    losses: Losses::default(),
-                    data_directory: String::new(),
-                    tables,
-                },
-            )
-            .unwrap();
-    }
-
-    /// Bounds a sealed minute's times as the persister does, so a fixture's minutes carry
-    /// the wall times that let a read skip them.
-    fn seal_window_bounds(
-        window: &Window,
-        field: impl Fn(&persistence::Observation) -> Option<u64>,
-    ) -> Option<persistence::TimeBounds> {
-        let mut result: Option<persistence::TimeBounds> = None;
-        for observation in window.observations() {
-            let value = field(observation)?;
-            result = Some(match result {
-                Some(bounds) => persistence::TimeBounds {
-                    min: bounds.min.min(value),
-                    max: bounds.max.max(value),
-                },
-                None => persistence::TimeBounds {
-                    min: value,
-                    max: value,
-                },
-            });
-        }
-        result
     }
 
     #[test]

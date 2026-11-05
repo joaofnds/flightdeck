@@ -792,23 +792,6 @@ fn read_events(
     Err(crate::Error::Bound("event scan"))
 }
 
-/// Seals a window, and returns whether this seal committed it rather than finding it sealed.
-#[cfg(test)]
-fn seal(
-    store: &Store,
-    writers: &Writers<'_>,
-    window: &Window,
-    state: &mut RunState,
-) -> Result<bool> {
-    let pending = match store.begin(&window.identity)? {
-        Begin::Committed(_) => return Ok(false),
-        Begin::Pending(pending) => pending,
-    };
-
-    seal_pending(store, writers, window, state, pending)?;
-    Ok(true)
-}
-
 fn seal_pending(
     store: &Store,
     writers: &Writers<'_>,
@@ -989,6 +972,27 @@ mod tests {
     use super::*;
     use collector::ring::{Identity, Shape};
 
+    impl Store {
+        /// The newest window of `run` the recording lists.
+        fn saved_newest(&self, run: &RunIdentity) -> io::Result<Option<Manifest>> {
+            Ok(self.saved_windows(run)?.into_iter().next())
+        }
+
+        /// The window of `identity`, if the recording lists one.
+        fn saved(&self, identity: &WindowIdentity) -> io::Result<Option<Manifest>> {
+            Ok(self
+                .saved_windows(&identity.run)?
+                .into_iter()
+                .find(|window| window.identity == *identity))
+        }
+
+        fn saved_windows(&self, run: &RunIdentity) -> io::Result<Vec<Manifest>> {
+            let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1 << 28));
+            crate::canonical::catalog::Catalog::open(self.root(), &budget)?
+                .windows_of(run, &mut crate::canonical::ReadWork::default())
+        }
+    }
+
     pub(super) mod forged_source;
     mod staging_tests;
     mod timing_tests;
@@ -1024,44 +1028,6 @@ mod tests {
             ring_name: "/fdhandoff.1".to_owned(),
             collector_pid: 0,
         }
-    }
-
-    fn window(recording: Identity, number: u64) -> Window {
-        window_at(recording, number, number * 60 + 1)
-    }
-
-    fn window_at(recording: Identity, number: u64, publication: u64) -> Window {
-        let shape = Shape {
-            slot_count: 1,
-            cpu_capacity: 1,
-            interface_capacity: 1,
-            core_capacity: 1,
-            state_capacity: 1,
-            fan_capacity: 1,
-            process_capacity: 1,
-            coalition_capacity: 1,
-            event_capacity: 1,
-        };
-        let identity = WindowIdentity {
-            run: registered(recording).identity,
-            window: number,
-        };
-        let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
-        let mut tick = crate::tick_buffer(&shape).unwrap();
-        tick.run_tick = number * 60;
-        window
-            .push_tick(
-                &Observation {
-                    publication,
-                    wall_ns: None,
-                    continuous_ns: None,
-                    awake_ns: None,
-                },
-                &tick,
-                &[],
-            )
-            .unwrap();
-        window
     }
 
     #[test]
@@ -1125,7 +1091,7 @@ mod tests {
         assert_eq!(vec![Duration::from_secs(1)], pauses);
         let store = Store::open(&root.0).unwrap();
         let window = WindowIdentity { run, window: 0 };
-        assert!(store.existing(&window).unwrap().is_some());
+        assert!(store.saved(&window).unwrap().is_some());
     }
 
     /// Creates an empty ring of its own for the registered run. The label keeps the ring's name
@@ -1235,7 +1201,7 @@ mod tests {
 
     fn assert_saved_identity(root: &Directory, store: &Store, run: &RunIdentity) {
         let manifest = store
-            .existing(&WindowIdentity {
+            .saved(&WindowIdentity {
                 run: *run,
                 window: 0,
             })
@@ -1299,49 +1265,6 @@ mod tests {
         );
 
         assert_eq!((u64::MAX, i32::MIN, b"worker\xff".to_vec(), 3), event);
-    }
-
-    #[test]
-    fn keeps_new_unknown_loss_pending_when_an_existing_key_is_replayed() {
-        // Goal: replaying an old canonical key cannot acknowledge a newly unknown extent.
-        // Method: seal, replay with new loss, then publish that status in the next key.
-        let root = Directory::new();
-        let store = Store::open(&root.0).unwrap();
-        let writers = Writers {
-            encoder: Encoder,
-            derive: &Underived,
-        };
-        let first = window(store.recording(), 0);
-        let mut unknown = RunState {
-            losses: Losses {
-                unknown: true,
-                ..Losses::default()
-            },
-            ..RunState::default()
-        };
-        assert!(seal(&store, &writers, &first, &mut RunState::default()).unwrap());
-
-        let acknowledged = seal(&store, &writers, &first, &mut unknown).unwrap();
-
-        assert!(!acknowledged);
-        assert!(
-            !store
-                .existing(&first.identity)
-                .unwrap()
-                .unwrap()
-                .losses
-                .unknown
-        );
-        let next = window(store.recording(), 1);
-        assert!(seal(&store, &writers, &next, &mut unknown).unwrap());
-        assert!(
-            store
-                .existing(&next.identity)
-                .unwrap()
-                .unwrap()
-                .losses
-                .unknown
-        );
     }
 
     #[test]
@@ -1497,47 +1420,5 @@ mod tests {
                 rows: 3,
             }])
         }
-    }
-
-    #[test]
-    fn seals_the_tables_derived_from_a_window_with_it() {
-        // Goal: a derived table seals in the same commit as the tables it derives from.
-        // Method: derive a table into the pending window, then reopen the committed window.
-        let root = Directory::new();
-        let store = Store::open(&root.0).unwrap();
-        let writers = Writers {
-            encoder: Encoder,
-            derive: &RanksStub { fails: false },
-        };
-        let window = window(store.recording(), 0);
-
-        seal(&store, &writers, &window, &mut RunState::default()).unwrap();
-
-        let sealed = store.existing(&window.identity).unwrap().unwrap();
-        assert_eq!(sealed.tables.last().unwrap().name, "app_ranks");
-        assert_eq!(sealed.tables.len(), crate::schema::TABLES.len() + 1);
-        let path = store.data_path(&sealed).join("app_ranks.parquet");
-        assert_eq!(std::fs::read(path).unwrap(), b"ranks");
-    }
-
-    #[test]
-    fn seals_a_window_without_its_derived_tables_when_deriving_fails() {
-        // Goal: a failed derivation loses only what a reader can derive again.
-        // Method: fail after writing part of a derived table, then reopen the committed window.
-        let root = Directory::new();
-        let store = Store::open(&root.0).unwrap();
-        let writers = Writers {
-            encoder: Encoder,
-            derive: &RanksStub { fails: true },
-        };
-        let window = window(store.recording(), 0);
-
-        let committed = seal(&store, &writers, &window, &mut RunState::default()).unwrap();
-
-        assert!(committed);
-        let reopened = store.existing(&window.identity).unwrap().unwrap();
-        assert_eq!(reopened.tables.len(), crate::schema::TABLES.len());
-        let path = store.data_path(&reopened).join("app_ranks.parquet");
-        assert!(!path.exists());
     }
 }

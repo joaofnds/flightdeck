@@ -11,7 +11,7 @@ use collector::recording::bootstrap::{Classification, classify};
 use collector::recording::private::PrivateDirectory;
 use collector::ring::{Identity, RunIdentity};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "fixtures")]
@@ -420,6 +420,72 @@ impl Catalog {
     /// Up to `objects_max` event objects, at most a page's worth, after the position a previous
     /// page named. It reads one proof for each, and it needs no window and no registry to reach
     /// them.
+    /// The windows of `run`, newest first.
+    pub fn windows_of(&self, run: &RunIdentity, work: &mut ReadWork) -> io::Result<Vec<Manifest>> {
+        let mut windows = Vec::new();
+        let mut publication = u64::MAX;
+        for _window in 0..RANGE_WINDOWS_MAX {
+            let Some(found) = self.window_at_or_before(run, publication, work)? else {
+                return Ok(windows);
+            };
+            publication = found.publication_first - 1;
+            windows.push(found);
+        }
+
+        Err(invalid())
+    }
+
+    /// What `run` saved of its events on ending and where under the root its batches lie, none
+    /// until it has.
+    pub(crate) fn terminal_of(
+        &self,
+        run: &RunIdentity,
+        work: &mut ReadWork,
+    ) -> io::Result<Option<(crate::event_recovery::Manifest, PathBuf)>> {
+        let key = CanonicalKey::source(Namespace::Terminal, run, 0)?;
+        let mut cursor = CanonicalCursor::begin_owned(
+            &self.root,
+            self.recording,
+            Namespace::Terminal,
+            SeekRange {
+                first: key,
+                last: key,
+                direction: Direction::Forward,
+            },
+            &self.budget,
+        )?;
+        let found = catalog_found(&mut cursor)?;
+        let Some(found) = found else {
+            work.add(cursor.work());
+            return Ok(None);
+        };
+        let mut gate = cursor.open_gate(&found)?;
+        let metadata = read_gate(&mut gate)?;
+        metadata.validate_key(Namespace::Terminal, &found)?;
+        cursor.check_snapshot()?;
+        work.add(cursor.work());
+        let directory = Path::new(metadata.base.name())
+            .join(collector::recording::identity_text(metadata.transaction).to_string())
+            .join(metadata.child.name());
+        let manifest = match metadata.body {
+            Body::Events(manifest) => manifest,
+            Body::LossOnly => crate::event_recovery::Manifest {
+                recovery: Recovery {
+                    run: metadata.run,
+                    events_first: metadata.loss.inherited.event_start,
+                    events_end: metadata.loss.event_end,
+                    rows: 0,
+                    losses: metadata.loss.totals()?,
+                },
+                identities: false,
+                batches: Vec::new(),
+            },
+            Body::Ordinary(_) => return Err(invalid()),
+        };
+
+        Ok(Some((manifest, directory)))
+    }
+
     pub fn event_objects_page(
         &self,
         after: Option<&EventObjectPosition>,

@@ -103,7 +103,7 @@ fn keeps_acquired_fan_history_when_exact_committed_points_overlap() {
     );
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let before = session.follow_latest().unwrap();
-    fan_seal(&fixture);
+    fixture.seal_held();
     session.poll().unwrap();
     assert_eq!(session.catalog()["windows"], 1);
     let mut saved = Session::open(&fixture.root).unwrap();
@@ -124,60 +124,6 @@ fn keeps_acquired_fan_history_when_exact_committed_points_overlap() {
     assert_eq!(selected["alternatives"].as_array().unwrap().len(), 1);
 }
 
-struct FanSeal {
-    run: RunIdentity,
-    wall_offset_ns: u64,
-}
-
-pub(super) fn fan_seal(fixture: &RingFixture) {
-    fan_seal_with(
-        fixture,
-        &FanSeal {
-            run: fixture.writer.identity().unwrap(),
-            wall_offset_ns: 0,
-        },
-    );
-}
-
-fn fan_seal_with(fixture: &RingFixture, seal: &FanSeal) {
-    fan_seal_into(fixture, seal, &fixture.root);
-}
-
-fn fan_seal_into(fixture: &RingFixture, seal: &FanSeal, root: &Path) {
-    let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
-    let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-    let mut window = Window::new(
-        WindowIdentity {
-            run: seal.run,
-            window: 0,
-        },
-        Limits::from_shape(&reader.shape()).unwrap(),
-    );
-    for _attempt in 0..=2 {
-        match reader.read_into(&mut tick).unwrap() {
-            Found::Nothing => break,
-            Found::Missed { .. } => panic!("fixture publications overwritten"),
-            Found::Publication { publication, .. } => {
-                let times = tick.times.unwrap();
-                window
-                    .push_tick(
-                        &persistence::Observation {
-                            publication,
-                            wall_ns: Some(times.wall_ns + seal.wall_offset_ns),
-                            continuous_ns: Some(times.continuous_ns),
-                            awake_ns: Some(times.awake_ns),
-                        },
-                        &tick,
-                        &[],
-                    )
-                    .unwrap();
-            }
-        }
-    }
-
-    seal_window(root, &window);
-}
-
 macro_rules! fan_availability {
     ($name:ident, $channels:expr, $expected:expr) => {
         #[test]
@@ -196,7 +142,7 @@ macro_rules! fan_availability {
             let mut session = LiveSession::open(&fixture.root).unwrap();
 
             let response = session.follow_latest().unwrap();
-            fan_seal(&fixture);
+            fixture.seal_held();
             let mut saved = Session::open(&fixture.root).unwrap();
             let selected = saved.select(1000, 0).unwrap();
             let mut reopened = LiveSession::open(&fixture.root).unwrap();
@@ -342,7 +288,7 @@ fn fan_publish_processes(
 #[test]
 fn refuses_exact_overlap_when_a_committed_clock_changed() {
     // Goal: an equal publication key cannot combine readings with incompatible source clocks.
-    // Method: acquire a real tick, then commit that key with its wall clock one ns later.
+    // Method: acquire a real tick, save it, then rewrite its saved wall clock one ns later.
     let mut fixture = RingFixture::new_with_shape(&FAN_SHAPE);
     fan_publish(
         &mut fixture,
@@ -353,12 +299,15 @@ fn refuses_exact_overlap_when_a_committed_clock_changed() {
         },
     );
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    fan_seal_with(
-        &fixture,
-        &FanSeal {
-            run: fixture.writer.identity().unwrap(),
-            wall_offset_ns: 1,
-        },
+    fixture.seal_held();
+    identity_fixture::saved_clocks_rewrite(
+        &identity_fixture::saved_commitment(&fixture.root, &fixture.writer.identity().unwrap(), 0),
+        &[persistence::Observation {
+            publication: 1,
+            wall_ns: Some(1000 * NANOSECONDS_PER_SECOND + 1),
+            continuous_ns: Some(NANOSECONDS_PER_SECOND),
+            awake_ns: Some(NANOSECONDS_PER_SECOND),
+        }],
     );
     session.poll().unwrap();
     assert_eq!(session.catalog()["windows"], 1);
@@ -379,7 +328,7 @@ fn refuses_exact_overlap_when_a_committed_clock_changed() {
 #[test]
 fn keeps_different_run_alternatives_separate_without_copying_fan_readings() {
     // Goal: a saved point from another run never receives this live run's fan readings.
-    // Method: commit a distinct run at the same second and retain both exact alternatives.
+    // Method: save the next run's reading of the same second and retain both exact alternatives.
     let mut fixture = RingFixture::new_with_shape(&FAN_SHAPE);
     fan_publish(
         &mut fixture,
@@ -390,9 +339,7 @@ fn keeps_different_run_alternatives_separate_without_copying_fan_readings() {
         },
     );
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    let mut other = fixture.writer.identity().unwrap();
-    other.run = collector::ring::Identity([17, 19]);
-    let mut other_fixture = RingFixture::new_with_shape(&FAN_SHAPE);
+    let mut other_fixture = fixture.next_run();
     fan_publish(
         &mut other_fixture,
         &FanSample {
@@ -401,14 +348,8 @@ fn keeps_different_run_alternatives_separate_without_copying_fan_readings() {
             channels: Some(&[2345.0, 0.0]),
         },
     );
-    fan_seal_into(
-        &other_fixture,
-        &FanSeal {
-            run: other,
-            wall_offset_ns: 0,
-        },
-        &fixture.root,
-    );
+    other_fixture.seal_held();
+    let other = other_fixture.writer.identity().unwrap();
     session.refresh_history().unwrap();
 
     let selected = session.select(1000, 0).unwrap();

@@ -184,12 +184,7 @@ fn assert_invalid_saved_load_cpu(second: &MachineSecond) {
 }
 
 fn saved_marker(fixture: &crate::live::identity_fixture::Fixture) -> std::path::PathBuf {
-    persistence::Store::open(&fixture.root)
-        .unwrap()
-        .marker_path(&persistence::WindowIdentity {
-            run: fixture.writer.identity().unwrap(),
-            window: 0,
-        })
+    fixture.marker(0)
 }
 
 fn read_saved_load(

@@ -5,9 +5,10 @@ use collector::recording::private;
 use collector::ring::{Identity, RunIdentity};
 
 use super::*;
+use crate::canonical::ready_fixture::ReadyWindow;
 use crate::engine::{AdmissionRefusal, Engine, PARQUET_SOURCES_MAX};
 use crate::event_recovery::{Batch, batch};
-use crate::{Begin, Losses, Manifest, Store, TableManifest, WindowIdentity};
+use crate::{Losses, Manifest, Store, TableManifest, WindowIdentity};
 
 mod source_pin;
 
@@ -20,10 +21,6 @@ struct Fixture {
 
 impl Fixture {
     fn new(parts: usize, rows: usize) -> Self {
-        Self::with_layout(parts, rows, true)
-    }
-
-    fn with_layout(parts: usize, rows: usize, partitioned: bool) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = PathBuf::from(format!(
             "/private/tmp/flightdeck-event-query-{}-{serial}",
@@ -38,23 +35,14 @@ impl Fixture {
             },
             window: 1,
         };
-        let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-            panic!("new fixture committed");
-        };
-        let events = pending.path().join("events");
-        if partitioned {
-            private::create_private_dir(&events).unwrap();
-        }
+        let ready = ReadyWindow::create(&root).unwrap();
+        let events = ready.path().join("events");
+        private::create_private_dir(&events).unwrap();
         let mut batches = Vec::with_capacity(parts);
         for index in 0..parts {
             let first = collector::u64_from_usize(index * rows) + 1;
             let mut frame = event_frame(first, rows);
-            let path = if partitioned {
-                events.join(crate::event_recovery::batch_name(index))
-            } else {
-                assert_eq!(parts, 1);
-                pending.path().join("events.parquet")
-            };
+            let path = events.join(crate::event_recovery::batch_name(index));
             crate::encoder::encode_write(&mut frame, crate::encoder::encode_open(&path).unwrap())
                 .unwrap();
             batches.push(Batch {
@@ -72,38 +60,42 @@ impl Fixture {
             identities: false,
             batches,
         };
-        if partitioned {
-            index.write(&events.join("index")).unwrap();
-        }
-        let manifest = Manifest {
-            identity,
-            publication_first: 1,
-            publication_end: 8,
-            events_first: 1,
-            events_end: count + 1,
-            wall_ns: None,
-            continuous_ns: None,
-            awake_ns: None,
-            losses: Losses::default(),
-            data_directory: String::new(),
-            tables: Self::with_layout_tables(&pending, count),
-            event_batches: partitioned.then_some(u32::try_from(parts).unwrap()),
-        };
-        let manifest = store.commit(pending, manifest).unwrap();
+        index.write(&events.join("index")).unwrap();
+        let manifest = ready
+            .prove(Manifest {
+                identity,
+                publication_first: 1,
+                publication_end: 8,
+                events_first: 1,
+                events_end: count + 1,
+                wall_ns: None,
+                continuous_ns: None,
+                awake_ns: None,
+                losses: Losses::default(),
+                data_directory: String::new(),
+                tables: Self::new_tables(&ready, 7, count),
+                event_batches: Some(u32::try_from(parts).unwrap()),
+            })
+            .unwrap();
+        drop(store);
         Self { root, manifest }
     }
 
-    fn with_layout_tables(pending: &crate::PendingWindow, count: u64) -> Vec<TableManifest> {
+    fn new_tables(ready: &ReadyWindow, ticks: u64, events: u64) -> Vec<TableManifest> {
         crate::schema::TABLES
             .iter()
             .map(|table| {
                 if table.name() != "events" {
-                    let path = pending.path().join(format!("{}.parquet", table.name()));
+                    let path = ready.path().join(format!("{}.parquet", table.name()));
                     private::open_private_file(&path, true).unwrap();
                 }
                 TableManifest {
                     name: table.name(),
-                    rows: if table.name() == "events" { count } else { 0 },
+                    rows: match table.name() {
+                        "ticks" => ticks,
+                        "events" => events,
+                        _ => 0,
+                    },
                 }
             })
             .collect()
@@ -387,27 +379,6 @@ fn keeps_budget_refusal_retryable_at_direct_count_and_source_apis() {
         Err(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))
     ));
     assert_eq!(empty.used(), 0);
-}
-
-#[test]
-fn preserves_single_file_and_batched_query_results() {
-    // Goal: the logical source supports both physical layouts without changing SQL values.
-    // Method: compare the same full rows from a legacy single file and three bounded parts.
-    let legacy = Fixture::with_layout(1, 12, false);
-    let batched = Fixture::new(3, 4);
-    let engine = Engine::new();
-    let budget = budget();
-    let legacy_source = legacy.source(&engine, &budget);
-    let batched_source = batched.source(&engine, &budget);
-
-    let old = engine
-        .query(&format!("SELECT * FROM {legacy_source} ORDER BY event"))
-        .unwrap();
-    let new = engine
-        .query(&format!("SELECT * FROM {batched_source} ORDER BY event"))
-        .unwrap();
-
-    assert!(old.equals_missing(&new));
 }
 
 #[test]

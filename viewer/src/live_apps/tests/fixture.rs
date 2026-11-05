@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use collector::machine::Memory;
 use collector::processes::{Process, Task, Usage};
-use collector::recording::private;
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, Identity, IdentityObservation, IdentityPublication,
     ObservationTimes, Place, ProcessCreation, ProcessIdentity, ProgramBytes, RingReader,
@@ -60,7 +59,7 @@ impl Fixture {
             "flightdeck-live-app-frame-{}-{serial}",
             std::process::id(),
         ));
-        private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let place = Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdlaf{}x{serial}", std::process::id()),

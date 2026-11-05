@@ -345,7 +345,7 @@ impl Registration {
     fn prepare(root: &Path, place: &Place) -> io::Result<Self> {
         create_private_dir(root)?;
         let lock = FileLock::wait_short(&root.join("registration.lock"))?;
-        let recording = recording_identity(root)?;
+        let recording = recording_identity(root, &lock)?;
         let mut registry = Registry::read(root)?;
         registry.capture_previous(root, place, recording)?;
         registry.write(root)?;
@@ -386,40 +386,25 @@ pub fn read_identity(root: &Path) -> io::Result<Identity> {
 }
 
 /// Refuses unsupported existing roots before any writer lock, announcement or data mutation.
-/// An absent root may be initialized later under the registration lock.
+/// An absent root, or one no writer finished setting up, may be initialized later under the
+/// registration lock.
 pub fn check_writer(root: &Path) -> io::Result<()> {
-    match format::read_writer_identity(root) {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => recording_identity_check_new(root),
-        Err(error) => Err(error),
+    let directory = match private::PrivateDirectory::open(root) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    match bootstrap::classify_settled(&directory, &mut [0; 4097])? {
+        bootstrap::Classification::Unsupported => Err(io::Error::from(io::ErrorKind::Unsupported)),
+        bootstrap::Classification::Corrupt => Err(io::Error::from(io::ErrorKind::InvalidData)),
+        _ => Ok(()),
     }
 }
 
-/// Initializes only an absent identity, under the caller's registration lock.
-pub fn recording_identity(root: &Path) -> io::Result<Identity> {
-    match format::read_writer_identity(root) {
-        Ok(identity) => Ok(identity),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            recording_identity_check_new(root)?;
-            let identity = random_identity()?;
-            format::create(root, identity)?;
-            Ok(identity)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn recording_identity_check_new(root: &Path) -> io::Result<()> {
-    for artifact in ["data", "commits", "runs", "retired", "event-recovery"] {
-        let mut buffer = [0; private::PATH_MAX];
-        let path = private::join_path(root, artifact, &mut buffer)?;
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidData)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
+/// The recording's identity, setting the root up first where no writer finished that.
+pub fn recording_identity(root: &Path, registration: &FileLock) -> io::Result<Identity> {
+    let directory = private::PrivateDirectory::open(root)?;
+    bootstrap::initialize(&directory, registration, &mut [0; 4097])
 }
 
 pub fn random_identity() -> io::Result<Identity> {

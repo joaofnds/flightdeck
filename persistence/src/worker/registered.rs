@@ -12,7 +12,8 @@ use crate::canonical::{ReadWork, SourceFrontier, SourceFrontierRead};
 use crate::event_recovery::Batch;
 use crate::resources::{ByteBudget, WORKING_BYTES_MAX};
 use crate::store::{
-    Interrupted, NormalProof, ProofStep, PublicationLedger, PublicationStep, RegisteredAttempt,
+    Interrupted, LossPublication, NormalProof, ProofStep, PublicationLedger, PublicationStep,
+    RegisteredAttempt,
 };
 use crate::transaction::{
     AttemptInput, AttemptOperation, LossTransfer, Predecessor, SourceTiming, UnknownProvenance,
@@ -29,34 +30,22 @@ pub(super) fn persist_one(
     closed: bool,
     state: &mut RunState,
 ) -> Result<Progress> {
-    if state.source == SourceState::Unavailable {
-        return Ok(Progress::Unavailable);
+    if let Some(progress) = persist_one_settled(store, registered, state)? {
+        return Ok(progress);
     }
-    if registered.identity.recording != store.recording() {
-        super::source_unavailable(registered, state, "foreign recording identity");
-        return Ok(Progress::Unavailable);
-    }
-    if state.source == SourceState::Complete {
-        return Ok(Progress::Complete);
-    }
-    // Nothing but the run that holds the slot changes what is in it, so a deferred run reads only
-    // whether it is still held, however long that run takes to come to it.
-    if state.deferred && store.slot_occupied()? {
-        return Ok(Progress::Deferred);
-    }
-    state.deferred = false;
     let budget = Arc::new(ByteBudget::new(
         usize::try_from(persist_one_memory_limit(state))
             .map_err(|_| crate::Error::Bound("memory limit"))?,
     ));
-    let interrupted = if state.loaded {
-        false
+    let turn = if state.loaded {
+        SlotTurn::Free
     } else {
-        match persist_one_slot(store, registered, state, &budget)? {
-            SlotTurn::Answered(progress) => return Ok(progress),
-            SlotTurn::Interrupted => true,
-            SlotTurn::Free => false,
-        }
+        persist_one_slot(store, registered, state, &budget)?
+    };
+    let interrupted = match turn {
+        SlotTurn::Answered(progress) => return Ok(progress),
+        SlotTurn::Interrupted | SlotTurn::InterruptedLoss => true,
+        SlotTurn::Free => false,
     };
     let frontier = if !interrupted && !state.loaded {
         store.source_frontier(&registered.identity, &budget, &mut ReadWork::default())?
@@ -75,9 +64,15 @@ pub(super) fn persist_one(
         super::source_unavailable(registered, state, "source names no identity");
         return Ok(Progress::Unavailable);
     }
+    // Refused before the ring holds a reading, as a recording that could never be saved.
+    Limits::from_shape(&reader.shape())?;
     let mut newest = None;
     if super::persist_one_closed(&mut reader, &mut newest, registered.collector_pid, closed)? {
         reader.set_writer_gone();
+    }
+    if matches!(turn, SlotTurn::InterruptedLoss) {
+        finish_loss(store.resume_loss_proof(reader, &budget)?)?;
+        return Ok(Progress::Sealed);
     }
     if interrupted {
         if !store.abandon_terminal_attempt(&reader, &budget)? {
@@ -90,6 +85,31 @@ pub(super) fn persist_one(
     }
 
     persist_one_scan(store, writers, registered, reader, newest, state, &budget)
+}
+
+/// The answer when the run's state alone gives one, with no source to read.
+fn persist_one_settled(
+    store: &Store,
+    registered: &RegisteredRun,
+    state: &mut RunState,
+) -> Result<Option<Progress>> {
+    if state.source == SourceState::Unavailable {
+        return Ok(Some(Progress::Unavailable));
+    }
+    if registered.identity.recording != store.recording() {
+        super::source_unavailable(registered, state, "foreign recording identity");
+        return Ok(Some(Progress::Unavailable));
+    }
+    if state.source == SourceState::Complete {
+        return Ok(Some(Progress::Complete));
+    }
+    // Nothing but the run that holds the slot changes what is in it, so a deferred run reads only
+    // whether it is still held, however long that run takes to come to it.
+    if state.deferred && store.slot_occupied()? {
+        return Ok(Some(Progress::Deferred));
+    }
+    state.deferred = false;
+    Ok(None)
 }
 
 /// Looks past lost publications for the next ready window of the run, and seals it.
@@ -146,6 +166,8 @@ enum SlotTurn {
     Answered(Progress),
     /// The slot holds this run's attempt, which needs its source.
     Interrupted,
+    /// The slot holds what this run lost, whose proof needs its source.
+    InterruptedLoss,
     Free,
 }
 
@@ -163,6 +185,9 @@ fn persist_one_slot(
         finish_publication(store.resume_publication(budget)?)?;
         return Ok(SlotTurn::Answered(Progress::Sealed));
     }
+    if let Interrupted::Loss(run) = attempt {
+        return persist_one_slot_loss(store, registered, run, state, budget);
+    }
     if store.abandon_empty_attempt(budget)? {
         return Ok(SlotTurn::Free);
     }
@@ -175,6 +200,30 @@ fn persist_one_slot(
     }
 
     Ok(SlotTurn::Interrupted)
+}
+
+/// Finishes what a run lost if that takes no source, and otherwise says whose source it takes.
+fn persist_one_slot_loss(
+    store: &Store,
+    registered: &RegisteredRun,
+    run: RunIdentity,
+    state: &mut RunState,
+    budget: &Arc<ByteBudget>,
+) -> Result<SlotTurn> {
+    match store.resume_loss_publication(budget) {
+        Ok(publication) => {
+            finish_loss(publication)?;
+            return Ok(SlotTurn::Answered(Progress::Sealed));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Err(error) => return Err(error.into()),
+    }
+    if run != registered.identity {
+        state.deferred = true;
+        return Ok(SlotTurn::Answered(Progress::Deferred));
+    }
+
+    Ok(SlotTurn::InterruptedLoss)
 }
 
 fn persist_one_memory_limit(state: &RunState) -> u64 {
@@ -371,8 +420,18 @@ fn seal_terminal(
     reader.set_writer_gone();
     clock.staged();
     clock.written();
-    let proof = attempt.prove_terminal(&manifest.recovery, &manifest.batches, reader, budget)?;
-    seal_publish_proof(proof, &mut clock)?;
+    // A run that kept no row and can say how much it lost ends in an object of only that. A mark of
+    // unknown extent is what such an object cannot say.
+    let losses = manifest.recovery.losses;
+    let lost = losses.publications != 0 || losses.events != 0;
+    if manifest.recovery.rows == 0 && lost && !losses.unknown {
+        clock.proved();
+        finish_loss(attempt.prove_loss(reader, budget)?)?;
+    } else {
+        let proof =
+            attempt.prove_terminal(&manifest.recovery, &manifest.batches, reader, budget)?;
+        seal_publish_proof(proof, &mut clock)?;
+    }
     collector::diagnostics::error(format_args!(
         "persister saved a run's tail rows={} {clock}",
         manifest.recovery.rows
@@ -417,6 +476,16 @@ fn seal_publish(
     clock: &mut SealClock,
 ) -> Result<()> {
     seal_publish_proof(attempt.prove_ordinary(manifest, reader, budget)?, clock)
+}
+
+fn finish_loss(mut publishing: LossPublication<'_>) -> Result<()> {
+    for _step in 0..PUBLICATION_STEPS_MAX {
+        if publishing.step()? == PublicationStep::Idle {
+            return Ok(());
+        }
+    }
+
+    Err(crate::Error::Bound("registered loss steps"))
 }
 
 fn seal_publish_proof(mut proof: NormalProof<'_>, clock: &mut SealClock) -> Result<()> {
@@ -815,5 +884,7 @@ pub fn seal_first_window_overrun(
     seal_publish(attempt, &manifest, reader, &budget, &mut SealClock::start())
 }
 
+#[cfg(test)]
+mod loss_tests;
 #[cfg(test)]
 mod tests;

@@ -36,7 +36,6 @@ mod tests {
         directory: PathBuf,
         place: Place,
         writer: Option<Writer>,
-        store: persistence::Store,
         run: RunIdentity,
         shape: Shape,
     }
@@ -75,7 +74,6 @@ mod tests {
                 directory,
                 place,
                 writer: Some(writer),
-                store,
                 run,
                 shape,
             }
@@ -238,8 +236,8 @@ mod tests {
                     &Observation {
                         publication,
                         wall_ns: Some(100_000_000_000 + tick.run_tick * 1_000_000_000),
-                        continuous_ns: None,
-                        awake_ns: None,
+                        continuous_ns: Some(tick.run_tick * 1_000_000_000),
+                        awake_ns: Some(tick.run_tick * 1_000_000_000),
                     },
                     &tick,
                     &numbered,
@@ -347,29 +345,12 @@ mod tests {
     }
 
     fn commit_second(fixture: &Fixture, second: &Window) {
-        let pending = match fixture.store.begin(&second.identity).unwrap() {
-            persistence::Begin::Pending(pending) => pending,
-            persistence::Begin::Committed(_) => panic!("new window"),
-        };
-        let tables = Encoder.encode(second, pending.path()).unwrap();
-        let manifest = persistence::Manifest {
-            event_batches: None,
-            identity: second.identity,
-            publication_first: 2,
-            publication_end: 3,
-            events_first: second.event_range().start,
-            events_end: second.event_range().end,
-            wall_ns: Some(persistence::TimeBounds {
-                min: 160_000_000_000,
-                max: 160_000_000_000,
-            }),
-            continuous_ns: None,
-            awake_ns: None,
-            losses: persistence::Losses::default(),
-            data_directory: String::new(),
-            tables,
-        };
-        fixture.store.commit(pending, manifest).unwrap();
+        persistence::canonical::ready_fixture::publish_window(
+            &fixture.directory.join("recording"),
+            second,
+            |_path, _tables| {},
+        )
+        .unwrap();
     }
 
     fn encoded(fixture: &Fixture, window: &Window) -> (Normalized, Normalized) {

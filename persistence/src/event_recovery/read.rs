@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use collector::ring::RunIdentity;
@@ -27,31 +27,36 @@ pub fn read_page(
     Pages::open(root, run)?.read(first_event, limit)
 }
 
-/// A run's saved tail, whose every file was checked on opening it. A tail can hold 4,096 batches,
-/// so checking each file again for each page took four minutes of a walk on a CI runner.
-pub struct Pages<'root> {
-    root: &'root Path,
+/// A run's saved tail.
+pub struct Pages {
+    directory: PathBuf,
     manifest: Manifest,
 }
 
-impl<'root> Pages<'root> {
-    pub fn open(root: &'root Path, run: &RunIdentity) -> Result<Self> {
+impl Pages {
+    pub fn open(root: &Path, run: &RunIdentity) -> Result<Self> {
         super::validate_run(root, run)?;
-        let manifest = crate::store::events::read_committed(root, run)?
+        let budget = Arc::new(ByteBudget::new(READ_BUDGET_BYTES));
+        let catalog = crate::canonical::catalog::Catalog::open(root, &budget)?;
+        let (manifest, directory) = catalog
+            .terminal_of(run, &mut crate::canonical::ReadWork::default())?
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
 
-        Ok(Self { root, manifest })
+        Ok(Self {
+            directory: root.join(directory),
+            manifest,
+        })
     }
 
     /// Reads at most one physical batch, validates all its rows, then selects ascending events.
     /// `next` resumes after returned rows or at the next batch, including gaps in event numbers.
     pub fn read(&self, first_event: u64, limit: usize) -> Result<EventPage> {
-        read_page_of(self.root, &self.manifest, first_event, limit)
+        read_page_of(&self.directory, &self.manifest, first_event, limit)
     }
 }
 
 fn read_page_of(
-    root: &Path,
+    directory: &Path,
     manifest: &Manifest,
     first_event: u64,
     limit: usize,
@@ -70,7 +75,7 @@ fn read_page_of(
     let mut rows = super::batch::empty(manifest.identities)?;
     let mut next = None;
     if let Some(index) = selected {
-        rows = read_batch(root, manifest, index, &budget)?;
+        rows = read_batch(directory, manifest, index, &budget)?;
         let event = rows.column("event")?.u64()?;
         let offset = event
             .into_no_null_iter()
@@ -103,15 +108,13 @@ fn read_page_of(
 }
 
 fn read_batch(
-    root: &Path,
+    directory: &Path,
     manifest: &Manifest,
     index: usize,
     budget: &Arc<ByteBudget>,
 ) -> Result<DataFrame> {
     let batch = &manifest.batches[index];
-    let path = super::directory(root, &manifest.recovery.run)
-        .join("data")
-        .join(super::batch_name(index));
+    let path = directory.join(super::batch_name(index));
     let file = collector::recording::private::open_private_file(&path, false)?;
     read_batch_file(file, batch, manifest.identities, false, budget)
 }

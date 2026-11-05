@@ -12,6 +12,14 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        let harness = Self::with_empty_root();
+        let registration = FileLock::wait_short(&harness.root.join("registration.lock")).unwrap();
+        recording_identity(&harness.root, &registration).unwrap();
+        drop(registration);
+        harness
+    }
+
+    fn with_empty_root() -> Self {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "fd-identity-registration-{}-{number}",
@@ -189,7 +197,7 @@ fn plans_the_full_profile_below_the_existing_one_gibibyte_reader_limit() {
 fn refuses_an_oversized_identity_mapping_before_creating_registration_artifacts() {
     // Goal: a source the live reader cannot map fails explicitly before registration.
     // Method: offer twice the full profile's slot count and inspect untouched private state.
-    let harness = Harness::new();
+    let harness = Harness::with_empty_root();
     let shape = Shape {
         slot_count: 240,
         cpu_capacity: 18,

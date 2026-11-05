@@ -25,9 +25,6 @@ const NS: u64 = 1_000_000_000;
 /// All context readers share this allowance for event-part inputs and retained query buffers.
 const EVENT_QUERY_BYTES_MAX: usize = 256 * 1024 * 1024;
 
-#[cfg(test)]
-mod legacy_event_tests;
-
 pub struct Session {
     root: PathBuf,
     pub(crate) windows: Vec<Manifest>,
@@ -1391,7 +1388,7 @@ pub(crate) mod registered;
 #[cfg(test)]
 mod registered_tests;
 #[cfg(test)]
-mod reopen_tests;
+pub(crate) mod reopen_tests;
 mod selection;
 pub use earlier::{
     CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS, LOADED_SECONDS,

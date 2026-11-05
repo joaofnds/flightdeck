@@ -1,8 +1,11 @@
 use super::*;
 use crate::session::Session;
 use collector::machine::{CPUTicks, Memory};
-use collector::ring::{Identity, RunIdentity, Shape, Tick, TickBuffers};
-use persistence::{Begin, Encoder, Limits, Store, Window, WindowIdentity};
+use collector::recording::RegisteredRun;
+use collector::ring::{
+    Dropped, Found, ObservationTimes, Place, Readings, RingReader, Shape, Tick, TickBuffers, Writer,
+};
+use persistence::{Limits, Store, Window, WindowIdentity};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +14,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Recording {
     root: PathBuf,
+    writer: Writer,
     window: Window,
 }
 
@@ -24,16 +28,8 @@ impl Recording {
         let root =
             std::env::temp_dir().join(format!("flightdeck-scalar-{}-{serial}", std::process::id()));
         let store = Store::open(&root).unwrap();
-        let identity = WindowIdentity {
-            run: RunIdentity {
-                recording: store.recording(),
-                run: Identity([11, 12]),
-                boot: Identity([13, 14]),
-            },
-            window: 0,
-        };
         let shape = Shape {
-            slot_count: 2,
+            slot_count: 8,
             cpu_capacity: 2,
             interface_capacity: 1,
             core_capacity: 1,
@@ -43,23 +39,48 @@ impl Recording {
             coalition_capacity: 1,
             event_capacity: 8,
         };
-        let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
+        let place = Place {
+            lock_path: root.join("ring.lock"),
+            name_prefix: format!("/fdscalar{}x{serial}", std::process::id()),
+        };
+        let run = collector::recording::new_run_identity(store.recording()).unwrap();
+        let mut writer = Writer::create_recording(&place, shape, &run, 0).unwrap();
+        let mut reader = RingReader::open_generation(writer.name()).unwrap();
+        let mut read = persistence::tick_buffer(&shape).unwrap();
+        let mut window = Window::new(
+            WindowIdentity { run, window: 0 },
+            Limits::from_shape(&shape).unwrap(),
+        );
         for publication in 1..=count {
             let tick = reading(publication);
+            let times = ObservationTimes {
+                wall_ns: (999 + publication) * 1_000_000_000,
+                continuous_ns: (publication * 2 - 1) * 1_000_000_000,
+                awake_ns: publication * 1_000_000_000,
+            };
+            with_ticks_publish(&mut writer, &tick, &times);
+            assert!(matches!(
+                reader.read_into(&mut read).unwrap(),
+                Found::Publication { .. }
+            ));
             window
                 .push_tick(
                     &persistence::Observation {
                         publication,
-                        wall_ns: Some((999 + publication) * 1_000_000_000),
-                        continuous_ns: Some((publication * 2 - 1) * 1_000_000_000),
-                        awake_ns: Some(publication * 1_000_000_000),
+                        wall_ns: Some(times.wall_ns),
+                        continuous_ns: Some(times.continuous_ns),
+                        awake_ns: Some(times.awake_ns),
                     },
-                    &tick,
+                    &read,
                     &[],
                 )
                 .unwrap();
         }
-        Self { root, window }
+        Self {
+            root,
+            writer,
+            window,
+        }
     }
 
     fn project(&self) -> Tables {
@@ -91,38 +112,65 @@ impl Recording {
         self.seal_with(|_pending| {});
     }
 
+    /// Saves the ring's readings with the persister's own worker, then gives `adjust` the directory
+    /// they lie in.
     fn seal_with(&self, adjust: impl FnOnce(&Path)) {
         let store = Store::open(&self.root).unwrap();
-        let identity = self.window.identity;
-        let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-            panic!("fixture already sealed");
+        let run = self.window.identity.run;
+        let registered = RegisteredRun {
+            identity: run,
+            ring_name: self.writer.name().to_owned(),
+            collector_pid: 0,
         };
-        let tables = Encoder.encode(&self.window, pending.path()).unwrap();
-        adjust(pending.path());
-        store
-            .commit(
-                pending,
-                persistence::Manifest {
-                    event_batches: None,
-                    identity,
-                    publication_first: 1,
-                    publication_end: self.window.publication_range().end,
-                    events_first: 0,
-                    events_end: 0,
-                    wall_ns: None,
-                    continuous_ns: None,
-                    awake_ns: None,
-                    losses: persistence::Losses::default(),
-                    data_directory: String::new(),
-                    tables,
-                },
-            )
-            .unwrap();
+        persistence::worker::seal_held_windows(
+            &store,
+            &registered,
+            None,
+            &mut persistence::worker::HeldWindows::default(),
+            &crate::live::identity_fixture::Underived,
+        )
+        .unwrap();
+        let commitment = crate::live::identity_fixture::saved_commitment(&self.root, &run, 0);
+        adjust(commitment.parent().unwrap());
     }
+}
+
+/// Publishes what `tick` holds, leaving out the sources it says went unread.
+fn with_ticks_publish(writer: &mut Writer, tick: &Tick, times: &ObservationTimes) {
+    writer.publish_observed(
+        &Readings {
+            run_tick: tick.run_tick,
+            cpus: &tick.cpus,
+            memory: &tick.memory,
+            interfaces: &[],
+            ioreport: tick
+                .ioreport_read
+                .then_some(collector::ioreport::IOReportReadings {
+                    gpu_energy_nj: tick.gpu_energy_nj,
+                    gpu_active_ns: &tick.gpu_active_ns,
+                    cores: &[],
+                }),
+            smc: tick.smc_read.then_some(collector::smc::SmcReadings {
+                power_watts: tick.power_watts,
+                soc_celsius: tick.soc_celsius,
+                cpu_celsius: tick.cpu_celsius,
+                gpu_celsius: tick.gpu_celsius,
+                fan_rpm: &tick.fan_rpm,
+            }),
+            processes: &[],
+            processes_refused: 0,
+            processes_gone: 0,
+            coalitions: &[],
+            events: &[],
+            dropped: Dropped::default(),
+        },
+        times,
+    );
 }
 
 impl Drop for Recording {
     fn drop(&mut self) {
+        collector::ring::unlink_generation(self.writer.name()).unwrap();
         std::fs::remove_dir_all(&self.root).unwrap();
     }
 }
@@ -349,15 +397,16 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
 #[test]
 fn refuses_an_admitted_empty_fan_source_without_its_rpm_column() {
     // Goal: an empty malformed saved fan source never becomes measured fanless.
-    // Method: admit a two-column empty Parquet before pinning it, then select publicly.
+    // Method: save the minute, replace its fans with a two-column empty Parquet, then select
+    // publicly.
     use polars::polars_utils::compression::ZstdLevel;
     use polars::prelude::{
         Column, DataFrame, ParquetCompression, ParquetWriter, StatisticsOptions,
     };
 
     let recording = Recording::new();
-    recording.seal_with(|pending| {
-        let fans = pending.join("fans.parquet");
+    recording.seal_with(|ready| {
+        let fans = ready.join("fans.parquet");
         assert!(fans.is_file());
         std::fs::remove_file(&fans).unwrap();
         let mut frame = DataFrame::new(
@@ -368,7 +417,7 @@ fn refuses_an_admitted_empty_fan_source_without_its_rpm_column() {
             ],
         )
         .unwrap();
-        ParquetWriter::new(std::fs::File::create(&fans).unwrap())
+        ParquetWriter::new(collector::recording::private::open_private_file(&fans, true).unwrap())
             .with_compression(ParquetCompression::Zstd(Some(
                 ZstdLevel::try_new(3).unwrap(),
             )))

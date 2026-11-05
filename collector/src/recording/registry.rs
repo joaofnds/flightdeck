@@ -386,6 +386,9 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("flightdeck-registry-retire-{}", std::process::id()));
         private::create_private_dir(&root).unwrap();
+        let registration = private::FileLock::wait_short(&root.join("registration.lock")).unwrap();
+        crate::recording::recording_identity(&root, &registration).unwrap();
+        drop(registration);
         let place = Place {
             lock_path: root.join("ring.lock"),
             name_prefix: "/fdr.".into(),

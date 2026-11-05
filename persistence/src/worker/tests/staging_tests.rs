@@ -35,7 +35,7 @@ fn resumes_after_overwrites_exhaust_the_scan_budget() {
     assert!(matches!(result, Some(Staged::Waiting)));
     assert_eq!(state.next_publication, 6);
     assert_eq!(state.losses.publications, 5);
-    assert!(store.progress(&registered.identity).unwrap().is_none());
+    assert!(store.saved_newest(&registered.identity).unwrap().is_none());
     drop(scan);
     ring.0.finish();
     let writers = Writers {
@@ -46,7 +46,7 @@ fn resumes_after_overwrites_exhaust_the_scan_budget() {
         persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
         Progress::Sealed
     ));
-    let saved = store.progress(&registered.identity).unwrap().unwrap();
+    let saved = store.saved_newest(&registered.identity).unwrap().unwrap();
     assert_eq!(saved.identity.window, 6);
     assert_eq!((saved.publication_first, saved.publication_end), (7, 8));
     assert_eq!(saved.losses.publications, 6);
@@ -58,62 +58,9 @@ fn resumes_after_overwrites_exhaust_the_scan_budget() {
 }
 
 #[test]
-fn drains_a_final_publication_after_an_empty_read() {
-    // Goal: completion observed after Nothing cannot retire an unread final publication.
-    // Method: publish and finish between the empty read and the terminal decision.
-    for publications in [0, 1] {
-        let root = Directory::new();
-        let store = Store::open(&root.0).unwrap();
-        let mut registered = registered(store.recording());
-        let mut ring = Ring::new(&root, &registered.identity, 1);
-        registered.ring_name = ring.0.name().to_owned();
-        let mut reader = RingReader::open_generation(ring.0.name()).unwrap();
-        let mut tick = crate::tick_buffer(&reader.shape()).unwrap();
-        let mut state = RunState {
-            next_publication: reader.next_publication(),
-            loaded: true,
-            source: SourceState::Open,
-            losses: Losses {
-                publications,
-                ..Losses::default()
-            },
-            ..RunState::default()
-        };
-        assert!(matches!(
-            reader.read_into(&mut tick).unwrap(),
-            Found::Nothing
-        ));
-        assert!(!reader.completed());
-        ring.publish(0);
-        ring.0.finish();
-
-        let result = persist_one_stage_end(&reader, &registered, false, &mut state).unwrap();
-
-        assert!(matches!(result, Staged::Waiting));
-        assert_eq!(state.source, SourceState::Open);
-        drop(reader);
-        let writers = Writers {
-            encoder: Encoder,
-            derive: &Underived,
-        };
-        assert!(matches!(
-            persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
-            Progress::Sealed
-        ));
-        let saved = store.progress(&registered.identity).unwrap().unwrap();
-        assert_eq!((saved.publication_first, saved.publication_end), (1, 2));
-        assert_eq!(saved.losses.publications, publications);
-        assert!(matches!(
-            persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
-            Progress::Complete
-        ));
-    }
-}
-
-#[test]
 fn waits_for_the_open_successor_after_losing_the_selected_minute() {
     // Goal: losing a selected minute cannot seal its still-open successor.
-    // Method: overwrite the selection, resume the worker, then finish and inspect its seal.
+    // Method: overwrite the minute before the worker reads it, then finish and inspect its seal.
     let root = Directory::new();
     let store = Store::open(&root.0).unwrap();
     let mut registered = registered(store.recording());
@@ -122,36 +69,17 @@ fn waits_for_the_open_successor_after_losing_the_selected_minute() {
     registered.ring_name = ring.0.name().to_owned();
     ring.publish(0);
     ring.publish(60);
-    let mut reader = RingReader::open_generation(ring.0.name()).unwrap();
-    let limits = Limits::from_shape(&reader.shape()).unwrap();
-    let mut tick = crate::tick_buffer(&reader.shape()).unwrap();
+    ring.publish(61);
     let selected = WindowIdentity {
         run: registered.identity,
         window: 0,
     };
-    let mut newest = None;
-    assert!(
-        !persist_one_closed(&mut reader, &mut newest, registered.collector_pid, false).unwrap()
-    );
-    assert!(window_ready(&reader, newest.as_ref(), &selected, false).unwrap());
-    ring.publish(61);
-    reader.seek_publication(1).unwrap();
-    let mut state = RunState {
-        next_publication: 1,
-        loaded: true,
-        ..RunState::default()
-    };
+    let mut state = RunState::default();
     let writers = Writers {
         encoder: Encoder,
         derive: &Underived,
     };
 
-    assert!(
-        persist_one_stage_selected(&store, &mut reader, &mut tick, selected, limits, &mut state)
-            .unwrap()
-            .is_none()
-    );
-    drop(reader);
     assert!(matches!(
         persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
         Progress::Waiting
@@ -162,8 +90,8 @@ fn waits_for_the_open_successor_after_losing_the_selected_minute() {
         Progress::Sealed
     ));
 
-    assert!(store.existing(&selected).unwrap().is_none());
-    let saved = store.progress(&registered.identity).unwrap().unwrap();
+    assert!(store.saved(&selected).unwrap().is_none());
+    let saved = store.saved_newest(&registered.identity).unwrap().unwrap();
     assert_eq!(
         (
             saved.identity.window,
@@ -174,111 +102,6 @@ fn waits_for_the_open_successor_after_losing_the_selected_minute() {
     );
     assert_eq!(saved.losses.publications, 1);
     assert_eq!(state.losses, Losses::default());
-}
-
-#[test]
-fn leaves_a_missed_suffix_for_the_next_minute() {
-    // Goal: a partial minute does not claim loss beyond its saved publication end.
-    // Method: copy one tick, overwrite its successor, then reach the next minute.
-    let root = Directory::new();
-    let store = Store::open(&root.0).unwrap();
-    let mut registered = registered(store.recording());
-    let run = registered.identity;
-    let mut ring = Ring::new(&root, &run, 3);
-    registered.ring_name = ring.0.name().to_owned();
-    ring.publish(0);
-    ring.publish(1);
-    ring.publish(60);
-    let mut reader = RingReader::open_generation(ring.0.name()).unwrap();
-    let limits = Limits::from_shape(&reader.shape()).unwrap();
-    let mut tick = crate::tick_buffer(&reader.shape()).unwrap();
-    let identity = WindowIdentity { run, window: 0 };
-    let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-        panic!("new window")
-    };
-    let mut staged = staging::Staging::new(
-        &reader,
-        identity,
-        limits,
-        event_writer(&pending, &reader, identity),
-    );
-    let mut losses = Losses::default();
-    assert!(staged.read(&mut reader, &mut tick, &mut losses).unwrap());
-    ring.publish(61);
-    ring.publish(62);
-
-    assert!(staged.read(&mut reader, &mut tick, &mut losses).unwrap());
-    assert!(!staged.read(&mut reader, &mut tick, &mut losses).unwrap());
-    let window = staged.finish(&mut reader, &mut losses).unwrap();
-
-    assert_eq!(window.publication_range(), 1..2);
-    assert_eq!(losses.publications, 0);
-    assert_eq!(reader.next_publication(), 3);
-    drop(reader);
-    let writers = Writers {
-        encoder: Encoder,
-        derive: &Underived,
-    };
-    seal_pending(
-        &store,
-        &writers,
-        &window,
-        &mut RunState {
-            losses,
-            ..RunState::default()
-        },
-        pending,
-    )
-    .unwrap();
-    drop(store);
-    ring.0.finish();
-    let recovered = Store::open(&root.0).unwrap();
-    let mut state = RunState::default();
-    assert!(matches!(
-        persist_one(&recovered, &writers, &registered, false, &mut state).unwrap(),
-        Progress::Sealed
-    ));
-    let saved = recovered.progress(&run).unwrap().unwrap();
-    assert_eq!((saved.publication_first, saved.publication_end), (3, 6));
-    assert_eq!(saved.losses.publications, 1);
-    assert_eq!(state.losses, Losses::default());
-}
-
-#[test]
-fn advances_a_wholly_lost_selection_without_returning_an_empty_window() {
-    // Goal: an overwritten selection advances without entering the encoder.
-    // Method: select minute zero, overwrite it, and use the worker's selected-minute step.
-    let root = Directory::new();
-    let store = Store::open(&root.0).unwrap();
-    let run = registered(store.recording()).identity;
-    let mut ring = Ring::new(&root, &run, 2);
-    ring.publish(0);
-    ring.publish(60);
-    let mut reader = RingReader::open_generation(ring.0.name()).unwrap();
-    let limits = Limits::from_shape(&reader.shape()).unwrap();
-    let mut tick = crate::tick_buffer(&reader.shape()).unwrap();
-    assert!(matches!(
-        reader.read_into(&mut tick).unwrap(),
-        Found::Publication { .. }
-    ));
-    let selected = WindowIdentity { run, window: 0 };
-    let newest = persist_one_latest_timing(&mut reader).unwrap();
-    assert!(window_ready(&reader, newest.as_ref(), &selected, false).unwrap());
-    ring.publish(61);
-    reader.seek_publication(1).unwrap();
-    let mut state = RunState {
-        next_publication: 1,
-        loaded: true,
-        ..RunState::default()
-    };
-
-    let result =
-        persist_one_stage_selected(&store, &mut reader, &mut tick, selected, limits, &mut state)
-            .unwrap();
-
-    assert!(result.is_none());
-    assert_eq!(state.next_publication, 2);
-    assert_eq!(state.losses.publications, 1);
 }
 
 #[test]
@@ -323,49 +146,17 @@ fn carries_event_loss_only_with_the_minute_that_copied_its_reading() {
         persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
         Progress::Sealed
     ));
-    let first = store.progress(&registered.identity).unwrap().unwrap();
+    let first = store.saved_newest(&registered.identity).unwrap().unwrap();
     assert!(matches!(
         persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
         Progress::Sealed
     ));
-    let next = store.progress(&registered.identity).unwrap().unwrap();
+    let next = store.saved_newest(&registered.identity).unwrap().unwrap();
 
     assert_eq!(first.identity.window, 0);
     assert_eq!(first.losses.events, 1);
     assert_eq!(next.identity.window, 1);
     assert_eq!(next.losses, Losses::default());
-}
-
-#[test]
-fn refuses_a_lost_selection_that_has_not_advanced() {
-    // Goal: an empty selected step cannot retry without making progress.
-    // Method: ask the real source for a publication beyond its current end.
-    let root = Directory::new();
-    let store = Store::open(&root.0).unwrap();
-    let run = registered(store.recording()).identity;
-    let mut ring = Ring::new(&root, &run, 2);
-    ring.publish(0);
-    let mut reader = RingReader::open_generation(ring.0.name()).unwrap();
-    let limits = Limits::from_shape(&reader.shape()).unwrap();
-    let mut tick = crate::tick_buffer(&reader.shape()).unwrap();
-    reader.seek_publication(2).unwrap();
-    let mut state = RunState::default();
-
-    let result = persist_one_stage_selected(
-        &store,
-        &mut reader,
-        &mut tick,
-        WindowIdentity { run, window: 0 },
-        limits,
-        &mut state,
-    );
-
-    assert!(matches!(
-        result,
-        Err(crate::Error::Bound("lost selection without progress"))
-    ));
-    assert_eq!(state.next_publication, 0);
-    assert_eq!(state.losses, Losses::default());
 }
 
 #[test]
@@ -393,7 +184,6 @@ fn completes_an_empty_source_with_only_prior_unknown_loss() {
 
     assert!(matches!(result, Progress::Complete));
     assert_eq!(state.source, SourceState::Complete);
-    assert_eq!(state.losses, Losses::default());
     let durable = crate::event_recovery::read_page(&root.0, &registered.identity, 1, 1).unwrap();
     assert_eq!(durable.rows.height(), 0);
     assert_eq!(
@@ -403,7 +193,7 @@ fn completes_an_empty_source_with_only_prior_unknown_loss() {
             ..Losses::default()
         }
     );
-    assert!(store.progress(&registered.identity).unwrap().is_none());
+    assert!(store.saved_newest(&registered.identity).unwrap().is_none());
 }
 
 struct Ring(collector::ring::Writer, u64);
@@ -474,22 +264,4 @@ impl Drop for Ring {
     fn drop(&mut self) {
         collector::ring::unlink_generation(self.0.name()).unwrap();
     }
-}
-
-fn event_writer(
-    pending: &crate::store::PendingWindow,
-    reader: &RingReader,
-    identity: WindowIdentity,
-) -> crate::event_table::writer::Writer {
-    crate::event_table::writer::Writer::new(
-        collector::recording::private::PrivateDirectory::open(pending.path())
-            .unwrap()
-            .create_directory("events")
-            .unwrap(),
-        identity,
-        reader.next_event(),
-        reader.dictionary_capacity().is_some(),
-        WORKING_BYTES_MAX,
-    )
-    .unwrap()
 }

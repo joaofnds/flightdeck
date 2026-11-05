@@ -488,7 +488,7 @@ impl SealedRecording {
                 publication,
             );
         }
-        Self::commit_derived(&store, identity, &window, derive);
+        Self::commit_derived(&recording.root, &window, derive);
         drop(reader);
         drop(generation);
         drop(store);

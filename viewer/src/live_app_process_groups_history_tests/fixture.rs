@@ -49,14 +49,6 @@ pub(crate) fn dense() -> Fixture {
     dense_with(collector::ring::Writer::create_with_identity)
 }
 
-/// A dense ring over a recording of the format before registered recordings.
-pub(crate) fn dense_legacy() -> Fixture {
-    dense_over(
-        Fixture::legacy_of(true, 2),
-        collector::ring::Writer::create_with_identity,
-    )
-}
-
 /// A dense ring whose ticks also carry the system records, each process's GPU time among them.
 pub(crate) fn dense_with_system() -> Fixture {
     dense_with(collector::ring::Writer::create_with_system)

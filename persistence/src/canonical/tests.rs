@@ -181,6 +181,83 @@ fn loss_fixture() -> (Fixture, CanonicalMetadata) {
 }
 
 #[test]
+fn a_window_listing_a_derived_table_in_place_of_one_of_its_tables_is_refused() {
+    // Goal: a derived table never stands in for a table every window holds.
+    // Method: list app ranks in place of the events table, so the count of tables holds.
+    let mut manifest = proof_manifest();
+    assert_eq!("events", manifest.tables.pop().unwrap().name);
+    manifest.tables.push(crate::TableManifest {
+        name: "app_ranks",
+        rows: 3,
+    });
+
+    let metadata = ready_fixture::ordinary_metadata(Identity([30, 31]), &manifest);
+
+    assert_eq!(
+        metadata.validate().unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+#[test]
+fn a_window_listing_a_derived_table_twice_is_refused() {
+    // Goal: a window holds each derived table at most once.
+    // Method: list app ranks twice in the manifest of a proof.
+    let mut manifest = proof_manifest();
+    for _copy in 0..2 {
+        manifest.tables.push(crate::TableManifest {
+            name: "app_ranks",
+            rows: 3,
+        });
+    }
+
+    let metadata = ready_fixture::ordinary_metadata(Identity([30, 31]), &manifest);
+
+    assert_eq!(
+        metadata.validate().unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+/// A manifest a proof accepts as it stands.
+fn proof_manifest() -> crate::Manifest {
+    let tables = crate::schema::TABLES
+        .iter()
+        .map(|table| crate::TableManifest {
+            name: table.name(),
+            rows: if table.name() == "events" { 4 } else { 3 },
+        })
+        .collect();
+    let mut manifest = crate::Manifest {
+        identity: crate::WindowIdentity {
+            run: RunIdentity {
+                recording: Identity([1, 2]),
+                run: Identity([3, 4]),
+                boot: Identity([5, 6]),
+            },
+            window: 17,
+        },
+        publication_first: 20,
+        publication_end: 23,
+        events_first: 90,
+        events_end: 94,
+        wall_ns: None,
+        continuous_ns: None,
+        awake_ns: None,
+        losses: crate::Losses::default(),
+        data_directory: String::new(),
+        tables,
+        event_batches: Some(1),
+    };
+    manifest.data_directory = format!(
+        "data/{}/ready",
+        collector::recording::identity_text(Identity([30, 31]))
+    );
+    ready_fixture::ordinary_metadata(Identity([30, 31]), &manifest)
+        .validate()
+        .unwrap();
+
+    manifest
+}
+#[test]
 fn loss_only_tail_reopens_with_idle_slots_and_no_derived_index() {
     // Goal: canonical gate metadata alone establishes exact ownership.
     // Method: install an encoded gate and query through Store without any accelerator.

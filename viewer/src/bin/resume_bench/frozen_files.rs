@@ -1,11 +1,12 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
 
 use collector::recording::private;
-use collector::ring::{Identity, RunIdentity};
+use collector::ring::RunIdentity;
 use persistence::Manifest;
 
 use super::Directories;
@@ -17,11 +18,16 @@ pub(super) struct FrozenFiles {
     pub(super) captured: Vec<CapturedWindow>,
 }
 
+/// The names that make a sealed window visible, one for its source and one for each reading.
 struct FrozenMarker {
-    visible: PathBuf,
-    hidden: PathBuf,
+    names: Vec<FrozenName>,
     publication_end: u64,
     window: u64,
+}
+
+struct FrozenName {
+    visible: PathBuf,
+    hidden: PathBuf,
 }
 
 pub(super) struct Seal {
@@ -40,42 +46,51 @@ struct Destination<'a> {
 }
 
 const WINDOWS_MAX: usize = 100_000;
-const RUNS_MAX: usize = 4096;
-const DAYS_MAX: usize = 4096;
 const COMPONENTS_MAX: usize = 8;
+/// More files and directories than the tree of 100,000 windows holds.
+const ENTRIES_MAX: usize = 1 << 28;
+/// The directories that hold what a recording saved. Their files never change once linked.
+const SAVED_DIRECTORIES: [&str; 7] = [
+    "data",
+    "recovery-data",
+    "ordinary",
+    "observations-known",
+    "observations-unknown",
+    "terminal",
+    "event-fragments",
+];
+/// The directories that name a window of the recording, by hard links to its proof.
+const WINDOW_NAMES: [&str; 3] = ["ordinary", "observations-known", "observations-unknown"];
+/// The files that describe the recording, which change by replacement.
+const LINKED_FILES: [&str; 4] = ["identity", "foreground", "maintenance", "namespace-state"];
+/// The locks that exist in a set up recording. A link would share the running recording's lock.
+const LOCKS: [&str; 3] = ["registration.lock", "collector.lock", "recorder.lock"];
 
 impl FrozenFiles {
-    pub(super) fn capture(
-        directories: &Directories<'_>,
-        recording: Identity,
-        active: &RunIdentity,
-    ) -> io::Result<Self> {
-        fs::hard_link(
-            directories.source.join("identity"),
-            directories.target.join("identity"),
-        )?;
-        create_directory(&directories.target.join("commits"))?;
-        create_directory(&directories.target.join("data"))?;
+    pub(super) fn capture(directories: &Directories<'_>, active: &RunIdentity) -> io::Result<Self> {
+        for name in LINKED_FILES {
+            fs::hard_link(directories.source.join(name), directories.target.join(name))?;
+        }
+        for name in LOCKS {
+            drop(private::open_private_file(
+                &directories.target.join(name),
+                true,
+            )?);
+        }
         create_directory(&directories.target.join("frozen_hidden"))?;
-        let mut windows = Vec::new();
-        capture_metadata(directories, recording, &mut windows)?;
+        for name in SAVED_DIRECTORIES {
+            capture_tree(directories, Path::new(name))?;
+        }
+        let windows = capture_windows(directories.target)?;
+        let mut names = capture_names(directories.target)?;
 
         let mut markers = Vec::new();
         for window in &windows {
-            capture_data(directories, window)?;
             if window.manifest.identity.run == *active {
-                let relative = window
-                    .marker
-                    .strip_prefix(directories.target)
-                    .map_err(io::Error::other)?;
-                let hidden = directories.target.join("frozen_hidden").join(relative);
-                create_parent(&Destination {
-                    root: directories.target,
-                    path: &hidden,
-                })?;
+                let proof = fs::metadata(&window.marker)?.ino();
+                let links = names.remove(&proof).unwrap_or_default();
                 markers.push(FrozenMarker {
-                    visible: window.marker.clone(),
-                    hidden,
+                    names: frozen_names(directories.target, links)?,
                     publication_end: window.manifest.publication_end,
                     window: window.manifest.identity.window,
                 });
@@ -97,7 +112,9 @@ impl FrozenFiles {
         assert!(self.markers.len() <= WINDOWS_MAX);
         for (index, marker) in self.markers.iter().enumerate() {
             if marker.publication_end > newest + 1 {
-                fs::rename(&marker.visible, &marker.hidden)?;
+                for name in &marker.names {
+                    fs::rename(&name.visible, &name.hidden)?;
+                }
                 hidden.push(index);
             }
         }
@@ -111,8 +128,7 @@ impl FrozenFiles {
             let Some(index) = hidden.last().copied() else {
                 return Ok(());
             };
-            let marker = &self.markers[index];
-            fs::rename(&marker.hidden, &marker.visible)?;
+            reveal(&self.markers[index])?;
             assert_eq!(hidden.pop(), Some(index));
         }
         assert!(hidden.is_empty());
@@ -163,61 +179,109 @@ impl FrozenFiles {
 
     fn replay_reveal(&self, hidden: &mut Vec<usize>, position: usize) -> io::Result<()> {
         assert!(position < hidden.len());
-        let marker = &self.markers[hidden[position]];
-        fs::rename(&marker.hidden, &marker.visible)?;
+        reveal(&self.markers[hidden[position]])?;
         hidden.remove(position);
         Ok(())
     }
 }
 
-fn capture_metadata(
-    directories: &Directories<'_>,
-    recording: Identity,
-    windows: &mut Vec<CapturedWindow>,
-) -> io::Result<()> {
-    visit_entries(&directories.source.join("commits"), RUNS_MAX, |run| {
-        visit_entries(run, DAYS_MAX, |day| {
-            visit_entries(day, WINDOWS_MAX, |marker| {
-                if windows.len() == WINDOWS_MAX {
-                    return Err(io::Error::other("frozen recording window bound"));
-                }
-                let relative = marker
-                    .strip_prefix(directories.source)
-                    .map_err(io::Error::other)?;
-                let captured = directories.target.join(relative);
-                create_parent(&Destination {
-                    root: directories.target,
-                    path: &captured,
-                })?;
-                fs::hard_link(marker, &captured)?;
-                let manifest = persistence::list_committed(directories.source, marker, recording)?;
-                windows.push(CapturedWindow {
-                    manifest,
-                    marker: captured,
-                });
-                Ok(())
-            })
-        })
-    })
+/// Makes a hidden window visible again. A reveal that failed part way resumes where it stopped.
+fn reveal(marker: &FrozenMarker) -> io::Result<()> {
+    for name in &marker.names {
+        match fs::rename(&name.hidden, &name.visible) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(())
 }
 
-fn capture_data(directories: &Directories<'_>, window: &CapturedWindow) -> io::Result<()> {
-    let relative = Path::new(&window.manifest.data_directory);
-    let directory = directories.target.join(relative);
-    create_parent(&Destination {
-        root: directories.target,
-        path: &directory.join("metadata"),
-    })?;
-    fs::hard_link(&window.marker, directory.join("metadata"))?;
-    assert!(window.manifest.tables.len() <= 16);
-    for table in &window.manifest.tables {
-        let name = format!("{}.parquet", table.name);
-        let original = directories.source.join(relative).join(&name);
-        private::verify_file(&original)?;
-        fs::hard_link(original, directory.join(name))?;
+/// Links the files under `relative` of the source into the target, with their directories.
+fn capture_tree(directories: &Directories<'_>, relative: &Path) -> io::Result<()> {
+    create_directory(&directories.target.join(relative))?;
+    let mut walking = vec![relative.to_path_buf()];
+    let mut entries = 0;
+    while let Some(directory) = walking.pop() {
+        for entry in fs::read_dir(directories.source.join(&directory))? {
+            entries += 1;
+            if entries == ENTRIES_MAX {
+                return Err(io::Error::other("frozen recording entry bound"));
+            }
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let child = directory.join(entry.file_name());
+            if kind.is_symlink() {
+                return Err(io::Error::other("fixture source symlink"));
+            }
+            if kind.is_dir() {
+                create_directory(&directories.target.join(&child))?;
+                walking.push(child);
+            } else {
+                fs::hard_link(entry.path(), directories.target.join(&child))?;
+            }
+        }
     }
-    persistence::read_committed(directories.target, &window.marker)?;
+
     Ok(())
+}
+
+/// The windows a captured recording holds, each with the proof that commits it.
+fn capture_windows(target: &Path) -> io::Result<Vec<CapturedWindow>> {
+    let mut windows = Vec::new();
+    for attempt in fs::read_dir(target.join("data"))? {
+        let marker = attempt?.path().join("ready").join("metadata");
+        if !marker.exists() {
+            continue;
+        }
+        if windows.len() == WINDOWS_MAX {
+            return Err(io::Error::other("frozen recording window bound"));
+        }
+        let manifest = persistence::read_committed(target, &marker)?;
+        windows.push(CapturedWindow { manifest, marker });
+    }
+
+    Ok(windows)
+}
+
+/// The names of each proof in the directories that name windows, by the proof's inode.
+fn capture_names(target: &Path) -> io::Result<HashMap<u64, Vec<PathBuf>>> {
+    let mut names: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+    let mut walking: Vec<PathBuf> = WINDOW_NAMES.iter().map(|name| target.join(name)).collect();
+    let mut entries = 0;
+    while let Some(directory) = walking.pop() {
+        for entry in fs::read_dir(&directory)? {
+            entries += 1;
+            if entries == ENTRIES_MAX {
+                return Err(io::Error::other("frozen recording entry bound"));
+            }
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                walking.push(entry.path());
+            } else {
+                let inode = entry.metadata()?.ino();
+                names.entry(inode).or_default().push(entry.path());
+            }
+        }
+    }
+
+    Ok(names)
+}
+
+fn frozen_names(target: &Path, links: Vec<PathBuf>) -> io::Result<Vec<FrozenName>> {
+    let mut names = Vec::with_capacity(links.len());
+    for visible in links {
+        let relative = visible.strip_prefix(target).map_err(io::Error::other)?;
+        let hidden = target.join("frozen_hidden").join(relative);
+        create_parent(&Destination {
+            root: target,
+            path: &hidden,
+        })?;
+        names.push(FrozenName { visible, hidden });
+    }
+
+    Ok(names)
 }
 
 fn create_parent(destination: &Destination<'_>) -> io::Result<()> {
@@ -251,24 +315,4 @@ fn create_directory(path: &Path) -> io::Result<()> {
         }
         Err(error) => Err(error),
     }
-}
-
-fn visit_entries(
-    directory: &Path,
-    maximum: usize,
-    mut visit: impl FnMut(&Path) -> io::Result<()>,
-) -> io::Result<()> {
-    private::verify_directory(directory)?;
-    let entries = fs::read_dir(directory)?;
-    for (index, entry) in entries.take(maximum + 1).enumerate() {
-        if index == maximum {
-            return Err(io::Error::other("fixture directory entry bound"));
-        }
-        let entry = entry?;
-        if entry.file_type()?.is_symlink() {
-            return Err(io::Error::other("fixture source symlink"));
-        }
-        visit(&entry.path())?;
-    }
-    Ok(())
 }

@@ -41,7 +41,7 @@ impl ResidentFixture {
             "flightdeck-resident-{}-{serial}",
             std::process::id()
         ));
-        collector::recording::private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let place = Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdrs{}x{serial}", std::process::id()),

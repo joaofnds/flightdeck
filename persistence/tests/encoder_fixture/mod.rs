@@ -95,12 +95,12 @@ pub fn window(full: bool) -> Window {
     let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
     for index in 0..61 {
         tick.run_tick = index;
-        tick.events = index * event_count..(index + 1) * event_count;
+        tick.events = index * event_count + 1..(index + 1) * event_count + 1;
         let numbered: Vec<_> = events
             .iter()
             .enumerate()
             .map(|(offset, event)| NumberedEvent {
-                number: index * event_count + u64::try_from(offset).unwrap(),
+                number: index * event_count + u64::try_from(offset).unwrap() + 1,
                 tick: index,
                 event,
             })
@@ -108,8 +108,8 @@ pub fn window(full: bool) -> Window {
         let observation = Observation {
             publication: index + 1,
             wall_ns: Some(1_000_000_000_000 + index * 1_000_000_000),
-            continuous_ns: Some(index * 1_000_000_000),
-            awake_ns: Some(index * 1_000_000_000),
+            continuous_ns: Some(index * 900_000_000),
+            awake_ns: Some(index * 900_000_000),
         };
         window.push_tick(&observation, &tick, &numbered).unwrap();
     }

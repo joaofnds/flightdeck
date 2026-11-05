@@ -101,8 +101,8 @@ impl Control {
         super::check_writer(root)?;
         // Held until the file is settled, so `request_recording_stop` cannot land on a file this
         // has judged and is about to replace.
-        let _registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
-        let identity = recording_identity(root)?;
+        let registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
+        let identity = recording_identity(root, &registration)?;
         let path = root.join("recorder.control");
         let previous = match Self::open_writable(root) {
             Ok(control) => Some(control),
@@ -629,7 +629,11 @@ mod tests {
         // Goal: an initialization crash can recover without replacing live shared backing.
         // Method: leave an invalid private file, first with a role lock and then without it.
         let directory = Directory::new();
-        recording_identity(&directory.0).unwrap();
+        {
+            let registration =
+                private::FileLock::wait_short(&directory.0.join("registration.lock")).unwrap();
+            recording_identity(&directory.0, &registration).unwrap();
+        }
         private::atomic_write(&directory.0, "recorder.control", &[0; BYTES]).unwrap();
         let owner = private::FileLock::try_lock(&directory.0.join("collector.lock")).unwrap();
         assert_eq!(

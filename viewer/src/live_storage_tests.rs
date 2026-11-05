@@ -83,7 +83,7 @@ fn follows_selects_and_reopens_disk_values_with_observation_gaps() {
     storage_publish(&mut fixture, 5, Some(&storage_snapshot(5)));
     session.poll().unwrap();
     let latest = session.follow_latest().unwrap();
-    storage_seal(&fixture);
+    fixture.seal_held();
     let mut saved = Session::open(&fixture.root).unwrap();
     let committed = saved.select(1005, 0).unwrap();
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
@@ -116,7 +116,7 @@ fn storage_fixture_with_slots(slot_count: u64) -> RingFixture {
         "flightdeck-live-storage-{}-{serial}",
         std::process::id()
     ));
-    private::create_private_dir(&root).unwrap();
+    drop(persistence::Store::open(&root).unwrap());
     let place = Place {
         lock_path: root.join("ring.lock"),
         name_prefix: format!("/fdsv{}x{serial}", std::process::id()),
@@ -150,6 +150,8 @@ fn storage_fixture_with_slots(slot_count: u64) -> RingFixture {
         root,
         writer,
         following_fans: 2,
+        owns_root: true,
+        persister: std::sync::Mutex::default(),
     }
 }
 
@@ -213,83 +215,26 @@ fn storage_publish(fixture: &mut RingFixture, tick: u64, disks: Option<&DiskSnap
         .unwrap();
 }
 
-fn storage_seal(fixture: &RingFixture) {
-    let mut reader = RingReader::open_generation(fixture.writer.name()).unwrap();
-    let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-    let mut window = Window::new(
-        WindowIdentity {
-            run: fixture.writer.identity().unwrap(),
-            window: 0,
-        },
-        Limits::from_shape(&reader.shape()).unwrap(),
-    );
-    for _attempt in 0..=8 {
-        match reader.read_into(&mut tick).unwrap() {
-            Found::Nothing => break,
-            Found::Missed { .. } => panic!("fixture publications overwritten"),
-            Found::Publication { publication, .. } => {
-                let times = tick.times.unwrap();
-                window
-                    .push_tick(
-                        &persistence::Observation {
-                            publication,
-                            wall_ns: Some(times.wall_ns),
-                            continuous_ns: Some(times.continuous_ns),
-                            awake_ns: Some(times.awake_ns),
-                        },
-                        &tick,
-                        &[],
-                    )
-                    .unwrap();
-            }
-        }
-    }
-    seal_window(&fixture.root, &window);
-}
-
 #[test]
-fn reads_mixed_extended_and_legacy_minutes_without_fabricating_disks() {
-    // Goal: a recording can retain measured disk history beside a legacy unavailable minute.
-    // Method: seal a disk minute, then an original-schema minute, and query both with Session.
+fn reads_a_minute_without_disk_readings_beside_a_measured_one_without_fabricating_disks() {
+    // Goal: a recording keeps measured disk history beside a minute that read no disks.
+    // Method: save a measured minute, then a minute of one reading without disks, and read both.
     let mut fixture = storage_fixture();
     storage_publish(&mut fixture, 1, Some(&storage_snapshot(1)));
     storage_publish(&mut fixture, 2, Some(&storage_snapshot(2)));
-    storage_seal(&fixture);
-    let shape = RingReader::open_generation(fixture.writer.name())
-        .unwrap()
-        .shape();
-    let mut tick = persistence::tick_buffer(&shape).unwrap();
-    tick.run_tick = 61;
-    let mut legacy = Window::new(
-        WindowIdentity {
-            run: fixture.writer.identity().unwrap(),
-            window: 1,
-        },
-        Limits::from_shape(&shape).unwrap(),
-    );
-    legacy
-        .push_tick(
-            &persistence::Observation {
-                publication: 3,
-                wall_ns: Some(1061 * NANOSECONDS_PER_SECOND),
-                continuous_ns: Some(61 * NANOSECONDS_PER_SECOND),
-                awake_ns: Some(61 * NANOSECONDS_PER_SECOND),
-            },
-            &tick,
-            &[],
-        )
-        .unwrap();
-    seal_window(&fixture.root, &legacy);
+    fixture.seal_held();
+    storage_publish(&mut fixture, 61, None);
+    fixture.seal_held();
 
     let mut saved = Session::open(&fixture.root).unwrap();
-    let extended = saved.select(1002, 0).unwrap();
-    let legacy = saved.select(1061, 0).unwrap();
+    let measured = saved.select(1002, 0).unwrap();
+    let unmeasured = saved.select(1061, 0).unwrap();
 
     assert_eq!(saved.catalog()["windows"], 2);
-    assert_eq!(extended["summary"]["storage"]["read_bps"], 4096.0);
-    assert!(legacy["summary"]["storage"].is_null());
-    assert_eq!(legacy["trends"][1]["storage"]["read_bps"], 4096.0);
-    assert!(legacy["trends"][2]["storage"].is_null());
+    assert_eq!(measured["summary"]["storage"]["read_bps"], 4096.0);
+    assert!(unmeasured["summary"]["storage"].is_null());
+    assert_eq!(unmeasured["trends"][1]["storage"]["read_bps"], 4096.0);
+    assert!(unmeasured["trends"][2]["storage"].is_null());
 }
 
 mod merge_tests {

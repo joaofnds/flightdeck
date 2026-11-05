@@ -70,7 +70,7 @@ impl TailRange {
     }
 
     /// The last second of a context whose tail this could be, which a session's span must hold.
-    fn context_last_second(self) -> u64 {
+    pub(crate) fn context_last_second(self) -> u64 {
         self.join_second().saturating_add(CHARTED_SECONDS)
     }
 

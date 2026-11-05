@@ -7,15 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use collector::machine::Memory;
 use collector::processes::{Process, Task, Usage};
-use collector::recording::{
-    RegisteredRun, Registry, new_run_identity, private, recording_identity,
-};
+use collector::recording::{RegisteredRun, Registry, new_run_identity, private, read_identity};
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, IdentityObservation, IdentityPublication, ObservationTimes,
     Place, ProcessCreation, ProcessIdentity, ProgramBuffers, ProgramBytes, ProgramReference,
-    Readings, RingReader, Shape, UsageAvailability, Writer,
+    Readings, RingReader, RunIdentity, Shape, UsageAvailability, Writer,
 };
-use persistence::{Begin, Limits, Losses, Manifest, Observation, Window, WindowIdentity};
+use persistence::{Limits, Manifest, Observation, Window, WindowIdentity};
 
 use super::FrozenRecording;
 
@@ -72,7 +70,12 @@ fn retries_a_failed_eligible_seal_before_completing_replay() {
         target: &source.target,
     })
     .unwrap();
-    let destination = marker(frozen.root(), source.writer.identity().unwrap().run, 30);
+    let destination = marker(
+        frozen.root(),
+        &source.root,
+        &source.writer.identity().unwrap(),
+        30,
+    );
     frozen.replay_reset(1859).unwrap();
     fs::create_dir(&destination).unwrap();
 
@@ -192,13 +195,13 @@ fn completes_a_finite_paced_replay_and_exposes_its_seal_only_after_eligible_step
     let reader = RingReader::open_generation(&registry.runs[0].ring_name).unwrap();
     frozen.replay_reset(1859).unwrap();
     assert!(frozen.replay_run(10_000).is_err());
-    assert!(!marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    assert!(!marker(frozen.root(), &source.root, &registry.runs[0].identity, 30).exists());
 
     frozen.replay_run(1).unwrap();
 
     assert_eq!(reader.publication_newest().unwrap(), 1900);
     assert!(reader.completed());
-    assert!(marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    assert!(marker(frozen.root(), &source.root, &registry.runs[0].identity, 30).exists());
 }
 
 #[test]
@@ -218,7 +221,7 @@ fn replays_only_monotone_retained_publications_and_eligible_seals() {
     frozen.replay_reset(1781).unwrap();
     assert_eq!(reader.publication_newest().unwrap(), 1780);
     assert!(!reader.completed());
-    assert!(!marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    assert!(!marker(frozen.root(), &source.root, &registry.runs[0].identity, 30).exists());
     frozen.replay_step(1800).unwrap();
     assert_eq!(reader.publication_newest().unwrap(), 1800);
     let expectation = source.root.join("step.json");
@@ -230,9 +233,9 @@ fn replays_only_monotone_retained_publications_and_eligible_seals() {
     assert!(frozen.replay_step(1799).is_err());
     assert!(frozen.replay_seal(30).is_err());
     frozen.replay_step(1860).unwrap();
-    assert!(!marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    assert!(!marker(frozen.root(), &source.root, &registry.runs[0].identity, 30).exists());
     frozen.replay_seal(30).unwrap();
-    assert!(marker(frozen.root(), registry.runs[0].identity.run, 30).exists());
+    assert!(marker(frozen.root(), &source.root, &registry.runs[0].identity, 30).exists());
     assert_eq!(reader.publication_newest().unwrap(), 1860);
     assert!(frozen.replay_complete().is_err());
     frozen.replay_step(1900).unwrap();
@@ -366,15 +369,15 @@ fn captures_real_identity_rows_and_restores_covered_and_overwritten_gaps() {
     source.publish(1901);
     assert_eq!(reader.publication_newest().unwrap(), 1900);
     for gap in [1, 30, 60, 1800] {
-        assert_checkpoint(&frozen, run, gap);
+        assert_checkpoint(&frozen, &source, run, gap);
         frozen.advance().unwrap();
         assert_eq!(reader.publication_newest().unwrap(), 1900);
-        assert!(marker(frozen.root(), run.identity.run, 30).exists());
+        assert!(marker(frozen.root(), &source.root, &run.identity, 30).exists());
     }
     assert!(frozen.checkpoint(1901).is_err());
     assert_latest_row(&run.ring_name, &source.program);
-    let original = marker(&source.root, run.identity.run, 0);
-    let captured = marker(frozen.root(), run.identity.run, 0);
+    let original = marker(&source.root, &source.root, &run.identity, 0);
+    let captured = marker(frozen.root(), &source.root, &run.identity, 0);
     assert_eq!(
         fs::metadata(&original).unwrap().ino(),
         fs::metadata(&captured).unwrap().ino()
@@ -385,10 +388,13 @@ fn captures_real_identity_rows_and_restores_covered_and_overwritten_gaps() {
     assert!(source.target.exists());
     assert!(RingReader::open_generation(&run.ring_name).is_err());
     assert_eq!(
-        persistence::read_committed(&source.target, &captured)
-            .unwrap()
-            .identity
-            .window,
+        persistence::read_committed(
+            &source.target,
+            &proof(&source.target, &source.root, &run.identity, 0)
+        )
+        .unwrap()
+        .identity
+        .window,
         0
     );
     assert_eq!(
@@ -400,15 +406,15 @@ fn captures_real_identity_rows_and_restores_covered_and_overwritten_gaps() {
     );
 }
 
-fn assert_checkpoint(frozen: &FrozenRecording, run: &RegisteredRun, gap: u64) {
+fn assert_checkpoint(frozen: &FrozenRecording, source: &Fixture, run: &RegisteredRun, gap: u64) {
     frozen.checkpoint(gap).unwrap();
     let mut reader = RingReader::open_generation(&run.ring_name).unwrap();
     assert_eq!(reader.publication_newest().unwrap(), 1900 - gap);
     assert_eq!(
-        marker(frozen.root(), run.identity.run, 30).exists(),
+        marker(frozen.root(), &source.root, &run.identity, 30).exists(),
         gap < 60
     );
-    let prefix = marker(frozen.root(), run.identity.run, 0);
+    let prefix = proof(frozen.root(), &source.root, &run.identity, 0);
     assert_eq!(
         persistence::read_committed(frozen.root(), &prefix)
             .unwrap()
@@ -431,7 +437,7 @@ impl Fixture {
         private::create_private_dir(&root).unwrap();
         drop(persistence::Store::open(&root).unwrap());
         let target = root.join("captured");
-        let identity = new_run_identity(recording_identity(&root).unwrap()).unwrap();
+        let identity = new_run_identity(read_identity(&root).unwrap()).unwrap();
         let mut writer = Writer::create_with_identity(
             &Place {
                 lock_path: root.join("ring.lock"),
@@ -510,8 +516,8 @@ impl Fixture {
                     &Observation {
                         publication,
                         wall_ns: Some(publication * 1_000_000_000),
-                        continuous_ns: Some(publication * 1_000_000_000),
-                        awake_ns: Some(publication * 1_000_000_000),
+                        continuous_ns: Some((publication - 1) * 1_000_000_000),
+                        awake_ns: Some((publication - 1) * 1_000_000_000),
                     },
                     &tick,
                     &[],
@@ -565,8 +571,8 @@ impl Fixture {
                 },
                 Some(&ObservationTimes {
                     wall_ns: self.wall_ns.unwrap_or(publication * 1_000_000_000),
-                    continuous_ns: publication * 1_000_000_000,
-                    awake_ns: publication * 1_000_000_000,
+                    continuous_ns: (publication - 1) * 1_000_000_000,
+                    awake_ns: (publication - 1) * 1_000_000_000,
                 }),
                 &IdentityPublication {
                     processes: &[observation],
@@ -713,34 +719,7 @@ impl Drop for Fixture {
 }
 
 fn seal(root: &std::path::Path, window: &Window) {
-    let store = persistence::Store::open(root).unwrap();
-    let Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-        panic!("test window already committed");
-    };
-    let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
-    let publications = window.publication_range();
-    let events = window.event_range();
-    store
-        .commit(
-            pending,
-            Manifest {
-                event_batches: None,
-                identity: window.identity,
-                publication_first: publications.start,
-                publication_end: publications.end,
-                events_first: events.start,
-                events_end: events.end,
-                wall_ns: Some(persistence::TimeBounds {
-                    min: publications.start * 1_000_000_000,
-                    max: (publications.end - 1) * 1_000_000_000,
-                }),
-                continuous_ns: None,
-                awake_ns: None,
-                losses: Losses::default(),
-                data_directory: String::new(),
-                tables,
-            },
-        )
+    persistence::canonical::ready_fixture::publish_window(root, window, |_path, _tables| {})
         .unwrap();
 }
 
@@ -773,8 +752,51 @@ fn process(publication: u64) -> Process {
     }
 }
 
-fn marker(root: &std::path::Path, run: collector::ring::Identity, window: u64) -> PathBuf {
-    persistence::layout::WindowKey { run, window }.marker(root)
+/// What `run` saved as `window`, of the recording at `source`.
+fn saved(source: &std::path::Path, run: &RunIdentity, window: u64) -> Manifest {
+    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(1 << 28));
+    persistence::canonical::catalog::Catalog::open(source, &budget)
+        .unwrap()
+        .windows_of(run, &mut persistence::canonical::ReadWork::default())
+        .unwrap()
+        .into_iter()
+        .find(|manifest| manifest.identity.window == window)
+        .unwrap()
+}
+
+/// The proof of `window` under `root`, a capture of the recording at `source` or that recording.
+fn proof(
+    root: &std::path::Path,
+    source: &std::path::Path,
+    run: &RunIdentity,
+    window: u64,
+) -> PathBuf {
+    root.join(saved(source, run, window).data_directory)
+        .join("metadata")
+}
+
+/// The name of `window` among the recording's ordinary windows under `root`, a capture of the
+/// recording at `source` or that recording.
+fn marker(
+    root: &std::path::Path,
+    source: &std::path::Path,
+    run: &RunIdentity,
+    window: u64,
+) -> PathBuf {
+    let inode = fs::metadata(proof(source, source, run, window))
+        .unwrap()
+        .ino();
+    let ordinary = source.join("ordinary");
+    for leaf in fs::read_dir(&ordinary).unwrap() {
+        let leaf = leaf.unwrap().path();
+        for name in fs::read_dir(&leaf).unwrap() {
+            let name = name.unwrap();
+            if name.metadata().unwrap().ino() == inode {
+                return root.join(name.path().strip_prefix(source).unwrap());
+            }
+        }
+    }
+    panic!("the recording names no window {window}");
 }
 
 fn assert_latest_row(name: &str, original_program: &ProgramReference) {

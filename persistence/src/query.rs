@@ -1,15 +1,16 @@
 //! Bounded query sources for saved and staged recording tables.
 
-use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
+use crate::canonical::ReadWork;
+use crate::canonical::catalog::Catalog;
 use crate::engine::{Engine, Row};
-use crate::layout::{self, DirectoryNames, Kind, WindowLocation};
+use crate::resources::ByteBudget;
 use crate::schema::{CORE_STATE_FREQUENCY_FIELD, PROCESS_GPU_FIELD, Table};
-use collector::recording::discovery::Selection;
 use polars::prelude::DataType;
 
-use crate::{Manifest, Result, read_committed};
+use crate::{Manifest, Result};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Second {
@@ -82,47 +83,24 @@ const CORE_STATE_COLUMNS_MAX: usize = 5;
 
 /// Errors preserve incomplete enumeration rather than returning a complete empty answer.
 pub fn processes_at_second(root: &Path, second: u64) -> Result<Second> {
+    const NS: u64 = 1_000_000_000;
+    const CATALOG_BYTES_MAX: usize = 1 << 28;
     validate_root(root)?;
     collector::recording::private::verify_directory(root)?;
+    let budget = Arc::new(ByteBudget::new(CATALOG_BYTES_MAX));
+    let catalog = Catalog::open(root, &budget)?;
+    let mut work = ReadWork::default();
     let mut result = Second::default();
-    visit_names(&layout::base(root, Kind::Data), |run| {
-        layout::validate_run(run)?;
-        let run_path = layout::run(root, Kind::Data, collector::recording::parse_identity(run)?);
-        visit_names(&run_path, |day| {
-            layout::validate_day(day)?;
-            visit_names(&run_path.join(day), |name| {
-                if name.starts_with('.') {
-                    return Ok(());
-                }
-                let location = WindowLocation::parse(&DirectoryNames {
-                    run,
-                    day,
-                    window: name,
-                })?;
-                let window = location.name;
-                if window.select_second(second)? == Selection::Outside {
-                    return Ok(());
-                }
-                let marker = location.key.marker(root);
-                let manifest = match read_committed(root, &marker) {
-                    Ok(manifest) => manifest,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-                    Err(error) => return Err(error.into()),
-                };
-                if Path::new(&manifest.data_directory) != location.ready_relative() {
-                    return Err(io::Error::from(io::ErrorKind::InvalidData).into());
-                }
-                match window.select_second(second)? {
-                    Selection::Match => result
-                        .processes
-                        .extend(query_window(root, &manifest, second)?),
-                    Selection::Unknown => result.unavailable_time_windows += 1,
-                    Selection::Outside => unreachable!("outside window filtered above"),
-                }
-                Ok(())
-            })
-        })
-    })?;
+    let first_ns = second
+        .checked_mul(NS)
+        .ok_or(crate::Error::Bound("second"))?;
+    for manifest in catalog.windows_in(first_ns, first_ns + NS, &mut work)? {
+        result
+            .processes
+            .extend(query_window(root, &manifest, second)?);
+    }
+    result.unavailable_time_windows =
+        collector::u64_from_usize(catalog.windows_without_clock(&mut work)?.len());
     result.processes.sort_unstable();
     Ok(result)
 }
@@ -138,13 +116,9 @@ pub fn validate_root(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn visit_names(path: &Path, mut visit: impl FnMut(&str) -> Result<()>) -> Result<()> {
-    layout::visit_names(path, &mut visit)
-}
-
 fn query_window(root: &Path, manifest: &Manifest, second: u64) -> Result<Vec<(i32, u64)>> {
     let connection = Engine::new();
-    let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(
+    let budget = Arc::new(ByteBudget::new(
         usize::try_from(crate::resources::WORKING_BYTES_MAX)
             .map_err(|_| crate::Error::Bound("query memory"))?,
     ));

@@ -5,14 +5,11 @@ use collector::machine::Memory;
 use collector::processes::{Process, Task};
 use collector::recording::{RegisteredRun, Registry, private};
 use collector::ring::{
-    DictionaryCapacity, Dropped, Found, Identity, IdentityObservation, IdentityPublication,
-    ObservationTimes, Place, ProcessIdentity, RingReader, RunIdentity, Shape, UsageAvailability,
-    Writer,
+    DictionaryCapacity, Dropped, Identity, IdentityObservation, IdentityPublication,
+    ObservationTimes, Place, ProcessIdentity, RunIdentity, Shape, UsageAvailability, Writer,
 };
 use persistence::engine::{Engine, Row};
-use persistence::{
-    Begin, Encoder, Limits, Losses, Manifest, Store, TimeBounds, Window, WindowIdentity,
-};
+use persistence::{Manifest, Store};
 
 use super::tests::usage;
 use super::*;
@@ -55,7 +52,7 @@ struct Recorded {
 #[test]
 fn reopens_real_v4_publications_after_writer_exit_and_aggregates_original_captured_metadata() {
     // Goal: saved App totals use captured metadata after the source writer has exited.
-    // Method: publish through v4, stage/encode/commit, drop writer, reopen Parquet and aggregate.
+    // Method: publish through v4, save with the worker, drop writer, reopen Parquet and aggregate.
     let mut fixture = Fixture::new();
     fixture.record();
     let manifest = fixture.manifest.as_ref().unwrap();
@@ -198,95 +195,22 @@ impl Fixture {
         publish(&mut writer, 1);
         writer.finish();
         drop(writer);
-        let mut staged = None;
-        self.stage(&identity, &mut staged);
-        let window = staged.unwrap();
-        self.commit(&store, &window);
-    }
-
-    fn commit(&mut self, store: &Store, window: &Window) {
-        let Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-            panic!("fresh fixture already committed");
+        let registered = RegisteredRun {
+            identity,
+            ring_name: self.ring.clone(),
+            collector_pid: 0,
         };
-        let tables = Encoder.encode(window, pending.path()).unwrap();
-        self.manifest = Some(
-            store
-                .commit(
-                    pending,
-                    Manifest {
-                        event_batches: None,
-                        identity: window.identity,
-                        publication_first: 1,
-                        publication_end: 3,
-                        events_first: 1,
-                        events_end: 1,
-                        wall_ns: Some(TimeBounds {
-                            min: 1_800_000_000_000_000_000,
-                            max: 1_800_000_001_000_000_000,
-                        }),
-                        continuous_ns: Some(TimeBounds {
-                            min: 1_000_000_000,
-                            max: 2_000_000_000,
-                        }),
-                        awake_ns: Some(TimeBounds {
-                            min: 1_000_000_000,
-                            max: 2_000_000_000,
-                        }),
-                        losses: Losses::default(),
-                        data_directory: String::new(),
-                        tables,
-                    },
-                )
-                .unwrap(),
-        );
-    }
-
-    fn stage(&self, identity: &RunIdentity, output: &mut Option<Window>) {
-        let mut reader = RingReader::open_generation(&self.ring).unwrap();
-        assert!(reader.completed());
-        assert_eq!(reader.source_layout_version(), 6);
-        let mut tick = persistence::tick_buffer(&SHAPE).unwrap();
-        let mut identities = Vec::with_capacity(5);
-        let window = output.insert(Window::new(
-            WindowIdentity {
-                run: *identity,
-                window: 0,
-            },
-            Limits::from_shape(&SHAPE).unwrap(),
+        persistence::worker::seal_held_windows(
+            &store,
+            &registered,
+            None,
+            &mut persistence::worker::HeldWindows::default(),
+            &crate::live::identity_fixture::Underived,
+        )
+        .unwrap();
+        self.manifest = Some(crate::live::identity_fixture::saved_window(
+            &self.root, &identity, 0,
         ));
-        for expected in 1..=2 {
-            let Found::Publication { publication, .. } = reader
-                .read_identity_into(&mut tick, &mut identities)
-                .unwrap()
-            else {
-                panic!("fixture publication absent");
-            };
-            assert_eq!(publication, expected);
-            let times = tick.times.unwrap();
-            window
-                .push_tick_with_identity(
-                    &persistence::Observation {
-                        publication,
-                        wall_ns: Some(times.wall_ns),
-                        continuous_ns: Some(times.continuous_ns),
-                        awake_ns: Some(times.awake_ns),
-                    },
-                    &tick,
-                    &[],
-                    &persistence::IdentitySource {
-                        reader: &reader,
-                        processes: &identities,
-                        events: &[],
-                    },
-                )
-                .unwrap();
-        }
-        assert_eq!(
-            reader
-                .read_identity_into(&mut tick, &mut identities)
-                .unwrap(),
-            Found::Nothing
-        );
     }
 
     fn read(&self, connection: &Engine, output: &mut Vec<Recorded>) {

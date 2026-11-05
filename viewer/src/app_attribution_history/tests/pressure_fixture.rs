@@ -12,8 +12,9 @@ pub(super) struct Recording {
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+/// Room for a minute of readings, which a persister reads while the minute passes.
 const SHAPE: Shape = Shape {
-    slot_count: 2,
+    slot_count: 64,
     cpu_capacity: 1,
     interface_capacity: 1,
     core_capacity: 1,
@@ -31,7 +32,7 @@ impl Recording {
             "flightdeck-attribution-pressure-{}-{serial}",
             std::process::id()
         ));
-        collector::recording::private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let place = collector::ring::Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdap{}x{serial}", std::process::id()),
@@ -61,46 +62,25 @@ impl Recording {
     }
 
     fn capture(&mut self) {
-        let mut reader = collector::ring::RingReader::open_generation(self.writer.name()).unwrap();
-        let mut tick = persistence::tick_buffer(&SHAPE).unwrap();
-        let mut identities = Vec::with_capacity(300);
+        let store = persistence::Store::open(&self.root).unwrap();
+        let run = collector::recording::RegisteredRun {
+            identity: self.writer.identity().unwrap(),
+            ring_name: self.writer.name().to_owned(),
+            collector_pid: 0,
+        };
+        let mut held = persistence::worker::HeldWindows::default();
         for minute in 0..3 {
-            let mut window = persistence::Window::new(
-                persistence::WindowIdentity {
-                    run: self.writer.identity().unwrap(),
-                    window: minute,
-                },
-                persistence::Limits::from_shape(&SHAPE).unwrap(),
-            );
-            let end = (minute * 60 + 60).min(128);
-            for run_tick in minute * 60..end {
+            for run_tick in minute * 60..(minute * 60 + 60).min(128) {
                 self.publish(run_tick);
-                let found = reader
-                    .read_identity_into(&mut tick, &mut identities)
-                    .unwrap();
-                let collector::ring::Found::Publication { publication, .. } = found else {
-                    panic!("pressure fixture lost a scheduled reading");
-                };
-                let times = tick.times.unwrap();
-                window
-                    .push_tick_with_identity(
-                        &persistence::Observation {
-                            publication,
-                            wall_ns: Some(times.wall_ns),
-                            continuous_ns: Some(times.continuous_ns),
-                            awake_ns: Some(times.awake_ns),
-                        },
-                        &tick,
-                        &[],
-                        &persistence::IdentitySource {
-                            reader: &reader,
-                            processes: &identities,
-                            events: &[],
-                        },
-                    )
-                    .unwrap();
             }
-            self.seal(&window, end);
+            persistence::worker::seal_held_windows(
+                &store,
+                &run,
+                Some(minute),
+                &mut held,
+                &crate::live::identity_fixture::Underived,
+            )
+            .unwrap();
         }
     }
 
@@ -186,38 +166,6 @@ impl Recording {
                 },
             });
         }
-    }
-
-    fn seal(&self, window: &persistence::Window, end: u64) {
-        let store = persistence::Store::open(&self.root).unwrap();
-        let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-            panic!("pressure window was already committed");
-        };
-        let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
-        let publications = window.publication_range();
-        let events = window.event_range();
-        store
-            .commit(
-                pending,
-                persistence::Manifest {
-                    event_batches: None,
-                    identity: window.identity,
-                    publication_first: publications.start,
-                    publication_end: publications.end,
-                    events_first: events.start,
-                    events_end: events.end,
-                    wall_ns: Some(persistence::TimeBounds {
-                        min: (1000 + window.identity.window * 60) * 1_000_000_000,
-                        max: (999 + end) * 1_000_000_000,
-                    }),
-                    continuous_ns: None,
-                    awake_ns: None,
-                    losses: persistence::Losses::default(),
-                    data_directory: String::new(),
-                    tables,
-                },
-            )
-            .unwrap();
     }
 }
 

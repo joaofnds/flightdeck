@@ -229,7 +229,7 @@ impl Candidate {
         Self::new_with(root, writer, run)
     }
 
-    /// A candidate on a recording of the registered format, which no creator makes yet.
+    /// A candidate whose ring has no registration behind it, as a test's own ring does.
     fn registered(rows: u64) -> Self {
         let (root, place) = Self::new_place(rows);
         let directory = PrivateDirectory::open(&root).unwrap();
@@ -268,7 +268,7 @@ impl Candidate {
         let root =
             std::env::temp_dir().join(format!("fd-event-stream-{}-{serial}", std::process::id()));
         assert!(!root.exists());
-        collector::recording::private::create_private_dir(&root).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
         let place = ring::Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdes{}{serial}", std::process::id()),
@@ -461,8 +461,7 @@ impl Candidate {
     }
 
     fn verify_ordinary(&self, rows: u64) {
-        let store = persistence::Store::open(&self.root).unwrap();
-        let manifest = store.progress(&self.run).unwrap().unwrap();
+        let manifest = crate::saved_windows::saved_manifests(&self.root, &self.run).swap_remove(0);
         assert_eq!(
             manifest.publication_first..manifest.publication_end,
             rows - 7..rows + 1
@@ -494,8 +493,7 @@ impl Candidate {
     }
 
     fn verify_terminal(&self, rows: u64) {
-        let store = persistence::Store::open(&self.root).unwrap();
-        assert!(store.progress(&self.run).unwrap().is_none());
+        assert!(crate::saved_windows::saved_manifests(&self.root, &self.run).is_empty());
         let pages = persistence::event_recovery::Pages::open(&self.root, &self.run).unwrap();
         let mut expected = 1;
         for _page in 0..ROWS_MAX {

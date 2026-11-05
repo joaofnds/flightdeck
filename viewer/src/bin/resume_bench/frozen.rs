@@ -5,7 +5,7 @@ use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
-use collector::recording::{Registry, private, random_identity, read_identity};
+use collector::recording::{Registry, private, random_identity};
 
 #[path = "frozen_files.rs"]
 mod files;
@@ -46,11 +46,10 @@ impl FrozenRecording {
             .runs
             .last()
             .ok_or_else(|| io::Error::other("recording has no registered ring"))?;
-        let recording = read_identity(directories.source)?;
 
         DirBuilder::new().mode(0o700).create(directories.target)?;
         private::verify_directory(directories.target)?;
-        let files = FrozenFiles::capture(directories, recording, &active.identity)?;
+        let files = FrozenFiles::capture(directories, &active.identity)?;
         let mut rings = Vec::with_capacity(registry.runs.len());
         let nonce = random_identity()?.0[0];
         assert!(registry.runs.len() <= 2);

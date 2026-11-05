@@ -13,7 +13,7 @@ mod identity_fixture;
 #[cfg(test)]
 mod tests {
     use collector::machine::Memory;
-    use collector::recording::{Registration, private};
+    use collector::recording::{RegisteredRun, Registration};
     use collector::ring::{Dropped, ObservationTimes, Place, Readings, Shape, Writer};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +25,7 @@ mod tests {
         root: PathBuf,
         writer: Writer,
         elapsed: u64,
+        persister: std::sync::Mutex<persistence::worker::HeldWindows>,
     }
 
     impl Recording {
@@ -54,7 +55,7 @@ mod tests {
             collector::ring::unlink_generation(recording.writer.name()).unwrap();
             recording.writer = writer;
             let registry = collector::recording::Registry {
-                runs: vec![collector::recording::RegisteredRun {
+                runs: vec![RegisteredRun {
                     identity: recording.writer.identity().unwrap(),
                     ring_name: recording.writer.name().to_owned(),
                     collector_pid: 0,
@@ -69,7 +70,7 @@ mod tests {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
             let root = std::env::temp_dir()
                 .join(format!("flightdeck-live-{}-{serial}", std::process::id()));
-            private::create_private_dir(&root).unwrap();
+            drop(persistence::Store::open(&root).unwrap());
             let place = Place {
                 lock_path: root.join("ring.lock"),
                 name_prefix: format!("/fdlive{}x{serial}", std::process::id()),
@@ -93,6 +94,7 @@ mod tests {
                 root,
                 writer,
                 elapsed: 0,
+                persister: std::sync::Mutex::default(),
             }
         }
 
@@ -100,73 +102,23 @@ mod tests {
             self.seal_window(0);
         }
 
+        /// Saves the windows the ring holds past what is saved through `window_index`, with the
+        /// persister's own worker.
         fn seal_window(&self, window_index: u64) {
-            let mut reader =
-                collector::ring::RingReader::open_generation(self.writer.name()).unwrap();
-            let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-            let identity = persistence::WindowIdentity {
-                run: self.writer.identity().unwrap(),
-                window: window_index,
-            };
-            let mut window = persistence::Window::new(
-                identity,
-                persistence::Limits::from_shape(&reader.shape()).unwrap(),
-            );
-            for _attempt in 0..8 {
-                match reader.read_into(&mut tick).unwrap() {
-                    collector::ring::Found::Nothing => break,
-                    collector::ring::Found::Missed { .. } => panic!("fixture source overwritten"),
-                    collector::ring::Found::Publication { publication, .. } => {
-                        let times = tick.times.unwrap();
-                        if times.continuous_ns >= (window_index + 1) * 60_000_000_000 {
-                            break;
-                        }
-                        if times.continuous_ns < window_index * 60_000_000_000 {
-                            continue;
-                        }
-                        window
-                            .push_tick(
-                                &persistence::Observation {
-                                    publication,
-                                    wall_ns: Some(times.wall_ns),
-                                    continuous_ns: Some(times.continuous_ns),
-                                    awake_ns: Some(times.awake_ns),
-                                },
-                                &tick,
-                                &[],
-                            )
-                            .unwrap();
-                    }
-                }
-            }
             let store = persistence::Store::open(&self.root).unwrap();
-            let persistence::Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-                panic!("fixture window already committed");
+            let run = RegisteredRun {
+                identity: self.writer.identity().unwrap(),
+                ring_name: self.writer.name().to_owned(),
+                collector_pid: 0,
             };
-            let tables = persistence::Encoder
-                .encode(&window, pending.path())
-                .unwrap();
-            let publications = window.publication_range();
-            let events = window.event_range();
-            store
-                .commit(
-                    pending,
-                    persistence::Manifest {
-                        event_batches: None,
-                        identity,
-                        publication_first: publications.start,
-                        publication_end: publications.end,
-                        events_first: events.start,
-                        events_end: events.end,
-                        wall_ns: None,
-                        continuous_ns: None,
-                        awake_ns: None,
-                        losses: persistence::Losses::default(),
-                        data_directory: String::new(),
-                        tables,
-                    },
-                )
-                .unwrap();
+            persistence::worker::seal_held_windows(
+                &store,
+                &run,
+                Some(window_index),
+                &mut self.persister.lock().unwrap(),
+                &super::identity_fixture::Underived,
+            )
+            .unwrap();
         }
 
         fn publish_resources(&mut self, second: u64) {
@@ -508,7 +460,7 @@ mod tests {
         registry
             .add(
                 &recording.root,
-                collector::recording::RegisteredRun {
+                RegisteredRun {
                     identity: current,
                     ring_name: recording.writer.name().to_owned(),
                     collector_pid: std::process::id(),
@@ -1094,6 +1046,7 @@ mod tests {
         recording.seal();
         let mut session = viewer::Session::open(&recording.root).unwrap();
         session.select(1001, 0).unwrap();
+        session.page("ticks", 0).unwrap();
         let work = measured.counts();
 
         assert_eq!(work.staged_ticks, 2);

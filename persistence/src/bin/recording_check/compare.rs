@@ -3,11 +3,9 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use collector::recording::discovery::Selection;
 use collector::ring::{Identity, RunIdentity};
 use persistence::engine::{Engine, InterruptHandle, Row as QueryRow};
-use persistence::layout::{self, DirectoryNames, Kind, WindowLocation};
-use persistence::{Error, Manifest, Result, read_committed};
+use persistence::{Error, Manifest, Result};
 use polars::prelude::AnyValue;
 
 use super::rows::{self, Row, TABLES};
@@ -342,55 +340,24 @@ fn inspect_row_kind(line: &str, source: &mut Reference) -> Result<()> {
 }
 
 fn discover(root: &Path, source: &Reference) -> Result<Vec<Manifest>> {
+    const NS: u64 = 1_000_000_000;
+    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(1 << 28));
+    let catalog = persistence::canonical::catalog::Catalog::open(root, &budget)?;
+    let mut work = persistence::canonical::ReadWork::default();
     let mut manifests = Vec::with_capacity(128);
-    visit(&layout::base(root, Kind::Data), |run| {
-        layout::validate_run(run)?;
-        let run_path = layout::run(root, Kind::Data, collector::recording::parse_identity(run)?);
-        visit(&run_path, |day| {
-            layout::validate_day(day)?;
-            visit(&run_path.join(day), |name| {
-                if name.starts_with('.') {
-                    return Ok(());
-                }
-                check_deadline(source.deadline)?;
-                let location = WindowLocation::parse(&DirectoryNames {
-                    run,
-                    day,
-                    window: name,
-                })?;
-                let window = location.name;
-                let mut selected = false;
-                for second in &source.seconds {
-                    if window.select_second(*second)? == Selection::Match {
-                        selected = true;
-                        break;
-                    }
-                }
-                if !selected {
-                    return Ok(());
-                }
-                let marker = location.key.marker(root);
-                let manifest = match read_committed(root, &marker) {
-                    Ok(manifest) => manifest,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                    Err(error) => return Err(error.into()),
-                };
-                if manifest.identity.run != source.identity {
-                    return Ok(());
-                }
-                if Path::new(&manifest.data_directory) != location.ready_relative() {
-                    return Err(bound(
-                        "discovered directory does not match canonical marker",
-                    ));
-                }
-                if manifests.len() == 128 {
-                    return Err(bound("reference window count"));
-                }
-                manifests.push(manifest);
-                Ok(())
-            })
-        })
-    })?;
+    for second in &source.seconds {
+        check_deadline(source.deadline)?;
+        let first_ns = second.checked_mul(NS).ok_or_else(|| bound("second"))?;
+        for manifest in catalog.windows_in(first_ns, first_ns + NS, &mut work)? {
+            if manifest.identity.run != source.identity || manifests.contains(&manifest) {
+                continue;
+            }
+            if manifests.len() == 128 {
+                return Err(bound("reference window count"));
+            }
+            manifests.push(manifest);
+        }
+    }
     discover_order(&mut manifests, &source.identity)?;
     Ok(manifests)
 }
@@ -417,10 +384,6 @@ fn discover_order(manifests: &mut [Manifest], identity: &RunIdentity) -> Result<
     }
 
     Ok(())
-}
-
-fn visit(path: &Path, entry: impl FnMut(&str) -> Result<()>) -> Result<()> {
-    layout::visit_names(path, entry)
 }
 
 fn compare_table(

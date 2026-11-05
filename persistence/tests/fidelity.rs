@@ -39,8 +39,7 @@ mod tests {
     };
     use collector::tracker::{Event, Noticed};
     use persistence::{
-        Begin, Encoder, IdentitySource, Limits, Losses, Manifest, NumberedEvent, Observation,
-        Store, TimeBounds, Window, WindowIdentity,
+        IdentitySource, Limits, NumberedEvent, Observation, Store, Window, WindowIdentity,
     };
 
     struct Recording(PathBuf);
@@ -80,7 +79,7 @@ mod tests {
 
         let captured = capture::run(&place.lock_path, &reference, 10);
         let window = stage_captured_legacy(&mut reader, &identity, &shape);
-        commit_identity(&store, &window, |_| {});
+        commit_identity(&recording.0, &window, |_| {});
         drop(reader);
         let name = writer.name().to_owned();
         drop(writer);
@@ -476,7 +475,7 @@ mod tests {
         };
         let window = stage_identity(&recording, &reference, &identity);
 
-        commit_identity(&store, &window, |_| {});
+        commit_identity(&recording.0, &window, |_| {});
 
         compare::run(&recording.0, &reference).unwrap();
     }
@@ -619,16 +618,56 @@ mod tests {
             "SELECT * REPLACE(1::UTINYINT AS identity_availability) FROM source WHERE event=2 \
             UNION ALL SELECT * FROM source WHERE event<>2",
             "source and disk typed values differ";
-        detects_omitted_independent_event_identity, persistence::schema::Table::Events,
-            "SELECT * FROM source WHERE event<>1",
-            "source and disk typed values differ";
-        detects_extra_independent_event_identity, persistence::schema::Table::Events,
-            "SELECT * FROM source UNION ALL SELECT * FROM source WHERE event=1",
-            "source and disk typed values differ";
         detects_changed_independent_event_identity, persistence::schema::Table::Events,
             "SELECT * REPLACE('event-other'::BLOB AS executable_name) FROM source WHERE event=1 \
             UNION ALL SELECT * FROM source WHERE event<>1",
             "source and disk typed values differ";
+    }
+
+    #[test]
+    fn detects_omitted_independent_event_identity() {
+        // Goal: an event row gone from a saved window cannot pass independent source fidelity.
+        // Method: seal the window, whose proof counts its events, then remove the row.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        let saved = recording.encode_identity(&reference, |_| {});
+        rewrite_saved_events(&recording.0, &saved, "SELECT * FROM source WHERE event<>1");
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(
+            matches!(
+                &result,
+                Err(persistence::Error::Engine(error))
+                    if error.to_string().contains("event physical row count")
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn detects_extra_independent_event_identity() {
+        // Goal: an event row added to a saved window cannot pass independent source fidelity.
+        // Method: seal the window, whose proof counts its events, then repeat a row.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        let saved = recording.encode_identity(&reference, |_| {});
+        rewrite_saved_events(
+            &recording.0,
+            &saved,
+            "SELECT * FROM source UNION ALL SELECT * FROM source WHERE event=1",
+        );
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(
+            matches!(
+                &result,
+                Err(persistence::Error::Engine(error))
+                    if error.to_string().contains("event physical row count")
+            ),
+            "{result:?}"
+        );
     }
 
     macro_rules! reference_mutations {
@@ -810,7 +849,7 @@ mod tests {
             &self,
             reference: &std::path::Path,
             extend: impl FnOnce(&std::path::Path),
-        ) {
+        ) -> persistence::Manifest {
             let store = Store::open(&self.0).unwrap();
             let identity = WindowIdentity {
                 run: RunIdentity {
@@ -821,7 +860,7 @@ mod tests {
                 window: 0,
             };
             let window = stage_identity(self, reference, &identity);
-            commit_identity(&store, &window, extend);
+            commit_identity(&self.0, &window, extend)
         }
     }
 
@@ -841,40 +880,16 @@ mod tests {
             write_reference(reference, &identity.run, &frames);
 
             let window = stage(&identity, &shape, &frames);
-            let Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-                panic!("fresh fidelity fixture was committed");
-            };
-            let mut tables = Encoder.encode(&window, pending.path()).unwrap();
-            extend(pending.path());
-            encode_row_counts(pending.path(), &mut tables);
-            store
-                .commit(
-                    pending,
-                    Manifest {
-                        event_batches: None,
-                        identity,
-                        publication_first: 17,
-                        publication_end: 19,
-                        events_first: 101,
-                        events_end: 111,
-                        wall_ns: Some(TimeBounds {
-                            min: 50_000_000_111,
-                            max: 50_000_001_111,
-                        }),
-                        continuous_ns: Some(TimeBounds {
-                            min: 100_000_000_333,
-                            max: 100_000_001_333,
-                        }),
-                        awake_ns: Some(TimeBounds {
-                            min: 80_000_000_777,
-                            max: 80_000_001_777,
-                        }),
-                        losses: Losses::default(),
-                        data_directory: String::new(),
-                        tables,
-                    },
-                )
-                .unwrap();
+            drop(store);
+            persistence::canonical::ready_fixture::publish_window(
+                &self.0,
+                &window,
+                |path, tables| {
+                    extend(path);
+                    encode_row_counts(path, tables);
+                },
+            )
+            .unwrap();
         }
     }
 
@@ -995,13 +1010,36 @@ mod tests {
         write_table(directory, table, &mut frame);
     }
 
+    /// Rewrites the one batch of a saved window's events through a query over them, named `source`.
+    fn rewrite_saved_events(
+        root: &std::path::Path,
+        saved: &persistence::Manifest,
+        selection: &str,
+    ) {
+        let events = root.join(&saved.data_directory).join("events");
+        let engine = persistence::engine::Engine::new();
+        engine
+            .register_lazy(
+                "source",
+                persistence::engine::scan(&events.join("0000.parquet")).unwrap(),
+            )
+            .unwrap();
+        let mut frame = engine.query(selection).unwrap();
+
+        write_table_file(&events, "0000.parquet", &mut frame);
+    }
+
     fn write_table(
         directory: &std::path::Path,
         table: persistence::schema::Table,
         frame: &mut DataFrame,
     ) {
+        write_table_file(directory, &format!("{}.parquet", table.name()), frame);
+    }
+
+    fn write_table_file(directory: &std::path::Path, name: &str, frame: &mut DataFrame) {
         let extended = directory.join("extended.parquet");
-        let bytes = ParquetWriter::new(fs::File::create_new(&extended).unwrap())
+        let bytes = ParquetWriter::new(private::open_private_file(&extended, true).unwrap())
             .with_compression(ParquetCompression::Zstd(Some(
                 ZstdLevel::try_new(3).unwrap(),
             )))
@@ -1015,11 +1053,7 @@ mod tests {
             .unwrap();
         assert!(bytes > 0);
 
-        fs::rename(
-            extended,
-            directory.join(format!("{}.parquet", table.name())),
-        )
-        .unwrap();
+        fs::rename(extended, directory.join(name)).unwrap();
     }
 
     fn frame(shape: &Shape, index: u64) -> Frame {
@@ -1033,7 +1067,7 @@ mod tests {
         tick.run_tick = index + 4;
         tick.times = Some(ObservationTimes {
             wall_ns: 50_000_000_111 + index * 1000,
-            continuous_ns: 100_000_000_333 + index * 1000,
+            continuous_ns: 10_000_000_333 + index * 1000,
             awake_ns: 80_000_000_777 + index * 1000,
         });
         tick.processes[0].usage.user_ns = 0;
@@ -1371,40 +1405,15 @@ mod tests {
         }
     }
 
-    fn commit_identity(store: &Store, window: &Window, extend: impl FnOnce(&std::path::Path)) {
-        let Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-            panic!("fresh identity fixture was committed");
-        };
-        let mut tables = Encoder.encode(window, pending.path()).unwrap();
-        extend(pending.path());
-        encode_row_counts(pending.path(), &mut tables);
-        store
-            .commit(
-                pending,
-                Manifest {
-                    event_batches: None,
-                    identity: window.identity,
-                    publication_first: 1,
-                    publication_end: 2,
-                    events_first: 1,
-                    events_end: 6,
-                    wall_ns: Some(TimeBounds {
-                        min: 50_000_000_111,
-                        max: 50_000_000_111,
-                    }),
-                    continuous_ns: Some(TimeBounds {
-                        min: 100_000_000_333,
-                        max: 100_000_000_333,
-                    }),
-                    awake_ns: Some(TimeBounds {
-                        min: 80_000_000_777,
-                        max: 80_000_000_777,
-                    }),
-                    losses: Losses::default(),
-                    data_directory: String::new(),
-                    tables,
-                },
-            )
-            .unwrap();
+    fn commit_identity(
+        root: &std::path::Path,
+        window: &Window,
+        extend: impl FnOnce(&std::path::Path),
+    ) -> persistence::Manifest {
+        persistence::canonical::ready_fixture::publish_window(root, window, |path, tables| {
+            extend(path);
+            encode_row_counts(path, tables);
+        })
+        .unwrap()
     }
 }

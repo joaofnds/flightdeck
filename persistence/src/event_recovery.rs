@@ -8,12 +8,10 @@ use polars::prelude::DataFrame;
 use crate::{Losses, Result};
 
 pub(crate) mod batch;
-mod discovery;
 pub(crate) mod metadata;
 pub(crate) mod read;
 
 pub(crate) use batch::{write_tail, write_tail_into};
-pub use discovery::{Discovery, DiscoveryPage};
 pub(crate) use metadata::Manifest;
 pub use read::{Pages, read_page};
 
@@ -58,7 +56,8 @@ pub(crate) fn directory(root: &Path, run: &RunIdentity) -> PathBuf {
     base(root).join(key(run))
 }
 
-pub(crate) fn batch_name(index: usize) -> String {
+#[must_use]
+pub fn batch_name(index: usize) -> String {
     format!("{index:04}.parquet")
 }
 

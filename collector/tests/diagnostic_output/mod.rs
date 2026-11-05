@@ -187,26 +187,23 @@ impl Harness {
     }
 
     fn has_committed_window(&self) -> bool {
-        let runs = match fs::read_dir(self.root.join("recording/commits")) {
+        let windows = match fs::read_dir(self.root.join("recording/data")) {
             Ok(entries) => entries,
             Err(error) => {
                 assert_eq!(io::ErrorKind::NotFound, error.kind());
                 return false;
             }
         };
-        for run in runs.take(2) {
-            for sequence in fs::read_dir(run.unwrap().path()).unwrap().take(2) {
-                for window in fs::read_dir(sequence.unwrap().path()).unwrap().take(2) {
-                    let window = window.unwrap();
-                    if window.path().extension() == Some(std::ffi::OsStr::new("seal")) {
-                        let metadata = window.metadata().unwrap();
-                        if metadata.is_file() {
-                            if metadata.len() > 0 {
-                                return true;
-                            }
+        for window in windows.take(2) {
+            match fs::metadata(window.unwrap().path().join("ready/metadata")) {
+                Ok(proof) => {
+                    if proof.is_file() {
+                        if proof.len() > 0 {
+                            return true;
                         }
                     }
                 }
+                Err(error) => assert_eq!(io::ErrorKind::NotFound, error.kind()),
             }
         }
 

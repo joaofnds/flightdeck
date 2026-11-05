@@ -1524,6 +1524,7 @@ dependencies = [
  "base64 0.22.1",
  "collector",
  "model",
+ "persistence",
  "polars",
  "polars-arrow",
  "polars-arrow-format",

@@ -225,7 +225,7 @@ compressed with Zstandard. Most tables occupy one file sorted by series. Events 
 bounded files in event-number order under one index, while its query presentation retains
 the process order. Each event file holds at most 16,384 rows and 8 MiB of owned input payload;
 encoding workspace is charged separately. Two tables, the per-App ranks and parts, are
-derived from the others as the window seals. A window becomes visible through a commit marker
+derived from the others as the window seals. A window becomes visible through commit markers
 written only once every table of it is synced to disk, so a reader never sees half a minute.
 
 An event can outlive its observation in the ring. Recovery saves its original event number
@@ -652,9 +652,10 @@ window sealed before they existed lacks them, and App parts carry a version, so 
 needs the Apps of a window whose parts it does not read derives them from the window's processes
 and events (The persister and the recording).
 
-**Commit marker.** A hard link, under the recording's `commits/` directory, to the metadata file
-of a window, made once every file of the window is synced to disk. A window belongs to the
-recording only once its marker exists (The persister and the recording).
+**Commit marker.** A hard link, under the recording's `ordinary` directory and its observation
+directories, to the metadata file of a window, made once every file of the window is synced to
+disk. A window belongs to the recording only once its marker exists. A legacy recording, which
+readers still accept, keeps its markers under `commits/` (The persister and the recording).
 
 **Registry.** The `runs` file in the recording, which names the active run and at most one
 earlier run, with each one's ring and collector pid (The persister and the recording).

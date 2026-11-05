@@ -222,15 +222,7 @@ fn preserves_populated_live_core_level_states_without_retaining_a_table() {
             ["1", "1", "1", "6", null]
         ])
     );
-    let mut window = Window::new(
-        WindowIdentity {
-            run: session.sources[0].identity,
-            window: 0,
-        },
-        Limits::from_shape(&session.sources[0].reader.shape()).unwrap(),
-    );
-    cpu_detail_stage(&mut window, &session.sources[0], 1);
-    seal_window(&fixture.root, &window);
+    fixture.seal_held();
     let mut saved = Session::open(&fixture.root).unwrap();
     saved.select(1000, 0).unwrap();
     assert!(saved.page("core_level_states", 0).is_err());

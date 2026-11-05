@@ -2,6 +2,9 @@
 //! They live in the persister's package, since cargo builds a package's own binaries for its
 //! tests and the collector starts the persister from its own directory.
 
+#[cfg(test)]
+mod saved_windows;
+
 // Clippy lets a test unwrap only inside a module marked as a test's.
 #[cfg(test)]
 mod tests {
@@ -351,18 +354,10 @@ mod tests {
         false
     }
 
-    fn only_entry(path: &Path) -> PathBuf {
-        let mut entries = fs::read_dir(path).unwrap();
-        let path = entries.next().unwrap().unwrap().path();
-        assert!(entries.next().is_none());
-        path
-    }
-
     fn committed_range(root: &Path) -> std::ops::Range<u64> {
-        let run = only_entry(&root.join("commits"));
-        let day = only_entry(&run);
-        let marker = only_entry(&day);
-        let manifest = persistence::read_committed(root, &marker).unwrap();
+        let registry = collector::recording::Registry::read(root).unwrap();
+        let run = registry.runs[0].identity;
+        let manifest = crate::saved_windows::saved_manifests(root, &run).swap_remove(0);
         manifest.publication_first..manifest.publication_end
     }
 
@@ -491,7 +486,7 @@ mod tests {
         // Goal: an invocation directory cannot substitute a different persistence executable.
         // Method: place a failing sibling beside a collector symlink and inspect the seal.
         let ring = TestRing::new("symlink");
-        let launch = ring.recording.join("launch");
+        let launch = ring.recording.with_extension("launch");
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)

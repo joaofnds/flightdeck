@@ -955,15 +955,17 @@ impl SnapshotReader {
 
 #[test]
 fn corrupt_saved_history_is_reported_instead_of_becoming_an_empty_recording() {
-    // Goal: an unreadable commitment cannot masquerade as valid no-data history.
-    // Method: corrupt only this fixture's saved seal and read through the normal worker.
+    // Goal: an unreadable proof cannot masquerade as valid no-data history.
+    // Method: corrupt only this fixture's saved proof and read through the normal worker.
     let recording = SealedRecording::new();
-    let seal = recording
-        .root
-        .join("commits/00000000000000010000000000000002")
-        .join("00000000000000000000/00000000000000000000.seal");
-    assert!(!std::fs::read(&seal).unwrap().is_empty());
-    std::fs::write(seal, b"corrupt").unwrap();
+    let attempt = std::fs::read_dir(recording.root.join("data"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let proof = attempt.path().join("ready/metadata");
+    assert!(!std::fs::read(&proof).unwrap().is_empty());
+    std::fs::write(proof, b"corrupt").unwrap();
 
     let result = recording.read(SealedRecording::request());
 
@@ -1115,7 +1117,7 @@ impl SealedRecording {
         Self::append(&mut window, 1, 1000);
         Self::append(&mut window, 2, 1002);
         Self::append(&mut window, 3, 1002);
-        Self::commit_derived(&store, identity, &window, derive);
+        Self::commit_derived(&recording.root, &window, derive);
         drop(store);
 
         recording
@@ -1149,7 +1151,7 @@ impl SealedRecording {
         Self::append(&mut window, 1, 1000);
         Self::append(&mut window, 2, 2200);
         Self::append(&mut window, 3, 2200);
-        Self::commit_derived(&store, identity, &window, derive);
+        Self::commit_derived(&recording.root, &window, derive);
         drop(store);
 
         recording
@@ -1179,6 +1181,7 @@ impl SealedRecording {
     fn append(window: &mut persistence::Window, publication: u64, second: u64) {
         let mut tick = persistence::tick_buffer(&Self::shape()).unwrap();
         tick.run_tick = publication - 1;
+        tick.events = 1..1;
         tick.memory.total_bytes = 4096 * publication;
         let observation = persistence::Observation {
             publication,
@@ -1189,55 +1192,18 @@ impl SealedRecording {
         window.push_tick(&observation, &tick, &[]).unwrap();
     }
 
-    fn commit(
-        store: &persistence::Store,
-        identity: persistence::WindowIdentity,
-        window: &persistence::Window,
-    ) {
-        Self::commit_derived(store, identity, window, &Underived);
+    fn commit(root: &std::path::Path, window: &persistence::Window) {
+        Self::commit_derived(root, window, &Underived);
     }
 
     /// Commits the run's first window with the tables `derive` derives from it, as the persister
     /// seals a window.
     fn commit_derived(
-        store: &persistence::Store,
-        identity: persistence::WindowIdentity,
+        root: &std::path::Path,
         window: &persistence::Window,
         derive: &dyn persistence::worker::Derive,
     ) {
-        let persistence::Begin::Pending(pending) = store.begin(&identity).unwrap() else {
-            panic!("Fixture window already committed");
-        };
-        let mut tables = persistence::Encoder.encode(window, pending.path()).unwrap();
-        tables.extend(
-            derive
-                .derive(&persistence::worker::Derivation {
-                    window,
-                    pending: &collector::recording::private::PrivateDirectory::open(pending.path())
-                        .unwrap(),
-                })
-                .unwrap(),
-        );
-        let publications = window.publication_range();
-        let events = window.event_range();
-        store
-            .commit(
-                pending,
-                persistence::Manifest {
-                    event_batches: None,
-                    identity,
-                    publication_first: publications.start,
-                    publication_end: publications.end,
-                    events_first: events.start,
-                    events_end: events.end,
-                    wall_ns: None,
-                    continuous_ns: None,
-                    awake_ns: None,
-                    losses: persistence::Losses::default(),
-                    data_directory: String::new(),
-                    tables,
-                },
-            )
+        persistence::canonical::ready_fixture::publish_window_derived(root, window, derive)
             .unwrap();
     }
 

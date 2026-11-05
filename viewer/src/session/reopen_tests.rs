@@ -214,7 +214,7 @@ fn a_session_no_longer_lists_every_sealed_window_once_one_is_deleted() {
 }
 
 /// Removes `window`'s readings from the namespaces that name them, and its files.
-fn delete_window(root: &Path, window: &Manifest) {
+pub(crate) fn delete_window(root: &Path, window: &Manifest) {
     use std::os::unix::fs::MetadataExt;
     let directory = root.join(&window.data_directory);
     let proof = std::fs::metadata(directory.join("metadata")).unwrap().ino();

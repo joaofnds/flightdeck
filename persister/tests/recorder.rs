@@ -4,6 +4,9 @@
 mod terminal_source;
 
 #[cfg(test)]
+mod saved_windows;
+
+#[cfg(test)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
@@ -114,7 +117,7 @@ mod tests {
             .err()
             .expect("the held worker lock must refuse another owner");
         assert_eq!(expected.kind(), std::io::ErrorKind::WouldBlock);
-        let diagnostics = recording.root.join("diagnostics");
+        let diagnostics = recording.beside_root().join("diagnostics");
         recording.child = Some(
             Command::new(
                 PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("collector"),
@@ -161,19 +164,19 @@ mod tests {
         }
         recording.launch(PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"));
         recording.wait_for_exit();
-        let mut buffer: Box<[_; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]> =
-            vec![0; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap();
-        let mut discovery =
-            persistence::event_recovery::Discovery::open(&recording.root, &mut buffer).unwrap();
-        let page = discovery.next_page(2).unwrap();
-        assert!(page.complete);
-        assert_eq!(page.runs.len(), 1);
-        assert_eq!(page.runs[0].run, replacement);
-        assert_eq!(page.runs[0].rows, 1);
-        assert_eq!(page.runs[0].losses, persistence::Losses::default());
+        let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(1 << 28));
+        let catalog =
+            persistence::canonical::catalog::Catalog::open(&recording.root, &budget).unwrap();
+        let page = catalog
+            .event_objects_page(None, 2, &mut persistence::canonical::ReadWork::default())
+            .unwrap();
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].recovery.run, replacement);
+        assert_eq!(page.objects[0].recovery.rows, 1);
+        assert_eq!(
+            page.objects[0].recovery.losses,
+            persistence::Losses::default()
+        );
         let events =
             persistence::event_recovery::read_page(&recording.root, &replacement, 1, 1).unwrap();
         assert_eq!(events.coverage, 1..2);
@@ -188,13 +191,7 @@ mod tests {
             Registry::completed(&recording.root, &replacement, &registry.runs[1].ring_name)
                 .unwrap()
         );
-        assert!(
-            persistence::Store::open(&recording.root)
-                .unwrap()
-                .progress(&replacement)
-                .unwrap()
-                .is_none()
-        );
+        assert!(crate::saved_windows::saved_manifests(&recording.root, &replacement).is_empty());
         eprintln!(
             "native terminal replacement exact_events=1..2 publications=0 loss=0 receipt=true"
         );
@@ -381,7 +378,7 @@ mod tests {
         // Goal: a missing sibling cannot permanently disable saving or replace acquisition.
         // Method: withhold only this fixture's persister executable, then restore it.
         let mut recording = Recording::new("launch", 30);
-        let binaries = recording.root.join("bin");
+        let binaries = recording.beside_root().join("bin");
         fs::DirBuilder::new().mode(0o700).create(&binaries).unwrap();
         let built = PathBuf::from(env!("CARGO_BIN_EXE_persister"));
         fs::copy(built.with_file_name("recorder"), binaries.join("recorder")).unwrap();
@@ -449,7 +446,43 @@ mod tests {
             return;
         }
         let mut recording = Recording::new("sync", 6);
-        let library = recording.root.join("sync-fault.dylib");
+        recording.sync_fault = Some(a_native_sync_failure_library(&recording));
+        let diagnostic = recording.beside_root().join("diagnostics");
+        recording.launch_with(
+            PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"),
+            Stdio::null(),
+            Stdio::from(fs::File::create_new(&diagnostic).unwrap()),
+        );
+        let control =
+            recording.wait_for(|control| control.settled(Role::Persister).alive().unwrap());
+        fs::write(recording.beside_root().join("refuse-sync"), b"refuse").unwrap();
+        recording.wait_for(|control| control.settled(Role::Controller).retries > 0);
+        let path = fs::read_to_string(recording.beside_root().join("sync-observed")).unwrap();
+        assert!(PathBuf::from(&path).starts_with(recording.root.canonicalize().unwrap()));
+        assert!(path.ends_with(".parquet"));
+        assert!(path.contains("/pending/"));
+        assert_eq!(control.settled(Role::Persister).publication, 0);
+        assert_ne!(control.settled(Role::Persister).state, State::Running);
+        let before = Instant::now();
+        fs::remove_file(recording.beside_root().join("refuse-sync")).unwrap();
+        recording.wait_for_exit();
+        assert!(before.elapsed() < Duration::from_secs(30));
+        let output = fs::read_to_string(&diagnostic).unwrap();
+        assert!(
+            output.contains("Input/output error (os error 5)"),
+            "{output}"
+        );
+        eprintln!(
+            "native_sync_eio path={path} recovery_ns={} diagnostics={output}",
+            before.elapsed().as_nanos()
+        );
+        recording.assert_saved_publications(control.settled(Role::Collector).publication);
+    }
+
+    /// Builds the library that refuses the persister's sync, and shows it forwards every other
+    /// `fcntl` as it found it.
+    fn a_native_sync_failure_library(recording: &Recording) -> PathBuf {
+        let library = recording.beside_root().join("sync-fault.dylib");
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
         let built = Command::new(rustc)
             .args(["--edition=2024", "--crate-type=cdylib"])
@@ -464,7 +497,8 @@ mod tests {
             String::from_utf8_lossy(&built.stderr)
         );
         for injected in [false, true] {
-            let mut probe = fcntl_probe_command(&recording.root.join("forwarding"), "owner");
+            let mut probe =
+                fcntl_probe_command(&recording.beside_root().join("forwarding"), "owner");
             if injected {
                 probe.env("DYLD_INSERT_LIBRARIES", &library);
             }
@@ -479,37 +513,7 @@ mod tests {
                  F_SETLK=pass F_GETLK=pass"
             );
         }
-        recording.sync_fault = Some(library);
-        let diagnostic = recording.root.join("diagnostics");
-        recording.launch_with(
-            PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"),
-            Stdio::null(),
-            Stdio::from(fs::File::create_new(&diagnostic).unwrap()),
-        );
-        let control =
-            recording.wait_for(|control| control.settled(Role::Persister).alive().unwrap());
-        fs::write(recording.root.join("refuse-sync"), b"refuse").unwrap();
-        recording.wait_for(|control| control.settled(Role::Controller).retries > 0);
-        let path = fs::read_to_string(recording.root.join("sync-observed")).unwrap();
-        assert!(PathBuf::from(&path).starts_with(recording.root.canonicalize().unwrap()));
-        assert!(path.ends_with(".parquet"));
-        assert!(path.contains(".pending/"));
-        assert_eq!(control.settled(Role::Persister).publication, 0);
-        assert_ne!(control.settled(Role::Persister).state, State::Running);
-        let before = Instant::now();
-        fs::remove_file(recording.root.join("refuse-sync")).unwrap();
-        recording.wait_for_exit();
-        assert!(before.elapsed() < Duration::from_secs(30));
-        let output = fs::read_to_string(&diagnostic).unwrap();
-        assert!(
-            output.contains("Input/output error (os error 5)"),
-            "{output}"
-        );
-        eprintln!(
-            "native_sync_eio path={path} recovery_ns={} diagnostics={output}",
-            before.elapsed().as_nanos()
-        );
-        recording.assert_saved_publications(control.settled(Role::Collector).publication);
+        library
     }
 
     #[repr(C)]
@@ -837,11 +841,11 @@ mod tests {
         if pressure {
             recording.memory = 1;
         }
-        let output = recording.root.join("resources");
+        let output = recording.beside_root().join("resources");
         recording.launch_with(
             PathBuf::from(env!("CARGO_BIN_EXE_persister")).with_file_name("recorder"),
             Stdio::from(fs::File::create_new(&output).unwrap()),
-            Stdio::from(fs::File::create_new(recording.root.join("diagnostics")).unwrap()),
+            Stdio::from(fs::File::create_new(recording.beside_root().join("diagnostics")).unwrap()),
         );
         let control =
             recording.wait_for(|control| control.settled(Role::Collector).state == State::Running);
@@ -870,9 +874,10 @@ mod tests {
         let newest = control.settled(Role::Collector).publication;
         assert_eq!(control.settled(Role::Persister).publication, newest);
         let registry = collector::recording::Registry::read(&recording.root).unwrap();
-        let store = persistence::Store::open(&recording.root).unwrap();
         assert_eq!(registry.runs.len(), 1);
-        let final_window = store.progress(&registry.runs[0].identity).unwrap().unwrap();
+        let run = registry.runs[0].identity;
+        let final_window =
+            crate::saved_windows::saved_manifests(&recording.root, &run).swap_remove(0);
         assert_eq!(final_window.publication_end, newest + 1);
         assert_eq!(final_window.losses, persistence::Losses::default());
         eprintln!(
@@ -972,6 +977,19 @@ mod tests {
             unlink_generation(&source).unwrap();
             identity
         }
+        /// A private directory beside the recording, since a recording's root admits no name a
+        /// writer does not put there.
+        fn beside_root(&self) -> PathBuf {
+            let beside = self.root.with_extension("beside");
+            match fs::DirBuilder::new().mode(0o700).create(&beside) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{error}"),
+            }
+
+            beside
+        }
+
         fn start(name: &str, seconds: u64) -> Self {
             let mut recording = Self::new(name, seconds);
             recording
@@ -1080,10 +1098,13 @@ mod tests {
             if let Some(library) = &self.sync_fault {
                 command
                     .env("DYLD_INSERT_LIBRARIES", library)
-                    .env("FLIGHTDECK_TEST_REFUSE_SYNC", self.root.join("refuse-sync"))
+                    .env(
+                        "FLIGHTDECK_TEST_REFUSE_SYNC",
+                        self.beside_root().join("refuse-sync"),
+                    )
                     .env(
                         "FLIGHTDECK_TEST_SYNC_OBSERVED",
-                        self.root.join("sync-observed"),
+                        self.beside_root().join("sync-observed"),
                     );
             }
             let child = command
@@ -1137,10 +1158,9 @@ mod tests {
         }
 
         fn assert_saved_run(&self, run: collector::ring::RunIdentity, first: u64, newest: u64) {
-            let store = persistence::Store::open(&self.root).unwrap();
-            let manifest = store
-                .existing(&persistence::WindowIdentity { run, window: 0 })
-                .unwrap()
+            let manifest = crate::saved_windows::saved_manifests(&self.root, &run)
+                .into_iter()
+                .find(|manifest| manifest.identity.window == 0)
                 .unwrap();
             assert_eq!(manifest.publication_first, first);
             assert_eq!(manifest.publication_end, newest + 1);
@@ -1208,7 +1228,7 @@ mod tests {
         }
 
         fn drop_report(&self) {
-            if let Ok(output) = fs::read_to_string(self.root.join("diagnostics")) {
+            if let Ok(output) = fs::read_to_string(self.beside_root().join("diagnostics")) {
                 eprintln!("failed fixture diagnostics: {output}");
             }
             if let Ok(control) = Control::open(&self.root) {
@@ -1227,8 +1247,8 @@ mod tests {
             if std::thread::panicking() {
                 self.drop_report();
             }
-            if self.root.join("refuse-sync").exists() {
-                fs::remove_file(self.root.join("refuse-sync")).unwrap();
+            if self.beside_root().join("refuse-sync").exists() {
+                fs::remove_file(self.beside_root().join("refuse-sync")).unwrap();
             }
             if self.root.join("data").exists() {
                 fs::set_permissions(self.root.join("data"), fs::Permissions::from_mode(0o700))
@@ -1289,6 +1309,9 @@ mod tests {
                 fs::remove_file(&self.place.lock_path).unwrap();
             }
             fs::remove_dir_all(&self.root).unwrap();
+            if self.root.with_extension("beside").exists() {
+                fs::remove_dir_all(self.root.with_extension("beside")).unwrap();
+            }
         }
     }
 }

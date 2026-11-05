@@ -258,25 +258,16 @@ fn binds_opened_part_files_and_preserves_missing_file_errors() {
 }
 
 #[test]
-fn pins_legacy_files_and_empty_indexes_without_fabricating_parts() {
-    // Goal: both supported ordinary layouts keep every actual file in their source identity.
-    // Method: replace the legacy file and an empty index after opening direct plans.
-    for partitioned in [false, true] {
-        let fixture = Fixture::with_layout(usize::from(!partitioned), 2, partitioned);
-        let budget = budget();
-        let table = fixture.table(&budget);
-        let path = if partitioned {
-            fixture.part(0).with_file_name("index")
-        } else {
-            fixture
-                .root
-                .join(&fixture.manifest.data_directory)
-                .join("events.parquet")
-        };
-        let plan = table.into_lazy(&budget).unwrap();
-        replace(&path);
-        assert!(plan.collect().is_err());
-    }
+fn pins_an_empty_index_without_fabricating_parts() {
+    // Goal: a table with no parts keeps its index in its source identity.
+    // Method: replace the empty index after opening a direct plan.
+    let fixture = Fixture::new(0, 2);
+    let budget = budget();
+    let table = fixture.table(&budget);
+    let path = fixture.part(0).with_file_name("index");
+    let plan = table.into_lazy(&budget).unwrap();
+    replace(&path);
+    assert!(plan.collect().is_err());
 }
 
 #[test]

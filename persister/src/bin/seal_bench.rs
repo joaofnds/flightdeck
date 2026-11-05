@@ -122,7 +122,7 @@ fn options_count(value: &str, bounds: RangeInclusive<u64>) -> Result<u64, String
 fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     persistence::engine::initialize_process()?;
     let root = std::env::temp_dir().join(format!("seal_bench-{}", std::process::id()));
-    collector::recording::private::create_private_dir(&root)?;
+    drop(persistence::Store::open(&root)?);
 
     let place = Place {
         lock_path: root.join("ring.lock"),

@@ -296,6 +296,9 @@ impl DrainRoot {
     fn new(name: &str) -> Self {
         let root = std::env::temp_dir().join(format!("fd-drain-{}-{name}", std::process::id()));
         private::create_private_dir(&root).unwrap();
+        let registration = FileLock::wait_short(&root.join("registration.lock")).unwrap();
+        recording::recording_identity(&root, &registration).unwrap();
+        drop(registration);
         Self(root)
     }
 

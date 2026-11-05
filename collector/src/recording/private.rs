@@ -167,9 +167,18 @@ impl FileLock {
 
     /// Bounded waiting is reserved for short registry transactions, never lifetime ownership.
     pub fn wait_short(path: &Path) -> io::Result<Self> {
+        Self::wait_short_for(|| Self::try_lock(path))
+    }
+
+    /// `wait_short` for a name in `directory`, which reaches a root at the longest path.
+    pub fn wait_short_in(directory: &PrivateDirectory, name: &str) -> io::Result<Self> {
+        Self::wait_short_for(|| Self::try_lock_in(directory, name))
+    }
+
+    fn wait_short_for(lock: impl Fn() -> io::Result<Self>) -> io::Result<Self> {
         let start = Instant::now();
         for attempt in 0..SHORT_LOCK_ATTEMPTS_MAX {
-            match Self::try_lock(path) {
+            match lock() {
                 Ok(lock) => return Ok(lock),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     if start.elapsed() >= SHORT_LOCK_TIMEOUT {

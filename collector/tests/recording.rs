@@ -2,8 +2,9 @@
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use collector::recording::{Registration, Registry, private};
     use collector::ring::{Identity, Place, RingReader, RunIdentity, Shape, Writer};
@@ -53,10 +54,7 @@ mod tests {
         let (second, registered) = second.into_parts();
         let second = OwnedWriter(second);
 
-        assert_eq!(
-            std::io::ErrorKind::WouldBlock,
-            registered.unwrap_err().kind()
-        );
+        assert_eq!(ErrorKind::WouldBlock, registered.unwrap_err().kind());
         let registry = Registry::read(&ring.root).unwrap();
         assert_eq!(1, registry.runs.len());
         assert_eq!(first.0.name(), registry.runs[0].ring_name);
@@ -75,9 +73,9 @@ mod tests {
             .into_parts();
         let first = OwnedWriter(first);
         status.unwrap();
-        let other = ring.root.join("other-recording");
+        let other = ring.root.with_file_name("other-recording");
         private::create_private_dir(&other).unwrap();
-        collector::recording::recording_identity(&other).unwrap();
+        recording_identity(&other).unwrap();
         Registry::default().write(&other).unwrap();
         let first_before = std::fs::metadata(ring.root.join("runs")).unwrap().ino();
         let other_before = std::fs::metadata(other.join("runs")).unwrap().ino();
@@ -86,7 +84,7 @@ mod tests {
             .err()
             .unwrap();
 
-        assert_eq!(std::io::ErrorKind::WouldBlock, refused.kind());
+        assert_eq!(ErrorKind::WouldBlock, refused.kind());
         assert_eq!(
             first_before,
             std::fs::metadata(ring.root.join("runs")).unwrap().ino()
@@ -111,11 +109,11 @@ mod tests {
             let artifact = ring.root.join(name);
             private::create_private_dir(&artifact).unwrap();
 
-            let refused = collector::recording::recording_identity(&ring.root);
+            let refused = recording_identity(&ring.root);
 
             let identity_exists = ring.root.join("identity").exists();
             std::fs::remove_dir(&artifact).unwrap();
-            assert_eq!(std::io::ErrorKind::InvalidData, refused.unwrap_err().kind());
+            assert_eq!(ErrorKind::InvalidData, refused.unwrap_err().kind());
             assert!(!identity_exists);
         }
     }
@@ -198,7 +196,7 @@ mod tests {
         for (index, name) in names.iter().enumerate() {
             if index + 2 < names.len() {
                 assert_eq!(
-                    std::io::ErrorKind::NotFound,
+                    ErrorKind::NotFound,
                     RingReader::open_generation(name).err().unwrap().kind()
                 );
             } else {
@@ -240,14 +238,14 @@ mod tests {
             Registration::start(&ring.root, &place(&ring.root, "refused"), shape(), 0).unwrap();
         let (first, status) = first.into_parts();
         let first = OwnedWriter(first);
-        assert_eq!(std::io::ErrorKind::WouldBlock, status.unwrap_err().kind());
+        assert_eq!(ErrorKind::WouldBlock, status.unwrap_err().kind());
         drop(short);
 
         let second =
             Registration::start(&ring.root, &place(&ring.root, "blocked"), shape(), 0).unwrap();
         let (second, status) = second.into_parts();
         let second = OwnedWriter(second);
-        assert_eq!(std::io::ErrorKind::WouldBlock, status.unwrap_err().kind());
+        assert_eq!(ErrorKind::WouldBlock, status.unwrap_err().kind());
         assert!(Registry::read(&ring.root).unwrap().runs.is_empty());
         drop(first);
 
@@ -261,25 +259,25 @@ mod tests {
     }
 
     #[test]
-    fn replaces_an_interrupted_identity_temporary_without_publishing_partial_identity() {
+    fn a_partial_first_step_of_setting_up_a_recording_is_replaced() {
         // Goal: interruption during first identity initialization cannot poison future starts.
         // Method: leave a partial private pending file, then initialize and read the identity.
         let ring = RetainedRing::new();
-        let pending = ring.root.join("identity.pending");
+        let pending = ring.root.join("bootstrap.pending");
+        let mut bootstrap = [0; 64];
+        collector::recording::bootstrap::codec::encode_bootstrap(Identity([1, 1]), &mut bootstrap)
+            .unwrap();
         let mut file = private::open_private_file(&pending, true).unwrap();
-        std::io::Write::write_all(&mut file, b"00000000000").unwrap();
+        std::io::Write::write_all(&mut file, &bootstrap[..11]).unwrap();
 
-        let identity = collector::recording::recording_identity(&ring.root).unwrap();
+        let identity = recording_identity(&ring.root).unwrap();
 
         assert_eq!(
             74,
             std::fs::metadata(ring.root.join("identity")).unwrap().len()
         );
         assert!(!pending.exists());
-        assert_eq!(
-            identity,
-            collector::recording::recording_identity(&ring.root).unwrap()
-        );
+        assert_eq!(identity, recording_identity(&ring.root).unwrap());
     }
 
     #[test]
@@ -290,9 +288,140 @@ mod tests {
         let mut file = private::open_private_file(&ring.root.join("identity"), true).unwrap();
         std::io::Write::write_all(&mut file, b"00000000000000010000000000000002\n\n").unwrap();
 
-        let read = collector::recording::recording_identity(&ring.root);
+        let read = recording_identity(&ring.root);
 
-        assert_eq!(std::io::ErrorKind::InvalidData, read.unwrap_err().kind());
+        assert_eq!(ErrorKind::InvalidData, read.unwrap_err().kind());
+    }
+
+    #[test]
+    fn a_first_start_sets_up_the_recording_its_run_names() {
+        // Goal: the first start of a recording leaves it set up, under the recording its run names.
+        // Method: start in an empty root with the ring's lock outside it, then classify the root.
+        let ring = RetainedRing::new();
+        let place = place(&ring.root, "first");
+
+        let (writer, registered) = Registration::start(&ring.root, &place, shape(), 0)
+            .unwrap()
+            .into_parts();
+
+        registered.unwrap();
+        let writer = OwnedWriter(writer);
+        let directory = private::PrivateDirectory::open(&ring.root).unwrap();
+        assert_eq!(
+            collector::recording::bootstrap::classify(&directory, &mut [0; 4097]).unwrap(),
+            collector::recording::bootstrap::Classification::Initialized(
+                writer.0.identity().unwrap().recording
+            )
+        );
+    }
+
+    #[test]
+    fn a_previous_writers_recording_is_refused_and_left_as_it_was() {
+        // Goal: every route that would write a recording refuses a previous writer's before it
+        // changes anything, so the recording stays as that writer left it.
+        // Method: lay out a recording of each previous identity format, try each route, and compare
+        // every name and byte under the root.
+        const IDENTITY: &str = "00000000000000010000000000000002\n";
+        let formats = [
+            IDENTITY.to_owned(),
+            format!("flightdeck-recording-1\n00000001\n00000001\n{IDENTITY}"),
+        ];
+        for format in formats {
+            let ring = RetainedRing::new();
+            previous_recording(&ring.root, format.as_bytes());
+            let before = previous_recording_files(&ring.root);
+            let lock =
+                private::FileLock::wait_short(&ring.root.with_file_name("elsewhere.lock")).unwrap();
+            let place = place(&ring.root, "previous");
+
+            let check = collector::recording::check_writer(&ring.root);
+            let identity = collector::recording::recording_identity(&ring.root, &lock);
+            let start = Registration::start(&ring.root, &place, shape(), 0);
+            let control = collector::recording::control::Control::create(&ring.root);
+
+            assert_eq!(check.unwrap_err().kind(), ErrorKind::Unsupported);
+            assert_eq!(identity.unwrap_err().kind(), ErrorKind::Unsupported);
+            assert_eq!(start.err().unwrap().kind(), ErrorKind::Unsupported);
+            assert_eq!(control.err().unwrap().kind(), ErrorKind::Unsupported);
+            assert_eq!(previous_recording_files(&ring.root), before);
+        }
+    }
+
+    #[test]
+    fn a_recorder_refuses_a_previous_writers_recording_before_it_takes_its_lock_there() {
+        // Goal: the recorder, whose lock file lives in the recording, adds nothing to a previous
+        // writer's recording when it refuses it.
+        // Method: start the real recorder on one and compare every name and byte under the root.
+        let ring = RetainedRing::new();
+        previous_recording(&ring.root, b"00000000000000010000000000000002\n");
+        let before = previous_recording_files(&ring.root);
+
+        let refused = std::process::Command::new(env!("CARGO_BIN_EXE_recorder"))
+            .arg("--recording")
+            .arg(&ring.root)
+            .output()
+            .unwrap();
+
+        assert!(!refused.status.success());
+        assert_eq!(previous_recording_files(&ring.root), before);
+    }
+
+    #[test]
+    fn a_change_to_the_recording_during_a_check_never_refuses_it() {
+        // Goal: a writer that replaces the recording's state while another process starts does not
+        // fail that process's start.
+        // Method: replace the state with the same bytes from a thread while the checks a start
+        // makes run again and again.
+        const CHECKS: u32 = 500;
+        let ring = RetainedRing::new();
+        recording_identity(&ring.root).unwrap();
+        let state = std::fs::read(ring.root.join("namespace-state")).unwrap();
+        let stop = AtomicBool::new(false);
+
+        let checks = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    private::atomic_write(&ring.root, "namespace-state", &state).unwrap();
+                }
+            });
+            let checks = (0..CHECKS).try_for_each(|_check| {
+                collector::recording::check_writer(&ring.root)?;
+                recording_identity(&ring.root).map(drop)
+            });
+            stop.store(true, Ordering::Relaxed);
+
+            checks
+        });
+
+        checks.unwrap();
+    }
+
+    /// A recording as a previous writer left it, with the names such a recording holds.
+    fn previous_recording(root: &std::path::Path, identity: &[u8]) {
+        private::atomic_write(root, "identity", identity).unwrap();
+        private::atomic_write(root, "runs", b"flightdeck-runs-1\n0\n").unwrap();
+        for directory in ["data", "commits"] {
+            private::create_private_dir(&root.join(directory)).unwrap();
+        }
+    }
+
+    /// Every name directly under `root`, with the bytes of those that are files.
+    fn previous_recording_files(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let bytes = if entry.file_type().unwrap().is_file() {
+                    std::fs::read(entry.path()).unwrap()
+                } else {
+                    Vec::new()
+                };
+                (entry.file_name().to_str().unwrap().to_owned(), bytes)
+            })
+            .collect();
+        files.sort();
+
+        files
     }
 
     struct OwnedWriter(Writer);
@@ -303,9 +432,14 @@ mod tests {
         }
     }
 
+    fn recording_identity(root: &std::path::Path) -> std::io::Result<Identity> {
+        let registration = private::FileLock::wait_short(&root.join("registration.lock"))?;
+        collector::recording::recording_identity(root, &registration)
+    }
+
     fn place(root: &std::path::Path, label: &str) -> Place {
         Place {
-            lock_path: root.join(format!("{label}.lock")),
+            lock_path: root.with_file_name(format!("{label}.lock")),
             name_prefix: "/fd.".to_owned(),
         }
     }
@@ -327,13 +461,15 @@ mod tests {
     impl RetainedRing {
         fn new() -> Self {
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir().join(format!(
+            let base = std::env::temp_dir().join(format!(
                 "flightdeck-registration-owner-{}-{serial}",
                 std::process::id()
             ));
+            private::create_private_dir(&base).unwrap();
+            let root = base.join("recording");
             private::create_private_dir(&root).unwrap();
             let place = Place {
-                lock_path: root.join("ring.lock"),
+                lock_path: base.join("ring.lock"),
                 name_prefix: format!("/fdo{}{serial}", std::process::id()),
             };
             let identity = RunIdentity {
@@ -364,7 +500,7 @@ mod tests {
     impl Drop for RetainedRing {
         fn drop(&mut self) {
             collector::ring::unlink_generation(self.writer.name()).unwrap();
-            std::fs::remove_dir_all(&self.root).unwrap();
+            std::fs::remove_dir_all(self.root.parent().unwrap()).unwrap();
         }
     }
 }

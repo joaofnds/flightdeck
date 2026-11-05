@@ -6,7 +6,7 @@ mod tests;
 mod observation;
 mod root;
 pub use observation::StateObservation;
-pub use root::{Classification, classify, initialize};
+pub use root::{Classification, classify, classify_settled, initialize};
 
 #[cfg(test)]
 mod classification_tests;

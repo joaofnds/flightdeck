@@ -161,7 +161,7 @@ impl SealedRecording {
                 wall_ns: 1_001_400_000_000,
             },
         );
-        Self::commit(&store, identity, &window);
+        Self::commit(&recording.root, &window);
         drop(store);
 
         recording
@@ -174,6 +174,7 @@ impl SealedRecording {
     ) {
         let mut tick = persistence::tick_buffer(shape).unwrap();
         tick.run_tick = observed.publication - 1;
+        tick.events = 1..1;
         for cpu in 0..u32::try_from(shape.cpu_capacity).unwrap() {
             let publication = u32::try_from(observed.publication).unwrap();
             tick.cpus.push(collector::machine::CPUTicks {

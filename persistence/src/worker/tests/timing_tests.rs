@@ -4,6 +4,7 @@ use crate::allocation_tests::{Observation as Allocations, observe};
 use crate::resources::ByteBudget;
 use collector::ring::{ObservationTimes, Place, Readings, Writer};
 use std::io::Read;
+use std::sync::Arc;
 
 mod terminal_tests;
 
@@ -22,7 +23,7 @@ fn waits_for_malformed_current_payload_then_refuses_it_when_complete() {
     assert!(
         source
             .store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .is_none()
     );
@@ -43,7 +44,7 @@ fn refuses_malformed_boundary_before_sealing_the_earlier_minute() {
     assert!(
         source
             .store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .is_none()
     );
@@ -63,7 +64,7 @@ fn seals_a_valid_prefix_before_a_later_malformed_newest_payload() {
 
     let saved = source
         .store
-        .progress(&source.registered.identity)
+        .saved_newest(&source.registered.identity)
         .unwrap()
         .unwrap();
     assert_eq!(saved.identity.window, 0);
@@ -73,7 +74,7 @@ fn seals_a_valid_prefix_before_a_later_malformed_newest_payload() {
     assert!(
         source
             .store
-            .existing(&WindowIdentity {
+            .saved(&WindowIdentity {
                 run: source.registered.identity,
                 window: 1,
             })
@@ -85,13 +86,13 @@ fn seals_a_valid_prefix_before_a_later_malformed_newest_payload() {
 #[test]
 fn skips_malformed_old_payload_when_its_minute_is_already_committed() {
     // Goal: committed progress remains authoritative after payload validation moves later.
-    // Method: seal, corrupt the saved reading, replay its key and drain the valid successor.
+    // Method: seal, corrupt the saved reading, restart the worker and drain the valid successor.
     let mut source = Scenario::new();
     source.publish(0);
     source.publish(60);
     assert!(matches!(source.pass().unwrap(), Progress::Sealed));
     source.corrupt_payload(1);
-    source.state.next_publication = 1;
+    source.state = RunState::default();
 
     assert!(matches!(source.pass().unwrap(), Progress::Waiting));
 
@@ -101,7 +102,7 @@ fn skips_malformed_old_payload_when_its_minute_is_already_committed() {
     assert_eq!(
         source
             .store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .unwrap()
             .identity
@@ -129,7 +130,7 @@ fn counts_an_overwritten_unread_malformed_publication_as_loss() {
 
     let saved = source
         .store
-        .progress(&source.registered.identity)
+        .saved_newest(&source.registered.identity)
         .unwrap()
         .unwrap();
     assert_eq!((saved.publication_first, saved.publication_end), (2, 6));
@@ -161,7 +162,7 @@ macro_rules! terminal_newest_bypass {
             assert_eq!(
                 source
                     .store
-                    .progress(&source.registered.identity)
+                    .saved_newest(&source.registered.identity)
                     .unwrap()
                     .unwrap()
                     .identity
@@ -213,7 +214,7 @@ fn refuses_continuous_time_before_the_run_origin() {
     assert!(
         source
             .store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .is_none()
     );
@@ -243,7 +244,7 @@ fn rechecks_a_producer_death_without_another_publication() {
     assert_eq!(
         source
             .store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .unwrap()
             .publication_end,
@@ -268,27 +269,54 @@ fn seals_completion_without_another_publication_after_waiting() {
 }
 
 #[test]
-fn skips_a_committed_key_before_interpreting_unused_newest_continuous_time() {
-    // Goal: an unused newest clock does not prevent committed-key recovery.
-    // Method: seal a key, forge a later before-origin clock and replay only that key's scan step.
+fn seals_the_tables_derived_from_a_window_with_it() {
+    // Goal: a window's derived tables are part of what it seals.
+    // Method: seal a real minute with the persister's own deriver, then read it from the window.
     let mut source = Scenario::new();
+    source.writers.derive = Box::leak(Box::<crate::sealed_apps::SealedApps>::default());
     source.publish(0);
     source.publish(60);
+
     assert!(matches!(source.pass().unwrap(), Progress::Sealed));
-    source.publish(61);
-    source.change_slot_word(3, 40, 0);
-    source.state.next_publication = 1;
-    let reader = persist_one_open(&source.registered, &mut source.state)
+
+    let sealed = source
+        .store
+        .saved_newest(&source.registered.identity)
         .unwrap()
         .unwrap();
-    let mut scan = scanning::Scanning::new(reader, &source.registered, false).unwrap();
+    assert!(sealed.tables.iter().any(|table| table.name == "app_ranks"));
+    assert!(sealed.tables.len() > crate::schema::TABLES.len());
+    let path = source
+        .root
+        .0
+        .join(&sealed.data_directory)
+        .join("app_ranks.parquet");
+    assert!(path.is_file());
+}
 
-    let result = scan
-        .read(&source.store, &source.registered, &mut source.state)
+#[test]
+fn seals_a_window_without_its_derived_tables_when_deriving_fails() {
+    // Goal: a failed derivation loses only what a reader can derive again.
+    // Method: fail after writing part of a derived table, then read the saved window.
+    let mut source = Scenario::new();
+    source.writers.derive = &RanksStub { fails: true };
+    source.publish(0);
+    source.publish(60);
+
+    assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+
+    let sealed = source
+        .store
+        .saved_newest(&source.registered.identity)
+        .unwrap()
         .unwrap();
-
-    assert!(result.is_none());
-    assert_eq!(source.state.next_publication, 2);
+    assert_eq!(sealed.tables.len(), crate::schema::TABLES.len());
+    let path = source
+        .root
+        .0
+        .join(&sealed.data_directory)
+        .join("app_ranks.parquet");
+    assert!(!path.exists());
 }
 
 #[test]
@@ -317,7 +345,7 @@ fn refuses_a_persistence_shape_bound_before_waiting_on_an_empty_source() {
         result,
         Err(crate::Error::Bound("ring section capacity"))
     ));
-    assert!(store.progress(&registered.identity).unwrap().is_none());
+    assert!(store.saved_newest(&registered.identity).unwrap().is_none());
     drop(ring);
 }
 
@@ -397,7 +425,7 @@ fn refused_usage_observation(parent: u32) {
     let store = Store::open(&source.root.0).unwrap();
     assert!(
         store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .is_none()
     );
@@ -488,11 +516,11 @@ fn missing_source_observation(root: &Path) {
     let store = Store::open(&source.root.0).unwrap();
     assert!(
         store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .is_none()
     );
-    let saved = store.progress(&successor.identity).unwrap().unwrap();
+    let saved = store.saved_newest(&successor.identity).unwrap().unwrap();
     assert_eq!((saved.publication_first, saved.publication_end), (1, 2));
     assert_eq!(
         saved.losses,
@@ -907,7 +935,7 @@ fn recovery_at_each_minute_offset_keeps_the_normal_seal_boundary() {
         assert!(
             source
                 .store
-                .progress(&source.registered.identity)
+                .saved_newest(&source.registered.identity)
                 .unwrap()
                 .is_none()
         );
@@ -990,7 +1018,7 @@ fn a_closed_run_before_its_first_observation_keeps_its_event_without_a_minute() 
     assert!(
         source
             .store
-            .progress(&source.registered.identity)
+            .saved_newest(&source.registered.identity)
             .unwrap()
             .is_none()
     );
@@ -1005,18 +1033,17 @@ fn a_closed_run_before_its_first_observation_keeps_its_event_without_a_minute() 
     assert_eq!(page.coverage, 1..2);
     assert_eq!(page.losses, Losses::default());
     assert_eq!(page.next, None);
-    let mut buffer: Box<[_; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]> =
-        vec![0; collector::recording::discovery::DIRECTORY_BUFFER_WORDS]
-            .into_boxed_slice()
-            .try_into()
-            .unwrap();
-    let mut discovery =
-        crate::event_recovery::Discovery::open(&source.root.0, &mut buffer).unwrap();
-    let discovered = discovery.next_page(8).unwrap();
-    assert!(discovered.complete);
-    assert_eq!(discovered.runs.len(), 1);
-    assert_eq!(discovered.runs[0].run, source.registered.identity);
-    assert_eq!(discovered.runs[0].rows, 1);
+    let budget = Arc::new(ByteBudget::new(1 << 28));
+    let catalog = crate::canonical::catalog::Catalog::open(&source.root.0, &budget).unwrap();
+    let discovered = catalog
+        .event_objects_page(None, 8, &mut crate::canonical::ReadWork::default())
+        .unwrap();
+    assert_eq!(discovered.objects.len(), 1);
+    assert_eq!(
+        discovered.objects[0].recovery.run,
+        source.registered.identity
+    );
+    assert_eq!(discovered.objects[0].recovery.rows, 1);
 }
 
 fn assert_exact_window(
@@ -1028,7 +1055,7 @@ fn assert_exact_window(
 ) {
     let manifest = source
         .store
-        .existing(&WindowIdentity {
+        .saved(&WindowIdentity {
             run: source.registered.identity,
             window,
         })
@@ -1038,7 +1065,9 @@ fn assert_exact_window(
         manifest.publication_first..manifest.publication_end,
         publications
     );
-    assert_eq!(manifest.events_first..manifest.events_end, events);
+    // A window's event coverage starts where the frontier ended, before any events it lost.
+    assert_eq!(manifest.events_first + losses.events, events.start);
+    assert_eq!(manifest.events_end, events.end);
     assert_eq!(manifest.losses, losses);
     let engine = crate::engine::Engine::new();
     for (table, column, expected) in [
@@ -1046,7 +1075,7 @@ fn assert_exact_window(
         ("events", "event", events),
     ] {
         let relation = if table == "events" {
-            let budget = std::sync::Arc::new(ByteBudget::new(128 * 1024 * 1024));
+            let budget = Arc::new(ByteBudget::new(128 * 1024 * 1024));
             engine
                 .event_source(&source.root.0, &manifest, &budget)
                 .unwrap()

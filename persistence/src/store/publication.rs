@@ -1696,6 +1696,7 @@ fn validate_metadata(metadata: &CanonicalMetadata, state: &NormalState) -> io::R
     }
     if let Body::Events(manifest) = &metadata.body {
         if manifest.recovery.rows == 0
+            && !manifest.recovery.losses.unknown
             && (manifest.recovery.losses.events != 0 || manifest.recovery.losses.publications != 0)
         {
             return Err(io::Error::from(io::ErrorKind::Unsupported));

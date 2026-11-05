@@ -55,6 +55,28 @@ impl Drop for Root {
 }
 
 #[test]
+fn a_recording_set_up_in_part_finishes_with_the_identity_it_began() {
+    // Goal: a process that ended while setting up a recording leaves a root the next one
+    // finishes, under the same identity.
+    // Method: seed the first step of a setup, then ask for the recording's identity.
+    let fixture = Root::new();
+    let root = PrivateDirectory::open(&fixture.0).unwrap();
+    let registration = FileLock::try_lock(&fixture.0.join("registration.lock")).unwrap();
+    let identity = Identity([1, 2]);
+    let mut bootstrap = [0; 64];
+    encode_bootstrap(identity, &mut bootstrap).unwrap();
+    private::atomic_write_in(&root, "bootstrap", &bootstrap).unwrap();
+
+    let finished = crate::recording::recording_identity(&fixture.0, &registration).unwrap();
+
+    assert_eq!(finished, identity);
+    assert_eq!(
+        classify(&root, &mut [0; 4097]).unwrap(),
+        Classification::Initialized(identity)
+    );
+}
+
+#[test]
 fn initializer_adopts_partial_scaffold_and_reader_detects_replaced_quiet_inode() {
     // Goal: restart preserves registration identity and independent reopen catches ABA.
     // Method: seed an interrupted scaffold, initialize, then replace identical state bytes.
