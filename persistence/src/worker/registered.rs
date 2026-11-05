@@ -8,7 +8,7 @@ use super::{
     Derivation, Limits, Progress, RegisteredRun, Result, RunState, SourceState, Store, Window,
     WindowIdentity, Writers,
 };
-use crate::canonical::ReadWork;
+use crate::canonical::{ReadWork, SourceFrontierRead};
 use crate::event_recovery::Batch;
 use crate::resources::{ByteBudget, WORKING_BYTES_MAX};
 use crate::store::{
@@ -186,7 +186,7 @@ fn seal(
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<()> {
-    let input = seal_input(
+    let (input, frontier) = seal_input(
         store,
         &reader,
         &selection.identity,
@@ -194,7 +194,7 @@ fn seal(
         state,
         budget,
     )?;
-    let attempt = match store.register_attempt(&input, &mut reader, budget) {
+    let attempt = match store.register_attempt_from_frontier(&input, &mut reader, frontier) {
         Ok(attempt) => attempt,
         Err(refusal) => {
             return if seal_selection_lost(&mut reader, selection.publication)? {
@@ -268,11 +268,11 @@ fn seal_terminal(
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<()> {
-    let input = seal_terminal_input(store, registered, &reader, state, budget)?;
+    let (input, frontier) = seal_terminal_input(store, registered, &reader, state, budget)?;
     let AttemptOperation::Terminal { event_end } = input.operation else {
         return Err(crate::Error::Bound("terminal attempt operation"));
     };
-    let attempt = store.register_attempt(&input, &mut reader, budget)?;
+    let attempt = store.register_attempt_from_frontier(&input, &mut reader, frontier)?;
     let manifest = crate::event_recovery::write_tail_into(
         reader,
         &registered.identity,
@@ -294,13 +294,13 @@ fn seal_terminal(
     Ok(())
 }
 
-fn seal_terminal_input(
-    store: &Store,
+fn seal_terminal_input<'store>(
+    store: &'store Store,
     registered: &RegisteredRun,
     reader: &RingReader,
     state: &RunState,
     budget: &Arc<ByteBudget>,
-) -> Result<AttemptInput> {
+) -> Result<SealInput<'store>> {
     let event_end = reader
         .event_newest()?
         .checked_add(1)
@@ -466,14 +466,18 @@ fn seal_report(
     ));
 }
 
-fn seal_input(
-    store: &Store,
+/// An attempt's input and the read of the frontier it was built from, which its registration
+/// takes over.
+type SealInput<'store> = (AttemptInput, SourceFrontierRead<'store, 'static>);
+
+fn seal_input<'store>(
+    store: &'store Store,
     reader: &RingReader,
     identity: &WindowIdentity,
     publication: u64,
     state: &RunState,
     budget: &Arc<ByteBudget>,
-) -> Result<AttemptInput> {
+) -> Result<SealInput<'store>> {
     let operation = AttemptOperation::Ordinary {
         window: identity.window,
         attempted_origin: publication,
@@ -492,17 +496,17 @@ fn seal_input(
 
 /// The attempt that takes the source from its frontier, charging the publications the scan found
 /// lost up to `publication_end`.
-fn seal_input_of(
-    store: &Store,
+fn seal_input_of<'store>(
+    store: &'store Store,
     reader: &RingReader,
     run: &RunIdentity,
     operation: AttemptOperation,
     publication_end: u64,
     state: &RunState,
     budget: &Arc<ByteBudget>,
-) -> Result<AttemptInput> {
-    let frontier = store.source_frontier(run, budget, &mut ReadWork::default())?;
-    let (predecessor, publication_start, event_start, prior_window) = match &frontier {
+) -> Result<SealInput<'store>> {
+    let mut frontier = store.source_frontier_read(run, budget)?;
+    let (predecessor, publication_start, event_start, prior_window) = match frontier.result()? {
         Some(frontier) => (
             frontier.predecessor().clone(),
             frontier.publication_end(),
@@ -517,7 +521,7 @@ fn seal_input_of(
         ),
     };
 
-    Ok(AttemptInput {
+    let input = AttemptInput {
         run: *run,
         operation,
         captured: reader.dictionary_capacity().is_some(),
@@ -534,7 +538,9 @@ fn seal_input_of(
             unknown: seal_input_unknown(run, state),
             prior_window,
         },
-    })
+    };
+
+    Ok((input, frontier))
 }
 
 /// Names the last run whose extent could not be read. A registry that only counts its evicted

@@ -490,8 +490,9 @@ impl Recording {
             window: attempted.number,
         };
         let publication = attempted.publication;
-        let input =
-            super::seal_input(store, &reader, &identity, publication, &state, &budget).unwrap();
+        let input = super::seal_input(store, &reader, &identity, publication, &state, &budget)
+            .unwrap()
+            .0;
         let attempt = store
             .register_attempt(&input, &mut reader, &budget)
             .unwrap();
@@ -554,8 +555,9 @@ impl Recording {
         let registered = self.registered();
         let mut reader = RingReader::open_generation(&registered.ring_name).unwrap();
         reader.set_writer_gone();
-        let input =
-            super::seal_terminal_input(store, &registered, &reader, &state, &budget).unwrap();
+        let input = super::seal_terminal_input(store, &registered, &reader, &state, &budget)
+            .unwrap()
+            .0;
         let AttemptOperation::Terminal { event_end } = input.operation else {
             panic!("a terminal seal has a terminal operation");
         };
@@ -1754,8 +1756,9 @@ fn a_selection_overwritten_after_registering_is_counted_once_by_the_next_scan() 
         publication: 1,
     };
     let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
-    let input =
-        super::seal_input(&store, &reader, &selection.identity, 1, &state, &budget).unwrap();
+    let input = super::seal_input(&store, &reader, &selection.identity, 1, &state, &budget)
+        .unwrap()
+        .0;
     let attempt = store
         .register_attempt(&input, &mut reader, &budget)
         .unwrap();
@@ -1812,8 +1815,9 @@ fn a_selection_whose_start_was_overwritten_is_selected_again_from_what_remains()
         publication: 1,
     };
     let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
-    let input =
-        super::seal_input(&store, &reader, &selection.identity, 1, &state, &budget).unwrap();
+    let input = super::seal_input(&store, &reader, &selection.identity, 1, &state, &budget)
+        .unwrap()
+        .0;
     let attempt = store
         .register_attempt(&input, &mut reader, &budget)
         .unwrap();
@@ -1890,7 +1894,9 @@ fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
         window: 0,
     };
     let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
-    let input = super::seal_input(&store, &reader, &identity, 1, &state, &budget).unwrap();
+    let input = super::seal_input(&store, &reader, &identity, 1, &state, &budget)
+        .unwrap()
+        .0;
     let attempt = store
         .register_attempt(&input, &mut reader, &budget)
         .unwrap();
@@ -1947,7 +1953,9 @@ fn a_seal_charges_its_event_writer_to_the_one_budget_it_was_given() {
         window: 0,
     };
     let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
-    let input = super::seal_input(&store, &reader, &identity, 1, &state, &budget).unwrap();
+    let input = super::seal_input(&store, &reader, &identity, 1, &state, &budget)
+        .unwrap()
+        .0;
     let attempt = store
         .register_attempt(&input, &mut reader, &budget)
         .unwrap();

@@ -290,6 +290,22 @@ impl<'root> SourceFrontierRead<'root, 'static> {
             failed: false,
         })
     }
+    /// A read taken to its end, whose result a registration can take over instead of reading the
+    /// frontier again. Each read costs every event batch of the newest window.
+    pub(crate) fn begin_finished(
+        root: &'root PrivateDirectory,
+        run: RunIdentity,
+        budget: &Arc<ByteBudget>,
+    ) -> io::Result<Self> {
+        let mut query = Self::begin_owned(root, run, budget)?;
+        for _ in 0..3 {
+            let remaining = 4096_u64.saturating_sub(query.work().node_attempts);
+            if query.step_limited(remaining)? == FrontierStep::Complete {
+                return Ok(query);
+            }
+        }
+        Err(retry())
+    }
 }
 fn source_value(candidate: &AdmittedCanonical, ordered_window: Option<u64>) -> SourceFrontier {
     let metadata = &candidate.metadata;
