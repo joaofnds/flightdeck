@@ -61,6 +61,30 @@ fn a_saved_batch_that_reads_as_no_batch_stops_the_worker() {
 }
 
 #[test]
+fn a_batch_saved_past_a_missing_one_stops_the_worker() {
+    // Goal: the writer creates batches in order, so a batch past a missing ordinal is not what a
+    // process leaves, and it stays to be read rather than being taken for nothing saved (P02.3).
+    // Method: stop before the event index, move the only batch one ordinal on, restart, and read
+    // the refusal and the batch.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::EventIndexAbsent);
+    drop(first);
+    let pending = attempt_directory(&recording.root, "data", "pending");
+    let moved = pending
+        .join("events")
+        .join(crate::event_recovery::batch_name(1));
+    std::fs::rename(Recording::only_event_batch(&pending), &moved).unwrap();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let result = recording.persist_result(&restarted, &mut RunState::default());
+
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == ErrorKind::Unsupported));
+    assert!(moved.exists());
+}
+
+#[test]
 fn a_batch_its_index_names_that_is_gone_stops_the_worker() {
     // Goal: the writer finishes every batch before their index, so an index that names a batch no
     // longer there is damage, which stays to be read rather than being staged over (P02.3).
@@ -215,6 +239,44 @@ fn a_mark_of_unknown_extent_outlives_a_minute_staged_again() {
     assert_eq!(
         recording.saved_unknown_provenance(),
         [None, Some(named), None]
+    );
+}
+
+#[test]
+fn a_mark_its_attempt_registered_stays_on_the_minute_staged_again() {
+    // Goal: a mark the attempt registered is the minute's own, so the next minute claims no unknown
+    // extent it does not have (P02.3).
+    // Method: stop a seal registered with the mark inside a table, restart the whole worker in a
+    // registry that still counts the eviction, and read what each minute names.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    recording.writer.finish();
+    let first = Store::open(&recording.root).unwrap();
+    let attempted = InterruptedWindow {
+        number: 0,
+        publication: 1,
+        publications_lost: 0,
+        unknown: true,
+    };
+    recording.interrupted_seal_of(&first, &attempted, Interruption::TableTorn);
+    drop(first);
+    let registry = Registry {
+        runs: vec![recording.registered()],
+        evictions: 1,
+    };
+
+    whole_worker_of(&recording.root, &registry, &mut |_pause| {
+        panic!("a finished run gives the worker nothing to wait for")
+    });
+
+    let named = UnknownProvenance {
+        reason: UnknownReason::Predecessor,
+        run: recording.run.run,
+        boot: recording.run.boot,
+    };
+    assert_eq!(
+        recording.saved_unknown_provenance(),
+        [Some(named), None, None]
     );
 }
 
@@ -414,6 +476,7 @@ fn a_later_minute_interrupted_inside_a_table_converges() {
         number: 1,
         publication: 3,
         publications_lost: 0,
+        unknown: false,
     };
     recording.interrupted_seal_of(&first, &second, Interruption::TableTorn);
     drop(first);

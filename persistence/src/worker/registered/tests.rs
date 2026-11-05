@@ -48,6 +48,8 @@ struct InterruptedWindow {
     number: u64,
     publication: u64,
     publications_lost: u64,
+    /// Whether the attempt registered with a mark of unknown extent.
+    unknown: bool,
 }
 
 fn shape() -> Shape {
@@ -480,6 +482,7 @@ impl Recording {
             number: 0,
             publication: 1,
             publications_lost: 0,
+            unknown: false,
         };
         self.interrupted_seal_of(store, &attempted, interruption);
     }
@@ -494,6 +497,7 @@ impl Recording {
         let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
         let mut state = RunState::default();
         state.losses.publications = attempted.publications_lost;
+        state.losses.unknown = attempted.unknown;
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
         let identity = WindowIdentity {
             run: self.run,
@@ -1213,6 +1217,7 @@ fn interrupted_lagging_seal_counts_its_losses_once(interruption: Interruption) {
         number: 5,
         publication: 7,
         publications_lost: 4,
+        unknown: false,
     };
     let first = Store::open(&recording.root).unwrap();
     recording.interrupted_seal_of(&first, &attempted, interruption);
@@ -1283,6 +1288,7 @@ fn a_seal_with_no_rows_past_lost_events_counts_them_when_staged_again() {
         number: 6,
         publication: 8,
         publications_lost: 5,
+        unknown: false,
     };
     let first = Store::open(&recording.root).unwrap();
     recording.interrupted_seal_of(&first, &attempted, Interruption::TableMissing);
@@ -1456,6 +1462,7 @@ fn a_crashed_runs_last_minute_finds_its_end_when_staged_again() {
         number: 2,
         publication: 4,
         publications_lost: 0,
+        unknown: false,
     };
     recording.interrupted_seal_of(&first, &last, Interruption::TableTorn);
     drop(first);
