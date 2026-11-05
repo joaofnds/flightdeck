@@ -239,7 +239,11 @@ The ordinary saved-recording Session still needs an inspection route for them.
 New recording roots carry a 74-byte identity envelope with separate required reader and
 writer versions. Readers accept supported legacy roots, but new writers refuse them before
 taking ownership or changing their files. Older binaries reject the new envelope, so they
-cannot append an incompatible run. The transition requires a new recording root.
+cannot append an incompatible run. The transition requires a new recording root. The app's
+default launch makes one by renaming an older recording that no process holds to
+`flightdeck.<identity>.recording` beside it, where `--recording PATH` still opens it and nothing
+expires its readings or removes it. A recording that `--recording PATH` names stays where it is,
+so its recorder refuses it.
 
 The persister checks its current and kernel lifetime-peak physical footprint every 100 ms
 against the limit passed by the recorder, 256 MiB, and exits if either exceeds it. The

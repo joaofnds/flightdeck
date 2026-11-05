@@ -17,7 +17,9 @@ the app, required recorder, collector and persister executables, and artwork; mi
 packaging. It can be moved outside the checkout.
 
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
-It attaches to an advancing existing recording or starts a recorder controller when no controller
+It first renames a recording an older version wrote there, unless a process still holds it, to
+`flightdeck.<identity>.recording` beside it and starts a new recording, and the charts then begin
+empty. It attaches to an advancing existing recording or starts a recorder controller when no controller
 is running. It attaches only to a compatible worker build, and
 otherwise fails with both builds named. A ring states its own layout, which every reader
 checks, so an app opening a recording another build wrote reads it only where the

@@ -10,9 +10,11 @@ pub mod format;
 mod holder;
 pub mod private;
 mod registry;
+mod set_aside;
 
 pub use holder::{Holder, holder};
 pub use registry::{RegisteredRun, Registry, RegistryBuffer};
+pub use set_aside::set_aside_older;
 
 /// The fingerprint of the code this collector is built from.
 pub const BUILD: u64 = include!(concat!(env!("OUT_DIR"), "/build"));

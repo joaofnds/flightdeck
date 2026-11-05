@@ -35,6 +35,16 @@ pub(super) fn read_writer_identity(root: &Path) -> io::Result<Identity> {
     Ok(format.identity)
 }
 
+/// The identity of a root that requires a writer older than this one, or `None` for any other.
+pub(super) fn older_writer_identity(root: &Path) -> io::Result<Option<Identity>> {
+    let format = read(root)?;
+    if format.writer < WRITER_PROTOCOL {
+        Ok(Some(format.identity))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(super) fn create(root: &Path, identity: Identity) -> io::Result<()> {
     let header = std::str::from_utf8(HEADER).map_err(|_| invalid())?;
     let text = format!(

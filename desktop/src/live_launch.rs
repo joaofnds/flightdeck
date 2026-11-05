@@ -89,6 +89,7 @@ pub fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
 
     let control = control(options)?;
     let root = recording(options)?;
+    set_aside_older_recording(&root, options);
     let collector = collector_session(&root, options)?;
     // A recording opened read-only has no ring to follow, so the store does not hold it yet.
     let mode = if options.source.read_only() {
@@ -381,6 +382,21 @@ pub fn recording(options: &Options) -> Result<PathBuf, Box<dyn std::error::Error
     }
 
     Ok(application_support()?.join("flightdeck.recording"))
+}
+
+/// Moves an older version's recording away from the default path, so the launch starts a new one
+/// there, since no recorder of this version appends to it. A recording the launch names stays,
+/// and its recorder's refusal reaches the status line, as one that fails to move does here.
+fn set_aside_older_recording(root: &std::path::Path, options: &Options) {
+    if options.source.recording.is_some() {
+        return;
+    }
+
+    match collector::recording::set_aside_older(root) {
+        Ok(Some(moved)) => eprintln!("Set the older recording aside at {}", moved.display()),
+        Ok(None) => {}
+        Err(error) => eprintln!("Older recording stays at {}: {error}", root.display()),
+    }
 }
 
 /// The directory Flightdeck keeps the user's files in.
