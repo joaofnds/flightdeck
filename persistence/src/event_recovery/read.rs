@@ -164,6 +164,16 @@ fn decode_batch_file(
     budget: &Arc<ByteBudget>,
     work: Option<&dyn crate::engine::RawTableWork>,
 ) -> Result<DataFrame> {
+    decode_batch_file_columns(file, identities, false, budget, work)
+}
+
+fn decode_batch_file_columns(
+    file: std::fs::File,
+    identities: bool,
+    numbers_only: bool,
+    budget: &Arc<ByteBudget>,
+    work: Option<&dyn crate::engine::RawTableWork>,
+) -> Result<DataFrame> {
     let limits = DecodeLimits {
         compressed_bytes: collector::u64_from_usize(COMPRESSED_BYTES_MAX),
         expanded_bytes: collector::u64_from_usize(EXPANDED_BYTES_MAX),
@@ -181,22 +191,27 @@ fn decode_batch_file(
     if profile != identities || !crate::event_observation::extended_fields(admitted.fields())? {
         return Err(Error::Bound("physical event profile"));
     }
-    let mut columns: Vec<_> = model::catalog::EVENTS
+    let mut whole: Vec<_> = model::catalog::EVENTS
         .columns
         .iter()
         .map(|column| column.name)
         .collect();
     if identities {
-        columns.extend(model::catalog::IDENTITY.iter().map(|column| column.name));
+        whole.extend(model::catalog::IDENTITY.iter().map(|column| column.name));
     }
-    columns.extend(
+    whole.extend(
         model::catalog::EVENT_OBSERVATION
             .iter()
             .map(|column| column.name),
     );
+    let columns = if numbers_only {
+        &["event"][..]
+    } else {
+        &whole[..]
+    };
     let frame = admitted
         .read_metadata_counted(
-            &columns,
+            columns,
             Some(u32::try_from(BATCH_ROWS_MAX).map_err(|_| Error::Bound("terminal batch rows"))?),
             work,
         )
@@ -217,23 +232,46 @@ pub(crate) fn read_original_batch_file(
 ) -> Result<super::Batch> {
     let frame = decode_batch_file(file, identities, budget, None)?;
     *decoded_bytes += collector::u64_from_usize(frame.estimated_size(true));
-    let events = frame.column("event")?.u64()?;
-    let first = events.get(0).ok_or(Error::Bound("original first event"))?;
-    let last = events
-        .get(frame.height() - 1)
-        .ok_or(Error::Bound("original last event"))?;
-    let batch = super::Batch {
-        first,
-        end: last
-            .checked_add(1)
-            .ok_or(Error::Bound("original event overflow"))?,
-        rows: collector::u64_from_usize(frame.height()),
-    };
+    let batch = read_original_batch_extent(&frame)?;
     read_batch_validate(&frame, &batch, identities, associated)?;
     if batch.first == 0 {
         return Err(Error::Bound("original event origin"));
     }
     Ok(batch)
+}
+
+/// An original batch's extent from its event numbers alone, for a proof that goes on to read every
+/// batch whole. Reading each of them twice took 1.9 of the 4.1 s of a proof at the largest shape on
+/// an M5 Pro.
+pub(crate) fn read_original_batch_numbers(
+    file: std::fs::File,
+    identities: bool,
+    budget: &Arc<ByteBudget>,
+    decoded_bytes: &mut u64,
+) -> Result<super::Batch> {
+    let frame = decode_batch_file_columns(file, identities, true, budget, None)?;
+    *decoded_bytes += collector::u64_from_usize(frame.estimated_size(true));
+    let batch = read_original_batch_extent(&frame)?;
+    if batch.first == 0 {
+        return Err(Error::Bound("original event origin"));
+    }
+    Ok(batch)
+}
+
+fn read_original_batch_extent(frame: &DataFrame) -> Result<super::Batch> {
+    let events = frame.column("event")?.u64()?;
+    let first = events.get(0).ok_or(Error::Bound("original first event"))?;
+    let last = events
+        .get(frame.height() - 1)
+        .ok_or(Error::Bound("original last event"))?;
+
+    Ok(super::Batch {
+        first,
+        end: last
+            .checked_add(1)
+            .ok_or(Error::Bound("original event overflow"))?,
+        rows: collector::u64_from_usize(frame.height()),
+    })
 }
 
 fn validate_owned_payload(frame: &DataFrame, identities: bool) -> Result<()> {

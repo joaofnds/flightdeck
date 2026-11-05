@@ -230,10 +230,20 @@ pub struct OriginalInventory<'attempt, 'store> {
     unordered: bool,
     index_conflict: bool,
     previous_first: u64,
+    batch_columns: BatchColumns,
     work: InventoryWork,
     budget: Arc<ByteBudget>,
     reservation: ByteReservation,
 }
+
+/// What a census reads of each batch it counts.
+#[derive(Clone, Copy)]
+enum BatchColumns {
+    Whole,
+    /// Only the event numbers, since the proof that follows reads every batch whole.
+    EventNumbers,
+}
+
 pub(super) struct NormalInventory {
     census_header: Option<census::CensusHeader>,
     cleanup_original_inode: (u64, u64),
@@ -406,6 +416,7 @@ impl<'store> OriginalInventory<'store, 'store> {
             unordered,
             index_conflict,
             previous_first,
+            batch_columns,
             work,
             budget,
             reservation,
@@ -430,6 +441,7 @@ impl<'store> OriginalInventory<'store, 'store> {
             unordered,
             index_conflict,
             previous_first,
+            batch_columns,
             work,
             budget,
             reservation,
@@ -559,6 +571,7 @@ impl<'store> RegisteredAttempt<'store> {
             unordered: false,
             index_conflict: false,
             previous_first: 0,
+            batch_columns: BatchColumns::Whole,
             work: *work,
             budget: Arc::clone(budget),
             reservation,
@@ -651,6 +664,12 @@ impl OriginalInventory<'_, '_> {
             self.next += 1;
         }
         Ok(InventoryStep::Continue)
+    }
+
+    /// Leaves each batch's rows to the caller, which reads every batch whole before anything
+    /// depends on them.
+    pub(super) fn read_numbers_only(&mut self) {
+        self.batch_columns = BatchColumns::EventNumbers;
     }
 
     pub(super) fn normal_batches(
@@ -983,13 +1002,7 @@ impl OriginalInventory<'_, '_> {
             return Ok(());
         }
         self.work.raw_file_clones += 1;
-        let result = crate::event_recovery::read::read_original_batch_file(
-            file.try_clone()?,
-            self.attempt.input().captured,
-            uses_events_directory,
-            &self.budget,
-            &mut self.work.decoded_bytes,
-        );
+        let result = self.probe_batch_read(file.try_clone()?, uses_events_directory);
         if FileIdentity::read(&file)? != identity {
             return Err(invalid().into());
         }
@@ -1013,6 +1026,29 @@ impl OriginalInventory<'_, '_> {
             Err(error) => return Err(error),
         }
         Ok(())
+    }
+
+    fn probe_batch_read(
+        &mut self,
+        file: File,
+        uses_events_directory: bool,
+    ) -> Result<crate::event_recovery::Batch> {
+        let identities = self.attempt.input().captured;
+        match self.batch_columns {
+            BatchColumns::EventNumbers => crate::event_recovery::read::read_original_batch_numbers(
+                file,
+                identities,
+                &self.budget,
+                &mut self.work.decoded_bytes,
+            ),
+            BatchColumns::Whole => crate::event_recovery::read::read_original_batch_file(
+                file,
+                identities,
+                uses_events_directory,
+                &self.budget,
+                &mut self.work.decoded_bytes,
+            ),
+        }
     }
 
     fn probe_batch_complete(

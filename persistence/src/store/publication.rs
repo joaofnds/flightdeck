@@ -236,6 +236,11 @@ impl<'store> RegisteredAttempt<'store> {
         let proof = super::normal_proof::SourceProof::new(reader, &self.input, scratch)?;
         let state = NormalState::registered(self.transaction, self.input.clone());
         let mut inner = NormalPublication::new(self, state, budget, Some(reservation), None)?;
+        inner
+            .inventory
+            .as_mut()
+            .ok_or_else(invalid)?
+            .read_numbers_only();
         inner.draft = Some(draft);
         inner.proof = Some(proof);
         Ok(NormalProof { inner })

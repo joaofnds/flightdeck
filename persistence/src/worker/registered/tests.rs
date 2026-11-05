@@ -2016,6 +2016,105 @@ fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
     assert_eq!(recording.frontier(&reopened).unwrap().publication_end(), 13);
 }
 
+/// Stages `recording`'s first window by hand up to where its proof begins.
+fn staged_first_window<'store>(
+    recording: &Recording,
+    store: &'store Store,
+    budget: &Arc<ByteBudget>,
+) -> (RegisteredAttempt<'store>, crate::Manifest, RingReader) {
+    let derive = SealedApps::default();
+    let writers = Writers {
+        encoder: Encoder,
+        derive: &derive,
+    };
+    let mut state = RunState {
+        next_publication: 1,
+        loaded: true,
+        ..RunState::default()
+    };
+    let identity = WindowIdentity {
+        run: recording.run,
+        window: 0,
+    };
+    let mut reader = RingReader::open_generation(recording.writer.name()).unwrap();
+    let input = super::seal_input(store, &reader, &identity, 1, &state, budget)
+        .unwrap()
+        .0;
+    let attempt = store.register_attempt(&input, &mut reader, budget).unwrap();
+    reader.seek_publication(1).unwrap();
+    reader.seek_event(input.losses.event_start).unwrap();
+    let window =
+        super::seal_stage(&attempt, &mut reader, identity, &[], &mut state, budget).unwrap();
+    let manifest = super::seal_write(&attempt, &writers, &window, &state).unwrap();
+
+    (attempt, manifest, reader)
+}
+
+#[test]
+fn a_fresh_proof_decodes_each_batch_whole_only_once() {
+    // Goal: a census before the proof's own read costs the event numbers and no more, since a
+    // second whole read took 1.9 of 4.1 s at the largest shape.
+    // Method: stage two events, take the proof to its end, and read what its census decoded.
+    let mut recording = Recording::new();
+    recording.publish_events_in_minute(0, 2);
+    recording.publish_in_minute(1);
+    let store = Store::open(&recording.root).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let (attempt, manifest, reader) = staged_first_window(&recording, &store, &budget);
+    let mut proof = attempt.prove_ordinary(&manifest, reader, &budget).unwrap();
+
+    for _step in 0..PROOF_STEPS_MAX {
+        if proof.step().unwrap() == ProofStep::Complete {
+            break;
+        }
+    }
+
+    let event_number_bytes = 8;
+    assert_eq!(proof.work().inventory.decoded_bytes, 2 * event_number_bytes);
+}
+
+/// More steps than a small window's proof takes.
+const PROOF_STEPS_MAX: u32 = 1 << 12;
+
+#[test]
+fn a_proof_refuses_a_batch_whose_rows_are_invalid_past_their_event_numbers() {
+    // Goal: a census of event numbers alone leaves unread nothing a fresh proof should refuse.
+    // Method: stage a window, give a batch's rows a kind no event has, and prove it.
+    let mut recording = Recording::new();
+    recording.publish_events_in_minute(0, 2);
+    recording.publish_in_minute(1);
+    let store = Store::open(&recording.root).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let (attempt, manifest, reader) = staged_first_window(&recording, &store, &budget);
+    let pending = recording.saved_windows()[0].join("pending");
+    let batch = Recording::only_event_batch(&pending);
+    let table = crate::engine::AdmittedTable::from_file_budgeted(
+        std::fs::File::open(&batch).unwrap(),
+        &budget,
+    )
+    .unwrap();
+    let names: Vec<_> = table.fields().map(|(name, _)| name).collect();
+    let mut frame = table.read_metadata_budgeted(&names, None).unwrap();
+    drop(table);
+    let kinds = vec![Some(u8::MAX); frame.height()];
+    frame
+        .with_column(polars::prelude::Column::new("kind".into(), kinds))
+        .unwrap();
+    crate::encoder::encode_write_event_batch(&mut frame, std::fs::File::create(&batch).unwrap())
+        .unwrap();
+
+    let refused = super::seal_publish(
+        attempt,
+        &manifest,
+        reader,
+        &budget,
+        &mut super::SealClock::start(),
+    );
+
+    let refusal = refused.err().unwrap();
+    assert!(matches!(refusal, crate::Error::Io(error) if error.kind() == ErrorKind::InvalidData));
+}
+
 #[test]
 fn a_seal_charges_its_event_writer_to_the_one_budget_it_was_given() {
     // Goal: the worker's memory limit covers the event writer too, so a seal cannot reserve that
