@@ -189,3 +189,105 @@ impl Worker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use collector::recording::private::create_private_dir;
+    use collector::recording::{identity_text, random_identity};
+    use std::os::unix::fs::FileExt;
+    use std::path::PathBuf;
+
+    struct RefusedControl {
+        root: PathBuf,
+        control: Control,
+    }
+
+    impl RefusedControl {
+        /// A control file whose controller publication stands between its two sequence stores.
+        fn new() -> Self {
+            let token = identity_text(random_identity().unwrap());
+            let root = std::env::temp_dir().join(format!("flightdeck-refused-control-{token}"));
+            create_private_dir(&root).unwrap();
+            drop(Control::create(&root).unwrap());
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(root.join("recorder.control"))
+                .unwrap();
+            file.write_all_at(&1_u64.to_ne_bytes(), 16 * 8).unwrap();
+            let control = Control::open(&root).unwrap();
+            assert_eq!(
+                control.read(Role::Controller).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            Self { root, control }
+        }
+    }
+
+    impl Drop for RefusedControl {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.root).unwrap();
+        }
+    }
+
+    fn healthy(health: Health) -> Worker {
+        Worker {
+            health,
+            alive: true,
+            fresh: true,
+        }
+    }
+
+    #[test]
+    fn a_refused_read_finds_the_writer_of_the_kept_record_gone() {
+        // Goal: keeping a record across a refused read cannot keep a dead writer looking alive.
+        // Method: keep a record marked alive whose process has exited, and refuse the read.
+        let fixture = RefusedControl::new();
+        let mut exited = std::process::Command::new("/usr/bin/true").spawn().unwrap();
+        let pid = i32::try_from(exited.id()).unwrap();
+        assert!(exited.wait().unwrap().success());
+        let own = Health::own().unwrap();
+        let previous = Ok(healthy(Health { pid, ..own }));
+
+        let worker = Worker::read(
+            &fixture.control,
+            Role::Controller,
+            own.heartbeat_ns,
+            Some(&previous),
+        )
+        .unwrap();
+
+        assert!(!worker.alive);
+    }
+
+    #[test]
+    fn a_refused_read_finds_the_heartbeat_of_the_kept_record_stale() {
+        // Goal: keeping a record across a refused read cannot keep a silent writer looking fresh.
+        // Method: keep a record marked fresh, refuse the read just past the heartbeat's limit.
+        let fixture = RefusedControl::new();
+        let own = Health::own().unwrap();
+        let previous = Ok(healthy(own));
+
+        let worker = Worker::read(
+            &fixture.control,
+            Role::Controller,
+            own.heartbeat_ns + HEARTBEAT_LIMIT_NS + 1,
+            Some(&previous),
+        )
+        .unwrap();
+
+        assert!(worker.alive);
+        assert!(!worker.fresh);
+    }
+
+    #[test]
+    fn a_refused_read_with_no_kept_record_stays_refused() {
+        // Goal: with nothing to keep, a refused read is reported rather than invented.
+        // Method: refuse the first read of a controller.
+        let fixture = RefusedControl::new();
+
+        let result = Worker::read(&fixture.control, Role::Controller, 0, None);
+
+        assert_eq!(result.err().unwrap().kind(), io::ErrorKind::WouldBlock);
+    }
+}

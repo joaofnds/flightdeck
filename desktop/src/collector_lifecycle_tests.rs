@@ -122,46 +122,79 @@ fn an_interrupted_controller_health_write_preserves_independent_worker_health() 
     );
 }
 
-#[test]
-fn an_interrupted_health_read_keeps_a_healthy_controller_available() {
-    // Goal: catching a live controller mid-publication does not report it unavailable.
-    // Method: read complete records once, then leave the controller's real mapped sequence odd,
-    // as a writer paused between its two stores does, and read again.
+/// Reads the complete records of all three roles once, then leaves `role`'s real mapped sequence
+/// odd, as a writer paused between its two stores does, and reads again. Returns the notice of
+/// each read and the second read's retry and failure.
+fn notices_across_an_interrupted_read(
+    role: Role,
+    sequence_byte: u64,
+) -> (String, String, bool, Option<String>) {
     use std::os::unix::fs::FileExt;
     let fixture = Recording::managed();
-    let _persister_lock =
-        collector::recording::private::FileLock::try_lock(&fixture.root.join("persister.lock"))
+    let mut reporters = [Role::Controller, Role::Collector, Role::Persister]
+        .map(|role| Reporter::new(Control::open_writable(&fixture.root).unwrap(), role).unwrap());
+    for reporter in &mut reporters {
+        reporter
+            .update(WorkerState::Running, fixture.run(), 7)
             .unwrap();
-    let mut controller = Reporter::new(
-        Control::open_writable(&fixture.root).unwrap(),
-        Role::Controller,
-    )
-    .unwrap();
-    let mut collector = Reporter::new(
-        Control::open_writable(&fixture.root).unwrap(),
-        Role::Collector,
-    )
-    .unwrap();
-    controller
-        .update(WorkerState::Running, Identity([0; 2]), 0)
-        .unwrap();
-    collector
-        .update(WorkerState::Running, fixture.run(), 7)
-        .unwrap();
+    }
     let mut session = fixture.session(Mode::Auto);
     session.tick();
+    let (first, _) = session.status().unwrap();
     let file = std::fs::OpenOptions::new()
         .write(true)
         .open(fixture.root.join("recorder.control"))
         .unwrap();
-    file.write_all_at(&1_u64.to_ne_bytes(), 16 * 8).unwrap();
+    file.write_all_at(&1_u64.to_ne_bytes(), sequence_byte)
+        .unwrap();
+    assert_eq!(
+        Control::open(&fixture.root)
+            .unwrap()
+            .read(role)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 
     session.tick();
 
-    let (notice, retry) = session.status().unwrap();
-    assert!(notice.contains("Recovery: available"), "{notice}");
+    let (second, retry) = session.status().unwrap();
+    (first, second, retry, session.0.policy.failure.clone())
+}
+
+#[test]
+fn an_interrupted_health_read_keeps_a_healthy_controller_available() {
+    // Goal: catching a live controller mid-publication does not report it unavailable.
+    // Method: refuse only the controller's second read through its real mapped sequence.
+    let (first, second, retry, failure) =
+        notices_across_an_interrupted_read(Role::Controller, 16 * 8);
+
+    assert!(second.contains("Recovery: available"), "{second}");
+    assert_eq!(first, second);
     assert!(!retry);
-    assert_eq!(session.0.policy.failure, None);
+    assert_eq!(failure, None);
+}
+
+#[test]
+fn an_interrupted_health_read_keeps_a_healthy_collector_running() {
+    // Goal: catching a live collector mid-publication does not report acquisition unavailable.
+    // Method: refuse only the collector's second read through its real mapped sequence.
+    let (first, second, _, failure) = notices_across_an_interrupted_read(Role::Collector, 32 * 8);
+
+    assert!(second.contains("Acquisition: running;"), "{second}");
+    assert_eq!(first, second);
+    assert_eq!(failure, None);
+}
+
+#[test]
+fn an_interrupted_health_read_keeps_a_healthy_persister_running() {
+    // Goal: catching a live persister mid-publication does not report durability unavailable.
+    // Method: refuse only the persister's second read through its real mapped sequence.
+    let (first, second, _, failure) = notices_across_an_interrupted_read(Role::Persister, 48 * 8);
+
+    assert!(second.contains("Durable recording: running"), "{second}");
+    assert_eq!(first, second);
+    assert_eq!(failure, None);
 }
 
 #[test]
