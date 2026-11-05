@@ -51,6 +51,10 @@ struct SessionState {
 }
 
 const OUTPUT_BYTES_MAX: usize = 16_384;
+/// The store holds what the path named at launch, so only a launch can set a recording aside and
+/// follow the new one, which a recording its holder kept in place until now still needs.
+const OLDER_RECORDING_FAILURE: &str = "This recording comes from an older Flightdeck. Quit \
+     Flightdeck from its menu bar item and open it again to set it aside and start a new one.";
 const STOP_INTERVAL: Duration = Duration::from_millis(25);
 const STOP_ATTEMPTS_MAX: u128 = 5082;
 const _: () = {
@@ -244,6 +248,12 @@ impl CollectorSession {
 
     fn spawn(&mut self) -> io::Result<()> {
         assert!(self.0.child.is_none());
+        if self.0.policy.mode == Mode::Auto
+            && collector::recording::is_older(&self.0.configuration.root)?
+        {
+            self.failed(OLDER_RECORDING_FAILURE);
+            return Ok(());
+        }
         let ring = if self.0.configuration.isolated {
             isolated_ring()
         } else {

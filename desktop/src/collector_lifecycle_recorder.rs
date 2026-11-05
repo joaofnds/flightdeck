@@ -27,8 +27,8 @@ impl Recorder {
         let control = match Control::open(root) {
             Ok(control) => control,
             // A control file this build cannot read, such as one a release before an upgrade left,
-            // tells nothing of its workers, and a new recorder replaces it. What holds the
-            // recording's locks still says whether a worker of that build runs.
+            // tells nothing of its workers, and a new recorder replaces it. The collector's lock
+            // and announcement still say whether that build's collector runs.
             Err(error)
                 if matches!(
                     error.kind(),
@@ -78,6 +78,10 @@ impl Recorder {
             _ => None,
         };
         let controller_missing = matches!(&self.controller, Ok(controller) if !controller.alive);
+        let controller_stopping = matches!(
+            &self.controller,
+            Ok(controller) if controller.alive && controller.health.state == State::Stopping
+        );
         let controller_pid = match &self.controller {
             Ok(controller) if controller.alive => {
                 Some(u32::try_from(controller.health.pid).map_err(io::Error::other)?)
@@ -87,6 +91,8 @@ impl Recorder {
         Ok(Source {
             recording: if controller_missing {
                 RecordingStatus::Ready
+            } else if controller_stopping {
+                RecordingStatus::Finishing
             } else {
                 RecordingStatus::Pending
             },

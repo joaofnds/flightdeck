@@ -85,7 +85,7 @@ pub(super) enum Build {
 pub(super) fn other_build_failure(build: u64) -> String {
     format!(
         "The running collector is built from other code than this Flightdeck (build {build:016x}, \
-         expected {:016x}). Stop that recording explicitly, then retry.",
+         expected {:016x}). Stop it with `pkill -x 'recorder|collector'`, then retry.",
         collector::recording::BUILD
     )
 }
@@ -192,12 +192,13 @@ impl Policy {
             self.state = State::Starting;
             return Action::Spawn;
         }
+        // A read can catch a healthy controller mid-publication, which the next read clears. One
+        // that died there never clears, and a recorder started beside a live one exits at its lock.
         if source.controller_unavailable {
-            if self.restart_requested {
+            if self.restart_requested || self.expired(now, DISCOVERY_LIMIT) {
                 self.state = State::Starting;
                 return Action::Spawn;
             }
-            self.fail("Recorder controller is unavailable; retry to restore automatic recovery");
             return Action::None;
         }
         if let Build::Other(build) = source.build {

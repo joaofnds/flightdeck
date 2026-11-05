@@ -293,9 +293,10 @@ fn an_automatic_launch_reclaims_workers_that_outlived_their_controller() {
 }
 
 #[test]
-fn an_automatic_launch_waits_for_a_request_when_controller_health_is_unreadable() {
-    // Goal: health the app cannot read never starts a recorder beside one that may be running.
-    // Method: discover with the controller's health refused, then request a retry.
+fn an_automatic_launch_starts_a_recorder_once_controller_health_stays_unreadable() {
+    // Goal: a controller that died mid-publication cannot keep every later launch from recording,
+    // while a healthy one caught mid-publication goes unanswered. Method: discover with the
+    // controller's health refused, at once and at the discovery limit.
     let mut policy = Policy::new(Mode::Auto);
     let source = Source {
         recording: RecordingStatus::Pending,
@@ -303,12 +304,45 @@ fn an_automatic_launch_waits_for_a_request_when_controller_health_is_unreadable(
         ..Source::default()
     };
 
-    let unrequested = policy.step(Duration::ZERO, &source);
-    policy.retry();
-    let requested = policy.step(Duration::from_secs(1), &source);
+    let at_once = policy.step(Duration::ZERO, &source);
+    let at_the_limit = policy.step(DISCOVERY_LIMIT, &source);
 
-    assert_eq!(unrequested, Action::None);
-    assert_eq!(requested, Action::Spawn);
+    assert_eq!(at_once, Action::None);
+    assert_eq!(at_the_limit, Action::Spawn);
+}
+
+#[test]
+fn a_retry_starts_a_recorder_at_once_when_controller_health_is_unreadable() {
+    // Goal: the user's request needs no wait for the discovery limit.
+    // Method: lose the controller's health while attached, retry, and discover once.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.step(Duration::ZERO, &existing(1));
+    policy.step(Duration::from_secs(1), &existing(2));
+    let source = Source {
+        controller_unavailable: true,
+        ..Source::default()
+    };
+    policy.step(Duration::from_secs(2), &source);
+    policy.retry();
+
+    assert_eq!(policy.step(Duration::from_secs(3), &source), Action::Spawn);
+}
+
+#[test]
+fn a_recorder_lost_while_the_app_is_open_waits_for_a_retry() {
+    // Goal: a recorder the user stopped from a terminal stays stopped until the user asks.
+    // Method: attach to advancing readings, then lose the controller.
+    let mut policy = Policy::new(Mode::Auto);
+    policy.step(Duration::ZERO, &existing(1));
+    policy.step(Duration::from_secs(1), &existing(2));
+    let mut source = existing(3);
+    source.controller_missing = true;
+
+    let action = policy.step(Duration::from_secs(2), &source);
+
+    assert_eq!(action, Action::None);
+    assert_eq!(policy.state, State::Failed);
+    assert_eq!(policy.owned_pid, None);
 }
 
 #[test]

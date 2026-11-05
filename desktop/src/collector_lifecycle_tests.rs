@@ -108,7 +108,98 @@ fn a_recorder_running_under_another_build_is_reported_by_its_build() {
     let source = health::Health::new().read(&fixture.root, None).unwrap();
 
     assert_eq!(policy::Build::Other(OTHER_BUILD), source.build);
-    assert!(!source.controller_missing);
+    let action = policy::Policy::new(Mode::Auto).step(std::time::Duration::ZERO, &source);
+    assert_eq!(action, policy::Action::None);
+}
+
+#[test]
+fn a_launch_waits_for_a_controller_that_is_stopping() {
+    // Goal: a launch during a long stop waits for it rather than failing and starting nothing.
+    // Method: publish a live controller's stop, and read what the launch's discovery sees.
+    let fixture = Recording::managed();
+    let mut controller = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Controller,
+    )
+    .unwrap();
+    controller.set_state(WorkerState::Stopping).unwrap();
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(source.recording == policy::RecordingStatus::Finishing);
+}
+
+#[test]
+fn a_retry_on_a_recording_older_than_this_version_starts_nothing_and_says_how_to_recover() {
+    // Goal: a recording that could not move at launch, which only a new launch can set aside,
+    // never leaves the user retrying a recorder that refuses it.
+    // Method: discover an older root that nothing holds, as a retry finds it once its holder quit.
+    let parent = std::env::temp_dir().join(format!(
+        "flightdeck-lifecycle-{}",
+        identity_text(random_identity().unwrap())
+    ));
+    let root = parent.join("flightdeck.recording");
+    collector::recording::private::create_private_dir(&parent).unwrap();
+    collector::recording::private::create_private_dir(&root).unwrap();
+    collector::recording::private::atomic_write(
+        &root,
+        "identity",
+        b"00000000000000010000000000000002\n",
+    )
+    .unwrap();
+    let mut session = CollectorSession::new(Configuration {
+        root,
+        mode: Mode::Auto,
+        binary: std::env::current_exe().unwrap(),
+        isolated: false,
+    });
+
+    session.tick();
+
+    let spawned = session.0.child.is_some();
+    let failure = session.failure().map(str::to_owned);
+    std::fs::remove_dir_all(parent).unwrap();
+    assert!(!spawned);
+    assert!(failure.unwrap().contains("open it again"));
+}
+
+#[test]
+fn a_launch_over_a_root_with_no_identity_starts_a_recorder() {
+    // Goal: a recorder that died before it wrote the root's identity cannot block every launch.
+    // Method: discover an empty private directory.
+    let root = std::env::temp_dir().join(format!(
+        "flightdeck-lifecycle-{}",
+        identity_text(random_identity().unwrap())
+    ));
+    collector::recording::private::create_private_dir(&root).unwrap();
+
+    let source = health::Health::new().read(&root, None).unwrap();
+
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(source.recording == policy::RecordingStatus::Ready);
+}
+
+#[test]
+fn a_ring_refused_for_a_run_nothing_holds_does_not_block_a_launch() {
+    // Goal: a stale ring of a finished run, which rings outlive until a reboot, starts no failure.
+    // Method: point the finished run's registration at another run's ring, so its identity differs.
+    let mut fixture = Recording::new();
+    let other = Recording::new();
+    let ring = fixture.finish();
+    let runs = std::fs::read_to_string(fixture.root.join("runs")).unwrap();
+    assert!(runs.contains(&ring));
+    collector::recording::private::atomic_write(
+        &fixture.root,
+        "runs",
+        runs.replace(&ring, other.writer.as_ref().unwrap().name())
+            .as_bytes(),
+    )
+    .unwrap();
+
+    let source = health::Health::new().read(&fixture.root, None).unwrap();
+
+    assert!(source.recording == policy::RecordingStatus::Ready);
+    assert!(!source.producer_alive);
 }
 
 #[test]
@@ -134,16 +225,9 @@ fn an_interrupted_controller_health_write_preserves_independent_worker_health() 
 
     session.tick();
 
-    let (notice, retry) = session.status().unwrap();
+    let (notice, _) = session.status().unwrap();
     assert!(notice.contains("Acquisition: running;"), "{notice}");
     assert!(notice.contains("Recovery: unavailable"), "{notice}");
-    assert!(retry);
-    let source = session.source_if_needed().unwrap();
-    session.retry();
-    assert_eq!(
-        session.0.policy.step(Duration::from_secs(1), &source),
-        Action::Spawn
-    );
 }
 
 /// Reads the complete records of all three roles once, then leaves `role`'s real mapped sequence
@@ -746,6 +830,10 @@ impl Recording {
             .open(self.root.join("recorder.control"))
             .unwrap();
         file.write_all_at(&build.to_ne_bytes(), 6 * 8).unwrap();
+        assert_eq!(
+            Control::open(&self.root).err().unwrap().kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 
     fn announce(&self, run: Identity, build: u64) {

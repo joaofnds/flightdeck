@@ -47,8 +47,12 @@ impl Health {
     fn read_legacy(&mut self, root: &Path, owned_pid: Option<u32>) -> io::Result<Source> {
         let recording = match read_identity(root) {
             Ok(identity) => identity,
+            // A recorder that died before it wrote the identity left a root the next one adopts.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(Source::default());
+                return Ok(Source {
+                    recording: RecordingStatus::Ready,
+                    ..Source::default()
+                });
             }
             Err(error) => return Err(error),
         };
@@ -72,39 +76,36 @@ impl Health {
             }
 
             let followed = owned_pid.is_none_or(|pid| pid == registered.collector_pid);
-            let alive = match announced {
-                Some((run, build)) if run == registered.identity.run => {
-                    if build != BUILD {
-                        if followed {
-                            source.build = Build::Other(build);
-                        }
-                        continue;
-                    }
-
-                    true
-                }
-                _ => false,
+            // Only the announced run has a writer. Any other run's ring may stay until a reboot in
+            // a shape or under a name this build refuses, which must not keep a launch from
+            // recording.
+            let Some((_, build)) = announced.filter(|(run, _)| *run == registered.identity.run)
+            else {
+                continue;
             };
+            if build != BUILD {
+                if followed {
+                    source.build = Build::Other(build);
+                }
+                continue;
+            }
+
             let reader = read_reader(&mut previous, &registered.identity, registered.ring_name)?;
             let Some(reader) = reader else {
-                if alive {
-                    source.recording = RecordingStatus::Pending;
-                    source.producer_alive = true;
-                }
+                source.recording = RecordingStatus::Pending;
+                source.producer_alive = true;
                 continue;
             };
 
-            if alive {
-                if reader.ring.completed() {
-                    // The run ended, and either its collector still saves its last readings, or
-                    // the collector now holding the recording has yet to withdraw the
-                    // announcement the run left.
-                    source.recording = RecordingStatus::Finishing;
-                } else {
-                    source.producer_alive = true;
-                    if followed {
-                        source.observation = read_observation(&reader, registered.collector_pid)?;
-                    }
+            if reader.ring.completed() {
+                // The run ended, and either its collector still saves its last readings, or
+                // the collector now holding the recording has yet to withdraw the
+                // announcement the run left.
+                source.recording = RecordingStatus::Finishing;
+            } else {
+                source.producer_alive = true;
+                if followed {
+                    source.observation = read_observation(&reader, registered.collector_pid)?;
                 }
             }
             self.0.readers[index] = Some(reader);
