@@ -1,20 +1,21 @@
 use super::super::tests::forged_source::{ForgedWord, WritableSource};
-use super::super::{Progress, RunState, WindowIdentity, Writers, persist_one};
+use super::super::{Outcome, Progress, RunState, WindowIdentity, Writers, persist_one, run_paced};
 use crate::canonical::metadata::{Body, Lifecycle};
 use crate::canonical::{CanonicalMetadata, ReadWork, SourceFrontier};
 use crate::resources::ByteBudget;
 use crate::sealed_apps::SealedApps;
 use crate::store::{ProofStep, PublicationStep};
-use crate::transaction::AttemptOperation;
+use crate::transaction::{AttemptOperation, UnknownProvenance, UnknownReason};
 use crate::{Encoder, Store};
 use collector::recording::private::{self, FileLock, PrivateDirectory};
-use collector::recording::{RegisteredRun, bootstrap};
+use collector::recording::{RegisteredRun, Registry, bootstrap};
 use collector::ring::{Identity, Place, RingReader, RunIdentity, Shape, Writer};
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -442,6 +443,24 @@ impl Recording {
             .collect();
         manifests.sort_by_key(|manifest| manifest.publication_first);
         manifests
+    }
+
+    /// What each saved window names as the source of its unknown extent, in publication order.
+    fn saved_unknown_provenance(&self) -> Vec<Option<UnknownProvenance>> {
+        let mut named: Vec<_> = self
+            .saved_windows()
+            .iter()
+            .map(|window| {
+                let mut file = std::fs::File::open(window.join("ready/metadata")).unwrap();
+                let metadata = CanonicalMetadata::read(&mut file).unwrap();
+                let Body::Ordinary(manifest) = metadata.body else {
+                    panic!("an ordinary window holds an ordinary body");
+                };
+                (manifest.publication_first, metadata.loss.inherited.unknown)
+            })
+            .collect();
+        named.sort_by_key(|(publication, _)| *publication);
+        named.into_iter().map(|(_, unknown)| unknown).collect()
     }
 
     /// Takes the worker's own seal of the first window as far as the interruption, then stops
@@ -1588,4 +1607,147 @@ fn a_proved_seal_publishes_when_its_source_is_gone() {
 
     assert!(matches!(progress, Progress::Sealed));
     assert_eq!(recording.frontier(&restarted).unwrap().publication_end(), 3);
+}
+
+/// Runs the whole worker over the runs the registry names, oldest first, until it exits.
+fn whole_worker(root: &Path, runs: Vec<RegisteredRun>, pause: &mut dyn FnMut(Duration)) -> Outcome {
+    let registry = Registry { runs, evictions: 0 };
+
+    whole_worker_of(root, &registry, pause)
+}
+
+fn whole_worker_of(root: &Path, registry: &Registry, pause: &mut dyn FnMut(Duration)) -> Outcome {
+    registry.write(root).unwrap();
+
+    run_paced(
+        root,
+        crate::resources::WORKING_BYTES_MAX,
+        &SealedApps::default(),
+        pause,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_whole_worker_saves_a_finished_run_retires_it_and_exits() {
+    // Goal: the worker's own loop drives a registered recording to a certified end and lets go of
+    // the run, and a later worker finds nothing left to do (P01.5, P02.3).
+    // Method: run the whole worker over a finished ring, read what it saved through a new Store,
+    // then run it again with the ring gone, which only the retirement can answer.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    recording.writer.finish();
+    let run = recording.registered();
+
+    let outcome = whole_worker(&recording.root, vec![run.clone()], &mut |_pause| {
+        panic!("a finished run gives the worker nothing to wait for")
+    });
+
+    assert!(matches!(outcome, Outcome::Complete));
+    assert_eq!(recording.saved_windows().len(), 3);
+    assert!(Registry::completed(&recording.root, &run.identity, &run.ring_name).unwrap());
+    let store = Store::open(&recording.root).unwrap();
+    assert!(recording.frontier(&store).unwrap().complete());
+    drop(store);
+    recording.lose_source();
+
+    let again = whole_worker(&recording.root, vec![run], &mut |_pause| {
+        panic!("a retired run gives the worker nothing to wait for")
+    });
+
+    assert!(matches!(again, Outcome::Complete));
+    assert_eq!(recording.saved_windows().len(), 3);
+}
+
+#[test]
+fn the_whole_worker_paces_itself_until_a_live_run_finishes() {
+    // Goal: a worker beside a live collector waits, and a stopping collector, which waits for the
+    // worker to exit, waits for no further pause once the last minute and the end are saved.
+    // Method: run the whole worker over a live ring, and in its first pause publish the next
+    // minute and finish the ring as a stopping collector does.
+    let mut recording = Recording::new();
+    recording.publish_in_minute(LIVE_MINUTE);
+    let root = recording.root.clone();
+    let run = RegisteredRun {
+        collector_pid: std::process::id(),
+        ..recording.registered()
+    };
+    let mut pauses = 0;
+
+    let outcome = whole_worker(&root, vec![run], &mut |_pause| {
+        pauses += 1;
+        assert_eq!(pauses, 1, "the worker paused after the ring finished");
+        recording.publish_in_minute(LIVE_MINUTE + 1);
+        recording.writer.finish();
+    });
+
+    assert!(matches!(outcome, Outcome::Complete));
+    assert_eq!(pauses, 1);
+    assert_eq!(recording.saved_windows().len(), 2);
+    let store = Store::open(&recording.root).unwrap();
+    assert!(recording.frontier(&store).unwrap().complete());
+}
+
+#[test]
+fn the_whole_worker_marks_what_a_lost_run_may_have_held_and_goes_on() {
+    // Goal: a run whose ring is gone stops nothing, and the extent it may have held stays visible
+    // on the next saved minute rather than reading as no loss (P02.3).
+    // Method: register a run with no ring ahead of a finished run, run the whole worker, and read
+    // the losses each saved minute records.
+    let mut lost = Recording::new();
+    lost.lose_source();
+    let mut next = lost.another_run();
+    for minute in 0..3 {
+        next.publish_in_minute(minute);
+    }
+    next.writer.finish();
+    let runs = vec![lost.registered(), next.registered()];
+
+    let outcome = whole_worker(&lost.root, runs, &mut |_pause| {
+        panic!("every source is finished or gone")
+    });
+
+    assert!(matches!(outcome, Outcome::Complete));
+    let unknown: Vec<_> = lost
+        .saved_losses()
+        .iter()
+        .map(|loss| loss.unknown)
+        .collect();
+    assert_eq!(unknown, [true, false, false]);
+    let named = UnknownProvenance {
+        reason: UnknownReason::Predecessor,
+        run: lost.run.run,
+        boot: lost.run.boot,
+    };
+    assert_eq!(lost.saved_unknown_provenance(), [Some(named), None, None]);
+}
+
+#[test]
+fn the_whole_worker_marks_what_an_evicted_ring_may_have_held() {
+    // Goal: a restart beside evicted rings says that an extent is unknown even though nothing
+    // names the rings, so the run after that extent stands as its last observed boundary (P02.3).
+    // Method: run the whole worker over a finished run in a registry that counts one eviction.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    recording.writer.finish();
+    let registry = Registry {
+        runs: vec![recording.registered()],
+        evictions: 1,
+    };
+
+    let outcome = whole_worker_of(&recording.root, &registry, &mut |_pause| {
+        panic!("a finished run gives the worker nothing to wait for")
+    });
+
+    assert!(matches!(outcome, Outcome::Complete));
+    let named = UnknownProvenance {
+        reason: UnknownReason::Predecessor,
+        run: recording.run.run,
+        boot: recording.run.boot,
+    };
+    assert_eq!(
+        recording.saved_unknown_provenance(),
+        [Some(named), None, None]
+    );
 }

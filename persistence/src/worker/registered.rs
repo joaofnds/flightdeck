@@ -14,7 +14,10 @@ use crate::resources::{ByteBudget, WORKING_BYTES_MAX};
 use crate::store::{
     Interrupted, NormalProof, ProofStep, PublicationLedger, PublicationStep, RegisteredAttempt,
 };
-use crate::transaction::{AttemptInput, AttemptOperation, LossTransfer, Predecessor, SourceTiming};
+use crate::transaction::{
+    AttemptInput, AttemptOperation, LossTransfer, Predecessor, SourceTiming, UnknownProvenance,
+    UnknownReason,
+};
 
 /// More steps than the largest publication takes, so a publication that stops moving fails.
 const PUBLICATION_STEPS_MAX: u64 = 1 << 20;
@@ -457,9 +460,24 @@ fn seal_input_of(
             event_inherited_end: event_start,
             publications: state.losses.publications,
             events: 0,
-            unknown: None,
+            unknown: seal_input_unknown(run, state),
             prior_window,
         },
+    })
+}
+
+/// Names the last run whose extent could not be read. A registry that only counts its evicted
+/// rings names none, so the run after the unknown extent is the last boundary anything observed.
+fn seal_input_unknown(run: &RunIdentity, state: &RunState) -> Option<UnknownProvenance> {
+    if !state.losses.unknown {
+        return None;
+    }
+    let boundary = state.unknown_boundary.unwrap_or(*run);
+
+    Some(UnknownProvenance {
+        reason: UnknownReason::Predecessor,
+        run: boundary.run,
+        boot: boundary.boot,
     })
 }
 

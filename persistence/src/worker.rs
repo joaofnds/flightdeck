@@ -240,6 +240,7 @@ fn run_pass(
         let closed = index + 1 < runs.len();
         let state = &mut recovery.states[index];
         state.memory_limit = recovery.memory_limit;
+        state.unknown_boundary = recovery.unknown_boundary;
         if state.source == SourceState::Unchecked {
             state.source =
                 if Registry::completed(root, &registered.identity, &registered.ring_name)? {
@@ -265,6 +266,7 @@ fn run_pass(
             Progress::Unavailable => {
                 if !unavailable {
                     recovery.pending_unknown = true;
+                    recovery.unknown_boundary = Some(registered.identity);
                 }
             }
         }
@@ -300,6 +302,7 @@ struct Recovery {
     evictions: Option<u64>,
     // Prior unsealed history has unknown extent; this does not count lost current rows.
     pending_unknown: bool,
+    unknown_boundary: Option<RunIdentity>,
     memory_limit: u64,
 }
 
@@ -313,6 +316,8 @@ struct RunState {
     source: SourceState,
     loaded: bool,
     memory_limit: u64,
+    /// The last run seen unavailable, which a saved minute's unknown extent names.
+    unknown_boundary: Option<RunIdentity>,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1376,6 +1381,7 @@ mod tests {
                 source: SourceState::Unavailable,
                 loaded: true,
                 memory_limit: WORKING_BYTES_MAX,
+                unknown_boundary: None,
             },
         ];
 
