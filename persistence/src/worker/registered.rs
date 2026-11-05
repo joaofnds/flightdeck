@@ -260,7 +260,7 @@ fn seal_registered(
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<()> {
-    let started = std::time::Instant::now();
+    let mut clock = SealClock::start();
     let losses_before = state.losses;
     reader.seek_publication(selection.publication)?;
     reader.seek_event(attempt.input().losses.event_start)?;
@@ -284,14 +284,61 @@ fn seal_registered(
             Err(crate::Error::Bound("overwritten selection saved rows"))
         };
     }
+    clock.staged();
     let manifest = seal_write(&attempt, writers, &window, state)?;
     let staged_bytes = window.staged_bytes();
     drop(window);
+    clock.written();
 
-    seal_publish(attempt, &manifest, reader, budget)?;
-    seal_report(&manifest, started, staged_bytes, state);
+    seal_publish(attempt, &manifest, reader, budget, &mut clock)?;
+    seal_report(&manifest, &clock, staged_bytes, state);
 
     Ok(())
+}
+
+/// Where a seal's time went, which the diagnostics give for each window saved.
+struct SealClock {
+    started: std::time::Instant,
+    staged_ns: u128,
+    written_ns: u128,
+    proved_ns: u128,
+}
+
+impl SealClock {
+    fn start() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            staged_ns: 0,
+            written_ns: 0,
+            proved_ns: 0,
+        }
+    }
+
+    fn staged(&mut self) {
+        self.staged_ns = self.started.elapsed().as_nanos();
+    }
+
+    fn written(&mut self) {
+        self.written_ns = self.started.elapsed().as_nanos();
+    }
+
+    fn proved(&mut self) {
+        self.proved_ns = self.started.elapsed().as_nanos();
+    }
+}
+
+impl std::fmt::Display for SealClock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let total_ns = self.started.elapsed().as_nanos();
+        write!(
+            formatter,
+            "seal_ns={total_ns} stage_ns={} tables_ns={} proof_ns={} publish_ns={}",
+            self.staged_ns,
+            self.written_ns - self.staged_ns,
+            self.proved_ns - self.written_ns,
+            total_ns - self.proved_ns,
+        )
+    }
 }
 
 /// Saves what the finished source holds past the last window, and certifies the run's end.
@@ -307,6 +354,7 @@ fn seal_terminal(
         unreachable!("a terminal attempt's input has a terminal operation");
     };
     let attempt = store.register_attempt_from_frontier(&input, &mut reader, frontier)?;
+    let mut clock = SealClock::start();
     let manifest = crate::event_recovery::write_tail_into(
         reader,
         &registered.identity,
@@ -321,8 +369,14 @@ fn seal_terminal(
 
     let mut reader = RingReader::open_generation(&registered.ring_name)?;
     reader.set_writer_gone();
+    clock.staged();
+    clock.written();
     let proof = attempt.prove_terminal(&manifest.recovery, &manifest.batches, reader, budget)?;
-    seal_publish_proof(proof)?;
+    seal_publish_proof(proof, &mut clock)?;
+    collector::diagnostics::error(format_args!(
+        "persister saved a run's tail rows={} {clock}",
+        manifest.recovery.rows
+    ));
     state.source = SourceState::Complete;
 
     Ok(())
@@ -360,13 +414,15 @@ fn seal_publish(
     manifest: &crate::Manifest,
     reader: RingReader,
     budget: &Arc<ByteBudget>,
+    clock: &mut SealClock,
 ) -> Result<()> {
-    seal_publish_proof(attempt.prove_ordinary(manifest, reader, budget)?)
+    seal_publish_proof(attempt.prove_ordinary(manifest, reader, budget)?, clock)
 }
 
-fn seal_publish_proof(mut proof: NormalProof<'_>) -> Result<()> {
+fn seal_publish_proof(mut proof: NormalProof<'_>, clock: &mut SealClock) -> Result<()> {
     for _step in 0..PUBLICATION_STEPS_MAX {
         if proof.step()? == ProofStep::Complete {
+            clock.proved();
             return finish_publication(proof.into_publication()?);
         }
     }
@@ -461,7 +517,7 @@ fn recover_staging_again(
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<()> {
-    let started = std::time::Instant::now();
+    let mut clock = SealClock::start();
     let mut attempt = store.resume_attempt()?;
     let input = attempt.input().clone();
     let AttemptOperation::Ordinary {
@@ -503,12 +559,14 @@ fn recover_staging_again(
         return Err(crate::Error::Bound("interrupted window overwritten"));
     }
 
+    clock.staged();
     attempt.restage_tables()?;
     let manifest = seal_write(&attempt, writers, &window, state)?;
     let staged_bytes = window.staged_bytes();
     drop(window);
-    seal_publish(attempt, &manifest, reader, budget)?;
-    seal_report(&manifest, started, staged_bytes, state);
+    clock.written();
+    seal_publish(attempt, &manifest, reader, budget, &mut clock)?;
+    seal_report(&manifest, &clock, staged_bytes, state);
     // The attempt registered before that mark was raised, so the next minute carries it.
     state.losses.unknown = unknown_since;
 
@@ -517,7 +575,7 @@ fn recover_staging_again(
 
 fn seal_report(
     manifest: &crate::Manifest,
-    started: std::time::Instant,
+    clock: &SealClock,
     staged_bytes: u64,
     state: &mut RunState,
 ) {
@@ -526,14 +584,13 @@ fn seal_report(
     state.next_event = manifest.events_end;
     state.losses = crate::Losses::default();
     collector::diagnostics::error(format_args!(
-        "persister sealed window={} publications={}..{} loss={} events_lost={} seal_ns={} \
+        "persister sealed window={} publications={}..{} loss={} events_lost={} {clock} \
         staged_bytes={staged_bytes} tables={}",
         manifest.identity.window,
         manifest.publication_first,
         manifest.publication_end,
         manifest.losses.publications,
         manifest.losses.events,
-        started.elapsed().as_nanos(),
         manifest.tables.len()
     ));
 }

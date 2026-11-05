@@ -2005,7 +2005,8 @@ fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
     let window = staged.finish(&mut reader, &mut state.losses).unwrap();
     let manifest = super::seal_write(&attempt, &writers, &window, &state).unwrap();
     drop(window);
-    super::seal_publish(attempt, &manifest, reader, &budget).unwrap();
+    let mut clock = super::SealClock::start();
+    super::seal_publish(attempt, &manifest, reader, &budget, &mut clock).unwrap();
 
     // Thirteen publications with eight retained leaves 6 to 13, so 2 to 5 are the gap.
     assert_eq!(manifest.publication_first, 1);
