@@ -120,7 +120,7 @@ impl SourceProof {
                 } if observed == first && end > first => Ok(end),
                 Found::Publication { publication, .. } if publication == first => Ok(first),
                 Found::Nothing
-                    if reader.ended()
+                    if reader.completed()
                         && reader.publication_newest()?.checked_add(1) == Some(first) =>
                 {
                     Ok(first)
@@ -134,7 +134,7 @@ impl SourceProof {
             return Ok(None);
         }
         self.checked_read(input, |reader| {
-            if !reader.ended() {
+            if !reader.completed() {
                 return Err(io::Error::from(io::ErrorKind::WouldBlock));
             }
             let publication_end = reader

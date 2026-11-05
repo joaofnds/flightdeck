@@ -1430,6 +1430,38 @@ fn a_run_whose_writer_died_saves_its_last_minute_and_certifies_its_end() {
 }
 
 #[test]
+fn a_crashed_runs_last_minute_finds_its_end_when_staged_again() {
+    // Goal: an interrupted last minute of a crashed collector still ends the run (P01.2).
+    // Method: save two minutes, stop the third after registering, and restart with the pid gone,
+    // which takes reopening the ring, then read the run through to its certified end.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    recording.persist(&first, &mut state);
+    recording.persist(&first, &mut state);
+    let last = InterruptedWindow {
+        number: 2,
+        publication: 4,
+        publications_lost: 0,
+    };
+    recording.interrupted_seal_of(&first, &last, Interruption::Registered);
+    drop(first);
+    let restarted = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+
+    let finished = recording.persist(&restarted, &mut state);
+    let certified = recording.persist(&restarted, &mut state);
+
+    assert!(matches!(finished, Progress::Sealed));
+    assert!(matches!(certified, Progress::Complete));
+    assert_eq!(
+        recording.saved_terminal().lifecycle,
+        Lifecycle::DeadGeneration
+    );
+}
+
+#[test]
 fn a_certified_run_stays_complete_when_its_source_is_gone() {
     // Goal: a certified end needs no source, so a reboot before retiring the run stops nothing.
     // Method: finish a run, certify it, remove its source, and step a new worker.
