@@ -23,7 +23,7 @@ struct Worker {
 const HEARTBEAT_LIMIT_NS: u64 = 5_000_000_000;
 
 impl Recorder {
-    pub fn read(root: &Path) -> io::Result<Option<Self>> {
+    pub fn read(root: &Path, previous: Option<&Self>) -> io::Result<Option<Self>> {
         let control = match Control::open(root) {
             Ok(control) => control,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -31,9 +31,24 @@ impl Recorder {
         };
         let now_ns = control::now()?;
         Ok(Some(Self {
-            controller: Worker::read(&control, Role::Controller, now_ns),
-            collector: Worker::read(&control, Role::Collector, now_ns),
-            persister: Worker::read(&control, Role::Persister, now_ns),
+            controller: Worker::read(
+                &control,
+                Role::Controller,
+                now_ns,
+                previous.map(|recorder| &recorder.controller),
+            ),
+            collector: Worker::read(
+                &control,
+                Role::Collector,
+                now_ns,
+                previous.map(|recorder| &recorder.collector),
+            ),
+            persister: Worker::read(
+                &control,
+                Role::Persister,
+                now_ns,
+                previous.map(|recorder| &recorder.persister),
+            ),
             authority: identity_text(control.authority()).to_string(),
             now_ns,
         }))
@@ -115,8 +130,22 @@ impl Recorder {
 }
 
 impl Worker {
-    fn read(control: &Control, role: Role, now_ns: u64) -> io::Result<Self> {
-        let health = control.read(role)?;
+    fn read(
+        control: &Control,
+        role: Role,
+        now_ns: u64,
+        previous: Option<&io::Result<Self>>,
+    ) -> io::Result<Self> {
+        let health = match (control.read(role), previous) {
+            (Ok(health), _) => health,
+            // A publication caught between its two sequence stores says nothing about the worker,
+            // so its last complete record stands. That record's process and heartbeat are judged
+            // afresh below, so a writer that died mid-publication still goes missing or stale.
+            (Err(error), Some(Ok(worker))) if error.kind() == io::ErrorKind::WouldBlock => {
+                worker.health
+            }
+            (Err(error), _) => return Err(error),
+        };
         let alive = health.alive()?;
         let fresh = now_ns
             .checked_sub(health.heartbeat_ns)

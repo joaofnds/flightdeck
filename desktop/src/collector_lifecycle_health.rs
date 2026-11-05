@@ -33,8 +33,8 @@ impl Health {
     }
 
     pub fn read(&mut self, root: &Path, owned_pid: Option<u32>) -> io::Result<Source> {
-        self.0.recorder = None;
-        if let Some(recorder) = super::recorder::Recorder::read(root)? {
+        let previous = self.0.recorder.take();
+        if let Some(recorder) = super::recorder::Recorder::read(root, previous.as_ref())? {
             let source = recorder.source()?;
             self.0.recorder = Some(recorder);
             self.0.readers = [None, None];

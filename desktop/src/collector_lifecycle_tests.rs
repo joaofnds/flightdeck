@@ -123,6 +123,48 @@ fn an_interrupted_controller_health_write_preserves_independent_worker_health() 
 }
 
 #[test]
+fn an_interrupted_health_read_keeps_a_healthy_controller_available() {
+    // Goal: catching a live controller mid-publication does not report it unavailable.
+    // Method: read complete records once, then leave the controller's real mapped sequence odd,
+    // as a writer paused between its two stores does, and read again.
+    use std::os::unix::fs::FileExt;
+    let fixture = Recording::managed();
+    let _persister_lock =
+        collector::recording::private::FileLock::try_lock(&fixture.root.join("persister.lock"))
+            .unwrap();
+    let mut controller = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Controller,
+    )
+    .unwrap();
+    let mut collector = Reporter::new(
+        Control::open_writable(&fixture.root).unwrap(),
+        Role::Collector,
+    )
+    .unwrap();
+    controller
+        .update(WorkerState::Running, Identity([0; 2]), 0)
+        .unwrap();
+    collector
+        .update(WorkerState::Running, fixture.run(), 7)
+        .unwrap();
+    let mut session = fixture.session(Mode::Auto);
+    session.tick();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(fixture.root.join("recorder.control"))
+        .unwrap();
+    file.write_all_at(&1_u64.to_ne_bytes(), 16 * 8).unwrap();
+
+    session.tick();
+
+    let (notice, retry) = session.status().unwrap();
+    assert!(notice.contains("Recovery: available"), "{notice}");
+    assert!(!retry);
+    assert_eq!(session.0.policy.failure, None);
+}
+
+#[test]
 fn paused_selection_does_not_freeze_owned_collector_health() {
     // Goal: inspecting publication one cannot terminate a healthy owned producer.
     // Method: publish twice to a real registered ring while presenting the first snapshot.
