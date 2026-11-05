@@ -2382,6 +2382,18 @@ fn follow_merge_point(merge: PointMerge<'_>) -> Result<()> {
 #[path = "live_fixture.rs"]
 pub(crate) mod identity_fixture;
 
+/// The first file holding the events of the saved window `manifest`.
+#[cfg(test)]
+pub(crate) fn saved_events(root: &Path, manifest: &persistence::Manifest) -> PathBuf {
+    let budget = Arc::new(persistence::resources::ByteBudget::new(1 << 28));
+    persistence::event_table::EventTable::open_budgeted(root, manifest, &budget)
+        .unwrap()
+        .part(0)
+        .unwrap()
+        .path()
+        .to_owned()
+}
+
 #[cfg(test)]
 #[path = "live_forged_source.rs"]
 pub(crate) mod forged_source;

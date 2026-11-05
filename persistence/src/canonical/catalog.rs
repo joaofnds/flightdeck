@@ -62,6 +62,21 @@ pub struct KnownPage {
     pub next: Option<KnownReading>,
 }
 
+/// One saved reading whose clock was unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownReading {
+    pub run: RunIdentity,
+    pub publication: u64,
+}
+
+/// A bounded part of the readings whose clock was unknown, by run, boot and publication.
+#[derive(Debug)]
+pub struct UnknownPage {
+    pub readings: Vec<UnknownReading>,
+    /// The reading the next page continues after, none at the end.
+    pub next: Option<UnknownReading>,
+}
+
 /// A saved object of events that belongs to no minute: what a run's source held past its last
 /// minute, or rows saved when the minute they were for could not be. Neither completes a minute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +142,32 @@ impl KnownReading {
                 boot: identity(&source[16..32])?,
             },
             publication: u64::from_be_bytes(array(&source[32..40])?),
+        })
+    }
+}
+
+impl UnknownReading {
+    /// The name this reading has in the unknown namespace.
+    pub(crate) fn key(&self) -> io::Result<CanonicalKey> {
+        let mut bytes = [0; 48];
+        let source = CanonicalKey::source(Namespace::Ordinary, &self.run, self.publication)?;
+        bytes[..SOURCE_BYTES].copy_from_slice(&source.bytes[..SOURCE_BYTES]);
+
+        CanonicalKey::from_bytes(Namespace::Unknown, &bytes)
+    }
+
+    fn from_key(recording: Identity, key: &CanonicalKey) -> io::Result<Self> {
+        if key.bytes[SOURCE_BYTES..48] != [0; 8] {
+            return Err(invalid());
+        }
+
+        Ok(Self {
+            run: RunIdentity {
+                recording,
+                run: identity(&key.bytes[..16])?,
+                boot: identity(&key.bytes[16..32])?,
+            },
+            publication: u64::from_be_bytes(array(&key.bytes[32..40])?),
         })
     }
 }
@@ -299,6 +340,83 @@ impl Catalog {
         Ok(None)
     }
 
+    /// The readings with no known clock, after the reading a previous page's `next` named, if any.
+    pub fn unknown_page(
+        &self,
+        after: Option<UnknownReading>,
+        work: &mut ReadWork,
+    ) -> io::Result<UnknownPage> {
+        let mut page = UnknownPage {
+            readings: Vec::with_capacity(PAGE_READINGS_MAX),
+            next: None,
+        };
+        let first = match after {
+            Some(after) => match key_successor(Namespace::Unknown, &after.key()?)? {
+                Some(first) => first,
+                None => return Ok(page),
+            },
+            None => CanonicalKey::from_bytes(Namespace::Unknown, &[0; 48])?,
+        };
+        let mut cursor = CanonicalCursor::begin_owned(
+            &self.root,
+            self.recording,
+            Namespace::Unknown,
+            SeekRange {
+                first,
+                last: CanonicalKey::from_bytes(Namespace::Unknown, &[0xff; 48])?,
+                direction: Direction::Forward,
+            },
+            &self.budget,
+        )?;
+        for _reading in 0..PAGE_READINGS_MAX {
+            let Some(key) = catalog_found(&mut cursor)? else {
+                work.add(cursor.work());
+                return Ok(page);
+            };
+            page.readings
+                .push(UnknownReading::from_key(self.recording, &key)?);
+        }
+        page.next = catalog_found(&mut cursor)?.and(page.readings.last().copied());
+        work.add(cursor.work());
+
+        Ok(page)
+    }
+
+    /// The windows none of whose readings has a clock, which no clock range can reach. A reading
+    /// with a clock leaves its window to the clock range, so the two lists never share a window. It
+    /// reads one proof for each window holding such a reading, so what it costs follows those
+    /// windows and never what the recording holds around them.
+    pub fn windows_without_clock(&self, work: &mut ReadWork) -> crate::Result<Vec<Manifest>> {
+        let mut windows = Vec::new();
+        // The readings of one window lie together in this namespace, so one count at a time does.
+        let mut counted: Option<(Manifest, u64)> = None;
+        let mut after = None;
+        for _page in 0..RANGE_PAGES_MAX {
+            let page = self.unknown_page(after, work)?;
+            for reading in &page.readings {
+                if let Some((window, readings)) = &mut counted
+                    && window_holds(window, &reading.run, reading.publication)
+                {
+                    *readings += 1;
+                    continue;
+                }
+                windows_without_clock_keep(&mut windows, counted.take())?;
+                // A reading's window outlives its links, so a reading with no window is damage.
+                let window = self
+                    .window_holding(&reading.run, reading.publication, work)?
+                    .ok_or_else(invalid)?;
+                counted = Some((window, 1));
+            }
+            let Some(next) = page.next else {
+                windows_without_clock_keep(&mut windows, counted.take())?;
+                return Ok(windows);
+            };
+            after = Some(next);
+        }
+
+        Err(crate::Error::Bound("catalog unknown pages"))
+    }
+
     /// Up to `objects_max` event objects, at most a page's worth, after the position a previous
     /// page named. It reads one proof for each, and it needs no window and no registry to reach
     /// them.
@@ -374,11 +492,39 @@ impl Catalog {
     }
 }
 
+/// Keeps the window just counted if `readings`, its readings with no clock, are all it saved.
+fn windows_without_clock_keep(
+    windows: &mut Vec<Manifest>,
+    counted: Option<(Manifest, u64)>,
+) -> crate::Result<()> {
+    let Some((window, readings)) = counted else {
+        return Ok(());
+    };
+    let saved = window
+        .tables
+        .iter()
+        .find(|table| table.name == "ticks")
+        .ok_or_else(invalid)?
+        .rows;
+    if readings == saved {
+        if windows.len() == RANGE_WINDOWS_MAX {
+            return Err(crate::Error::Bound("catalog windows without a clock"));
+        }
+        windows.push(window);
+    }
+
+    Ok(())
+}
+
 fn windows_in_listed(windows: &[Manifest], reading: &KnownReading) -> bool {
-    windows.iter().any(|manifest| {
-        manifest.identity.run == reading.run
-            && (manifest.publication_first..manifest.publication_end).contains(&reading.publication)
-    })
+    windows
+        .iter()
+        .any(|manifest| window_holds(manifest, &reading.run, reading.publication))
+}
+
+fn window_holds(manifest: &Manifest, run: &RunIdentity, publication: u64) -> bool {
+    manifest.identity.run == *run
+        && (manifest.publication_first..manifest.publication_end).contains(&publication)
 }
 
 /// The manifest behind the first gate `cursor` finds that owns a window, none where it finds no
@@ -392,7 +538,7 @@ fn window_holding_gate(
             return Ok(None);
         };
         let mut gate = cursor.open_gate(&key)?;
-        let metadata = CanonicalMetadata::read(&mut gate)?;
+        let metadata = read_gate(&mut gate)?;
         if metadata.run != *run {
             return Err(invalid());
         }
@@ -404,6 +550,18 @@ fn window_holding_gate(
     }
 
     Err(invalid())
+}
+
+/// Reads the proof a gate links. A gate names a proof only once it is whole, so a short one is
+/// damage and not a write still going on.
+fn read_gate(gate: &mut std::fs::File) -> io::Result<CanonicalMetadata> {
+    CanonicalMetadata::read(gate).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            invalid()
+        } else {
+            error
+        }
+    })
 }
 
 /// The namespace range a page of event objects reads, none when nothing can follow its position.
@@ -442,7 +600,7 @@ fn event_object(
     key: &CanonicalKey,
 ) -> io::Result<EventObject> {
     let mut gate = cursor.open_gate(key)?;
-    let metadata = CanonicalMetadata::read(&mut gate)?;
+    let metadata = read_gate(&mut gate)?;
     metadata.validate_key(namespace, key)?;
     cursor.check_snapshot()?;
     let recovery = match metadata.body {

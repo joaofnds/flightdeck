@@ -247,10 +247,7 @@ fn resident_history_rejects_replaced_saved_files_on_a_cache_hit() {
     let (fixture, session) = saved_context();
     session.app_resident_history().unwrap();
     let saved = session.history.as_ref().unwrap();
-    let path = fixture
-        .root
-        .join(&saved.windows[0].data_directory)
-        .join("events.parquet");
+    let path = crate::live::saved_events(&fixture.root, &saved.windows[0]);
     let original = fixture.root.join("events-original.parquet");
     std::fs::rename(&path, &original).unwrap();
     std::fs::copy(&original, &path).unwrap();

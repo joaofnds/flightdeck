@@ -1045,7 +1045,7 @@ refuses_damaged_processes! {
         |frame| with_column(frame, lit(2).cast(DataType::UInt8).alias("identity_version"));
     refuses_an_event_of_another_observations_tick, "events", "committed App event tick",
         |frame| with_column(frame, (col("run_tick") + lit(1)).alias("run_tick"));
-    refuses_events_of_one_number, "events", "committed App event order",
+    refuses_events_of_one_number, "events", "event physical order",
         |frame| with_column(frame, col("event").min().alias("event"));
 }
 
@@ -1225,7 +1225,7 @@ refuses_damaged_ticks! {
         |frame| with_column(frame, lit(7).cast(DataType::Int32).alias("pid"));
     refuses_a_tick_of_an_event_of_another_tick, "events", "sealed tick event tick",
         |frame| with_column(frame, (col("run_tick") + lit(1)).alias("run_tick"));
-    refuses_a_tick_of_events_of_one_number, "events", "sealed tick event order",
+    refuses_a_tick_of_events_of_one_number, "events", "event physical order",
         |frame| with_column(frame, col("event").min().alias("event"));
     refuses_a_tick_of_an_event_of_no_kind, "events", "event numeric semantics",
         |frame| with_column(frame, lit(9).cast(DataType::UInt8).alias("kind"));

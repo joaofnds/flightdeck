@@ -135,7 +135,9 @@ fn new_saved_endpoint_and_replacement_session_keep_old_validated_facts() {
 #[test]
 fn late_predecessor_replaces_a_cached_unavailable_interval() {
     // Capture publication 3 before 2 is sealed, then add its real predecessor in a new window.
-    let mut cold = cold();
+    // Only the format before registered recordings can hold this state, since a registered
+    // recording saves its windows in order.
+    let mut cold = cold_of(named::dense_legacy());
     cold.history = History::new();
     let manifest = &cold.saved.windows[0];
     let marker = store_marker(&cold.fixture, manifest);
@@ -256,7 +258,7 @@ fn removed_warm_commitment_is_refused_without_a_partial_cohort() {
     // A retained source pin requires its publication marker on every warm reuse.
     let cold = cold();
     call(&cold, 2, BYTES_MAX).unwrap();
-    std::fs::remove_file(store_marker(&cold.fixture, &cold.saved.windows[0])).unwrap();
+    std::fs::remove_file(cold.fixture.marker(cold.saved.windows[0].identity.window)).unwrap();
 
     let result = call(&cold, 2, BYTES_MAX);
 
@@ -392,6 +394,12 @@ fn kept_cold() -> Box<Cold> {
 
 fn cold() -> Box<Cold> {
     let mut fixture = named::dense();
+    // So that the publication `advance` adds falls in a window of its own.
+    fixture.start_at_run_tick(57);
+    cold_of(fixture)
+}
+
+fn cold_of(mut fixture: Fixture) -> Box<Cold> {
     publish(&mut fixture, 1);
     publish(&mut fixture, 2);
     fixture.seal();
@@ -493,7 +501,7 @@ fn call(
 
 fn advance(cold: &mut Cold) {
     publish(&mut cold.fixture, 3);
-    commit(&cold.fixture, 3, 1);
+    cold.fixture.seal_minute(1);
     cold.saved = Session::open_with(&cold.fixture.root, Arc::clone(&cold.cancellation), 0).unwrap();
 }
 

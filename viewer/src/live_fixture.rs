@@ -8,10 +8,12 @@ use collector::ring::{
     Readings, RingReader, Shape, UsageAvailability, Writer,
 };
 use collector::tracker::Event;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+const SAVED_WINDOWS_MAX: u64 = 4096;
 const SHAPE: Shape = Shape {
     slot_count: 8,
     cpu_capacity: 1,
@@ -27,7 +29,7 @@ const SHAPE: Shape = Shape {
 pub struct Fixture {
     pub root: PathBuf,
     pub writer: Writer,
-    elapsed: u64,
+    pub elapsed: u64,
     continuous_step_ns: u64,
     awake_step_ns: u64,
     usage_override: Option<Usage>,
@@ -36,6 +38,7 @@ pub struct Fixture {
     owns_root: bool,
     registered: bool,
     clocks: Clocks,
+    persister: Mutex<persistence::worker::HeldWindows>,
 }
 
 /// What the fixture's next reading says of its clocks.
@@ -109,6 +112,7 @@ impl Fixture {
             owns_root: true,
             registered: true,
             clocks: Clocks::Known,
+            persister: Mutex::default(),
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
@@ -119,7 +123,14 @@ impl Fixture {
             assert_eq!(process_capacity, 2);
             return recording.new_mode_next_run(identity);
         }
+        if identity {
+            return Self::registered_of(process_capacity);
+        }
+        Self::legacy_of(identity, process_capacity)
+    }
 
+    /// A recording of the format before registered recordings, whose rings may hold identities.
+    pub fn legacy_of(identity: bool, process_capacity: u64) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "flightdeck-live-identity-{}-{serial}",
@@ -158,12 +169,13 @@ impl Fixture {
             owns_root: true,
             registered: false,
             clocks: Clocks::Known,
+            persister: Mutex::default(),
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
     }
 
-    fn new_mode_identity(root: &std::path::Path, shape: &Shape, serial: u64, writer: &mut Writer) {
+    fn new_mode_identity(root: &Path, shape: &Shape, serial: u64, writer: &mut Writer) {
         let place = Place {
             lock_path: root.join("identity.lock"),
             name_prefix: format!("/fdvi{}x{serial}", std::process::id()),
@@ -253,6 +265,7 @@ impl Fixture {
             owns_root: false,
             registered: self.registered,
             clocks: Clocks::Known,
+            persister: Mutex::default(),
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
@@ -520,7 +533,9 @@ impl Fixture {
             ring_name: self.writer.name().to_owned(),
             collector_pid: 0,
         };
-        persistence::worker::seal_held_windows(&store, &run, window_last, derive).unwrap();
+        let mut held = self.persister.lock().unwrap();
+        persistence::worker::seal_held_windows(&store, &run, window_last, &mut held, derive)
+            .unwrap();
     }
 
     /// Rewrites the clocks of `observations` in the ticks table saved for `window`, which the
@@ -586,7 +601,7 @@ impl Fixture {
         let catalog = persistence::canonical::catalog::Catalog::open(&self.root, &budget).unwrap();
         let mut work = persistence::canonical::ReadWork::default();
         let mut publication = u64::MAX;
-        for _saved in 0..=window + 1 {
+        for _saved in 0..SAVED_WINDOWS_MAX {
             let saved = catalog
                 .window_at_or_before(&run, publication, &mut work)
                 .unwrap()

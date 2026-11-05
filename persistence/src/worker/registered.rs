@@ -746,5 +746,74 @@ fn seal_write(
     Ok(manifest)
 }
 
+/// Staging of a window a caller steps through itself, with the memory a persister has.
+#[cfg(any(test, feature = "fixtures"))]
+fn staging_by_hand(
+    attempt: &RegisteredAttempt<'_>,
+    reader: &RingReader,
+    identity: WindowIdentity,
+) -> Result<super::staging::Staging> {
+    let events = crate::event_table::writer::Writer::new(
+        attempt.events_directory()?,
+        identity,
+        reader.next_event(),
+        reader.dictionary_capacity().is_some(),
+        256 * 1024 * 1024,
+    )?;
+
+    Ok(super::staging::Staging::new(
+        reader,
+        identity,
+        Limits::from_shape(&reader.shape())?,
+        events,
+    ))
+}
+
+/// Saves a registered run's first window, which starts at its first publication, with `overrun`
+/// called after the persister reads that publication, so the ring can overwrite the next ones
+/// before the persister reaches them, and the window keeps what it read on either side of them.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn seal_first_window_overrun(
+    store: &Store,
+    registered: &RegisteredRun,
+    derive: &dyn super::Derive,
+    overrun: &mut dyn FnMut(),
+) -> Result<()> {
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let writers = Writers {
+        encoder: crate::Encoder,
+        derive,
+    };
+    let mut state = RunState {
+        next_publication: 1,
+        loaded: true,
+        ..RunState::default()
+    };
+    let identity = WindowIdentity {
+        run: registered.identity,
+        window: 0,
+    };
+    let mut reader = RingReader::open_generation(&registered.ring_name)?;
+    let input = seal_input(store, &reader, &identity, 1, &state, &budget)?.0;
+    let attempt = store.register_attempt(&input, &mut reader, &budget)?;
+    reader.seek_publication(1)?;
+    reader.seek_event(input.losses.event_start)?;
+    let shape = reader.shape();
+    let mut tick = crate::tick_buffer(&shape)?;
+    let mut staged = staging_by_hand(&attempt, &reader, identity)?;
+    let mut reading = staged.read(&mut reader, &mut tick, &mut state.losses)?;
+    overrun();
+    for _step in 0..=shape.slot_count {
+        if !reading {
+            break;
+        }
+        reading = staged.read(&mut reader, &mut tick, &mut state.losses)?;
+    }
+    let window = staged.finish(&mut reader, &mut state.losses)?;
+    let manifest = seal_write(&attempt, &writers, &window, &state)?;
+    drop(window);
+    seal_publish(attempt, &manifest, reader, &budget, &mut SealClock::start())
+}
+
 #[cfg(test)]
 mod tests;

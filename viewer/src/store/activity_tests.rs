@@ -92,7 +92,7 @@ fn resumed_payload_ingestion_matches_a_fresh_store_without_changing_a_retained_v
     // Method: retain an old View, seal an overwritten prefix, and compare with fresh ingestion.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
-    let store = Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
+    let store = Store::start_with_payload(&fixture.root, 256 * 1024 * 1024).unwrap();
     let retained = view_where(&store, |view| view.seconds.len() == 1);
     store.set_active(false);
     wait_until_paused(&store);
@@ -103,7 +103,7 @@ fn resumed_payload_ingestion_matches_a_fresh_store_without_changing_a_retained_v
     for second in 160..170 {
         fixture.publish_with_system_rows(second);
     }
-    let fresh = Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
+    let fresh = Store::start_with_payload(&fixture.root, 256 * 1024 * 1024).unwrap();
     let expected = view_where(&fresh, |view| {
         view.seconds
             .last()

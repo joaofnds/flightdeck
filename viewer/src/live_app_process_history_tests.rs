@@ -490,6 +490,7 @@ fn preserves_large_group_amounts_and_suppresses_an_overflowed_gauge() {
 fn retains_a_live_group_publication_omitted_inside_a_committed_range() {
     // A real sparse sealed minute encloses p2 without recording its measured group interval.
     let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(56);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish_interval(&mut fixture, &mut session, 1, false);
     publish_interval(&mut fixture, &mut session, 2, false);
@@ -498,7 +499,11 @@ fn retains_a_live_group_publication_omitted_inside_a_committed_range() {
     let before = session
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
-    named::seal_selected(&fixture, &[1, 3]);
+    named::seal_past_lost_second(
+        &mut fixture,
+        4..11,
+        &[named::member(7, b"worker", b"/A.app", usage())],
+    );
 
     session.refresh_history().unwrap();
     let after = session
@@ -523,6 +528,7 @@ fn retains_a_live_group_publication_omitted_inside_a_committed_range() {
 fn retains_a_live_group_interval_when_only_its_endpoint_is_committed() {
     // Saving p2 alone cannot replace the valid interval captured against uncommitted p1.
     let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(57);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish_interval(&mut fixture, &mut session, 1, false);
     publish_interval(&mut fixture, &mut session, 2, false);
@@ -530,7 +536,8 @@ fn retains_a_live_group_interval_when_only_its_endpoint_is_committed() {
     let before = session
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
-    named::seal_selected(&fixture, &[2]);
+    publish_past_first_second(&mut fixture);
+    fixture.seal_minute(0);
 
     session.refresh_history().unwrap();
     let after = session
@@ -546,6 +553,7 @@ fn retains_a_live_group_interval_when_only_its_endpoint_is_committed() {
 fn retains_a_live_terminal_interval_when_its_baseline_is_not_committed() {
     // A terminal saved endpoint without p1 cannot erase the captured verified exit work.
     let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(57);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish_interval(&mut fixture, &mut session, 1, false);
     publish_interval(&mut fixture, &mut session, 2, true);
@@ -553,7 +561,8 @@ fn retains_a_live_terminal_interval_when_its_baseline_is_not_committed() {
     let before = session
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
-    named::seal_selected(&fixture, &[2]);
+    publish_past_first_second(&mut fixture);
+    fixture.seal_minute(0);
 
     session.refresh_history().unwrap();
     let after = session
@@ -563,6 +572,17 @@ fn retains_a_live_terminal_interval_when_its_baseline_is_not_committed() {
     assert_eq!(before["points"][1]["disk_read_bytes"]["known"], "4096");
     assert_eq!(before["points"][1]["resident_bytes"]["measured_members"], 0);
     assert_eq!(after["points"], before["points"]);
+}
+
+/// Publishes the ticks that overwrite the first publication in the ring.
+fn publish_past_first_second(fixture: &mut Fixture) {
+    for publication in 3..10 {
+        named::publish(
+            fixture,
+            publication,
+            &[named::member(7, b"worker", b"/A.app", usage())],
+        );
+    }
 }
 
 fn publish_interval(

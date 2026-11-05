@@ -89,11 +89,7 @@ fn attribution_saturated_cache_rejects_replaced_pinned_files_on_a_warm_query() {
         .saved_residents
         .borrow_mut()
         .take_attribution();
-    let path = pressure
-        .fixture
-        .root
-        .join(&cache.pins()[0].manifest.data_directory)
-        .join("events.parquet");
+    let path = crate::live::saved_events(&pressure.fixture.root, &cache.pins()[0].manifest);
     pressure
         .history
         .saved_residents

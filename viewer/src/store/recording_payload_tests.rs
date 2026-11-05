@@ -251,18 +251,20 @@ fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
 #[test]
 fn saved_origin_carries_the_admitted_manifests_actual_losses() {
     // Goal: saved facts distinguish window losses from live reader losses without a new scan.
-    // Method: set nonzero losses on a real sealed manifest, then use the complete Store loader.
+    // Method: let the ring overwrite a minute's first readings and events before the persister
+    // reads them, then use the complete Store loader.
     let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(100);
-    fixture.seal();
-    let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found, None).unwrap();
-    let losses = persistence::Losses {
-        publications: 4,
-        events: 7,
-        unknown: true,
-    };
-    change_committed_losses(&fixture.root, &found[0].marker, &losses);
+    fixture.start_at_run_tick(47);
+    let events: [_; 3] = std::array::from_fn(|_| collector::tracker::Event::Exec { pid: 7 });
+    for second in 100..113 {
+        fixture.publish_with_events(second, &events);
+    }
+    fixture.seal_minute(0);
+    let losses = persistence::read_committed(&fixture.root, &fixture.marker(0))
+        .unwrap()
+        .losses;
+    assert_eq!(losses.publications, 5);
+    assert!(losses.events > 0);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut origins = Vec::new();
@@ -277,38 +279,9 @@ fn saved_origin_carries_the_admitted_manifests_actual_losses() {
         .unwrap();
 
     assert_eq!(outcome.left_out, None);
-    assert_eq!(origins, [crate::store::native::Origin::Saved(losses)]);
+    assert_eq!(origins, [crate::store::native::Origin::Saved(losses); 8]);
     drop(outcome);
     assert_eq!(budget.used(), 0);
-}
-
-fn change_committed_losses(
-    root: &std::path::Path,
-    marker: &std::path::Path,
-    losses: &persistence::Losses,
-) {
-    let mut bytes = std::fs::read(marker).unwrap();
-    // Format 1 puts the loss words after identities and the five window/range words.
-    let first = b"FDSEAL01".len()
-        + 2 * size_of::<u64>()
-        + 3 * size_of::<collector::ring::Identity>()
-        + 5 * size_of::<u64>();
-    for (index, amount) in [
-        losses.publications,
-        losses.events,
-        u64::from(losses.unknown),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let start = first + index * size_of::<u64>();
-        bytes[start..start + size_of::<u64>()].copy_from_slice(&amount.to_le_bytes());
-    }
-    std::fs::write(marker, bytes).unwrap();
-    assert_eq!(
-        persistence::read_committed(root, marker).unwrap().losses,
-        *losses
-    );
 }
 
 #[test]
@@ -1004,40 +977,31 @@ fn a_sealed_boot_mismatch_cannot_seed_machine_rates_under_the_registry_identity(
     assert_eq!(successors[0].cpu_percent, None);
     assert!(!successors[0].follows);
     assert!(accepted.is_empty());
-    assert_eq!(outcome.left_out, Some(crate::store::Failure::Refused));
+    assert_eq!(
+        outcome.left_out,
+        Some(crate::store::Failure::Commits(
+            std::io::ErrorKind::InvalidData
+        ))
+    );
     assert!(!terminal_present);
     assert_eq!(successors[1].cpu_percent, Some(50.0));
     assert_eq!(budget.used(), 0);
 }
 
 fn change_committed_boot(root: &std::path::Path, marker: &std::path::Path) {
-    use std::os::unix::fs::MetadataExt;
-
     let original = persistence::read_committed(root, marker).unwrap();
-    let metadata = root.join(&original.data_directory).join("metadata");
-    let inode = std::fs::metadata(marker).unwrap().ino();
-    assert_eq!(std::fs::metadata(&metadata).unwrap().ino(), inode);
     let mut bytes = std::fs::read(marker).unwrap();
     // Format 1 stores magic, schema/encoding words, then recording/run/boot identities.
-    let boot =
-        b"FDSEAL01".len() + 2 * size_of::<u64>() + 2 * size_of::<collector::ring::Identity>();
-    assert_eq!(&bytes[..8], b"FDSEAL01");
+    let boot = crate::store::tests::saved_manifest_start(&bytes)
+        + b"FDSEAL01".len()
+        + 2 * size_of::<u64>()
+        + 2 * size_of::<collector::ring::Identity>();
     assert_eq!(
         &bytes[boot..boot + 8],
         &original.identity.run.boot.0[0].to_le_bytes()
     );
     bytes[boot] ^= 1;
     std::fs::write(marker, bytes).unwrap();
-
-    let changed = persistence::read_committed(root, marker).unwrap();
-    assert_eq!(
-        changed.identity.run.recording,
-        original.identity.run.recording
-    );
-    assert_eq!(changed.identity.run.run, original.identity.run.run);
-    assert_ne!(changed.identity.run.boot, original.identity.run.boot);
-    assert_eq!(std::fs::metadata(marker).unwrap().ino(), inode);
-    assert_eq!(std::fs::metadata(metadata).unwrap().ino(), inode);
 }
 
 #[test]
@@ -1241,10 +1205,7 @@ fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
     let manifest = persistence::read_committed(source.root, source.marker).unwrap();
     events_loader_make_ungrouped(&source);
     let replacement = events_loader_prepare_replacement(&source);
-    let events = source
-        .root
-        .join(&manifest.data_directory)
-        .join("events.parquet");
+    let events = crate::live::saved_events(source.root, &manifest);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let expected = events_loader_legacy(&source, &budget, &operation);
@@ -1309,6 +1270,7 @@ fn events_loader_fixture() -> Fixture {
 fn events_loader_consumed_inodes(source: &crate::recording::SealedSource<'_>) -> Vec<u64> {
     use std::os::unix::fs::MetadataExt;
     let manifest = persistence::read_committed(source.root, source.marker).unwrap();
+    let events = crate::live::saved_events(source.root, &manifest);
     let directory = source.root.join(manifest.data_directory);
     let mut inodes: Vec<_> = [
         "ticks",
@@ -1319,7 +1281,6 @@ fn events_loader_consumed_inodes(source: &crate::recording::SealedSource<'_>) ->
         "core_states",
         "fans",
         "processes",
-        "events",
     ]
     .iter()
     .map(|name| {
@@ -1328,6 +1289,7 @@ fn events_loader_consumed_inodes(source: &crate::recording::SealedSource<'_>) ->
             .ino()
     })
     .collect();
+    inodes.push(std::fs::metadata(events).unwrap().ino());
     inodes.sort_unstable();
 
     inodes
@@ -1391,16 +1353,13 @@ fn events_loader_prepare_replacement(
 ) -> std::path::PathBuf {
     use polars::prelude::{IntoLazy, UInt64Type, col, lit};
     let manifest = persistence::read_committed(source.root, source.marker).unwrap();
-    let path = source
-        .root
-        .join(manifest.data_directory)
-        .join("events.parquet");
+    let path = crate::live::saved_events(source.root, &manifest);
     let original = persistence::engine::scan(&path).unwrap().collect().unwrap();
     let numbers = persistence::engine::Cells::<UInt64Type>::named(&original, "event").unwrap();
     let numbers: Vec<_> = (0..original.height())
         .map(|row| numbers.get(row).unwrap())
         .collect();
-    assert_eq!(numbers, [2, 3, 1]);
+    assert_eq!(numbers, [1, 2, 3]);
     let mut changed = original
         .lazy()
         .with_columns([(col("pid") + lit(10_i32)).alias("pid")])
@@ -1565,10 +1524,7 @@ fn events_capture_budget_denial_remains_typed_without_legacy_retry() {
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
-    let events = fixture
-        .root
-        .join(manifest.data_directory)
-        .join("events.parquet");
+    let events = crate::live::saved_events(&fixture.root, &manifest);
     let inode = std::fs::metadata(events).unwrap().ino();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -1668,10 +1624,7 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
-    let events = fixture
-        .root
-        .join(&manifest.data_directory)
-        .join("events.parquet");
+    let events = crate::live::saved_events(&fixture.root, &manifest);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();

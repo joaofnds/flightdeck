@@ -145,11 +145,7 @@ fn batch_final_validation_rejects_replaced_cached_files_and_restores_ownership()
     fixture.query(&history, BYTES_MAX).unwrap();
     let mut resident = history.saved_residents.borrow_mut();
     let rates = resident.take_attribution();
-    let path = fixture
-        .fixture
-        .root
-        .join(&rates.pins()[0].manifest.data_directory)
-        .join("events.parquet");
+    let path = crate::live::saved_events(&fixture.fixture.root, &rates.pins()[0].manifest);
     let retained = rates.count();
     resident.install_attribution(rates);
     drop(resident);

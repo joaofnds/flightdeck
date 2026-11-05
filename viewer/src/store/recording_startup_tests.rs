@@ -147,7 +147,7 @@ fn a_changed_manifest_after_machine_loading_refuses_the_process_upgrade() {
     }
     assert!(startup.phase == Phase::SelectedBoundary);
     let marker = &startup.minutes[startup.selected.unwrap()].found.marker;
-    change_loss_word(&fixture.root, marker);
+    crate::store::tests::change_saved_manifest(&fixture.root, marker);
 
     startup.advance(&input, &mut held, &mut ring).unwrap();
     let result = startup.advance(&input, &mut held, &mut ring);
@@ -164,24 +164,6 @@ fn a_changed_manifest_after_machine_loading_refuses_the_process_upgrade() {
     );
     drop((startup, held, ring));
     assert_eq!(budget.used(), 0);
-}
-
-fn change_loss_word(root: &Path, marker: &Path) {
-    let mut bytes = std::fs::read(marker).unwrap();
-    // The format puts loss words after identities and the five window/range words.
-    let first = b"FDSEAL01".len()
-        + 2 * size_of::<u64>()
-        + 3 * size_of::<collector::ring::Identity>()
-        + 5 * size_of::<u64>();
-    bytes[first..first + size_of::<u64>()].copy_from_slice(&1_u64.to_le_bytes());
-    std::fs::write(marker, bytes).unwrap();
-    assert_eq!(
-        persistence::read_committed(root, marker)
-            .unwrap()
-            .losses
-            .publications,
-        1
-    );
 }
 
 #[test]
@@ -285,7 +267,7 @@ fn sealed_candidate_rejects_a_changed_witness_before_installation() {
     let accepted = stage.accepted();
     let source_generation = stage.held.source_generation;
     let marker = fixture.marker(0);
-    change_loss_word(&fixture.root, &marker);
+    crate::store::tests::change_saved_manifest(&fixture.root, &marker);
     drop(pinned);
 
     let result = stage.advance(&fixture, &budget);

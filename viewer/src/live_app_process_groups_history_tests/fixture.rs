@@ -49,13 +49,24 @@ pub(crate) fn dense() -> Fixture {
     dense_with(collector::ring::Writer::create_with_identity)
 }
 
+/// A dense ring over a recording of the format before registered recordings.
+pub(crate) fn dense_legacy() -> Fixture {
+    dense_over(
+        Fixture::legacy_of(true, 2),
+        collector::ring::Writer::create_with_identity,
+    )
+}
+
 /// A dense ring whose ticks also carry the system records, each process's GPU time among them.
 pub(crate) fn dense_with_system() -> Fixture {
     dense_with(collector::ring::Writer::create_with_system)
 }
 
 fn dense_with(create: CreateWriter) -> Fixture {
-    let mut fixture = Fixture::new();
+    dense_over(Fixture::new(), create)
+}
+
+fn dense_over(mut fixture: Fixture, create: CreateWriter) -> Fixture {
     let identity = fixture.writer.identity().unwrap();
     let writer = create(
         &collector::ring::Place {
@@ -112,12 +123,13 @@ pub(crate) fn publish_with_interval(
     rows: &[Named<'_>],
     interval_ns: u64,
 ) {
+    let run_tick = fixture.elapsed + publication;
     let times = collector::ring::ObservationTimes {
         wall_ns: (1000 + publication) * 1_000_000_000,
-        continuous_ns: publication * interval_ns,
-        awake_ns: publication * interval_ns,
+        continuous_ns: run_tick * interval_ns,
+        awake_ns: run_tick * interval_ns,
     };
-    publish_at(fixture, publication, rows, &times);
+    publish_at(fixture, run_tick, rows, &times);
 }
 
 /// Publishes `rows` as the tick `run_tick` of the run, taken at `times`.

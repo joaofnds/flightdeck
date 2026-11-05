@@ -109,10 +109,19 @@ fn find_registered(
     };
     let first_ns = newest_ns
         .map(|newest| newest.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000));
-    let minutes = catalog_retry(|| {
+    let mut minutes = catalog_retry(|| {
         catalog.windows_in(first_ns.unwrap_or(0), u64::MAX, &mut ReadWork::default())
     })
     .map_err(find_failure)?;
+    let unknown_clock_ticks =
+        catalog_retry(|| Ok(catalog.unknown_count_within_page(&mut ReadWork::default())?))
+            .map_err(find_failure)?;
+    if unknown_clock_ticks != Some(0) {
+        minutes.extend(
+            catalog_retry(|| catalog.windows_without_clock(&mut ReadWork::default()))
+                .map_err(find_failure)?,
+        );
+    }
     find_registered_range(root, catalog, &minutes, runs, found)?;
     find_order(found, runs, window);
 
@@ -124,11 +133,9 @@ fn find_registered(
             .map_err(|_| Failure::Commits(io::ErrorKind::InvalidData))?,
         first_known_second: ends.map(|(first, _last)| first / 1_000_000_000),
         last_known_second: ends.map(|(_first, last)| last / 1_000_000_000),
-        unknown_clock_ticks: catalog_retry(|| {
-            Ok(catalog.unknown_count_within_page(&mut ReadWork::default())?)
-        })
-        .map_err(find_failure)?,
-        decoded_is_whole: false,
+        unknown_clock_ticks,
+        // With no clock to start from, the range took in every window the recording holds.
+        decoded_is_whole: first_ns.is_none(),
     })
 }
 

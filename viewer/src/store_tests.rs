@@ -8,6 +8,31 @@ use crate::live::identity_fixture::Fixture;
 
 const COMPLETE_CAPTURE_BYTES_MAX: usize = 64 * 1024 * 1024;
 
+/// Where the manifest starts in the bytes of a window's commitment file, since a registered
+/// window's follows the 512 bytes of its proof.
+pub(super) fn saved_manifest_start(bytes: &[u8]) -> usize {
+    if bytes[..8] == *b"FDCAN002" { 512 } else { 0 }
+}
+
+/// Makes the commitment file at `marker` read as a sound manifest other than the one it held.
+/// The proof binds a manifest's identity, range and losses to its own, but not its clocks.
+pub(super) fn change_saved_manifest(root: &std::path::Path, marker: &std::path::Path) {
+    let original = persistence::read_committed(root, marker).unwrap();
+    let mut bytes = std::fs::read(marker).unwrap();
+    assert_eq!(&bytes[..8], b"FDCAN002");
+    // The manifest's identities follow its magic and two words. Eight words of window, range and
+    // losses come next, and then a word saying it has a wall clock, and its first bound.
+    let wall_ns_max = saved_manifest_start(&bytes)
+        + b"FDSEAL01".len()
+        + 2 * size_of::<u64>()
+        + 3 * size_of::<collector::ring::Identity>()
+        + 10 * size_of::<u64>();
+    let wall_ns = u64::from_le_bytes(bytes[wall_ns_max..wall_ns_max + 8].try_into().unwrap());
+    bytes[wall_ns_max..wall_ns_max + 8].copy_from_slice(&(wall_ns + 1).to_le_bytes());
+    std::fs::write(marker, bytes).unwrap();
+    assert_ne!(persistence::read_committed(root, marker).unwrap(), original);
+}
+
 #[test]
 fn a_sealed_sample_refusal_preserves_machine_observations_and_valid_input() {
     // Goal: presentation capacity cannot erase a valid measured predecessor.

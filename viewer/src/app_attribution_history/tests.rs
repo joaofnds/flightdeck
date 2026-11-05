@@ -298,10 +298,8 @@ fn attribution_rejects_replaced_saved_files_on_a_cache_hit() {
     session
         .app_attribution_history(AppAttributionMetric::Cpu)
         .unwrap();
-    let path = fixture
-        .root
-        .join(&session.history.as_ref().unwrap().windows[0].data_directory)
-        .join("events.parquet");
+    let path =
+        crate::live::saved_events(&fixture.root, &session.history.as_ref().unwrap().windows[0]);
     std::fs::rename(&path, fixture.root.join("events-original.parquet")).unwrap();
     std::fs::copy(fixture.root.join("events-original.parquet"), &path).unwrap();
 

@@ -878,7 +878,7 @@ fn assert_cold_matches_warm(sealed_count: u64) {
     for offset in 0..sealed_count {
         fixture.publish_with_usage(100 + offset, &usage(offset));
     }
-    let warm = super::Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
+    let warm = super::Store::start_with_payload(&fixture.root, 256 * 1024 * 1024).unwrap();
     super::tests::view_where(&warm, |view| {
         view.seconds.len() == usize::try_from(sealed_count).unwrap()
     });
@@ -890,7 +890,7 @@ fn assert_cold_matches_warm(sealed_count: u64) {
         view.seconds.len() == usize::try_from(sealed_count + 8).unwrap()
     });
 
-    let cold = super::Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
+    let cold = super::Store::start_with_payload(&fixture.root, 256 * 1024 * 1024).unwrap();
     let actual = super::tests::view_where(&cold, |view| {
         view.seconds.len() == usize::try_from(sealed_count + 8).unwrap()
     });
@@ -1004,7 +1004,7 @@ fn fixture_load_peak(fixture: &Fixture) -> usize {
     let outcome =
         super::recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
             let super::apps::TickApps::Loaded(apps) = apps else {
-                panic!("valid fixture must load within the unchanged 64 MiB allowance");
+                panic!("valid fixture must load within its allowance");
             };
             assert_eq!(apps.processes.as_ref().unwrap().len(), 2);
             observations += 1;

@@ -27,18 +27,15 @@ fn a_commit_restores_the_selected_tick_without_rebuilding_scalar_context() {
 #[test]
 fn a_commit_before_the_selection_loads_no_selected_tick_or_scalar_context() {
     // Goal: a selection newer than all commits needs no saved-row handoff queries.
-    // Method: seal the first observation, then select the next live observation before polling.
+    // Method: select the observation of the next minute, then seal the minute before it.
     let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
     fixture.publish_with_system_rows(1000);
-    fixture.seal();
-    let marker = fixture.marker(0);
-    let hidden = fixture.root.join("withheld.seal");
-    std::fs::rename(&marker, &hidden).unwrap();
     let mut live = LiveSession::open(&fixture.root).unwrap();
     fixture.publish_with_system_rows(1001);
     live.poll().unwrap();
     live.follow_latest().unwrap();
-    std::fs::rename(hidden, marker).unwrap();
+    fixture.seal_minute(0);
 
     assert!(!live.poll().unwrap());
 
@@ -199,8 +196,10 @@ fn a_covering_commit_with_a_changed_subsecond_clock_preserves_the_previous_histo
 #[test]
 fn duplicate_covering_commits_preserve_the_previous_history() {
     // Goal: two saved windows covering the same publication cannot pick one by directory order.
-    // Method: commit a second table set covering that publication, then compare public state.
-    let mut handoff = CommitHandoff::new();
+    // Method: commit a second table set covering that publication, then compare public state. Only
+    // the format before registered recordings can hold this state, since the first window to cover
+    // a publication of a registered recording ends the attempts to save it.
+    let mut handoff = CommitHandoff::over(Fixture::legacy_of(true, 2));
     handoff.duplicate_commit();
 
     assert!(!handoff.live.poll().unwrap());
@@ -245,7 +244,10 @@ struct CommitHandoff {
 
 impl CommitHandoff {
     fn new() -> Self {
-        let mut fixture = Fixture::new();
+        Self::over(Fixture::new())
+    }
+
+    fn over(mut fixture: Fixture) -> Self {
         fixture.publish_with_system_rows(1000);
         fixture.publish_with_system_rows(1001);
         drop(persistence::Store::open(&fixture.root).unwrap());

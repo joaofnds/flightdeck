@@ -138,7 +138,7 @@ pub(super) fn publish(fixture: &mut Fixture, publication: u64, rows: &[Named<'_>
         .writer
         .publish_with_identity(
             &Readings {
-                run_tick: publication,
+                run_tick: fixture.elapsed + publication,
                 cpus: &[collector::machine::CPUTicks {
                     user: 1,
                     system: 0,
@@ -161,8 +161,8 @@ pub(super) fn publish(fixture: &mut Fixture, publication: u64, rows: &[Named<'_>
             },
             Some(&collector::ring::ObservationTimes {
                 wall_ns: (1000 + publication) * 1_000_000_000,
-                continuous_ns: publication * 1_000_000_000,
-                awake_ns: publication * 1_000_000_000,
+                continuous_ns: (fixture.elapsed + publication) * 1_000_000_000,
+                awake_ns: (fixture.elapsed + publication) * 1_000_000_000,
             }),
             &IdentityPublication {
                 processes: &live,
@@ -215,121 +215,28 @@ fn process(row: &Named<'_>) -> Option<Process> {
     })
 }
 
-pub(super) fn seal_selected(fixture: &Fixture, selected: &[u64]) {
-    assert!(selected.len() <= 8);
-    let mut reader = collector::ring::RingReader::open_generation(fixture.writer.name()).unwrap();
-    let shape = reader.shape();
-    let mut tick = persistence::tick_buffer(&shape).unwrap();
-    let mut identities = Vec::with_capacity(2);
-    let mut owned = Vec::with_capacity(32);
-    let mut event_identities = Vec::with_capacity(32);
-    let mut window = persistence::Window::new(
-        persistence::WindowIdentity {
-            run: fixture.writer.identity().unwrap(),
-            window: 0,
-        },
-        persistence::Limits::from_shape(&shape).unwrap(),
-    );
-    for _index in 0..8 {
-        let publication = match reader
-            .read_identity_into(&mut tick, &mut identities)
-            .unwrap()
-        {
-            collector::ring::Found::Publication { publication, .. } => publication,
-            collector::ring::Found::Nothing => break,
-            collector::ring::Found::Missed { .. } => panic!("selected sealing lost a publication"),
-        };
-        read_events(&mut reader, &tick, &mut owned, &mut event_identities);
-        if !selected.contains(&publication) {
-            continue;
-        }
-        let times = tick.times.unwrap();
-        let events: Vec<_> = owned
-            .iter()
-            .map(|(number, run_tick, event)| persistence::NumberedEvent {
-                number: *number,
-                tick: *run_tick,
-                event,
-            })
-            .collect();
-        window
-            .push_tick_with_identity(
-                &persistence::Observation {
-                    publication,
-                    wall_ns: Some(times.wall_ns),
-                    continuous_ns: Some(times.continuous_ns),
-                    awake_ns: Some(times.awake_ns),
-                },
-                &tick,
-                &events,
-                &persistence::IdentitySource {
-                    reader: &reader,
-                    processes: &identities,
-                    events: &event_identities,
-                },
-            )
-            .unwrap();
-    }
-    seal_window(fixture, &window);
-}
-
-fn read_events(
-    reader: &mut collector::ring::RingReader,
-    tick: &collector::ring::Tick,
-    owned: &mut Vec<(u64, u64, collector::tracker::Event)>,
-    identities: &mut Vec<IdentityObservation>,
+/// Saves the first window, publishing `publications` with `rows` once the persister reads its
+/// first publication, so that they overwrite the second in the ring before it gets there.
+pub(super) fn seal_past_lost_second(
+    fixture: &mut Fixture,
+    publications: std::ops::Range<u64>,
+    rows: &[Named<'_>],
 ) {
-    owned.clear();
-    identities.clear();
-    assert!(tick.events.end - tick.events.start <= 32);
-    for expected in tick.events.clone() {
-        let mut identity = IdentityObservation::EMPTY;
-        let collector::ring::FoundEvent::Event {
-            number,
-            tick,
-            event,
-        } = reader.read_event_identity(&mut identity).unwrap()
-        else {
-            panic!("missing exit event")
-        };
-        assert_eq!(number, expected);
-        owned.push((number, tick, event));
-        identities.push(identity);
-    }
-}
-
-fn seal_window(fixture: &Fixture, window: &persistence::Window) {
     let store = persistence::Store::open(&fixture.root).unwrap();
-    let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-        panic!("selected window is already committed");
+    let run = collector::recording::RegisteredRun {
+        identity: fixture.writer.identity().unwrap(),
+        ring_name: fixture.writer.name().to_owned(),
+        collector_pid: 0,
     };
-    let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
-    let publications = window.publication_range();
-    let events = window.event_range();
-    let times: Vec<_> = window
-        .observations()
-        .filter_map(|observation| observation.wall_ns)
-        .collect();
-    store
-        .commit(
-            pending,
-            persistence::Manifest {
-                event_batches: None,
-                identity: window.identity,
-                publication_first: publications.start,
-                publication_end: publications.end,
-                events_first: events.start,
-                events_end: events.end,
-                wall_ns: Some(persistence::TimeBounds {
-                    min: *times.iter().min().unwrap(),
-                    max: *times.iter().max().unwrap(),
-                }),
-                continuous_ns: None,
-                awake_ns: None,
-                losses: persistence::Losses::default(),
-                data_directory: String::new(),
-                tables,
-            },
-        )
-        .unwrap();
+    persistence::worker::seal_first_window_overrun(
+        &store,
+        &run,
+        &crate::live::identity_fixture::Underived,
+        &mut || {
+            for publication in publications.clone() {
+                publish(fixture, publication, rows);
+            }
+        },
+    )
+    .unwrap();
 }

@@ -108,9 +108,13 @@ fn retained_app_trace_matches_the_native_live_session() {
         .app_history(KeyKind::Bundle, b"/Apps/Current.app", &cancellation, 0)
         .unwrap();
 
-    assert_eq!(trace_fields(&shown), trace_fields(&expected));
-    assert_eq!(shown["points"][0]["segment"], "1");
-    assert_eq!(shown["points"][1]["segment"], "1");
+    // A segment only says which points join, and each source numbers its own.
+    assert_eq!(shown["points"][0]["segment"], shown["points"][1]["segment"]);
+    assert_eq!(
+        expected["points"][0]["segment"],
+        expected["points"][1]["segment"]
+    );
+    assert_eq!(without_segments(&shown), without_segments(&expected));
 }
 
 #[test]
@@ -159,6 +163,16 @@ fn missing_payload_context(fixture: &Fixture) -> Arc<QueryContext> {
     .unwrap();
 
     context(fixture, held, &budget)
+}
+
+fn without_segments(value: &Value) -> Value {
+    let [selected, seconds, points] = trace_fields(value);
+    let mut points = points.clone();
+    for point in points.as_array_mut().unwrap() {
+        point.as_object_mut().unwrap().remove("segment");
+    }
+
+    json!([selected, seconds, points])
 }
 
 fn trace_fields(value: &Value) -> [&Value; 3] {

@@ -476,17 +476,9 @@ fn historical_apps(trace: &persistence::work::ingestion::Trace) -> usize {
 }
 
 fn large_fixture() -> Fixture {
-    let mut fixture = Fixture::new();
-    let mut reader = collector::ring::RingReader::open_generation(fixture.writer.name()).unwrap();
-    let shape = reader.shape();
+    // A ring that holds a whole minute, so that the persister saves every reading of each.
+    let mut fixture = Fixture::new_mode(true, 7, None);
     for minute in 0..40 {
-        let mut window = persistence::Window::new(
-            persistence::WindowIdentity {
-                run: fixture.writer.identity().unwrap(),
-                window: minute,
-            },
-            persistence::Limits::from_shape(&shape).unwrap(),
-        );
         for run_tick in minute * 60..((minute + 1) * 60).min(2375) {
             let wall = if run_tick < 1295 {
                 10000 + 2 * run_tick
@@ -494,109 +486,8 @@ fn large_fixture() -> Fixture {
                 11295 + run_tick
             };
             fixture.publish_with_usage(wall, &usage(run_tick));
-            large_fixture_capture(&mut reader, &mut window);
         }
-        large_fixture_commit(&fixture.root, &window);
+        fixture.seal_minute(minute);
     }
-    drop(reader);
     fixture
-}
-
-fn large_fixture_capture(
-    reader: &mut collector::ring::RingReader,
-    window: &mut persistence::Window,
-) {
-    use collector::ring::{Found, FoundEvent, IdentityObservation};
-    let mut tick = persistence::tick_buffer(&reader.shape()).unwrap();
-    let mut identities = Vec::with_capacity(2);
-    let Found::Publication { publication, .. } = reader
-        .read_identity_into(&mut tick, &mut identities)
-        .unwrap()
-    else {
-        panic!("fixture tick missing");
-    };
-    assert_eq!(tick.run_tick / 60, window.identity.window);
-    assert!(tick.events.end - tick.events.start <= 32);
-    let mut events = Vec::new();
-    let mut event_identities = Vec::new();
-    for expected in tick.events.clone() {
-        let mut identity = IdentityObservation::EMPTY;
-        let FoundEvent::Event {
-            number,
-            tick: run_tick,
-            event,
-        } = reader.read_event_identity(&mut identity).unwrap()
-        else {
-            panic!("fixture event missing");
-        };
-        assert_eq!(number, expected);
-        assert_eq!(run_tick, tick.run_tick);
-        events.push((number, event));
-        event_identities.push(identity);
-    }
-    let numbered: Vec<_> = events
-        .iter()
-        .map(|(number, event)| persistence::NumberedEvent {
-            number: *number,
-            tick: tick.run_tick,
-            event,
-        })
-        .collect();
-    let times = tick.times.unwrap();
-    window
-        .push_tick_with_identity(
-            &persistence::Observation {
-                publication,
-                wall_ns: Some(times.wall_ns),
-                continuous_ns: Some(times.continuous_ns),
-                awake_ns: Some(times.awake_ns),
-            },
-            &tick,
-            &numbered,
-            &persistence::IdentitySource {
-                reader,
-                processes: &identities,
-                events: &event_identities,
-            },
-        )
-        .unwrap();
-}
-
-fn large_fixture_commit(root: &Path, window: &persistence::Window) {
-    let store = persistence::Store::open(root).unwrap();
-    let persistence::Begin::Pending(pending) = store.begin(&window.identity).unwrap() else {
-        panic!("fixture window already committed");
-    };
-    let tables = persistence::Encoder.encode(window, pending.path()).unwrap();
-    let publications = window.publication_range();
-    let events = window.event_range();
-    let min = window
-        .observations()
-        .map(|observation| observation.wall_ns.unwrap())
-        .min()
-        .unwrap();
-    let max = window
-        .observations()
-        .map(|observation| observation.wall_ns.unwrap())
-        .max()
-        .unwrap();
-    store
-        .commit(
-            pending,
-            Manifest {
-                event_batches: None,
-                identity: window.identity,
-                publication_first: publications.start,
-                publication_end: publications.end,
-                events_first: events.start,
-                events_end: events.end,
-                wall_ns: Some(persistence::TimeBounds { min, max }),
-                continuous_ns: None,
-                awake_ns: None,
-                losses: persistence::Losses::default(),
-                data_directory: String::new(),
-                tables,
-            },
-        )
-        .unwrap();
 }

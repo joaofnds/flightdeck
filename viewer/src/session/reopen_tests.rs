@@ -203,15 +203,33 @@ fn a_session_lists_every_sealed_window_until_another_is_sealed() {
 #[test]
 fn a_session_no_longer_lists_every_sealed_window_once_one_is_deleted() {
     // Goal: a window retention deleted since the listing calls for a new listing too.
-    // Method: open over two sealed minutes, delete the first one's marker, and ask.
+    // Method: open over two sealed minutes, delete every name of the first one, and ask.
     let fixture = sealed_minutes(2);
     let session = Session::open(&fixture.root).unwrap();
-    let first = persistence::layout::WindowKey::from(&session.windows[0].identity);
-    std::fs::remove_file(first.marker(&fixture.root)).unwrap();
+    delete_window(&fixture.root, &session.windows[0]);
 
     let listed = session.lists_every_sealed_window().unwrap();
 
     assert!(!listed);
+}
+
+/// Removes `window`'s readings from the namespaces that name them, and its files.
+fn delete_window(root: &Path, window: &Manifest) {
+    use std::os::unix::fs::MetadataExt;
+    let directory = root.join(&window.data_directory);
+    let proof = std::fs::metadata(directory.join("metadata")).unwrap().ino();
+    let mut walked = vec![root.to_path_buf()];
+    while let Some(path) = walked.pop() {
+        for entry in std::fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                walked.push(entry.path());
+            } else if entry.metadata().unwrap().ino() == proof {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// More minutes than `discover` has reader threads, so a thread reads several markers. The

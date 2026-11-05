@@ -46,35 +46,52 @@ struct Writers<'derive> {
     derive: &'derive dyn Derive,
 }
 
+#[cfg(feature = "fixtures")]
+pub use registered::seal_first_window_overrun;
+
+/// What a persister keeps from one window of a registered run to the next.
+#[cfg(feature = "fixtures")]
+#[derive(Default)]
+pub struct HeldWindows {
+    state: RunState,
+}
+
 /// Saves the windows of a registered run its ring holds past what is saved, through `window_last`
 /// if it names one, whether or not a later window has begun, and leaves the run open, as the
-/// minutes going by would.
+/// minutes going by would. Like a persister that stays up, it reads the saved rows only the first
+/// time `held` is used.
 #[cfg(feature = "fixtures")]
 pub fn seal_held_windows(
     store: &Store,
     registered: &RegisteredRun,
     window_last: Option<u64>,
+    held: &mut HeldWindows,
     derive: &dyn Derive,
 ) -> Result<()> {
     let writers = Writers {
         encoder: Encoder,
         derive,
     };
-    let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1 << 28));
+    let state = &mut held.state;
     let mut reader = RingReader::open_generation(&registered.ring_name)?;
     let newest = reader.publication_newest()?;
-    let frontier = store.source_frontier(
-        &registered.identity,
-        &budget,
-        &mut crate::canonical::ReadWork::default(),
-    )?;
-    let mut state = RunState::default();
-    let mut next = frontier.map_or(reader.publication_first(), |saved| saved.publication_end());
+    let mut next = if state.loaded {
+        state.next_publication
+    } else {
+        let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1 << 28));
+        store
+            .source_frontier(
+                &registered.identity,
+                &budget,
+                &mut crate::canonical::ReadWork::default(),
+            )?
+            .map_or(reader.publication_first(), |saved| saved.publication_end())
+    };
     for _window in 0..=reader.shape().slot_count {
         if next > newest || seal_held_windows_past(&mut reader, next, window_last)? {
             return Ok(());
         }
-        persist_one(store, &writers, registered, true, &mut state)?;
+        persist_one(store, &writers, registered, true, state)?;
         next = state.next_publication;
     }
 

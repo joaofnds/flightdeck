@@ -168,7 +168,7 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     assert_primary_query(&retained, &selected);
     let accepted = run.stage.accepted();
     let root = run.fixture.root.clone();
-    change_loss_word(&root, &run.stage.startup.minutes[0].found.marker);
+    crate::store::tests::change_saved_manifest(&root, &run.stage.startup.minutes[0].found.marker);
     let token = run.submit_primary_query(&handle);
     assert_eq!(
         token,

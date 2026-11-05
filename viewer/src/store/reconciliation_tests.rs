@@ -33,7 +33,7 @@ fn a_contiguous_sealed_to_ring_handoff_qualifies_the_published_view() {
     fixture.seal_minute(0);
     fixture.publish_with_events(10_001, &[]);
 
-    let store = super::Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
+    let store = super::Store::start_with_payload(&fixture.root, 256 * 1024 * 1024).unwrap();
     let view = view_where(&store, |view| view.seconds.len() == 2);
 
     assert_eq!(view.failure, None);
@@ -50,7 +50,7 @@ fn an_initially_overwritten_prefix_stays_unqualified_after_catching_up() {
     for second in 10_000..10_012 {
         fixture.publish_with_events(second, &[]);
     }
-    let store = super::Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
+    let store = super::Store::start_with_payload(&fixture.root, 256 * 1024 * 1024).unwrap();
 
     let initial = view_where(&store, |view| view.seconds.len() == 8);
 
@@ -75,7 +75,7 @@ fn a_matching_sealed_prefix_qualifies_an_initially_wrapped_ring() {
         fixture.publish_with_events(second, &[]);
     }
 
-    let store = super::Store::start_with_payload(&fixture.root, 64 * 1024 * 1024).unwrap();
+    let store = super::Store::start_with_payload(&fixture.root, 256 * 1024 * 1024).unwrap();
     let view = view_where(&store, |view| view.seconds.len() == 12);
 
     assert!(view.ring_complete);

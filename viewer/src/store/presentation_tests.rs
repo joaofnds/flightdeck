@@ -78,12 +78,7 @@ fn borrowed_pages_preserve_the_same_json_from_native_and_saved_samples() {
     fixture.publish_with_system_rows(101);
     let (native, expected) = retained_fixture(&fixture);
     fixture.seal_minute(0);
-    let marker = persistence::Store::open(&fixture.root)
-        .unwrap()
-        .marker_path(&persistence::WindowIdentity {
-            run: fixture.writer.identity().unwrap(),
-            window: 0,
-        });
+    let marker = fixture.marker(0);
     let minute = crate::recording::SealedMinute::open(&fixture.root, &marker).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut saved = AppsSecond::with_room();

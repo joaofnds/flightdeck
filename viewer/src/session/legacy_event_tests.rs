@@ -390,7 +390,7 @@ fn check_rows(rows: &DataFrame, count: usize, bytes: usize, event: &str) {
 
 fn fixture(count: usize, bytes: usize) -> (Fixture, persistence::Manifest) {
     assert!(collector::u64_from_usize(count) <= persistence::schema::IDENTITY_ROWS_MAX);
-    let mut fixture = Fixture::new();
+    let mut fixture = Fixture::legacy_of(true, 2);
     fixture.publish(1000);
     fixture.seal_minute(0);
     let identity = persistence::WindowIdentity {
