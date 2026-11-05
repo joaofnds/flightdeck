@@ -1,5 +1,6 @@
 use super::super::{Progress, RunState, WindowIdentity, Writers, persist_one};
-use crate::canonical::{ReadWork, SourceFrontier};
+use crate::canonical::metadata::Body;
+use crate::canonical::{CanonicalMetadata, ReadWork, SourceFrontier};
 use crate::resources::ByteBudget;
 use crate::sealed_apps::SealedApps;
 use crate::store::{ProofStep, PublicationStep};
@@ -111,6 +112,7 @@ struct Recording {
     run: RunIdentity,
     tick: u64,
     captured: bool,
+    source_lost: bool,
 }
 
 impl Recording {
@@ -159,6 +161,7 @@ impl Recording {
             run,
             tick: 0,
             captured,
+            source_lost: false,
         }
     }
 
@@ -338,6 +341,37 @@ impl Recording {
             .collect()
     }
 
+    /// Removes the source as a reboot does, so no reader can open it again.
+    fn lose_source(&mut self) {
+        collector::ring::unlink_generation(self.writer.name()).unwrap();
+        self.source_lost = true;
+    }
+
+    /// Publishes a tick in each of the minutes, past what the ring holds if there are enough.
+    fn publish_minutes(&mut self, minutes: std::ops::Range<u64>) {
+        for minute in minutes {
+            self.publish_in_minute(minute);
+        }
+    }
+
+    /// The counts of lost publications and events in each saved window's manifest, in order.
+    fn saved_losses(&self) -> Vec<crate::Losses> {
+        let mut manifests: Vec<_> = self
+            .saved_windows()
+            .iter()
+            .map(|window| {
+                let mut file = std::fs::File::open(window.join("ready/metadata")).unwrap();
+                let metadata = CanonicalMetadata::read(&mut file).unwrap();
+                let Body::Ordinary(manifest) = metadata.body else {
+                    panic!("an ordinary window holds an ordinary body");
+                };
+                manifest
+            })
+            .collect();
+        manifests.sort_by_key(|manifest| manifest.publication_first);
+        manifests.iter().map(|manifest| manifest.losses).collect()
+    }
+
     /// Takes the worker's own seal of the first window as far as the interruption, then stops
     /// as a process that ended there would, leaving what a torn write leaves.
     fn interrupted_seal(&self, store: &Store, interruption: Interruption) {
@@ -436,7 +470,8 @@ impl Recording {
         let mut state = RunState::default();
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
         let mut attempt = store.resume_attempt().unwrap();
-        let saved = attempt.restage(&budget).unwrap();
+        let saved = attempt.saved(&budget).unwrap();
+        attempt.restage(&saved).unwrap();
         let identity = WindowIdentity {
             run: self.run,
             window: 0,
@@ -444,7 +479,7 @@ impl Recording {
 
         reader.seek_publication(reader.publication_first()).unwrap();
         reader.seek_event(reader.event_first()).unwrap();
-        super::seal_stage(&attempt, &mut reader, identity, &saved, &mut state).unwrap();
+        super::seal_stage(&attempt, &mut reader, identity, &saved.batches, &mut state).unwrap();
     }
 
     fn only_event_batch(pending: &Path) -> PathBuf {
@@ -482,7 +517,9 @@ impl Recording {
 
 impl Drop for Recording {
     fn drop(&mut self) {
-        collector::ring::unlink_generation(self.writer.name()).unwrap();
+        if !self.source_lost {
+            collector::ring::unlink_generation(self.writer.name()).unwrap();
+        }
         std::fs::remove_dir_all(&self.base).unwrap();
     }
 }
@@ -821,4 +858,124 @@ fn a_seal_interrupted_again_while_it_is_recovered_converges() {
     recording.persist(&restarted, &mut state);
 
     assert_eq!(recording.saved_files(), *UNINTERRUPTED);
+}
+
+#[test]
+fn a_seal_with_nothing_saved_counts_what_the_ring_overwrote_meanwhile() {
+    // Goal: publications overwritten while the worker was down are counted once as lost (P02.3).
+    // Method: stop after registering, publish past the ring's eight slots, restart, and read the
+    // first saved window's counts, against the fourteen published and eight the ring holds.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::Registered);
+    drop(first);
+    recording.publish_minutes(3..13);
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+    let losses = recording.saved_losses();
+    assert_eq!(losses.len(), 1);
+    assert_eq!(losses[0].publications, 6);
+    assert_eq!(losses[0].events, 0);
+    let objects = std::fs::read_dir(recording.root.join("data")).unwrap();
+    assert_eq!(objects.count(), 1);
+}
+
+#[test]
+fn a_seal_that_saved_tables_and_no_rows_is_finished_rather_than_abandoned() {
+    // Goal: a minute with no events saves no rows, so its tables alone keep the attempt (P02.3).
+    // Method: stop with all but one table written on such a minute, restart, read the frontier.
+    let mut recording = Recording::new();
+    recording.publish_minutes(0..2);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::TableMissing);
+    drop(first);
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+    assert_eq!(recording.frontier(&restarted).unwrap().publication_end(), 2);
+}
+
+#[test]
+fn a_seal_abandoned_up_to_its_slot_is_abandoned_again() {
+    // Goal: a process that ends after removing an empty attempt's directories, before its slot,
+    // stops nothing, since a restart finds the same empty attempt (P02.3).
+    // Method: stop after registering, remove those directories, restart, and read what remains.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::Registered);
+    drop(first);
+    for object in std::fs::read_dir(recording.root.join("data")).unwrap() {
+        std::fs::remove_dir_all(object.unwrap().path()).unwrap();
+    }
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+    assert_eq!(recording.frontier(&restarted).unwrap().publication_end(), 3);
+}
+
+#[test]
+fn a_seal_with_nothing_saved_lets_another_run_go_on_when_its_source_is_gone() {
+    // Goal: a reboot during a seal that saved nothing cannot stop new minutes (P02.3).
+    // Method: stop after registering, remove the source as a reboot does, and step a new run.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let mut other = recording.another_run();
+    other.publish_in_minute(0);
+    other.publish_in_minute(1);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::Registered);
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = other.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+}
+
+#[test]
+fn a_torn_event_batch_counts_as_nothing_saved_when_its_source_is_gone() {
+    // Goal: a batch no row can be read from does not hold the slot once the source is gone.
+    // Method: tear the only batch, remove the source, and step a new run.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let mut other = recording.another_run();
+    other.publish_in_minute(0);
+    other.publish_in_minute(1);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::EventBatchTorn);
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = other.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+}
+
+#[test]
+fn a_proved_seal_publishes_when_its_source_is_gone() {
+    // Goal: durable proof metadata needs no source, so a reboot after it loses nothing (P02.3).
+    // Method: stop after the proof, remove the source, restart, and read the frontier.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::Proved);
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let progress = recording.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(progress, Progress::Sealed));
+    assert_eq!(recording.frontier(&restarted).unwrap().publication_end(), 3);
 }

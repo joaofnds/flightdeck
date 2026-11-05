@@ -37,7 +37,7 @@ pub(super) fn persist_one(
     let budget = Arc::new(ByteBudget::new(
         usize::try_from(memory_limit(state)).map_err(|_| crate::Error::Bound("memory limit"))?,
     ));
-    let interrupted = if state.loaded {
+    let mut interrupted = if state.loaded {
         None
     } else {
         store.interrupted()?
@@ -45,6 +45,9 @@ pub(super) fn persist_one(
     if interrupted == Some(Interrupted::Publication) {
         finish_publication(store.resume_publication(&budget)?)?;
         return Ok(Progress::Sealed);
+    }
+    if interrupted.is_some() && store.abandon_empty_attempt(&budget)? {
+        interrupted = None;
     }
     if interrupted.is_some_and(|attempt| attempt != Interrupted::Staging(registered.identity)) {
         return Ok(Progress::Deferred);
@@ -245,7 +248,8 @@ fn recover_staging_again(
     else {
         return Err(crate::Error::Bound("interrupted attempt operation"));
     };
-    let saved = attempt.restage(budget)?;
+    let saved = attempt.saved(budget)?;
+    attempt.restage(&saved)?;
     let registered = crate::Losses {
         publications: input.losses.publications,
         events: input.losses.events,
@@ -258,7 +262,7 @@ fn recover_staging_again(
         run: input.run,
         window,
     };
-    let window = seal_stage(&attempt, &mut reader, identity, &saved, state)?;
+    let window = seal_stage(&attempt, &mut reader, identity, &saved.batches, state)?;
     if state.losses != registered {
         return Err(crate::Error::Bound("interrupted window overwritten"));
     }
