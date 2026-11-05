@@ -263,6 +263,55 @@ fn an_explicit_recorder_start_can_reclaim_surviving_workers() {
 }
 
 #[test]
+fn an_automatic_launch_starts_a_recorder_that_stopped() {
+    // Goal: opening the app resumes recording however the last recorder ended.
+    // Method: discover with the controller and both workers gone from a ready recording.
+    let mut policy = Policy::new(Mode::Auto);
+    let stopped = Source {
+        recording: RecordingStatus::Ready,
+        controller_missing: true,
+        ..Source::default()
+    };
+
+    let action = policy.step(Duration::ZERO, &stopped);
+
+    assert_eq!(action, Action::Spawn);
+    assert_eq!(policy.state, State::Starting);
+}
+
+#[test]
+fn an_automatic_launch_reclaims_workers_that_outlived_their_controller() {
+    // Goal: opening the app restores automatic recovery for workers still recording.
+    // Method: discover with advancing acquisition and the controller gone.
+    let mut policy = Policy::new(Mode::Auto);
+    let mut source = existing(10);
+    source.controller_missing = true;
+
+    let action = policy.step(Duration::ZERO, &source);
+
+    assert_eq!(action, Action::Spawn);
+}
+
+#[test]
+fn an_automatic_launch_waits_for_a_request_when_controller_health_is_unreadable() {
+    // Goal: health the app cannot read never starts a recorder beside one that may be running.
+    // Method: discover with the controller's health refused, then request a retry.
+    let mut policy = Policy::new(Mode::Auto);
+    let source = Source {
+        recording: RecordingStatus::Pending,
+        controller_unavailable: true,
+        ..Source::default()
+    };
+
+    let unrequested = policy.step(Duration::ZERO, &source);
+    policy.retry();
+    let requested = policy.step(Duration::from_secs(1), &source);
+
+    assert_eq!(unrequested, Action::None);
+    assert_eq!(requested, Action::Spawn);
+}
+
+#[test]
 fn controller_health_loss_after_attachment_offers_explicit_recovery() {
     // Goal: advancing acquisition cannot hide the loss of controller health after attachment.
     // Method: attach to advancing readings, then make only controller health unreadable.

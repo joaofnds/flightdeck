@@ -17,8 +17,8 @@ the app, required recorder, collector and persister executables, and artwork; mi
 packaging. It can be moved outside the checkout.
 
 Default launch uses `~/Library/Application Support/Flightdeck/flightdeck.recording`.
-It attaches to an advancing existing recording or starts a recorder controller when collection
-is absent. It attaches only to a compatible worker build, and
+It attaches to an advancing existing recording or starts a recorder controller when no controller
+is running. It attaches only to a compatible worker build, and
 otherwise fails with both builds named. A ring states its own layout, which every reader
 checks, so an app opening a recording another build wrote reads it only where the
 layouts agree. A collector counts as running only while it holds the recording's lifetime
@@ -91,7 +91,8 @@ isolated ring. The controller owns recovery and the workers retain their own rec
 locks. The status line reports acquisition and durable-recording health separately from
 bounded shared records, even when diagnostic output is unavailable. If the controller
 exits, surviving workers continue and the status says automatic recovery is unavailable.
-Retry explicitly starts a controller that verifies surviving worker identities before adoption.
+Retry, or the next launch on the default recording, starts a controller that verifies surviving
+worker identities before adoption.
 Opening a recording read-only grants no start or shutdown authority.
 
 A live launch keeps running

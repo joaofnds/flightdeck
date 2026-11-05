@@ -68,9 +68,9 @@ acquisition and durable recording separately; durable progress advances only aft
 canonical seal commits. Finite runs, Ctrl-C and SIGTERM ask acquisition to stop and drain
 the saved tail. GUI quit detaches while recording continues.
 
-If the recorder dies, healthy workers continue. Automatic recovery then needs an explicit
-recorder start; no installed service restarts it. Repeating the same command adopts workers
-only when their native creation identity, authority and build protocol match. To request
+If the recorder dies, healthy workers continue. Automatic recovery then needs a recorder
+start, which the app's next launch makes; no installed service restarts it. Repeating the same
+command adopts workers only when their native creation identity, authority and build protocol match. To request
 shutdown from another terminal, run `recorder --recording PATH --stop yes`. A stop requested
 after a recorder process started stops the cohort it starts, however far that start has got,
 while a stop from before it, or a stale mapped request, cannot target that later cohort.

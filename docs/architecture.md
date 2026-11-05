@@ -79,7 +79,7 @@ The recorder holds only the controller lock. Workers hold their own acquisition 
 locks and publish separate fixed-size health records with native process creation identity.
 The private mapping also binds the recording, cohort authority and source compatibility
 fingerprint. Durable health advances after canonical commit synchronization. Recorder loss
-leaves healthy workers running; explicit relaunch verifies survivors before adopting them.
+leaves healthy workers running; a relaunch verifies survivors before adopting them.
 A persister operating failure receives bounded retries while acquisition continues.
 
 The persister first reads timing and completion information to decide whether a window is

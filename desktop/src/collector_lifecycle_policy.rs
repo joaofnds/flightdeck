@@ -188,7 +188,11 @@ impl Policy {
         if self.since.is_none() {
             self.since = Some(now);
         }
-        if source.controller_missing || source.controller_unavailable {
+        if source.controller_missing {
+            self.state = State::Starting;
+            return Action::Spawn;
+        }
+        if source.controller_unavailable {
             if self.restart_requested {
                 self.state = State::Starting;
                 return Action::Spawn;

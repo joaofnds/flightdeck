@@ -58,9 +58,9 @@ fn attached_health_separates_acquisition_and_durable_failure_without_output() {
 }
 
 #[test]
-fn surviving_acquisition_without_controller_requires_explicit_recovery() {
-    // Goal: a surviving worker never implies that automatic recovery is available.
-    // Method: publish only acquisition health, inspect it through the GUI, then request retry.
+fn surviving_acquisition_without_controller_starts_a_recorder() {
+    // Goal: a launch restores automatic recovery for a worker that outlived its controller.
+    // Method: publish only acquisition health, then take the session's first step.
     let fixture = Recording::managed();
     let mut collector = Reporter::new(
         Control::open_writable(&fixture.root).unwrap(),
@@ -74,17 +74,10 @@ fn surviving_acquisition_without_controller_requires_explicit_recovery() {
 
     session.tick();
 
-    let (notice, retry) = session.status().unwrap();
-    assert!(notice.contains("Acquisition: running;"), "{notice}");
-    assert!(notice.contains("Recovery: unavailable"), "{notice}");
-    assert!(retry);
-    assert!(session.0.child.is_none());
-    let source = session.source_if_needed().unwrap();
-    session.retry();
-    assert_eq!(
-        session.0.policy.step(Duration::from_secs(1), &source),
-        Action::Spawn
-    );
+    let mut child = session.0.child.take().unwrap();
+    assert_eq!(session.owned_pid(), Some(child.id()));
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 #[test]
