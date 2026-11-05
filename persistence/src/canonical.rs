@@ -1,4 +1,5 @@
 //! Descriptor-relative canonical metadata and snapshot-bounded source lookup.
+pub mod catalog;
 mod frontier;
 pub(crate) mod insert;
 pub(crate) mod metadata;

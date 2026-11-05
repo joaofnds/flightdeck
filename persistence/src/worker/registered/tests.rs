@@ -2133,6 +2133,9 @@ fn the_whole_worker_marks_what_an_evicted_ring_may_have_held() {
     );
 }
 
+#[path = "catalog_tests.rs"]
+mod catalog_tests;
+
 #[path = "kill_tests.rs"]
 mod kill_tests;
 

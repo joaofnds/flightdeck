@@ -106,6 +106,8 @@ pub enum CommitBoundary {
 
 const PARTITION_ENTRIES_MAX: usize = 1442;
 const WINDOW_FILES_MAX: usize = 17;
+/// The file in a registered window's directory that its gates link.
+const PROOF_NAME: &str = "metadata";
 const _: () = {
     // An enumeration reads every table, held or derived, the metadata, and then its end.
     assert!(
@@ -603,11 +605,38 @@ fn ready_relative(manifest: &Manifest) -> PathBuf {
 }
 
 /// Refuses a data directory other than the one the window's identity names.
-fn validate_data_directory(manifest: &Manifest) -> io::Result<()> {
+pub(crate) fn validate_data_directory(manifest: &Manifest) -> io::Result<()> {
+    if registered_directory(&manifest.data_directory) {
+        // The proof that holds this manifest was decoded against its attempt's directory.
+        return Ok(());
+    }
     if Path::new(&manifest.data_directory) != ready_relative(manifest) {
         return Err(invalid("data directory identity"));
     }
     Ok(())
+}
+
+/// The file that stands for `manifest`'s commitment, which the read functions below take. A
+/// window of a registered attempt has no marker: its gates link the proof in its own directory.
+#[must_use]
+pub fn commitment_path(root: &Path, manifest: &Manifest) -> PathBuf {
+    if registered_directory(&manifest.data_directory) {
+        root.join(&manifest.data_directory).join(PROOF_NAME)
+    } else {
+        WindowKey::from(&manifest.identity).marker(root)
+    }
+}
+
+/// Whether a window's directory is an attempt's, `data/<attempt>/ready`, rather than one its
+/// identity names, which lies deeper.
+fn registered_directory(data_directory: &str) -> bool {
+    let mut parts = Path::new(data_directory).components();
+    parts.next().is_some_and(|base| base.as_os_str() == "data")
+        && parts.next().is_some()
+        && parts
+            .next()
+            .is_some_and(|child| child.as_os_str() == "ready")
+        && parts.next().is_none()
 }
 
 pub fn read_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
@@ -623,12 +652,28 @@ pub(crate) fn read_committed_file(
 ) -> io::Result<Manifest> {
     private::verify_directory(root)?;
     let manifest = read_marker_file(root, marker, file)?;
+    if registered_directory(&manifest.data_directory) {
+        Store::validate_window_files(root, &manifest)?;
+        Store::validate_link(root, &manifest, file)?;
+        if registered_recording(root)? != manifest.identity.run.recording {
+            return Err(invalid("recording identity mismatch"));
+        }
+        return Ok(manifest);
+    }
     Store::verify_partition(root, Kind::Commits, &manifest.identity)?;
     Store::validate_committed(root, &manifest, file)?;
     if collector::recording::read_identity(root)? != manifest.identity.run.recording {
         return Err(invalid("recording identity mismatch"));
     }
     Ok(manifest)
+}
+
+fn registered_recording(root: &Path) -> io::Result<Identity> {
+    let directory = private::PrivateDirectory::open(root)?;
+    match collector::recording::bootstrap::classify(&directory, &mut [0; 4097])? {
+        collector::recording::bootstrap::Classification::Initialized(recording) => Ok(recording),
+        _ => Err(invalid("recording identity mismatch")),
+    }
 }
 
 /// Rereads a marker that `read_committed` accepted, for a reader holding the window open. A
@@ -664,9 +709,24 @@ fn read_marker(root: &Path, marker: &Path) -> io::Result<(Manifest, File)> {
 }
 
 fn read_marker_file(root: &Path, marker: &Path, file: &mut File) -> io::Result<Manifest> {
+    if marker.file_name().is_some_and(|name| name == PROOF_NAME) {
+        return read_marker_file_proof(root, marker, file);
+    }
     let manifest = Manifest::read(file)?;
     let expected = WindowKey::from(&manifest.identity).marker(root);
     if expected != marker {
+        return Err(invalid("noncanonical marker path"));
+    }
+    Ok(manifest)
+}
+
+/// Reads the manifest out of a registered window's proof, which names the directory it must lie in.
+fn read_marker_file_proof(root: &Path, marker: &Path, file: &mut File) -> io::Result<Manifest> {
+    let metadata = crate::canonical::CanonicalMetadata::read(file)?;
+    let crate::canonical::metadata::Body::Ordinary(manifest) = metadata.body else {
+        return Err(invalid("proof of no ordinary window"));
+    };
+    if root.join(&manifest.data_directory).join(PROOF_NAME) != marker {
         return Err(invalid("noncanonical marker path"));
     }
     Ok(manifest)

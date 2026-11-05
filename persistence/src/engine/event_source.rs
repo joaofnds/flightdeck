@@ -113,12 +113,9 @@ impl EventSourcePin {
         let reservation = budget
             .reserve(SNAPSHOT_OVERHEAD + 8 * private::PATH_MAX + count * size_of::<Fingerprint>())
             .ok_or(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))?;
-        if Path::new(&manifest.data_directory)
-            != crate::layout::WindowKey::from(&manifest.identity).ready_relative(manifest.wall_ns)
-        {
-            return Err(Error::Bound("event source data directory").into());
-        }
-        let marker = crate::layout::WindowKey::from(&manifest.identity).marker(root);
+        crate::store::validate_data_directory(manifest)
+            .map_err(|_| Error::Bound("event source data directory"))?;
+        let marker = crate::store::commitment_path(root, manifest);
         let directory = root.join(&manifest.data_directory);
         if marker.as_os_str().len() >= private::PATH_MAX
             || directory.as_os_str().len() >= private::PATH_MAX

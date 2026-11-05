@@ -77,7 +77,7 @@ impl EventTable {
         let reservation = budget
             .reserve(index::WORKING_BYTES)
             .ok_or(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))?;
-        let marker = crate::layout::WindowKey::from(&manifest.identity).marker(root);
+        let marker = crate::store::commitment_path(root, manifest);
         let mut file = collector::recording::private::open_private_file(&marker, false)?;
         pin.validate_marker_file(&file)?;
         let committed = crate::store::read_committed_file(root, &marker, &mut file)?;

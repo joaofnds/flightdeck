@@ -38,8 +38,8 @@ pub use store::{
     InheritedAttempt, InventoryStep, InventoryWork, LossPublication, NormalProof,
     NormalPublication, OrdinaryRecovery, OriginalFile, OriginalInventory, OriginalPlacement,
     PendingWindow, ProofStep, PublicationLedger, PublicationStep, PublicationWork,
-    RegisteredAttempt, RegisteredFile, RowPublication, RowPublicationStep, Store, list_committed,
-    ownership_contended, read_committed, reread_committed,
+    RegisteredAttempt, RegisteredFile, RowPublication, RowPublicationStep, Store, commitment_path,
+    list_committed, ownership_contended, read_committed, reread_committed,
 };
 
 pub use encoder::{
