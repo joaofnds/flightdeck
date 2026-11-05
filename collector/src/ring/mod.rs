@@ -200,7 +200,8 @@ struct WriterLock(File);
 impl Drop for WriterLock {
     fn drop(&mut self) {
         if let Err(error) = self.0.unlock() {
-            crate::diagnostics::error(format_args!("ring lock: release refused: {error}"));
+            let code = error.raw_os_error();
+            crate::diagnostics::error(format_args!("ring lock: release refused: {code:?}"));
         }
     }
 }

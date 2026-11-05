@@ -26,10 +26,10 @@ const WAIT_ATTEMPTS_MAX: usize = 200;
 /// the workspace's other tests at a load average of 50.
 const ISOLATED_WAIT_ATTEMPTS_MAX: usize = 3000;
 const ISOLATED_MARKER: &str = "FLIGHTDECK_NATIVE_LOCK_PROBE_ISOLATED";
-const COMPLETED_SENTINEL: &str = "flightdeck-native-lock-proof completed_cases=9";
+const COMPLETED_SENTINEL: &str = "flightdeck-native-lock-proof completed_cases=6";
 const TEST_NAME: &str = concat!(
     "ring::object::lock_tests::",
-    "a_paused_preexec_child_can_hold_a_dropped_writers_cloexec_lock"
+    "a_paused_preexec_child_holds_the_lock_of_a_file_closed_without_unlocking"
 );
 const ECHILD: i32 = 10;
 
@@ -138,7 +138,24 @@ fn open_probe(path: &Path) -> File {
 }
 
 #[test]
-fn a_paused_preexec_child_can_hold_a_dropped_writers_cloexec_lock() {
+fn a_writers_lock_is_free_once_dropped_though_a_paused_child_holds_a_copy() {
+    // Goal: a writer that has gone leaves its ring free while a child still starting holds a copy
+    // of the lock's descriptor.
+    // Method: fork a child that stops holding the copy, drop the writer's lock, then take the lock
+    // through a fresh open while the child is still stopped.
+    let path = std::env::temp_dir().join(format!("flightdeck-writer-lock-{}", std::process::id()));
+    let lock = WriterLock(create_lock(&path).unwrap());
+    let child = PausedChild::start(&lock.0, false).unwrap();
+
+    drop(lock);
+
+    open_probe(&path).try_lock().unwrap();
+    assert_eq!(0, child.finish().unwrap());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn a_paused_preexec_child_holds_the_lock_of_a_file_closed_without_unlocking() {
     // Goal: identify whether pre-exec descriptor inheritance alone causes transient Busy.
     // Method: isolate by exec, then toggle only the paused child's inherited target fd.
     if std::env::var_os(ISOLATED_MARKER).as_deref() == Some(std::ffi::OsStr::new("1")) {
@@ -214,15 +231,8 @@ fn run_native_probe() {
             drop(create_lock(&path).unwrap());
             completed += 1;
         }
-        // A writer's lock, unlike the plain file above, is free once dropped despite the copy.
-        let lock = WriterLock(create_lock(&path).unwrap());
-        let child = PausedChild::start(&lock.0, false).unwrap();
-        drop(lock);
-        open_probe(&path).try_lock().unwrap();
-        assert_eq!(0, child.finish().unwrap());
-        completed += 1;
     }
     std::fs::remove_file(path).unwrap();
-    assert_eq!(9, completed);
+    assert_eq!(6, completed);
     println!("\n{COMPLETED_SENTINEL}");
 }
