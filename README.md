@@ -70,9 +70,9 @@ the saved tail. GUI quit detaches while recording continues.
 
 If the recorder dies, healthy workers continue. Automatic recovery then needs a recorder
 start, which the app's next launch makes; no installed service restarts it. Repeating the same
-command adopts workers only when their native creation identity, authority and build protocol match. To request
-shutdown from another terminal, run `recorder --recording PATH --stop yes`. A stop requested
-after a recorder process started stops the cohort it starts, however far that start has got,
+command adopts workers only when their native creation identity, authority and build protocol
+match. To request shutdown from another terminal, run `recorder --recording PATH --stop yes`.
+A stop requested after a recorder process started stops the cohort it starts, however far that start has got,
 while a stop from before it, or a stale mapped request, cannot target that later cohort.
 The recorder measures all three processes; a
 final CPU total for an adopted worker it cannot reap is reported as unavailable. Recording directories are created with
