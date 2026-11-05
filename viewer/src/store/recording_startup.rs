@@ -208,7 +208,9 @@ impl Startup {
         assert!(held.startup == crate::store::StartupState::Loading);
         if self.cursor.is_complete() {
             if let Some(checked) = &mut self.checked {
-                if self.cursor.decoder.decoded_catalog.windows == checked.windows {
+                if checked.decoded_is_whole
+                    && self.cursor.decoder.decoded_catalog.windows == checked.windows
+                {
                     checked.first_known_second =
                         self.cursor.decoder.decoded_catalog.first_known_second;
                     checked.last_known_second =

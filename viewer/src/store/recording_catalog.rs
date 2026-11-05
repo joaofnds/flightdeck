@@ -5,10 +5,13 @@ use std::path::Path;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
+use persistence::canonical::ReadWork;
+use persistence::canonical::catalog::Catalog;
 use persistence::{Error, Manifest};
 
 use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_predecessor};
 use crate::cancellation::Operation;
+use crate::session::registered::catalog_retry;
 use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 use crate::store::Failure;
 
@@ -27,6 +30,9 @@ pub(super) fn find(
         }
     }
     let runs = find_runs(root, recording)?;
+    if let Some(catalog) = super::find_window_catalog(root)? {
+        return find_registered(root, recording, &runs, &catalog, found, window);
+    }
     let mut catalog = Vec::new();
     let base = persistence::layout::base(root, persistence::layout::Kind::Commits);
     if !base
@@ -41,6 +47,12 @@ pub(super) fn find(
     let first_ns = find_newest(&catalog, &runs)
         .map(|newest| newest.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000));
     find_range(root, &catalog, &runs, first_ns, found)?;
+    find_order(found, &runs, window);
+    metadata(recording, &runs, &catalog, first_ns)
+}
+
+/// Orders `found` newest first by run and keeps what a load continuing from `window.since` reads.
+fn find_order(found: &mut Vec<Found>, runs: &[RunIdentity], window: &LoadWindow<'_>) {
     found.sort_unstable_by_key(|minute| {
         let order = runs
             .iter()
@@ -56,7 +68,122 @@ pub(super) fn find(
             }
         }
     }
-    metadata(recording, &runs, &catalog, first_ns)
+}
+
+/// Does what `find` does for a registered recording: the clock range comes from the newest saved
+/// window, and only the windows of that range are read.
+fn find_registered(
+    root: &Path,
+    recording: Identity,
+    runs: &[RunIdentity],
+    catalog: &Catalog,
+    found: &mut Vec<Found>,
+    window: &LoadWindow<'_>,
+) -> Result<CheckedCatalog, Failure> {
+    let lookup = |read: &mut dyn FnMut() -> persistence::Result<_>| {
+        catalog_retry(read).map_err(find_failure)
+    };
+    if let Some(since) = window.since {
+        if !runs.contains(&since.run) {
+            let saved = lookup(&mut || {
+                Ok(catalog.window_at_or_before(&since.run, u64::MAX, &mut ReadWork::default())?)
+            })?;
+            if saved.is_none() {
+                return Err(Failure::ChangedIdentity);
+            }
+        }
+    }
+    let mut newest = None;
+    for run in runs.iter().rev() {
+        newest = lookup(&mut || {
+            Ok(catalog.window_at_or_before(run, u64::MAX, &mut ReadWork::default())?)
+        })?;
+        if newest.is_some() {
+            break;
+        }
+    }
+    let ends = find_registered_ends(catalog)?;
+    let newest_ns = match newest {
+        Some(manifest) => manifest.wall_ns.map(|wall| wall.max),
+        None => ends.map(|(_first, last)| last),
+    };
+    let first_ns = newest_ns
+        .map(|newest| newest.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000));
+    let minutes = catalog_retry(|| {
+        catalog.windows_in(first_ns.unwrap_or(0), u64::MAX, &mut ReadWork::default())
+    })
+    .map_err(find_failure)?;
+    find_registered_range(root, catalog, &minutes, runs, found)?;
+    find_order(found, runs, window);
+
+    Ok(CheckedCatalog {
+        recording,
+        newest_run: runs.last().copied(),
+        first_ns,
+        windows: u32::try_from(minutes.len())
+            .map_err(|_| Failure::Commits(io::ErrorKind::InvalidData))?,
+        first_known_second: ends.map(|(first, _last)| first / 1_000_000_000),
+        last_known_second: ends.map(|(_first, last)| last / 1_000_000_000),
+        unknown_clock_ticks: catalog_retry(|| {
+            Ok(catalog.unknown_count_within_page(&mut ReadWork::default())?)
+        })
+        .map_err(find_failure)?,
+        decoded_is_whole: false,
+    })
+}
+
+/// The clocks of the recording's oldest and newest readings.
+fn find_registered_ends(catalog: &Catalog) -> Result<Option<(u64, u64)>, Failure> {
+    let ends = catalog_retry(|| {
+        let oldest = catalog.oldest_known(&mut ReadWork::default())?;
+        let newest = catalog.newest_known(&mut ReadWork::default())?;
+        Ok(oldest.zip(newest))
+    })
+    .map_err(find_failure)?;
+
+    Ok(ends.map(|(oldest, newest)| (oldest.wall_ns, newest.wall_ns)))
+}
+
+fn find_registered_range(
+    root: &Path,
+    catalog: &Catalog,
+    minutes: &[Manifest],
+    runs: &[RunIdentity],
+    found: &mut Vec<Found>,
+) -> Result<(), Failure> {
+    for manifest in minutes {
+        if found.len() == MINUTES_MAX {
+            return Err(Failure::Commits(io::ErrorKind::InvalidData));
+        }
+        let run = match runs.iter().find(|run| run.run == manifest.identity.run.run) {
+            Some(run) => *run,
+            None => manifest.identity.run,
+        };
+        let previous = match manifest.publication_first.checked_sub(1) {
+            Some(before) => catalog_retry(|| {
+                Ok(catalog.window_at_or_before(
+                    &manifest.identity.run,
+                    before,
+                    &mut ReadWork::default(),
+                )?)
+            })
+            .map_err(find_failure)?,
+            None => None,
+        };
+        found.push(Found {
+            run,
+            marker: persistence::commitment_path(root, manifest),
+            wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
+            publication_end: manifest.publication_end,
+            previous_source: previous.map(|previous| super::BoundaryKey {
+                run: previous.identity.run,
+                marker: persistence::commitment_path(root, &previous),
+                publication_end: previous.publication_end,
+            }),
+        });
+    }
+
+    Ok(())
 }
 
 fn metadata(
@@ -83,6 +210,7 @@ fn metadata(
             .map(|wall| wall.max / 1_000_000_000)
             .max(),
         unknown_clock_ticks: catalog.is_empty().then_some(0),
+        decoded_is_whole: true,
     })
 }
 

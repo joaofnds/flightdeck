@@ -48,7 +48,10 @@ pub struct Session {
     event_query_budget: Arc<persistence::resources::ByteBudget>,
     first: Option<u64>,
     last: Option<u64>,
-    unknown: u64,
+    /// The readings with no known clock, none where the recording's catalog has not counted them.
+    unknown: Option<u64>,
+    /// How the session reaches its windows, none where it listed them from their markers.
+    registered: Option<registered::Registered>,
     selected: Option<Observation>,
     selected_context: Vec<crate::cpu_history_sample::Identity>,
     context_last_second: Option<u64>,
@@ -80,6 +83,17 @@ pub struct Session {
     before_app_history_install: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
     #[cfg(test)]
     pub(crate) after_process_groups_frame: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+}
+
+/// What a session starts from, which `Session::reopen` found.
+struct Listed<'root> {
+    root: &'root Path,
+    windows: Vec<Manifest>,
+    verified: Vec<AtomicBool>,
+    connection: Engine,
+    event_query_budget: Arc<persistence::resources::ByteBudget>,
+    registered: Option<registered::Registered>,
+    operation: Operation,
 }
 
 /// The context a select read: its range, its observations, in no order, its points, in time
@@ -208,7 +222,7 @@ impl Observation {
 /// The windows a session's reads verified. Only `Session::verified_windows` makes one, so a
 /// reopen can never take a listed window for a verified one.
 #[derive(Default)]
-pub(crate) struct Verified(Vec<Manifest>);
+pub(crate) struct Verified(pub(super) Vec<Manifest>);
 
 impl Session {
     /// Opens only existing committed history. Never creates, locks or repairs a recording.
@@ -235,23 +249,57 @@ impl Session {
         private::verify_directory(root)?;
         let recording = collector::recording::read_identity(root)?;
         let earlier_markers = reopen_markers(root, recording, earlier);
+        let event_query_budget = Arc::new(persistence::resources::ByteBudget::new(
+            EVENT_QUERY_BYTES_MAX,
+        ));
+        let registered = registered::Registered::open(root, &event_query_budget, &operation)?;
         let mut windows = Vec::new();
-        discover(root, recording, &mut windows, &operation)?;
+        if registered.is_none() {
+            discover(root, recording, &mut windows, &operation)?;
+        }
         let verified = reopen_verified(root, &windows, &earlier_markers);
         let connection = data::connection();
         operation.attach(&connection)?;
-        let mut session = Self {
+        let mut session = Self::listed(Listed {
+            root,
+            windows,
+            verified,
+            connection,
+            event_query_budget,
+            registered,
+            operation,
+        });
+        if session.registered.is_some() {
+            session.reopen_registered(epoch, earlier)?;
+        } else {
+            session.operation.begin(epoch)?.run(|| session.extent())?;
+        }
+        Ok(session)
+    }
+
+    /// A session of `listed`, with nothing read from its windows yet.
+    fn listed(listed: Listed<'_>) -> Self {
+        let Listed {
+            root,
+            windows,
+            verified,
+            connection,
+            event_query_budget,
+            registered,
+            operation,
+        } = listed;
+
+        Self {
             root: root.to_owned(),
             windows,
             verified,
             connection,
             context_connections: (0..CONTEXT_READERS).map(|_| data::connection()).collect(),
-            event_query_budget: Arc::new(persistence::resources::ByteBudget::new(
-                EVENT_QUERY_BYTES_MAX,
-            )),
+            event_query_budget,
             first: None,
             last: None,
-            unknown: 0,
+            unknown: Some(0),
+            registered,
             wall_bounds: Vec::new(),
             earlier_tail: std::cell::RefCell::new(None),
             last_context: None,
@@ -285,9 +333,28 @@ impl Session {
             before_app_history_install: std::cell::RefCell::new(None),
             #[cfg(test)]
             after_process_groups_frame: std::cell::RefCell::new(None),
-        };
-        session.operation.begin(epoch)?.run(|| session.extent())?;
-        Ok(session)
+        }
+    }
+
+    /// Reads where a registered recording's clock begins and ends, and lists the windows of its
+    /// newest span. A window an earlier session's read verified stays verified.
+    fn reopen_registered(&mut self, epoch: u64, earlier: &Verified) -> Result<()> {
+        self.operation.begin(epoch)?.run(|| {
+            let Some(registered) = &self.registered else {
+                return Err(Error::Bound("registered session"));
+            };
+            let ends = registered.ends(&self.operation)?;
+            self.unknown = registered.unknown_clock_ticks(&self.operation)?;
+            if let Some(ends) = ends {
+                self.first = Some(ends.first);
+                self.last = Some(ends.last);
+                self.load_span(ends.last)?;
+                let verified = registered::verified_flags(&self.windows, &earlier.0);
+                self.verified = verified;
+            }
+
+            Ok(())
+        })
     }
 
     pub fn begin(&mut self, epoch: u64) -> Result<()> {
@@ -337,6 +404,7 @@ impl Session {
         self.context_last_second = None;
         self.app_sample_cache.get_mut().take();
         self.operation.check()?;
+        self.load_span(selection.context_last_second)?;
         let range = ContextRange::charted_ending_at(selection.context_last_second)?;
         let LastContext {
             mut observations,
@@ -468,6 +536,7 @@ impl Session {
     ) -> Result<Option<Value>> {
         self.selected = None;
         self.app_sample_cache.get_mut().take();
+        self.load_span(second)?;
         let end = second
             .checked_add(1)
             .and_then(|value| value.checked_mul(NS))
@@ -846,7 +915,7 @@ impl Session {
                     },
                 });
             } else {
-                self.unknown += 1;
+                self.unknown = self.unknown.map(|unknown| unknown + 1);
             }
         }
 
@@ -856,6 +925,9 @@ impl Session {
     /// Whether the sealed windows on disk are the ones this session listed. A sealed window never
     /// changes, so a walk of the markers' names shows it without reading a marker.
     pub(crate) fn lists_every_sealed_window(&self) -> Result<bool> {
+        if self.registered.is_some() {
+            return self.span_lists_every_window();
+        }
         let base = layout::base(&self.root, Kind::Commits);
         if !base.try_exists()? {
             return Ok(false);
@@ -883,6 +955,17 @@ impl Session {
         }
         Ok(observations)
     }
+}
+
+/// Whether `root` has anywhere saved history could be, which a recording with no window yet has
+/// once it is registered, and an older format only once its first window committed.
+pub(crate) fn saved_history_exists(root: &Path) -> io::Result<bool> {
+    if layout::base(root, Kind::Commits).try_exists()? {
+        return Ok(true);
+    }
+
+    root.join(persistence::canonical::Namespace::Ordinary.name())
+        .try_exists()
 }
 
 /// Threads that read a context's windows. On an M5 Pro the newest sixteen minutes of a
@@ -979,7 +1062,7 @@ impl Reader<'_> {
 
         assert_eq!(self.verified.len(), self.windows.len());
         let manifest = &self.windows[window];
-        let marker = layout::WindowKey::from(&manifest.identity).marker(self.root);
+        let marker = persistence::commitment_path(self.root, manifest);
         let flag = &self.verified[window];
         let committed = if flag.load(Ordering::Acquire) {
             reread_committed(self.root, &marker)?
@@ -1169,7 +1252,7 @@ fn reopen_verified(
     windows
         .iter()
         .map(|manifest| {
-            let marker = layout::WindowKey::from(&manifest.identity).marker(root);
+            let marker = persistence::commitment_path(root, manifest);
             let kept = earlier.get(&marker).copied();
             AtomicBool::new(kept == Some(manifest))
         })
@@ -1185,7 +1268,7 @@ fn reopen_markers<'earlier>(
     let mut markers = BTreeMap::new();
     for manifest in &earlier.0 {
         if manifest.identity.run.recording == recording {
-            let marker = layout::WindowKey::from(&manifest.identity).marker(root);
+            let marker = persistence::commitment_path(root, manifest);
             markers.insert(marker, manifest);
         }
     }
@@ -1302,6 +1385,9 @@ mod committed_apps;
 #[cfg(test)]
 mod context_tests;
 mod earlier;
+pub(crate) mod registered;
+#[cfg(test)]
+mod registered_tests;
 #[cfg(test)]
 mod reopen_tests;
 mod selection;

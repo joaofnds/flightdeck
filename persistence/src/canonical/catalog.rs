@@ -13,6 +13,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "fixtures")]
+pub mod fixture;
+
 /// The readings of one page, the most one pass over the namespace returns.
 pub const PAGE_READINGS_MAX: usize = 128;
 
@@ -20,6 +23,12 @@ pub const PAGE_READINGS_MAX: usize = 128;
 /// is at most 124 nodes deep, so a namespace that needs more than this is not one the writer made.
 const LOOKUP_STEPS_MAX: usize = 1024;
 const _: () = assert!(PAGE_READINGS_MAX < LOOKUP_STEPS_MAX);
+
+/// The windows one clock range may touch. A window holds at least one reading of its range, so this
+/// is more than an hour of a window for every second of it from a run started every minute.
+const RANGE_WINDOWS_MAX: usize = 4096;
+/// The pages one clock range reads, more than a second's readings of every window it may touch.
+const RANGE_PAGES_MAX: usize = 1 << 12;
 
 const NS_PER_HOUR: u64 = 3_600_000_000_000;
 
@@ -170,20 +179,42 @@ impl Catalog {
         Ok(page)
     }
 
-    fn known_cursor(&self, range: SeekRange) -> io::Result<CanonicalCursor<'_, 'static>> {
-        CanonicalCursor::begin_owned(
-            &self.root,
-            self.recording,
-            Namespace::Known,
-            range,
-            &self.budget,
-        )
+    /// The windows holding a reading with a clock from `first_ns` up to but not including `end_ns`,
+    /// each once, in the order of their first reading in the range. It reads one proof for each,
+    /// so what it costs follows the range and never what the recording holds around it.
+    pub fn windows_in(
+        &self,
+        first_ns: u64,
+        end_ns: u64,
+        work: &mut ReadWork,
+    ) -> crate::Result<Vec<Manifest>> {
+        let mut windows = Vec::new();
+        let mut after = None;
+        for _page in 0..RANGE_PAGES_MAX {
+            let page = self.known_page(first_ns, end_ns, after, work)?;
+            for reading in &page.readings {
+                if windows_in_listed(&windows, reading) {
+                    continue;
+                }
+                if windows.len() == RANGE_WINDOWS_MAX {
+                    return Err(crate::Error::Bound("catalog range windows"));
+                }
+                // A reading's window outlives its links, so a reading with no window is damage.
+                let window = self.window_holding(&reading.run, reading.publication, work)?;
+                windows.push(window.ok_or_else(invalid)?);
+            }
+            let Some(next) = page.next else {
+                return Ok(windows);
+            };
+            after = Some(next);
+        }
+
+        Err(crate::Error::Bound("catalog range pages"))
     }
 
-    /// The manifest of the saved window of `run` that holds `publication`, or none where the
-    /// recording saved no minute holding it. It reads that window's proof and no other, and it
-    /// leaves the window's files to whoever reads them.
-    pub fn window_holding(
+    /// The newest saved window of `run` that starts at or before `publication`, none where the run
+    /// saved no such window. It reads one proof, and one more for each gate that owns only a loss.
+    pub fn window_at_or_before(
         &self,
         run: &RunIdentity,
         publication: u64,
@@ -207,33 +238,92 @@ impl Catalog {
         let manifest = window_holding_gate(&mut cursor, run);
         work.add(cursor.work());
 
-        Ok(manifest?.filter(|manifest| {
+        manifest
+    }
+
+    /// How many readings have no known clock, none where one page does not reach their end, so a
+    /// partial count is never taken for the whole.
+    pub fn unknown_count_within_page(&self, work: &mut ReadWork) -> io::Result<Option<u64>> {
+        let range = SeekRange {
+            first: CanonicalKey::from_bytes(Namespace::Unknown, &[0; 48])?,
+            last: CanonicalKey::from_bytes(Namespace::Unknown, &[0xff; 48])?,
+            direction: Direction::Forward,
+        };
+        let mut cursor = CanonicalCursor::begin_owned(
+            &self.root,
+            self.recording,
+            Namespace::Unknown,
+            range,
+            &self.budget,
+        )?;
+        for count in 0..=PAGE_READINGS_MAX {
+            if catalog_found(&mut cursor)?.is_none() {
+                work.add(cursor.work());
+                return Ok(Some(u64::try_from(count).map_err(|_| invalid())?));
+            }
+        }
+        work.add(cursor.work());
+
+        Ok(None)
+    }
+
+    fn known_cursor(&self, range: SeekRange) -> io::Result<CanonicalCursor<'_, 'static>> {
+        CanonicalCursor::begin_owned(
+            &self.root,
+            self.recording,
+            Namespace::Known,
+            range,
+            &self.budget,
+        )
+    }
+
+    /// The manifest of the saved window of `run` that holds `publication`, or none where the
+    /// recording saved no minute holding it. It reads that window's proof and no other, and it
+    /// leaves the window's files to whoever reads them.
+    pub fn window_holding(
+        &self,
+        run: &RunIdentity,
+        publication: u64,
+        work: &mut ReadWork,
+    ) -> io::Result<Option<Manifest>> {
+        let manifest = self.window_at_or_before(run, publication, work)?;
+
+        Ok(manifest.filter(|manifest| {
             (manifest.publication_first..manifest.publication_end).contains(&publication)
         }))
     }
 }
 
-/// The manifest behind the first gate `cursor` finds, none where it finds no gate or a gate that
-/// owns only a loss.
+fn windows_in_listed(windows: &[Manifest], reading: &KnownReading) -> bool {
+    windows.iter().any(|manifest| {
+        manifest.identity.run == reading.run
+            && (manifest.publication_first..manifest.publication_end).contains(&reading.publication)
+    })
+}
+
+/// The manifest behind the first gate `cursor` finds that owns a window, none where it finds no
+/// such gate. A gate that owns only a loss holds no reading, so the window before it is the answer.
 fn window_holding_gate(
     cursor: &mut CanonicalCursor<'_, 'static>,
     run: &RunIdentity,
 ) -> io::Result<Option<Manifest>> {
-    let Some(key) = catalog_found(cursor)? else {
-        return Ok(None);
-    };
-    let mut gate = cursor.open_gate(&key)?;
-    let metadata = CanonicalMetadata::read(&mut gate)?;
-    if metadata.run != *run {
-        return Err(invalid());
+    for _gate in 0..LOOKUP_STEPS_MAX {
+        let Some(key) = catalog_found(cursor)? else {
+            return Ok(None);
+        };
+        let mut gate = cursor.open_gate(&key)?;
+        let metadata = CanonicalMetadata::read(&mut gate)?;
+        if metadata.run != *run {
+            return Err(invalid());
+        }
+        metadata.validate_key(Namespace::Ordinary, &key)?;
+        cursor.check_snapshot()?;
+        if let Body::Ordinary(manifest) = metadata.body {
+            return Ok(Some(manifest));
+        }
     }
-    metadata.validate_key(Namespace::Ordinary, &key)?;
-    cursor.check_snapshot()?;
 
-    match metadata.body {
-        Body::Ordinary(manifest) => Ok(Some(manifest)),
-        Body::LossOnly | Body::Events(_) => Ok(None),
-    }
+    Err(invalid())
 }
 
 /// The next key `cursor` finds, none at the end of its range. Reaching the work limit is not the

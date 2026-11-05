@@ -69,6 +69,11 @@ impl TailRange {
         }
     }
 
+    /// The last second of a context whose tail this could be, which a session's span must hold.
+    fn context_last_second(self) -> u64 {
+        self.join_second().saturating_add(CHARTED_SECONDS)
+    }
+
     /// Whether a minute whose readings lie within `bounds` holds a reading of the tail or of
     /// its join, as `Session::observations` skips a minute by its bounds.
     fn needs(self, bounds: Option<&TimeBounds>) -> bool {
@@ -324,6 +329,9 @@ impl KeptTail {
         range: TailRange,
         respond: impl FnOnce(&[Value]) -> Result<T>,
     ) -> Result<Option<T>> {
+        if !history.span_holds(range.context_last_second())? {
+            return Ok(None);
+        }
         if let Some((assembled, points)) = history.earlier_tail.borrow().as_ref() {
             if *assembled == range {
                 return respond(points).map(Some);

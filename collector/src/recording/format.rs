@@ -11,6 +11,9 @@ const IDENTITY_BYTES: usize = 33;
 const BYTES: usize = HEADER.len() + 2 * REQUIREMENT_BYTES + IDENTITY_BYTES;
 pub const READER_PROTOCOL: u32 = 1;
 pub const WRITER_PROTOCOL: u32 = 1;
+/// The newest reader requirement this version reads, which a registered recording names.
+const READER_PROTOCOL_MAX: u32 = 2;
+const _: () = assert!(READER_PROTOCOL <= READER_PROTOCOL_MAX);
 const _: () = assert!(BYTES <= 128);
 
 struct Format {
@@ -68,7 +71,7 @@ fn read(root: &Path) -> io::Result<Format> {
         length += count;
     }
     let format = parse(&bytes[..length])?;
-    if format.reader > READER_PROTOCOL {
+    if format.reader > READER_PROTOCOL_MAX {
         return Err(io::Error::from(io::ErrorKind::Unsupported));
     }
 
@@ -250,7 +253,7 @@ mod tests {
         let identity = root.0.join("identity");
         for bytes in [
             b"malformed".as_slice(),
-            b"flightdeck-recording-1\n00000002\n00000001\n00000000000000010000000000000002\n",
+            b"flightdeck-recording-1\n00000003\n00000001\n00000000000000010000000000000002\n",
             &[b'x'; BYTES + 1],
         ] {
             private::atomic_write(&root.0, "identity", bytes).unwrap();
@@ -307,7 +310,8 @@ mod tests {
         for (reader, writer, read_ok, write_ok) in [
             (1, 1, true, true),
             (1, 2, true, false),
-            (2, 1, false, false),
+            (2, 2, true, false),
+            (3, 1, false, false),
             (0, 1, false, false),
             (1, 0, false, false),
         ] {

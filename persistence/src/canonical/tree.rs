@@ -22,7 +22,8 @@ pub enum Namespace {
     Fragments,
 }
 impl Namespace {
-    pub(crate) fn name(self) -> &'static str {
+    #[must_use]
+    pub fn name(self) -> &'static str {
         match self {
             Self::Ordinary => "ordinary",
             Self::Known => "observations-known",

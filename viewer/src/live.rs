@@ -543,6 +543,7 @@ impl LiveSession {
 
         if let Some(history) = &mut self.history {
             history.begin(self.operation.epoch())?;
+            history.load_span(context_last_second)?;
             self.earlier
                 .fill(history, TailRange::of_context(context_last_second))?;
         }
@@ -644,9 +645,11 @@ impl LiveSession {
     }
 
     fn follow_restore(&mut self, range: ContextRange) -> Result<()> {
-        let Some(history) = &self.history else {
+        let Some(history) = &mut self.history else {
             return Ok(());
         };
+        history.load_span((range.end_ns - 1) / NANOSECONDS_PER_SECOND)?;
+        let history = &*history;
 
         let history_end = history.catalog()["last_second"]
             .as_u64()
@@ -1139,7 +1142,7 @@ impl LiveSession {
     }
 
     fn refresh_history(&mut self) -> Result<()> {
-        if self.root.join("commits").try_exists()? {
+        if crate::session::saved_history_exists(&self.root)? {
             // The windows the previous `Session` verified on a read need only their markers read
             // again.
             let verified = self
@@ -1209,8 +1212,19 @@ impl LiveSession {
                     run: source.identity,
                     window,
                 };
-                let marker = persistence::layout::WindowKey::from(&identity).marker(&self.root);
-                if marker.try_exists()? {
+                let registered = self
+                    .history
+                    .as_ref()
+                    .map(|history| history.registered_window_saved(&identity))
+                    .transpose()?
+                    .flatten();
+                let saved = match registered {
+                    Some(saved) => saved,
+                    None => persistence::layout::WindowKey::from(&identity)
+                        .marker(&self.root)
+                        .try_exists()?,
+                };
+                if saved {
                     committed = true;
                 }
             }

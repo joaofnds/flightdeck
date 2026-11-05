@@ -11,5 +11,13 @@ persistence = { path = "../persistence" }
 polars = { workspace = true }
 serde_json = "=1.0.154"
 
+[features]
+# Tests at the full size of a long recording, which take minutes of links and so stay out of the
+# checks: `cargo test --locked -p viewer --lib --features long-recording -- registered_tests`.
+long-recording = []
+
+[dev-dependencies]
+persistence = { path = "../persistence", features = ["fixtures"] }
+
 [lints]
 workspace = true

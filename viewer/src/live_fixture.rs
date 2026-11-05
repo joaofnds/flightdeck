@@ -1,7 +1,7 @@
 //! Real registered sources shared by focused live identity adapter tests.
 use collector::machine::Memory;
 use collector::processes::{Process, Task, Unreadable, Usage};
-use collector::recording::{RegisteredRun, Registration, Registry, private};
+use collector::recording::{RegisteredRun, Registration, Registry, bootstrap, private};
 use collector::ring::{
     DictionaryCapacity, Dropped, Found, FoundEvent, IdentityObservation, IdentityPublication,
     ObservationTimes, Place, ProcessCreation, ProcessIdentity, ProgramBytes, ProgramReference,
@@ -34,11 +34,65 @@ pub struct Fixture {
     identity: bool,
     process_capacity: u64,
     owns_root: bool,
+    registered: bool,
 }
 
 impl Fixture {
     pub fn new() -> Self {
         Self::new_mode(true, 2, None)
+    }
+
+    /// A fixture whose run records into a registered recording, whose minutes it saves through the
+    /// persister's own worker.
+    pub fn registered() -> Self {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "flightdeck-live-registered-{}-{serial}",
+            std::process::id()
+        ));
+        private::create_private_dir(&root).unwrap();
+        let directory = private::PrivateDirectory::open(&root).unwrap();
+        let lock = private::FileLock::try_lock_in(&directory, "registration.lock").unwrap();
+        let recording = bootstrap::initialize(&directory, &lock, &mut [0; 4097]).unwrap();
+        drop(lock);
+        let place = Place {
+            lock_path: root.join("identity.lock"),
+            name_prefix: format!("/fdvr{}x{serial}", std::process::id()),
+        };
+        let shape = Shape {
+            event_capacity: SHAPE.event_capacity.max(SHAPE.slot_count + 1),
+            ..SHAPE
+        };
+        let run = collector::recording::new_run_identity(recording).unwrap();
+        let capacity = DictionaryCapacity {
+            entries: 4,
+            arena_bytes: 32_768,
+        };
+        let writer = Writer::create_with_identity(&place, shape, capacity, &run, 0).unwrap();
+        Registry {
+            runs: vec![RegisteredRun {
+                identity: run,
+                ring_name: writer.name().to_owned(),
+                collector_pid: 0,
+            }],
+            evictions: 0,
+        }
+        .write(&root)
+        .unwrap();
+        let mut fixture = Self {
+            root,
+            writer,
+            elapsed: 0,
+            continuous_step_ns: 0,
+            awake_step_ns: 0,
+            usage_override: None,
+            identity: true,
+            process_capacity: 2,
+            owns_root: true,
+            registered: true,
+        };
+        fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
+        fixture
     }
 
     pub fn new_mode(identity: bool, process_capacity: u64, recording: Option<&Self>) -> Self {
@@ -83,6 +137,7 @@ impl Fixture {
             identity,
             process_capacity,
             owns_root: true,
+            registered: false,
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
@@ -176,6 +231,7 @@ impl Fixture {
             identity,
             process_capacity: 2,
             owns_root: false,
+            registered: false,
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
@@ -366,6 +422,11 @@ impl Fixture {
         derive: &dyn persistence::worker::Derive,
     ) {
         assert!(observations.len() <= 8);
+        if self.registered {
+            assert!(observations.is_empty());
+            self.seal_registered(derive);
+            return;
+        }
         let mut reader = RingReader::open_generation(self.writer.name()).unwrap();
         let window = self.seal_read(&mut reader, minute, observations);
         drop(reader);
@@ -412,6 +473,16 @@ impl Fixture {
                 },
             )
             .unwrap();
+    }
+
+    fn seal_registered(&self, derive: &dyn persistence::worker::Derive) {
+        let store = persistence::Store::open(&self.root).unwrap();
+        let run = RegisteredRun {
+            identity: self.writer.identity().unwrap(),
+            ring_name: self.writer.name().to_owned(),
+            collector_pid: 0,
+        };
+        persistence::worker::seal_held_windows(&store, &run, derive).unwrap();
     }
 
     fn seal_read(

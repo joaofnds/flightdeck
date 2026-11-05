@@ -1,4 +1,4 @@
-use super::{Observation, Session, WINDOWS_MAX};
+use super::{NS, Observation, Session, WINDOWS_MAX};
 use collector::recording::identity_text;
 use persistence::{Error, Result};
 use serde_json::{Value, json};
@@ -12,6 +12,10 @@ impl Session {
         let publication = selected["publication"]
             .as_u64()
             .ok_or(Error::Bound("selected publication"))?;
+        let wall_ns = selected["wall_ns"]
+            .as_u64()
+            .ok_or(Error::Bound("selected wall time"))?;
+        self.load_span(wall_ns / NS)?;
         let Some(window) = self.restore_selection_window(selected, publication)? else {
             return Ok(());
         };

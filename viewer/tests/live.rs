@@ -1840,3 +1840,25 @@ mod tests {
         assert_eq!(session.page("events", 0).unwrap(), events);
     }
 }
+
+#[cfg(test)]
+mod registered_checks {
+    use super::identity_fixture::Fixture;
+    use viewer::LiveSession;
+
+    #[test]
+    fn a_live_session_reads_a_saved_minute_of_a_registered_recording() {
+        // Goal: everything a live session answers from a registered recording reaches it through
+        // the interface the desktop app uses (P02.5).
+        // Method: save a minute through the worker, open a live session and select its second.
+        let mut fixture = Fixture::registered();
+        fixture.publish_with_system_rows(1000);
+        fixture.seal();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+
+        let selected = session.select(1000, 0).unwrap();
+
+        assert_eq!(session.catalog()["last_second"], 1000);
+        assert_eq!(selected["selected"]["publication"], 1);
+    }
+}

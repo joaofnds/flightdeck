@@ -46,6 +46,39 @@ struct Writers<'derive> {
     derive: &'derive dyn Derive,
 }
 
+/// Saves every window of a registered run its ring holds past what is saved, whether or not a later
+/// window has begun, and leaves the run open, as the minutes going by would.
+#[cfg(feature = "fixtures")]
+pub fn seal_held_windows(
+    store: &Store,
+    registered: &RegisteredRun,
+    derive: &dyn Derive,
+) -> Result<()> {
+    let writers = Writers {
+        encoder: Encoder,
+        derive,
+    };
+    let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1 << 28));
+    let reader = RingReader::open_generation(&registered.ring_name)?;
+    let newest = reader.publication_newest()?;
+    let frontier = store.source_frontier(
+        &registered.identity,
+        &budget,
+        &mut crate::canonical::ReadWork::default(),
+    )?;
+    let mut state = RunState::default();
+    let mut next = frontier.map_or(reader.publication_first(), |saved| saved.publication_end());
+    for _window in 0..=reader.shape().slot_count {
+        if next > newest {
+            return Ok(());
+        }
+        persist_one(store, &writers, registered, true, &mut state)?;
+        next = state.next_publication;
+    }
+
+    Err(crate::Error::Bound("held windows"))
+}
+
 pub fn run(root: &Path, memory_limit: u64, derive: &dyn Derive) -> Result<Outcome> {
     run_paced(root, memory_limit, derive, &mut thread::sleep, None)
 }

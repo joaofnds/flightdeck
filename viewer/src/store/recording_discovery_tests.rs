@@ -30,6 +30,7 @@ fn an_empty_completed_catalog_keeps_checked_absence_without_inventing_a_clock() 
             first_known_second: None,
             last_known_second: None,
             unknown_clock_ticks: Some(0),
+            decoded_is_whole: true,
         })
     );
 }
@@ -59,6 +60,29 @@ fn a_successful_load_reports_the_actual_catalog_pruning_floor() {
                 * 1_000_000_000,
         )
     );
+}
+
+#[test]
+fn a_registered_recording_loads_its_minutes_through_its_catalog() {
+    // Goal: the store's load reaches a registered recording's minutes with no list of them, and
+    // reports what it read (P02.1).
+    // Method: save two minutes far apart through the worker and load the newest hour.
+    let mut fixture = Fixture::registered();
+    fixture.publish_with_events(10_000, &[]);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_events(100_000, &[]);
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+    let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {}).unwrap();
+
+    assert_eq!(outcome.left_out, None);
+    let checked = outcome.checked_catalog.unwrap();
+    assert_eq!(checked.windows, 1);
+    assert_eq!(checked.first_known_second, Some(10_000));
+    assert_eq!(checked.last_known_second, Some(100_000));
+    assert_eq!(checked.unknown_clock_ticks, Some(0));
 }
 
 #[test]

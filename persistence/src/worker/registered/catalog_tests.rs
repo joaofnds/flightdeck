@@ -206,6 +206,51 @@ fn a_lookup_leaves_every_other_window_unread() {
     assert!(damaged.is_err());
 }
 
+#[test]
+fn a_clock_range_finds_each_window_it_touches_once() {
+    // Goal: a range of the clock reaches every window holding a reading in it, and none other,
+    // however many of a window's readings fall in it (P02.1, P02.2).
+    // Method: save two minutes and ask for ranges over both, over the second alone and past them.
+    let recording = catalog_tests_two_saved_minutes();
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+    let mut work = ReadWork::default();
+
+    let both = catalog.windows_in(0, 60_000_000_004, &mut work).unwrap();
+    let second = catalog.windows_in(3, 60_000_000_004, &mut work).unwrap();
+    let past = catalog
+        .windows_in(60_000_000_004, u64::MAX, &mut work)
+        .unwrap();
+
+    let numbers = |windows: &[crate::Manifest]| -> Vec<u64> {
+        windows
+            .iter()
+            .map(|window| window.identity.window)
+            .collect()
+    };
+    assert_eq!(numbers(&both), [0, 1]);
+    assert_eq!(numbers(&second), [1]);
+    assert!(past.is_empty());
+}
+
+#[test]
+fn a_clock_range_leaves_the_windows_outside_it_unread() {
+    // Goal: damage outside a range stops no reader of the range, and damage inside it is explicit
+    // rather than a window quietly missing (P02.3).
+    // Method: save two minutes, damage the first window's proof, and ask for a range over the
+    // second and one over both.
+    let recording = catalog_tests_two_saved_minutes();
+    std::fs::write(catalog_tests_first_window_proof(&recording), b"damage").unwrap();
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+    let mut work = ReadWork::default();
+
+    let second = catalog.windows_in(3, 60_000_000_004, &mut work).unwrap();
+    let both = catalog.windows_in(0, 60_000_000_004, &mut work);
+
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].identity.window, 1);
+    assert!(both.is_err());
+}
+
 /// The proof of the recording's first window, found by its publication's gate.
 fn catalog_tests_first_window_proof(recording: &Recording) -> PathBuf {
     let name = CanonicalKey::source(Namespace::Ordinary, &recording.run, 1)

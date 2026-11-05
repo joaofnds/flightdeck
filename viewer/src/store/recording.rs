@@ -29,6 +29,8 @@ mod discovery_tests;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
+use persistence::canonical::ReadWork;
+use persistence::canonical::catalog::Catalog;
 use persistence::layout::{self, Kind, WINDOWS_PER_DAY, WindowKey};
 
 use super::apps::{Kept, TickApps};
@@ -38,6 +40,7 @@ use crate::recording::{
     AppMinute, AppParts, AppRow, MachineMinute, Refused, SampleRow, SealedMinute, read_apps,
     read_machine,
 };
+use crate::session::registered::catalog_retry;
 use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 
 /// Accepted sealed observations, their incomplete-read status and their independent predecessors.
@@ -59,6 +62,9 @@ pub(super) struct CheckedCatalog {
     pub first_known_second: Option<u64>,
     pub last_known_second: Option<u64>,
     pub unknown_clock_ticks: Option<u64>,
+    /// Whether decoding every minute `windows` counts reads all the recording holds, which a
+    /// registered recording's catalog needs no decoding to answer.
+    pub decoded_is_whole: bool,
 }
 
 #[derive(Debug, Default)]
@@ -260,7 +266,9 @@ fn load_payload_window_using(
             match catalog::revalidate(root, &checked) {
                 Ok(()) => {
                     let mut checked = checked;
-                    if outcome.decoded_catalog.windows == checked.windows {
+                    if checked.decoded_is_whole
+                        && outcome.decoded_catalog.windows == checked.windows
+                    {
                         checked.first_known_second = outcome.decoded_catalog.first_known_second;
                         checked.last_known_second = outcome.decoded_catalog.last_known_second;
                         checked.unknown_clock_ticks =
@@ -1146,6 +1154,7 @@ fn find_window(
     // Every run is searched, since a load that finds no held minute to continue from replaces
     // the hour, and the hour reaches back into the runs before `since`'s.
     let mut oldest_ns = None;
+    let catalog = find_window_catalog(root)?;
     for run in runs.iter().rev() {
         let finding = FindRun {
             root,
@@ -1153,9 +1162,11 @@ fn find_window(
             run,
             span_ns: (window.seconds + LEAD_IN_SECONDS) * 1_000_000_000,
         };
-        let more = finding
-            .find(&mut oldest_ns, found)
-            .map_err(|error| Failure::Commits(error.kind()))?;
+        let more = match &catalog {
+            Some(catalog) => finding.find_registered(catalog, &mut oldest_ns, found),
+            None => finding.find(&mut oldest_ns, found),
+        }
+        .map_err(|error| Failure::Commits(error.kind()))?;
         if !more {
             break;
         }
@@ -1170,6 +1181,20 @@ fn find_window(
     }
 
     Ok(Continuity::Replace)
+}
+
+/// The catalog of a registered recording, none for an older format, whose windows have markers.
+pub(super) fn find_window_catalog(root: &Path) -> Result<Option<Catalog>, Failure> {
+    let budget = Arc::new(persistence::resources::ByteBudget::new(CATALOG_BYTES_MAX));
+    let opened = catalog_retry(|| Catalog::open(root, &budget).map_err(persistence::Error::from));
+    match opened {
+        Ok(catalog) => Ok(Some(catalog)),
+        Err(persistence::Error::Io(error)) if error.kind() == io::ErrorKind::Unsupported => {
+            Ok(None)
+        }
+        Err(persistence::Error::Io(error)) => Err(Failure::Commits(error.kind())),
+        Err(_) => Err(Failure::Commits(io::ErrorKind::InvalidData)),
+    }
 }
 
 /// The index in `found`, newest first, of the newest minute the store holds whole, which seeds
@@ -1193,6 +1218,52 @@ struct FindRun<'a> {
 }
 
 impl FindRun<'_> {
+    /// Does what `find` does for a registered recording, whose catalog names the minute before a
+    /// minute, so it reads one proof for each minute it finds and no list of them.
+    fn find_registered(
+        &self,
+        catalog: &Catalog,
+        oldest_ns: &mut Option<u64>,
+        found: &mut Vec<Found>,
+    ) -> io::Result<bool> {
+        let mut last = u64::MAX;
+        for _minute in 0..=MINUTES_MAX {
+            let manifest = catalog_retry(|| {
+                catalog
+                    .window_at_or_before(self.run, last, &mut ReadWork::default())
+                    .map_err(persistence::Error::from)
+            })
+            .map_err(find_registered_failure)?;
+            let Some(manifest) = manifest else {
+                return Ok(true);
+            };
+            let oldest = *oldest_ns.get_or_insert_with(|| {
+                manifest
+                    .wall_ns
+                    .map_or(0, |wall| wall.max.saturating_sub(self.span_ns))
+            });
+            if manifest.wall_ns.is_some_and(|wall| wall.max < oldest) {
+                return Ok(false);
+            }
+            if found.len() == MINUTES_MAX {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            found.push(Found {
+                run: *self.run,
+                marker: persistence::commitment_path(self.root, &manifest),
+                wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
+                publication_end: manifest.publication_end,
+                previous_source: None,
+            });
+            let Some(before) = manifest.publication_first.checked_sub(1) else {
+                return Ok(true);
+            };
+            last = before;
+        }
+
+        Err(io::Error::from(io::ErrorKind::InvalidData))
+    }
+
     /// Finds the run's sealed minutes newer than `oldest_ns` into `found`, newest first, where
     /// the first minute found sets `oldest_ns`. Returns false at the old boundary and fails
     /// if another required minute exceeds `found`'s capacity.
@@ -1248,6 +1319,16 @@ impl FindRun<'_> {
         Ok(true)
     }
 }
+
+fn find_registered_failure(error: persistence::Error) -> io::Error {
+    match error {
+        persistence::Error::Io(error) => error,
+        _ => io::Error::from(io::ErrorKind::InvalidData),
+    }
+}
+
+/// The working memory of a load's catalog lookups, each of which reserves its cursor's.
+const CATALOG_BYTES_MAX: usize = 1024 * 1024;
 
 /// The windows a day of a run holds at most.
 const WINDOWS_PER_DAY_COUNT: usize = 1_440;
