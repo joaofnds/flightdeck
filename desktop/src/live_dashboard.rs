@@ -1460,17 +1460,19 @@ impl LiveDashboard {
             return "Reader connected".into();
         }
 
-        if snapshot.catalog["collector_completed"].as_bool() == Some(true) {
+        // The store's View the page draws may hold seconds the worker has not read yet, and the
+        // worker rests meanwhile, so a run it saw end may not be the run the View follows.
+        let view_newest = self.store_view_last_second();
+        let worker_newest = snapshot.catalog["last_second"].as_u64();
+        if snapshot.catalog["collector_completed"].as_bool() == Some(true)
+            && view_newest <= worker_newest
+        {
             return "Collector stopped".into();
         }
         if self.request.second.is_some() {
             return "Paused".into();
         }
-        // The store's View the page draws may hold seconds the worker has not read yet.
-        let newest = self
-            .store_view_last_second()
-            .or_else(|| snapshot.catalog["last_second"].as_u64());
-        let Some(newest) = newest else {
+        let Some(newest) = view_newest.or(worker_newest) else {
             return "No live readings".into();
         };
 

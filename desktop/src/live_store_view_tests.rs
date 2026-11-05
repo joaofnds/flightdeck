@@ -228,6 +228,39 @@ fn the_status_judges_the_views_newest_second() {
 }
 
 #[test]
+fn a_run_that_ended_before_the_view_s_newest_second_leaves_the_status_live() {
+    // Goal: the worker's answer from before a new run started says nothing of that run, since
+    // the worker rests while the page draws from the View. Method: readings that end at 10,000
+    // with their run completed, a View that ends at 10,005, and the clock at 10,006.
+    let mut dashboard = dashboard(&[reading_at(9_999, 0), reading_at(10_000, 0)]);
+    dashboard.snapshot.as_mut().unwrap().catalog["collector_completed"] = json!(true);
+
+    dashboard.take_view(newer_view());
+
+    assert_eq!(
+        dashboard.status_at(UNIX_EPOCH + Duration::from_secs(10_006)),
+        "Live"
+    );
+}
+
+#[test]
+fn a_run_that_ended_at_the_view_s_newest_second_stops_the_status() {
+    // Goal: a collector that really stopped still reads as stopped under a View of its seconds.
+    // Method: readings that end at 10,005 with their run completed, and a View of those seconds.
+    let mut dashboard = dashboard(&newer_seconds());
+    let catalog = &mut dashboard.snapshot.as_mut().unwrap().catalog;
+    catalog["collector_completed"] = json!(true);
+    catalog["last_second"] = json!(10_005);
+
+    dashboard.take_view(newer_view());
+
+    assert_eq!(
+        dashboard.status_at(UNIX_EPOCH + Duration::from_secs(10_006)),
+        "Collector stopped"
+    );
+}
+
+#[test]
 fn the_cpu_chart_names_the_levels_of_the_views_newest_second() {
     // Goal: the View's own seconds name the CPU chart's levels, so the chart takes nothing from
     // the worker's readings. Method: a View whose newest second names performance and
