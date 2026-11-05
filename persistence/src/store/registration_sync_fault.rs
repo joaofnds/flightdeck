@@ -225,11 +225,52 @@ unsafe extern "C" fn observe_stat(fd: i32, stat: *mut c_void) -> i32 {
     unsafe { *__error() = error };
     result
 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct OpenDescriptor {
+    descriptor: i32,
+    kind: u32,
+}
+unsafe extern "C" {
+    fn getpid() -> i32;
+    fn proc_pidinfo(
+        process: i32,
+        flavor: i32,
+        argument: u64,
+        buffer: *mut c_void,
+        size: i32,
+    ) -> i32;
+}
+const PROC_PIDLISTFDS: i32 = 1;
+const OPEN_DESCRIPTORS_MAX: usize = 1024;
+// A census runs at every directory read and stat. Asking for each of the 1024 possible
+// descriptors made one child's 34,786 passes cost 35 million calls, which passed the child's
+// 180 second wait on a Mac running a test per core, while a process holds a few dozen.
+unsafe fn open_descriptors(
+    table: &mut [OpenDescriptor; OPEN_DESCRIPTORS_MAX],
+) -> &[OpenDescriptor] {
+    let bytes = unsafe {
+        proc_pidinfo(
+            getpid(),
+            PROC_PIDLISTFDS,
+            0,
+            table.as_mut_ptr().cast(),
+            i32::try_from(size_of_val(table)).unwrap(),
+        )
+    };
+    assert!(bytes > 0);
+    &table[..usize::try_from(bytes).unwrap() / size_of::<OpenDescriptor>()]
+}
 unsafe fn observe_descriptors(root: *const c_char) {
     let length = unsafe { strlen(root) };
     let mut namespaces = 0_u16;
     let mut raw = 0_u16;
-    for fd in 0..1024 {
+    let mut table = [OpenDescriptor {
+        descriptor: 0,
+        kind: 0,
+    }; OPEN_DESCRIPTORS_MAX];
+    for open in unsafe { open_descriptors(&mut table) } {
+        let fd = open.descriptor;
         let mut path = [0_u8; 1024];
         if unsafe { fcntl(fd, 50, path.as_mut_ptr()) } != 0 {
             continue;
