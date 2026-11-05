@@ -159,6 +159,12 @@ impl<'store> OrdinaryRecovery<'store> {
         }
         work
     }
+    /// Whether the originals have proved themselves and their publication has begun, from which
+    /// point it needs every one of them.
+    #[must_use]
+    pub(crate) fn publishing(&self) -> bool {
+        self.publication.is_some()
+    }
     /// One census continuation, source tick, or bounded comparison chunk per call.
     pub fn step(&mut self) -> io::Result<PublicationStep> {
         let result = self.step_inner();

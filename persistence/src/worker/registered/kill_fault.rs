@@ -1,7 +1,9 @@
 //! Ends its process at one numbered change to a recording, as a kill would: before the change, or
-//! with half of a write done. A full sync changes nothing the next process can see, so it has no
-//! number and returns at once, since a kill loses nothing a sync would have kept and a run's time
-//! is mostly its syncs. Nothing outside the directory the test names has a number either.
+//! with half of a write done. Told to refuse instead, it fails that change and every later one, as
+//! a full disk does, so the worker reports an error and goes on running until it stops. A full sync
+//! changes nothing the next process can see, so it has no number and returns at once, since a kill
+//! loses nothing a sync would have kept and a run's time is mostly its syncs. Nothing outside the
+//! directory the test names has a number either.
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -9,12 +11,16 @@ const O_CREAT_BIT: u32 = 9;
 const F_GETPATH: i32 = 50;
 const F_FULLFSYNC: i32 = 51;
 const SEEK_CUR: i32 = 1;
+const ENOSPC: i32 = 28;
 /// What a test reads as this library having ended the process, which nothing else exits with.
 const KILLED: i32 = 137;
+/// More digits than any change's number has.
+const KILL_NUMBER_DIGITS_MAX: usize = 19;
 
 static CHANGES: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "C" {
+    fn __error() -> *mut i32;
     fn _exit(status: i32) -> !;
     fn fcntl(descriptor: i32, command: i32, ...) -> i32;
     fn getenv(name: *const c_char) -> *const c_char;
@@ -29,12 +35,7 @@ unsafe extern "C" {
     fn mkdirat(directory: i32, name: *const c_char, mode: u16) -> i32;
     fn openat(directory: i32, name: *const c_char, flags: i32, ...) -> i32;
     fn pwrite(file: i32, bytes: *const c_void, count: usize, offset: i64) -> isize;
-    fn renameat(
-        source: i32,
-        name: *const c_char,
-        target: i32,
-        destination: *const c_char,
-    ) -> i32;
+    fn renameat(source: i32, name: *const c_char, target: i32, destination: *const c_char) -> i32;
     fn strlen(text: *const c_char) -> usize;
     fn strncmp(left: *const c_char, right: *const c_char, count: usize) -> i32;
     fn unlinkat(directory: i32, name: *const c_char, flags: i32) -> i32;
@@ -47,15 +48,18 @@ unsafe fn kill_number() -> u64 {
         return 0;
     }
     let mut number = 0;
-    let mut position = text;
-    loop {
-        let digit = unsafe { *position } as u8;
+    for position in 0..KILL_NUMBER_DIGITS_MAX {
+        let digit = unsafe { *text.add(position) } as u8;
         if !digit.is_ascii_digit() {
             return number;
         }
         number = number * 10 + u64::from(digit - b'0');
-        position = unsafe { position.add(1) };
     }
+    number
+}
+
+unsafe fn refusing() -> bool {
+    !unsafe { getenv(c"FLIGHTDECK_KILL_REFUSES".as_ptr()) }.is_null()
 }
 
 unsafe fn inside_recording(descriptor: i32) -> bool {
@@ -73,34 +77,67 @@ unsafe fn inside_recording(descriptor: i32) -> bool {
     same_start && (path[length] == 0 || path[length] == b'/')
 }
 
-/// Numbers one change to `descriptor`, and ends the process if the test named that number.
-unsafe fn before_change(descriptor: i32) {
-    if !unsafe { inside_recording(descriptor) } {
-        return;
-    }
-    let number = CHANGES.fetch_add(1, Ordering::Relaxed) + 1;
-    if number == unsafe { kill_number() } {
-        unsafe { _exit(KILLED) };
-    }
-}
-
-/// Numbers a write, and says whether the test named its half done, which leaves that half for the
-/// caller to write. A write at the file's start has a number for before it as well, the only place
-/// a kill leaves an empty file. Before a later write it leaves what half of that write leaves, only
-/// shorter, and a number there would cost a run of the worker for no state of its own.
-unsafe fn before_write(file: i32, at_start: bool) -> bool {
-    if !unsafe { inside_recording(file) } {
+/// Ends the process if the test named this change, and says whether to refuse it otherwise.
+unsafe fn at_change(number: u64) -> bool {
+    let named = unsafe { kill_number() };
+    if named == 0 || number < named {
         return false;
     }
-    let named = unsafe { kill_number() };
-    if at_start {
-        let before = CHANGES.fetch_add(1, Ordering::Relaxed) + 1;
-        if before == named {
-            unsafe { _exit(KILLED) };
-        }
+    if unsafe { refusing() } {
+        return true;
+    }
+    if number == named {
+        unsafe { _exit(KILLED) };
+    }
+    false
+}
+
+/// Numbers one change to `descriptor`, and says whether to refuse it.
+unsafe fn before_change(descriptor: i32) -> bool {
+    if !unsafe { inside_recording(descriptor) } {
+        return false;
     }
 
-    CHANGES.fetch_add(1, Ordering::Relaxed) + 1 == named
+    unsafe { at_change(CHANGES.fetch_add(1, Ordering::Relaxed) + 1) }
+}
+
+/// Fails a change as a full disk does.
+unsafe fn refused() -> i32 {
+    unsafe { *__error() = ENOSPC };
+
+    -1
+}
+
+/// What becomes of a write.
+#[derive(PartialEq)]
+enum WriteStep {
+    Whole,
+    Half,
+    Refused,
+}
+
+/// Numbers a write. A write at the file's start has a number for before it as well, the only place
+/// a kill leaves an empty file. Before a later write it leaves what half of that write leaves, only
+/// shorter, and a number there would cost a run of the worker for no state of its own.
+unsafe fn before_write(file: i32, at_start: bool) -> WriteStep {
+    if !unsafe { inside_recording(file) } {
+        return WriteStep::Whole;
+    }
+    if at_start && unsafe { at_change(CHANGES.fetch_add(1, Ordering::Relaxed) + 1) } {
+        return WriteStep::Refused;
+    }
+    let number = CHANGES.fetch_add(1, Ordering::Relaxed) + 1;
+    let named = unsafe { kill_number() };
+    if named == 0 || number < named {
+        return WriteStep::Whole;
+    }
+    if unsafe { refusing() } {
+        return WriteStep::Refused;
+    }
+    if number == named {
+        return WriteStep::Half;
+    }
+    WriteStep::Whole
 }
 
 #[repr(C)]
@@ -115,7 +152,11 @@ static INTERPOSE_WRITE: WriteInterpose = WriteInterpose {
     original: write,
 };
 unsafe extern "C" fn killed_write(file: i32, bytes: *const c_void, count: usize) -> isize {
-    if unsafe { before_write(file, lseek(file, 0, SEEK_CUR) == 0) } {
+    let step = unsafe { before_write(file, lseek(file, 0, SEEK_CUR) == 0) };
+    if step == WriteStep::Refused {
+        return unsafe { refused() } as isize;
+    }
+    if step == WriteStep::Half {
         // A write this library cannot complete ends the process just the same.
         unsafe { write(file, bytes, count / 2) };
         unsafe { _exit(KILLED) };
@@ -140,7 +181,11 @@ unsafe extern "C" fn killed_pwrite(
     count: usize,
     offset: i64,
 ) -> isize {
-    if unsafe { before_write(file, offset == 0) } {
+    let step = unsafe { before_write(file, offset == 0) };
+    if step == WriteStep::Refused {
+        return unsafe { refused() } as isize;
+    }
+    if step == WriteStep::Half {
         // A write this library cannot complete ends the process just the same.
         unsafe { pwrite(file, bytes, count / 2, offset) };
         unsafe { _exit(KILLED) };
@@ -165,7 +210,9 @@ unsafe extern "C" fn killed_rename(
     target: i32,
     destination: *const c_char,
 ) -> i32 {
-    unsafe { before_change(target) };
+    if unsafe { before_change(target) } {
+        return unsafe { refused() };
+    }
     unsafe { renameat(source, name, target, destination) }
 }
 
@@ -187,7 +234,9 @@ unsafe extern "C" fn killed_link(
     destination: *const c_char,
     flags: i32,
 ) -> i32 {
-    unsafe { before_change(target) };
+    if unsafe { before_change(target) } {
+        return unsafe { refused() };
+    }
     unsafe { linkat(source, name, target, destination, flags) }
 }
 
@@ -203,7 +252,9 @@ static INTERPOSE_UNLINK: UnlinkInterpose = UnlinkInterpose {
     original: unlinkat,
 };
 unsafe extern "C" fn killed_unlink(directory: i32, name: *const c_char, flags: i32) -> i32 {
-    unsafe { before_change(directory) };
+    if unsafe { before_change(directory) } {
+        return unsafe { refused() };
+    }
     unsafe { unlinkat(directory, name, flags) }
 }
 
@@ -219,7 +270,9 @@ static INTERPOSE_DIRECTORY: DirectoryInterpose = DirectoryInterpose {
     original: mkdirat,
 };
 unsafe extern "C" fn killed_directory(directory: i32, name: *const c_char, mode: u16) -> i32 {
-    unsafe { before_change(directory) };
+    if unsafe { before_change(directory) } {
+        return unsafe { refused() };
+    }
     unsafe { mkdirat(directory, name, mode) }
 }
 
@@ -300,11 +353,12 @@ unsafe extern "C" fn route_open(_directory: i32, _name: *const c_char, _flags: i
 #[unsafe(naked)]
 unsafe extern "C" fn route_open(_directory: i32, _name: *const c_char, _flags: i32) -> i32 {
     core::arch::naked_asm!(
-        "test edx, 0x200",
+        "test edx, {create_mask}",
         "jnz 2f",
         "jmp {original}",
         "2:",
         "jmp {create}",
+        create_mask = const 1 << O_CREAT_BIT,
         original = sym openat,
         create = sym killed_create,
     );
@@ -316,6 +370,8 @@ unsafe extern "C" fn killed_create(
     flags: i32,
     mode: u32,
 ) -> i32 {
-    unsafe { before_change(directory) };
+    if unsafe { before_change(directory) } {
+        return unsafe { refused() };
+    }
     unsafe { openat(directory, name, flags, mode) }
 }

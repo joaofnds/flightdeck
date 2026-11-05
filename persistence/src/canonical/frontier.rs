@@ -62,15 +62,9 @@ impl SourceFrontier {
     ) -> io::Result<Option<Self>> {
         let mut state = [0; 256];
         let mut query = SourceFrontierRead::begin_counted(root, *run, &mut state, budget, work)?;
-        let result = (|| {
-            for _ in 0..3 {
-                let remaining = 4096_u64.saturating_sub(query.work().node_attempts);
-                if query.step_limited(remaining)? == FrontierStep::Complete {
-                    return Ok(query.result()?.cloned());
-                }
-            }
-            Err(retry())
-        })();
+        let result = query
+            .step_to_end()
+            .and_then(|()| Ok(query.result()?.cloned()));
         *work = query.work();
         result
     }
@@ -244,6 +238,16 @@ impl<'root, 'state> SourceFrontierRead<'root, 'state> {
             Ok(FrontierStep::Continue)
         }
     }
+    /// Takes every step a lookup may, one for each namespace, within one lookup's nodes.
+    fn step_to_end(&mut self) -> io::Result<()> {
+        for _namespace in 0..3 {
+            let remaining = 4096_u64.saturating_sub(self.work().node_attempts);
+            if self.step_limited(remaining)? == FrontierStep::Complete {
+                return Ok(());
+            }
+        }
+        Err(retry())
+    }
     pub fn result(&mut self) -> io::Result<Option<&SourceFrontier>> {
         if self.failed {
             return Err(invalid());
@@ -298,13 +302,9 @@ impl<'root> SourceFrontierRead<'root, 'static> {
         budget: &Arc<ByteBudget>,
     ) -> io::Result<Self> {
         let mut query = Self::begin_owned(root, run, budget)?;
-        for _ in 0..3 {
-            let remaining = 4096_u64.saturating_sub(query.work().node_attempts);
-            if query.step_limited(remaining)? == FrontierStep::Complete {
-                return Ok(query);
-            }
-        }
-        Err(retry())
+        query.step_to_end()?;
+
+        Ok(query)
     }
 }
 fn source_value(candidate: &AdmittedCanonical, ordered_window: Option<u64>) -> SourceFrontier {

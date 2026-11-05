@@ -2,7 +2,7 @@ use super::tree::{CanonicalKey, Namespace, invalid};
 use crate::transaction::{CanonicalKind, LossTransfer, Predecessor};
 use collector::ring::{Identity, RunIdentity};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RawBase {
@@ -217,6 +217,20 @@ impl CanonicalMetadata {
     pub(crate) fn read(file: &mut File) -> io::Result<Self> {
         let length = file.metadata()?.len();
         Self::read_from(file, length)
+    }
+    /// Whether the file is shorter than its own header says, which only a write that never
+    /// finished leaves. It leaves the file's offset where `read` starts.
+    pub(crate) fn short(file: &mut File) -> io::Result<bool> {
+        let length = file.metadata()?.len();
+        if length < 512 {
+            return Ok(true);
+        }
+        let mut bytes = [0; 512];
+        file.read_exact(&mut bytes)?;
+        file.rewind()?;
+        let inner_length = small(&bytes, 188)?;
+
+        Ok(length < 512 + u64::from(inner_length))
     }
     pub(crate) fn read_from(file: &mut impl Read, length: u64) -> io::Result<Self> {
         let mut bytes = [0; 512];

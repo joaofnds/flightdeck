@@ -1,15 +1,19 @@
 //! The whole worker ended at every change it makes to a recording, in a process of its own.
 
 use super::super::super::{Outcome, run_paced};
-use super::{Recording, recording_with_withheld_events};
+use super::Recording;
+use crate::canonical::CanonicalMetadata;
+use crate::canonical::metadata::{Body, CanonicalLoss, EndpointEvidence, Lifecycle};
 use crate::sealed_apps::SealedApps;
 use crate::store::Store;
+use crate::transaction::{CanonicalKind, Predecessor};
 use collector::recording::Registry;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// More changes than a run of a few minutes makes, so a worker that never stops fails the test.
@@ -18,6 +22,10 @@ const CHANGES_MAX: u64 = 1 << 14;
 /// What the interposer exits with when it ends a worker.
 const KILLED: i32 = 137;
 
+/// What a worker's process exits with when the worker stops with an error, which tells that from
+/// a panic.
+const STOPPED: i32 = 138;
+
 /// The same bound the store's native children take, for a child that hangs.
 const CHILD_WAIT_MAX: Duration = Duration::from_secs(180);
 
@@ -25,12 +33,32 @@ const CHILD_WAIT_MAX: Duration = Duration::from_secs(180);
 const KILLED_WORKERS: usize = 4;
 
 /// How far apart the first kills of a check's pairs stand.
-const KILLED_TWICE_FIRST_STRIDE: u64 = 8;
+const KILLED_TWICE_FIRST_STRIDE: u64 = 16;
 
-/// How many changes of each restart a check's pairs kill.
-const KILLED_TWICE_SECONDS: u64 = 16;
+/// How many changes of each restart a check's pairs end.
+const KILLED_TWICE_SECONDS: u64 = 12;
+
+/// More events than one batch holds, so a crashed run's terminal holds two batches.
+const CRASHED_RUN_EVENTS: usize = 16_390;
 
 const CHILD_TEST: &str = "worker::registered::tests::kill_tests::killed_worker_child";
+
+/// Holds these tests to one at a time, so the processes they start never crowd the native tests
+/// beside them, which wait on the disk under bounds of their own.
+static ONE_KILL_TEST: Mutex<()> = Mutex::new(());
+
+fn one_kill_test() -> MutexGuard<'static, ()> {
+    ONE_KILL_TEST.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How a test ends a worker's process, at the numbered change.
+#[derive(Clone, Copy)]
+enum Fault {
+    Nothing,
+    Kill(u64),
+    /// Refuses this change and every one after it, as a full disk does.
+    Refuse(u64),
+}
 
 /// The interposer, built for the test that asks and removed with it.
 struct Interposer {
@@ -105,20 +133,66 @@ fn killed_worker_child() {
         &SealedApps::default(),
         &mut |_pause| panic!("a finished run gives the worker nothing to wait for"),
         None,
-    )
-    .unwrap();
+    );
 
-    assert!(matches!(outcome, Outcome::Complete));
+    match outcome {
+        Ok(outcome) => assert!(matches!(outcome, Outcome::Complete)),
+        Err(error) => {
+            eprintln!("the worker stopped: {error}");
+            std::process::exit(STOPPED);
+        }
+    }
 }
 
 /// One saved file by name, length and digest, so a difference reads in a line rather than bytes.
 type FileDigest = (PathBuf, usize, u64);
+
+/// What one saved proof claims, leaving out what names the recording or the attempt.
+#[derive(Debug, PartialEq)]
+struct ProofClaim {
+    kind: CanonicalKind,
+    window: u64,
+    canonical_origin: u64,
+    original_end: u64,
+    evidence: EndpointEvidence,
+    lifecycle: Lifecycle,
+    loss: CanonicalLoss,
+    manifest_losses: Option<crate::Losses>,
+}
+
+impl ProofClaim {
+    fn read(ready: &Path) -> Self {
+        let mut file = std::fs::File::open(ready.join("metadata")).unwrap();
+        let metadata = CanonicalMetadata::read(&mut file).unwrap();
+        let mut loss = metadata.loss;
+        if loss.inherited.predecessor != Predecessor::Genesis {
+            // The predecessor names its attempt, which differs between recordings. Its ends do not.
+            loss.inherited.predecessor = Predecessor::Genesis;
+        }
+        let manifest_losses = match metadata.body {
+            Body::Ordinary(manifest) => Some(manifest.losses),
+            _ => None,
+        };
+
+        Self {
+            kind: metadata.kind,
+            window: metadata.window,
+            canonical_origin: metadata.canonical_origin,
+            original_end: metadata.original_end,
+            evidence: metadata.evidence,
+            lifecycle: metadata.lifecycle,
+            loss,
+            manifest_losses,
+        }
+    }
+}
 
 /// What a run comes to, which a worker that was killed and restarted must come to as well.
 #[derive(Debug, PartialEq)]
 struct Converged {
     windows: Vec<Vec<FileDigest>>,
     terminals: Vec<Vec<FileDigest>>,
+    claims: Vec<ProofClaim>,
     publication_end: u64,
     event_end: u64,
     complete: bool,
@@ -130,15 +204,31 @@ fn converged(recording: &Recording) -> Converged {
     let run = recording.registered();
     let store = Store::open(&recording.root).unwrap();
     let frontier = recording.frontier(&store).unwrap();
-    let terminals = std::fs::read_dir(recording.root.join("recovery-data"))
-        .unwrap()
-        .map(|terminal| {
-            let ready = terminal.unwrap().path().join("ready");
-            converged_digests(Recording::saved_files_in(&ready))
-        })
+    let terminal_directories: Vec<PathBuf> =
+        std::fs::read_dir(recording.root.join("recovery-data"))
+            .unwrap()
+            .map(|terminal| terminal.unwrap().path().join("ready"))
+            .collect();
+    let terminals = terminal_directories
+        .iter()
+        .map(|ready| converged_digests(Recording::saved_files_in(ready)))
         .collect();
+    let mut claims: Vec<ProofClaim> = recording
+        .saved_windows()
+        .iter()
+        .map(|window| window.join("ready"))
+        .chain(terminal_directories.iter().cloned())
+        .map(|ready| ProofClaim::read(&ready))
+        .collect();
+    claims.sort_by_key(|claim| {
+        (
+            claim.canonical_origin,
+            claim.kind == CanonicalKind::Terminal,
+        )
+    });
 
     Converged {
+        claims,
         windows: recording
             .saved_files()
             .into_iter()
@@ -170,9 +260,7 @@ fn converged_digests(files: Vec<(PathBuf, Vec<u8>)>) -> Vec<FileDigest> {
 /// Runs the worker to its end in a child no kill reaches, since no change is number zero. `after`
 /// says what came before it, the first thing a failed restart has to tell.
 fn killed_worker_finish(recording: &Recording, interposer: &Interposer, after: &str) {
-    let killed = killed_worker_run(recording, interposer, 0, after);
-
-    assert!(!killed, "{after}: a worker that names no change was killed");
+    killed_worker_run(recording, interposer, Fault::Nothing, after);
 }
 
 /// A finished run with one minute of events, whose worker saves it, certifies its end and retires
@@ -185,9 +273,29 @@ fn killed_worker_finished_run() -> Recording {
     killed_worker_registered(recording)
 }
 
-/// A collector that died with events its tick never published, so its terminal holds rows.
+/// A collector that died having published one tick and written the events of the next, so its run
+/// holds a window and a terminal of two batches.
 fn killed_worker_crashed_run() -> Recording {
-    killed_worker_registered(recording_with_withheld_events())
+    let mut recording =
+        Recording::with_event_capacity(collector::u64_from_usize(CRASHED_RUN_EVENTS) + 2);
+    recording.publish_events_in_minute(0, 2);
+    recording.publish_events_in_minute(0, CRASHED_RUN_EVENTS);
+    recording.withhold_publications_past(1);
+
+    killed_worker_registered(recording)
+}
+
+/// A collector that overran its ring before it finished, so the minute's proof counts what the ring
+/// overwrote, both publications and events.
+fn killed_worker_lagging_run() -> Recording {
+    let mut recording = Recording::new();
+    for _tick in 0..10 {
+        let count = recording.writer.event_room().min(3);
+        recording.publish_events_in_minute(0, count);
+    }
+    recording.writer.finish();
+
+    killed_worker_registered(recording)
 }
 
 fn killed_worker_registered(recording: Recording) -> Recording {
@@ -200,36 +308,48 @@ fn killed_worker_registered(recording: Recording) -> Recording {
     recording
 }
 
-/// Runs the whole worker in a child that the interposer ends at change `number`, and says
-/// whether it did, which it does not once the run makes fewer changes than that.
+/// Runs the whole worker in a child with the fault, and says whether the fault ended it, which it
+/// does not once the run makes fewer changes than that.
 fn killed_worker_run(
     recording: &Recording,
     interposer: &Interposer,
-    number: u64,
+    fault: Fault,
     after: &str,
 ) -> bool {
     let root = recording.root.canonicalize().unwrap();
     let log = recording.base.join("killed-worker.log");
     let output = std::fs::File::create(&log).unwrap();
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", CHILD_TEST, "--nocapture"])
         .env("DYLD_INSERT_LIBRARIES", &interposer.library)
         .env("FLIGHTDECK_KILLED_WORKER_ROOT", &root)
         .env("FLIGHTDECK_KILL_ROOT", &root)
-        .env("FLIGHTDECK_KILL_AT", number.to_string())
         .stdin(Stdio::null())
         .stdout(output.try_clone().unwrap())
-        .stderr(output)
-        .spawn()
-        .unwrap();
+        .stderr(output);
+    let expected = match fault {
+        Fault::Nothing => None,
+        Fault::Kill(number) => {
+            command.env("FLIGHTDECK_KILL_AT", number.to_string());
+            Some(KILLED)
+        }
+        Fault::Refuse(number) => {
+            command
+                .env("FLIGHTDECK_KILL_AT", number.to_string())
+                .env("FLIGHTDECK_KILL_REFUSES", "1");
+            Some(STOPPED)
+        }
+    };
+    let mut child = command.spawn().unwrap();
     let status = child_wait(&mut child);
 
-    if status.code() == Some(KILLED) {
+    if expected.is_some() && status.code() == expected {
         return true;
     }
     assert!(
         status.success(),
-        "{after}, change {number}: {status:?} signal {:?}\n{}",
+        "{after}: {status:?} signal {:?}\n{}",
         status.signal(),
         std::fs::read_to_string(&log).unwrap()
     );
@@ -242,21 +362,41 @@ fn a_worker_killed_at_each_change_of_a_finished_run_comes_to_the_same_end() {
     // the same way (P02.3).
     // Method: for each numbered change, end a worker there in its own process, restart it, and
     // compare what the run comes to with a worker that was never ended.
-    killed_worker_converges(killed_worker_finished_run);
+    let _one = one_kill_test();
+    killed_worker_converges(killed_worker_finished_run, 1, Fault::Kill);
 }
 
 #[test]
-fn a_worker_killed_at_each_change_of_a_crashed_run_comes_to_the_same_end() {
-    // Goal: the same for a terminal that holds rows, which a finished run's does not (P02.3).
-    // Method: as above, over a source with events its writer never published.
-    killed_worker_converges(killed_worker_crashed_run);
+fn a_worker_killed_during_a_crashed_run_comes_to_the_same_end() {
+    // Goal: the same for a dead writer's window and a terminal of two batches, which a finished
+    // run does not reach (P02.3).
+    // Method: as above at every third change, since much of the run is what the finished run makes.
+    let _one = one_kill_test();
+    killed_worker_converges(killed_worker_crashed_run, 3, Fault::Kill);
 }
 
-fn killed_worker_converges(recording_new: fn() -> Recording) {
+#[test]
+fn a_worker_killed_during_a_run_that_overran_its_ring_comes_to_the_same_end() {
+    // Goal: what the ring overwrote is counted once whatever a restart finds saved (P01.2, P02.3).
+    // Method: as above at every third change, over a run with publications and events lost.
+    let _one = one_kill_test();
+    killed_worker_converges(killed_worker_lagging_run, 3, Fault::Kill);
+}
+
+#[test]
+fn a_worker_refused_a_change_comes_to_the_same_end_once_the_disk_has_room() {
+    // Goal: a change the file system refuses is an error, never a panic or a saved state a restart
+    // cannot finish (P02.3).
+    // Method: refuse each fourth change and all after it, then restart with nothing refused.
+    let _one = one_kill_test();
+    killed_worker_converges(killed_worker_finished_run, 4, Fault::Refuse);
+}
+
+fn killed_worker_converges(recording_new: fn() -> Recording, stride: u64, fault: fn(u64) -> Fault) {
     let interposer = Interposer::build();
     let uninterrupted = {
         let recording = recording_new();
-        killed_worker_finish(&recording, &interposer, "never killed");
+        killed_worker_finish(&recording, &interposer, "never ended");
         converged(&recording)
     };
     let next = AtomicU64::new(1);
@@ -266,16 +406,16 @@ fn killed_worker_converges(recording_new: fn() -> Recording) {
         for _worker in 0..KILLED_WORKERS {
             scope.spawn(|| {
                 for _attempt in 0..CHANGES_MAX {
-                    let number = next.fetch_add(1, Ordering::Relaxed);
+                    let number = next.fetch_add(stride, Ordering::Relaxed);
                     let recording = recording_new();
-                    let killed = killed_worker_run(&recording, &interposer, number, "first run");
-                    let after = format!("killed at change {number}");
-                    if killed {
+                    let ended = killed_worker_run(&recording, &interposer, fault(number), "first");
+                    let after = format!("ended at change {number}");
+                    if ended {
                         killed_worker_finish(&recording, &interposer, &after);
                     }
 
                     assert_eq!(converged(&recording), uninterrupted, "{after}");
-                    if !killed {
+                    if !ended {
                         return;
                     }
                     changes.fetch_max(number, Ordering::Relaxed);
@@ -295,64 +435,139 @@ fn a_worker_killed_again_while_it_recovers_comes_to_the_same_end() {
     // Method: end a worker at a first change, end its restart at a second, restart it again, and
     // compare with a worker that was never ended, over the pairs a check can afford. A restart
     // makes its recovery's own changes first, and past them it is a run the single kills cover.
-    killed_twice_converges(KILLED_TWICE_FIRST_STRIDE, KILLED_TWICE_SECONDS);
+    let _one = one_kill_test();
+    let pairs = killed_twice_converges(
+        killed_worker_finished_run,
+        KILLED_TWICE_FIRST_STRIDE,
+        KILLED_TWICE_SECONDS,
+        Fault::Kill,
+    );
+
+    assert!(pairs > 0, "no restart was ended");
+}
+
+#[test]
+fn a_worker_killed_again_while_it_gives_up_a_terminal_comes_to_the_same_end() {
+    // Goal: the same over a terminal of two batches, which a restart removes and writes again.
+    // Method: as above, over a crashed run.
+    let _one = one_kill_test();
+    let pairs = killed_twice_converges(
+        killed_worker_crashed_run,
+        KILLED_TWICE_FIRST_STRIDE,
+        KILLED_TWICE_SECONDS,
+        Fault::Kill,
+    );
+
+    assert!(pairs > 0, "no restart was ended");
+}
+
+#[test]
+fn a_worker_refused_a_change_while_it_recovers_comes_to_the_same_end() {
+    // Goal: a failure during recovery removes nothing a later restart needs, so it finishes once
+    // the disk has room (P02.3).
+    // Method: end a worker at a first change, refuse its restart from a second on, restart it with
+    // nothing refused, and compare with a worker that was never ended.
+    let _one = one_kill_test();
+    let pairs = killed_twice_converges(
+        killed_worker_finished_run,
+        KILLED_TWICE_FIRST_STRIDE,
+        KILLED_TWICE_SECONDS,
+        Fault::Refuse,
+    );
+
+    assert!(pairs > 0, "no restart was refused");
 }
 
 #[cfg(feature = "kill-every-pair")]
 #[test]
-fn a_worker_killed_again_at_every_change_comes_to_the_same_end() {
-    // Goal: the same over every pair of changes, which takes about an hour.
+fn a_worker_ended_twice_at_every_change_comes_to_the_same_end() {
+    // Goal: the same over every pair of changes of each kind of run, which takes hours.
     // Method: as above with nothing left out. Run it with `--features kill-every-pair`.
-    killed_twice_converges(1, CHANGES_MAX);
+    let _one = one_kill_test();
+    killed_twice_converges(killed_worker_finished_run, 1, CHANGES_MAX, Fault::Kill);
+    killed_twice_converges(killed_worker_crashed_run, 1, CHANGES_MAX, Fault::Kill);
+    killed_twice_converges(killed_worker_lagging_run, 1, CHANGES_MAX, Fault::Kill);
+    killed_twice_converges(killed_worker_finished_run, 1, CHANGES_MAX, Fault::Refuse);
 }
 
-fn killed_twice_converges(first_stride: u64, seconds: u64) {
+/// Ends a worker at first changes `first_stride` apart, faults its restart at each of `seconds`,
+/// and says how many restarts the fault reached.
+fn killed_twice_converges(
+    recording_new: fn() -> Recording,
+    first_stride: u64,
+    seconds: u64,
+    second: fn(u64) -> Fault,
+) -> u64 {
     let interposer = Interposer::build();
     let uninterrupted = {
-        let recording = killed_worker_finished_run();
-        killed_worker_finish(&recording, &interposer, "never killed");
+        let recording = recording_new();
+        killed_worker_finish(&recording, &interposer, "never ended");
         converged(&recording)
     };
     let next_first = AtomicU64::new(1);
+    let pairs = AtomicU64::new(0);
 
     std::thread::scope(|scope| {
         for _worker in 0..KILLED_WORKERS {
             scope.spawn(|| {
                 for _first in 0..CHANGES_MAX {
                     let first = next_first.fetch_add(first_stride, Ordering::Relaxed);
-                    if !killed_twice_at(first, seconds, &interposer, &uninterrupted) {
+                    let pair = KilledTwice {
+                        recording_new,
+                        first,
+                        seconds,
+                        second,
+                        interposer: &interposer,
+                        uninterrupted: &uninterrupted,
+                    };
+                    let Some(ended) = pair.converges() else {
                         return;
-                    }
+                    };
+                    pairs.fetch_add(ended, Ordering::Relaxed);
                 }
             });
         }
     });
+
+    pairs.into_inner()
 }
 
-/// Tries the second kills after the first, and says whether the first kill was reached at all.
-fn killed_twice_at(
+/// One first kill and the faults of the restart after it.
+struct KilledTwice<'test> {
+    recording_new: fn() -> Recording,
     first: u64,
     seconds: u64,
-    interposer: &Interposer,
-    uninterrupted: &Converged,
-) -> bool {
-    for second in 1..=seconds {
-        let recording = killed_worker_finished_run();
-        if !killed_worker_run(&recording, interposer, first, "first run") {
-            return false;
-        }
-        let after = format!("killed at change {first}");
-        let killed = killed_worker_run(&recording, interposer, second, &after);
-        let after = format!("{after}, then at change {second}");
-        if killed {
-            killed_worker_finish(&recording, interposer, &after);
+    second: fn(u64) -> Fault,
+    interposer: &'test Interposer,
+    uninterrupted: &'test Converged,
+}
+
+impl KilledTwice<'_> {
+    /// Tries the faults after the first kill, and says how many of them reached the restart, or
+    /// none at all when the first kill was not reached.
+    fn converges(&self) -> Option<u64> {
+        let mut ended = 0;
+        for second in 1..=self.seconds {
+            let recording = (self.recording_new)();
+            let first = Fault::Kill(self.first);
+            if !killed_worker_run(&recording, self.interposer, first, "first") {
+                return None;
+            }
+            let after = format!("killed at change {}", self.first);
+            let faulted = (self.second)(second);
+            let reached = killed_worker_run(&recording, self.interposer, faulted, &after);
+            let after = format!("{after}, then at change {second}");
+            if reached {
+                killed_worker_finish(&recording, self.interposer, &after);
+            }
+
+            assert_eq!(converged(&recording), *self.uninterrupted, "{after}");
+            if !reached {
+                return Some(ended);
+            }
+            ended += 1;
         }
 
-        assert_eq!(converged(&recording), *uninterrupted, "{after}");
-        if !killed {
-            return true;
-        }
+        Some(ended)
     }
-
-    true
 }

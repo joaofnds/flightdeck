@@ -1,6 +1,6 @@
 //! An interrupted ordinary attempt, finished from what it saved and the source's retained window.
 
-use super::attempt::TABLE_FILES;
+use super::attempt::{TABLE_FILES, validate_terminal_source};
 use super::inventory::{BatchFact, InventoryStep, OriginalFile};
 use super::{RegisteredAttempt, Store, publication_control};
 use crate::canonical::CanonicalMetadata;
@@ -32,6 +32,8 @@ const TABLE_KINDS: [OriginalFile; 12] = [
     OriginalFile::Metadata,
 ];
 
+const _: () = assert!(TABLE_KINDS.len() == TABLE_FILES.len() + 1);
+
 /// What a process left in the foreground slot, by what can finish it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Interrupted {
@@ -42,6 +44,15 @@ pub(crate) enum Interrupted {
 }
 
 impl Store {
+    /// Whether any attempt holds the foreground slot, which reads the slot and nothing it names.
+    pub(crate) fn slot_occupied(&self) -> io::Result<bool> {
+        let mut work = super::PublicationWork::default();
+        let state =
+            publication_control::read_optional_normal(&self.directory, self.recording, &mut work)?;
+
+        Ok(state.is_some())
+    }
+
     /// Names what the foreground slot holds, or nothing when it is idle. Routes the worker does
     /// not start yet refuse here, so nothing they left is taken for an ordinary attempt.
     pub(crate) fn interrupted(&self) -> io::Result<Option<Interrupted>> {
@@ -71,19 +82,14 @@ impl Store {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(staging),
             Err(error) => return Err(error),
         };
-        match CanonicalMetadata::read(&mut file) {
-            Ok(_) => Ok(Some(Interrupted::Publication)),
-            // A process that ended while writing its proof left it short, so it proves nothing.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData
-                ) =>
-            {
-                Ok(staging)
-            }
-            Err(error) => Err(error),
+        // A process that ended while writing its proof left it short, so it proves nothing. A file
+        // of its full length that does not read is damage, which stops the worker.
+        if CanonicalMetadata::short(&mut file)? {
+            return Ok(staging);
         }
+        CanonicalMetadata::read(&mut file)?;
+
+        Ok(Some(Interrupted::Publication))
     }
 }
 
@@ -132,14 +138,20 @@ impl Store {
         Ok(true)
     }
 
-    /// Clears the slot of a terminal attempt that has rows but no proof, with its source held and
-    /// says whether it did. A finished source reads the same again, so the next scan writes them.
-    pub(crate) fn abandon_terminal_attempt(&self, budget: &Arc<ByteBudget>) -> crate::Result<bool> {
+    /// Clears the slot of a terminal attempt that has rows but no proof and says whether it did. A
+    /// finished source reads the same again, so the next scan writes them. `reader` must be the
+    /// source the attempt registered, ended at the end the attempt names, or nothing goes.
+    pub(crate) fn abandon_terminal_attempt(
+        &self,
+        reader: &collector::ring::RingReader,
+        budget: &Arc<ByteBudget>,
+    ) -> crate::Result<bool> {
         let mut attempt = self.resume_attempt()?;
         if !matches!(attempt.input.operation, AttemptOperation::Terminal { .. }) {
             return Ok(false);
         }
 
+        validate_terminal_source(&attempt.input, reader)?;
         let saved = attempt.saved(budget)?;
         attempt.abandon(&saved)?;
         Ok(true)
@@ -156,7 +168,7 @@ impl RegisteredAttempt<'_> {
             if inventory.has_overlaps() || inventory.has_unordered_extents() {
                 return Err(restage_refused().into());
             }
-            let (batches, torn) = restage_saved(inventory.batches())?;
+            let (batches, torn) = saved_batches(inventory.batches())?;
             let tables = TABLE_KINDS
                 .iter()
                 .any(|kind| inventory.file(*kind).is_some());
@@ -167,7 +179,7 @@ impl RegisteredAttempt<'_> {
             });
         }
 
-        Err(io::Error::from(io::ErrorKind::InvalidData).into())
+        Err(crate::Error::Bound("attempt inventory steps"))
     }
 
     /// Grants append back to an interrupted ordinary attempt. A saved row stays as it was, since
@@ -190,7 +202,9 @@ impl RegisteredAttempt<'_> {
     }
 
     /// Removes every table. Called only with the tables' window held in memory, so the ring
-    /// wrapping past that window from here on loses nothing that is removed.
+    /// wrapping past that window from here on loses nothing that is removed. The required tables
+    /// go first, since recovery accepts a minute with no derived tables and a process may end
+    /// part way.
     pub(crate) fn restage_tables(&self) -> io::Result<()> {
         for name in TABLE_FILES {
             restage_remove(self.original_directory(), name)?;
@@ -205,7 +219,8 @@ impl RegisteredAttempt<'_> {
     fn abandon(self, saved: &Saved) -> io::Result<()> {
         let terminal = matches!(self.input.operation, AttemptOperation::Terminal { .. });
         if terminal {
-            for ordinal in 0..saved.batches.len() + usize::from(saved.torn.is_some()) {
+            // The newest first, so a process that ends part way leaves the writer's own order.
+            for ordinal in (0..saved.batches.len() + usize::from(saved.torn.is_some())).rev() {
                 restage_remove(self.original_directory(), &batch_name(ordinal))?;
             }
             // A process that ended while writing its proof left it short.
@@ -246,9 +261,10 @@ impl RegisteredAttempt<'_> {
     }
 }
 
-/// The complete batches before the first that is not, and the torn batch after them. The writer
-/// creates batches in order, so it can leave nothing else, and anything else is not its work.
-fn restage_saved(facts: &[BatchFact]) -> io::Result<(Vec<Batch>, Option<usize>)> {
+/// The complete batches before the first that is not, and the ordinal of the torn batch after them.
+/// The writer creates batches in order and a process that ends leaves a file with no footer, so
+/// anything else is not its work, including a whole file whose rows do not read.
+fn saved_batches(facts: &[BatchFact]) -> io::Result<(Vec<Batch>, Option<usize>)> {
     let mut saved = Vec::new();
     for fact in facts {
         let BatchFact::Complete {
@@ -260,15 +276,16 @@ fn restage_saved(facts: &[BatchFact]) -> io::Result<(Vec<Batch>, Option<usize>)>
         saved.push(Batch { first, end, rows });
     }
     let after = &facts[saved.len()..];
-    let torn = matches!(after.first(), Some(BatchFact::Malformed { .. }));
-    let rest = after.get(usize::from(torn)..).unwrap_or_default();
+    let has_torn = matches!(
+        after.first(),
+        Some(BatchFact::Malformed { framed: false, .. })
+    );
+    let rest = &after[usize::from(has_torn)..];
     if rest.iter().any(|fact| *fact != BatchFact::Missing) {
         return Err(restage_refused());
     }
 
-    let torn = torn.then_some(saved.len());
-
-    Ok((saved, torn))
+    Ok((saved.clone(), has_torn.then_some(saved.len())))
 }
 
 fn restage_remove(directory: &PrivateDirectory, name: &str) -> io::Result<()> {

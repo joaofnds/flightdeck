@@ -490,7 +490,8 @@ pub(super) fn validate_terminal_source(
     }
     let generation = reader.generation();
     // Completion acquire precedes the final header reads, including when a previous
-    // read returned Nothing just before the producer's last publication.
+    // read returned Nothing just before the producer's last publication. A writer the worker
+    // found gone has no publication still to come.
     if !reader.ended() {
         return Err(unresolved("terminal source is not complete"));
     }

@@ -130,7 +130,7 @@ pub(super) fn read_normal(
 }
 /// Whether a whole Idle state may wait beside this one: the end of cleanup, or the end of an
 /// ordinary or terminal attempt given up before any proof, which has chosen no census.
-fn clears_to_idle(state: &NormalState) -> bool {
+pub(super) fn clears_to_idle(state: &NormalState) -> bool {
     match state.phase {
         Phase::Cleanup | Phase::SalvageCommitted => true,
         Phase::Registered => state.census.kind == 0 && !state.input.is_finite(),

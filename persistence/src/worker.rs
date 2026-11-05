@@ -36,7 +36,7 @@ pub trait Derive {
 pub struct Derivation<'seal> {
     /// The window as the persister staged it, which the tables it wrote hold.
     pub window: &'seal Window,
-    /// The directory of the tables the persister wrote for the window.
+    /// The directory the window's tables go in, which the persister's own may reach only after.
     pub pending: &'seal collector::recording::private::PrivateDirectory,
 }
 
@@ -318,6 +318,8 @@ struct RunState {
     memory_limit: u64,
     /// The last run seen unavailable, which a saved minute's unknown extent names.
     unknown_boundary: Option<RunIdentity>,
+    /// Whether another run's interrupted attempt holds the slot this run needs.
+    deferred: bool,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1381,6 +1383,7 @@ mod tests {
                 source: SourceState::Unavailable,
                 loaded: true,
                 memory_limit: WORKING_BYTES_MAX,
+                deferred: true,
                 unknown_boundary: None,
             },
         ];

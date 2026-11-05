@@ -90,10 +90,12 @@ fmt:
     rustfmt --edition 2024 --check collector/src/recording/private/sync_fault.rs
     rustfmt --edition 2024 --check collector/src/recording/bootstrap/classification_interpose.rs
     rustfmt --edition 2024 --check persistence/src/store/registration_sync_fault.rs
+    rustfmt --edition 2024 --check persistence/src/worker/registered/kill_fault.rs
 
 # Lint the root workspace.
 clippy:
     cargo clippy --locked --workspace --all-targets -- --deny warnings
+    cargo clippy --locked -p persistence --all-targets --features kill-every-pair -- --deny warnings
 
 # Test the root workspace.
 test:

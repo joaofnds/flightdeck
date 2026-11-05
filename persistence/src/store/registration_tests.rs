@@ -1380,3 +1380,31 @@ fn source_timing_mismatch_and_closed_slot_bytes_refuse_before_artifacts() {
 
 #[path = "loss_proof_tests.rs"]
 mod loss_proof_tests;
+
+#[test]
+fn only_an_attempt_that_chose_no_census_may_clear_to_idle_from_registered() {
+    // Goal: an Idle scratch stands beside a registered state only where giving the attempt up is
+    // possible, since any other reading of it would hide authority the slot still holds.
+    // Method: ask of a registered ordinary state, of one with a census, of a finite one, and of
+    // later phases that do not clear.
+    let fixture = Fixture::new(false);
+    let ordinary =
+        crate::transaction::normal::NormalState::registered(Identity([1, 2]), fixture.input(false));
+    let mut with_census = ordinary.clone();
+    with_census.census.kind = 1;
+    let mut finite_input = fixture.input(false);
+    finite_input.operation = AttemptOperation::Finite {
+        event_end: 1,
+        order_floor: 0,
+        source_first: 1,
+    };
+    let finite =
+        crate::transaction::normal::NormalState::registered(Identity([1, 2]), finite_input);
+    let mut publishing = ordinary.clone();
+    publishing.phase = bootstrap::codec::Phase::Publishing;
+
+    assert!(publication_control::clears_to_idle(&ordinary));
+    assert!(!publication_control::clears_to_idle(&with_census));
+    assert!(!publication_control::clears_to_idle(&finite));
+    assert!(!publication_control::clears_to_idle(&publishing));
+}

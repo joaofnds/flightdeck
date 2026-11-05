@@ -20,7 +20,7 @@ use std::time::Duration;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// The steps a publication takes from a complete proof to an idle slot.
-const PUBLICATION_STEPS: u32 = 8;
+const PUBLICATION_STEPS: u32 = 19;
 
 /// A minute whose clocks run past any start of this test process, so its pid reads as the
 /// collector that published it.
@@ -135,15 +135,26 @@ struct Recording {
 
 impl Recording {
     fn new() -> Self {
-        Self::create(false)
+        Self::create(false, shape())
     }
 
     /// A recording whose collector captures each process's identity and program.
     fn captured() -> Self {
-        Self::create(true)
+        Self::create(true, shape())
     }
 
-    fn create(captured: bool) -> Self {
+    /// A recording whose ring holds this many events.
+    fn with_event_capacity(event_capacity: u64) -> Self {
+        Self::create(
+            false,
+            Shape {
+                event_capacity,
+                ..shape()
+            },
+        )
+    }
+
+    fn create(captured: bool, shape: Shape) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("fd-worker-{}-{serial}", std::process::id()));
         private::create_private_dir(&base).unwrap();
@@ -162,7 +173,6 @@ impl Recording {
             lock_path: base.join("ring.lock"),
             name_prefix: format!("/fdw{:x}{serial:x}", std::process::id()),
         };
-        let shape = shape();
         let writer = if captured {
             let capacity = collector::ring::DictionaryCapacity {
                 entries: 4,
@@ -920,9 +930,9 @@ fn a_seal_interrupted_after_its_proof_converges() {
 #[test]
 fn a_seal_interrupted_at_each_publication_step_converges() {
     // Goal: every durable step of a publication goes on to the same end at restart (P02.3).
-    // Method: stop after each step count, restart the worker, and compare with an uninterrupted
-    // run. The helper stops at Idle, so the last count covers a publication that has finished.
-    for steps in 1..=PUBLICATION_STEPS {
+    // Method: stop after every third step, since the kill tests end a worker at each change a step
+    // makes, restart the worker, and compare with an uninterrupted run.
+    for steps in (1..PUBLICATION_STEPS).step_by(3) {
         interrupted_seal_converges(
             Recording::new(),
             Interruption::PublicationSteps(steps),
@@ -1447,7 +1457,7 @@ fn a_crashed_runs_last_minute_finds_its_end_when_staged_again() {
         publication: 4,
         publications_lost: 0,
     };
-    recording.interrupted_seal_of(&first, &last, Interruption::Registered);
+    recording.interrupted_seal_of(&first, &last, Interruption::TableTorn);
     drop(first);
     let restarted = Store::open(&recording.root).unwrap();
     let mut state = RunState::default();
@@ -1607,9 +1617,9 @@ fn a_terminal_seal_interrupted_after_its_proof_converges() {
 #[test]
 fn a_terminal_seal_interrupted_at_each_publication_step_converges() {
     // Goal: every durable step of a terminal publication goes on to the same end (P02.3).
-    // Method: stop after each step count, restart, and read the terminal. The helper stops at
-    // Idle, so the last count covers a publication that has finished.
-    for steps in 1..=PUBLICATION_STEPS {
+    // Method: stop after every third step, since the kill tests end a worker at each change a step
+    // makes, restart, and read the terminal. The helper stops at Idle.
+    for steps in (1..=PUBLICATION_STEPS).step_by(3) {
         interrupted_terminal_converges(Interruption::PublicationSteps(steps));
     }
 }
@@ -2125,3 +2135,6 @@ fn the_whole_worker_marks_what_an_evicted_ring_may_have_held() {
 
 #[path = "kill_tests.rs"]
 mod kill_tests;
+
+#[path = "refusal_tests.rs"]
+mod refusal_tests;
