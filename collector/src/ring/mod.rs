@@ -174,8 +174,10 @@ pub enum FoundEvent {
 
 /// The writer of a ring, which holds the lock file for as long as it lives.
 pub struct Writer {
-    _lock: WriterLock,
+    /// Declared before the ring's lock so it drops first, the reverse of how a start takes them,
+    /// since a start that takes the ring's lock while this is held goes on unregistered.
     recording_ownership: Option<crate::recording::private::FileLock>,
+    _lock: WriterLock,
     mapping: Mapping,
     layout: Layout,
     /// The newest publication written, or the previous ring's newest before the first.
