@@ -174,7 +174,7 @@ pub enum FoundEvent {
 
 /// The writer of a ring, which holds the lock file for as long as it lives.
 pub struct Writer {
-    _lock: File,
+    _lock: WriterLock,
     recording_ownership: Option<crate::recording::private::FileLock>,
     mapping: Mapping,
     layout: Layout,
@@ -192,17 +192,30 @@ pub struct Writer {
     reference_owner: u64,
 }
 
+/// The ring's lock file, unlocked before it closes. `flock` holds a lock until every copy of its
+/// descriptor closes, and a process starting on another thread holds a copy until its exec, so
+/// closing alone can leave the ring busy after its writer has gone.
+struct WriterLock(File);
+
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            crate::diagnostics::error(format_args!("ring lock: release refused: {error}"));
+        }
+    }
+}
+
 /// The exclusive place lock acquired before recording metadata may be changed.
 pub(crate) struct LockedPlace<'place> {
     place: &'place Place,
-    lock: File,
+    lock: WriterLock,
 }
 
 impl<'place> LockedPlace<'place> {
     pub(crate) fn acquire(place: &'place Place) -> io::Result<Self> {
         Ok(Self {
             place,
-            lock: create_lock(&place.lock_path)?,
+            lock: WriterLock(create_lock(&place.lock_path)?),
         })
     }
 
@@ -643,7 +656,7 @@ impl Writer {
             .as_nanos();
         let run_start_ns = u64::try_from(run_start_ns).map_err(io::Error::other)?;
 
-        let previous = create_previous(&place.name_prefix, &lock)?;
+        let previous = create_previous(&place.name_prefix, &lock.0)?;
 
         let names = RingNames {
             prefix: &place.name_prefix,
@@ -653,7 +666,7 @@ impl Writer {
         // nothing can name, so the lock file names the token first. Generation 0 is no ring,
         // and a reader takes it as a ring that is gone.
         if previous.generation == 0 {
-            create_name(&lock, &ring_name(&names, 0)?)?;
+            create_name(&lock.0, &ring_name(&names, 0)?)?;
         }
 
         let created = create_object(&names, previous.generation, &layout)?;
@@ -667,7 +680,7 @@ impl Writer {
         };
         let mapping = create_layout_mapping(&created, &layout, &header, &origin)?;
 
-        create_name(&lock, &created.name).inspect_err(|_| create_unlink(&created.name))?;
+        create_name(&lock.0, &created.name).inspect_err(|_| create_unlink(&created.name))?;
         // Only once the lock file names the new ring, so a reader that reads the lock file from
         // now on never finds the ring it names gone. One that read it just before finds the
         // empty ring gone and looks again.

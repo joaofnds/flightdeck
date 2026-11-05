@@ -1,5 +1,6 @@
 //! Native lock inheritance across the short interval before a child executes.
 
+use super::super::WriterLock;
 use super::{LOCK_MODE, create_lock};
 use std::ffi::c_int;
 use std::fs::{File, OpenOptions, TryLockError};
@@ -25,7 +26,7 @@ const WAIT_ATTEMPTS_MAX: usize = 200;
 /// the workspace's other tests at a load average of 50.
 const ISOLATED_WAIT_ATTEMPTS_MAX: usize = 3000;
 const ISOLATED_MARKER: &str = "FLIGHTDECK_NATIVE_LOCK_PROBE_ISOLATED";
-const COMPLETED_SENTINEL: &str = "flightdeck-native-lock-proof completed_cases=6";
+const COMPLETED_SENTINEL: &str = "flightdeck-native-lock-proof completed_cases=9";
 const TEST_NAME: &str = concat!(
     "ring::object::lock_tests::",
     "a_paused_preexec_child_can_hold_a_dropped_writers_cloexec_lock"
@@ -213,8 +214,15 @@ fn run_native_probe() {
             drop(create_lock(&path).unwrap());
             completed += 1;
         }
+        // A writer's lock, unlike the plain file above, is free once dropped despite the copy.
+        let lock = WriterLock(create_lock(&path).unwrap());
+        let child = PausedChild::start(&lock.0, false).unwrap();
+        drop(lock);
+        open_probe(&path).try_lock().unwrap();
+        assert_eq!(0, child.finish().unwrap());
+        completed += 1;
     }
     std::fs::remove_file(path).unwrap();
-    assert_eq!(6, completed);
+    assert_eq!(9, completed);
     println!("\n{COMPLETED_SENTINEL}");
 }
