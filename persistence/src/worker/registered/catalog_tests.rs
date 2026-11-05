@@ -1,5 +1,7 @@
 use super::*;
-use crate::canonical::catalog::{Catalog, KnownReading, PAGE_READINGS_MAX};
+use crate::canonical::catalog::{
+    Catalog, EventObject, EventObjectKind, KnownReading, PAGE_READINGS_MAX,
+};
 use crate::canonical::{CanonicalKey, Namespace, ReadWork};
 
 /// Two minutes saved and a third still open: readings at wall 1 and 2 in the first window and at
@@ -393,4 +395,143 @@ fn catalog_tests_two_saved_minutes_and_one_publishing() -> Recording {
     };
     recording.interrupted_seal_of(&store, &second, Interruption::PublicationSteps(0));
     recording
+}
+
+/// Every saved object of events, reading `objects_max` at a time.
+fn catalog_tests_event_objects(catalog: &Catalog, objects_max: usize) -> Vec<EventObject> {
+    let mut objects = Vec::new();
+    let mut after = None;
+    for _page in 0..16 {
+        let page = catalog
+            .event_objects_page(after.as_ref(), objects_max, &mut ReadWork::default())
+            .unwrap();
+        objects.extend(page.objects);
+        if page.next.is_none() {
+            return objects;
+        }
+        after = page.next;
+    }
+    panic!("a page of event objects that never ends");
+}
+
+/// A finished run that saved only events its writer never published.
+fn catalog_tests_terminal_only(recording: &mut Recording) {
+    recording.publish_events_in_minute(0, 2);
+    recording.withhold_publications_past(0);
+    let store = Store::open(&recording.root).unwrap();
+    assert!(matches!(
+        recording.persist(&store, &mut RunState::default()),
+        Progress::Complete
+    ));
+}
+
+#[test]
+fn a_recording_with_no_minute_lists_the_events_of_its_terminal() {
+    // Goal: events a run saved apart from any minute are found with no window to lead to them, and
+    // what they cover comes with them (P02.1).
+    // Method: save only a terminal, and read the event objects and the known readings.
+    let mut recording = Recording::new();
+    catalog_tests_terminal_only(&mut recording);
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+
+    let objects = catalog_tests_event_objects(&catalog, 8);
+    let newest = catalog.newest_known(&mut ReadWork::default()).unwrap();
+
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].kind, EventObjectKind::Terminal);
+    assert_eq!(objects[0].recovery.run, recording.run);
+    assert_eq!(objects[0].recovery.rows, 2);
+    assert_eq!(newest, None);
+}
+
+#[test]
+fn a_run_the_registry_forgot_keeps_its_event_objects() {
+    // Goal: an evicted run's saved events are reached through the recording and never through the
+    // registry that named its source (P02.3).
+    // Method: save only a terminal, empty the registry as an eviction does, and list the objects.
+    let mut recording = Recording::new();
+    catalog_tests_terminal_only(&mut recording);
+    Registry {
+        runs: Vec::new(),
+        evictions: 1,
+    }
+    .write(&recording.root)
+    .unwrap();
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+
+    let objects = catalog_tests_event_objects(&catalog, 8);
+
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].recovery.run, recording.run);
+}
+
+#[test]
+fn event_objects_continue_page_by_page_with_none_lost_or_repeated() {
+    // Goal: a page is a bounded part of the objects, and its continuation reaches the rest (P02.2).
+    // Method: save a terminal for each of two runs, and read them one to a page and then together.
+    let mut recording = Recording::new();
+    catalog_tests_terminal_only(&mut recording);
+    let mut other = recording.another_run();
+    other.publish_in_minute(0);
+    other.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    assert!(matches!(
+        other.persist(&store, &mut state),
+        Progress::Sealed
+    ));
+    assert!(matches!(
+        other.persist(&store, &mut state),
+        Progress::Complete
+    ));
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+
+    let paged = catalog_tests_event_objects(&catalog, 1);
+    let whole = catalog_tests_event_objects(&catalog, 8);
+
+    assert_eq!(paged.len(), 2);
+    assert_ne!(paged[0].recovery.run, paged[1].recovery.run);
+    assert_eq!(paged, whole);
+}
+
+#[test]
+fn a_damaged_event_object_is_explicit_rather_than_a_shorter_list() {
+    // Goal: a partial inventory is never presented as the whole of it (P02.3).
+    // Method: save a terminal, damage its proof, and read the objects.
+    let mut recording = Recording::new();
+    catalog_tests_terminal_only(&mut recording);
+    let mut objects = std::fs::read_dir(recording.root.join("recovery-data")).unwrap();
+    let object = objects.next().unwrap().unwrap().path();
+    std::fs::write(object.join("ready/metadata"), b"damage").unwrap();
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+
+    let page = catalog.event_objects_page(None, 8, &mut ReadWork::default());
+
+    assert!(page.is_err());
+}
+
+#[test]
+fn a_proof_under_another_objects_name_is_refused() {
+    // Goal: a gate moved onto another key never lists its proof as that key's object (P02.3).
+    // Method: save a terminal, rename its gate so the name holds another run, and read the objects.
+    let mut recording = Recording::new();
+    catalog_tests_terminal_only(&mut recording);
+    let mut leaves = std::fs::read_dir(recording.root.join("terminal")).unwrap();
+    let leaf = leaves.next().unwrap().unwrap().path();
+    let mut gates = std::fs::read_dir(&leaf).unwrap();
+    let gate = gates.next().unwrap().unwrap().file_name();
+    let gate = gate.to_str().unwrap();
+    let digit_last = gate.len() - ".seal".len() - 1;
+    let digit_other = if gate.as_bytes()[digit_last] == b'0' {
+        "1"
+    } else {
+        "0"
+    };
+    let moved = format!("{}{digit_other}.seal", &gate[..digit_last]);
+    std::fs::rename(leaf.join(gate), leaf.join(moved)).unwrap();
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+
+    let page = catalog.event_objects_page(None, 8, &mut ReadWork::default());
+
+    assert!(page.is_err());
 }

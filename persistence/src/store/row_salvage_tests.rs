@@ -14,7 +14,31 @@ fn captured_registered_survivors_require_a_durable_row_bearing_disposition() {
     // Method: use the shared real producer/encoder fixture with captured identity enabled.
     registered_survivors(true);
 }
-fn registered_survivors(captured: bool) {
+#[test]
+fn a_fragment_of_saved_rows_is_listed_as_an_event_object() {
+    // Goal: rows saved apart from a minute are found like a terminal's, and typed so that a
+    // fragment is never taken for a minute's completion (P02.1).
+    // Method: publish a fragment through the interrupted Store path and list the event objects.
+    let fixture = registered_survivors(false);
+    let budget = registration_budget();
+    let catalog = crate::canonical::catalog::Catalog::open(&fixture.root, &budget).unwrap();
+
+    let terminals = catalog
+        .event_objects_page(None, 8, &mut ReadWork::default())
+        .unwrap();
+    let page = catalog
+        .event_objects_page(terminals.next.as_ref(), 8, &mut ReadWork::default())
+        .unwrap();
+
+    assert_eq!(terminals.objects.len(), 0);
+    assert_eq!(page.objects.len(), 1);
+    assert_eq!(
+        page.objects[0].kind,
+        crate::canonical::catalog::EventObjectKind::Fragment
+    );
+    assert_eq!(page.objects[0].recovery.rows, 2);
+}
+fn registered_survivors(captured: bool) -> Fixture {
     let mut fixture = proof_fixture(captured, 1);
     let store = Store::open(&fixture.root).unwrap();
     let budget = registration_budget();
@@ -64,6 +88,7 @@ fn registered_survivors(captured: bool) {
     assert!(idle);
     assert_eq!(ledger.work().cleanup_removals, 4);
     registered_survivors_oracle(&fixture, &budget, &rows, captured);
+    fixture
 }
 fn registered_survivors_oracle(
     fixture: &Fixture,

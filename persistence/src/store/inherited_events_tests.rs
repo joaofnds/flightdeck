@@ -1206,6 +1206,7 @@ fn finite_metadata(
 }
 mod finite_events_all_loss_after_registered_overwrite {
     use super::*;
+    use crate::{canonical::ReadWork, resources::ByteBudget};
 
     #[test]
     fn numeric() {
@@ -1223,28 +1224,37 @@ mod finite_events_all_loss_after_registered_overwrite {
         run(true);
     }
 
+    #[test]
+    fn lists_an_event_object_that_says_what_it_lost() {
+        // Goal: an object that kept no row still names the events it covers and what they lost,
+        // so a list of event objects counts them (P02.1).
+        // Method: settle the refinement, then read the fragments after the empty terminals.
+        let (mut fixture, _) = inherited_fixture(false);
+        let budget = registration_budget();
+        let store = Store::open(&fixture.root).unwrap();
+        run_settled(&mut fixture, &store, &budget, false);
+        let catalog = crate::canonical::catalog::Catalog::open(&fixture.root, &budget).unwrap();
+        let terminals = catalog
+            .event_objects_page(None, 8, &mut ReadWork::default())
+            .unwrap();
+
+        let fragments = catalog
+            .event_objects_page(terminals.next.as_ref(), 8, &mut ReadWork::default())
+            .unwrap();
+
+        let recovery = fragments.objects[0].recovery;
+        assert_eq!(fragments.objects.len(), 1);
+        assert_eq!(recovery.rows, 0);
+        assert_eq!(recovery.events_first, 1);
+        assert_eq!(recovery.events_end, 5);
+        assert_eq!(recovery.losses.events, 4);
+    }
+
     fn run(captured: bool) {
         let (mut fixture, _) = inherited_fixture(captured);
         let budget = registration_budget();
-        let ledger = PublicationLedger::new(&budget).unwrap();
         let store = Store::open(&fixture.root).unwrap();
-        let mut finite = store
-            .begin_finite_events(fixture.reader(), &budget, &ledger)
-            .unwrap();
-        let transaction = finite_state(&fixture).transaction;
-        for number in 5..=6 {
-            if captured {
-                publish_captured_pair_at(&mut fixture, number, number);
-            } else {
-                publish_numeric_pair_at(&mut fixture, number, number);
-            }
-        }
-        let mut reader = fixture.reader();
-        reader.seek_event(3).unwrap();
-        assert!(matches!(reader.read_event().unwrap(),
-                collector::ring::FoundEvent::Missed { first:3, end } if end >= 5));
-        finish_finite(&mut finite);
-        drop(finite);
+        let transaction = run_settled(&mut fixture, &store, &budget, captured);
         let metadata = finite_metadata(&fixture, transaction, "loss");
         assert_eq!(
             metadata.kind,
@@ -1265,6 +1275,35 @@ mod finite_events_all_loss_after_registered_overwrite {
         assert_eq!(frontier.publication_end(), 1);
         assert_eq!(frontier.prior_window(), None);
         assert!(!frontier.complete());
+    }
+
+    /// Overwrites what the finite events admitted while they settle, and returns their object.
+    fn run_settled(
+        fixture: &mut Fixture,
+        store: &Store,
+        budget: &Arc<ByteBudget>,
+        captured: bool,
+    ) -> Identity {
+        let ledger = PublicationLedger::new(budget).unwrap();
+        let mut finite = store
+            .begin_finite_events(fixture.reader(), budget, &ledger)
+            .unwrap();
+        let transaction = finite_state(fixture).transaction;
+        for number in 5..=6 {
+            if captured {
+                publish_captured_pair_at(fixture, number, number);
+            } else {
+                publish_numeric_pair_at(fixture, number, number);
+            }
+        }
+        let mut reader = fixture.reader();
+        reader.seek_event(3).unwrap();
+        assert!(matches!(reader.read_event().unwrap(),
+                collector::ring::FoundEvent::Missed { first:3, end } if end >= 5));
+        finish_finite(&mut finite);
+        drop(finite);
+
+        transaction
     }
 }
 

@@ -84,6 +84,40 @@ fn runs_sharing_a_second_both_stay_selectable() {
     );
 }
 
+#[test]
+fn a_reading_with_no_clock_is_counted_and_its_window_still_reads() {
+    // Goal: a window with partly missing clocks is found through the readings that have one, and
+    // the rest are counted rather than lost (P02.5).
+    // Method: save a minute of a reading with clocks and one without, and select the first.
+    let mut fixture = Fixture::registered();
+    fixture.publish_with_system_rows(SECOND_FIRST);
+    fixture.publish_without_clock();
+    fixture.seal();
+    let mut session = Session::open(&fixture.root).unwrap();
+
+    let selected = session.select(SECOND_FIRST, 0).unwrap();
+
+    assert_eq!(selected["selected"]["publication"], 1);
+    assert_eq!(session.catalog()["unknown_clock_ticks"], 1);
+}
+
+#[test]
+fn readings_with_no_clock_at_all_are_counted_with_no_second_to_show() {
+    // Goal: readings no clock can place still count, and a recording of nothing else has no ends to
+    // offer rather than wrong ones (P02.5).
+    // Method: save a minute of readings without clocks and open a session.
+    let mut fixture = Fixture::registered();
+    fixture.publish_without_clock();
+    fixture.publish_without_clock();
+    fixture.seal();
+
+    let session = Session::open(&fixture.root).unwrap();
+
+    let catalog = session.catalog();
+    assert_eq!(catalog["first_second"], serde_json::Value::Null);
+    assert_eq!(catalog["unknown_clock_ticks"], 2);
+}
+
 /// Three minutes saved, the first a long way before the others on the clock and out of reach of
 /// their span, though the run's ticks follow on.
 const SECOND_FAR: u64 = SECOND_FIRST + 100_000;

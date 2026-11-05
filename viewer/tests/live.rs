@@ -1861,4 +1861,21 @@ mod registered_checks {
         assert_eq!(session.catalog()["last_second"], 1000);
         assert_eq!(selected["selected"]["publication"], 1);
     }
+
+    #[test]
+    fn a_live_session_counts_a_reading_with_no_clock_beside_the_one_it_selects() {
+        // Goal: a reading no clock can place reaches the desktop app as a count, and costs it
+        // nothing of the reading beside it (P02.5).
+        // Method: save a minute of a reading with clocks and one without, and select the first.
+        let mut fixture = Fixture::registered();
+        fixture.publish_with_system_rows(1000);
+        fixture.publish_without_clock();
+        fixture.seal();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+
+        let selected = session.select(1000, 0).unwrap();
+
+        assert_eq!(session.catalog()["unknown_clock_ticks"], 1);
+        assert_eq!(selected["selected"]["publication"], 1);
+    }
 }

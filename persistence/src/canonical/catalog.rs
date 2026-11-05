@@ -5,6 +5,7 @@ use super::tree::{
     CanonicalCursor, CanonicalKey, Direction, Namespace, ReadStep, ReadWork, SeekRange, invalid,
 };
 use crate::Manifest;
+use crate::event_recovery::Recovery;
 use crate::resources::ByteBudget;
 use collector::recording::bootstrap::{Classification, classify};
 use collector::recording::private::PrivateDirectory;
@@ -59,6 +60,37 @@ pub struct KnownPage {
     pub readings: Vec<KnownReading>,
     /// The reading the next page continues after, none at the end of the range.
     pub next: Option<KnownReading>,
+}
+
+/// A saved object of events that belongs to no minute: what a run's source held past its last
+/// minute, or rows saved when the minute they were for could not be. Neither completes a minute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventObject {
+    pub kind: EventObjectKind,
+    /// The run it belongs to, the events it covers, the rows it holds of them and what was lost.
+    pub recovery: Recovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventObjectKind {
+    Terminal,
+    Fragment,
+}
+
+/// A bounded part of a recording's event objects, the terminals and then the fragments.
+#[derive(Debug)]
+pub struct EventObjectPage {
+    pub objects: Vec<EventObject>,
+    /// Where the next page continues, none once every object has been listed. A page may be empty
+    /// and still have a next one.
+    pub next: Option<EventObjectPosition>,
+}
+
+/// Where a page of event objects ended.
+#[derive(Clone, Copy, Debug)]
+pub struct EventObjectPosition {
+    namespace: Namespace,
+    after: Option<CanonicalKey>,
 }
 
 impl KnownReading {
@@ -267,6 +299,54 @@ impl Catalog {
         Ok(None)
     }
 
+    /// Up to `objects_max` event objects, at most a page's worth, after the position a previous
+    /// page named. It reads one proof for each, and it needs no window and no registry to reach
+    /// them.
+    pub fn event_objects_page(
+        &self,
+        after: Option<&EventObjectPosition>,
+        objects_max: usize,
+        work: &mut ReadWork,
+    ) -> io::Result<EventObjectPage> {
+        assert!(objects_max > 0);
+        assert!(objects_max <= PAGE_READINGS_MAX);
+        let position = after.copied().unwrap_or(EventObjectPosition {
+            namespace: Namespace::Terminal,
+            after: None,
+        });
+        let mut page = EventObjectPage {
+            objects: Vec::with_capacity(objects_max),
+            next: None,
+        };
+        let Some(range) = event_objects_range(&position)? else {
+            page.next = event_objects_next_namespace(position.namespace);
+            return Ok(page);
+        };
+        let mut cursor = CanonicalCursor::begin_owned(
+            &self.root,
+            self.recording,
+            position.namespace,
+            range,
+            &self.budget,
+        )?;
+        for _object in 0..objects_max {
+            let Some(key) = catalog_found(&mut cursor)? else {
+                work.add(cursor.work());
+                page.next = event_objects_next_namespace(position.namespace);
+                return Ok(page);
+            };
+            page.objects
+                .push(event_object(&mut cursor, position.namespace, &key)?);
+            page.next = Some(EventObjectPosition {
+                namespace: position.namespace,
+                after: Some(key),
+            });
+        }
+        work.add(cursor.work());
+
+        Ok(page)
+    }
+
     fn known_cursor(&self, range: SeekRange) -> io::Result<CanonicalCursor<'_, 'static>> {
         CanonicalCursor::begin_owned(
             &self.root,
@@ -326,6 +406,65 @@ fn window_holding_gate(
     Err(invalid())
 }
 
+/// The namespace range a page of event objects reads, none when nothing can follow its position.
+fn event_objects_range(position: &EventObjectPosition) -> io::Result<Option<SeekRange>> {
+    let width = position.namespace.width();
+    let first = match &position.after {
+        Some(key) => match key_successor(position.namespace, key)? {
+            Some(first) => first,
+            None => return Ok(None),
+        },
+        None => CanonicalKey::from_bytes(position.namespace, &[0; 60][..width])?,
+    };
+
+    Ok(Some(SeekRange {
+        first,
+        last: CanonicalKey::from_bytes(position.namespace, &[0xff; 60][..width])?,
+        direction: Direction::Forward,
+    }))
+}
+
+/// Where the objects go on once `namespace` has none left, none after the last namespace.
+fn event_objects_next_namespace(namespace: Namespace) -> Option<EventObjectPosition> {
+    match namespace {
+        Namespace::Terminal => Some(EventObjectPosition {
+            namespace: Namespace::Fragments,
+            after: None,
+        }),
+        _ => None,
+    }
+}
+
+/// The object behind the gate at `key`, whose proof was written with the gate's own name.
+fn event_object(
+    cursor: &mut CanonicalCursor<'_, 'static>,
+    namespace: Namespace,
+    key: &CanonicalKey,
+) -> io::Result<EventObject> {
+    let mut gate = cursor.open_gate(key)?;
+    let metadata = CanonicalMetadata::read(&mut gate)?;
+    metadata.validate_key(namespace, key)?;
+    cursor.check_snapshot()?;
+    let recovery = match metadata.body {
+        Body::Events(manifest) => manifest.recovery,
+        Body::LossOnly => Recovery {
+            run: metadata.run,
+            events_first: metadata.loss.inherited.event_start,
+            events_end: metadata.loss.event_end,
+            rows: 0,
+            losses: metadata.loss.totals()?,
+        },
+        Body::Ordinary(_) => return Err(invalid()),
+    };
+    let kind = if namespace == Namespace::Terminal {
+        EventObjectKind::Terminal
+    } else {
+        EventObjectKind::Fragment
+    };
+
+    Ok(EventObject { kind, recovery })
+}
+
 /// The next key `cursor` finds, none at the end of its range. Reaching the work limit is not the
 /// end of a range, so a namespace that keeps asking for more is refused.
 fn catalog_found(cursor: &mut CanonicalCursor<'_, 'static>) -> io::Result<Option<CanonicalKey>> {
@@ -350,7 +489,7 @@ fn known_page_range(
         return Ok(None);
     };
     let first = match after {
-        Some(reading) => match known_page_range_successor(&reading.key()?)? {
+        Some(reading) => match key_successor(Namespace::Known, &reading.key()?)? {
             Some(key) => key,
             None => return Ok(None),
         },
@@ -379,13 +518,12 @@ fn known_page_range_clock(wall_ns: u64, fill: u8) -> io::Result<CanonicalKey> {
 }
 
 /// The key straight after `key`, none after the largest.
-fn known_page_range_successor(key: &CanonicalKey) -> io::Result<Option<CanonicalKey>> {
-    let mut bytes = [0; 60];
-    bytes.copy_from_slice(&key.bytes[..60]);
-    for index in (0..60).rev() {
+fn key_successor(namespace: Namespace, key: &CanonicalKey) -> io::Result<Option<CanonicalKey>> {
+    let mut bytes = key.bytes;
+    for index in (0..namespace.width()).rev() {
         if bytes[index] != 0xff {
             bytes[index] += 1;
-            return CanonicalKey::from_bytes(Namespace::Known, &bytes).map(Some);
+            return CanonicalKey::from_bytes(namespace, &bytes[..namespace.width()]).map(Some);
         }
         bytes[index] = 0;
     }

@@ -35,6 +35,13 @@ pub struct Fixture {
     process_capacity: u64,
     owns_root: bool,
     registered: bool,
+    clocks: Clocks,
+}
+
+/// What the fixture's next reading says of its clocks.
+enum Clocks {
+    Known,
+    Unknown,
 }
 
 impl Fixture {
@@ -90,6 +97,7 @@ impl Fixture {
             process_capacity: 2,
             owns_root: true,
             registered: true,
+            clocks: Clocks::Known,
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
@@ -138,6 +146,7 @@ impl Fixture {
             process_capacity,
             owns_root: true,
             registered: false,
+            clocks: Clocks::Known,
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
@@ -232,6 +241,7 @@ impl Fixture {
             process_capacity: 2,
             owns_root: false,
             registered: self.registered,
+            clocks: Clocks::Known,
         };
         fixture.set_clock_intervals(1_000_000_000, 1_000_000_000);
         fixture
@@ -268,6 +278,13 @@ impl Fixture {
 
     pub fn skip_run_ticks(&mut self, count: u64) {
         self.elapsed = self.elapsed.checked_add(count).unwrap();
+    }
+
+    /// Publishes a reading whose clocks are unknown, as a source with no clocks leaves it.
+    pub fn publish_without_clock(&mut self) {
+        self.clocks = Clocks::Unknown;
+        self.publish_with_system_rows(0);
+        self.clocks = Clocks::Known;
     }
 
     pub fn publish_with_system_rows(&mut self, second: u64) {
@@ -341,15 +358,17 @@ impl Fixture {
             continuous_ns: self.elapsed * self.continuous_step_ns,
             awake_ns: self.elapsed * self.awake_step_ns,
         };
-        if self.identity {
-            self.publish_identity(&mut readings, &times);
+        if matches!(self.clocks, Clocks::Unknown) {
+            self.publish_identity(&mut readings, None);
+        } else if self.identity {
+            self.publish_identity(&mut readings, Some(&times));
         } else {
             self.writer.publish_observed(&readings, &times);
         }
         self.elapsed += 1;
     }
 
-    fn publish_identity(&mut self, readings: &mut Readings<'_>, times: &ObservationTimes) {
+    fn publish_identity(&mut self, readings: &mut Readings<'_>, times: Option<&ObservationTimes>) {
         let refused = self.intern(b"refused\xff", b"/Apps/Outer\xfe.app");
         let current = self.intern(b"current", b"/Apps/Current.app");
         let departed = self.intern(b"departed\xfd", b"/Old.app");
@@ -378,7 +397,7 @@ impl Fixture {
         self.writer
             .publish_with_identity(
                 readings,
-                Some(times),
+                times,
                 &IdentityPublication {
                     processes: &processes,
                     events: &events,
