@@ -104,6 +104,7 @@ struct Step {
     persister: Option<Health>,
     collecting: bool,
     persisting: bool,
+    persister_exit: Option<ExitStatus>,
     locks: Locks,
     stopping: bool,
 }
@@ -121,7 +122,7 @@ impl Supervisor {
         {
             self.reporter.control().request_stop()?;
         }
-        let persister_finished = self.step_reap(now)?;
+        let persister_exit = self.step_reap(now)?;
         let collector_locked = FileLock::held(&self.options.root.join("collector.lock"))?;
         let persister_locked = FileLock::held(&self.options.root.join("persister.lock"))?;
         let collector = observed(self.reporter.control(), Role::Collector)?;
@@ -144,7 +145,7 @@ impl Supervisor {
         if let Some(persister) = &persister {
             self.persistence.watch(persister, persisting)?;
         }
-        if persister_finished && collecting {
+        if finished_every_run(persister_exit) && collecting {
             self.persistence.failed(now);
             self.reporter.retry(
                 Failure::Operating,
@@ -169,6 +170,7 @@ impl Supervisor {
             persister,
             collecting,
             persisting,
+            persister_exit,
             locks: Locks {
                 collector: collector_locked,
                 persister: persister_locked,
@@ -177,7 +179,7 @@ impl Supervisor {
         })
     }
 
-    fn step_reap(&mut self, now: u64) -> io::Result<bool> {
+    fn step_reap(&mut self, now: u64) -> io::Result<Option<ExitStatus>> {
         let collector_exit = self.acquisition.reap(self.costs.timebase())?;
         let persister_exit = self.persistence.reap(self.costs.timebase())?;
         if let Some(status) = collector_exit {
@@ -192,7 +194,7 @@ impl Supervisor {
                 self.persistence.exited(status, now, &mut self.reporter)?;
             }
         }
-        Ok(persister_exit.is_some_and(|status| status.success()))
+        Ok(persister_exit)
     }
 
     fn step_costs(
@@ -225,7 +227,7 @@ impl Supervisor {
             && self.persistence.idle()
             && !step.locks.persister
         {
-            if self.current_completed()? {
+            if finished_every_run(step.persister_exit) || self.current_completed()? {
                 self.acquisition.start(
                     &self.options,
                     Role::Collector,
@@ -275,7 +277,8 @@ impl Supervisor {
             && !step.locks.collector;
         // A previous persister's stopped record says nothing about its replacement's tail.
         // Read the latest receipt only after no worker can still register another source.
-        let completed = workers_idle && self.current_completed()?;
+        let completed = workers_idle
+            && (finished_every_run(step.persister_exit) || self.current_completed()?);
         if persistence_idle && !completed {
             self.persistence.start(
                 &self.options,
@@ -308,6 +311,13 @@ impl Supervisor {
             None => Ok(true),
         }
     }
+}
+
+/// Whether a persister's exit means it did all it can, which is so only for a success, since it
+/// exits with one once every registered run is retired or has a source it cannot read. A reboot
+/// takes a run's ring for good, and no persister can ever retire that run.
+fn finished_every_run(persister_exit: Option<ExitStatus>) -> bool {
+    persister_exit.is_some_and(|status| status.success())
 }
 
 fn observed(control: &Control, role: Role) -> io::Result<Option<Health>> {

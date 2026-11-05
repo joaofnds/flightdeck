@@ -363,6 +363,7 @@ impl DrainRoot {
             persister: Some(health),
             collecting: false,
             persisting: false,
+            persister_exit: None,
             locks: Locks {
                 collector: false,
                 persister: false,

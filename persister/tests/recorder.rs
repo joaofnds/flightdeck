@@ -263,6 +263,61 @@ mod tests {
     }
 
     #[test]
+    fn a_recorder_records_again_after_a_reboot_took_the_last_runs_source() {
+        // Goal: a reboot removes the ring of the run that was recording, and nothing can bring it
+        // back, so the next launch goes on to record rather than wait for that source for good.
+        // Method: kill the cohort as a power loss would, unlink the ring, relaunch, and see a new
+        // collector's readings advance.
+        let mut recording = Recording::start("lost-source", 30);
+        let before = recording.wait_for(|control| {
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
+        });
+        let collector = before.settled(Role::Collector);
+        recording.power_loss(&before);
+
+        recording.launch(Recording::recorder_executable());
+
+        let after = recording.wait_for(|control| {
+            let current = control.settled(Role::Collector);
+            current.creation != collector.creation
+                && current.state == State::Running
+                && current.publication >= 2
+        });
+        assert_eq!(before.authority(), after.authority());
+        Control::open_writable(&recording.root)
+            .unwrap()
+            .request_stop()
+            .unwrap();
+        recording.wait_for_exit();
+        let registry = collector::recording::Registry::read(&recording.root).unwrap();
+        let saved = crate::saved_windows::saved_manifests(
+            &recording.root,
+            &registry.runs.last().unwrap().identity,
+        );
+        assert!(saved[0].losses.unknown);
+    }
+
+    #[test]
+    fn a_stop_completes_after_a_reboot_took_the_last_runs_source() {
+        // Goal: a stop ends the recorder even though the last run's source can never supply its
+        // tail, since no persister could ever retire that run.
+        // Method: leave a lost source, stop before the replacement's first instruction, release it.
+        let mut recording = Recording::start("stop-lost-source", 30);
+        let before = recording.wait_for(|control| {
+            control.settled(Role::Collector).state == State::Running
+                && control.settled(Role::Persister).alive().unwrap()
+        });
+        recording.power_loss(&before);
+        recording.launch_held();
+
+        recording.stop_from_another_terminal();
+        recording.release_held();
+
+        recording.wait_for_exit();
+    }
+
+    #[test]
     fn controller_death_preserves_workers_and_relaunch_adopts_survivors() {
         // Goal: loss of the controller leaves workers independent; relaunch recovers supervision.
         // Method: kill it, verify advancing acquisition, then kill persistence and relaunch.
@@ -988,6 +1043,19 @@ mod tests {
             }
 
             beside
+        }
+
+        /// Ends the cohort at once and removes the last run's ring, which is what a power loss
+        /// or a reboot leaves, since macOS keeps shared memory only until it restarts.
+        fn power_loss(&mut self, control: &Control) {
+            let mut controller = self.child.take().unwrap();
+            controller.kill().unwrap();
+            controller.wait().unwrap();
+            assert_eq!(0, unsafe { kill(control.settled(Role::Collector).pid, 9) });
+            assert_eq!(0, unsafe { kill(control.settled(Role::Persister).pid, 9) });
+            self.wait_for_old_workers();
+            let registry = collector::recording::Registry::read(&self.root).unwrap();
+            unlink_generation(&registry.runs.last().unwrap().ring_name).unwrap();
         }
 
         fn start(name: &str, seconds: u64) -> Self {
