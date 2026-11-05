@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use collector::recording::Registration;
+use collector::recording::private::{FileLock, PrivateDirectory};
+use collector::recording::{RegisteredRun, Registration, Registry, bootstrap};
 use collector::ring::{self, IdentityObservation, IdentityPublication, ObservationTimes};
+use persistence::canonical::ReadWork;
 use persistence::resources::ByteBudget;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -162,6 +164,39 @@ fn terminal_maximum_event_tail_keeps_every_native_byte() {
     observe(ROWS_MAX, true);
 }
 
+#[test]
+#[ignore = "opt-in admitted maximum event capacity through a registered recording"]
+fn registered_ordinary_maximum_event_tail_is_saved_under_the_ceilings() {
+    // Goal: the registered Store and worker save the largest admitted log within 256 MiB and the
+    // 30 second recovery bound, which nothing has measured through their own transaction (P02.4).
+    // Method: run the persister binary over a registered root with a finished maximum ring.
+    observe_registered(ROWS_MAX, false);
+}
+
+#[test]
+#[ignore = "opt-in admitted maximum terminal event capacity through a registered recording"]
+fn registered_terminal_maximum_event_tail_is_saved_under_the_ceilings() {
+    // Goal: a registered run with no observed publication meets the same ceilings (P02.4).
+    // Method: hide every publication of a maximum ring and run the persister binary over it.
+    observe_registered(ROWS_MAX, true);
+}
+
+fn observe_registered(rows: u64, terminal: bool) {
+    let mut candidate = Candidate::registered(rows);
+    candidate.publish(rows);
+    if terminal {
+        candidate.withhold_publications(rows);
+    }
+    let started = Instant::now();
+
+    candidate.run_worker();
+    let elapsed = started.elapsed();
+
+    candidate.verify_registered(rows, terminal);
+    eprintln!("event_stream registered rows={rows} terminal={terminal} elapsed={elapsed:?}");
+    assert!(elapsed <= Duration::from_secs(30));
+}
+
 fn observe(rows: u64, terminal: bool) {
     let mut candidate = Candidate::new(rows);
     candidate.publish(rows);
@@ -178,6 +213,56 @@ fn observe(rows: u64, terminal: bool) {
 
 impl Candidate {
     fn new(rows: u64) -> Self {
+        let (root, place) = Self::new_place(rows);
+        let (writer, registration) = Registration::start_with_identity(
+            &root,
+            &place,
+            Self::new_shape(rows),
+            Self::new_dictionary(),
+            1,
+        )
+        .unwrap()
+        .into_parts();
+        registration.unwrap();
+        let run = writer.identity().unwrap();
+
+        Self::new_with(root, writer, run)
+    }
+
+    /// A candidate on a recording of the registered format, which no creator makes yet.
+    fn registered(rows: u64) -> Self {
+        let (root, place) = Self::new_place(rows);
+        let directory = PrivateDirectory::open(&root).unwrap();
+        let lock = FileLock::try_lock_in(&directory, "registration.lock").unwrap();
+        let recording = bootstrap::initialize(&directory, &lock, &mut [0; 4097]).unwrap();
+        drop(lock);
+        let run = ring::RunIdentity {
+            recording,
+            run: ring::Identity([8, 9]),
+            boot: ring::Identity([10, 11]),
+        };
+        let writer = ring::Writer::create_with_identity(
+            &place,
+            Self::new_shape(rows),
+            Self::new_dictionary(),
+            &run,
+            1,
+        )
+        .unwrap();
+        let registry = Registry {
+            runs: vec![RegisteredRun {
+                identity: run,
+                ring_name: writer.name().to_owned(),
+                collector_pid: 0,
+            }],
+            evictions: 0,
+        };
+        registry.write(&root).unwrap();
+
+        Self::new_with(root, writer, run)
+    }
+
+    fn new_place(rows: u64) -> (PathBuf, ring::Place) {
         assert!(rows <= ROWS_MAX);
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
         let root =
@@ -188,7 +273,12 @@ impl Candidate {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdes{}{serial}", std::process::id()),
         };
-        let shape = ring::Shape {
+
+        (root, place)
+    }
+
+    fn new_shape(rows: u64) -> ring::Shape {
+        ring::Shape {
             slot_count: 8,
             cpu_capacity: 1,
             interface_capacity: 1,
@@ -198,23 +288,20 @@ impl Candidate {
             process_capacity: 1,
             coalition_capacity: 1,
             event_capacity: rows,
-        };
-        let (writer, registration) = Registration::start_with_identity(
-            &root,
-            &place,
-            shape,
-            ring::DictionaryCapacity {
-                entries: 1,
-                arena_bytes: 8192,
-            },
-            1,
-        )
-        .unwrap()
-        .into_parts();
-        registration.unwrap();
-        let run = writer.identity().unwrap();
+        }
+    }
+
+    fn new_dictionary() -> ring::DictionaryCapacity {
+        ring::DictionaryCapacity {
+            entries: 1,
+            arena_bytes: 8192,
+        }
+    }
+
+    fn new_with(root: PathBuf, writer: ring::Writer, run: ring::RunIdentity) -> Self {
         let source = writer.name().to_owned();
         let sources = vec![source.clone()];
+
         Self {
             root,
             writer: Some(writer),
@@ -294,7 +381,7 @@ impl Candidate {
         let target = format!("{}.99", self.source.rsplit_once('.').unwrap().0);
         self.sources.push(target.clone());
         source::withhold(&self.source, &target, expected);
-        let mut registry = collector::recording::Registry::read(&self.root).unwrap();
+        let mut registry = Registry::read(&self.root).unwrap();
         assert_eq!(registry.runs.len(), 1);
         registry.runs[0].ring_name.clone_from(&target);
         registry.write(&self.root).unwrap();
@@ -355,6 +442,22 @@ impl Candidate {
         }
         // The production watchdog independently enforces120s for each operation.
         panic!("owned event worker exceeded180second fixture observation deadline");
+    }
+
+    /// What the canonical frontier says of the run, whose read admits every row of its newest
+    /// window. The worker's own tests hold the bytes of those rows.
+    fn verify_registered(&self, rows: u64, terminal: bool) {
+        let store = persistence::Store::open(&self.root).unwrap();
+        let budget = Arc::new(ByteBudget::new(MEMORY_BYTES));
+        let frontier = store
+            .source_frontier(&self.run, &budget, &mut ReadWork::default())
+            .unwrap()
+            .unwrap();
+
+        assert!(frontier.complete());
+        assert_eq!(frontier.event_end(), rows + 1);
+        let publication_end = if terminal { 1 } else { rows + 1 };
+        assert_eq!(frontier.publication_end(), publication_end);
     }
 
     fn verify_ordinary(&self, rows: u64) {
