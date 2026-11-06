@@ -604,14 +604,32 @@ const FIRST_SECOND: u64 = 2_000;
 const READER_WAIT_MAX: Duration = Duration::from_secs(120);
 const NAMES_MAX: usize = 1 << 16;
 
+/// As `expire_and_remove`, with `boot` the boot still running, so its record stays while its
+/// readings lie past where another boot's first pass would say it ended. A clock on `boot` far
+/// ahead of any real one stands still as `expire_and_remove`'s does.
+fn expire_and_remove_while_running(root: &Path, boot: Identity, continuous_ns: u64) -> u64 {
+    let now = ClockReading {
+        boot,
+        continuous_ns: CLOCK_NS,
+        wall_ns: CLOCK_NS + continuous_ns,
+    };
+    Clock::started_at(&now)
+        .write(&PrivateDirectory::open(root).unwrap())
+        .unwrap();
+    let store = persistence::Store::open(root).unwrap();
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 << 20));
+
+    store.retire_expired(&now, &[], &budget).unwrap()
+}
+
 /// Moves the cutoff a minute at a time up to the newest reading, with a pass at each, and lets
 /// `read_count` go up twice after each, so the second of those reads started after the pass. A
 /// read takes far less than the grace physical removal leaves a read under way, so no read sees the
 /// clock stand two passes behind what has gone.
-fn removal_beside_reads(root: &Path, read_count: &AtomicU64) -> u64 {
+fn removal_beside_reads(root: &Path, boot: Identity, read_count: &AtomicU64) -> u64 {
     let mut removed = 0;
     for minute in 1..NINE_MINUTES - 1 {
-        removed += expire_and_remove(root, (minute + 1) * 60 * NS);
+        removed += expire_and_remove_while_running(root, boot, (minute + 1) * 60 * NS);
         let reads = read_count.load(Ordering::Acquire);
         let waited = Instant::now();
         while read_count.load(Ordering::Acquire) < reads + 2 {
@@ -647,18 +665,39 @@ fn names_under(root: &Path) -> BTreeSet<PathBuf> {
 }
 
 #[test]
+fn a_read_opened_before_a_pass_reads_on_past_it() {
+    // Goal: the grace removal leaves covers a read that opened a pass ago, which still lists the
+    // minute that pass could take.
+    // Method: open a session before each pass of a clock moving a minute at a time, and read the
+    // newest second through it after the pass.
+    let fixture = saved_across_nine_minutes();
+    let boot = fixture.writer.identity().unwrap().boot;
+    let newest = FIRST_SECOND + NINE_MINUTES - 1;
+    let mut removed = 0;
+
+    for minute in 1..NINE_MINUTES - 1 {
+        let mut session = Session::open(&fixture.root).unwrap();
+        removed += expire_and_remove_while_running(&fixture.root, boot, (minute + 1) * 60 * NS);
+        session.select(newest, 0).unwrap();
+    }
+
+    assert!(removed > 0);
+}
+
+#[test]
 fn a_reader_opening_beside_removal_meets_no_damage() {
     // Goal: removal goes on beside readers, who meet neither damage nor a missing newest reading.
     // Method: open a session and read the newest second over and over on this thread, while another
     // removes the fixture's minutes oldest first.
     let fixture = saved_across_nine_minutes();
     let root = fixture.root.clone();
+    let boot = fixture.writer.identity().unwrap().boot;
     let newest = FIRST_SECOND + NINE_MINUTES - 1;
     let read_count = Arc::new(AtomicU64::new(0));
     let removal = {
         let root = root.clone();
         let read_count = Arc::clone(&read_count);
-        std::thread::spawn(move || removal_beside_reads(&root, &read_count))
+        std::thread::spawn(move || removal_beside_reads(&root, boot, &read_count))
     };
 
     let waited = Instant::now();
