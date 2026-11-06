@@ -50,10 +50,13 @@ impl Store {
             return Ok(0);
         }
 
-        let clock = Clock::read(&self.directory, now);
+        let clock = Clock::read_for_removal(&self.directory, now)?;
         // A full disk can refuse this write, and the clock loses nothing by it.
         if let Err(error) = clock.write(&self.directory) {
             collector::diagnostics::error(format_args!("retention clock save: {error}"));
+        }
+        if let Err(error) = retention::boot_records_settle(&self.directory, &clock) {
+            collector::diagnostics::error(format_args!("retention boot records: {error}"));
         }
         let period = Period::read(&self.directory);
         let entries = retention::expired_entries(

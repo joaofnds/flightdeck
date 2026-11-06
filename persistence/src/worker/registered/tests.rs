@@ -3038,10 +3038,10 @@ fn the_whole_worker_paces_itself_until_a_live_run_finishes() {
 #[test]
 fn the_whole_worker_removes_what_outlived_the_retention_period() {
     // Goal: a recording the real worker saves loses what its period no longer covers, while a
-    // minute whose newest reading the period still covers stays whole (P03.2).
-    // Method: save three minutes through the whole worker on a retention clock the test places,
-    // move the clock until the cutoff stands on the newest reading of the middle minute, and run
-    // the worker again over the same run.
+    // minute whose newest reading the period still covers stays whole.
+    // Method: save three minutes through the whole worker on a retention clock the test places, so
+    // the cutoff stands on the newest reading of the middle minute, place it there again since the
+    // worker moved it, and run the worker again over the same run.
     const CLOCK_NS: u64 = 1 << 62;
     const PERIOD_SECONDS: u64 = 60;
     const GRACE_SECONDS: u64 = 60;
@@ -3059,16 +3059,16 @@ fn the_whole_worker_removes_what_outlived_the_retention_period() {
         .write(&root)
         .unwrap();
     boot_offset_save(&root, recording.run.boot, cutoff_ns - middle_newest_ns).unwrap();
-    let mut no_pause = |_pause| panic!("the run is finished");
-    whole_worker(&recording.root, vec![recording.registered()], &mut no_pause);
-    assert_eq!(recording.saved_manifests().len(), 3);
-    Clock::started_at(&ClockReading {
+    let placed = Clock::started_at(&ClockReading {
         boot: Identity([9, 9]),
         continuous_ns: 0,
         wall_ns: CLOCK_NS,
-    })
-    .write(&root)
-    .unwrap();
+    });
+    placed.write(&root).unwrap();
+    let mut no_pause = |_pause| panic!("the run is finished");
+    whole_worker(&recording.root, vec![recording.registered()], &mut no_pause);
+    assert_eq!(recording.saved_manifests().len(), 3);
+    placed.write(&root).unwrap();
 
     whole_worker(&recording.root, vec![recording.registered()], &mut no_pause);
 

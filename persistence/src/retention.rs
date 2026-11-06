@@ -18,7 +18,11 @@ use collector::ring::Identity;
 use std::io::{self, Read};
 
 const BOOT_MAGIC: &[u8; 8] = b"FDRETBT1";
-const BOOT_SIZE: usize = 16;
+const BOOT_PREFIX: &str = "boot-";
+/// More boots than a recording of ten years could need, which the directory's few other names
+/// leave room in.
+const BOOT_RECORDS_MAX: usize = 1 << 16;
+const BOOT_SIZE: usize = 24;
 const CLOCK_MAGIC: &[u8; 8] = b"FDRETCK1";
 const CLOCK_NAME: &str = "clock";
 const CLOCK_SIZE: usize = 48;
@@ -169,6 +173,27 @@ impl Clock {
                 Self::started_at(now)
             }
         }
+    }
+
+    /// The clock a pass of physical removal runs on at `now`. A clock that starts again because
+    /// its record is gone or does not read stands no lower than the newest entry of the order, so
+    /// a lost record cannot make a saved publication look young.
+    pub(crate) fn read_for_removal(
+        root: &PrivateDirectory,
+        now: &ClockReading,
+    ) -> io::Result<Self> {
+        match Self::read_saved(root) {
+            Ok(Some(saved)) => return Ok(saved.advanced_to(now)),
+            Ok(None) => {}
+            Err(error) => {
+                collector::diagnostics::error(format_args!("retention clock: {error}"));
+            }
+        }
+
+        Ok(Self {
+            progress_ns: now.wall_ns.max(newest_entry_ns(root)?),
+            at: *now,
+        })
     }
 
     fn read_saved(root: &PrivateDirectory) -> io::Result<Option<Self>> {
@@ -418,32 +443,113 @@ fn retained_from_ns_boot_offset(
 
 /// What `boot` saved as its offset, none where no publication of that boot has needed one.
 pub(crate) fn boot_offset_ns(root: &PrivateDirectory, boot: Identity) -> io::Result<Option<u64>> {
-    let mut bytes = [0; BOOT_SIZE + 1];
-    let Some(length) = read_bounded(root, &boot_record_name(boot), &mut bytes)? else {
-        return Ok(None);
-    };
-    if length != BOOT_SIZE || bytes[..8] != BOOT_MAGIC[..] {
-        return Err(invalid());
-    }
+    let record = BootRecord::read(root, &boot_record_name(boot))?;
 
-    Ok(Some(read_word(&bytes, 8)))
+    Ok(record.map(|record| record.offset_ns))
 }
 
 /// Saves the offset of a boot that has none. No caller replaces one, so a reading keeps one place.
 pub fn boot_offset_save(root: &PrivateDirectory, boot: Identity, offset_ns: u64) -> io::Result<()> {
-    let mut bytes = [0; BOOT_SIZE];
-    bytes[..8].copy_from_slice(BOOT_MAGIC);
-    bytes[8..].copy_from_slice(&offset_ns.to_be_bytes());
+    let record = BootRecord {
+        offset_ns,
+        ended_ns: 0,
+    };
 
-    private::atomic_write_in(
-        &root.open_directory(DIRECTORY_NAME)?,
-        &boot_record_name(boot),
-        &bytes,
-    )
+    record.write(root, &boot_record_name(boot))
 }
 
 fn boot_record_name(boot: Identity) -> String {
-    format!("boot-{}", collector::recording::identity_text(boot))
+    format!("{BOOT_PREFIX}{}", collector::recording::identity_text(boot))
+}
+
+/// What a boot's record holds.
+struct BootRecord {
+    offset_ns: u64,
+    /// The clock when a pass first saw another boot running, which no reading of this boot can lie
+    /// past, or zero until then.
+    ended_ns: u64,
+}
+
+impl BootRecord {
+    fn read(root: &PrivateDirectory, name: &str) -> io::Result<Option<Self>> {
+        let mut bytes = [0; BOOT_SIZE + 1];
+        let Some(length) = read_bounded(root, name, &mut bytes)? else {
+            return Ok(None);
+        };
+        if length != BOOT_SIZE || bytes[..8] != BOOT_MAGIC[..] {
+            return Err(invalid());
+        }
+
+        Ok(Some(Self {
+            offset_ns: read_word(&bytes, 8),
+            ended_ns: read_word(&bytes, 16),
+        }))
+    }
+
+    fn write(&self, root: &PrivateDirectory, name: &str) -> io::Result<()> {
+        let mut bytes = [0; BOOT_SIZE];
+        bytes[..8].copy_from_slice(BOOT_MAGIC);
+        bytes[8..16].copy_from_slice(&self.offset_ns.to_be_bytes());
+        bytes[16..].copy_from_slice(&self.ended_ns.to_be_bytes());
+
+        private::atomic_write_in(&root.open_directory(DIRECTORY_NAME)?, name, &bytes)
+    }
+}
+
+/// Removes the record of each boot that has ended and that no publication can still need, since a
+/// reader shows a reading whose boot has no record. A record that does not read places no reading,
+/// so it goes as well.
+pub(crate) fn boot_records_settle(root: &PrivateDirectory, clock: &Clock) -> io::Result<()> {
+    let directory = root.open_directory(DIRECTORY_NAME)?;
+    let mut names = Vec::new();
+    directory.visit_names(BOOT_RECORDS_MAX, |name| {
+        if name.starts_with(BOOT_PREFIX) {
+            names.push(name.to_owned());
+        }
+        Ok(())
+    })?;
+
+    let running = boot_record_name(clock.at.boot);
+    for name in names.iter().filter(|name| **name != running) {
+        boot_records_settle_one(root, &directory, name, clock)?;
+    }
+
+    Ok(())
+}
+
+fn boot_records_settle_one(
+    root: &PrivateDirectory,
+    directory: &PrivateDirectory,
+    name: &str,
+    clock: &Clock,
+) -> io::Result<()> {
+    let record = match BootRecord::read(root, name) {
+        Ok(record) => record,
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            collector::diagnostics::error(format_args!("retention boot record {name}: {error}"));
+            return directory.remove_file(name);
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(record) = record else {
+        return Ok(());
+    };
+    if record.ended_ns == 0 {
+        let ended = BootRecord {
+            ended_ns: clock.progress_ns,
+            ..record
+        };
+        return ended.write(root, name);
+    }
+
+    let at_or_below_end = Cutoff {
+        expired_below_ns: record.ended_ns.saturating_add(1),
+    };
+    if expired_entries(root, at_or_below_end, 1)?.is_empty() {
+        directory.remove_file(name)?;
+    }
+
+    Ok(())
 }
 
 /// A publication's name in the retention order, which physical removal walks oldest first. Its
@@ -553,6 +659,38 @@ fn order_remove_hour(order: &PrivateDirectory, hour: &str) -> io::Result<()> {
     }
 
     order.full_sync()
+}
+
+/// The newest retained time the order holds, zero where it holds none.
+fn newest_entry_ns(root: &PrivateDirectory) -> io::Result<u64> {
+    let order = match order_directory(root) {
+        Ok(order) => order,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut newest_hour = None;
+    order.visit_names(ORDER_HOURS_MAX, |name| {
+        if let Ok(hour) = name.parse::<u64>() {
+            newest_hour = newest_hour.max(Some(hour));
+        }
+        Ok(())
+    })?;
+    let Some(hour) = newest_hour else {
+        return Ok(0);
+    };
+
+    let hour_name = hour.to_string();
+    let mut newest_ns = 0;
+    order
+        .open_directory(&hour_name)?
+        .visit_names(ORDER_HOURS_MAX, |name| {
+            if let Some(entry) = ListedEntry::parse(&hour_name, name) {
+                newest_ns = newest_ns.max(entry.retained_from_ns);
+            }
+            Ok(())
+        })?;
+
+    Ok(newest_ns)
 }
 
 /// The entries whose retained time lies below `cutoff`, oldest hours first and oldest first, at

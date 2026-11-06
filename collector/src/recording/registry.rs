@@ -8,6 +8,8 @@ use crate::ring::{
 
 const REGISTRY_BYTES_MAX: usize = 4096;
 const RUNS_MAX: usize = 2;
+/// More than a registry's runs and a refused write beside each can leave.
+const RECEIPT_NAMES_MAX: usize = 1 << 10;
 
 /// The registry plus one byte to distinguish a full valid file from an oversized one.
 pub type RegistryBuffer = [u8; REGISTRY_BYTES_MAX + 1];
@@ -169,6 +171,9 @@ impl Registry {
         {
             return Ok(());
         }
+        if let Err(error) = remove_unlisted_receipts(root, &self.runs) {
+            crate::diagnostics::error(format_args!("recording retention: receipts: {error}"));
+        }
         if self.runs.len() == RUNS_MAX {
             let oldest = &self.runs[0];
             if oldest.identity.recording != run.identity.recording {
@@ -252,6 +257,31 @@ fn capture_previous_identity(
         run: random_identity()?,
         boot: Identity([0, 0]),
     }))
+}
+
+/// Removes each receipt, and each refused write of one, that names no run of `runs`, the registry
+/// as it was last saved. A restart reaches a receipt only while the run's ring exists. An eviction
+/// reads its run's receipt, so that receipt goes at the next registration, and a crash before the
+/// registry's next write finds it still there.
+fn remove_unlisted_receipts(root: &Path, runs: &[RegisteredRun]) -> io::Result<()> {
+    let directory = match private::PrivateDirectory::open(&root.join("retired")) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut unlisted = Vec::new();
+    directory.visit_names(RECEIPT_NAMES_MAX, |name| {
+        let receipt = name.strip_suffix(".pending").unwrap_or(name);
+        if !runs.iter().any(|run| run.ring_name[1..] == *receipt) {
+            unlisted.push(name.to_owned());
+        }
+        Ok(())
+    })?;
+    for name in &unlisted {
+        directory.remove_file(name)?;
+    }
+
+    Ok(())
 }
 
 fn is_retired(root: &Path, identity: &RunIdentity, name: &str) -> io::Result<bool> {
@@ -378,6 +408,46 @@ mod tests {
     use super::*;
     use crate::allocator_count::allocator_calls_in;
     use std::io::Write;
+
+    #[test]
+    fn a_registration_removes_the_receipt_of_each_run_no_longer_registered() {
+        // Goal: receipts plateau however many runs a recording sees (P03.3), and the oldest run's
+        // receipt still reads when its eviction asks whether it was saved.
+        // Method: register and retire five runs in turn, beside a refused write of an old receipt.
+        let root = std::env::temp_dir().join(format!(
+            "flightdeck-registry-receipts-{}",
+            std::process::id()
+        ));
+        private::create_private_dir(&root).unwrap();
+        private::create_private_dir(&root.join("retired")).unwrap();
+        std::fs::write(root.join("retired/fdr.gone.pending"), b"refused").unwrap();
+        let mut registry = Registry::default();
+
+        for index in 0..5_u64 {
+            let identity = RunIdentity {
+                recording: Identity([1, 2]),
+                run: Identity([3, index]),
+                boot: Identity([4, 5]),
+            };
+            let run = RegisteredRun {
+                identity,
+                ring_name: format!("/fdr.{index}"),
+                collector_pid: 0,
+            };
+            registry.add(&root, run).unwrap();
+            registry.write(&root).unwrap();
+            Registry::retire(&root, &identity).unwrap();
+        }
+
+        let mut names: Vec<_> = std::fs::read_dir(root.join("retired"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["fdr.2", "fdr.3", "fdr.4"]);
+        assert_eq!(registry.evictions, 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn marks_a_drained_source_complete_without_allocating_or_untracking_its_ring() {

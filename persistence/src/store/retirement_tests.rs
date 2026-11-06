@@ -1,7 +1,9 @@
 //! Physical removal through the real publication route, with the clock given to it.
 
 use super::*;
-use crate::retention::{Clock, ClockReading, Period, boot_offset_save, order_entry_names};
+use crate::retention::{
+    Clock, ClockReading, Period, boot_offset_ns, boot_offset_save, order_entry_names,
+};
 
 const PERIOD_SECONDS: u64 = 60;
 const GRACE_SECONDS: u64 = 60;
@@ -19,6 +21,9 @@ fn retirement_store(fixture: &Fixture) -> Store {
         .write(&root)
         .unwrap();
     boot_offset_save(&root, fixture.run.boot, 0).unwrap();
+    Clock::started_at(&retirement_at(fixture, 0))
+        .write(&root)
+        .unwrap();
     store
 }
 
@@ -67,6 +72,15 @@ fn retirement_drain(fixture: &Fixture, store: &Store, runs: &[RunIdentity], cloc
         }
     }
     panic!("removal did not finish");
+}
+
+/// A reading of the clock in a boot that no publication of the fixture ran in.
+fn retirement_in_another_boot(clock_ns: u64) -> ClockReading {
+    ClockReading {
+        boot: Identity([5, 5]),
+        continuous_ns: clock_ns,
+        wall_ns: clock_ns,
+    }
 }
 
 fn retirement_names_under(fixture: &Fixture, directory: &str) -> usize {
@@ -467,4 +481,112 @@ fn a_successor_that_does_not_read_stops_no_removal() {
 
     assert_eq!(retired, 2);
     assert_eq!(order_entry_names(&fixture.root).len(), 0);
+}
+
+#[test]
+fn a_clock_that_lost_its_record_stands_no_lower_than_the_newest_entry() {
+    // Goal: a lost clock record cannot make a saved publication look young, however far back the
+    // wall clock stands.
+    // Method: lose the record, take a pass with the wall clock at zero, and see what the newest
+    // entry's place expired.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 4);
+    let places = retirement_places(&fixture);
+    let newest = *places.last().unwrap();
+    let kept_from = newest - (PERIOD_SECONDS + GRACE_SECONDS) * SECOND_NS;
+    assert!(places[0] < kept_from);
+    fs::remove_file(fixture.root.join("retention/clock")).unwrap();
+
+    store
+        .retire_expired(&retirement_at(&fixture, 0), &[], &registration_budget())
+        .unwrap();
+
+    assert!(retirement_places(&fixture)[0] >= kept_from);
+}
+
+#[test]
+fn a_saved_clock_behind_the_newest_entry_stays_where_it_is() {
+    // Goal: the floor applies only where the record is lost, so a saved clock's value decides.
+    // Method: take a pass with a saved clock at zero, behind every entry.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 4);
+    let places = retirement_places(&fixture);
+
+    store
+        .retire_expired(&retirement_at(&fixture, 0), &[], &registration_budget())
+        .unwrap();
+
+    assert_eq!(retirement_places(&fixture), places);
+}
+
+#[test]
+fn a_boot_record_stays_until_nothing_of_that_boot_can_need_it() {
+    // Goal: boot records plateau, and a record outlives its publications, since a reader shows a
+    // reading whose boot has no record (P03.3).
+    // Method: run a pass in another boot, expire all but the entry at the value that pass recorded,
+    // and then that one too.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    retirement_windows(&mut fixture, &store, 2);
+    let newest = *retirement_places(&fixture).last().unwrap();
+    let running = Identity([5, 5]);
+    boot_offset_save(&root, running, 7).unwrap();
+    Clock::started_at(&retirement_at(&fixture, newest))
+        .write(&root)
+        .unwrap();
+    let budget = registration_budget();
+
+    let keeping = retirement_clock_keeping(newest);
+    for clock_ns in [newest, keeping, keeping] {
+        store
+            .retire_expired(&retirement_in_another_boot(clock_ns), &[], &budget)
+            .unwrap();
+    }
+    assert_eq!(retirement_places(&fixture), [newest]);
+    let beside_the_last_entry = boot_offset_ns(&root, fixture.run.boot).unwrap();
+    for clock_ns in [keeping + 1, keeping + 2] {
+        store
+            .retire_expired(&retirement_in_another_boot(clock_ns), &[], &budget)
+            .unwrap();
+    }
+
+    assert_eq!(beside_the_last_entry, Some(0));
+    assert_eq!(retirement_places(&fixture), [0_u64; 0]);
+    assert_eq!(boot_offset_ns(&root, fixture.run.boot).unwrap(), None);
+    assert_eq!(boot_offset_ns(&root, running).unwrap(), Some(7));
+}
+
+#[test]
+fn a_boot_record_that_does_not_read_goes_without_stopping_the_pass() {
+    // Goal: a damaged record, which places no reading, neither stays forever nor stops removal.
+    // Method: damage a boot's record, and take two passes past every entry in another boot, since
+    // the older window waits for the first pass to take the newer one, whose boot it can no longer
+    // place.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    retirement_windows(&mut fixture, &store, 2);
+    let newest = *retirement_places(&fixture).last().unwrap();
+    let name = format!(
+        "retention/boot-{}",
+        collector::recording::identity_text(fixture.run.boot)
+    );
+    fs::write(fixture.root.join(name), b"damaged").unwrap();
+    let far = retirement_clock_keeping(newest) + 1;
+
+    for _pass in 0..2 {
+        store
+            .retire_expired(
+                &retirement_in_another_boot(far),
+                &[],
+                &registration_budget(),
+            )
+            .unwrap();
+    }
+
+    assert_eq!(boot_offset_ns(&root, fixture.run.boot).unwrap(), None);
+    assert_eq!(retirement_places(&fixture), [0_u64; 0]);
 }
