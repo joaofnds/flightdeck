@@ -5,8 +5,8 @@ use std::sync::Arc;
 use collector::ring::{Found, PublicationTiming, RingReader, RunIdentity};
 
 use super::{
-    Derivation, Limits, Progress, RegisteredRun, Result, RunState, SourceState, Store, Window,
-    WindowIdentity, Writers,
+    Derivation, Limits, Progress, RegisteredRun, Result, RunState, SavedRecording, SourceState,
+    Store, Window, WindowIdentity, Writers,
 };
 use crate::canonical::{ReadWork, SourceFrontier, SourceFrontierRead};
 use crate::event_recovery::Batch;
@@ -435,7 +435,7 @@ fn seal_registered(
         };
     }
     clock.staged();
-    let manifest = seal_write(&attempt, writers, &window, state)?;
+    let manifest = seal_write(&attempt, writers, &window, state, seal_saved(store, budget))?;
     let staged_bytes = window.staged_bytes();
     drop(window);
     clock.written();
@@ -739,7 +739,7 @@ fn recover_staging_again(
 
     clock.staged();
     attempt.restage_tables()?;
-    let manifest = seal_write(&attempt, writers, &window, state)?;
+    let manifest = seal_write(&attempt, writers, &window, state, seal_saved(store, budget))?;
     let staged_bytes = window.staged_bytes();
     drop(window);
     clock.written();
@@ -893,11 +893,19 @@ fn seal_stage(
     Err(crate::Error::Bound("registered window ticks"))
 }
 
+fn seal_saved<'seal>(store: &'seal Store, budget: &'seal Arc<ByteBudget>) -> SavedRecording<'seal> {
+    SavedRecording {
+        root: store.root(),
+        budget,
+    }
+}
+
 fn seal_write(
     attempt: &RegisteredAttempt<'_>,
     writers: &Writers<'_>,
     window: &Window,
     state: &RunState,
+    saved: SavedRecording<'_>,
 ) -> Result<crate::Manifest> {
     let directory = attempt.original_directory();
     // Recovery accepts a minute with no derived tables, since deriving may fail, and it finishes
@@ -908,6 +916,7 @@ fn seal_write(
         &Derivation {
             window,
             pending: directory,
+            saved: Some(saved),
         },
     )?;
     let mut tables = writers.encoder.encode_into(window, directory)?;
@@ -994,7 +1003,13 @@ pub fn seal_first_window_overrun(
         reading = staged.read(&mut reader, &mut tick, &mut state.losses)?;
     }
     let window = staged.finish(&mut reader, &mut state.losses)?;
-    let manifest = seal_write(&attempt, &writers, &window, &state)?;
+    let manifest = seal_write(
+        &attempt,
+        &writers,
+        &window,
+        &state,
+        seal_saved(store, &budget),
+    )?;
     drop(window);
     seal_publish(attempt, &manifest, reader, &budget, &mut SealClock::start())
 }

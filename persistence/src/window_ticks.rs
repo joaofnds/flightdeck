@@ -1,7 +1,7 @@
 //! The ticks of a window the persister staged, as the columns the model's App rule reads, each
 //! beside the tick before it, so the persister derives a window's Apps from what it staged
 //! without reading back the tables it wrote.
-use collector::ring::ProcessCreation;
+use collector::ring::{ProcessCreation, RunIdentity};
 use model::apps::{Creation, Measurement, ProgramUnavailable, Stamp, Tick, Usage};
 use model::columns::{EventRow, ExitRow, Full, ProcessRow, Refusal, TickColumns};
 use model::programs::{Program, Programs};
@@ -32,6 +32,8 @@ pub struct WindowTicks {
     pair: [TickColumns; 2],
     /// The observation of each tick of `pair`, none where the columns hold no tick.
     observations: [Option<Observation>; 2],
+    /// The run of the tick read last, none where the columns hold no tick.
+    run: Option<RunIdentity>,
     /// The live processes of the tick being read, before they are put in pid order.
     processes: Vec<ProcessRow>,
     /// The entry in the run's index of each program of the window being read, none until a
@@ -49,6 +51,7 @@ impl Default for WindowTicks {
                 TickColumns::new(processes, events),
             ],
             observations: [None; 2],
+            run: None,
             processes: Vec::with_capacity(PROCESSES_MAX),
             entries: vec![None; owned_identity::PROGRAMS_MAX],
         }
@@ -79,6 +82,45 @@ impl WindowTicks {
             columns.clear();
         }
         self.observations = [None; 2];
+        self.run = None;
+    }
+
+    /// Whether the tick read last is the one `window` follows. A run's windows are saved in order,
+    /// so any tick read before the window's first of the same run is the newest before it.
+    #[must_use]
+    pub fn follows(&self, window: &Window) -> bool {
+        let Some(first) = window.ticks.first() else {
+            return false;
+        };
+
+        self.run == Some(window.identity.run)
+            && self.observations[1]
+                .is_some_and(|last| last.publication < first.observation.publication)
+    }
+
+    /// Makes the tick `read` fills the tick read last, so the next tick takes its rates from it as
+    /// it would had this derivation read that tick itself. The reader cleared these ticks first, so
+    /// a refusal leaves no tick.
+    pub fn seed(
+        &mut self,
+        window: &Window,
+        before: &SeedTick,
+        read: impl FnOnce(&mut TickColumns) -> Result<()>,
+    ) -> Result<()> {
+        assert!(self.run.is_none());
+        let columns = &mut self.pair[1];
+        columns.start(Stamp {
+            recording: window.identity.run.recording.0,
+            boot: window.identity.run.boot.0,
+            run: window.identity.run.run.0,
+            tick: before.run_tick,
+            continuous_ns: before.observation.continuous_ns,
+        });
+        read(columns)?;
+        columns.finish();
+        self.observations = [None, Some(before.observation)];
+
+        Ok(())
     }
 
     fn read_window(
@@ -109,6 +151,7 @@ impl WindowTicks {
             columns.finish();
             self.pair.swap(0, 1);
             self.observations = [self.observations[1], Some(tick.observation)];
+            self.run = Some(window.identity.run);
 
             consume(&WindowTick {
                 observation: tick.observation,
@@ -122,6 +165,12 @@ impl WindowTicks {
         }
         Ok(())
     }
+}
+
+/// A saved tick to seed a derivation with.
+pub struct SeedTick {
+    pub observation: Observation,
+    pub run_tick: u64,
 }
 
 /// The run's index of programs, and where each program of the window lies in it.

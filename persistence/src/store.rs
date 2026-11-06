@@ -43,7 +43,6 @@ mod event_table;
 mod tests;
 
 pub struct Store {
-    #[cfg(test)]
     root: PathBuf,
     directory: private::PrivateDirectory,
     recording: Identity,
@@ -100,7 +99,6 @@ impl Store {
         };
         directory.full_sync()?;
         Ok(Self {
-            #[cfg(test)]
             root: root.to_owned(),
             directory,
             recording,
@@ -109,7 +107,6 @@ impl Store {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }

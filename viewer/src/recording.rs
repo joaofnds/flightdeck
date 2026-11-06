@@ -329,7 +329,7 @@ fn ordered<T, K: Ord>(
 mod tests;
 
 #[cfg(test)]
-pub(crate) use tests::sealed_system_minute;
+pub(crate) use tests::{damage_table_file, sealed_system_minute, system_ring};
 
 #[cfg(test)]
 #[path = "recording/ticks_input_tests.rs"]

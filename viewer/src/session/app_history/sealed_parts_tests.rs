@@ -150,29 +150,256 @@ fn a_window_keeps_the_facts_of_each_second_for_an_app_that_ran_at_none() {
 }
 
 #[test]
-fn a_window_derived_after_a_restart_keeps_no_rates_for_its_first_observation() {
-    // Goal: a derivation that did not derive the minute before a window gives the window's
-    // first observation no rates, where a replay of both minutes takes them from that minute,
-    // since the persister reads no sealed minute back.
-    // Method: seal run ticks 59 and 60 in two minutes, each through a derivation of its own as
-    // a restarted persister seals them, and compare the parts of both ticks with a replay's.
+fn a_window_derived_after_a_restart_keeps_what_a_derivation_that_stayed_up_keeps() {
+    // Goal: restarting only the persister changes no saved App rate, since the minute before a
+    // window is on disk whichever derivation saved it.
+    // Method: seal run ticks 58 and 59 in one minute and tick 60 in the next, each minute through
+    // a derivation of its own as a restarted persister seals them, and compare the parts of every
+    // tick with a replay's. Two ticks in the first minute show which of them the second reads.
     let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(59);
+    fixture.start_at_run_tick(58);
+    fixture.publish_with_system_rows(1058);
     fixture.publish_with_system_rows(1059);
     fixture.publish_with_system_rows(1060);
     fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
     fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
     let session = Session::open(&fixture.root).unwrap();
     let samples = replayed_samples(&session, 1060);
-    let keys = app_keys(&samples[1]);
-    let replayed = replayed_parts(&samples, &keys[..1]).remove(0);
+    let keys = app_keys(&samples[2]);
 
     let kept = kept_parts(&session, 1060, &keys[0]);
 
-    assert_eq!(kept.len(), 2);
-    assert_eq!(kept[0], replayed[0]);
-    assert_eq!(kept[1].paging["previous"], Value::Null);
-    assert_ne!(replayed[1].paging["previous"], Value::Null);
+    assert_eq!(kept.len(), 3);
+    assert_ne!(kept[2].paging["previous"], Value::Null);
+    assert_eq!(vec![kept], replayed_parts(&samples, &keys[..1]));
+}
+
+/// Seals what `publish` publishes as minute 0 and what `publish_next` publishes as minute 1, each
+/// through a derivation of its own, as a persister restarted between them seals them.
+fn sealed_across_a_restart(
+    fixture: &mut Fixture,
+    publish: impl FnOnce(&mut Fixture),
+    publish_next: impl FnOnce(&mut Fixture),
+) {
+    fixture.start_at_run_tick(59);
+    publish(fixture);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    publish_next(fixture);
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+}
+
+/// The parts kept of each App of the replay's last second, and those the replay gives.
+fn kept_and_replayed(fixture: &Fixture, second: u64) -> (Vec<Vec<Shown>>, Vec<Vec<Shown>>) {
+    let session = Session::open(&fixture.root).unwrap();
+    let samples = replayed_samples(&session, second);
+    let keys = app_keys(samples.last().unwrap());
+    let kept = keys
+        .iter()
+        .map(|key| kept_parts(&session, second, key))
+        .collect();
+
+    (kept, replayed_parts(&samples, &keys))
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_that_replaced_a_pid() {
+    // Goal: a pid another process took between two minutes bridges no rate across a restart, as it
+    // bridges none in a replay.
+    // Method: publish a pid in one minute and a new process on that pid in the next, restart
+    // between them, and compare what is kept with the replay.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+    let worker = || named::member(7, b"worker", b"/A.app", usage);
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| named::publish(fixture, 0, &[worker()]),
+        |fixture| {
+            let mut replaced = worker();
+            replaced.version = 2;
+            named::publish(fixture, 1, &[replaced]);
+        },
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert!(!kept.is_empty());
+    assert_ne!(kept[0][1].paging["previous"], Value::Null);
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_that_exited() {
+    // Goal: a process seen only in its exit keeps the state a replay gives across a restart.
+    // Method: publish a process and its exit in the last tick of a minute and the process alone in
+    // the next tick, restart between them, and compare what is kept with the replay.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+    let helper = || named::member(8, b"helper", b"/A.app", usage);
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| {
+            let mut exited = helper();
+            exited.exited = true;
+            named::publish(fixture, 0, &[helper(), exited]);
+        },
+        |fixture| named::publish(fixture, 1, &[helper()]),
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert!(!kept.is_empty());
+    assert_ne!(kept[0][1].paging["previous"], Value::Null);
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_that_used_the_gpu() {
+    // Goal: GPU time is read back with the rest of a saved tick, so a restart keeps its rate.
+    // Method: publish a process with GPU time on each side of a boundary, restart between them,
+    // and compare what is kept with the replay.
+    let mut fixture = Fixture::new();
+    crate::recording::system_ring(&mut fixture);
+    let usage = usage();
+    let renderer = |gpu_ns| {
+        let mut member = named::member(9, b"renderer", b"/A.app", usage);
+        member.gpu_ns = Some(gpu_ns);
+        member
+    };
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| named::publish(fixture, 0, &[renderer(1_000)]),
+        |fixture| named::publish(fixture, 1, &[renderer(5_000)]),
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert_ne!(kept[0][1].paging["previous"], Value::Null);
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_whose_program_changed() {
+    // Goal: an exec between two minutes reads across a restart as it reads in a replay.
+    // Method: publish a tick with an exec on each side of the boundary, restart between them, and
+    // compare what is kept with the replay.
+    let mut fixture = Fixture::new();
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| fixture.publish(1059),
+        |fixture| fixture.publish(1060),
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1060);
+    assert!(!kept.is_empty());
+    assert_ne!(kept[0][1].paging["previous"], Value::Null);
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_bridges_no_missed_tick() {
+    // Goal: the minute before gives no rate across a tick nobody read, restarted or not. A replay
+    // names the reading before and calls its rates unavailable, where a saved part names none, so
+    // a derivation that stayed up differs from a replay in that one field too.
+    // Method: publish run ticks 59 and 61 either side of the boundary, restart between them, and
+    // compare tick 61's parts with the replay's with that field set aside.
+    let mut fixture = Fixture::new();
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| fixture.publish_with_system_rows(1059),
+        |fixture| {
+            fixture.skip_run_ticks(1);
+            fixture.publish_with_system_rows(1061);
+        },
+    );
+
+    let (mut kept, mut replayed) = kept_and_replayed(&fixture, 1061);
+    assert_eq!(kept[0][1].paging["previous"], Value::Null);
+    for part in kept.iter_mut().chain(&mut replayed).flatten() {
+        part.paging["previous"] = Value::Null;
+        part.detail["previous"] = Value::Null;
+    }
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_saved_minute_that_does_not_read_costs_the_next_its_derived_tables_and_nothing_more() {
+    // Goal: damage in the minute a restart reads back stops no save. The next window is saved with
+    // no derived tables for a reader to rebuild or refuse, and the window after it derives again.
+    // Method: save a minute, damage its processes, restart, and save two more minutes.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    let saved = Session::open(&fixture.root).unwrap().windows[0].clone();
+    let processes = fixture
+        .root
+        .join(&saved.data_directory)
+        .join("processes.parquet");
+    let bytes = std::fs::read(&processes).unwrap();
+    std::fs::write(&processes, b"damaged").unwrap();
+    let derivation = persistence::sealed_apps::SealedApps::default();
+    fixture.publish_with_system_rows(1060);
+
+    fixture.seal_minute_derived(1, &derivation);
+
+    let mut session = crate::LiveSession::open(&fixture.root).unwrap();
+    session.select(1060, 0).unwrap();
+    let read_with_damage = session.app_history(KeyKind::Bundle, b"/Apps/Current.app");
+    drop(session);
+    std::fs::write(&processes, bytes).unwrap();
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(1120);
+    fixture.publish_with_system_rows(1121);
+    fixture.seal_minute_derived(2, &derivation);
+    let windows = Session::open(&fixture.root).unwrap().windows;
+    let derived =
+        |window: &persistence::Manifest| window.tables.iter().any(|table| table.name == APP_PARTS);
+    assert!(matches!(read_with_damage, Err(Error::Bound(_))));
+    assert_eq!(windows.len(), 3);
+    assert!(derived(&windows[0]));
+    assert!(!derived(&windows[1]));
+    assert!(derived(&windows[2]));
+}
+
+#[test]
+fn a_saved_minute_of_an_identity_version_this_build_does_not_read_gives_the_next_no_rates() {
+    // Goal: rows a restart reads back pass the checks a replay of them passes, so a minute a replay
+    // refuses costs the next window its derived tables rather than lending it rates.
+    // Method: save a minute, rewrite its processes to a later identity version, restart, and save
+    // the next minute.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    let saved = Session::open(&fixture.root).unwrap().windows[0].clone();
+    let processes = fixture
+        .root
+        .join(&saved.data_directory)
+        .join("processes.parquet");
+    crate::recording::damage_table_file(&processes, |mut frame| {
+        let versions = vec![persistence::schema::IDENTITY_VERSION + 1; frame.height()];
+        frame
+            .replace(
+                "identity_version",
+                Column::new("identity_version".into(), versions),
+            )
+            .unwrap();
+        frame
+    });
+    fixture.publish_with_system_rows(1060);
+
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+
+    let windows = Session::open(&fixture.root).unwrap().windows;
+    assert_eq!(windows.len(), 2);
+    assert!(
+        !windows[1]
+            .tables
+            .iter()
+            .any(|table| table.name == APP_PARTS)
+    );
 }
 
 #[test]
@@ -201,6 +428,38 @@ fn a_window_takes_the_minute_before_from_the_derivation_that_sealed_it() {
     assert_eq!(kept.len(), 2);
     assert_ne!(kept[1].paging["previous"], Value::Null);
     assert_eq!(vec![kept], replayed_parts(&replayed, &keys[..1]));
+}
+
+#[test]
+fn a_derivation_that_last_read_another_run_takes_the_minute_before_from_the_windows_own_run() {
+    // Goal: rates never cross a change of run or boot, so a persister that goes on to another
+    // run's window takes the tick before from that window's run.
+    // Method: seal a minute of a run through one derivation, then ticks 59 and 60 of the run after
+    // it, the first through a derivation of its own and the second through the first derivation,
+    // and compare the parts of tick 60 with those a replay gives.
+    let derivation = persistence::sealed_apps::SealedApps::default();
+    let mut fixture = Fixture::registered();
+    fixture.publish_with_system_rows(1000);
+    fixture.seal_minute_derived(0, &derivation);
+    let mut next = Fixture::new_mode(true, 2, Some(&fixture));
+    next.start_at_run_tick(59);
+    next.publish_with_system_rows(1059);
+    next.publish_with_system_rows(1060);
+    next.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    next.seal_minute_derived(1, &derivation);
+    let session = Session::open(&next.root).unwrap();
+    let keys = app_keys(replayed_samples(&session, 1060).last().unwrap());
+
+    let kept = kept_parts(&session, 1060, &keys[0]);
+
+    let newest = kept.last().unwrap();
+    let replayed = replayed_samples_ending_at(&session, newest.selected);
+    assert_ne!(newest.paging["previous"], Value::Null);
+    let shown = replayed_parts(&replayed, &keys[..1]).remove(0);
+    assert_eq!(
+        shown.iter().find(|shown| shown.selected == newest.selected),
+        Some(newest),
+    );
 }
 
 #[test]
@@ -506,10 +765,17 @@ fn replayed_samples(session: &Session, second: u64) -> Vec<Sample> {
             Ok(())
         })
         .unwrap();
+
+    replayed_samples_ending_at(session, selected.unwrap())
+}
+
+/// The samples a replay of the saved minutes up to the observation `selected` gives, in
+/// publication order.
+fn replayed_samples_ending_at(session: &Session, selected: Observation) -> Vec<Sample> {
     let mut replayed = Vec::new();
     session
         .visit_app_attribution(
-            &crate::live_app_response::Selected::ending_at(selected.unwrap()).unwrap(),
+            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
             |_observation| Ok(false),
             |frame, previous, _windows| {
                 let mut sample = None;

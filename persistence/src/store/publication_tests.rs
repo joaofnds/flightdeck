@@ -1022,6 +1022,7 @@ fn write_derivatives(attempt: &RegisteredAttempt<'_>, fixture: &Fixture, manifes
         .derive(&crate::worker::Derivation {
             window: &window,
             pending: &PrivateDirectory::open(&derived).unwrap(),
+            saved: None,
         })
         .unwrap();
     for table in &tables {

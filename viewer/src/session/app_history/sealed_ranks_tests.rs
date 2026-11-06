@@ -74,6 +74,27 @@ fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before()
 }
 
 #[test]
+fn a_window_derived_after_a_restart_keeps_the_ranks_of_a_derivation_that_stayed_up() {
+    // Goal: restarting only the persister changes no saved ranking at the boundary between minutes.
+    // Method: seal run ticks 59 and 60 in two minutes, each through a derivation of its own, and
+    // compare tick 60's ranks with those a replay of both minutes gives.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.publish_with_system_rows(1060);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+    let session = Session::open(&fixture.root).unwrap();
+
+    let kept = kept_ranks(&session, 1060);
+
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[1].metrics[0].metric, Metric::Cpu);
+    assert!(!kept[1].metrics[0].entries.is_empty());
+    assert_eq!(kept, replayed_ranks(&session, &kept[1]));
+}
+
+#[test]
 fn a_window_whose_parts_fail_to_write_keeps_its_ranks() {
     // Goal: a window whose App parts the persister fails to write keeps its ranks, and seals
     // without the parts' table or its file, so the replay gives its parts.

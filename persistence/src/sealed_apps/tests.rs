@@ -51,6 +51,31 @@ fn keeps_a_row_for_each_ranking_that_ranks_no_app() {
 }
 
 #[test]
+fn a_derivation_goes_back_to_the_saved_minute_unless_it_read_the_tick_before() {
+    // Goal: a derivation takes a window's first rates from what it read only where that is the
+    // tick before, so another run's tick or a later one sends it to the saved minute instead.
+    // Method: read a window of a run, and ask about that run's next window, about an earlier one,
+    // and about another run's.
+    let mut state = state();
+    let mut read_window = legacy_window(0);
+    stage_legacy(&mut read_window, 5, &[process(3, 30)], &[]);
+    read(&mut state, &read_window).unwrap();
+    let staged_at = |publication| {
+        let mut window = legacy_window(1);
+        stage_legacy(&mut window, publication, &[process(3, 30)], &[]);
+        window
+    };
+    let mut another_run = staged_at(6);
+    another_run.identity.run.run = collector::ring::Identity([77, 78]);
+
+    assert!(state.ticks.follows(&staged_at(6)));
+    assert!(!state.ticks.follows(&staged_at(5)));
+    assert!(!state.ticks.follows(&another_run));
+    state.ticks.clear();
+    assert!(!state.ticks.follows(&staged_at(6)));
+}
+
+#[test]
 fn takes_no_rates_for_the_first_tick_after_a_refused_window() {
     // Goal: a refused window leaves no tick for the next window's first to take rates from.
     // Method: read a window whose second tick holds two processes of one pid, then a window
@@ -68,6 +93,58 @@ fn takes_no_rates_for_the_first_tick_after_a_refused_window() {
     assert!(matches!(error, Error::Bound("window tick pid order")));
     assert_eq!(state.window.ticks.len(), 1);
     assert_eq!(state.window.ticks[0].previous, None);
+}
+
+#[test]
+fn a_full_index_refuses_one_window_and_not_the_next() {
+    // Goal: a run that fills the index of programs loses the derived tables of one window and not
+    // of every window after it.
+    // Method: derive a window, fill the index, then derive two windows that name a program the
+    // index has not met.
+    let mut ring = Ring::new();
+    let met = ring.intern(b"met", None);
+    let unmet = ring.intern(b"unmet", None);
+    ring.publish(
+        0,
+        &[process(1, 10)],
+        &[identity(1, UsageAvailability::Measured, met)],
+        &[],
+        &[],
+    );
+    let first = ring.stage(0);
+    let unmet_identity = [identity(1, UsageAvailability::Measured, unmet)];
+    ring.publish(1, &[process(1, 11)], &unmet_identity, &[], &[]);
+    let refused = ring.stage(1);
+    ring.publish(2, &[process(1, 12)], &unmet_identity, &[], &[]);
+    let next = ring.stage(2);
+    let (pending, pending_next) = (Pending::new(), Pending::new());
+    let apps = SealedApps::default();
+    apps.derive(&derivation(&first, &pending.directory()))
+        .unwrap();
+    let mut filler = 0_u32;
+    while apps
+        .state
+        .borrow_mut()
+        .programs
+        .intern(filler_program(&filler.to_le_bytes()))
+        .is_some()
+    {
+        filler += 1;
+    }
+
+    let directory = pending_next.directory();
+    let error = apps.derive(&derivation(&refused, &directory)).unwrap_err();
+    let derived = apps.derive(&derivation(&next, &directory));
+
+    assert!(matches!(error, Error::Bound("window program index")));
+    assert_eq!(derived.unwrap().len(), 2);
+}
+
+fn filler_program(name: &[u8]) -> model::programs::Program<'_> {
+    model::programs::Program {
+        executable_name: name,
+        app_path: None,
+    }
 }
 
 #[test]
@@ -172,7 +249,11 @@ fn derivation<'seal>(
     window: &'seal Window,
     pending: &'seal collector::recording::private::PrivateDirectory,
 ) -> Derivation<'seal> {
-    Derivation { window, pending }
+    Derivation {
+        window,
+        pending,
+        saved: None,
+    }
 }
 
 /// A pending directory of its own, removed with it.

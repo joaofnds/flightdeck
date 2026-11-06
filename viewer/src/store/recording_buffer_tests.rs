@@ -34,6 +34,24 @@ fn reloading_reuses_app_decode_storage_without_retaining_previous_rows() {
 }
 
 #[test]
+fn a_store_shows_the_rates_of_a_minutes_first_second_after_a_restart() {
+    // Goal: a persister restarted between two minutes costs the store's route no App rate.
+    // Method: seal run ticks 59 and 60 in two minutes, each through a derivation of its own, and
+    // load them as a store does.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.publish_with_system_rows(1060);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+
+    let seconds = capture(&fixture, &mut LoadBuffers::default());
+
+    assert_eq!(seconds.len(), 2);
+    assert_eq!(seconds[1].2.elapsed_ns, Some(1_000_000_000));
+}
+
+#[test]
 fn decoder_storage_does_not_carry_rows_or_rates_between_recordings() {
     // Goal: retained decode capacity cannot introduce facts from a previous recording.
     // Method: reuse it across two sealed sources with different identities and wall times.

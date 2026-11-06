@@ -225,6 +225,7 @@ pub fn publish_window_derived(
         tables.extend(derive.derive(&Derivation {
             window,
             pending: &directory,
+            saved: None,
         })?);
         Ok(())
     })

@@ -1610,6 +1610,7 @@ fn row_publication_make_derivatives(fixture: &Fixture) {
         .derive(&crate::worker::Derivation {
             window: &window,
             pending: &PrivateDirectory::open(&directory).unwrap(),
+            saved: None,
         })
         .unwrap();
     assert_eq!(tables.len(), crate::schema::DERIVED_TABLES.len());

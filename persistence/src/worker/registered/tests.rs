@@ -656,7 +656,8 @@ impl Recording {
             encoder: Encoder,
             derive: &derive,
         };
-        let manifest = super::seal_write(&attempt, &writers, &window, &state).unwrap();
+        let saved = super::seal_saved(store, &budget);
+        let manifest = super::seal_write(&attempt, &writers, &window, &state, saved).unwrap();
         drop(window);
         if Self::interrupted_seal_tables(&pending, interruption) {
             return;
@@ -2806,7 +2807,8 @@ fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
         }
     }
     let window = staged.finish(&mut reader, &mut state.losses).unwrap();
-    let manifest = super::seal_write(&attempt, &writers, &window, &state).unwrap();
+    let saved = super::seal_saved(&store, &budget);
+    let manifest = super::seal_write(&attempt, &writers, &window, &state, saved).unwrap();
     drop(window);
     let mut clock = super::SealClock::start();
     super::seal_publish(attempt, &manifest, reader, &budget, &mut clock).unwrap();
@@ -2848,7 +2850,8 @@ fn staged_first_window<'store>(
     reader.seek_event(input.losses.event_start).unwrap();
     let window =
         super::seal_stage(&attempt, &mut reader, identity, &[], &mut state, budget).unwrap();
-    let manifest = super::seal_write(&attempt, &writers, &window, &state).unwrap();
+    let saved = super::seal_saved(store, budget);
+    let manifest = super::seal_write(&attempt, &writers, &window, &state, saved).unwrap();
 
     (attempt, manifest, reader)
 }

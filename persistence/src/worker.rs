@@ -2,6 +2,7 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,16 @@ pub struct Derivation<'seal> {
     pub window: &'seal Window,
     /// The directory the window's tables go in, which the persister's own may reach only after.
     pub pending: &'seal collector::recording::private::PrivateDirectory,
+    /// The recording the window joins, whose saved minute before it gives the first tick its
+    /// rates where the derivation did not read that minute itself, none where nothing is saved.
+    pub saved: Option<SavedRecording<'seal>>,
+}
+
+/// Where a derivation reads what the recording has saved.
+#[derive(Clone, Copy)]
+pub struct SavedRecording<'seal> {
+    pub root: &'seal Path,
+    pub budget: &'seal Arc<crate::resources::ByteBudget>,
 }
 
 /// What writes a window's tables: the persister's own and those derived from them.
@@ -78,7 +89,7 @@ pub fn seal_held_windows(
     let mut next = if state.loaded {
         state.next_publication
     } else {
-        let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1 << 28));
+        let budget = Arc::new(crate::resources::ByteBudget::new(1 << 28));
         store
             .source_frontier(
                 &registered.identity,
@@ -774,7 +785,7 @@ mod tests {
         }
 
         fn saved_windows(&self, run: &RunIdentity) -> io::Result<Vec<Manifest>> {
-            let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1 << 28));
+            let budget = Arc::new(crate::resources::ByteBudget::new(1 << 28));
             crate::canonical::catalog::Catalog::open(self.root(), &budget)?
                 .windows_of(run, &mut crate::canonical::ReadWork::default())
         }
@@ -1034,7 +1045,7 @@ mod tests {
         root: &Path,
         manifest: &Manifest,
     ) {
-        let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(128 * 1024 * 1024));
+        let budget = Arc::new(crate::resources::ByteBudget::new(128 * 1024 * 1024));
         let events = connection.event_source(root, manifest, &budget).unwrap();
         let frame = connection
             .query(&format!(

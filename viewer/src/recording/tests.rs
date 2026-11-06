@@ -1695,7 +1695,7 @@ fn damage_table(fixture: &Fixture, name: &str, damage: fn(DataFrame) -> DataFram
     }
 }
 
-fn damage_table_file(path: &std::path::Path, damage: fn(DataFrame) -> DataFrame) {
+pub(crate) fn damage_table_file(path: &std::path::Path, damage: fn(DataFrame) -> DataFrame) {
     let frame = persistence::engine::scan(path).unwrap().collect().unwrap();
     let mut damaged = damage(frame);
 
@@ -1733,7 +1733,7 @@ fn null(name: &str, data_type: DataType) -> Expr {
 
 /// Moves `fixture` onto a ring of its run, as `wide_ring` makes it, that also carries system
 /// readings, battery readings and disks.
-fn system_ring(fixture: &mut Fixture) {
+pub(crate) fn system_ring(fixture: &mut Fixture) {
     wide_ring(fixture, |place, shape, identity| {
         let capacity = DictionaryCapacity {
             entries: 4,

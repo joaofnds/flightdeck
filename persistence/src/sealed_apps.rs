@@ -16,6 +16,7 @@ use crate::worker::{Derivation, Derive};
 use crate::{Error, Observation, Result, TableManifest};
 
 mod parts;
+mod predecessor;
 mod ranks;
 
 /// The run's programs the index holds, as many as the collector's dictionary of a run holds.
@@ -74,6 +75,7 @@ impl Default for SealedApps {
 impl Derive for SealedApps {
     fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
         let mut state = self.state.borrow_mut();
+        state.seed(derivation)?;
         state.read(derivation.window)?;
 
         let mut tables = vec![ranks::encode(
@@ -100,8 +102,29 @@ struct State {
 }
 
 impl State {
-    /// Derives the Apps of each tick of the derivation's window. A refused window starts the
-    /// index again, so a full index refuses one window and not every one after it.
+    /// Puts the tick saved before the window where its first tick looks for its rates, unless this
+    /// derivation read that tick itself. Whatever came before no longer follows, so the index
+    /// starts again, and a full index refuses one window and not every one after it. A refusal
+    /// lets the window go on being saved with no derived tables for a reader to rebuild.
+    fn seed(&mut self, derivation: &Derivation<'_>) -> Result<()> {
+        if self.ticks.follows(derivation.window) {
+            return Ok(());
+        }
+        self.ticks.clear();
+        self.programs = Programs::new(PROGRAMS_CAPACITY);
+        let Some(saved) = derivation.saved else {
+            return Ok(());
+        };
+
+        predecessor::seed(
+            &mut self.ticks,
+            &mut self.programs,
+            derivation.window,
+            saved,
+        )
+    }
+
+    /// Derives the Apps of each tick of the derivation's window.
     fn read(&mut self, sealing: &crate::Window) -> Result<()> {
         if sealing.ticks.is_empty() {
             return Err(Error::Bound("sealed Apps ticks"));
@@ -115,17 +138,12 @@ impl State {
             ranks,
             window,
         } = self;
-        let read = ticks.read(sealing, programs, |tick| {
+        ticks.read(sealing, programs, |tick| {
             apps.derive(tick.programs, &tick.previous, &tick.selected);
             ranks.rank(tick.programs, apps.totals(), apps.elapsed_ns());
             window.push(tick, apps, ranks);
             Ok(())
-        });
-        if read.is_err() {
-            *programs = Programs::new(PROGRAMS_CAPACITY);
-        }
-
-        read
+        })
     }
 }
 
