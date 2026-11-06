@@ -625,6 +625,28 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_window_holding_a_stray_file() {
+        // Goal: the verifier reads a window's files only after checking them, as every reader does.
+        // Method: seal the window, put a private file beside its tables, and run the real verifier.
+        let recording = Recording::new();
+        let reference = recording.0.join("source.reference");
+        let saved = recording.encode_identity(&reference, |_| {});
+        let directory = recording.0.join(&saved.data_directory);
+        private::atomic_write(&directory, "stray", b"stray").unwrap();
+
+        let result = compare::run(&recording.0, &reference);
+
+        assert!(
+            matches!(
+                &result,
+                Err(persistence::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::InvalidData
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn detects_omitted_independent_event_identity() {
         // Goal: an event row gone from a saved window cannot pass independent source fidelity.
         // Method: seal the window, whose proof counts its events, then remove the row.

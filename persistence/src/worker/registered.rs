@@ -64,8 +64,11 @@ pub(super) fn persist_one(
         super::source_unavailable(registered, state, "source names no identity");
         return Ok(Progress::Unavailable);
     }
-    // Refused before the ring holds a reading, as a recording that could never be saved.
-    Limits::from_shape(&reader.shape())?;
+    // A source no window could hold stays unsaved, and the runs after it go on being saved.
+    if Limits::from_shape(&reader.shape()).is_err() {
+        super::source_unavailable(registered, state, "source too large to save");
+        return Ok(Progress::Unavailable);
+    }
     let mut newest = None;
     if super::persist_one_closed(&mut reader, &mut newest, registered.collector_pid, closed)? {
         reader.set_writer_gone();
@@ -186,7 +189,7 @@ fn persist_one_slot(
         return Ok(SlotTurn::Answered(Progress::Sealed));
     }
     if let Interrupted::Loss(run) = attempt {
-        return persist_one_slot_loss(store, registered, run, state, budget);
+        return persist_one_slot_loss(store, registered, &run, state, budget);
     }
     if store.abandon_empty_attempt(budget)? {
         return Ok(SlotTurn::Free);
@@ -206,7 +209,7 @@ fn persist_one_slot(
 fn persist_one_slot_loss(
     store: &Store,
     registered: &RegisteredRun,
-    run: RunIdentity,
+    run: &RunIdentity,
     state: &mut RunState,
     budget: &Arc<ByteBudget>,
 ) -> Result<SlotTurn> {
@@ -218,7 +221,7 @@ fn persist_one_slot_loss(
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
         Err(error) => return Err(error.into()),
     }
-    if run != registered.identity {
+    if *run != registered.identity {
         state.deferred = true;
         return Ok(SlotTurn::Answered(Progress::Deferred));
     }
@@ -425,6 +428,7 @@ fn seal_terminal(
     let losses = manifest.recovery.losses;
     let lost = losses.publications != 0 || losses.events != 0;
     if manifest.recovery.rows == 0 && lost && !losses.unknown {
+        // The report subtracts this mark from the next, so it counts this proof as publishing.
         clock.proved();
         finish_loss(attempt.prove_loss(reader, budget)?)?;
     } else {

@@ -6,6 +6,7 @@ mod engine_fixture;
 mod tests {
     use super::engine_fixture;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +21,8 @@ mod tests {
     use persistence::{Manifest, Store, TableManifest};
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
+    /// A second inside the window `saved_window` saves.
+    const ELOOP: i32 = 62;
     /// Held by each test for as long as its recording lives, shared with the other tests or,
     /// by a test that starts a child process, alone. A child holds a copy of every descriptor
     /// of this process until it runs its program, the recordings' locks included, so a test
@@ -202,9 +205,9 @@ mod tests {
     }
 
     #[test]
-    fn a_window_reopens_with_the_app_ranks_it_derived_when_it_sealed() {
-        // Goal: a window seals the table it derives beside its own, and a reader finds it.
-        // Method: save a window that lists app ranks after its tables, then read its proof.
+    fn a_window_reopens_with_the_app_ranks_its_proof_lists() {
+        // Goal: a reader finds a derived table a window's proof lists beside the window's own.
+        // Method: publish a window that lists app ranks after its tables, then read its proof.
         let recording = Recording::new();
 
         let saved = saved_window(&recording, &NamedTables(&["app_ranks"]));
@@ -219,11 +222,10 @@ mod tests {
     }
 
     #[test]
-    fn a_window_reopens_with_the_app_parts_it_derived_when_it_sealed() {
-        // Goal: a window seals every App's part of its observations beside its ranks, and a reader
-        // finds both.
-        // Method: save a window that lists app ranks and app parts after its tables, then read its
-        // proof.
+    fn a_window_reopens_with_the_app_parts_its_proof_lists() {
+        // Goal: a reader finds every App's part of a window's observations beside its ranks.
+        // Method: publish a window that lists app ranks and app parts after its tables, then read
+        // its proof.
         let recording = Recording::new();
 
         let saved = saved_window(&recording, &NamedTables(&["app_ranks", "app_parts"]));
@@ -277,6 +279,55 @@ mod tests {
     }
 
     #[test]
+    fn a_copied_proof_is_refused_by_a_read_and_a_reread() {
+        // Goal: a file with a proof's bytes cannot stand in for the proof the catalog links to.
+        // Method: replace a window's proof with a private copy of it, then read and reread it.
+        let recording = Recording::new();
+        let saved = saved_window(&recording, &NamedTables(&[]));
+        let proof = persistence::commitment_path(&recording.path, &saved);
+        let bytes = fs::read(&proof).unwrap();
+        fs::remove_file(&proof).unwrap();
+        collector::recording::private::open_private_file(&proof, true)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+
+        let read = persistence::read_committed(&recording.path, &proof);
+        let reread = persistence::reread_committed(&recording.path, &proof);
+
+        assert_eq!(std::io::ErrorKind::InvalidData, read.err().unwrap().kind());
+        assert_eq!(
+            std::io::ErrorKind::InvalidData,
+            reread.err().unwrap().kind()
+        );
+    }
+
+    macro_rules! a_query_past_the_clock_is_refused {
+        ($name:ident, $second:expr) => {
+            #[test]
+            fn $name() {
+                // Goal: a second whose nanoseconds no clock can hold is refused, not an overflow.
+                // Method: query it over a recording that holds a window.
+                let recording = Recording::new();
+                saved_window(&recording, &NamedTables(&[]));
+
+                let result = persistence::query::processes_at_second(&recording.path, $second);
+
+                assert!(matches!(result, Err(persistence::Error::Bound("second"))));
+            }
+        };
+    }
+
+    a_query_past_the_clock_is_refused!(
+        a_query_of_the_last_second_starting_in_the_clock_is_refused,
+        u64::MAX / 1_000_000_000
+    );
+    a_query_past_the_clock_is_refused!(
+        a_query_of_the_first_second_starting_past_the_clock_is_refused,
+        u64::MAX / 1_000_000_000 + 1
+    );
+
+    #[test]
     fn rereading_a_removed_commitment_reports_it_missing() {
         // Goal: a window evicted while a reader holds it open stops being readable.
         // Method: save a window, remove its proof, and reread it.
@@ -304,7 +355,7 @@ mod tests {
         let result = persistence::reread_committed(&recording.path, &proof);
 
         fs::remove_file(copy).unwrap();
-        assert!(result.is_err());
+        assert_eq!(Some(ELOOP), result.err().unwrap().raw_os_error());
     }
 
     #[test]
@@ -392,7 +443,10 @@ mod tests {
         let result = Store::open(&link);
 
         fs::remove_file(&link).unwrap();
-        assert!(result.is_err());
+        assert_eq!(
+            std::io::ErrorKind::NotADirectory,
+            result.err().unwrap().kind()
+        );
     }
 
     #[test]
@@ -461,19 +515,19 @@ mod tests {
 
     #[test]
     #[ignore = "uses passwordless sudo to exercise actual second-user refusals on CI"]
-    fn another_user_cannot_read_pending_or_committed_recording_artifacts() {
+    fn another_user_cannot_read_saved_recording_artifacts() {
         // Goal: another unprivileged user cannot open any recording artifact.
-        // Method: attempt actual nobody reads of pending files and then committed metadata/data.
+        // Method: attempt actual nobody reads of everything a saved minute leaves.
         parquet_privacy(
             true,
-            "tests::another_user_cannot_read_pending_or_committed_recording_artifacts",
+            "tests::another_user_cannot_read_saved_recording_artifacts",
         );
     }
 
     #[test]
     fn real_parquet_artifacts_are_private_below_an_inheriting_acl() {
         // Goal: native encoder output stays private even under an otherwise permissive ACL.
-        // Method: encode in an isolated worker with umask077 and inspect pending and sealed files.
+        // Method: encode in an isolated worker with umask077 and inspect what it sealed.
         parquet_privacy(
             false,
             "tests::real_parquet_artifacts_are_private_below_an_inheriting_acl",

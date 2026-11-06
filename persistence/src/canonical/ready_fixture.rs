@@ -96,9 +96,15 @@ impl ReadyWindow {
     }
 
     /// Writes the proof of `manifest`, which has no publication or event lost, and gives the
-    /// manifest as a reader lists it. Nothing lists the window until `publish` links it.
+    /// manifest as a reader lists it. Nothing lists the window until `publish` links it, so a
+    /// second name beside the window stands for the catalog name a read asks its proof to have.
     pub fn prove(&self, manifest: Manifest) -> Result<Manifest> {
-        Ok(self.prove_metadata(manifest)?.0)
+        let manifest = self.prove_metadata(manifest)?.0;
+        fs::hard_link(
+            self.directory.join("metadata"),
+            self.directory.with_file_name("proof"),
+        )?;
+        Ok(manifest)
     }
 
     /// Writes the proof of `manifest` and links it where a reader of the recording finds it, from

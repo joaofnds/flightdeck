@@ -259,6 +259,24 @@ impl Catalog {
         Ok(page)
     }
 
+    /// The windows holding a reading in `second`, counted from the epoch. A second no clock can
+    /// hold is refused, as no window could hold a reading in it.
+    pub fn windows_at_second(
+        &self,
+        second: u64,
+        work: &mut ReadWork,
+    ) -> crate::Result<Vec<Manifest>> {
+        const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+        let first_ns = second
+            .checked_mul(NANOSECONDS_PER_SECOND)
+            .ok_or(crate::Error::Bound("second"))?;
+        let end_ns = first_ns
+            .checked_add(NANOSECONDS_PER_SECOND)
+            .ok_or(crate::Error::Bound("second"))?;
+
+        self.windows_in(first_ns, end_ns, work)
+    }
+
     /// The windows holding a reading with a clock from `first_ns` up to but not including `end_ns`,
     /// each once, in the order of their first reading in the range. It reads one proof for each,
     /// so what it costs follows the range and never what the recording holds around it.
@@ -424,9 +442,6 @@ impl Catalog {
         Err(crate::Error::Bound("catalog unknown pages"))
     }
 
-    /// Up to `objects_max` event objects, at most a page's worth, after the position a previous
-    /// page named. It reads one proof for each, and it needs no window and no registry to reach
-    /// them.
     /// The windows of `run`, newest first.
     pub fn windows_of(&self, run: &RunIdentity, work: &mut ReadWork) -> io::Result<Vec<Manifest>> {
         let mut windows = Vec::new();
@@ -493,6 +508,9 @@ impl Catalog {
         Ok(Some((manifest, directory)))
     }
 
+    /// Up to `objects_max` event objects, at most a page's worth, after the position a previous
+    /// page named. It reads one proof for each, and it needs no window and no registry to reach
+    /// them.
     pub fn event_objects_page(
         &self,
         after: Option<&EventObjectPosition>,

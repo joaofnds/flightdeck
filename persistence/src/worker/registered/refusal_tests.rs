@@ -405,6 +405,54 @@ fn a_ring_with_no_identity_is_a_source_the_worker_goes_on_without() {
 }
 
 #[test]
+fn a_source_too_large_to_save_is_one_the_worker_goes_on_without() {
+    // Goal: a run no window could hold stops nothing, so the runs after it go on being saved.
+    // Method: name a real ring with a section past the largest a window holds in the run the
+    // worker steps.
+    let recording = Recording::new();
+    let store = Store::open(&recording.root).unwrap();
+    let place = Place {
+        lock_path: recording.base.join("oversized.lock"),
+        name_prefix: format!(
+            "/fdo{:x}{:x}",
+            std::process::id(),
+            super::NEXT.fetch_add(1, Ordering::Relaxed)
+        ),
+    };
+    let run = RunIdentity {
+        recording: store.recording(),
+        run: Identity([40, 41]),
+        boot: Identity([42, 43]),
+    };
+    let shape = collector::ring::Shape {
+        cpu_capacity: 257,
+        ..super::shape()
+    };
+    let oversized = Writer::create_recording(&place, shape, &run, 0).unwrap();
+    let registered = RegisteredRun {
+        identity: run,
+        ring_name: oversized.name().to_owned(),
+        collector_pid: 0,
+    };
+    let derive = SealedApps::default();
+    let writers = Writers {
+        encoder: Encoder,
+        derive: &derive,
+    };
+
+    let progress = persist_one(
+        &store,
+        &writers,
+        &registered,
+        false,
+        &mut RunState::default(),
+    );
+
+    collector::ring::unlink_generation(oversized.name()).unwrap();
+    assert!(matches!(progress, Ok(Progress::Unavailable)));
+}
+
+#[test]
 fn a_run_of_another_recording_is_a_source_the_worker_goes_on_without() {
     // Goal: a registry entry from another recording stops nothing and saves nothing here.
     // Method: name another recording in the run the worker steps.

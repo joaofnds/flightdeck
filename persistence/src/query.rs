@@ -83,7 +83,6 @@ const CORE_STATE_COLUMNS_MAX: usize = 5;
 
 /// Errors preserve incomplete enumeration rather than returning a complete empty answer.
 pub fn processes_at_second(root: &Path, second: u64) -> Result<Second> {
-    const NS: u64 = 1_000_000_000;
     const CATALOG_BYTES_MAX: usize = 1 << 28;
     validate_root(root)?;
     collector::recording::private::verify_directory(root)?;
@@ -91,10 +90,7 @@ pub fn processes_at_second(root: &Path, second: u64) -> Result<Second> {
     let catalog = Catalog::open(root, &budget)?;
     let mut work = ReadWork::default();
     let mut result = Second::default();
-    let first_ns = second
-        .checked_mul(NS)
-        .ok_or(crate::Error::Bound("second"))?;
-    for manifest in catalog.windows_in(first_ns, first_ns + NS, &mut work)? {
+    for manifest in catalog.windows_at_second(second, &mut work)? {
         result
             .processes
             .extend(query_window(root, &manifest, second)?);

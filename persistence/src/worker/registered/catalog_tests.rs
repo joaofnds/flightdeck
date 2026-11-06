@@ -16,6 +16,27 @@ fn catalog_tests_two_saved_minutes() -> Recording {
     recording
 }
 
+#[test]
+fn a_query_of_a_second_refuses_a_window_holding_a_stray_file() {
+    // Goal: a query reads a window's files only after checking them, as every reader does.
+    // Method: query a saved second, put a private file in its window's directory and query the
+    // same second again, so the file is all that changed.
+    let recording = catalog_tests_two_saved_minutes();
+    let readable = crate::query::processes_at_second(&recording.root, 0);
+    let directory = recording
+        .root
+        .join(&recording.saved_manifests()[0].data_directory);
+    private::atomic_write(&directory, "stray", b"stray").unwrap();
+
+    let refused = crate::query::processes_at_second(&recording.root, 0);
+
+    assert!(readable.is_ok());
+    assert!(matches!(
+        refused,
+        Err(crate::Error::Io(error)) if error.kind() == ErrorKind::InvalidData
+    ));
+}
+
 fn catalog_tests_budget() -> Arc<ByteBudget> {
     Arc::new(ByteBudget::new(256 * 1024 * 1024))
 }

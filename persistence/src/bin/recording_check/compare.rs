@@ -340,15 +340,13 @@ fn inspect_row_kind(line: &str, source: &mut Reference) -> Result<()> {
 }
 
 fn discover(root: &Path, source: &Reference) -> Result<Vec<Manifest>> {
-    const NS: u64 = 1_000_000_000;
     let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(1 << 28));
     let catalog = persistence::canonical::catalog::Catalog::open(root, &budget)?;
     let mut work = persistence::canonical::ReadWork::default();
     let mut manifests = Vec::with_capacity(128);
     for second in &source.seconds {
         check_deadline(source.deadline)?;
-        let first_ns = second.checked_mul(NS).ok_or_else(|| bound("second"))?;
-        for manifest in catalog.windows_in(first_ns, first_ns + NS, &mut work)? {
+        for manifest in catalog.windows_at_second(*second, &mut work)? {
             if manifest.identity.run != source.identity || manifests.contains(&manifest) {
                 continue;
             }

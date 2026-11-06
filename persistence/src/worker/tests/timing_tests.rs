@@ -321,7 +321,8 @@ fn seals_a_window_without_its_derived_tables_when_deriving_fails() {
 
 #[test]
 fn refuses_a_persistence_shape_bound_before_waiting_on_an_empty_source() {
-    // Goal: avoiding reading buffers does not weaken the tighter persistence admission.
+    // Goal: avoiding reading buffers does not weaken the tighter persistence admission, and a run
+    // no window could hold is one the worker goes on without.
     // Method: create an empty ring above the process staging limit and run the actual worker.
     let root = Directory::new();
     let store = Store::open(&root.0).unwrap();
@@ -332,19 +333,12 @@ fn refuses_a_persistence_shape_bound_before_waiting_on_an_empty_source() {
         encoder: Encoder,
         derive: &Underived,
     };
+    let mut state = RunState::default();
 
-    let result = persist_one(
-        &store,
-        &writers,
-        &registered,
-        false,
-        &mut RunState::default(),
-    );
+    let result = persist_one(&store, &writers, &registered, false, &mut state);
 
-    assert!(matches!(
-        result,
-        Err(crate::Error::Bound("ring section capacity"))
-    ));
+    assert!(matches!(result, Ok(Progress::Unavailable)));
+    assert!(matches!(state.source, SourceState::Unavailable));
     assert!(store.saved_newest(&registered.identity).unwrap().is_none());
     drop(ring);
 }

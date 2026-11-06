@@ -428,8 +428,18 @@ impl Store {
     /// The marker's own open already checked the inode both names share, so the metadata name
     /// is checked without following it and without opening the inode a second time.
     fn validate_link(root: &Path, manifest: &Manifest, marker: &File) -> io::Result<()> {
-        let source = fs::symlink_metadata(root.join(&manifest.data_directory).join("metadata"))?;
         let target = marker.metadata()?;
+        // A window's proof is the one file its name in the catalog links to, so a proof no name
+        // links to is a copy, which the path a reader opened cannot tell apart. The catalog
+        // compares that link itself when it lists the window.
+        if registered_directory(&manifest.data_directory) {
+            if target.nlink() < 2 {
+                return Err(invalid("proof without its catalog link"));
+            }
+            return Ok(());
+        }
+
+        let source = fs::symlink_metadata(root.join(&manifest.data_directory).join("metadata"))?;
         if source.dev() != target.dev() {
             return Err(invalid("marker device mismatch"));
         }
