@@ -444,6 +444,35 @@ fn a_restart_takes_the_newest_minute_saved_before_a_window() {
 }
 
 #[test]
+fn a_restart_takes_its_rates_from_the_newest_minute_saved_before_it() {
+    // Goal: the first tick after a restart measures against the tick just before it, however many
+    // minutes were saved before that tick's.
+    // Method: save a minute and, after a stretch of missed ticks, another that ends in the tick
+    // before the third minute, restart, and compare what is kept of the third with the replay,
+    // which has a rate only against that newest tick.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+    let helper = || named::member(8, b"helper", b"/A.app", usage);
+    let before = persistence::sealed_apps::SealedApps::default();
+
+    fixture.start_at_run_tick(59);
+    named::publish(&mut fixture, 0, &[helper()]);
+    fixture.seal_minute_derived(0, &before);
+    fixture.skip_run_ticks(59);
+    named::publish(&mut fixture, 1, &[helper()]);
+    fixture.seal_minute_derived(1, &before);
+    named::publish(&mut fixture, 2, &[helper()]);
+    fixture.seal_minute_derived(2, &persistence::sealed_apps::SealedApps::default());
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1002);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept, replayed);
+    let parts = &kept[0];
+    let newest = &parts[parts.len() - 1];
+    assert_eq!(newest.detail["app"]["cpu_ns"]["measured_members"], json!(1));
+}
+
+#[test]
 fn a_restart_changes_nothing_for_a_process_that_exited() {
     // Goal: a process whose exit lies in the tick before a restart keeps the state a replay gives.
     // Method: publish a process and its exit in the last tick of a minute and the process alone in
