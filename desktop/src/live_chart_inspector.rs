@@ -199,17 +199,12 @@ impl LiveDashboard {
 
             visible_count += 1;
             let summary = &inspector.summaries[line_index];
-            let unit = line.unit.as_deref().unwrap_or(&panel.unit);
-            table = table.child(chart_data_row([
-                line.name.clone(),
+            table = table.child(chart_data_row(chart_data_cells(
+                panel,
+                line,
                 self.chart_line_reading(panel, line_index, index),
-                super::line_reading(panel, summary.mean, unit),
-                super::line_reading(panel, summary.maximum, unit),
-                summary
-                    .maximum_second
-                    .map_or_else(String::new, |second| crate::chart_axes::clock(second, true)),
-                format!("{} / {}", summary.available, summary.total),
-            ]));
+                summary,
+            )));
         }
         if visible_count == 0 {
             table = table.child("No visible series. Enable one in the chart legend.");
@@ -356,6 +351,27 @@ fn split_reading(reading: &str) -> (&str, Option<&str>) {
     (value, Some(rest.trim_start_matches(" · ").trim()))
 }
 
+/// What the Data table's row of `line` says, beside what its selected second reads.
+fn chart_data_cells(
+    panel: &Panel,
+    line: &crate::data::Line,
+    selected: String,
+    summary: &SampleSummary,
+) -> [String; 6] {
+    let unit = line.unit.as_deref().unwrap_or(&panel.unit);
+
+    [
+        line.name.clone(),
+        selected,
+        super::line_reading(panel, summary.mean, unit),
+        super::line_reading(panel, summary.maximum, unit),
+        summary
+            .maximum_second
+            .map_or_else(String::new, |second| crate::chart_axes::clock(second, true)),
+        format!("{} / {}", summary.available, summary.total),
+    ]
+}
+
 fn chart_data_row(values: [String; 6]) -> gpui::Div {
     let mut row = div()
         .flex()
@@ -441,7 +457,7 @@ fn chart_summaries_reading(
 mod tests {
     use gpui::{Context, Render, TestAppContext, Window, div, prelude::*, px};
 
-    use super::{chart_summaries, split_reading, tooltip_row};
+    use super::{chart_data_cells, chart_summaries, split_reading, tooltip_row};
 
     struct Probe;
 
@@ -494,6 +510,23 @@ mod tests {
         ]);
 
         panel
+    }
+
+    #[test]
+    fn a_data_row_says_what_a_line_reached_and_when() {
+        // Goal: the Data table is the keyboard's route to a peak, so its row reads the maximum and
+        // the second that read it.
+        // Method: a line whose sample reaches past what it draws, and read its row.
+        let panel = reaching_panel(false);
+        let summaries = chart_summaries(&panel);
+
+        let cells = chart_data_cells(&panel, &panel.lines[0], String::new(), &summaries[0]);
+
+        assert_eq!(
+            cells[3],
+            crate::live_chart_view::line_reading(&panel, Some(95.0), &panel.unit)
+        );
+        assert_eq!(cells[4], crate::chart_axes::clock(9_000, true));
     }
 
     #[test]

@@ -2,7 +2,6 @@ use super::{
     axis, cards, charts, minute_rows, nearest, report_rows, run_status, seal_rows, sources,
 };
 use crate::chart_axes::TimeWindow;
-use crate::live_projection::LINE_STATISTICS_HELP;
 use crate::self_reports::{MinuteReport, Seal, SealTotals, SelfReports, TickReport};
 
 const WINDOW: TimeWindow = TimeWindow {
@@ -468,5 +467,8 @@ fn a_self_chart_says_what_its_points_and_marks_stand_for() {
     let charts = charts(&reports, WINDOW, None);
 
     let help = charts[0].panel.help.as_ref().unwrap();
-    assert!(help.contains(LINE_STATISTICS_HELP), "{help}");
+    assert!(
+        help.contains("the mean of the readings of its seconds"),
+        "{help}"
+    );
 }

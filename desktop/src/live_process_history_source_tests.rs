@@ -450,7 +450,7 @@ fn a_chart_of_process_groups_says_what_its_points_and_marks_stand_for() {
 
     let help = presentation.panels[0].help.as_ref().unwrap();
     assert!(
-        help.contains(crate::live_projection::LINE_STATISTICS_HELP),
+        help.contains("the mean of the readings of its seconds"),
         "{help}"
     );
 }

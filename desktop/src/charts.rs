@@ -2929,19 +2929,69 @@ mod live_tests {
     }
 
     #[test]
+    fn a_peak_under_six_pixels_draws_no_mark() {
+        // Goal: a stem too short to see or to aim at draws nothing, however little else the line
+        // does around it.
+        // Method: a steady line on an axis to 100, a peak a pixel or two tall and a taller one.
+        let on_axis = |peak| {
+            let mut panel = picked_panel(&picked_values(&[(450, peak)]));
+            panel.maximum = Some(100.0);
+            panel
+        };
+
+        let short = picked_marks(&on_axis(11.0));
+        let tall = picked_marks(&on_axis(30.0));
+
+        assert!(short.is_empty());
+        assert_eq!(tall.len(), 1);
+    }
+
+    #[test]
+    fn a_peak_before_the_window_draws_no_mark() {
+        // Goal: a curve averages readings from before its window, and a peak among them lies off
+        // the chart.
+        // Method: readings that begin 100 seconds before the window, with a peak on either side
+        // of its start.
+        let positions: Vec<f32> = (0_u16..900)
+            .map(|index| (f32::from(index) - 100.0) / 900.0)
+            .collect();
+        let window = TimeWindow {
+            first: 1000,
+            span: 900,
+        };
+        let clock = Clock {
+            buckets: Buckets::of(window, None, TICK_SECONDS, TEN_SECOND_CARD),
+            positions: &positions,
+            lower: 0,
+            sliding: false,
+            places: None,
+        };
+        let mut tops = vec![Some((10.0, 0.0)); 900];
+        tops[50] = Some((95.0, 0.0));
+        tops[450] = Some((95.0, 0.0));
+
+        let peaks = standing_peaks(&reaching_line(None), &tops, None, &clock, 6.0);
+
+        let seconds: Vec<u64> = peaks.iter().map(|peak| pick_second(peak.pick)).collect();
+        assert_eq!(seconds, [1350]);
+    }
+
+    #[test]
     fn the_nearer_of_two_marks_is_picked() {
         // Goal: where the targets of two peaks overlap the pointer picks the mark it is nearest.
-        // Method: two peaks 20 seconds apart, and point just beside each of them.
-        let panel = picked_panel(&picked_values(&[(450, 95.0), (470, 95.0)]));
+        // Method: two peaks close enough that the pointer lies inside both targets, and point just
+        // beside each of them.
+        let panel = picked_panel(&picked_values(&[(450, 95.0), (458, 95.0)]));
         let marks = picked_marks(&panel);
         let (first, second) = (&marks[0], &marks[1]);
         let middle = (first.tip + first.base) / 2.0;
+        assert!(second.x - first.x < px(12.0));
 
-        let near_first = picked_under(&panel, first.x + px(5.0), middle).unwrap();
-        let near_second = picked_under(&panel, second.x - px(5.0), middle).unwrap();
+        let near_first = picked_under(&panel, first.x + px(1.0), middle).unwrap();
+        let near_second = picked_under(&panel, second.x - px(1.0), middle).unwrap();
 
         assert_eq!(pick_second(near_first), 1450);
-        assert_eq!(pick_second(near_second), 1470);
+        assert_eq!(pick_second(near_second), 1458);
     }
 
     #[test]

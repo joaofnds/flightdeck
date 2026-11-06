@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{APP_STATISTICS_HELP, AppAttributionHistory, Metric};
+use super::{AppAttributionHistory, Metric};
 use crate::live_hover::Target;
 
 #[test]
@@ -26,7 +26,15 @@ fn a_chart_by_app_says_its_points_are_means_and_where_a_short_lived_app_is_found
 
     let panel = history.panel().unwrap();
 
-    assert!(panel.help.as_ref().unwrap().contains(APP_STATISTICS_HELP));
+    let help = panel.help.as_ref().unwrap();
+    assert!(
+        help.contains("the App's mean over the seconds it covers"),
+        "{help}"
+    );
+    assert!(
+        help.contains("pick the peak's stem on the Mac's chart"),
+        "{help}"
+    );
 }
 
 #[test]

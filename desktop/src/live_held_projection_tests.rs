@@ -327,7 +327,15 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         // Goal: a chart's reach reads the series the chart's line reads, on every line the Overview
         // draws, so no chart marks one reading under another's curve. Method: reduce one second,
         // then compare what each line reads of it with what it reaches.
-        let second = reading_at(9_020, 3);
+        let mut second = reading_at(9_020, 3);
+        second.cpu_percent = Some(11.0);
+        second.cpu_level_percent = [Some(12.0), Some(13.0)];
+        second.gpu_active_percent = Some(14.0);
+        second.power_watts = Some(15.0);
+        second.soc_celsius = Some(16.0);
+        second.fan_mean_rpm = Some(17.0);
+        second.disk_read_bps = Some(18.0);
+        second.disk_written_bps = Some(19.0);
         let stretch = stretch_of(902, std::slice::from_ref(&second));
         let seconds = [&second];
         let stretches = [Some(&*stretch.machine)];
@@ -358,9 +366,159 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let panels = overview_of_older(&older);
 
         let help = |id| panel_named(&panels, id).help.clone().unwrap();
-        assert!(help("live-cpu").contains(crate::live_projection::LINE_STATISTICS_HELP));
-        assert!(
-            help("live-memory-pressure").contains(crate::live_projection::STATE_STATISTICS_HELP)
+        assert!(help("live-cpu").contains("the mean of the readings of its seconds"));
+        assert!(help("live-cpu").contains("A stem marks a single reading"));
+        assert!(help("live-memory-pressure").contains("shows the highest state among them"));
+    }
+
+    /// The reach of the line named `line` of the chart `panel`, for a stretch that peaks at each of
+    /// its seconds in turn, as `read` writes a reading into a second, names that second.
+    fn every_offset_reaches(panel: &str, line: &str, read: impl Fn(&mut MachineSecond, f32)) {
+        for offset in 0..10 {
+            let peak = 9_020 + offset;
+            let older = older_seconds(|second, wall_second| {
+                read(second, if wall_second == peak { 95.0 } else { 10.0 });
+            });
+
+            let panels = overview_of_older(&older);
+
+            let chart = panel_named(&panels, panel);
+            let drawn = chart.lines.iter().find(|drawn| drawn.name == line).unwrap();
+            let reach = drawn.extremes.as_ref().unwrap()[0].unwrap();
+            assert_eq!((reach.low, reach.high), (10.0, 95.0), "offset {offset}");
+            assert_eq!(reach.peak.second(), peak, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn a_gpu_peak_of_one_second_reaches_its_chart_at_every_offset() {
+        // Goal: a one-second GPU peak stays on the chart wherever in its ten seconds it fell.
+        // Method: `every_offset_reaches`.
+        every_offset_reaches("live-gpu-activity", "Busy", |second, value| {
+            second.gpu_active_percent = Some(f64::from(value));
+        });
+    }
+
+    #[test]
+    fn a_power_peak_of_one_second_reaches_its_chart_at_every_offset() {
+        // Goal: a one-second power peak stays on the chart wherever in its ten seconds it fell.
+        // Method: `every_offset_reaches`.
+        every_offset_reaches("live-power", "Whole machine", |second, value| {
+            second.power_watts = Some(value);
+        });
+    }
+
+    #[test]
+    fn a_temperature_peak_of_one_second_reaches_its_chart_at_every_offset() {
+        // Goal: a one-second temperature peak stays on the chart wherever in its ten seconds it
+        // fell. Method: `every_offset_reaches`.
+        every_offset_reaches("live-correlation", "SoC temperature", |second, value| {
+            second.soc_celsius = Some(value);
+        });
+    }
+
+    #[test]
+    fn a_fan_peak_of_one_second_reaches_its_chart_at_every_offset() {
+        // Goal: a one-second fan peak stays on the chart wherever in its ten seconds it fell.
+        // Method: `every_offset_reaches`.
+        every_offset_reaches("live-correlation", "Fans", |second, value| {
+            second.fan_mean_rpm = Some(value);
+        });
+    }
+
+    #[test]
+    fn a_chart_finds_each_lines_reach_where_a_trend_point_holds_its_number() {
+        // Goal: each line asks for its reach by the path a trend point holds its number at, which
+        // is the path the reach's writer gives it, whatever form that path takes.
+        // Method: each line of the Overview, whose lines take a resource or a channel, against a
+        // reach holding only that line's path, and against what a trend point holds.
+        let point = trend_point(&reading_at(9_020, 3));
+        let derived = [
+            "memory_app_bytes",
+            "memory_used_bytes",
+            "power_remainder_watts",
+            "fan_mean_rpm",
+        ];
+        let peak = crate::data::MachinePlace::default();
+        let readings = overview(levels().as_ref())
+            .into_iter()
+            .flat_map(|specification| specification.lines);
+        for reading in readings {
+            let key = reading.reach.unwrap_or(reading.key);
+            let path = viewer::number_path(reading.resource, key, reading.channel);
+            let reached = serde_json::json!({"reach": {
+                "leaves": {path.clone(): [1.0, 2.0, 0]},
+                "places": [reach_place(&peak)],
+            }});
+
+            let reach = std::slice::from_ref(&reached).reach(&reading, 0).unwrap();
+
+            assert_eq!(reach.map(|reach| reach.high), Some(2.0), "{path}");
+            let held = point.pointer(&format!("/{path}")).is_some();
+            assert!(held || derived.contains(&path.as_str()), "{path}");
+        }
+    }
+
+    #[test]
+    fn the_stacked_power_chart_reaches_its_total_at_one_instant() {
+        // Goal: the top of the Energy page's stack names the whole machine's reach, which adding up
+        // the stack's parts would overstate.
+        // Method: a point whose reach names the machine's power, and read the stack's top line.
+        let mut point = trend_point(&reading_at(9_020, 3));
+        point["reach"] = serde_json::json!({"leaves": {"power_watts": [10.0, 95.0, 0]},
+            "places": [reach_place(&crate::data::MachinePlace::default())]});
+        let newest = reading_at(10_000, 3);
+        let mut selected = selection(&[], std::slice::from_ref(&newest));
+        selected["earlier_trends"] = serde_json::json!([point]);
+
+        let panels = panels("energy", &selected, None).unwrap();
+
+        let chart = panel_named(&panels, "live-power-breakdown");
+        let top = chart.lines.iter().find(|line| line.name == "GPU").unwrap();
+        let reach = top.extremes.as_ref().unwrap()[0];
+        assert_eq!(reach.map(|reach| reach.high), Some(95.0));
+    }
+
+    #[test]
+    fn only_the_first_full_detail_second_stands_for_the_stretch_at_the_join() {
+        // Goal: a full-detail second stands for itself, and the first of them also for the seconds
+        // before it that lie in no point, whichever stretch it reads in itself.
+        // Method: a gap across the join, so the first full-detail second reads in a later stretch
+        // than the one at the join, and read the reach of the first two.
+        let joined = reading_at(9_040, 3);
+        let later = (9_052..=10_000).map(|wall_second| reading_at(wall_second, 3));
+        let seconds: Vec<_> = std::iter::once(joined.clone()).chain(later).collect();
+        let mut view = view(1, &[], &seconds);
+        let mut peak = joined;
+        peak.cpu_percent = Some(95.0);
+        view.stretches = vec![stretch_of(904, &[peak])];
+
+        let panels = overview_panels(&view, levels().as_ref()).unwrap();
+
+        let line = &panel_named(&panels, "live-cpu").lines[0];
+        let extremes = line.extremes.as_ref().unwrap();
+        assert_eq!(extremes[0].map(|reach| reach.high), Some(95.0));
+        assert_eq!(extremes[1], None);
+    }
+
+    #[test]
+    fn a_thermal_chart_of_a_view_shows_the_worst_state_a_stretch_reached() {
+        // Goal: Overview's thermal chart keeps a short spell in a worse state that its first second
+        // does not read, and names the reading that read it.
+        // Method: a stretch Nominal but for one second past its first, and read its cell.
+        let older = older_seconds(|second, wall_second| {
+            second.thermal_pressure = Some(if wall_second == 9_024 { 2 } else { 0 });
+        });
+
+        let panels = overview_of_older(&older);
+
+        let panel = panel_named(&panels, crate::live_projection::THERMAL_STATE_ID);
+        let cell = usize::try_from(9_020 - panel.window.unwrap().first).unwrap();
+        let line = &panel.lines[0];
+        assert_eq!(line.values[cell], Some(2.0));
+        assert_eq!(
+            line.extremes.as_ref().unwrap()[cell].unwrap().peak.second(),
+            9_024
         );
     }
 

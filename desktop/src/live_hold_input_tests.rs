@@ -1689,6 +1689,48 @@ fn hour_with_a_second_reading_of(
     view
 }
 
+/// An hour whose CPU peaks at `peak`, with `Brief`, which ran at `peak` alone and led that second
+/// with 300 ms, and eight Apps that each spent 100 ms of that second and 500 ms of every other. A
+/// chart by App compares means over the seconds that measured an App, so those eight fill its
+/// lines, and a short-lived App that led its second by more than they read would have one.
+fn hour_with_a_brief_app_at(peak: u64) -> viewer::store::View {
+    const STEADY: [&str; 8] = ["A", "B", "C", "D", "E", "F", "G", "H"];
+
+    let mut view = hour_peaking_at(peak);
+    let apps_of = |second: &viewer::store::MachineSecond| {
+        let at_peak = second.wall_ns / 1_000_000_000 == peak;
+        let steady = if at_peak { 100_000_000 } else { 500_000_000 };
+        let mut apps: Vec<(&str, u64)> = STEADY.iter().map(|name| (*name, steady)).collect();
+        if at_peak {
+            apps.push(("Brief", 300_000_000));
+        }
+        apps.sort_unstable();
+        Arc::new(apps_at(second, &apps))
+    };
+    view.apps = view.seconds.iter().map(|second| apps_of(second)).collect();
+    let rebuilt: Vec<_> = view
+        .stretches
+        .iter()
+        .map(|held| {
+            let seconds: Vec<_> = view
+                .seconds
+                .iter()
+                .zip(&view.apps)
+                .filter(|(second, _)| second.wall_ns / 10_000_000_000 == held.stretch)
+                .map(|(_, apps)| Arc::clone(apps))
+                .collect();
+            if seconds.is_empty() {
+                return Arc::clone(held);
+            }
+            let mut stretch = viewer::store::AppsStretch::of_seconds(held.stretch, &seconds);
+            *stretch.machine = *held.machine;
+            Arc::new(stretch)
+        })
+        .collect();
+    view.stretches = rebuilt;
+    view
+}
+
 #[gpui::test]
 fn a_click_on_a_peaks_mark_ranks_the_short_lived_app_no_chart_draws(cx: &mut TestAppContext) {
     // Goal: an App that ran for the one second of a peak is found from the peak, though its mean
@@ -1696,17 +1738,9 @@ fn a_click_on_a_peaks_mark_ranks_the_short_lived_app_no_chart_draws(cx: &mut Tes
     // Method: Overview of an hour whose CPU peaks at one second, whose Apps that second are led
     // by one no other second holds. Read the chart by App, click the mark, read the top Apps.
     let mut harness = InputHarness::open_route(cx, "overview");
-    let mut view = hour_peaking_at(HELD);
-    let at = view
-        .seconds
-        .iter()
-        .position(|second| second.wall_ns / 1_000_000_000 == HELD)
-        .unwrap();
-    view.apps[at] = Arc::new(apps_at(
-        &view.seconds[at],
-        &[("Brief", 950_000_000), ("A", 10_000_000)],
-    ));
-    harness.driver.show_view_at_fifteen_minutes(view);
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_brief_app_at(HELD));
     let drawn = harness.driver.chart_line_names("live-cpu-apps");
     assert!(drawn.iter().any(|name| name == "A"), "{drawn:?}");
     assert!(!drawn.iter().any(|name| name == "Brief"), "{drawn:?}");

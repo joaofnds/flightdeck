@@ -313,3 +313,22 @@ fn merging_categories_cut_anywhere_equals_reducing_their_readings() {
         );
     }
 }
+
+#[test]
+fn a_summary_keeps_the_earliest_of_readings_that_tie() {
+    // Goal: a peak two readings share names the first of them, so a reduction and a merge of the
+    // same readings name the same reading.
+    // Method: two equal readings of a gauge and of a category, at different places.
+    let mut gauge = GaugeSummary::<u32>::default();
+    let mut thermal = Thermal::default();
+
+    gauge.push(Some(5.0), true, 1);
+    gauge.push(Some(5.0), true, 2);
+    thermal.push(Some(3), true, 1);
+    thermal.push(Some(3), true, 2);
+
+    let measured = gauge.measured.unwrap();
+    assert_eq!(measured.maximum.place, 1);
+    assert_eq!(measured.minimum.place, 1);
+    assert_eq!(thermal.highest.unwrap().place, 1);
+}

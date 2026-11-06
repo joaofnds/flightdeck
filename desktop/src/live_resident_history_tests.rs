@@ -34,7 +34,10 @@ fn a_chart_of_resident_memory_says_its_points_are_means() {
     let panel = history.panel().unwrap();
 
     let help = panel.help.as_ref().unwrap();
-    assert!(help.contains(crate::live_app_attribution_history::APP_STATISTICS_HELP));
+    assert!(
+        help.contains("the App's mean over the seconds it covers"),
+        "{help}"
+    );
 }
 
 #[test]

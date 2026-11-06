@@ -1385,7 +1385,7 @@ fn a_closed_stretch_adds_up_what_the_memory_chart_stacks_at_each_reading() {
         total_bytes: 1_000,
         app_bytes: Some(app_bytes),
         wired_bytes,
-        compressed_bytes: 0,
+        compressed_bytes: 10,
         pressure: collector::machine::Pressure::Normal,
         swap_used_bytes: 0,
         swap_total_bytes: 0,
@@ -1400,8 +1400,26 @@ fn a_closed_stretch_adds_up_what_the_memory_chart_stacks_at_each_reading() {
 
     let used = stretch.machine.memory_used_bytes.measured.unwrap();
 
-    assert!((used.maximum.value - 600.0).abs() < 0.01);
-    assert!((used.minimum.value - 200.0).abs() < 0.01);
+    assert!((used.maximum.value - 610.0).abs() < 0.01);
+    assert!((used.minimum.value - 210.0).abs() < 0.01);
+}
+
+#[test]
+fn a_stretch_after_a_peak_reaches_only_its_own_readings() {
+    // Goal: closing a stretch leaves nothing of it in the next one, so a chart marks a peak once.
+    // Method: two stretches with a peak in the first, and read what the second reached.
+    let mut held = Held::without_recording();
+    for wall_second in 1_000..=1_020 {
+        let mut second = second_at(wall_second);
+        second.elapsed_ns = Some(NANOSECONDS_PER_SECOND);
+        second.cpu_percent = Some(if wall_second == 1_003 { 95.0 } else { 10.0 });
+        assert!(held.take(&RUN, &second, TickApps::Missing(&Missing::Unread)));
+    }
+
+    let view = published(&mut held);
+
+    let later = view.stretches[1].machine.cpu_percent.measured.unwrap();
+    assert!((later.maximum.value - 10.0).abs() < 0.01);
 }
 
 #[test]

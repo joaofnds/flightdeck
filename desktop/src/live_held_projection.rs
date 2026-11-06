@@ -154,23 +154,15 @@ fn overview_panels_stretches<'view>(
     assert_eq!(domain.stride, viewer::EARLIER_STRIDE_SECONDS);
 
     let mut stretches = view.stretches.iter().peekable();
-    let mut detail_began = false;
-    seconds
-        .iter()
-        .map(|second| {
-            let mut wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
-            if wall_second >= domain.recent_first {
-                if detail_began {
-                    return None;
-                }
-                detail_began = true;
-                wall_second = domain.recent_first;
-            }
-            let held = overview_stretch(&mut stretches, wall_second)?;
+    let mut held = Vec::with_capacity(seconds.len());
+    for second in seconds {
+        // Each full-detail second asks for the stretch at the join, which only the first finds.
+        let wall_second = (second.wall_ns / NANOSECONDS_PER_SECOND).min(domain.recent_first);
+        let stretch = overview_stretch(&mut stretches, wall_second);
+        held.push(stretch.map(|stretch| &*stretch.machine));
+    }
 
-            Some(&*held.machine)
-        })
-        .collect()
+    held
 }
 
 /// The stretch `stretches` holds for `wall_second`. They run oldest first, as the points do, so
