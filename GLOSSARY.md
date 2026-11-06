@@ -93,7 +93,7 @@ in watts.
 **Rate**: how fast a counter, such as a process's CPU time or the bytes it read from disk,
 grew between two ticks, its change divided by the time between them. An App's rates come
 only from two ticks in a row of one collector run, so the first tick after a missed tick
-or a restart has none.
+or a collector restart has none. A restart of the persister alone changes no rate.
 
 **Resource coalition**: the group macOS puts a process in together with related
 processes. macOS keeps CPU time, energy, disk bytes and GPU time per coalition, and a

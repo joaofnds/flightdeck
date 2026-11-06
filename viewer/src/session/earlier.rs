@@ -131,7 +131,7 @@ struct KeptMinute {
     readings: Vec<Reading>,
     /// The point of the first reading of each stretch inside the minute, by publication. The
     /// first of a stretch across minutes is the first of it inside its own minute, so the tail
-    /// finds the point of every reading it keeps here.
+    /// finds here the point of every stretch whose first reading the period still covers.
     points: BTreeMap<u64, Value>,
     last: Last,
 }
