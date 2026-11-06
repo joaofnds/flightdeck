@@ -1,7 +1,7 @@
 //! The whole worker ended at every change it makes to a recording, in a process of its own.
 
 use super::super::super::{Outcome, run_paced};
-use super::Recording;
+use super::{OtherRun, Recording};
 use crate::canonical::CanonicalMetadata;
 use crate::canonical::metadata::{Body, CanonicalLoss, EndpointEvidence, Lifecycle};
 use crate::sealed_apps::SealedApps;
@@ -423,16 +423,52 @@ fn killed_retirement_passes(root: &Path) -> std::io::Result<()> {
 }
 
 /// A run the worker has saved whole and retired, a window and a terminal, with nothing left of it
-/// but what a pass removes.
-fn killed_retirement_recording(interposer: &Interposer) -> Recording {
+/// but what a pass removes, beside a run whose readings lie so far ahead that no pass reaches them.
+fn killed_retirement_recording(interposer: &Interposer) -> (Recording, OtherRun) {
+    const KEPT_MINUTE: u64 = 1 << 27;
     let recording = killed_worker_finished_run();
+    let mut kept = recording.another_run();
+    kept.publish_in_minute(KEPT_MINUTE);
+    kept.writer.finish();
+    let registry = Registry {
+        runs: vec![recording.registered(), kept.registered()],
+        evictions: 0,
+    };
+    registry.write(&recording.root).unwrap();
     killed_worker_finish(&recording, interposer, "the save");
 
-    recording
+    (recording, kept)
+}
+
+/// Every file of the run's saved window, by name, as a pass beside it must leave it. The run's
+/// terminal record holds no readings and takes its time from the clock, which this run lies past.
+fn killed_retirement_kept_files(recording: &Recording, kept: &OtherRun) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    for object in std::fs::read_dir(recording.root.join("data")).unwrap() {
+        let ready = object.unwrap().path().join("ready");
+        let Ok(mut proof) = std::fs::File::open(ready.join(crate::store::PROOF_NAME)) else {
+            continue;
+        };
+        let metadata = CanonicalMetadata::read(&mut proof).unwrap();
+        if metadata.run != kept.run || !matches!(metadata.body, Body::Ordinary(_)) {
+            continue;
+        }
+        for path in killed_retirement_paths(&ready) {
+            let file = ready.join(path);
+            if file.is_file() {
+                files.push((file.clone(), std::fs::read(file).unwrap()));
+            }
+        }
+    }
+    assert!(!files.is_empty());
+    files.sort();
+
+    files
 }
 
 /// Every path in the recording, which removal leaves the same whichever way it was ended. A retired
-/// run's receipt takes its name from the ring, which each recording names at random.
+/// run's receipt takes its name from the ring, a saved window's directory from an attempt, and its
+/// retention entry from an attempt and the clock, none of which two recordings share.
 fn killed_retirement_paths(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut directories = vec![root.to_path_buf()];
@@ -446,25 +482,45 @@ fn killed_retirement_paths(root: &Path) -> Vec<PathBuf> {
             if path.is_dir() {
                 directories.push(path.clone());
             }
-            let relative = path.strip_prefix(root).unwrap();
-            if relative.starts_with("retired") && !path.is_dir() {
-                paths.push(PathBuf::from("retired/receipt"));
-            } else {
-                paths.push(relative.to_path_buf());
-            }
+            paths.push(killed_retirement_paths_name(
+                path.strip_prefix(root).unwrap(),
+                path.is_dir(),
+            ));
         }
     }
     panic!("a recording of more directories than this test saves");
 }
 
+/// `relative` with the parts each recording names at random replaced.
+fn killed_retirement_paths_name(relative: &Path, directory: bool) -> PathBuf {
+    if relative.starts_with("retired") && !directory {
+        return PathBuf::from("retired/receipt");
+    }
+    if let Ok(entry) = relative.strip_prefix("retention/order") {
+        return PathBuf::from("retention/order")
+            .join(entry.iter().map(|_part| "entry").collect::<PathBuf>());
+    }
+    let mut parts = relative.components();
+    let base = parts.next().unwrap().as_os_str().to_str().unwrap();
+    if (base == "data" || base == "recovery-data") && parts.next().is_some() {
+        return Path::new(base).join("attempt").join(parts.as_path());
+    }
+
+    relative.to_path_buf()
+}
+
 /// What a reader meets where a pass ended: what the run saved, or less of it, or a wait. A window
 /// with only some of its names is one a reader could misread, so only a Busy may leave one.
-fn killed_retirement_reader(recording: &Recording, saved_windows: usize) {
+fn killed_retirement_reader(recording: &Recording, kept: &OtherRun) {
     let budget = Arc::new(crate::resources::ByteBudget::new(256 * 1024 * 1024));
     let catalog = crate::canonical::catalog::Catalog::open(&recording.root, &budget).unwrap();
     let run = recording.registered().identity;
     match catalog.windows_of(&run, &mut crate::canonical::ReadWork::default()) {
-        Ok(windows) => assert!(windows.len() <= saved_windows),
+        Ok(windows) => assert!(windows.len() <= 1),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+    }
+    match catalog.windows_of(&kept.run, &mut crate::canonical::ReadWork::default()) {
+        Ok(windows) => assert_eq!(windows.len(), 1),
         Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
     }
 
@@ -487,27 +543,32 @@ fn killed_retirement_names(root: &Path, namespace: &str) -> usize {
         .count()
 }
 
+/// What a pass that nobody ended leaves, with the one window of the run it must keep.
+fn killed_retirement_uninterrupted(interposer: &Interposer) -> Vec<PathBuf> {
+    let (recording, _kept) = killed_retirement_recording(interposer);
+    killed_child_run(
+        &RETIREMENT_CHILD,
+        &recording,
+        interposer,
+        Fault::Nothing,
+        "never ended",
+    );
+    assert_eq!(recording.saved_windows().len(), 1);
+
+    killed_retirement_paths(&recording.root)
+}
+
 fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
     let interposer = Interposer::build();
-    let (uninterrupted, saved_windows) = {
-        let recording = killed_retirement_recording(&interposer);
-        let saved_windows = recording.saved_windows().len();
-        killed_child_run(
-            &RETIREMENT_CHILD,
-            &recording,
-            &interposer,
-            Fault::Nothing,
-            "never ended",
-        );
-        (killed_retirement_paths(&recording.root), saved_windows)
-    };
-    assert!(saved_windows > 0);
-    let saved = killed_retirement_recording(&interposer);
+    let uninterrupted = killed_retirement_uninterrupted(&interposer);
+    let (saved, saved_kept) = killed_retirement_recording(&interposer);
+    assert_eq!(saved.saved_windows().len(), 2);
     // One reading a window, so a window's names are whole when these two counts agree.
     assert_eq!(
         killed_retirement_names(&saved.root, "observations-known"),
         killed_retirement_names(&saved.root, "ordinary")
     );
+    drop(saved_kept);
     drop(saved);
     let next = AtomicU64::new(1);
     let changes = AtomicU64::new(0);
@@ -517,7 +578,8 @@ fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
             scope.spawn(|| {
                 for _attempt in 0..CHANGES_MAX {
                     let number = next.fetch_add(stride, Ordering::Relaxed);
-                    let recording = killed_retirement_recording(&interposer);
+                    let (recording, kept) = killed_retirement_recording(&interposer);
+                    let kept_files = killed_retirement_kept_files(&recording, &kept);
                     let ended = killed_child_run(
                         &RETIREMENT_CHILD,
                         &recording,
@@ -527,7 +589,7 @@ fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
                     );
                     let after = format!("ended at change {number}");
                     if ended {
-                        killed_retirement_reader(&recording, saved_windows);
+                        killed_retirement_reader(&recording, &kept);
                     }
                     killed_child_run(
                         &RETIREMENT_CHILD,
@@ -540,6 +602,11 @@ fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
                     assert_eq!(
                         killed_retirement_paths(&recording.root),
                         uninterrupted,
+                        "{after}"
+                    );
+                    assert_eq!(
+                        killed_retirement_kept_files(&recording, &kept),
+                        kept_files,
                         "{after}"
                     );
                     if !ended {
@@ -559,9 +626,10 @@ fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
 #[test]
 fn a_pass_killed_at_each_change_of_a_removal_comes_to_the_same_end() {
     // Goal: no change a removal makes leaves a recording that a reader misreads or a restart cannot
-    // finish the same way.
-    // Method: for each numbered change, end a pass there in its own process, read the run as a
-    // reader would, restart, and compare what is left with a pass that was never ended.
+    // finish the same way, or costs a reading still inside the period.
+    // Method: for each numbered change, end a pass there in its own process, read the runs as a
+    // reader would, restart, compare what is left with a pass that was never ended, and compare the
+    // kept run's files with what they held before the pass.
     let _one = one_kill_test();
     killed_retirement_converges(1, Fault::Kill);
 }
