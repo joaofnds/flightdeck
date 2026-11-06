@@ -3,7 +3,7 @@
 use std::io;
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use collector::processes::{self, Unreadable};
 use collector::recording::{RegisteredRun, Registry};
@@ -152,14 +152,7 @@ fn run_paced(
         Err(error) if crate::ownership_contended(&error) => return Ok(Outcome::Owned),
         Err(error) => return Err(error.into()),
     };
-    let mut health = control
-        .map(|control| {
-            collector::recording::control::Reporter::new(
-                control,
-                collector::recording::control::Role::Persister,
-            )
-        })
-        .transpose()?;
+    let mut health = run_paced_health(control)?;
     let writers = Writers {
         encoder: Encoder,
         derive,
@@ -171,9 +164,11 @@ fn run_paced(
         memory_limit,
         ..Recovery::default()
     };
+    let mut retirement_last = None;
     for _pass in 0..u64::MAX {
         let operation = watchdog.operation()?;
         let runs = run_registry(&registry_path, &mut registry_buffer, &mut recovery)?;
+        run_retirement(&store, &runs, &mut retirement_last, memory_limit);
         let pass = run_pass(root, &store, &writers, &runs, &mut recovery)?;
         report_progress(&mut health, &recovery)?;
         match pass {
@@ -209,6 +204,19 @@ fn run_paced(
     unreachable!("persistence polling bound exhausted")
 }
 
+fn run_paced_health(
+    control: Option<collector::recording::control::Control>,
+) -> Result<Option<collector::recording::control::Reporter>> {
+    let reporter = control.map(|control| {
+        collector::recording::control::Reporter::new(
+            control,
+            collector::recording::control::Role::Persister,
+        )
+    });
+
+    Ok(reporter.transpose()?)
+}
+
 fn report_progress(
     health: &mut Option<collector::recording::control::Reporter>,
     recovery: &Recovery,
@@ -233,6 +241,42 @@ fn report_progress(
         }
     }
     Ok(())
+}
+
+const RETIREMENT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Removes what has outlived the retention period, at most once a minute. The first pass comes
+/// before a restart resumes anything, so a save that failed on a full disk finds the space when it
+/// tries again. A failure here is reported and stops no save.
+fn run_retirement(
+    store: &Store,
+    runs: &[RegisteredRun],
+    last: &mut Option<Instant>,
+    memory_limit: u64,
+) {
+    if !run_retirement_due(last, Instant::now()) {
+        return;
+    }
+    if let Err(error) = run_retirement_pass(store, runs, memory_limit) {
+        collector::diagnostics::error(format_args!("retention removal: {error}"));
+    }
+}
+
+fn run_retirement_due(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_some_and(|last| now.saturating_duration_since(last) < RETIREMENT_INTERVAL) {
+        return false;
+    }
+    *last = Some(now);
+
+    true
+}
+
+fn run_retirement_pass(store: &Store, runs: &[RegisteredRun], memory_limit: u64) -> Result<u64> {
+    let identities: Vec<_> = runs.iter().map(|run| run.identity).collect();
+    let budget = registered::persist_budget(memory_limit)?;
+    let now = crate::retention::ClockReading::now()?;
+
+    Ok(store.retire_expired(&now, &identities, &budget)?)
 }
 
 fn run_release(

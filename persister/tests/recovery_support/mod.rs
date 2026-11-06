@@ -59,6 +59,11 @@ impl RecordingHarness {
             std::env::temp_dir().join(format!("fd-recovery-{}-{ordinal}", std::process::id()));
         assert!(!root.exists(), "{} already exists", root.display());
         drop(persistence::Store::open(&root).unwrap());
+        // The harness's clocks count from this Mac's boot, which can lie past a shorter period.
+        persistence::retention::Period::from_seconds(10 * 365 * 86_400)
+            .unwrap()
+            .write(&collector::recording::private::PrivateDirectory::open(&root).unwrap())
+            .unwrap();
         let place = Place {
             lock_path: root.join("ring.lock"),
             name_prefix: format!("/fdr{}{ordinal}", std::process::id()),

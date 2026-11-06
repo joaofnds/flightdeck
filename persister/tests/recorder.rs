@@ -990,6 +990,11 @@ mod tests {
 
         fn fixture_closed(&self) -> collector::ring::RunIdentity {
             let mut writer = self.fixture_writer();
+            // These clocks count from this Mac's boot, which can lie past a shorter period.
+            persistence::retention::Period::from_seconds(10 * 365 * 86_400)
+                .unwrap()
+                .write(&collector::recording::private::PrivateDirectory::open(&self.root).unwrap())
+                .unwrap();
             let identity = writer.identity().unwrap();
             let memory = collector::machine::Memory::default();
             let readings = collector::ring::Readings {

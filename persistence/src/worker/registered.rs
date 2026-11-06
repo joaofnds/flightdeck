@@ -239,7 +239,7 @@ fn persist_one_slot_loss(
     Ok(SlotTurn::InterruptedLoss)
 }
 
-fn persist_budget(memory_limit: u64) -> Result<Arc<ByteBudget>> {
+pub(super) fn persist_budget(memory_limit: u64) -> Result<Arc<ByteBudget>> {
     let limit = if memory_limit == 0 {
         WORKING_BYTES_MAX
     } else {

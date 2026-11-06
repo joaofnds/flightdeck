@@ -1,8 +1,12 @@
 use super::super::tests::forged_source::{ForgedWord, WritableSource};
-use super::super::{Outcome, Progress, RunState, WindowIdentity, Writers, persist_one, run_paced};
+use super::super::{
+    Outcome, Progress, RunState, WindowIdentity, Writers, persist_one, run_paced,
+    run_retirement_due,
+};
 use crate::canonical::metadata::{Body, EndpointEvidence, Lifecycle};
 use crate::canonical::{CanonicalMetadata, ReadWork, SourceFrontier};
 use crate::resources::ByteBudget;
+use crate::retention::{Clock, ClockReading, Period, boot_offset_save};
 use crate::sealed_apps::SealedApps;
 use crate::store::{ProofStep, PublicationStep, RegisteredAttempt};
 use crate::transaction::{AttemptOperation, UnknownProvenance, UnknownReason};
@@ -15,7 +19,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -3032,6 +3036,71 @@ fn the_whole_worker_paces_itself_until_a_live_run_finishes() {
 }
 
 #[test]
+fn the_whole_worker_removes_what_outlived_the_retention_period() {
+    // Goal: a recording the real worker saves loses what its period no longer covers, while a
+    // minute whose newest reading the period still covers stays whole (P03.2).
+    // Method: save three minutes through the whole worker on a retention clock the test places,
+    // move the clock until the cutoff stands on the newest reading of the middle minute, and run
+    // the worker again over the same run.
+    const CLOCK_NS: u64 = 1 << 62;
+    const PERIOD_SECONDS: u64 = 60;
+    const GRACE_SECONDS: u64 = 60;
+    let cutoff_ns = CLOCK_NS - (PERIOD_SECONDS + GRACE_SECONDS) * 1_000_000_000;
+    let mut recording = Recording::new();
+    recording.publish_in_minute(0);
+    recording.publish_in_minute(1);
+    recording.publish_in_minute(1);
+    recording.publish_in_minute(2);
+    recording.writer.finish();
+    let middle_newest_ns = 60_000_000_000 + 3;
+    let root = PrivateDirectory::open(&recording.root).unwrap();
+    Period::from_seconds(PERIOD_SECONDS)
+        .unwrap()
+        .write(&root)
+        .unwrap();
+    boot_offset_save(&root, recording.run.boot, cutoff_ns - middle_newest_ns).unwrap();
+    let mut no_pause = |_pause| panic!("the run is finished");
+    whole_worker(&recording.root, vec![recording.registered()], &mut no_pause);
+    assert_eq!(recording.saved_manifests().len(), 3);
+    Clock::started_at(&ClockReading {
+        boot: Identity([9, 9]),
+        continuous_ns: 0,
+        wall_ns: CLOCK_NS,
+    })
+    .write(&root)
+    .unwrap();
+
+    whole_worker(&recording.root, vec![recording.registered()], &mut no_pause);
+
+    let newest: Vec<_> = recording
+        .saved_manifests()
+        .iter()
+        .map(|manifest| manifest.continuous_ns.unwrap().max)
+        .collect();
+    assert_eq!(newest, [middle_newest_ns, 120_000_000_000 + 4]);
+    assert_eq!(recording.saved_windows().len(), 2);
+}
+
+#[test]
+fn a_removal_pass_comes_first_and_then_once_a_minute() {
+    // Goal: the worker gives a restart room before it saves anything, and then returns to removal
+    // at most a minute after its last pass.
+    // Method: ask at the start, and just before and at a minute after each pass.
+    let start = Instant::now();
+    let mut last = None;
+
+    let first = run_retirement_due(&mut last, start);
+    let early = run_retirement_due(&mut last, start + Duration::from_secs(59));
+    let second = run_retirement_due(&mut last, start + Duration::from_secs(60));
+    let counted_from_the_second = run_retirement_due(&mut last, start + Duration::from_secs(119));
+
+    assert!(first);
+    assert!(!early);
+    assert!(second);
+    assert!(!counted_from_the_second);
+}
+
+#[test]
 fn the_whole_worker_marks_what_a_lost_run_may_have_held_and_goes_on() {
     // Goal: a run whose ring is gone stops nothing, and the extent it may have held stays visible
     // on the next saved minute rather than reading as no loss (P02.3).
@@ -3107,11 +3176,8 @@ fn a_window_stays_until_the_reading_after_it_has_outlived_the_period() {
     let store = Store::open(&recording.root).unwrap();
     let root = PrivateDirectory::open(&recording.root).unwrap();
     let run = recording.registered().identity;
-    crate::retention::Period::from_seconds(60)
-        .unwrap()
-        .write(&root)
-        .unwrap();
-    crate::retention::boot_offset_save(&root, run.boot, 0).unwrap();
+    Period::from_seconds(60).unwrap().write(&root).unwrap();
+    boot_offset_save(&root, run.boot, 0).unwrap();
     recording.publish_in_minute(0);
     recording.publish_in_minute(120);
     recording.publish_in_minute(121);
@@ -3119,7 +3185,7 @@ fn a_window_stays_until_the_reading_after_it_has_outlived_the_period() {
     recording.persist_live(&store, &mut state);
     recording.persist_live(&store, &mut state);
     assert_eq!(recording.saved_manifests().len(), 2);
-    let clock = |minute: u64| crate::retention::ClockReading {
+    let clock = |minute: u64| ClockReading {
         boot: run.boot,
         continuous_ns: minute * 60_000_000_000,
         wall_ns: minute * 60_000_000_000,
