@@ -421,8 +421,9 @@ impl KeptTail {
             let point = self
                 .kept(&history.windows[observation.window])
                 .and_then(|minute| minute.points.get(&observation.publication));
+            // A stretch whose first second expired has lost the one reading that stood for it.
             let Some(point) = point else {
-                unreachable!("the older tail keeps no point of a first reading of a stretch");
+                continue;
             };
             let mut point = point.clone();
             point["segment"] = (SEGMENT_BASE + segments[index]).into();

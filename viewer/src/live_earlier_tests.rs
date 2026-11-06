@@ -95,6 +95,28 @@ fn the_older_tail_leaves_out_what_expired() {
 }
 
 #[test]
+fn the_older_tail_starts_inside_a_stretch_the_period_cut_from_its_first_second() {
+    // Goal: a retention cutoff moves a second at a time, so it often falls inside a stretch of the
+    // older tail, and the tail still reads, leaving out the stretch whose point has expired.
+    // Method: place the cutoff five seconds past the start of a stretch, and read the tail.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish(&mut fixture);
+    let tick = (361..371)
+        .find(|tick| earlier_wall(*tick) % EARLIER_STRIDE_SECONDS == 5)
+        .unwrap();
+    let cut_ns = (tick - 1) * NANOSECONDS_PER_SECOND;
+    crate::session::retention_tests::expire_before(&fixture.root, cut_ns);
+
+    let tail = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(earlier_context_last(EARLIER_LIMIT))
+        .unwrap();
+
+    let first = tail["earlier_trends"][0]["wall_ns"].as_u64().unwrap();
+    assert_eq!(first / NANOSECONDS_PER_SECOND, earlier_wall(tick) + 5);
+}
+
+#[test]
 fn the_older_tail_reads_on_past_a_minute_removal_took_from_under_its_list() {
     // Goal: a session whose list still names a minute removal took reads the tail without calling
     // a healthy recording damaged, and shows what a new session shows.
