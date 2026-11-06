@@ -86,11 +86,15 @@ fn volume_file_written(path: &Path, bytes: &[u8]) -> bool {
 impl Drop for Volume {
     fn drop(&mut self) {
         let detached = Command::new("hdiutil")
-            .args(["detach", "-quiet", "-force"])
+            .args(["detach", "-force"])
             .arg(&self.mount)
-            .status()
+            .output()
             .unwrap();
-        assert!(detached.success());
+        assert!(
+            detached.status.success(),
+            "{}",
+            String::from_utf8_lossy(&detached.stderr)
+        );
         std::fs::remove_dir_all(&self.directory).unwrap();
     }
 }
