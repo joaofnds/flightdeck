@@ -330,7 +330,21 @@ mod tests {
     #[test]
     fn mapping_retirement_is_synchronous() {
         // Goal: mappings larger than the native async-unmap threshold retire before return.
-        // Method: probe the exact released address after each of32 real native mappings.
+        // Method: probe the exact released address after each of 32 real native mappings, in a
+        // process of its own, since another test's mapping can land on a released address.
+        if std::env::var_os("FLIGHTDECK_MAPPING_RETIREMENT_CHILD").is_none() {
+            let test_name = concat!(module_path!(), "::mapping_retirement_is_synchronous")
+                .strip_prefix("persistence::")
+                .unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--test-threads=1"])
+                .env("FLIGHTDECK_MAPPING_RETIREMENT_CHILD", "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
         let fixture = crate::engine::source_tests::Fixture::new();
         let cleanup_path = fixture.path.clone();
         eprintln!("DECODER owned fixture={}", cleanup_path.display());
