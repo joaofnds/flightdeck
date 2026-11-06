@@ -1,11 +1,11 @@
-//! One logical event table, stored as a legacy file or bounded parts in one window commit.
+//! One logical event table, stored as bounded parts in one window commit.
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use polars::prelude::DataFrame;
 
-use crate::engine::{AdmissionRefusal, AdmittedReadRefusal, DecodeLimits, EventSourcePin};
+use crate::engine::{AdmissionRefusal, AdmittedReadRefusal, EventSourcePin};
 use crate::resources::{ByteBudget, ByteReservation};
 use crate::{Error, Manifest, Result};
 
@@ -18,7 +18,7 @@ pub(crate) mod writer;
 pub struct EventTable {
     directory: PathBuf,
     rows: u64,
-    index: Option<index::Index>,
+    index: index::Index,
     budget: Arc<ByteBudget>,
     pin: EventSourcePin,
     _reservation: ByteReservation,
@@ -27,9 +27,8 @@ pub struct EventTable {
 pub struct EventPart {
     path: PathBuf,
     rows: u64,
-    events: Option<Range<u64>>,
-    identities: Option<bool>,
-    limits: Option<DecodeLimits>,
+    events: Range<u64>,
+    identities: bool,
     pin: EventSourcePin,
     index: usize,
     _reservation: ByteReservation,
@@ -92,18 +91,13 @@ impl EventTable {
             .find(|table| table.name == "events")
             .ok_or(Error::Bound("missing event table"))?
             .rows;
-        let index = if manifest.event_batches.is_some() {
-            let mut file = collector::recording::private::open_private_file(
-                &directory.join("events/index"),
-                false,
-            )?;
-            pin.validate_index_file(&file)?;
-            let index = index::Index::read_file(&mut file, manifest)?;
-            pin.validate_index_file(&file)?;
-            Some(index)
-        } else {
-            None
-        };
+        let mut file = collector::recording::private::open_private_file(
+            &directory.join("events/index"),
+            false,
+        )?;
+        pin.validate_index_file(&file)?;
+        let index = index::Index::read_file(&mut file, manifest)?;
+        pin.validate_index_file(&file)?;
         if !pin.validate()? {
             return Err(Error::Bound("changed event source identity").into());
         }
@@ -119,7 +113,7 @@ impl EventTable {
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.index.as_ref().map_or(1, |index| index.batches.len())
+        self.index.batches.len()
     }
 
     #[must_use]
@@ -135,33 +129,20 @@ impl EventTable {
             .budget
             .reserve(4096)
             .ok_or(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))?;
-        if let Some(table) = &self.index {
-            let batch = &table.batches[index];
-            Ok(EventPart {
-                path: self
-                    .directory
-                    .join("events")
-                    .join(crate::event_recovery::batch_name(index)),
-                rows: batch.rows,
-                events: Some(batch.first..batch.end),
-                identities: Some(table.identities),
-                limits: Some(read::limits()),
-                pin: self.pin.clone(),
-                index,
-                _reservation: reservation,
-            })
-        } else {
-            Ok(EventPart {
-                path: self.directory.join("events.parquet"),
-                rows: self.rows,
-                events: None,
-                identities: None,
-                limits: None,
-                pin: self.pin.clone(),
-                index,
-                _reservation: reservation,
-            })
-        }
+        let batch = &self.index.batches[index];
+
+        Ok(EventPart {
+            path: self
+                .directory
+                .join("events")
+                .join(crate::event_recovery::batch_name(index)),
+            rows: batch.rows,
+            events: batch.first..batch.end,
+            identities: self.index.identities,
+            pin: self.pin.clone(),
+            index,
+            _reservation: reservation,
+        })
     }
 }
 
@@ -188,12 +169,8 @@ impl EventPart {
         self.rows
     }
     #[must_use]
-    pub fn events(&self) -> Option<Range<u64>> {
+    pub fn events(&self) -> Range<u64> {
         self.events.clone()
-    }
-    #[must_use]
-    pub fn decode_limits(&self) -> Option<DecodeLimits> {
-        self.limits
     }
 
     /// Decodes/validates at most one physical batch, preserving every detached row.

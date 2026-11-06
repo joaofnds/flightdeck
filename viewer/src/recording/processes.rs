@@ -12,8 +12,7 @@ use persistence::schema::{
     identity_availability,
 };
 use polars::prelude::{
-    DataFrame, DataType, Expr, IntoLazy, Null, SortMultipleOptions, UInt32Type, UInt64Type, col,
-    lit,
+    DataFrame, DataType, Expr, IntoLazy, Null, UInt32Type, UInt64Type, col, lit,
 };
 
 use super::apps::AppMinute;
@@ -359,30 +358,13 @@ fn read_processes_batch_events(minute: &SealedMinute) -> Result<DataFrame, Refus
         null("threads", DataType::Int32),
         null("gpu_ns", DataType::UInt64),
     ];
-    let events = super::events::associated(minute)?
+    // Parts validate their native event order, so associated rows already have the assembly's
+    // order. Keep leased chunks instead of copying them into an unleased sort.
+    Ok(super::events::associated(minute)?
         .lazy()
         .with_columns(origin)
         .select(BATCH_COLUMNS.map(col))
         .collect()
-        .map_err(persistence::Error::from)?;
-    if minute.manifest.event_batches.is_some() {
-        // Parts validate their native event order, so associated rows already have the
-        // assembly's order. Keep leased chunks instead of copying them into an unleased sort.
-        return Ok(events);
-    }
-
-    // Legacy physical order is by process. Sort only the associated rows after validation.
-    Ok(events
-        .sort(
-            ["app_event"],
-            SortMultipleOptions {
-                descending: vec![false],
-                nulls_last: vec![false],
-                multithreaded: false,
-                maintain_order: true,
-                limit: None,
-            },
-        )
         .map_err(persistence::Error::from)?)
 }
 

@@ -1208,7 +1208,7 @@ fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
     let events = crate::live::saved_events(source.root, &manifest);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let expected = events_loader_legacy(&source, &budget, &operation);
+    let expected = events_loader_expected(&source, &budget, &operation);
     let expected_captures = events_loader_consumed_inodes(&source);
     let mut replay_decoder = Decoder::default();
     let events_captures = AtomicU64::new(0);
@@ -1397,7 +1397,7 @@ fn events_loader_write(path: &std::path::Path, frame: &mut polars::prelude::Data
         .unwrap();
 }
 
-fn events_loader_legacy(
+fn events_loader_expected(
     source: &crate::recording::SealedSource<'_>,
     budget: &Arc<ByteBudget>,
     operation: &crate::cancellation::Operation,
@@ -1936,7 +1936,7 @@ fn assert_retry_matches_original_minute(
         root: &fixture.root,
         marker: &found.marker,
     };
-    let (_, expected) = events_loader_legacy(&source, &budget, &operation);
+    let (_, expected) = events_loader_expected(&source, &budget, &operation);
     assert_eq!(retry.seconds.len(), expected.len());
     for (actual, expected) in retry.seconds.iter().zip(&expected) {
         assert_eq!(actual.apps.second().unwrap(), expected);

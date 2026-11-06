@@ -48,7 +48,7 @@ pub(super) fn admit(
             .map_err(|_| AdmissionRefusal::Bound("parquet rows"))?;
         let types = admission::storage_types(&metadata).map_err(admitted_file::refuse)?;
         let names = ColumnNames::capture(&metadata.schema[1..], &types, budget)?;
-        let profile = decode_profile::DecodeProfile::capture(&metadata, budget, true)?;
+        let profile = decode_profile::DecodeProfile::capture(&metadata, budget)?;
         let metadata_bytes =
             native_metadata::requested_bytes(&metadata, length).map_err(admitted_file::refuse)?;
         Ok((

@@ -245,7 +245,7 @@ fn proof_manifest() -> crate::Manifest {
         losses: crate::Losses::default(),
         data_directory: String::new(),
         tables,
-        event_batches: Some(1),
+        event_batches: 1,
     };
     manifest.data_directory = format!(
         "data/{}/ready",
@@ -257,6 +257,52 @@ fn proof_manifest() -> crate::Manifest {
 
     manifest
 }
+/// The bytes of the manifest every window now proves, whose last word counts its event batches and
+/// whose third word names its encoding.
+fn manifest_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    proof_manifest().write(&mut bytes).unwrap();
+
+    bytes
+}
+
+#[test]
+fn a_manifest_of_the_current_encoding_reads_back() {
+    // Goal: the refusals below turn on the words they change and on nothing else.
+    // Method: read a manifest as it was written.
+    let bytes = manifest_bytes();
+
+    let manifest = crate::Manifest::read(&mut bytes.as_slice()).unwrap();
+
+    assert_eq!(manifest, proof_manifest());
+}
+
+#[test]
+fn a_manifest_naming_no_event_batches_is_refused() {
+    // Goal: a window keeps its events in batches, so no manifest may say it holds one events file.
+    // Method: write the word that used to mean one events file over the count of batches.
+    let mut bytes = manifest_bytes();
+    let count = bytes.len() - size_of::<u64>();
+    bytes[count..].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    let error = crate::Manifest::read(&mut bytes.as_slice()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_manifest_of_the_older_encoding_is_refused() {
+    // Goal: the encoding that had no count of batches is no longer a way to read a window.
+    // Method: rewrite a manifest as that encoding wrote it, naming it and leaving the count out.
+    let mut bytes = manifest_bytes();
+    bytes.truncate(bytes.len() - size_of::<u64>());
+    bytes[16..24].copy_from_slice(&1_u64.to_le_bytes());
+
+    let error = crate::Manifest::read(&mut bytes.as_slice()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
 #[test]
 fn loss_only_tail_reopens_with_idle_slots_and_no_derived_index() {
     // Goal: canonical gate metadata alone establishes exact ownership.
@@ -610,7 +656,7 @@ fn ordinary_encoded(
         },
         data_directory: relative,
         tables,
-        event_batches: Some(0),
+        event_batches: 0,
     });
     (metadata, raw)
 }

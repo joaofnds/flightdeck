@@ -505,7 +505,7 @@ impl<'store> OrdinaryRecovery<'store> {
                 collector::recording::identity_text(self.state.transaction)
             ),
             tables,
-            event_batches: Some(u32::try_from(index.batches.len()).map_err(|_| invalid())?),
+            event_batches: u32::try_from(index.batches.len()).map_err(|_| invalid())?,
         })
     }
     fn finish(&mut self) -> io::Result<()> {

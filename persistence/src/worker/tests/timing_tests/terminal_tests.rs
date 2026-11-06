@@ -171,7 +171,7 @@ fn a_large_retained_prefix_streams_parts_inside_one_ordinary_window_commit() {
         .saved_newest(&source.registered.identity)
         .unwrap()
         .unwrap();
-    assert_eq!(manifest.event_batches, Some(4));
+    assert_eq!(manifest.event_batches, 4);
     assert_eq!(
         manifest.publication_first..manifest.publication_end,
         COUNT - 7..COUNT + 1

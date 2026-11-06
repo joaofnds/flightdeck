@@ -11,35 +11,8 @@ use crate::{Error, Result};
 #[cfg(test)]
 mod tests;
 
-pub(super) fn preflight(
-    part: &EventPart,
-    budget: &Arc<ByteBudget>,
-) -> std::result::Result<(), AdmittedReadRefusal> {
-    assert!(part.limits.is_none());
-    let file = collector::recording::private::open_private_file(part.path(), false)?;
-    part.pin.validate_part_file(part.index, &file)?;
-    let identity = file.try_clone()?;
-    let table = AdmittedTable::from_file_budgeted_profiled(file, budget)
-        .map_err(AdmittedReadRefusal::Admission)?;
-    if table.row_count() != part.rows {
-        return Err(Error::Bound("event physical row count").into());
-    }
-
-    slice_schema(&table, part)?;
-    let count = u32::try_from(BATCH_ROWS_MAX).map_err(|_| Error::Bound("event slice rows"))?;
-    for slice in 0..part.rows.div_ceil(u64::from(count)) {
-        let offset = slice * u64::from(count);
-        let _workspace = slice_workspace(&table, part, offset, count, budget)?;
-        let _work = table
-            .reserve_slice_work(offset, count)
-            .map_err(AdmittedReadRefusal::Admission)?;
-        let _metadata = table
-            .reserve_native_metadata()
-            .map_err(AdmittedReadRefusal::Admission)?;
-    }
-    part.pin.validate_part_file(part.index, &identity)?;
-    Ok(())
-}
+/// What normalizing and associating one slice may use, on top of what decoding it holds.
+const SLICE_WORKSPACE_BYTES: usize = BATCH_BYTES_MAX * 4;
 
 pub(super) fn limits() -> DecodeLimits {
     DecodeLimits {
@@ -66,12 +39,8 @@ pub(super) fn slice(
     let file = collector::recording::private::open_private_file(part.path(), false)?;
     part.pin.validate_part_file(part.index, &file)?;
     let identity = file.try_clone()?;
-    let table = if let Some(limits) = part.limits {
-        AdmittedTable::from_file_budgeted_with_limits(file, budget, &limits)
-    } else {
-        AdmittedTable::from_file_budgeted_profiled(file, budget)
-    }
-    .map_err(AdmittedReadRefusal::Admission)?;
+    let table = AdmittedTable::from_file_budgeted_with_limits(file, budget, &limits())
+        .map_err(AdmittedReadRefusal::Admission)?;
     let result = captured_slice(part, &table, offset, count, budget)?;
     part.pin.validate_part_file(part.index, &identity)?;
     Ok(result)
@@ -87,12 +56,11 @@ pub(super) fn capture(
 ) -> std::result::Result<CapturedEventPart, AdmittedReadRefusal> {
     let file = collector::recording::private::open_private_file(part.path(), false)?;
     part.pin.validate_part_file(part.index, &file)?;
-    if let Some(limits) = part.limits {
-        if file.metadata()?.len() > limits.compressed_bytes {
-            return Err(AdmittedReadRefusal::Admission(AdmissionRefusal::Bound(
-                "parquet file bytes",
-            )));
-        }
+    let limits = limits();
+    if file.metadata()?.len() > limits.compressed_bytes {
+        return Err(AdmittedReadRefusal::Admission(AdmissionRefusal::Bound(
+            "parquet file bytes",
+        )));
     }
 
     let mut input = capture(file, budget).map_err(AdmittedReadRefusal::Admission)?;
@@ -102,7 +70,7 @@ pub(super) fn capture(
 
     part.pin.validate_part_input(part.index, &input)?;
     input
-        .prepare_event_input(part.limits.as_ref())
+        .prepare_event_input(&limits)
         .map_err(AdmittedReadRefusal::Admission)?;
     if input.row_count() != part.rows {
         return Err(Error::Bound("event physical row count").into());
@@ -133,60 +101,34 @@ pub(super) fn captured_slice(
         return Err(Error::Bound("event physical row count").into());
     }
 
-    let reservation = slice_workspace(table, part, offset, count, budget)?;
-    let legacy_work = if part.limits.is_none() {
-        Some(
-            table
-                .reserve_slice_work(offset, count)
-                .map_err(AdmittedReadRefusal::Admission)?,
-        )
-    } else {
-        None
-    };
-    let (identities, provenance) = slice_schema(table, part)?;
-    let columns = slice_columns(identities, provenance);
+    let reservation = slice_workspace(budget)?;
+    let identities = slice_schema(table, part)?;
+    let columns = slice_columns(identities);
     crate::work::record(|counts| counts.collections += 1);
     crate::work::ingestion::record_content(crate::work::ingestion::Kind::NativeCollect, 0);
     let rows = table.read_slice_metadata_budgeted(&columns, offset, count)?;
-    let native_rows = normalize(rows, identities, provenance)?;
-    if let Some(events) = &part.events {
-        validate_extent(
-            &native_rows,
-            events,
-            offset == 0,
-            offset + collector::u64_from_usize(native_rows.height()) == part.rows,
-        )?;
-    }
+    let native_rows = normalize(rows, identities)?;
+    validate_extent(
+        &native_rows,
+        &part.events,
+        offset == 0,
+        offset + collector::u64_from_usize(native_rows.height()) == part.rows,
+    )?;
     // Copies and buffer leases precede any public borrow: native clones must keep their charge.
     let rows = crate::engine::frame_lease::copy_event_frame(&native_rows, budget)?;
     drop(native_rows);
-    drop(legacy_work);
     Ok(EventFrame { rows, reservation })
 }
 
 fn slice_workspace(
-    table: &AdmittedTable,
-    part: &EventPart,
-    offset: u64,
-    count: u32,
     budget: &Arc<ByteBudget>,
 ) -> std::result::Result<crate::resources::ByteReservation, AdmittedReadRefusal> {
-    let bytes = if part.limits.is_some() {
-        BATCH_BYTES_MAX * 4
-    } else {
-        let (_, chunks) = table
-            .slice_work_shape(offset, count)
-            .map_err(AdmittedReadRefusal::Admission)?;
-        let rows = usize::try_from(u64::from(count).min(part.rows - offset))
-            .map_err(|_| Error::Bound("event slice rows"))?;
-        super::workspace::normalization(rows, chunks)?.max(super::workspace::association(rows)?)
-    };
     budget
-        .reserve(bytes)
+        .reserve(SLICE_WORKSPACE_BYTES)
         .ok_or(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))
 }
 
-fn slice_columns(identities: bool, provenance: bool) -> Vec<&'static str> {
+fn slice_columns(identities: bool) -> Vec<&'static str> {
     let mut columns: Vec<_> = model::catalog::EVENTS
         .columns
         .iter()
@@ -195,45 +137,25 @@ fn slice_columns(identities: bool, provenance: bool) -> Vec<&'static str> {
     if identities {
         columns.extend(crate::schema::IDENTITY_FIELDS.iter().map(|field| field.0));
     }
-    if provenance {
-        columns.extend(
-            crate::schema::EVENT_OBSERVATION_FIELDS
-                .iter()
-                .map(|field| field.0),
-        );
-    }
+    columns.extend(
+        crate::schema::EVENT_OBSERVATION_FIELDS
+            .iter()
+            .map(|field| field.0),
+    );
     columns
 }
 
-fn slice_schema(table: &AdmittedTable, part: &EventPart) -> Result<(bool, bool)> {
+fn slice_schema(table: &AdmittedTable, part: &EventPart) -> Result<bool> {
     let identities =
         crate::identity::validate_fields(crate::schema::Table::Events, || table.fields())?;
     let provenance = crate::event_observation::extended_fields(table.fields())?;
-    if part
-        .identities
-        .is_some_and(|expected| expected != identities)
-        || (part.limits.is_some() && !provenance)
-    {
+    if part.identities != identities || !provenance {
         return Err(Error::Bound("event physical schema"));
     }
-    Ok((identities, provenance))
+    Ok(identities)
 }
 
-fn normalize(mut rows: DataFrame, identities: bool, provenance: bool) -> Result<DataFrame> {
-    if !provenance {
-        for (name, value) in [
-            (
-                "event_observation_version",
-                crate::event_observation::VERSION,
-            ),
-            (
-                "event_observation_availability",
-                crate::event_observation::ASSOCIATED,
-            ),
-        ] {
-            rows.with_column(Column::new(name.into(), vec![value; rows.height()]))?;
-        }
-    }
+fn normalize(mut rows: DataFrame, identities: bool) -> Result<DataFrame> {
     crate::event_recovery::batch::validate_frame(&rows, identities)?;
     if identities {
         return Ok(rows);

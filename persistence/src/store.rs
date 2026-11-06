@@ -128,7 +128,7 @@ impl Store {
         private::verify_directory(&path)?;
         Self::validate_files(&path, manifest)?;
         for table in &manifest.tables {
-            if table.name == "events" && manifest.event_batches.is_some() {
+            if table.name == "events" {
                 event_table::validate(&path.join("events"), manifest)?;
                 continue;
             }
@@ -150,18 +150,15 @@ impl Store {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_str().ok_or_else(|| invalid("file name encoding"))?;
-            if name == PROOF_NAME {
+            if name == PROOF_NAME || name == "events" {
                 count += 1;
                 continue;
             }
-            if name == "events" && manifest.event_batches.is_some() {
-                count += 1;
-                continue;
-            }
-            if !manifest.tables.iter().any(|table| {
-                !(table.name == "events" && manifest.event_batches.is_some())
-                    && name == format!("{}.parquet", table.name)
-            }) {
+            if !manifest
+                .tables
+                .iter()
+                .any(|table| table.name != "events" && name == format!("{}.parquet", table.name))
+            {
                 return Err(invalid("unexpected window file"));
             }
             count += 1;

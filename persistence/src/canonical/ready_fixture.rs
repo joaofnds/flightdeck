@@ -244,11 +244,15 @@ fn publish_window_extended(
         .ok_or(Error::Bound("ready window without an events table"))?
         .rows;
     ready.events_to_batch(window, events)?;
-    let mut manifest = crate::worker::seal_manifest(window, tables, crate::Losses::default())?;
+    let mut manifest = crate::worker::seal_manifest(
+        window,
+        tables,
+        crate::Losses::default(),
+        u32::from(events != 0),
+    );
     let range = publish_events(window);
     manifest.events_first = range.start;
     manifest.events_end = range.end;
-    manifest.event_batches = Some(u32::from(events != 0));
     ready.publish(root, manifest)
 }
 

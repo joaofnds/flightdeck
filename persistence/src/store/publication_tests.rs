@@ -67,7 +67,7 @@ fn encode_original_payload(
             collector::recording::identity_text(attempt.transaction())
         ),
         tables,
-        event_batches: Some(u32::try_from(index.batches.len()).unwrap()),
+        event_batches: u32::try_from(index.batches.len()).unwrap(),
     }
 }
 fn encode_original<'store>(
@@ -2078,13 +2078,11 @@ fn encode_original_payload_from_window(
         .find(|table| table.name == "events")
         .unwrap()
         .rows = 0;
-    let mut manifest =
-        crate::worker::seal_manifest(window, tables, crate::Losses::default()).unwrap();
+    let mut manifest = crate::worker::seal_manifest(window, tables, crate::Losses::default(), 0);
     manifest.data_directory = format!(
         "data/{}/ready",
         collector::recording::identity_text(attempt.transaction())
     );
-    manifest.event_batches = Some(0);
     manifest
 }
 fn observation_link_names(

@@ -654,7 +654,6 @@ impl CanonicalMetadata {
             || inner.events_first != self.loss.inherited.event_start
             || inner.events_end != self.loss.event_end
             || inner.losses != loss
-            || inner.event_batches.is_none()
             || inner.data_directory
                 != format!(
                     "data/{}/ready",

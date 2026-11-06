@@ -562,10 +562,11 @@ pub(crate) fn seal_manifest(
     window: &Window,
     tables: Vec<TableManifest>,
     losses: Losses,
-) -> Result<Manifest> {
+    event_batches: u32,
+) -> Manifest {
     let publications = window.publication_range();
     let events = window.event_range();
-    Ok(Manifest {
+    Manifest {
         identity: window.identity,
         publication_first: publications.start,
         publication_end: publications.end,
@@ -579,15 +580,8 @@ pub(crate) fn seal_manifest(
         losses,
         data_directory: String::new(),
         tables,
-        event_batches: window
-            .event_index
-            .as_ref()
-            .map(|index| {
-                u32::try_from(index.batches.len())
-                    .map_err(|_| crate::Error::Bound("event part count"))
-            })
-            .transpose()?,
-    })
+        event_batches,
+    }
 }
 
 /// The tables derived for a window, or none when deriving fails, since a reader can derive

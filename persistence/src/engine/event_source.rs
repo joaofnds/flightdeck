@@ -23,12 +23,13 @@ struct EventSourceSnapshot {
     marker: PathBuf,
     directory: PathBuf,
     marker_directory: (u64, u64),
-    partitioned: bool,
     files: Vec<Fingerprint>,
     reservation: ByteReservation,
 }
 
-const FILES_MAX: usize = crate::event_recovery::metadata::BATCHES_MAX + 2;
+/// The marker and the index, which a snapshot holds ahead of the parts.
+const FILES_BEFORE_PARTS: usize = 2;
+const FILES_MAX: usize = crate::event_recovery::metadata::BATCHES_MAX + FILES_BEFORE_PARTS;
 const SNAPSHOT_OVERHEAD: usize = size_of::<EventSourceSnapshot>() + 2 * size_of::<usize>();
 
 impl Engine {
@@ -102,14 +103,12 @@ impl EventSourcePin {
         {
             return Err(Error::Bound("event source path size").into());
         }
-        let count = manifest
-            .event_batches
-            .map_or(Ok(1), usize::try_from)
+        let count = usize::try_from(manifest.event_batches)
             .map_err(|_| Error::Bound("event source part count"))?;
         if count > crate::event_recovery::metadata::BATCHES_MAX {
             return Err(Error::Bound("event source part count").into());
         }
-        let count = count + 1 + usize::from(manifest.event_batches.is_some());
+        let count = count + FILES_BEFORE_PARTS;
         let reservation = budget
             .reserve(SNAPSHOT_OVERHEAD + 8 * private::PATH_MAX + count * size_of::<Fingerprint>())
             .ok_or(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))?;
@@ -132,7 +131,6 @@ impl EventSourcePin {
             marker,
             directory,
             marker_directory: (marker_directory.dev(), marker_directory.ino()),
-            partitioned: manifest.event_batches.is_some(),
             files: Vec::with_capacity(count),
             reservation,
         };
@@ -175,8 +173,7 @@ impl EventSourcePin {
     }
 
     pub(crate) fn validate_part_file(&self, index: usize, file: &File) -> Result<()> {
-        let offset = 1 + usize::from(self.0.partitioned);
-        self.validate_file(index.checked_add(offset), file)
+        self.validate_file(index.checked_add(FILES_BEFORE_PARTS), file)
     }
 
     pub(crate) fn validate_part_input(
@@ -184,9 +181,8 @@ impl EventSourcePin {
         index: usize,
         input: &super::AdmittedTable,
     ) -> Result<()> {
-        let offset = 1 + usize::from(self.0.partitioned);
         let expected = index
-            .checked_add(offset)
+            .checked_add(FILES_BEFORE_PARTS)
             .and_then(|index| self.0.files.get(index));
         if expected.is_none() || input.captured_file() != expected {
             return Err(Error::Bound("changed event source input"));
@@ -196,9 +192,6 @@ impl EventSourcePin {
     }
 
     pub(crate) fn validate_index_file(&self, file: &File) -> Result<()> {
-        if !self.0.partitioned {
-            return Err(Error::Bound("event source has no index"));
-        }
         self.validate_file(Some(1), file)
     }
 
@@ -250,12 +243,14 @@ impl EventSourceSnapshot {
         let mut bytes = [0; private::PATH_MAX];
         let mut remaining = &mut bytes[..];
         remaining.write_all(self.directory.as_os_str().as_bytes())?;
-        if !self.partitioned {
-            remaining.write_all(b"/events.parquet")?;
-        } else if index == 1 {
+        if index == 1 {
             remaining.write_all(b"/events/index")?;
         } else {
-            write!(remaining, "/events/{:04}.parquet", index - 2)?;
+            write!(
+                remaining,
+                "/events/{:04}.parquet",
+                index - FILES_BEFORE_PARTS
+            )?;
         }
         let count = private::PATH_MAX - remaining.len();
         read(Path::new(std::ffi::OsStr::from_bytes(&bytes[..count])))
@@ -268,7 +263,6 @@ impl PartialEq for EventSourcePin {
             || (self.0.marker == other.0.marker
                 && self.0.directory == other.0.directory
                 && self.0.marker_directory == other.0.marker_directory
-                && self.0.partitioned == other.0.partitioned
                 && self.0.files == other.0.files)
     }
 }

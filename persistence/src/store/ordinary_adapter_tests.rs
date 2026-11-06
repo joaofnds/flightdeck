@@ -71,7 +71,7 @@ fn adapter_descriptors(path: &Path) {
 
 fn adapter_captured_limit(fixture: &Fixture) {
     let budget = registration_budget();
-    let result = crate::engine::AdmittedTable::from_file_budgeted_profiled(
+    let result = crate::engine::AdmittedTable::from_file_budgeted(
         File::open(fixture.base.join("raw/processes.parquet")).unwrap(),
         &budget,
     );

@@ -55,6 +55,8 @@ impl Encoder {
 
         let mut tables = Vec::with_capacity(TABLES.len());
         for table in TABLES {
+            // A window no worker staged has no index, so its events go in one file here. No reader
+            // takes that for a window, and only the tests of this encoding read it.
             if matches!(table, Table::Events) {
                 if let Some(index) = &window.event_index {
                     tables.push(TableManifest {

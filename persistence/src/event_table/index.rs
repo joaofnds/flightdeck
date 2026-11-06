@@ -49,10 +49,8 @@ impl Index {
             || self.end != expected.events_end
             || self.rows != rows
             || expected.event_batches
-                != Some(
-                    u32::try_from(self.batches.len())
-                        .map_err(|_| Error::Bound("event index batches"))?,
-                )
+                != u32::try_from(self.batches.len())
+                    .map_err(|_| Error::Bound("event index batches"))?
         {
             return Err(Error::Bound("event index commitment"));
         }

@@ -33,15 +33,6 @@ impl EventTable {
         if self.rows > collector::u64_from_usize(crate::event_observation::ROWS_MAX) {
             return Err(Error::Bound("event query source rows").into());
         }
-        if self.index.is_none() {
-            // Intrinsic native decode/scratch admission happens before Engine::collect.
-            // Actual copies still reserve their measured lengths during each callback;
-            // later shared-ledger pressure can refuse those without allocating output.
-            let _query = budget
-                .reserve(QUERY_WORKING_BYTES)
-                .ok_or(AdmittedReadRefusal::Admission(AdmissionRefusal::Budget))?;
-            super::read::preflight(&self.part(0)?, budget)?;
-        }
         Ok(LazyFrame::anonymous_scan(
             Arc::new(EventScan {
                 table: self,

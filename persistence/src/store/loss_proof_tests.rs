@@ -56,7 +56,7 @@ fn encode_payload(
             collector::recording::identity_text(attempt.transaction())
         ),
         tables,
-        event_batches: Some(u32::try_from(index.batches.len()).unwrap()),
+        event_batches: u32::try_from(index.batches.len()).unwrap(),
     }
 }
 

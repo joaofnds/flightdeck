@@ -189,7 +189,7 @@ impl AdmittedTable {
         file: File,
         budget: &Arc<ByteBudget>,
     ) -> std::result::Result<Self, AdmissionRefusal> {
-        Self::from_file_limited(file, budget, None, false, None)
+        Self::from_file_limited(file, budget, None, None)
     }
 
     pub fn from_file_budgeted_with_limits(
@@ -197,7 +197,7 @@ impl AdmittedTable {
         budget: &Arc<ByteBudget>,
         limits: &DecodeLimits,
     ) -> std::result::Result<Self, AdmissionRefusal> {
-        Self::from_file_limited(file, budget, Some(limits), false, None)
+        Self::from_file_limited(file, budget, Some(limits), None)
     }
 
     pub(crate) fn from_file_limited_counted(
@@ -206,35 +206,20 @@ impl AdmittedTable {
         limits: &DecodeLimits,
         work: Option<&dyn RawTableWork>,
     ) -> std::result::Result<Self, AdmissionRefusal> {
-        Self::from_file_limited(file, budget, Some(limits), false, work)
-    }
-
-    /// Captures validated row-group work bounds for an explicitly budgeted legacy decode.
-    pub(crate) fn from_file_budgeted_profiled(
-        file: File,
-        budget: &Arc<ByteBudget>,
-    ) -> std::result::Result<Self, AdmissionRefusal> {
-        Self::from_file_limited(file, budget, None, true, None)
+        Self::from_file_limited(file, budget, Some(limits), work)
     }
 
     fn from_file_limited(
         mut file: File,
         budget: &Arc<ByteBudget>,
         limits: Option<&DecodeLimits>,
-        profile: bool,
         work: Option<&dyn RawTableWork>,
     ) -> std::result::Result<Self, AdmissionRefusal> {
         let (mut input, captured_file) = admitted_file::capture_verified(&mut file, |file| {
             let maximum =
                 limits.map_or(admission::FILE_BYTES_MAX, |limits| limits.compressed_bytes);
             let size = admitted_file::file_size(file, maximum).map_err(admitted_file::refuse)?;
-            Self::from_reader_limited(
-                file_input::CountedFile { file, work },
-                size,
-                budget,
-                limits,
-                profile,
-            )
+            Self::from_reader_limited(file_input::CountedFile { file, work }, size, budget, limits)
         })?;
         input.captured_file = Some(captured_file);
 
@@ -251,29 +236,22 @@ impl AdmittedTable {
 
     pub(crate) fn prepare_event_input(
         &mut self,
-        limits: Option<&DecodeLimits>,
+        limits: &DecodeLimits,
     ) -> std::result::Result<(), AdmissionRefusal> {
         let _scratch = self
             .budget
             .reserve(admission::cursor_scratch_bytes().map_err(admitted_file::refuse)?)
             .ok_or(AdmissionRefusal::Budget)?;
         let size = collector::u64_from_usize(self.input.bytes.len());
-        if limits.is_some_and(|limits| size > limits.compressed_bytes) {
+        if size > limits.compressed_bytes {
             return Err(AdmissionRefusal::Bound("parquet file bytes"));
         }
 
         let metadata =
             admission::validate_reader_metadata(&mut Cursor::new(&self.input.bytes), size)
                 .map_err(admitted_file::refuse)?;
-        if let Some(limits) = limits {
-            admission::validate_decode_limits(&metadata, limits).map_err(admitted_file::refuse)?;
-        } else if self.decode_profile.is_none() {
-            self.decode_profile = Some(decode_profile::DecodeProfile::capture(
-                &metadata,
-                &self.budget,
-                false,
-            )?);
-        }
+        admission::validate_decode_limits(&metadata, limits).map_err(admitted_file::refuse)?;
+
         Ok(())
     }
 
@@ -325,7 +303,7 @@ impl AdmittedTable {
         size: u64,
         budget: &Arc<ByteBudget>,
     ) -> std::result::Result<Self, AdmissionRefusal> {
-        Self::from_reader_limited(file, size, budget, None, false)
+        Self::from_reader_limited(file, size, budget, None)
     }
 
     fn from_reader_limited(
@@ -333,7 +311,6 @@ impl AdmittedTable {
         size: u64,
         budget: &Arc<ByteBudget>,
         limits: Option<&DecodeLimits>,
-        profile: bool,
     ) -> std::result::Result<Self, AdmissionRefusal> {
         let scratch = budget
             .reserve(admission::cursor_scratch_bytes().map_err(admitted_file::refuse)?)
@@ -342,7 +319,7 @@ impl AdmittedTable {
             usize::try_from(size).map_err(|_| AdmissionRefusal::Bound("parquet file bytes"))?;
         let input = budget.reserve(length).ok_or(AdmissionRefusal::Budget)?;
 
-        let result = Self::from_reader_capture(file, size, input, budget, limits, profile);
+        let result = Self::from_reader_capture(file, size, input, budget, limits);
         drop(scratch);
 
         result
@@ -450,7 +427,6 @@ impl AdmittedTable {
         input: ByteReservation,
         budget: &Arc<ByteBudget>,
         limits: Option<&DecodeLimits>,
-        profile: bool,
     ) -> std::result::Result<Self, AdmissionRefusal> {
         file.rewind()
             .map_err(Error::from)
@@ -473,13 +449,6 @@ impl AdmittedTable {
             .map_err(|_| AdmissionRefusal::Bound("parquet file rows"))?;
         let types = admission::storage_types(&metadata).map_err(admitted_file::refuse)?;
         let names = ColumnNames::capture(&metadata.schema[1..], &types, budget)?;
-        let decode_profile = if profile {
-            Some(decode_profile::DecodeProfile::capture(
-                &metadata, budget, false,
-            )?)
-        } else {
-            None
-        };
         drop(metadata);
 
         Ok(Self {
@@ -489,7 +458,7 @@ impl AdmittedTable {
             rows,
             metadata_bytes,
             budget: Arc::clone(budget),
-            decode_profile,
+            decode_profile: None,
             captured_file: None,
         })
     }

@@ -77,7 +77,7 @@ impl Fixture {
                 losses: Losses::default(),
                 data_directory: String::new(),
                 tables: Self::new_tables(&ready, 7, count),
-                event_batches: Some(u32::try_from(parts).unwrap()),
+                event_batches: u32::try_from(parts).unwrap(),
             })
             .unwrap();
         drop(store);

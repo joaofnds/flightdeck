@@ -23,7 +23,6 @@ impl DecodeProfile {
     pub(super) fn capture(
         metadata: &ThriftFileMetadata,
         budget: &Arc<ByteBudget>,
-        file_backed: bool,
     ) -> Result<Self, AdmissionRefusal> {
         assert!(metadata.row_groups.len() <= super::admission::ROW_GROUPS_MAX);
         let reservation = budget
@@ -47,7 +46,7 @@ impl DecodeProfile {
                     .meta_data
                     .as_ref()
                     .ok_or(AdmissionRefusal::Bound("parquet profile column"))?;
-                let work = capture_column_work_bytes(column, count, file_backed)?;
+                let work = capture_column_work_bytes(column, count)?;
                 columns.push(
                     usize::try_from(work)
                         .map_err(|_| AdmissionRefusal::Bound("parquet profile column bytes"))?,
@@ -141,7 +140,6 @@ impl DecodeProfile {
 fn capture_column_work_bytes(
     column: &polars_parquet_format::ColumnMetaData,
     count: u64,
-    file_backed: bool,
 ) -> Result<u64, AdmissionRefusal> {
     let expanded = u64::try_from(column.total_uncompressed_size)
         .map_err(|_| AdmissionRefusal::Bound("parquet profile expanded bytes"))?;
@@ -153,12 +151,8 @@ fn capture_column_work_bytes(
         _ => return Err(AdmissionRefusal::Bound("parquet profile scalar")),
     };
     // BinaryView can retain the entire group's payload alongside expanded pages.
-    let compressed = if file_backed {
-        u64::try_from(column.total_compressed_size)
-            .map_err(|_| AdmissionRefusal::Bound("parquet profile compressed bytes"))?
-    } else {
-        0
-    };
+    let compressed = u64::try_from(column.total_compressed_size)
+        .map_err(|_| AdmissionRefusal::Bound("parquet profile compressed bytes"))?;
     count
         .checked_mul(width)
         .and_then(|fixed| fixed.checked_add(count.div_ceil(8)))

@@ -53,13 +53,12 @@ fn direct_normalization_allocations_fit_the_reserved_fixed_schema_workspace() {
                     input.drop_in_place(name).unwrap();
                 }
             }
-            let bytes = super::super::workspace::normalization(rows, 1).unwrap();
+            let bytes = SLICE_WORKSPACE_BYTES;
             let budget = Arc::new(ByteBudget::new(bytes));
             let reservation = budget.reserve(bytes).unwrap();
 
-            let (normalized, allocations) = crate::allocation_tests::observe(&budget, || {
-                normalize(input, identities, false).unwrap()
-            });
+            let (normalized, allocations) =
+                crate::allocation_tests::observe(&budget, || normalize(input, identities).unwrap());
 
             eprintln!(
                 "normalization rows={rows} identities={identities} requested={} \
@@ -83,7 +82,7 @@ fn associated_filter_allocations_fit_the_reserved_numeric_and_view_workspace() {
     // Goal: association filtering copies views and scalars without copying program payload.
     // Method: measure a maximum batch's mixed association filter under its derived charge.
     let rows = BATCH_ROWS_MAX;
-    let mut input = normalize(frame(rows), true, false).unwrap();
+    let mut input = normalize(frame(rows), true).unwrap();
     input
         .with_column(Column::new(
             "publication".into(),
@@ -123,23 +122,15 @@ fn associated_filter_allocations_fit_the_reserved_numeric_and_view_workspace() {
 }
 
 #[test]
-fn refused_legacy_transform_workspace_allocates_nothing() {
+fn refused_transform_workspace_allocates_nothing() {
     // Goal: an unfunded transform never begins normalization or native value decoding.
-    // Method: retain all but one caller byte after admission and trace the real workspace gate.
-    let fixture = Fixture::with_rows(2);
-    let manifest = fixture.manifest();
-    let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
-    let source =
-        crate::event_table::EventTable::open_budgeted(&fixture.0, &manifest, &budget).unwrap();
-    let part = source.part(0).unwrap();
-    let file = collector::recording::private::open_private_file(part.path(), false).unwrap();
-    let table = AdmittedTable::from_file_budgeted_profiled(file, &budget).unwrap();
+    // Method: leave one byte too few of a caller's budget and trace the real workspace gate.
+    let budget = Arc::new(ByteBudget::new(2 * SLICE_WORKSPACE_BYTES));
     let occupied = budget
-        .reserve(budget.maximum() - budget.used() - 1)
+        .reserve(budget.maximum() - SLICE_WORKSPACE_BYTES + 1)
         .unwrap();
 
-    let (result, requests) =
-        crate::allocation_tests::observe(&budget, || slice_workspace(&table, &part, 0, 2, &budget));
+    let (result, requests) = crate::allocation_tests::observe(&budget, || slice_workspace(&budget));
 
     assert!(matches!(
         result,
@@ -155,7 +146,7 @@ fn associated_output_clones_keep_only_the_selected_program_storage_charged() {
     // Goal: the input/work guard cannot escape through a tiny retained association.
     // Method: retain one selected binary buffer after dropping input, output and projection.
     let budget = Arc::new(ByteBudget::new(4 * 1024 * 1024));
-    let mut input = normalize(frame(8), true, false).unwrap();
+    let mut input = normalize(frame(8), true).unwrap();
     input
         .with_column(Column::new(
             "publication".into(),
@@ -296,7 +287,7 @@ impl Fixture {
                     losses: Losses::default(),
                     data_directory: String::new(),
                     tables,
-                    event_batches: Some(1),
+                    event_batches: 1,
                 })
                 .unwrap(),
         );

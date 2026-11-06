@@ -16,8 +16,7 @@ fn underreported_expansion_is_refused_before_native_decode() {
     let fixture = underreported_fixture();
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
 
-    let result =
-        AdmittedTable::from_file_budgeted_profiled(File::open(&fixture.path).unwrap(), &budget);
+    let result = AdmittedTable::from_file_budgeted(File::open(&fixture.path).unwrap(), &budget);
 
     assert!(matches!(
         result,
@@ -120,8 +119,7 @@ fn profiled_slice_reserves_only_whole_intersecting_groups_before_decode() {
     write_groups(&fixture.path, &mut frame);
     let budget = Arc::new(ByteBudget::new(64 * 1024 * 1024));
     let table =
-        AdmittedTable::from_file_budgeted_profiled(File::open(&fixture.path).unwrap(), &budget)
-            .unwrap();
+        AdmittedTable::from_file_streaming(File::open(&fixture.path).unwrap(), &budget).unwrap();
     let first = table.reserve_slice_work(0, 1).unwrap();
     let second = table.reserve_slice_work(62, 1).unwrap();
     let both = table.reserve_slice_work(61, 2).unwrap();

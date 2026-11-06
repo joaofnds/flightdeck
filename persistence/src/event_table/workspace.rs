@@ -14,42 +14,27 @@ const _: () = {
     assert!(COLUMNS <= 32);
 };
 
-pub(super) fn normalization(rows: usize, chunks: usize) -> Result<usize> {
-    shape(rows, chunks)?;
-    // Legacy synthesis: two provenance bytes, identity availability/version, u64/i32,
-    // two BinaryView null vectors, source availability cast, and eight validity/mask maps.
-    let values = rows * (5 + size_of::<u64>() + size_of::<i32>() + 2 * size_of::<View>())
-        + 8 * rows.div_ceil(8);
-    Ok(structures(chunks) + values)
-}
-
 pub(super) fn association(rows: usize) -> Result<usize> {
-    shape(rows, 1)?;
-    // EventFrame buffers have one chunk. Filtering copies numeric/view values and validity,
-    // while binary payload remains borrowed until the separately charged leased copy.
-    Ok(structures(1) + COLUMNS * (rows * size_of::<View>() + rows.div_ceil(8)))
-}
-
-fn shape(rows: usize, chunks: usize) -> Result<()> {
-    if rows > crate::event_observation::BATCH_ROWS_MAX || chunks > 2048 {
+    if rows > crate::event_observation::BATCH_ROWS_MAX {
         return Err(Error::Bound("event transformation shape"));
     }
 
-    Ok(())
+    // EventFrame buffers have one chunk. Filtering copies numeric/view values and validity,
+    // while binary payload remains borrowed until the separately charged leased copy.
+    Ok(structures() + COLUMNS * (rows * size_of::<View>() + rows.div_ceil(8)))
 }
 
-fn structures(chunks: usize) -> usize {
-    // Pinned Polars 22a147d: flat scalar readers produce one array per selected row group;
-    // rechunking is disabled. A rename may clone its ChunkedArray and boxed array wrappers.
+fn structures() -> usize {
+    // Pinned Polars 22a147d: a rename may clone its ChunkedArray and boxed array wrappers.
     // Four complete column sets cover the input's projection, 14 validation columns,
     // nine synthetic columns, final catalog projection and their temporary wrappers.
-    // Four times each vector's max(n,4) covers Rust RawVec growth including old/new overlap.
+    // Four times a vector's room for four covers Rust RawVec growth including old/new overlap.
     let column = size_of::<ChunkedArray<UInt64Type>>()
         + 2 * size_of::<usize>()
         + size_of::<Field>()
         + 2 * size_of::<usize>()
         + 128
-        + 4 * chunks.max(4) * (size_of::<Box<dyn polars_arrow::array::Array>>() + ARRAY_BYTES)
+        + 4 * 4 * (size_of::<Box<dyn polars_arrow::array::Array>>() + ARRAY_BYTES)
         + size_of::<Buffer<u8>>();
     let columns = 4 * COLUMNS * column;
     let vectors = 4 * COLUMNS * size_of::<Column>();

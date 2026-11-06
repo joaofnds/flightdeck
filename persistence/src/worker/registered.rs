@@ -808,7 +808,13 @@ fn seal_write(
     let mut tables = writers.encoder.encode_into(window, directory)?;
     tables.extend(derived);
 
-    let mut manifest = super::seal_manifest(window, tables, state.losses)?;
+    let event_index = window
+        .event_index
+        .as_ref()
+        .ok_or(crate::Error::Bound("sealed window without an event index"))?;
+    let event_batches = u32::try_from(event_index.batches.len())
+        .map_err(|_| crate::Error::Bound("event part count"))?;
+    let mut manifest = super::seal_manifest(window, tables, state.losses, event_batches);
     // The window's event coverage starts where the frontier ended, before any events it lost.
     manifest.events_first = attempt.input().losses.event_start;
     manifest.data_directory = format!(

@@ -259,7 +259,7 @@ fn complete_payload(attempt: &RegisteredAttempt<'_>, fixture: &Fixture, count: u
             collector::recording::identity_text(attempt.transaction())
         ),
         tables,
-        event_batches: Some(1),
+        event_batches: 1,
     }
 }
 fn complete_payload_window(

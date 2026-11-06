@@ -840,7 +840,7 @@ fn an_empty_multipart_event_table_keeps_the_normalized_app_schema() {
     .unwrap();
     assert!(matches!(outcome, persistence::worker::Outcome::Complete));
     let minute = SealedMinute::open(&fixture.root, &fixture.marker(0)).unwrap();
-    assert_eq!(minute.manifest.event_batches, Some(0));
+    assert_eq!(minute.manifest.event_batches, 0);
 
     let events = super::events::associated(&minute).unwrap();
     let frames = decoded_frames(&minute).unwrap();
@@ -1573,7 +1573,7 @@ fn replayed_frames(fixture: &Fixture) -> Vec<Frame> {
     let connection = Engine::new();
     let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
     let source = |table: Table| {
-        if matches!(table, Table::Events) && manifest.event_batches.is_some() {
+        if matches!(table, Table::Events) {
             return connection
                 .event_source(&fixture.root, &manifest, &budget)
                 .unwrap();
@@ -1680,7 +1680,7 @@ pub(crate) fn sealed_system_minute() -> Fixture {
 /// Replaces table `name` of `fixture`'s sealed minute 0 with the copy `damage` makes of it.
 fn damage_table(fixture: &Fixture, name: &str, damage: fn(DataFrame) -> DataFrame) {
     let manifest = persistence::read_committed(&fixture.root, &fixture.marker(0)).unwrap();
-    if name == "events" && manifest.event_batches.is_some() {
+    if name == "events" {
         let table = persistence::event_table::EventTable::open(&fixture.root, &manifest).unwrap();
         for index in 0..table.len() {
             let part = table.part(index).unwrap();
