@@ -981,6 +981,58 @@ static UNINTERRUPTED: LazyLock<SavedFiles> =
 static UNINTERRUPTED_CAPTURED: LazyLock<SavedFiles> =
     LazyLock::new(|| saved_without_interruption(Recording::captured()));
 
+/// Every directory and file under `root` passes the private check a reader of them makes.
+fn assert_all_private(root: &Path) {
+    let mut unread = vec![root.to_path_buf()];
+    for _directory in 0..1 << 12 {
+        let Some(directory) = unread.pop() else {
+            return;
+        };
+        private::verify_directory(&directory).unwrap();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                unread.push(entry.path());
+            } else {
+                private::verify_file(&entry.path()).unwrap();
+            }
+        }
+    }
+    panic!("more directories than a seal leaves");
+}
+
+macro_rules! stopped_seal_is_private {
+    ($name:ident, $interruption:expr) => {
+        #[test]
+        fn $name() {
+            // Goal: nothing a seal holds on disk can be read by another user at any point, pending
+            // files included, since a stopped process leaves them.
+            // Method: stop a seal at this point and check everything under the recording.
+            let mut recording = Recording::new();
+            publish_three_minutes(&mut recording);
+            let store = Store::open(&recording.root).unwrap();
+
+            recording.interrupted_seal(&store, $interruption);
+
+            assert_all_private(&recording.root);
+        }
+    };
+}
+
+stopped_seal_is_private!(
+    a_seal_stopped_once_registered_is_private,
+    Interruption::Registered
+);
+stopped_seal_is_private!(
+    a_seal_stopped_with_events_staged_is_private,
+    Interruption::EventsStaged
+);
+stopped_seal_is_private!(
+    a_seal_stopped_with_tables_written_is_private,
+    Interruption::TablesWritten
+);
+stopped_seal_is_private!(a_proved_seal_stopped_is_private, Interruption::Proved);
+
 /// Runs the seal up to the interruption, restarts the worker, and takes two steps, which finish
 /// the interrupted minute and then save the next one, exactly as if nothing had happened.
 fn interrupted_seal_converges(

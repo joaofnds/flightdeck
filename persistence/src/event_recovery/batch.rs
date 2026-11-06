@@ -47,6 +47,7 @@ const _: () = {
     assert!(BATCHES_MAX < 10_000);
     assert!(ROWS_MAX.div_ceil(BATCH_ROWS_MIN) <= BATCHES_MAX);
     assert!(crate::WRITE_BUFFER_BYTES == 1024 * 1024);
+    assert!(READ_AHEAD_BYTES == 2 * BATCH_BYTES_MAX);
 };
 
 #[cfg(test)]
@@ -98,14 +99,18 @@ pub(crate) fn read_ahead<Item: Send>(
 ) -> Result<()> {
     std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(0);
-        let reading = std::thread::Builder::new()
+        let reader = std::thread::Builder::new()
             .name("event-read-ahead".to_owned())
             .spawn_scoped(scope, move || read(&sender))?;
         let written = read_ahead_write(&receiver, write);
         drop(receiver);
-        let read = reading
+        let read = reader
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        if let (Err(_), Err(error)) = (&written, &read) {
+            collector::diagnostics::error(format_args!("event read ahead also failed: {error}"));
+        }
+
         written.and(read)
     })
 }

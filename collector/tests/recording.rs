@@ -380,7 +380,10 @@ mod tests {
 
         let checks = std::thread::scope(|scope| {
             scope.spawn(|| {
-                while !stop.load(Ordering::Relaxed) {
+                for _write in 0..1 << 24 {
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
                     private::atomic_write(&ring.root, "namespace-state", &state).unwrap();
                 }
             });
@@ -405,23 +408,27 @@ mod tests {
         }
     }
 
-    /// Every name directly under `root`, with the bytes of those that are files.
-    fn previous_recording_files(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
-        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(root)
-            .unwrap()
-            .map(|entry| {
+    /// Every name under `root`, with the bytes of those that are files.
+    fn previous_recording_files(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut files = Vec::new();
+        let mut unread = vec![root.to_path_buf()];
+        for _directory in 0..1 << 12 {
+            let Some(directory) = unread.pop() else {
+                files.sort();
+                return files;
+            };
+            for entry in std::fs::read_dir(directory).unwrap() {
                 let entry = entry.unwrap();
                 let bytes = if entry.file_type().unwrap().is_file() {
                     std::fs::read(entry.path()).unwrap()
                 } else {
+                    unread.push(entry.path());
                     Vec::new()
                 };
-                (entry.file_name().to_str().unwrap().to_owned(), bytes)
-            })
-            .collect();
-        files.sort();
-
-        files
+                files.push((entry.path(), bytes));
+            }
+        }
+        panic!("more directories than a previous recording holds");
     }
 
     struct OwnedWriter(Writer);

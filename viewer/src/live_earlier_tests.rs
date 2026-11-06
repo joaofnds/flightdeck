@@ -108,7 +108,7 @@ fn rereads_only_the_minute_after_a_removed_one() {
 }
 
 #[test]
-fn reads_a_recovered_minute_and_the_minute_after_it() {
+fn reads_a_recovered_minute_and_no_other() {
     // Goal: a minute saved late is read and no other, since the minute after it belongs to a later
     // run, whose first reading takes the reading before it from its own run. Method: stop a run
     // with minute 5 unsaved, record the rest in the next run, read the tail, save minute 5, refresh
@@ -127,7 +127,7 @@ fn reads_a_recovered_minute_and_the_minute_after_it() {
 }
 
 #[test]
-fn reads_each_recovered_minute_once_with_a_newly_needed_one() {
+fn reads_each_of_two_recovered_minutes_once() {
     // Goal: a fill that reads two minutes saved late reads each once, though it reads them
     // together. Method: stop one run with its last minute, 5, unsaved and leave the next run with
     // its last, 12, unsaved, read the tail, save both, refresh the list, count the saved sources

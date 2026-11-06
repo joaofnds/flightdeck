@@ -357,7 +357,9 @@ mod tests {
     fn committed_range(root: &Path) -> std::ops::Range<u64> {
         let registry = collector::recording::Registry::read(root).unwrap();
         let run = registry.runs[0].identity;
-        let manifest = crate::saved_windows::saved_manifests(root, &run).swap_remove(0);
+        let mut saved = crate::saved_windows::saved_manifests(root, &run);
+        assert_eq!(saved.len(), 1);
+        let manifest = saved.swap_remove(0);
         manifest.publication_first..manifest.publication_end
     }
 

@@ -218,11 +218,18 @@ fn a_loss_object_interrupted_along_its_publication_converges() {
     // store. Each drop costs most of a second, so walking all of a publication's 300 steps takes
     // minutes.
     const DROPS: u32 = 24;
+    const PUBLICATION_STEPS_MAX: u32 = 1 << 20;
     let total = {
         let lost = LostRun::new();
-        lost.interrupted_publication(u32::MAX)
+        lost.interrupted_publication(PUBLICATION_STEPS_MAX)
     };
-    eprintln!("a loss publication takes {total} steps");
+    assert!(total > 0);
+    assert!(total < PUBLICATION_STEPS_MAX);
+    let uninterrupted = {
+        let lost = LostRun::new();
+        lost.interrupted_publication(PUBLICATION_STEPS_MAX);
+        lost.only_object()
+    };
     for drop in 0..=DROPS {
         let steps = total * drop / DROPS;
         let lost = LostRun::new();
@@ -231,9 +238,13 @@ fn a_loss_object_interrupted_along_its_publication_converges() {
         lost.finish(&mut RunState::default());
 
         let object = lost.only_object();
-        assert_eq!(object.recovery.rows, 0, "after {steps} steps");
+        assert_eq!(object.kind, uninterrupted.kind, "after {steps} steps");
         assert_eq!(
-            object.recovery.losses.publications, 1,
+            object.recovery.rows, uninterrupted.recovery.rows,
+            "after {steps} steps"
+        );
+        assert_eq!(
+            object.recovery.losses, uninterrupted.recovery.losses,
             "after {steps} steps"
         );
     }
