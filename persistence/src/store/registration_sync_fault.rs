@@ -304,6 +304,9 @@ unsafe fn observe_descriptors(root: *const c_char) {
     if namespaces > 8 && !FD_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         unsafe { report_descriptors(root) };
     }
+    if !raises_descriptor_peak(namespaces, raw) {
+        return;
+    }
     let log = unsafe { getenv(c"FLIGHTDECK_FD_LOG".as_ptr()) };
     assert!(!log.is_null());
     let fd = unsafe { open(log, 0x1 | 0x8 | 0x0100_0000) };
@@ -313,6 +316,19 @@ unsafe fn observe_descriptors(root: *const c_char) {
     let record = [n[0], n[1], r[0], r[1]];
     assert_eq!(unsafe { write(fd, record.as_ptr().cast(), 4) }, 4);
     assert_eq!(unsafe { close(fd) }, 0);
+}
+
+static FD_RECORDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static FD_NAMESPACE_PEAK: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+static FD_RAW_PEAK: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+// The tests read only the peaks. Appending at every pass left one child's 34,786 passes blocked
+// in write and close while other tests ran, past the child's 180 second wait.
+fn raises_descriptor_peak(namespaces: u16, raw: u16) -> bool {
+    let first = !FD_RECORDED.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let namespace_peak =
+        FD_NAMESPACE_PEAK.fetch_max(namespaces, std::sync::atomic::Ordering::Relaxed);
+    let raw_peak = FD_RAW_PEAK.fetch_max(raw, std::sync::atomic::Ordering::Relaxed);
+    first || namespaces > namespace_peak || raw > raw_peak
 }
 
 static FD_REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
