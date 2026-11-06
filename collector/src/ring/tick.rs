@@ -489,6 +489,7 @@ pub(super) fn load_timing(
     assert_eq!(layout.slot_words, slot.len());
     timing.run_tick = slot[SLOT_RUN_TICK].load(Ordering::Relaxed);
     timing.times = load_tick_times(slot, layout);
+    timing.events_first = slot[SLOT_EVENTS_FIRST].load(Ordering::Relaxed);
 }
 
 fn load_tick_times(slot: &[AtomicU64], layout: &Layout) -> Option<super::ObservationTimes> {

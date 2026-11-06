@@ -24,7 +24,8 @@ macro_rules! timing_parity {
                 timing,
                 PublicationTiming {
                     run_tick: 73,
-                    times: $times.copied()
+                    times: $times.copied(),
+                    events_first: tick.events.start,
                 }
             );
             assert_eq!(timing.run_tick, tick.run_tick);
@@ -96,7 +97,8 @@ fn clears_clocks_when_the_next_publication_has_none() {
         timing,
         PublicationTiming {
             run_tick: 74,
-            times: None
+            times: None,
+            events_first: 1,
         }
     );
 }

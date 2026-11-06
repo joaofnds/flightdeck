@@ -6,7 +6,8 @@ use collector::recording::RegisteredRun;
 use collector::ring::{ObservationTimes, Place, Readings, RingReader, RunIdentity, Shape, Writer};
 
 use super::super::tests::forged_source::{ForgedWord, WritableSource};
-use super::super::{Progress, RunState, Writers, persist_one};
+use super::super::{Progress, RunState, SourceState, Writers, persist_one};
+use super::tests::{SLOT_CHANGES_MAX, SlotChanges};
 use crate::canonical::ReadWork;
 use crate::canonical::catalog::{Catalog, EventObject};
 use crate::resources::ByteBudget;
@@ -133,7 +134,7 @@ impl LostRun {
     fn expect_slot_freed(&self) {
         let store = Store::open(&self.root).unwrap();
 
-        super::persist_unowned(&store, 0).unwrap();
+        super::persist_unowned(&store, &[], 0).unwrap();
 
         assert!(store.interrupted().unwrap().is_none());
         assert!(
@@ -297,23 +298,38 @@ fn a_loss_object_interrupted_along_its_publication_converges() {
     }
 }
 
+/// Ends a run's loss publication after the slot's `changes`th change, takes the step after every
+/// run's turn with the run's source gone, and says whether the publication had ended by itself.
+fn a_loss_stopped_after(changes: usize) -> bool {
+    let lost = LostRun::new();
+    let mut slot = SlotChanges::of(&lost.root);
+    lost.interrupted_publication_when(|_taken| slot.reached(changes));
+    let store = Store::open(&lost.root).unwrap();
+    let ended = !store.slot_occupied().unwrap();
+    let state = RunState {
+        identity: Some(lost.registered.identity),
+        source: SourceState::Gone,
+        ..RunState::default()
+    };
+
+    super::persist_unowned(&store, std::slice::from_ref(&state), 0).unwrap();
+
+    assert!(
+        store.interrupted().unwrap().is_none(),
+        "after {changes} changes"
+    );
+    ended
+}
+
 #[test]
-fn a_loss_interrupted_along_its_publication_frees_the_slot_once_its_source_is_gone() {
-    // Goal: a process that ends anywhere in publishing a run's loss, whose source then goes, leaves
-    // nothing that keeps the other runs waiting (P02.3).
-    // Method: drop a publication after each of an even spread of its steps and finish in a new
-    // store, once more for the attempt that has chosen a census. Each drop costs most of a second.
-    const DROPS: u32 = 8;
-    let total = LostRun::new().interrupted_publication(PUBLICATION_STEPS_MAX);
-    for drop in 0..=DROPS {
-        let lost = LostRun::new();
-        lost.interrupted_publication(total * drop / DROPS);
-        let store = Store::open(&lost.root).unwrap();
+fn a_loss_stopped_at_each_change_of_the_slot_frees_it_once_its_source_is_gone() {
+    // Goal: a process that ends at any point of publishing a run's loss that the next one can tell
+    // apart, whose source then goes, leaves nothing that keeps the other runs waiting (P02.3).
+    // Method: stop the publication after one more change of the slot each time, until it ends
+    // first.
+    let changes = (0..SLOT_CHANGES_MAX).find(|changes| a_loss_stopped_after(*changes));
 
-        super::persist_unowned(&store, 0).unwrap();
-
-        assert!(store.interrupted().unwrap().is_none());
-    }
+    assert!(changes.is_some());
 }
 
 #[test]
@@ -322,6 +338,99 @@ fn a_loss_with_a_census_and_no_source_frees_the_slot() {
     // Method: end the publication once the slot names a census, and finish in a new store.
     let lost = LostRun::new();
     lost.interrupted_at_census();
+
+    lost.expect_slot_freed();
+}
+
+#[test]
+fn a_loss_whose_source_refuses_waits_for_it() {
+    // Goal: a refused open does not show the source is gone, so the count it could still prove
+    // stays.
+    // Method: end the publication at its census, and take the step after every run's turn with the
+    // run's source refused.
+    let lost = LostRun::new();
+    lost.interrupted_at_census();
+    let store = Store::open(&lost.root).unwrap();
+    let state = RunState {
+        identity: Some(lost.registered.identity),
+        source: SourceState::Unavailable,
+        ..RunState::default()
+    };
+
+    let finished = super::persist_unowned(&store, std::slice::from_ref(&state), 0).unwrap();
+
+    assert!(!finished);
+    assert!(store.slot_occupied().unwrap());
+}
+
+impl LostRun {
+    /// Where the attempt in the slot keeps its files.
+    fn object(&self) -> PathBuf {
+        std::fs::read_dir(self.root.join("recovery-data"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+    }
+
+    /// Ends the run's publication once its census is on disk.
+    fn interrupted_with_census_file(&self) {
+        let root = self.root.join("recovery-data");
+        self.interrupted_publication_when(|_taken| {
+            std::fs::read_dir(&root).is_ok_and(|mut objects| {
+                objects
+                    .next()
+                    .is_some_and(|object| object.unwrap().path().join("original-census").exists())
+            })
+        });
+    }
+}
+
+#[test]
+fn a_loss_given_up_refuses_a_whole_batch_beside_its_census() {
+    // Goal: only a batch no row can be read from goes with a given up attempt, since a whole one
+    // would be rows lost with no trace.
+    // Method: end the publication with its census on disk, put a whole file in the first batch's
+    // place, take the step after every run's turn, and read the refusal and the file.
+    let lost = LostRun::new();
+    lost.interrupted_with_census_file();
+    let batch = lost
+        .object()
+        .join("pending")
+        .join(crate::event_recovery::batch_name(0));
+    let mut frame = polars::prelude::DataFrame::new(
+        1,
+        vec![polars::prelude::Column::new("event".into(), [1_u64])],
+    )
+    .unwrap();
+    crate::encoder::encode_write(
+        &mut frame,
+        collector::recording::private::open_private_file(&batch, true).unwrap(),
+    )
+    .unwrap();
+    let store = Store::open(&lost.root).unwrap();
+
+    let result = super::persist_unowned(&store, &[], 0);
+
+    assert!(result.is_err());
+    assert!(batch.exists());
+}
+
+#[test]
+fn a_loss_given_up_takes_its_census_torn_batch_and_short_proof() {
+    // Goal: all that an attempt with no rows can leave goes with it, so the slot frees.
+    // Method: end the publication with its census on disk, add a torn first batch and a short
+    // proof, and finish in a new store.
+    use std::io::Write;
+    let lost = LostRun::new();
+    lost.interrupted_with_census_file();
+    let pending = lost.object().join("pending");
+    for name in [crate::event_recovery::batch_name(0), "metadata".to_string()] {
+        let mut file =
+            collector::recording::private::open_private_file(&pending.join(name), true).unwrap();
+        file.write_all(b"short").unwrap();
+    }
 
     lost.expect_slot_freed();
 }

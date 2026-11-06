@@ -39,9 +39,10 @@ pub struct RingReader {
 pub struct PublicationTiming {
     pub run_tick: u64,
     pub times: Option<super::ObservationTimes>,
+    pub events_first: u64,
 }
 
-const _: () = assert!(size_of::<PublicationTiming>() <= 40);
+const _: () = assert!(size_of::<PublicationTiming>() <= 48);
 
 impl RingReader {
     /// Positions the next read without rescanning earlier publications.

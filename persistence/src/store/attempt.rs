@@ -530,6 +530,7 @@ fn validate_scanning_prefix(input: &AttemptInput, reader: &mut RingReader) -> io
         }
         match reader.read_timing_into(&mut timing)? {
             Found::Missed { first, end } if first < end => {}
+            Found::Publication { .. } if input.losses.kept_rows_own(&timing) => {}
             _ => return Err(invalid()),
         }
     }

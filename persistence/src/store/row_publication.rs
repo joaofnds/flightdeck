@@ -908,7 +908,7 @@ impl<'store> RowPublication<'store> {
             );
             let plan = inner.state.row_plan.ok_or_else(invalid)?;
             match result {
-                Ok(index) if !malformed && index.first == plan.first && index.end == plan.end => {}
+                Ok(index) if !malformed && index.first >= plan.first && index.end == plan.end => {}
                 Err(crate::Error::Bound(_)) if malformed => {}
                 Err(error) => return Err(rows::source_error(error)),
                 Ok(_) => return Err(invalid()),

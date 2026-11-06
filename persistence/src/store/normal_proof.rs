@@ -240,10 +240,16 @@ impl SourceProof {
         let result = self.checked_read(input, |reader| {
             if publication {
                 reader.seek_publication(first)?;
+                let mut timing = PublicationTiming::default();
                 reader
-                    .read_timing_into(&mut PublicationTiming::default())
+                    .read_timing_into(&mut timing)
                     .map(|found| match found {
                         Found::Missed { first, end } => Some((first, end)),
+                        Found::Publication { publication, .. }
+                            if input.losses.kept_rows_own(&timing) =>
+                        {
+                            Some((publication, publication + 1))
+                        }
                         _ => None,
                     })
             } else {

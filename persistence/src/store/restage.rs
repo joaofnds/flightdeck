@@ -1,7 +1,8 @@
-//! An interrupted ordinary attempt, finished from what it saved and the source's retained window.
+//! An interrupted attempt, finished from what it saved and the source's retained window, or cut
+//! down to its rows when that source can no longer supply the window.
 
 use super::attempt::{TABLE_FILES, validate_terminal_source};
-use super::inventory::{BatchFact, InventoryStep, OriginalFile};
+use super::inventory::{BatchFact, InventoryStep, OriginalFile, parquet_framing};
 use super::{RegisteredAttempt, StagingPermit, Store, publication_control};
 use crate::canonical::CanonicalMetadata;
 use crate::event_recovery::{Batch, batch_name};
@@ -38,7 +39,7 @@ const _: () = assert!(TABLE_KINDS.len() == TABLE_FILES.len() + 1);
 /// What a process left in the foreground slot, by what can finish it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Interrupted {
-    /// No proof is durable, so finishing it takes the run's source.
+    /// No proof is durable. The run's source finishes it, or only the rows stay once it cannot.
     Staging(RunIdentity),
     /// The proof is durable, so it publishes without the source.
     Publication,
@@ -166,11 +167,13 @@ impl Store {
 
     /// Takes the tables and any short proof from an attempt whose source can no longer supply its
     /// window, which no reader could reach without a proof, and clears the slot if that leaves
-    /// nothing. Says whether rows are left to keep. The tables go first, so a process that ends
-    /// part way finds the same attempt again and this converges.
+    /// nothing. Says what is left to publish. A saved batch that does not read refuses before
+    /// anything goes. The tables go first, so a process that ends part way finds the same attempt
+    /// again and this converges.
     pub(crate) fn keep_only_rows(&self, budget: &Arc<ByteBudget>) -> crate::Result<Kept> {
         let mut attempt = self.resume_attempt()?;
         let terminal = matches!(attempt.input.operation, AttemptOperation::Terminal { .. });
+        attempt.saved(budget)?;
         if !terminal {
             attempt.restage_tables()?;
         }
@@ -215,7 +218,7 @@ impl Store {
         let name = collector::recording::identity_text(state.transaction).to_string();
         match base.open_directory(&name) {
             Ok(object) => {
-                abandon_loss_object(&object)?;
+                abandon_loss_attempt_object(&object)?;
                 drop(object);
                 base.remove_directory(&name)?;
                 base.full_sync()?;
@@ -294,10 +297,10 @@ impl RegisteredAttempt<'_> {
         Ok(())
     }
 
-    /// Removes every table. Called only with the tables' window held in memory, so the ring
-    /// wrapping past that window from here on loses nothing that is removed. The required tables
-    /// go first, since recovery accepts a minute with no derived tables and a process may end
-    /// part way.
+    /// Removes every table, either with the tables' window held in memory, so the ring wrapping
+    /// past it from here on loses nothing that is removed, or with that window beyond any source.
+    /// The required tables go first, since recovery accepts a minute with no derived tables and a
+    /// process may end part way.
     pub(crate) fn restage_tables(&self) -> io::Result<()> {
         for name in TABLE_FILES {
             restage_remove(self.original_directory(), name)?;
@@ -381,9 +384,10 @@ fn saved_batches(facts: &[BatchFact]) -> io::Result<(Vec<Batch>, Option<usize>)>
     Ok((saved.clone(), has_torn.then_some(saved.len())))
 }
 
-fn abandon_loss_object(object: &PrivateDirectory) -> io::Result<()> {
+fn abandon_loss_attempt_object(object: &PrivateDirectory) -> io::Result<()> {
     match object.open_directory("pending") {
         Ok(pending) => {
+            abandon_loss_attempt_refuses_rows(&pending)?;
             restage_remove(&pending, "metadata")?;
             restage_remove(&pending, &batch_name(0))?;
             pending.full_sync()?;
@@ -396,6 +400,22 @@ fn abandon_loss_object(object: &PrivateDirectory) -> io::Result<()> {
     restage_remove(object, "original-census")?;
 
     object.full_sync()
+}
+
+/// Only a terminal with no rows starts counting what it lost, so a whole batch here is not the
+/// worker's own, and it stops the worker rather than going with no trace.
+fn abandon_loss_attempt_refuses_rows(pending: &PrivateDirectory) -> io::Result<()> {
+    let mut batch = match pending.open_file(&batch_name(0)) {
+        Ok(batch) => batch,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let bytes = batch.metadata()?.len();
+    if parquet_framing(&mut batch, bytes)? {
+        return Err(restage_refused());
+    }
+
+    Ok(())
 }
 
 fn restage_remove(directory: &PrivateDirectory, name: &str) -> io::Result<()> {

@@ -53,6 +53,9 @@ pub(super) fn persist_one(
         state.source = SourceState::Complete;
         return Ok(Progress::Complete);
     }
+    if let Some(frontier) = &frontier {
+        state.next_event = frontier.event_end();
+    }
     let Some(mut reader) = super::persist_one_open(registered, state)? else {
         return Ok(Progress::Unavailable);
     };
@@ -93,7 +96,7 @@ fn persist_one_settled(
     registered: &RegisteredRun,
     state: &mut RunState,
 ) -> Result<Option<Progress>> {
-    if state.source == SourceState::Unavailable {
+    if state.source.unreadable() {
         return Ok(Some(Progress::Unavailable));
     }
     if registered.identity.recording != store.recording() {
@@ -103,8 +106,8 @@ fn persist_one_settled(
     if state.source == SourceState::Complete {
         return Ok(Some(Progress::Complete));
     }
-    // Nothing but the run that holds the slot changes what is in it, so a deferred run reads only
-    // whether it is still held, however long that run takes to come to it.
+    // Only the run that holds the slot and the step after every run's turn change what is in it,
+    // so a deferred run reads only whether it is still held, however long that takes.
     if state.deferred && store.slot_occupied()? {
         return Ok(Some(Progress::Deferred));
     }
@@ -135,6 +138,12 @@ fn persist_one_scan(
             }
             Found::Missed { first, end } => {
                 state.losses.publications += end - first;
+                state.next_publication = reader.next_publication();
+            }
+            // Rows kept from a minute the ring overran own this tick's events, and a window's proof
+            // refuses a tick that starts before its rows, so it counts as lost with that minute.
+            Found::Publication { .. } if timing.events_first < state.next_event => {
+                state.losses.publications += 1;
                 state.next_publication = reader.next_publication();
             }
             Found::Publication { publication, .. } => {
@@ -243,19 +252,37 @@ fn persist_budget(memory_limit: u64) -> Result<Arc<ByteBudget>> {
 }
 
 /// Finishes an attempt every run's turn left in the slot, whose own run cannot finish it because
-/// its source is gone or it left the registry, and says whether there was one.
-pub(super) fn persist_unowned(store: &Store, memory_limit: u64) -> Result<bool> {
+/// its source is gone or it left the registry, and says whether there was one. An attempt whose
+/// source refused stays, since the ring may still hold what only it could finish.
+pub(super) fn persist_unowned(
+    store: &Store,
+    states: &[RunState],
+    memory_limit: u64,
+) -> Result<bool> {
     let Some(attempt) = store.interrupted()? else {
         return Ok(false);
+    };
+    let refused = |run: RunIdentity| {
+        let held_by = |state: &RunState| state.identity == Some(run);
+        states
+            .iter()
+            .any(|state| held_by(state) && state.source == SourceState::Unavailable)
     };
     let budget = persist_budget(memory_limit)?;
     match attempt {
         Interrupted::Publication => finish_publication(store.resume_publication(&budget)?)?,
         Interrupted::Rows => finish_rows(store, &budget)?,
+        Interrupted::Staging(run) if refused(run) => return Ok(false),
         Interrupted::Staging(_) => keep_saved_rows(store, &budget)?,
-        Interrupted::Loss(_) => match store.resume_loss_publication(&budget) {
+        Interrupted::Loss(run) => match store.resume_loss_publication(&budget) {
             Ok(publication) => finish_loss(publication)?,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && refused(run) => {
+                return Ok(false);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                collector::diagnostics::error(format_args!(
+                    "persister gave up counting what a run lost, since its source is gone"
+                ));
                 store.abandon_loss_attempt()?;
             }
             Err(error) => return Err(error.into()),
@@ -266,12 +293,28 @@ pub(super) fn persist_unowned(store: &Store, memory_limit: u64) -> Result<bool> 
 }
 
 /// Keeps what an attempt saved when its source can no longer supply its window, as a fragment of
-/// rows. The next scan counts the window's publications as lost, and finds any later events.
+/// rows or a terminal that certifies no end. The next scan counts the window's publications as
+/// lost, and finds any later events.
 fn keep_saved_rows(store: &Store, budget: &Arc<ByteBudget>) -> Result<()> {
     match store.keep_only_rows(budget)? {
-        Kept::Nothing => Ok(()),
-        Kept::Rows => finish_rows(store, budget),
-        Kept::Proof => finish_publication(store.resume_publication(budget)?),
+        Kept::Nothing => {
+            collector::diagnostics::error(format_args!(
+                "persister gave up an attempt that saved nothing and whose source cannot supply it"
+            ));
+            Ok(())
+        }
+        Kept::Rows => {
+            collector::diagnostics::error(format_args!(
+                "persister kept only the rows of a minute whose source cannot supply it"
+            ));
+            finish_rows(store, budget)
+        }
+        Kept::Proof => {
+            collector::diagnostics::error(format_args!(
+                "persister kept only the rows of a run whose source went before its end was proved"
+            ));
+            finish_publication(store.resume_publication(budget)?)
+        }
     }
 }
 
@@ -300,7 +343,6 @@ fn persist_one_load(
 ) -> Result<()> {
     if let Some(frontier) = frontier {
         state.next_publication = frontier.publication_end();
-        state.next_event = frontier.event_end();
         state.committed = frontier.publication_end() - 1;
     } else {
         state.next_publication = reader.publication_first();
@@ -590,7 +632,7 @@ fn recover_staging(
     ));
 
     let Some(mut reader) = super::persist_one_open(registered, state)? else {
-        return keep_saved_rows(store, budget);
+        return Ok(());
     };
     if writer_gone {
         reader.set_writer_gone();

@@ -420,14 +420,10 @@ impl<'store> RowMerge<'store> {
             }
         }
         if let IndexFact::Valid {
-            first,
-            end: indexed,
-            rows,
-            ..
+            end: indexed, rows, ..
         } = self.inventory.index()
         {
-            if first != self.inventory.registered_event_start()
-                || end > indexed
+            if end > indexed
                 || self.inventory.physical_rows() > rows
                 || rows > collector::u64_from_usize(crate::event_observation::ROWS_MAX)
             {

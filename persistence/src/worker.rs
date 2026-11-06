@@ -255,7 +255,7 @@ fn run_release(
             }
             matches!(
                 state.source,
-                SourceState::Complete | SourceState::Unavailable
+                SourceState::Complete | SourceState::Gone | SourceState::Unavailable
             )
         });
         if !terminal {
@@ -319,7 +319,7 @@ fn run_pass(
                     SourceState::Open
                 };
         }
-        let unavailable = state.source == SourceState::Unavailable;
+        let unavailable = state.source.unreadable();
         if recovery.pending_unknown {
             state.losses.unknown = true;
         }
@@ -341,7 +341,7 @@ fn run_pass(
             }
         }
     }
-    if registered::persist_unowned(store, recovery.memory_limit)? {
+    if registered::persist_unowned(store, &recovery.states, recovery.memory_limit)? {
         return Ok(Pass::Sealed);
     }
     Ok(Pass::Drained)
@@ -401,7 +401,16 @@ enum SourceState {
     Unchecked,
     Open,
     Complete,
+    /// No ring has the registered name, so nothing can read this run again.
+    Gone,
+    /// The ring refused, so it may still hold everything the run published.
     Unavailable,
+}
+
+impl SourceState {
+    fn unreadable(self) -> bool {
+        matches!(self, Self::Gone | Self::Unavailable)
+    }
 }
 
 fn run_states(states: &mut [RunState; 2], runs: &[RegisteredRun]) {
@@ -441,11 +450,15 @@ fn persist_one_open(
 ) -> Result<Option<RingReader>> {
     let mut reader = match RingReader::open_generation(&registered.ring_name) {
         Ok(reader) => reader,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            source_unavailable(registered, state, error);
+            state.source = SourceState::Gone;
+            return Ok(None);
+        }
         Err(error)
             if matches!(
                 error.kind(),
-                io::ErrorKind::NotFound
-                    | io::ErrorKind::PermissionDenied
+                io::ErrorKind::PermissionDenied
                     | io::ErrorKind::InvalidData
                     | io::ErrorKind::InvalidInput
                     | io::ErrorKind::Unsupported
@@ -622,6 +635,7 @@ fn window_number(reader: &RingReader, tick: &Tick) -> Result<u64> {
         &PublicationTiming {
             run_tick: tick.run_tick,
             times: tick.times,
+            events_first: tick.events.start,
         },
     )
 }

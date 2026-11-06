@@ -395,6 +395,13 @@ impl AttemptInput {
 }
 
 impl LossTransfer {
+    /// Whether rows kept from a minute the ring overran own a tick's events. A window's proof
+    /// refuses a tick that starts before its rows, so no window can hold this one, and it counts
+    /// as lost with that minute although the ring still holds it.
+    pub(crate) fn kept_rows_own(&self, timing: &collector::ring::PublicationTiming) -> bool {
+        timing.events_first < self.event_start
+    }
+
     pub(crate) fn encode(&self, bytes: &mut [u8]) {
         bytes.fill(0);
         bytes[..8].copy_from_slice(b"FDLoss02");

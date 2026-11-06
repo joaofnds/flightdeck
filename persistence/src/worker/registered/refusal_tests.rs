@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 /// The one attempt's directory under `base`, whichever of its places it has reached.
-fn attempt_directory(root: &Path, base: &str, child: &str) -> PathBuf {
+pub(super) fn attempt_directory(root: &Path, base: &str, child: &str) -> PathBuf {
     let mut objects = std::fs::read_dir(root.join(base)).unwrap();
     let object = objects.next().unwrap().unwrap().path();
     assert!(objects.next().is_none());
