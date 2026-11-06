@@ -14,6 +14,7 @@ use crate::EARLIER_STRIDE_SECONDS;
 const CATEGORY_CHANGES_KEPT: usize = 10;
 
 const _: () = {
+    // Ten readings change at most nine times, which `CATEGORY_CHANGES_KEPT` holds.
     assert!(EARLIER_STRIDE_SECONDS == 10);
     // The Mac's readings cost a store about 2 MiB at the most stretches it holds.
     assert!(size_of::<MachineStretch>() <= 6 * 1024);

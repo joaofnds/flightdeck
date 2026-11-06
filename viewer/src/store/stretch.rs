@@ -210,8 +210,8 @@ pub(super) struct Folded {
     pub(super) publication: u64,
 }
 
-/// Each App's readings added up over the seconds of one stretch the store took in, and what the
-/// App rule found of those seconds as a whole.
+/// Each App's readings added up over the seconds of one stretch the store took in, what the App
+/// rule found of those seconds as a whole, and what the Mac read over them.
 #[derive(Debug, Default)]
 pub struct AppsStretch {
     /// The stretch's wall seconds divided by `EARLIER_STRIDE_SECONDS`. The division floors.

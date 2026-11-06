@@ -325,7 +325,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
     #[test]
     fn a_stretch_of_one_second_reaches_what_that_second_reads_on_every_chart() {
         // Goal: a chart's reach reads the series the chart's line reads, on every line the Overview
-        // draws, so no chart bands one reading under another's curve. Method: reduce one second,
+        // draws, so no chart marks one reading under another's curve. Method: reduce one second,
         // then compare what each line reads of it with what it reaches.
         let second = reading_at(9_020, 3);
         let stretch = stretch_of(902, std::slice::from_ref(&second));

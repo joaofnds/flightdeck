@@ -399,9 +399,9 @@ fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<L
         (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
         (None, "soc_celsius", None) => stretch_reach_measured(&stretch.soc_celsius),
         (None, FAN_MEAN_KEY, None) => stretch_reach_measured(&stretch.fan_mean_rpm),
-        (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest),
+        (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest.as_ref()),
         (None, "thermal_pressure", None) => {
-            stretch_reach_category(stretch.thermal_pressure.highest)
+            stretch_reach_category(stretch.thermal_pressure.highest.as_ref())
         }
         _ => return Err(format!("The store reduces no reading {key}")),
     };
@@ -419,7 +419,7 @@ fn stretch_reach_measured(reduction: &Reduction<MachinePlace>) -> Option<LineRea
     })
 }
 
-fn stretch_reach_category(highest: Option<Mark<u8, MachinePlace>>) -> Option<LineReach> {
+fn stretch_reach_category(highest: Option<&Mark<u8, MachinePlace>>) -> Option<LineReach> {
     let highest = highest?;
     let level = f32::from(highest.category);
 

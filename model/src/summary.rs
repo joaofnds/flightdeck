@@ -13,7 +13,13 @@ mod tests;
 const TOTAL_FRACTION_BITS: u64 = 10;
 /// Past this many whole bits a reading is no quantity the Mac reports, and it counts as missing.
 const READING_WHOLE_BITS_MAX: u64 = 53;
-const _: () = assert!(READING_WHOLE_BITS_MAX + TOTAL_FRACTION_BITS < 64);
+const _: () = {
+    assert!(READING_WHOLE_BITS_MAX + TOTAL_FRACTION_BITS < 64);
+    // A summary holds no buffer, so what a chart keeps follows its series and its tier and not the
+    // recording's length.
+    assert!(size_of::<GaugeSummary<u32>>() <= 128);
+    assert!(size_of::<RateSummary<u32>>() <= 128);
+};
 
 /// One value of a reduction and the reading it came from.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -515,7 +515,7 @@ fn line_marks_peaks(panel: &Panel, line: &crate::data::Line, hidden: &[String]) 
         && !panel
             .lines
             .iter()
-            .any(|shown| stacked(panel, shown) && hidden.contains(&shown.name))
+            .any(|other| stacked(panel, other) && hidden.contains(&other.name))
 }
 
 /// Draws a stem from the curve to each peak that stands out of `line`, and a cap at its tip, so a
@@ -566,7 +566,7 @@ fn peak_marks(
     let overshoot_min = (geometry.maximum - geometry.minimum)
         * (PEAK_OVERSHOOT_HEIGHT_MIN / geometry.bounds.size.height);
 
-    standing_peaks(line, values, geometry.segments, clock, overshoot_min)
+    standing_peaks(line, values, geometry.segments, &clock, overshoot_min)
         .into_iter()
         .map(|peak| {
             let base = geometry.clock_point(clock.buckets, peak.end, peak.base);
@@ -574,7 +574,7 @@ fn peak_marks(
             PeakMark {
                 x: base.x,
                 base: base.y,
-                tip: peak_tip(geometry, peak.peak),
+                tip: peak_marks_tip(geometry, peak.peak),
                 pick: peak.pick,
             }
         })
@@ -583,12 +583,12 @@ fn peak_marks(
 
 /// The reading a peak's mark stands for, which picking the mark holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PeakPick {
-    /// The second it was read in.
-    pub second: u64,
-    /// Which reading of that second, where the panel names its readings. Two runs can read the
-    /// same wall second.
-    pub place: Option<MachinePlace>,
+pub(crate) enum PeakPick {
+    /// The reading itself, where the panel names its readings. Two runs can read the same wall
+    /// second.
+    Reading(MachinePlace),
+    /// The second it was read in, where the panel names none.
+    Second(u64),
 }
 
 /// The peak whose mark the pointer at `pointer` is on, the nearest across where several are, in
@@ -620,9 +620,9 @@ pub(crate) fn peak_under(
             }
             for mark in peak_marks(line, values, geometry) {
                 let across = (mark.x - pointer.x).abs();
-                let along = pointer.y >= mark.tip.min(mark.base) - PEAK_TARGET_REACH
-                    && pointer.y <= mark.tip.max(mark.base) + PEAK_TARGET_REACH;
-                if across <= PEAK_TARGET_REACH
+                let along = pointer.y >= mark.tip.min(mark.base) - PEAK_TARGET_MARGIN
+                    && pointer.y <= mark.tip.max(mark.base) + PEAK_TARGET_MARGIN;
+                if across <= PEAK_TARGET_MARGIN
                     && along
                     && nearest.is_none_or(|(least, _)| across <= least)
                 {
@@ -637,7 +637,7 @@ pub(crate) fn peak_under(
 
 /// Where the mark of a peak at `value` tips. The axis spans what the curve draws, so a peak beyond
 /// it marks the edge of the plot rather than stretching the chart.
-fn peak_tip(geometry: &Geometry<'_>, value: f32) -> Pixels {
+fn peak_marks_tip(geometry: &Geometry<'_>, value: f32) -> Pixels {
     geometry
         .y(value)
         .clamp(geometry.bounds.top(), geometry.bounds.bottom())
@@ -1012,7 +1012,7 @@ const PEAK_CAP_WIDTH: Pixels = px(5.0);
 const PEAK_CAP_HEIGHT: Pixels = px(2.0);
 /// How far from a peak's mark, across and along it, the pointer still picks the peak, which makes
 /// the mark a target at least 24 points wide.
-const PEAK_TARGET_REACH: Pixels = px(12.0);
+const PEAK_TARGET_MARGIN: Pixels = px(12.0);
 /// How far before the start of its second a reading's position may fall and still count in that
 /// second. A position is an f32 fraction of the window, whose rounding can put a reading taken
 /// on a whole second, as the self-monitoring reports are, a few microseconds before it, in some
@@ -1443,18 +1443,19 @@ impl BucketRange {
 }
 
 /// The range of each bucket in view that holds readings of `run`, in time order. Unlike a curve's
-/// point, a range stands for its own bucket alone and draws the buckets a curve leaves out, those
+/// point, a range stands for its own bucket alone and covers the buckets a curve leaves out, those
 /// the window's edge or the join of thinned and full-detail readings cuts, since a peak may lie in
 /// any of them. A sliding chart waits only for the bucket the newest second may still change.
 fn bucket_ranges(
     line: &crate::data::Line,
     values: &[Option<(f32, f32)>],
     run: std::ops::Range<usize>,
-    clock: Clock<'_>,
+    clock: &Clock<'_>,
 ) -> Vec<BucketRange> {
     let mut ranges: Vec<BucketRange> = Vec::with_capacity(run.len() / 8 + 1);
     for index in run {
-        let Some(next) = reading_range(line, values[index], clock.lower + index, clock) else {
+        let Some(next) = bucket_ranges_reading(line, values[index], clock.lower + index, clock)
+        else {
             continue;
         };
         match ranges.last_mut() {
@@ -1486,24 +1487,29 @@ fn standing_peaks(
     line: &crate::data::Line,
     values: &[Option<(f32, f32)>],
     segments: Option<&[u64]>,
-    clock: Clock<'_>,
+    clock: &Clock<'_>,
     overshoot_min: f32,
 ) -> Vec<StandingPeak> {
-    let mut peaks = Vec::new();
+    let mut candidates = Vec::new();
     for_each_run(
         values.len(),
         segments,
         clock.lower,
         |_| true,
         |run| {
-            let means = window_means(values, run.clone(), clock);
+            let means = window_means(values, run.clone(), *clock);
             for range in bucket_ranges(line, values, run, clock) {
-                peaks.push(standing_peaks_of_bucket(line, &means, range, clock.buckets));
+                candidates.push(standing_peaks_candidate(
+                    line,
+                    &means,
+                    &range,
+                    &clock.buckets,
+                ));
             }
         },
     );
 
-    let mut overshoots: Vec<f32> = peaks
+    let mut overshoots: Vec<f32> = candidates
         .iter()
         .map(|peak| (peak.peak - peak.base).abs())
         .collect();
@@ -1512,7 +1518,7 @@ fn standing_peaks(
         return Vec::new();
     }
     let Some((&tallest, others)) = overshoots.split_last() else {
-        return peaks;
+        return candidates;
     };
     // Floors, which only matters for a chart of a few buckets.
     let typical = others.get(others.len() * 3 / 4).copied().unwrap_or(0.0);
@@ -1523,18 +1529,19 @@ fn standing_peaks(
         stands_out
     };
     let least = overshoot_min.max(least);
-    peaks.retain(|peak| (peak.peak - peak.base).abs() >= least);
-    peaks
+    candidates.retain(|peak| (peak.peak - peak.base).abs() >= least);
+    candidates
 }
 
-/// The peak of the bucket `range` holds, beside the curve's point for that bucket. A bucket with no
+/// The peak of the bucket `range` holds, beside the curve's point for that bucket, which stands out
+/// only if `standing_peaks` keeps it. A bucket with no
 /// point of its own, which an edge of the window or the join cuts, takes the next point or else the
 /// last, and a run too short for any point stands on the bucket's own far reading.
-fn standing_peaks_of_bucket(
+fn standing_peaks_candidate(
     line: &crate::data::Line,
     means: &[WindowMean],
-    range: BucketRange,
-    buckets: Buckets,
+    range: &BucketRange,
+    buckets: &Buckets,
 ) -> StandingPeak {
     let bucket_end = (range.index + 1) * buckets.length_seconds;
     let next = means.partition_point(|mean| mean.end < bucket_end);
@@ -1563,11 +1570,11 @@ fn standing_peaks_of_bucket(
 /// the reach the line names for it, widened by `value`'s own top, which it has with or without a
 /// stack beneath it. The first detailed point names the reach of the stretch it joins, which can
 /// end before a gap, so its own reading can lie past that reach.
-fn reading_range(
+fn bucket_ranges_reading(
     line: &crate::data::Line,
     value: Option<(f32, f32)>,
     position: usize,
-    clock: Clock<'_>,
+    clock: &Clock<'_>,
 ) -> Option<BucketRange> {
     let mirrored = line.negative == Some(true);
     let at = clock.positions[position];
@@ -1575,35 +1582,30 @@ fn reading_range(
     let named = line
         .extremes
         .as_deref()
-        .and_then(|extremes| extremes.get(position).copied().flatten())
+        .and_then(|extremes| extremes[position])
         .map(|reach| {
             let (lowest, highest) = if mirrored {
                 (-reach.high, -reach.low)
             } else {
                 (reach.low, reach.high)
             };
-            let pick = PeakPick {
-                second: reach.peak.second(),
-                place: Some(reach.peak),
-            };
             BucketRange {
                 index,
                 lowest,
                 highest,
-                pick,
+                pick: PeakPick::Reading(reach.peak),
             }
         });
     let own = value.and_then(|(top, _)| {
-        let place = clock.places.map(|places| places[position]);
-        let second = match place {
-            Some(place) => place.second(),
-            None => clock.buckets.second_of(at)?,
+        let pick = match clock.places {
+            Some(places) => PeakPick::Reading(places[position]),
+            None => PeakPick::Second(clock.buckets.second_of(at)?),
         };
         Some(BucketRange {
             index,
             lowest: top,
             highest: top,
-            pick: PeakPick { second, place },
+            pick,
         })
     });
 
@@ -2373,7 +2375,7 @@ mod live_tests {
         };
 
         (
-            bucket_ranges(line, values, 0..values.len(), clock),
+            bucket_ranges(line, values, 0..values.len(), &clock),
             buckets.length_seconds,
         )
     }
@@ -2399,7 +2401,7 @@ mod live_tests {
             places: None,
         };
 
-        standing_peaks(line, values, None, clock, overshoot_min)
+        standing_peaks(line, values, None, &clock, overshoot_min)
     }
 
     /// A reading that turns from second to second, so the means of buckets differ.
@@ -2598,7 +2600,7 @@ mod live_tests {
 
     #[test]
     fn a_range_stays_within_its_own_buckets_readings_beside_a_gap() {
-        // Goal: a bucket with no readings draws no range, so a band never bridges a gap, and zero
+        // Goal: a bucket with no readings has no range, so a mark never bridges a gap, and zero
         // stays a reading. Method: readings of zero either side of a missing bucket.
         let mut values = vec![None; 900];
         values[100..110].fill(Some((0.0, 0.0)));
@@ -2651,7 +2653,7 @@ mod live_tests {
         values[899] = Some((80.0, 0.0));
         let line = reaching_line(None);
 
-        let ranges = bucket_ranges(&line, &values, 0..900, clock);
+        let ranges = bucket_ranges(&line, &values, 0..900, &clock);
 
         assert!((ranges[0].highest - 95.0).abs() < f32::EPSILON);
         assert!(
@@ -2812,8 +2814,8 @@ mod live_tests {
             ..live_geometry(1000, 0, &positions)
         };
 
-        assert_eq!(peak_tip(&geometry, 95.0), geometry.bounds.top());
-        assert_eq!(peak_tip(&geometry, -95.0), geometry.bounds.bottom());
+        assert_eq!(peak_marks_tip(&geometry, 95.0), geometry.bounds.top());
+        assert_eq!(peak_marks_tip(&geometry, -95.0), geometry.bounds.bottom());
     }
 
     /// The panel of 900 seconds from 1,000 with `values`, each reading named by its own place, on a
@@ -2873,6 +2875,14 @@ mod live_tests {
         marks
     }
 
+    /// The second `pick` holds.
+    fn pick_second(pick: PeakPick) -> u64 {
+        match pick {
+            PeakPick::Reading(place) => place.second(),
+            PeakPick::Second(second) => second,
+        }
+    }
+
     fn picked_under(panel: &Panel, x: Pixels, y: Pixels) -> Option<PeakPick> {
         peak_under(
             panel,
@@ -2894,11 +2904,7 @@ mod live_tests {
 
         let picked = picked_under(&panel, mark.x, (mark.tip + mark.base) / 2.0);
 
-        let expected = PeakPick {
-            second: 1450,
-            place: Some(picked_place(450)),
-        };
-        assert_eq!(picked, Some(expected));
+        assert_eq!(picked, Some(PeakPick::Reading(picked_place(450))));
     }
 
     #[test]
@@ -2934,8 +2940,8 @@ mod live_tests {
         let near_first = picked_under(&panel, first.x + px(5.0), middle).unwrap();
         let near_second = picked_under(&panel, second.x - px(5.0), middle).unwrap();
 
-        assert_eq!(near_first.second, 1450);
-        assert_eq!(near_second.second, 1470);
+        assert_eq!(pick_second(near_first), 1450);
+        assert_eq!(pick_second(near_second), 1470);
     }
 
     #[test]
@@ -2954,7 +2960,7 @@ mod live_tests {
                 lines: vec![line],
                 ..panel
             };
-            picked_marks(&mirrored_panel)[0].pick.second
+            pick_second(picked_marks(&mirrored_panel)[0].pick)
         };
 
         assert_eq!(picks(&higher_first, false), 1450);
@@ -2986,11 +2992,7 @@ mod live_tests {
         let marks = picked_marks(&panel);
 
         assert_eq!(marks.len(), 1);
-        let expected = PeakPick {
-            second: 1453,
-            place: Some(peak),
-        };
-        assert_eq!(marks[0].pick, expected);
+        assert_eq!(marks[0].pick, PeakPick::Reading(peak));
     }
 
     #[test]
@@ -3002,11 +3004,7 @@ mod live_tests {
 
         let marks = picked_marks(&panel);
 
-        let expected = PeakPick {
-            second: 1450,
-            place: None,
-        };
-        assert_eq!(marks[0].pick, expected);
+        assert_eq!(marks[0].pick, PeakPick::Second(1450));
     }
 
     #[test]
@@ -3061,9 +3059,9 @@ mod live_tests {
             places: None,
         };
         let seconds = |segments: Option<&[u64]>| -> Vec<u64> {
-            standing_peaks(&line, &tops, segments, clock, 6.0)
+            standing_peaks(&line, &tops, segments, &clock, 6.0)
                 .iter()
-                .map(|peak| peak.pick.second)
+                .map(|peak| pick_second(peak.pick))
                 .collect()
         };
 
@@ -3178,7 +3176,7 @@ mod live_tests {
         assert_eq!(ranges.len(), 1);
         assert!((ranges[0].highest - 95.0).abs() < f32::EPSILON);
         assert!((ranges[0].lowest - 5.0).abs() < f32::EPSILON);
-        assert_eq!(ranges[0].pick.second, 1100);
+        assert_eq!(pick_second(ranges[0].pick), 1100);
     }
 
     #[test]

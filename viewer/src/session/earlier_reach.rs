@@ -22,7 +22,7 @@ const PLACE_FIELDS: [&str; 7] = [
     "observation",
 ];
 
-/// The objects, arrays and numbers one trend point can hold, which is far fewer.
+/// More than the objects, arrays and numbers one trend point can hold.
 const NODES_MAX: usize = 4096;
 
 /// How far one number of a trend point went over the readings of its stretch.
@@ -107,7 +107,7 @@ impl Reach {
                     pending.extend(items.map(|(at, item)| (format!("{path}/{at}"), item)));
                 }
                 Value::Bool(flag) => self.take(path, f64::from(u8::from(*flag)), place),
-                Value::Object(fields) => reach_fields(&mut pending, &path, fields),
+                Value::Object(fields) => add_fields(&mut pending, &path, fields),
                 _ => {}
             }
         }
@@ -206,7 +206,7 @@ impl Reach {
 }
 
 /// Queues the fields of an object at `path`, leaving out those that only place a reading.
-fn reach_fields<'point>(
+fn add_fields<'point>(
     pending: &mut Vec<(String, &'point Value)>,
     path: &str,
     fields: &'point Map<String, Value>,

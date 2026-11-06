@@ -432,9 +432,9 @@ fn chart_summaries_reading(
     if let Some(reach) = reach {
         return Some((reach.high, Some(reach.peak.second())));
     }
-    let place = panel.places.as_ref().and_then(|places| places.get(index));
+    let place = panel.places.as_ref().map(|places| places[index]);
 
-    value.map(|value| (value, place.map(crate::data::MachinePlace::second)))
+    value.map(|value| (value, place.map(|place| place.second())))
 }
 
 #[cfg(test)]

@@ -498,9 +498,11 @@ impl LiveDashboard {
         let hidden = self.chart_hidden(panel);
         let pick = charts::peak_under(panel, bounds, inspection, &hidden, position)?;
 
-        Some(match pick.place {
-            Some(place) => crate::live_hover::Target::of_place(&place),
-            None => self.hover_target(self.snapshot.as_deref()?, pick.second),
+        Some(match pick {
+            charts::PeakPick::Reading(place) => crate::live_hover::Target::of_place(&place),
+            charts::PeakPick::Second(second) => {
+                self.hover_target(self.snapshot.as_deref()?, second)
+            }
         })
     }
 

@@ -595,8 +595,8 @@ impl Session {
         })
     }
 
-    /// Makes the point of the first reading of each stretch inside the minute `step` names,
-    /// whose tables the batch read as `tables`.
+    /// Makes the point of the first reading of each stretch inside the minute `step` names, and
+    /// what every reading of each stretch reached, from the tables the batch read as `tables`.
     fn earlier_minute(&self, step: Step, tables: MinuteTables) -> Result<KeptMinute> {
         assert!(step.window < self.windows.len());
         if let Some(before) = step.holder.window() {

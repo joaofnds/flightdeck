@@ -91,7 +91,7 @@ pub struct Line {
     pub unit: Option<String>,
     pub fill: Option<f32>,
     /// The lowest and highest reading each of `values` stands for, on the chart's own scale, where
-    /// a value stands for more than itself. A stacked line's reach the whole stack beneath it at
+    /// a value stands for more than itself. A stacked line's reach is the whole stack beneath it at
     /// one reading, and `None` leaves each value standing for itself alone.
     #[serde(skip)]
     pub extremes: Option<LineExtremes>,

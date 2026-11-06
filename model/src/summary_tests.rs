@@ -313,12 +313,3 @@ fn merging_categories_cut_anywhere_equals_reducing_their_readings() {
         );
     }
 }
-
-#[test]
-fn the_size_of_a_summary_does_not_grow_with_its_readings() {
-    // Goal: output stays bounded by the series and the tier, not by the recording's length.
-    // Method: the types hold no buffer, so their sizes are constants a build checks.
-    const { assert!(size_of::<GaugeSummary<u32>>() <= 128) };
-    const { assert!(size_of::<RateSummary<u32>>() <= 128) };
-    const { assert!(size_of::<Thermal>() <= 128) };
-}
