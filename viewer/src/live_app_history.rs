@@ -138,19 +138,42 @@ impl History {
                     }
                 }
             }
-            let removed = self
-                .points
-                .pop_front()
-                .unwrap_or_else(|| unreachable!("one bounded App point fits the empty cache"));
-            self.bytes -= removed.bytes() + removed.unshared_key_bytes();
-            self.bytes -= self.sums.remove(removed.elapsed_ns, &removed.apps);
-            self.group_bytes -= process::charged_bytes(removed.groups.as_ref());
+            self.remove_oldest();
             if !expired {
                 self.retention_limited = true;
             }
         }
 
         unreachable!("a bounded cache can evict all prior points");
+    }
+
+    fn remove_oldest(&mut self) {
+        let removed = self
+            .points
+            .pop_front()
+            .unwrap_or_else(|| unreachable!("one bounded App point fits the empty cache"));
+        self.bytes -= removed.bytes() + removed.unshared_key_bytes();
+        self.bytes -= self.sums.remove(removed.elapsed_ns, &removed.apps);
+        self.group_bytes -= process::charged_bytes(removed.groups.as_ref());
+    }
+
+    /// Lets go of what lies before `first` though no new point came in.
+    pub(super) fn expire(&mut self, first: u64) {
+        let before_first = |wall_ns: Option<u64>| wall_ns.is_some_and(|wall| wall < first);
+        for _attempt in 0..=OBSERVATIONS_MAX {
+            let oldest = self.points.front();
+            if !oldest.is_some_and(|point| before_first(point.observation.wall_ns)) {
+                break;
+            }
+            self.remove_oldest();
+        }
+        for _attempt in 0..=OBSERVATIONS_MAX {
+            let oldest = self.observations.front();
+            if !oldest.is_some_and(|observation| before_first(observation.wall_ns)) {
+                break;
+            }
+            self.observations.pop_front();
+        }
     }
 
     fn retain_observation(&mut self, observation: &Observation, first: u64) {

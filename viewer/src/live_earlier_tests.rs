@@ -95,6 +95,36 @@ fn the_older_tail_leaves_out_what_expired() {
 }
 
 #[test]
+fn the_older_tail_reads_on_past_a_minute_removal_took_from_under_its_list() {
+    // Goal: a session whose list still names a minute removal took reads the tail without calling
+    // a healthy recording damaged, and shows what a new session shows.
+    // Method: read a later tail, so the session keeps only later minutes, take a removal pass over
+    // the first five minutes, and step back over them.
+    let mut fixture = RingFixture::new_following();
+    let boot = fixture.writer.identity().unwrap().boot;
+    crate::session::retention_tests::expire_boot_before(&fixture.root, boot, 0);
+    earlier_publish(&mut fixture);
+    let last = earlier_context_last(EARLIER_LIMIT);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session
+        .earlier_context(earlier_context_last(EARLIER_LIMIT + 600))
+        .unwrap();
+    let removed = crate::session::retention_tests::expire_and_remove(
+        &fixture.root,
+        420 * NANOSECONDS_PER_SECOND,
+    );
+
+    let stepped = session.earlier_context(last).unwrap();
+
+    assert_eq!(removed, 5);
+    let new_session = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(last)
+        .unwrap();
+    assert_eq!(stepped, new_session);
+}
+
+#[test]
 fn reads_only_the_sources_of_a_newly_needed_minute() {
     // Goal: a stride whose tail reaches one more sealed minute reads that minute alone. Method:
     // read the tail, move its limit until the join reaches the first reading of minute 13, at

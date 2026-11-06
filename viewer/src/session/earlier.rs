@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use persistence::retention::Retained;
 use persistence::{Error, Manifest, Result, TimeBounds};
 use serde_json::Value;
 
@@ -225,22 +226,24 @@ impl KeptTail {
         // minute's first, without the point of its own first reading, and once whole when the
         // tail needs it too.
         let steps_max = 2 * history.windows.len() + 1;
+        let retained = history.reader().retained();
+        let needed = history.earlier_needed(range, &retained);
         let mut batch: Vec<(usize, Result<MinuteTables>)> = Vec::new();
         for _ in 0..steps_max {
-            let Some(step) = self.next(history, range) else {
-                self.fill_drop(history, range);
-                let points = self.assemble(history, range)?;
+            let Some(step) = self.next(history, &needed) else {
+                self.fill_drop(history, &needed);
+                let points = self.assemble(history, range, &needed, &retained)?;
                 history.earlier_tail.replace(Some((range, points)));
                 return Ok(());
             };
-            if self.fill_readings(history, range) > OBSERVATIONS_MAX {
+            if self.fill_readings(history, range, &needed) > OBSERVATIONS_MAX {
                 return Err(Error::Bound("context observations"));
             }
 
             if !batch.iter().any(|(window, _)| *window == step.window) {
                 // Holds one batch at a time, so the fill holds no more tables than a context.
                 batch.clear();
-                batch = history.earlier_batch(&self.fill_batch(history, range))?;
+                batch = history.earlier_batch(&self.fill_batch(history, &needed))?;
             }
             let Some(read) = batch.iter().position(|(window, _)| *window == step.window) else {
                 unreachable!("the older tail's batch misses the minute it reads next");
@@ -261,17 +264,15 @@ impl KeptTail {
 
     /// The readings in `range` of the kept minutes it needs, which stop the fill once a context
     /// could not hold them, before it reads every minute they come from.
-    fn fill_readings(&self, history: &Session, range: TailRange) -> usize {
+    fn fill_readings(&self, history: &Session, range: TailRange, needed: &[usize]) -> usize {
         let mut count = 0;
-        for (window, manifest) in history.windows.iter().enumerate() {
-            if range.needs(history.wall_bounds[window].as_ref()) {
-                if let Some(minute) = self.kept(manifest) {
-                    count += minute
-                        .readings
-                        .iter()
-                        .filter(|reading| range.holds(reading.wall))
-                        .count();
-                }
+        for &window in needed {
+            if let Some(minute) = self.kept(&history.windows[window]) {
+                count += minute
+                    .readings
+                    .iter()
+                    .filter(|reading| range.holds(reading.wall))
+                    .count();
             }
         }
 
@@ -280,14 +281,11 @@ impl KeptTail {
 
     /// The minutes the fill reads together: the minutes the steps `next` gives would read, in
     /// their order, up to `CONTEXT_READERS`, as the tail stands before the first of them.
-    fn fill_batch(&self, history: &Session, range: TailRange) -> Vec<usize> {
+    fn fill_batch(&self, history: &Session, needed: &[usize]) -> Vec<usize> {
         let mut windows = Vec::with_capacity(CONTEXT_READERS);
-        for window in 0..history.windows.len() {
+        for &window in needed {
             if windows.len() == CONTEXT_READERS {
                 break;
-            }
-            if !range.needs(history.wall_bounds[window].as_ref()) {
-                continue;
             }
 
             let holder = self.holder(history, window);
@@ -303,16 +301,14 @@ impl KeptTail {
         windows
     }
 
-    /// Drops the kept minutes `range` needs neither for a reading nor as the minute before one
+    /// Drops the kept minutes the tail needs neither for a reading nor as the minute before one
     /// it needs.
-    fn fill_drop(&mut self, history: &Session, range: TailRange) {
+    fn fill_drop(&mut self, history: &Session, needed: &[usize]) {
         let mut retained = Vec::new();
-        for window in 0..history.windows.len() {
-            if range.needs(history.wall_bounds[window].as_ref()) {
-                retained.push(&history.windows[window]);
-                if let Some(holder) = history.earlier_holder(window) {
-                    retained.push(&history.windows[holder]);
-                }
+        for &window in needed {
+            retained.push(&history.windows[window]);
+            if let Some(holder) = history.earlier_holder(window) {
+                retained.push(&history.windows[holder]);
             }
         }
         self.minutes
@@ -337,24 +333,22 @@ impl KeptTail {
                 return respond(points).map(Some);
             }
         }
-        if self.next(history, range).is_some() {
+        let retained = history.reader().retained();
+        let needed = history.earlier_needed(range, &retained);
+        if self.next(history, &needed).is_some() {
             return Ok(None);
         }
 
-        let points = self.assemble(history, range)?;
+        let points = self.assemble(history, range, &needed, &retained)?;
         let response = respond(&points);
         history.earlier_tail.replace(Some((range, points)));
         response.map(Some)
     }
 
-    /// The first read `range` needs, in the session's order of minutes, so a minute is read
+    /// The first read the tail needs, in the session's order of minutes, so a minute is read
     /// after the minute before it.
-    fn next(&self, history: &Session, range: TailRange) -> Option<Step<'_>> {
-        for window in 0..history.windows.len() {
-            if !range.needs(history.wall_bounds[window].as_ref()) {
-                continue;
-            }
-
+    fn next(&self, history: &Session, needed: &[usize]) -> Option<Step<'_>> {
+        for &window in needed {
             let holder = self.holder(history, window);
             if self.current(history, window, holder) {
                 continue;
@@ -410,8 +404,14 @@ impl KeptTail {
     /// thinned to the first of each stretch, and joined to the full-detail context where the
     /// readings after the limit continue its last segment. The tail keeps every minute `range`
     /// needs, with the point of every first reading of a stretch.
-    fn assemble(&self, history: &Session, range: TailRange) -> Result<Vec<Value>> {
-        let (mut observations, after) = self.assemble_readings(history, range)?;
+    fn assemble(
+        &self,
+        history: &Session,
+        range: TailRange,
+        needed: &[usize],
+        retained: &Retained,
+    ) -> Result<Vec<Value>> {
+        let (mut observations, after) = self.assemble_readings(history, range, needed, retained)?;
         observations.sort_by_key(|value| (value.wall, value.window, value.publication));
         let segments = segment_numbers(&observations);
 
@@ -451,17 +451,15 @@ impl KeptTail {
         &self,
         history: &Session,
         range: TailRange,
+        needed: &[usize],
+        retained: &Retained,
     ) -> Result<(Vec<Observation>, Vec<Observation>)> {
         let limit_ns = range.limit_second * NS;
         let join_ns = range.join_second() * NS;
-        let retained = history.reader().retained();
         let mut observations = Vec::new();
         let mut after = Vec::new();
-        for (window, manifest) in history.windows.iter().enumerate() {
-            if !range.needs(history.wall_bounds[window].as_ref()) {
-                continue;
-            }
-
+        for &window in needed {
+            let manifest = &history.windows[window];
             let Some(minute) = self.kept(manifest) else {
                 unreachable!("the older tail misses a minute its range needs");
             };
@@ -489,6 +487,21 @@ impl KeptTail {
 }
 
 impl Session {
+    /// The minutes of the list that hold a reading of `range` or of its join and may hold one
+    /// `retained` covers.
+    fn earlier_needed(&self, range: TailRange, retained: &Retained) -> Vec<usize> {
+        let mut needed = Vec::new();
+        for (window, manifest) in self.windows.iter().enumerate() {
+            if range.needs(self.wall_bounds[window].as_ref())
+                && super::window_may_hold_retained(manifest, retained)
+            {
+                needed.push(window);
+            }
+        }
+
+        needed
+    }
+
     /// The listed minute of the same run that holds the publication before the first of the
     /// minute at `window`, the first of the windows `Reader::predecessor_windows` names for
     /// that reading.

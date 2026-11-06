@@ -245,6 +245,83 @@ fn a_live_session_follows_no_restored_reading_once_it_expires() {
     assert_eq!(trend_seconds(&again), [1006, 1007, 1008]);
 }
 
+/// A session holding a ring's seconds 1001 to 1008, on whose clock the cutoff then moves to
+/// `continuous_ns`, with no new reading after it.
+fn live_session_with_no_new_reading(fixture: &mut Fixture, continuous_ns: u64) -> LiveSession {
+    for second in 1001..=1008 {
+        fixture.publish_with_system_rows(second);
+    }
+    let boot = fixture.writer.identity().unwrap().boot;
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.follow_latest().unwrap();
+    expire_boot_before(&fixture.root, boot, continuous_ns);
+
+    session
+}
+
+#[test]
+fn a_poll_with_no_new_reading_lets_go_of_what_expired() {
+    // Goal: the readings of a ring whose collector stopped leave memory as they expire.
+    // Method: hold a ring's seconds, place the cutoff among them, poll with nothing new, and ask
+    // for what each read shows.
+    let mut fixture = Fixture::new();
+    let mut session = live_session_with_no_new_reading(&mut fixture, 5 * NS);
+
+    let changed = session.poll().unwrap();
+
+    let followed = session.follow_latest().unwrap();
+    let history = session
+        .app_history(KeyKind::Bundle, b"/Apps/Current.app")
+        .unwrap();
+    assert!(changed);
+    assert_eq!(trend_seconds(&followed), [1006, 1007, 1008]);
+    assert_eq!(history["points"].as_array().unwrap().len(), 3, "{history}");
+}
+
+#[test]
+fn a_poll_with_nothing_expired_changes_nothing() {
+    // Goal: a poll that finds nothing new and nothing expired says so, so no page is redrawn.
+    // Method: hold a ring's seconds with the cutoff before them all, and poll.
+    let mut fixture = Fixture::new();
+    let mut session = live_session_with_no_new_reading(&mut fixture, 0);
+
+    assert!(!session.poll().unwrap());
+}
+
+#[test]
+fn a_select_with_no_poll_shows_no_reading_that_expired() {
+    // Goal: a page that holds a second polls nothing, and what it selects next still expires.
+    // Method: hold a ring's seconds, place the cutoff among them, and select with no poll.
+    let mut fixture = Fixture::new();
+    let mut session = live_session_with_no_new_reading(&mut fixture, 5 * NS);
+
+    let expired = session.select(1005, 0).unwrap();
+    let retained = session.select(1007, 0).unwrap();
+
+    assert!(expired["selected"].is_null());
+    assert_eq!(trend_seconds(&retained), [1006, 1007, 1008]);
+}
+
+#[test]
+fn a_ring_that_expires_whole_leaves_nothing_and_lends_the_next_reading_its_rates() {
+    // Goal: a ring wholly past the period shows nothing once polled, and the first reading after it
+    // still has the rates the last of them gives.
+    // Method: hold a ring's seconds, place the cutoff past them all, poll, publish one more second
+    // that the period covers, and read it.
+    let mut fixture = Fixture::new();
+    let mut session = live_session_with_no_new_reading(&mut fixture, 8 * NS);
+    session.poll().unwrap();
+    let nothing = session.select(1008, 0).unwrap();
+
+    fixture.publish_with_system_rows(1009);
+    session.poll().unwrap();
+    let next = session.follow_latest().unwrap();
+
+    assert!(nothing["selected"].is_null());
+    assert_eq!(trend_seconds(&next), [1009]);
+    assert!(next["summary"]["cpu_percent"].is_number(), "{next}");
+}
+
 #[test]
 fn a_ring_wholly_past_the_period_opens_with_nothing_to_follow() {
     // Goal: a ring its collector left long ago opens, and offers no reading it holds.
@@ -336,7 +413,7 @@ fn a_selected_second_gives_no_apps_once_it_has_expired() {
 /// Five readings of three saved minutes, with the tables `derive` derives, on a retention clock
 /// that has expired none of them: 1001 at 59 seconds, 1002 at 60 and 1003 at 119, then 1004 at 120
 /// and 1005 at 121.
-fn saved_across_three_minutes(derive: &dyn persistence::worker::Derive) -> Fixture {
+pub(crate) fn saved_across_three_minutes(derive: &dyn persistence::worker::Derive) -> Fixture {
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
     let boot = fixture.writer.identity().unwrap().boot;
@@ -356,7 +433,7 @@ fn saved_across_three_minutes(derive: &dyn persistence::worker::Derive) -> Fixtu
 
 /// Moves the clock `saved_across_three_minutes` placed until the cutoff stands at `continuous_ns`,
 /// takes a pass of physical removal, and says how many publications it removed.
-fn expire_and_remove(root: &Path, continuous_ns: u64) -> u64 {
+pub(crate) fn expire_and_remove(root: &Path, continuous_ns: u64) -> u64 {
     let now = ClockReading {
         boot: Identity([9, 9]),
         continuous_ns: 0,
@@ -461,8 +538,27 @@ fn the_first_retained_reading_comes_from_raw_readings_alone() {
     assert_eq!(retained_points, points[4..]);
 }
 
+#[test]
+fn an_app_history_reads_on_past_a_minute_removal_took_from_under_its_list() {
+    // Goal: a session whose list still names a minute removal took reads an App's history without
+    // calling a healthy recording damaged.
+    // Method: open a session over minutes saved with no parts, so its history replays them, take a
+    // removal pass that leaves the list naming a minute now gone, and ask for the history.
+    let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.select(1005, 0).unwrap();
+    let removed = expire_and_remove(&fixture.root, 121 * NS);
+
+    let history = session
+        .app_history(KeyKind::Bundle, b"/Apps/Current.app")
+        .unwrap();
+
+    assert_eq!(removed, 1);
+    assert!(history["restoration_error"].is_null(), "{history}");
+}
+
 /// Nine saved minutes of one reading each, at the start of its minute on the continuous clock.
-fn saved_across_nine_minutes() -> Fixture {
+pub(crate) fn saved_across_nine_minutes() -> Fixture {
     let mut fixture = Fixture::new();
     let boot = fixture.writer.identity().unwrap().boot;
     expire_boot_before(&fixture.root, boot, 0);

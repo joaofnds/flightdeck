@@ -351,6 +351,21 @@ pub(super) fn poll<T: WindowValue>(
     held.insert(value)
 }
 
+/// Lets go of what lies before `first_ns` though no new value came in. A window with nothing to
+/// let go stays as it is, since a page may hold it and a change would copy it.
+pub(super) fn expire<T: WindowValue>(window: &mut Arc<Window<T>>, first_ns: u64) {
+    let older = window
+        .observations
+        .values()
+        .any(|held| held.wall_ns < first_ns);
+    if older {
+        Arc::make_mut(window).retain(ContextRange {
+            first_ns,
+            end_ns: u64::MAX,
+        });
+    }
+}
+
 /// Gives the live observations of the window `range` that hold no value yet theirs, from their
 /// cached samples.
 fn fill_window_live<T: WindowValue>(

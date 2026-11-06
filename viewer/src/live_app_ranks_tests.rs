@@ -288,6 +288,27 @@ fn poll_ranks_drops_observations_older_than_the_window() {
 }
 
 #[test]
+fn poll_drops_the_ranks_of_a_reading_that_expired_with_no_new_reading() {
+    // Goal: the ranks of a reading the period no longer covers leave with it, also where no new
+    // reading ever comes in.
+    // Method: follow two live seconds, place the cutoff past the first, and poll with nothing new.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let first = session.follow_latest().unwrap()["selected"].clone();
+    fixture.publish_with_system_rows(1001);
+    session.poll().unwrap();
+    let last = session.follow_latest().unwrap()["selected"].clone();
+    let boot = fixture.writer.identity().unwrap().boot;
+    crate::session::retention_tests::expire_boot_before(&fixture.root, boot, 1_000_000_000);
+
+    session.poll().unwrap();
+
+    assert!(session.app_ranks().get(&observation_key(&first)).is_none());
+    assert!(session.app_ranks().get(&observation_key(&last)).is_some());
+}
+
+#[test]
 fn poll_keeps_the_ranks_of_a_selected_earlier_window() {
     // Goal: a page that polls live while an earlier second is selected, such as
     // Self-monitoring, leaves that window's ranks, so returning to it replays nothing.

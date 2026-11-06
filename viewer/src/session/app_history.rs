@@ -418,7 +418,7 @@ impl Session {
         let retained = self.reader().retained();
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
-            if app_history_replays(window, manifest, range, kept) {
+            if app_history_replays(window, manifest, range, kept, &retained) {
                 let mut readings = Vec::with_capacity(TICKS_PER_WINDOW_MAX);
                 self.app_history_ticks(
                     restore,
@@ -451,7 +451,7 @@ impl Session {
         let retained = self.reader().retained();
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
-            if !app_history_replays(window, manifest, range, kept) {
+            if !app_history_replays(window, manifest, range, kept, &retained) {
                 continue;
             }
             let mut readings = Vec::with_capacity(TICKS_PER_WINDOW_MAX);
@@ -840,8 +840,12 @@ fn app_history_replays(
     manifest: &persistence::Manifest,
     range: &ContextRange,
     kept: &BTreeSet<usize>,
+    retained: &Retained,
 ) -> bool {
     if kept.contains(&window) {
+        return false;
+    }
+    if !super::window_may_hold_retained(manifest, retained) {
         return false;
     }
 

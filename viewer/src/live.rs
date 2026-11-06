@@ -292,6 +292,10 @@ impl LiveSession {
             }
         }
 
+        if self.poll_expire()? {
+            changed = true;
+        }
+
         if let Err(error) = self.poll_commits() {
             self.history_failure(error)?;
         }
@@ -364,6 +368,7 @@ impl LiveSession {
             .checked_add(1)
             .and_then(|end| end.checked_mul(NANOSECONDS_PER_SECOND))
             .ok_or(Error::Bound("selection time"))?;
+        self.poll_expire()?;
         if self.select_refresh_due(second)? {
             self.refresh_history()?;
         }
@@ -1433,6 +1438,31 @@ impl LiveSession {
         Ok(())
     }
 
+    /// Lets go of what the period no longer covers though no new reading came in, as with a ring
+    /// whose collector stopped, and says whether anything left the readings a page shows.
+    fn poll_expire(&mut self) -> Result<bool> {
+        let Some(newest) = self.observations.back() else {
+            return Ok(false);
+        };
+        let held = self.observations.len();
+        let first = self.retained_first_ns(newest);
+        if first.is_none() {
+            // The first reading the period covers takes its rates from the last it does not.
+            let newest = self.observations.pop_back();
+            if let Some(replaced) = std::mem::replace(&mut self.expired_newest, newest) {
+                self.cache_bytes -= replaced.bytes;
+            }
+        }
+        let first = first.unwrap_or(u64::MAX);
+        self.poll_evict(first)?;
+        self.poll_points_evict(first)?;
+        self.app_history.expire(first);
+        window::expire(&mut self.app_ranks, first);
+        window::expire(&mut self.app_parts, first);
+
+        Ok(self.observations.len() < held)
+    }
+
     /// The wall clock before which this session shows no reading: the retention period's cutoff,
     /// as far back from `current` on the wall clock as it lies on the retention clock, none where
     /// `current` has expired. A wall clock stepped within the session's few minutes moves it by the
@@ -1579,6 +1609,11 @@ impl LiveSession {
     fn poll_points(&mut self, point: &Value, first: u64, scalar_bytes: usize) -> Result<()> {
         self.cache_bytes += scalar_bytes;
         self.points.push_back(point.clone());
+
+        self.poll_points_evict(first)
+    }
+
+    fn poll_points_evict(&mut self, first: u64) -> Result<()> {
         for _attempt in 0..=OBSERVATIONS_MAX {
             let expired = match self.points.front() {
                 Some(point) => {

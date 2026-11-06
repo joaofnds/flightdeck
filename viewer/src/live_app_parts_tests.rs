@@ -145,6 +145,30 @@ fn poll_parts_gives_each_live_second_the_kept_apps_detail() {
 }
 
 #[test]
+fn poll_drops_the_part_of_a_reading_that_expired_with_no_new_reading() {
+    // Goal: the kept App's part of a reading the period no longer covers leaves with it, also where
+    // no new reading ever comes in.
+    // Method: keep an App's parts over two live seconds, place the cutoff past the first, and poll
+    // with nothing new.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let first = session.follow_latest().unwrap()["selected"].clone();
+    let app = selected_app(&session);
+    session.part_window(app.kind, &app.bytes).unwrap();
+    fixture.publish_with_system_rows(1001);
+    session.poll().unwrap();
+    let last = session.follow_latest().unwrap()["selected"].clone();
+    let boot = fixture.writer.identity().unwrap().boot;
+    crate::session::retention_tests::expire_boot_before(&fixture.root, boot, 1_000_000_000);
+
+    session.poll().unwrap();
+
+    assert!(session.app_parts().get(&observation_key(&first)).is_none());
+    assert!(session.app_parts().get(&observation_key(&last)).is_some());
+}
+
+#[test]
 fn poll_parts_keeps_nothing_until_an_app_is_kept() {
     // Goal: a session whose Apps page never asked for an App spends no memory on parts.
     // Method: poll two live seconds without keeping any App's parts.

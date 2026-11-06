@@ -661,7 +661,7 @@ impl Session {
                     continue;
                 }
             }
-            if retained.holds_any(manifest.identity.run.boot, manifest.continuous_ns) {
+            if window_may_hold_retained(manifest, retained) {
                 windows.push(window);
             }
         }
@@ -888,6 +888,13 @@ impl Session {
         }
         Ok(observations)
     }
+}
+
+/// Whether the window of `manifest` may hold a reading to return. One that holds none is read for
+/// nothing but the rates of the reading after it, since removal may have taken it from under a
+/// list that still names it.
+fn window_may_hold_retained(manifest: &Manifest, retained: &Retained) -> bool {
+    retained.holds_any(manifest.identity.run.boot, manifest.continuous_ns)
 }
 
 /// Whether `root` has anywhere saved history could be, which one no writer finished setting up has
