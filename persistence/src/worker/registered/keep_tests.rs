@@ -220,9 +220,10 @@ fn rows_kept_after_earlier_losses_leave_them_for_the_next_window_to_count() {
 
 #[test]
 fn rows_kept_carry_the_unknown_extent_their_attempt_held() {
-    // Goal: an unknown extent the attempt carried survives in the fragment that replaces it (P02.5).
-    // Method: stop a seal that holds the mark with its rows saved, publish past the whole ring, keep
-    // the rows, and read what the fragment inherited.
+    // Goal: an unknown extent the attempt carried survives in the fragment that replaces it
+    // (P02.5).
+    // Method: stop a seal that holds the mark with its rows saved, publish past the whole ring,
+    // keep the rows, and read what the fragment inherited.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
     let attempted = InterruptedWindow {
