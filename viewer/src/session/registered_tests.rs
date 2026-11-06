@@ -1,5 +1,6 @@
 //! A session over a registered recording, saved through the persister's own worker.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,9 +15,6 @@ use super::Session;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::KeyKind;
 use crate::root_fixture::{older_root, unfinished_root};
-
-/// The entries a boundary lookup of the canonical tree examines at most.
-const ENTRIES_OF_A_BOUNDARY_MAX: u64 = 4_224;
 
 const SECOND_FIRST: u64 = 1000;
 
@@ -39,9 +37,7 @@ fn a_session_refuses_a_recording_of_an_older_format() {
 
     let opened = Session::open(&root);
 
-    assert!(
-        matches!(opened, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported)
-    );
+    assert!(matches!(opened, Err(Error::Io(error)) if error.kind() == ErrorKind::Unsupported));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -53,9 +49,7 @@ fn a_session_finds_no_recording_in_a_root_still_being_set_up() {
 
     let opened = Session::open(&root);
 
-    assert!(
-        matches!(opened, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
-    );
+    assert!(matches!(opened, Err(Error::Io(error)) if error.kind() == ErrorKind::NotFound));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -175,6 +169,13 @@ fn registered_numbers(session: &Session) -> Vec<u64> {
 }
 
 /// The proof of the listed window with number `window`.
+fn registered_refusal(read: persistence::Result<serde_json::Value>) -> ErrorKind {
+    match read {
+        Err(Error::Io(error)) => error.kind(),
+        other => panic!("not an I/O refusal: {other:?}"),
+    }
+}
+
 fn registered_proof(session: &Session, window: u64) -> PathBuf {
     let manifest = session
         .windows
@@ -220,7 +221,10 @@ fn a_read_past_the_listed_span_fails_rather_than_finding_nothing() {
 
     let read = session.context(range, &mut Vec::new());
 
-    assert!(matches!(read, Err(Error::Bound(_))));
+    assert!(matches!(
+        read,
+        Err(Error::Bound("read past the session's span"))
+    ));
 }
 
 #[test]
@@ -233,7 +237,10 @@ fn a_read_of_kept_parts_past_the_listed_span_fails_rather_than_finding_nothing()
 
     let read = session.visit_sealed_parts(range, KeyKind::Executable, b"app", |_part| Ok(()));
 
-    assert!(matches!(read, Err(Error::Bound(_))));
+    assert!(matches!(
+        read,
+        Err(Error::Bound("read past the session's span"))
+    ));
 }
 
 #[test]
@@ -252,7 +259,7 @@ fn an_unavailable_old_window_stops_no_reader_of_a_newer_one() {
     let old = reopened.select(SECOND_FIRST, 0);
 
     assert_eq!(new.unwrap()["selected"]["publication"], 3);
-    assert!(old.is_err());
+    assert_eq!(registered_refusal(old), ErrorKind::InvalidData);
 }
 
 #[test]
@@ -319,7 +326,7 @@ fn damage_in_the_margin_of_a_span_stops_no_reader_of_what_it_needs() {
 
     assert_eq!(listed, [1]);
     assert_eq!(new.unwrap()["selected"]["publication"], 2);
-    assert!(old.is_err());
+    assert_eq!(registered_refusal(old), ErrorKind::InvalidData);
 }
 
 #[test]
@@ -342,7 +349,7 @@ fn a_reopen_keeps_what_an_earlier_read_verified() {
         .select(SECOND_FAR + 60, 0);
 
     assert_eq!(again.unwrap()["selected"]["publication"], 3);
-    assert!(fresh.is_err());
+    assert_eq!(registered_refusal(fresh), ErrorKind::InvalidData);
 }
 
 #[test]
@@ -407,12 +414,14 @@ fn registered_read_both_ends(fixture: &Fixture, oldest: u64, newest: u64) -> usi
 }
 
 /// The windows the long recording's test reads at: either side of the old cap of a session's list
-/// and twice past it. A link takes about a millisecond, so the checks take a shorter recording,
-/// whose tree has the same shape one level up.
+/// and twice past it. A link takes about a millisecond, so the checks take a shorter recording that
+/// still passes the 4,096 windows one range of the catalog holds.
 #[cfg(feature = "long-recording")]
 const WINDOW_COUNTS: [u64; 4] = [65_535, 65_536, 65_537, 131_072];
 #[cfg(not(feature = "long-recording"))]
-const WINDOW_COUNTS: [u64; 4] = [1_023, 1_024, 1_025, 2_048];
+const WINDOW_COUNTS: [u64; 4] = [1_023, 1_024, 1_025, 4_100];
+const _: () = assert!(WINDOW_COUNTS[0] + 1 == WINDOW_COUNTS[1]);
+const _: () = assert!(WINDOW_COUNTS[1] + 1 == WINDOW_COUNTS[2]);
 
 /// The windows of the recordings a lookup's cost is measured over, a minute each for 1, 7 and 30
 /// days, of which the checks take the first.
@@ -423,6 +432,78 @@ const WINDOW_COUNTS_OF_DAYS: [u64; 1] = [1_440];
 
 /// Where linked windows start, far enough past the first second that no real save reaches them.
 const SECOND_BETWEEN: u64 = SECOND_FIRST + 20_000;
+
+/// The readings the recording's catalog names, counted from their names alone, so that a recording
+/// whose links went missing cannot pass for a long one.
+fn registered_readings(fixture: &Fixture) -> u64 {
+    const PAGES_MAX: u64 = 2_048;
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let catalog = Catalog::open(&fixture.root, &budget).unwrap();
+    let mut readings = 0;
+    let mut after = None;
+    for _page in 0..PAGES_MAX {
+        let page = catalog
+            .known_page(0, u64::MAX, after, &mut ReadWork::default())
+            .unwrap();
+        readings += u64::try_from(page.readings.len()).unwrap();
+        after = page.next;
+        if after.is_none() {
+            return readings;
+        }
+    }
+
+    panic!("more readings than {PAGES_MAX} pages hold");
+}
+
+/// Asserts that `work` is what `lookups` lookups read in a tree of `windows` links. Each crosses
+/// twice the levels of an even tree of 16 children, since keys that share digits split unevenly, at
+/// 16 entries a level, and then reads a leaf of 128 links. A walk of the tree passes this.
+fn registered_assert_entries(work: &ReadWork, lookups: u64, windows: u64) {
+    let levels = 2 * (u64::from(windows.ilog(16)) + 1);
+    let entries_max = lookups * (levels * 16 + 128);
+    assert!(
+        work.entries <= entries_max,
+        "{windows} windows: {} entries, at most {entries_max}",
+        work.entries
+    );
+}
+
+/// Takes the right to list from every child of the run's first branch but the newest, so a read
+/// that walks what the run saved fails. Returns them, for `registered_wall_restore`.
+fn registered_wall_off_older_links(fixture: &Fixture) -> Vec<PathBuf> {
+    const KEY_DIGITS: usize = 80;
+    let mut directory = fixture.root.join("ordinary");
+    for _level in 0..KEY_DIGITS {
+        let mut children: Vec<PathBuf> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect();
+        children.sort_unstable();
+        let newest = children.pop().unwrap();
+        if !children.is_empty() {
+            for child in &children {
+                registered_wall_mode(child, 0o000);
+            }
+            return children;
+        }
+        directory = newest;
+    }
+
+    panic!("no branch in {KEY_DIGITS} digits");
+}
+
+fn registered_wall_mode(directory: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(directory, permissions).unwrap();
+}
+
+fn registered_wall_restore(walled: &[PathBuf]) {
+    for directory in walled {
+        registered_wall_mode(directory, 0o700);
+    }
+}
 
 #[test]
 fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
@@ -439,28 +520,40 @@ fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
     fixture.seal();
     registered_link_between(&fixture, SECOND_BETWEEN, 1..below - 1);
     registered_save_minute(&mut fixture, newest);
+    let readings_below = registered_readings(&fixture);
 
     let listed_below = registered_read_both_ends(&fixture, SECOND_FIRST, newest);
     let mut live = crate::LiveSession::open(&fixture.root).unwrap();
     live.poll().unwrap();
-    assert_eq!(at, below + 1);
     registered_save_minute(&mut fixture, newest + 60);
     live.poll().unwrap();
-    let live_at = live.catalog()["last_second"].clone();
+    let live_at = live.catalog();
+    let readings_at = registered_readings(&fixture);
     let listed_at = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 60);
-    assert_eq!(above, at + 1);
     registered_save_minute(&mut fixture, newest + 120);
     live.poll().unwrap();
-    let live_above = live.catalog()["last_second"].clone();
+    let live_above = live.catalog();
+    let readings_above = registered_readings(&fixture);
     let listed_above = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 120);
     registered_link_between(&fixture, SECOND_BETWEEN, below - 1..twice - 4);
     registered_save_minute(&mut fixture, newest + 180);
     live.poll().unwrap();
+    let live_twice = live.catalog();
+    let readings_twice = registered_readings(&fixture);
     let listed_twice = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 180);
+    let oldest_of_live = live.select(SECOND_FIRST, 0).unwrap();
 
-    assert_eq!(live_at, newest + 60);
-    assert_eq!(live_above, newest + 120);
-    assert_eq!(live.catalog()["last_second"], newest + 180);
+    assert_eq!(readings_below, below);
+    assert_eq!(readings_at, at);
+    assert_eq!(readings_above, above);
+    assert_eq!(readings_twice, twice);
+    assert_eq!(live_at["last_second"], newest + 60);
+    assert_eq!(live_at["windows"], 2);
+    assert_eq!(live_above["last_second"], newest + 120);
+    assert_eq!(live_above["windows"], 3);
+    assert_eq!(live_twice["last_second"], newest + 180);
+    assert_eq!(live_twice["windows"], 4);
+    assert_eq!(oldest_of_live["second"], SECOND_FIRST);
     assert_eq!(live.catalog()["history_error"], serde_json::Value::Null);
     assert!(listed_below <= 4);
     assert!(listed_at <= 4);
@@ -481,6 +574,7 @@ fn two_runs_on_one_second_stay_selectable_past_the_old_cap() {
     fixture.seal();
     registered_link_between(&fixture, SECOND_BETWEEN, 1..below + 2);
     registered_save_minute(&mut fixture, SECOND_BETWEEN + below + 20_000);
+    let readings_past_the_cap = registered_readings(&fixture);
     let mut live = crate::LiveSession::open(&fixture.root).unwrap();
     live.poll().unwrap();
     let mut sharing = Fixture::new_mode(true, 2, Some(&fixture));
@@ -493,6 +587,7 @@ fn two_runs_on_one_second_stay_selectable_past_the_old_cap() {
     let mut session = Session::open(&fixture.root).unwrap();
     let one = session.select(SECOND_FIRST, 0).unwrap();
     let other = session.select(SECOND_FIRST, 1).unwrap();
+    assert_eq!(readings_past_the_cap, below + 3);
     assert_eq!(one["alternatives"].as_array().unwrap().len(), 2);
     assert_ne!(one["selected"]["run"], other["selected"]["run"]);
     assert_eq!(live.catalog()["history_error"], serde_json::Value::Null);
@@ -501,9 +596,9 @@ fn two_runs_on_one_second_stay_selectable_past_the_old_cap() {
 #[test]
 fn what_a_lookup_reads_stays_within_the_tree_however_long_the_recording() {
     // Goal: a lookup's work is bounded by the tree's shape and not by what the recording saved, at
-    // the sizes of 1, 7 and 30 days, and saving one more window costs the same (P02.2).
+    // the sizes of 1, 7 and 30 days (P02.2).
     // Method: link recordings of those sizes and count what the catalog's lookups read: the two
-    // ends, a window by its publication, a span of the clock and the run's frontier a save reads.
+    // ends and a span of the clock.
     for windows in WINDOW_COUNTS_OF_DAYS {
         let mut fixture = Fixture::registered();
         fixture.publish_with_system_rows(SECOND_FIRST);
@@ -511,26 +606,23 @@ fn what_a_lookup_reads_stays_within_the_tree_however_long_the_recording() {
         registered_link_between(&fixture, SECOND_FIRST + 20_000, 1..windows);
         let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
         let catalog = Catalog::open(&fixture.root, &budget).unwrap();
-        let run = fixture.writer.identity().unwrap();
 
         let mut ends = ReadWork::default();
         catalog.newest_known(&mut ends).unwrap();
         catalog.oldest_known(&mut ends).unwrap();
-        let mut exact = ReadWork::default();
-        catalog.window_holding(&run, 1, &mut exact).unwrap();
         let mut span = ReadWork::default();
         catalog
             .windows_in(0, (SECOND_FIRST + 1) * super::NS, &mut span)
             .unwrap();
-        let store = persistence::Store::open(&fixture.root).unwrap();
-        let mut frontier = ReadWork::default();
-        store.source_frontier(&run, &budget, &mut frontier).unwrap();
 
-        println!("{windows} windows: {ends:?} {exact:?} {span:?} {frontier:?}");
-        assert!(ends.entries <= 2 * ENTRIES_OF_A_BOUNDARY_MAX);
-        assert!(exact.entries <= ENTRIES_OF_A_BOUNDARY_MAX);
-        assert!(span.entries <= 2 * ENTRIES_OF_A_BOUNDARY_MAX);
-        assert!(frontier.entries <= 2 * ENTRIES_OF_A_BOUNDARY_MAX);
+        println!("{windows} windows: {ends:?} {span:?}");
+        assert_eq!(registered_readings(&fixture), windows);
+        registered_assert_entries(&ends, 2, windows);
+        assert_eq!(ends.metadata_admissions, 0);
+        assert_eq!(ends.raw_admissions, 0);
+        registered_assert_entries(&span, 2, windows);
+        assert_eq!(span.metadata_admissions, 1);
+        assert_eq!(span.raw_admissions, 0);
     }
 }
 
@@ -539,7 +631,9 @@ fn a_restart_on_a_long_run_reads_its_tail_and_not_what_it_saved_before() {
     // Goal: a restart costs what the run's tail holds and not what the run saved, at the sizes of
     // 1, 7 and 30 days (P02.2, P02.4).
     // Method: publish a run past its ring, save what the ring holds, link the run's earlier windows
-    // under it with proofs that do not read, restart the worker, and save the next minute.
+    // under it with proofs that do not read, and wall off the directories of the older ones, so
+    // that reading or walking them fails. Restart the worker, save the next minute, and count what
+    // finding the run's frontier and its newest window read.
     for windows in WINDOW_COUNTS_OF_DAYS {
         let mut fixture = Fixture::registered();
         for offset in 0..windows {
@@ -548,6 +642,7 @@ fn a_restart_on_a_long_run_reads_its_tail_and_not_what_it_saved_before() {
         fixture.seal();
         let run = fixture.writer.identity().unwrap();
         registered_link_of_run(&fixture, run, SECOND_FIRST - 1, 1..windows - 8);
+        let walled = registered_wall_off_older_links(&fixture);
         fixture.skip_run_ticks(60);
         fixture.publish_with_system_rows(SECOND_FIRST + windows + 60);
         let store = persistence::Store::open(&fixture.root).unwrap();
@@ -572,9 +667,23 @@ fn a_restart_on_a_long_run_reads_its_tail_and_not_what_it_saved_before() {
         let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
         let mut work = ReadWork::default();
         let frontier = store.source_frontier(&run, &budget, &mut work).unwrap();
-        println!("{windows} windows: saved the next minute in {elapsed:?}, {work:?}");
+        let catalog = Catalog::open(&fixture.root, &budget).unwrap();
+        let mut exact = ReadWork::default();
+        let newest = catalog
+            .window_holding(&run, windows + 1, &mut exact)
+            .unwrap();
+        registered_wall_restore(&walled);
+
+        println!("{windows} windows: saved the next minute in {elapsed:?}, {work:?} {exact:?}");
+        assert_eq!(registered_readings(&fixture), windows);
         assert_eq!(frontier.unwrap().publication_end(), windows + 2);
-        assert!(work.entries <= 2 * ENTRIES_OF_A_BOUNDARY_MAX);
+        assert!(newest.is_some());
+        registered_assert_entries(&work, 2, windows);
+        assert_eq!(work.metadata_admissions, 1);
+        assert_eq!(work.raw_admissions, 4);
+        registered_assert_entries(&exact, 1, windows);
+        assert_eq!(exact.metadata_admissions, 1);
+        assert_eq!(exact.raw_admissions, 0);
     }
 }
 
