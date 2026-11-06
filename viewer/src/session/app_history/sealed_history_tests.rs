@@ -32,6 +32,39 @@ fn restores_the_history_a_replay_gives_from_the_parts_a_window_keeps() {
 }
 
 #[test]
+fn a_partly_expired_minute_gives_only_the_history_of_its_readings_still_covered() {
+    // Goal: the parts a window keeps add up its whole minute, so one with an expired reading gives
+    // its history from its readings, and each reading still covered keeps the point it had.
+    // Method: read an App's history of a sealed minute, expire its first two readings, and read
+    // the history again.
+    const NS: u64 = 1_000_000_000;
+    let mut fixture = Fixture::new();
+    for second in 1001..=1004 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
+    let session = Session::open(&fixture.root).unwrap();
+    let mut selected = selected(&session, 1004);
+    selected.stamp.publication = 4;
+    selected.stamp.continuous_ns = Some(3 * NS);
+    selected.stamp.awake_ns = Some(3 * NS);
+    selected.run_tick = 3;
+    let ending = Selected::ending_at(selected).unwrap();
+    let whole = session.with_app_history(&ending, &CURRENT, points).unwrap();
+    drop(session);
+    crate::session::retention_tests::expire_before(&fixture.root, 2 * NS);
+
+    let session = Session::open(&fixture.root).unwrap();
+    let retained = session.with_app_history(&ending, &CURRENT, points).unwrap();
+
+    assert_eq!(whole.as_array().unwrap().len(), 4);
+    assert_eq!(
+        retained.as_array().unwrap(),
+        &whole.as_array().unwrap()[2..]
+    );
+}
+
+#[test]
 fn restores_a_window_that_keeps_parts_without_reading_its_saved_sources() {
     // Goal: an App's history reads none of the ticks, processes or events of a window that
     // keeps its Apps' parts, all of which a replay of its minute reads.

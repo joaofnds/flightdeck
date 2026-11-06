@@ -29,6 +29,8 @@ mod tests;
 /// interval the readings do not show, is `None` and never zero.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MachineSecond {
+    /// The boot the second's clocks belong to, which the store sets as it takes the second in.
+    pub boot: [u64; 2],
     pub publication: u64,
     pub run_tick: u64,
     pub wall_ns: u64,
@@ -193,6 +195,7 @@ impl MachineSecond {
         let wall_ns = reading.tick.wall_ns?;
 
         let second = Self {
+            boot: [0; 2],
             publication: reading.tick.publication,
             run_tick: reading.tick.run_tick,
             wall_ns,

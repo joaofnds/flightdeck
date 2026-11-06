@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use persistence::canonical::ReadWork;
-use persistence::canonical::catalog::Catalog;
+use persistence::canonical::catalog::{Catalog, KnownReading};
 use persistence::resources::ByteBudget;
+use persistence::retention::Retained;
 use persistence::{Error, Manifest, Result, WindowIdentity};
 
 use super::earlier::{LEAD_IN_SECONDS, LOADED_SECONDS};
@@ -25,6 +26,36 @@ const RETRY_PASSES_MAX: u32 = 2000;
 const RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
 
 const _: () = assert!(SPAN_MARGIN_SECONDS + LOADED_SECONDS + LEAD_IN_SECONDS <= 65_535);
+
+/// The oldest wall clock the retention period still covers, of a recording whose oldest listed
+/// reading is `oldest` and whose newest lies at `newest_ns`. An expired reading stays listed until
+/// physical removal reaches it, so this lies past `oldest` by how far that reading has expired. A
+/// wall clock stepped since then moves this and no reading, since each reading answers for itself
+/// when a read asks for it.
+pub(crate) fn first_retained_ns(
+    root: &Path,
+    catalog: &Catalog,
+    oldest: &KnownReading,
+    newest_ns: u64,
+) -> io::Result<u64> {
+    let window = match catalog.window_at_or_before(
+        &oldest.run,
+        oldest.publication,
+        &mut ReadWork::default(),
+    ) {
+        Ok(window) => window,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Err(error),
+        // Damage in the oldest window stops no reader of a newer one, and a read of it says so.
+        Err(_) => None,
+    };
+    let expired_by_ns = window
+        .and_then(|manifest| manifest.continuous_ns)
+        .map_or(0, |bounds| {
+            Retained::read(root, [oldest.run.boot]).expired_by_ns(oldest.run.boot, bounds.min)
+        });
+
+    Ok(oldest.wall_ns.saturating_add(expired_by_ns).min(newest_ns))
+}
 
 /// How a session of a registered recording reaches its windows.
 pub(super) struct Registered {
@@ -65,7 +96,9 @@ impl Registered {
         })
     }
 
-    pub(super) fn ends(&self, operation: &Operation) -> Result<Option<Ends>> {
+    /// The oldest second the retention period still covers and the newest second the recording
+    /// holds.
+    pub(super) fn ends(&self, root: &Path, operation: &Operation) -> Result<Option<Ends>> {
         let mut work = ReadWork::default();
         let oldest = registered_retry(operation, || {
             self.catalog.oldest_known(&mut work).map_err(Error::from)
@@ -77,8 +110,12 @@ impl Registered {
             return Ok(None);
         };
 
+        let first_ns = registered_retry(operation, || {
+            first_retained_ns(root, &self.catalog, &oldest, newest.wall_ns).map_err(Error::from)
+        })?;
+
         Ok(Some(Ends {
-            first: oldest.wall_ns / NS,
+            first: first_ns / NS,
             last: newest.wall_ns / NS,
         }))
     }
@@ -328,7 +365,7 @@ impl Session {
     /// Whether the windows the session's span holds on disk are those it lists.
     pub(crate) fn lists_every_sealed_window(&self) -> Result<bool> {
         let Some(span) = self.registered.span else {
-            return Ok(self.registered.ends(&self.operation)?.is_none());
+            return Ok(self.registered.ends(&self.root, &self.operation)?.is_none());
         };
 
         Ok(self

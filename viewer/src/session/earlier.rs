@@ -454,6 +454,7 @@ impl KeptTail {
     ) -> Result<(Vec<Observation>, Vec<Observation>)> {
         let limit_ns = range.limit_second * NS;
         let join_ns = range.join_second() * NS;
+        let retained = history.reader().retained();
         let mut observations = Vec::new();
         let mut after = Vec::new();
         for (window, manifest) in history.windows.iter().enumerate() {
@@ -465,6 +466,9 @@ impl KeptTail {
                 unreachable!("the older tail misses a minute its range needs");
             };
             for reading in &minute.readings {
+                if !retained.holds(manifest.identity.run.boot, reading.continuous) {
+                    continue;
+                }
                 if range.holds(reading.wall) {
                     observations.push(reading.observation(window));
                 } else {

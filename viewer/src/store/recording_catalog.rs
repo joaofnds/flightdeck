@@ -10,7 +10,7 @@ use persistence::canonical::catalog::Catalog;
 use persistence::{Error, Manifest};
 
 use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_predecessor};
-use crate::session::registered::catalog_retry;
+use crate::session::registered::{catalog_retry, first_retained_ns};
 use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 use crate::store::Failure;
 
@@ -82,7 +82,7 @@ fn find_windows(
             break;
         }
     }
-    let ends = find_windows_ends(catalog)?;
+    let ends = find_windows_ends(root, catalog)?;
     let newest_ns = match newest {
         Some(manifest) => manifest.wall_ns.map(|wall| wall.max),
         None => ends.map(|(_first, last)| last),
@@ -120,15 +120,18 @@ fn find_windows(
 }
 
 /// The clocks of the recording's oldest and newest readings.
-fn find_windows_ends(catalog: &Catalog) -> Result<Option<(u64, u64)>, Failure> {
-    let ends = catalog_retry(|| {
+fn find_windows_ends(root: &Path, catalog: &Catalog) -> Result<Option<(u64, u64)>, Failure> {
+    catalog_retry(|| {
         let oldest = catalog.oldest_known(&mut ReadWork::default())?;
         let newest = catalog.newest_known(&mut ReadWork::default())?;
-        Ok(oldest.zip(newest))
-    })
-    .map_err(find_failure)?;
+        let (Some(oldest), Some(newest)) = (oldest, newest) else {
+            return Ok(None);
+        };
+        let first_ns = first_retained_ns(root, catalog, &oldest, newest.wall_ns)?;
 
-    Ok(ends.map(|(oldest, newest)| (oldest.wall_ns, newest.wall_ns)))
+        Ok(Some((first_ns, newest.wall_ns)))
+    })
+    .map_err(find_failure)
 }
 
 fn find_windows_range(

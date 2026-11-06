@@ -92,6 +92,14 @@ impl Session {
         let endpoint = self
             .with_app_sample_endpoint(window, publication)?
             .ok_or(Error::Bound("committed App selected tick unavailable"))?;
+        let boot = self.windows[window].identity.run.boot;
+        if !self
+            .reader()
+            .retained()
+            .holds(boot, endpoint.stamp.continuous_ns)
+        {
+            return Err(Error::Bound("the selected second has expired"));
+        }
 
         with_app_sample_selection(selected, &endpoint)?;
         let mut current = None;

@@ -55,6 +55,46 @@ fn reads_each_minute_once_where_its_manifest_holds_no_wall_bounds() {
 }
 
 #[test]
+fn the_older_tail_leaves_out_what_expired() {
+    // Goal: a chart reaching past the full-detail context shows no expired reading, and every
+    // reading still covered keeps its place.
+    // Method: read the tail of a saved hour, place the cutoff among its minutes at the clock of
+    // tick 361, the first of minute 6, and read the tail again.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish(&mut fixture);
+    let last = earlier_context_last(EARLIER_LIMIT);
+    let whole = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(last)
+        .unwrap();
+    crate::session::retention_tests::expire_before(&fixture.root, 360 * NANOSECONDS_PER_SECOND);
+
+    let retained = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(last)
+        .unwrap();
+
+    let cut_ns = earlier_wall(361) * NANOSECONDS_PER_SECOND;
+    let walls = |tail: &Value| -> Vec<u64> {
+        tail["earlier_trends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["wall_ns"].as_u64().unwrap())
+            .collect()
+    };
+    let whole_walls = walls(&whole);
+    assert!(whole_walls[0] < cut_ns);
+    assert_eq!(
+        walls(&retained),
+        whole_walls
+            .into_iter()
+            .filter(|wall| *wall >= cut_ns)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn reads_only_the_sources_of_a_newly_needed_minute() {
     // Goal: a stride whose tail reaches one more sealed minute reads that minute alone. Method:
     // read the tail, move its limit until the join reaches the first reading of minute 13, at

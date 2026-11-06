@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use collector::recording::{bootstrap, identity_text, private};
 use persistence::engine::{Engine, Row};
+use persistence::retention::Retained;
 use persistence::{Error, Manifest, Result, TimeBounds, read_committed, reread_committed};
 use serde_json::{Value, json};
 
@@ -316,7 +317,7 @@ impl Session {
     /// newest span. A window an earlier session's read verified stays verified.
     fn reopen_registered(&mut self, epoch: u64, earlier: &Verified) -> Result<()> {
         self.operation.begin(epoch)?.run(|| {
-            let ends = self.registered.ends(&self.operation)?;
+            let ends = self.registered.ends(&self.root, &self.operation)?;
             self.unknown = self.registered.unknown_clock_ticks(&self.operation)?;
             if let Some(ends) = ends {
                 self.first = Some(ends.first);
@@ -440,13 +441,11 @@ impl Session {
     /// context taken again rechecks every window its read verified, so a window evicted since
     /// fails the select as a read of it would.
     fn select_inner_context(&mut self, range: ContextRange) -> Result<LastContext> {
-        if let Some(last) = &self.last_context {
-            if last.range == range {
-                for &window in &last.windows {
-                    self.validate_commitment(window)?;
-                }
-                return Ok(last.clone());
+        if let Some(last) = self.select_inner_context_kept(range) {
+            for &window in &last.windows {
+                self.validate_commitment(window)?;
             }
+            return Ok(last.clone());
         }
 
         let mut points = Vec::new();
@@ -461,6 +460,21 @@ impl Session {
 
         self.last_context = Some(last.clone());
         Ok(last)
+    }
+
+    /// The context of `range` the last select read, unless a reading of it has expired since.
+    fn select_inner_context_kept(&self, range: ContextRange) -> Option<&LastContext> {
+        let last = self
+            .last_context
+            .as_ref()
+            .filter(|last| last.range == range)?;
+        let retained = self.reader().retained();
+        let holds_every = last.observations.iter().all(|observation| {
+            let boot = self.windows[observation.window].identity.run.boot;
+            retained.holds(boot, observation.continuous)
+        });
+
+        holds_every.then_some(last)
     }
 
     /// The windows a read of `range` verified: those that may hold its readings, and those holding
@@ -479,7 +493,9 @@ impl Session {
             }
         }
         let reader = self.reader();
-        let mut windows: BTreeSet<usize> = self.context_windows(range).into_iter().collect();
+        let retained = reader.retained();
+        let mut windows: BTreeSet<usize> =
+            self.context_windows(range, &retained).into_iter().collect();
         for first in firsts.values() {
             windows.extend(reader.predecessor_windows(first));
         }
@@ -565,13 +581,14 @@ impl Session {
         assert_eq!(self.context_connections.len(), CONTEXT_READERS);
         self.span_check(range)?;
 
-        let windows = self.context_windows(range);
+        let retained = self.reader().retained();
+        let windows = self.context_windows(range, &retained);
         let chunk = context_chunk(windows.len());
         assert!(context_reader_count(windows.len()) <= self.context_connections.len());
         let parts: Vec<&[usize]> = windows.chunks(chunk).collect();
         assert_eq!(parts.len(), context_reader_count(windows.len()));
         let mut observations = Vec::new();
-        let read = |reader: &Reader<'_>, part| context_read_part(reader, part, range);
+        let read = |reader: &Reader<'_>, part| context_read_part(reader, part, range, &retained);
         for part in self.context_readers("flightdeck-context", parts, read)? {
             let (mut part_observations, mut part_points) = part?;
             if observations.len() + part_observations.len() > OBSERVATIONS_MAX {
@@ -633,7 +650,7 @@ impl Session {
 
     /// The windows whose readings may fall in `range`: those whose wall-clock bounds overlap it,
     /// and those whose manifest holds no bounds.
-    fn context_windows(&self, range: ContextRange) -> Vec<usize> {
+    fn context_windows(&self, range: ContextRange, retained: &Retained) -> Vec<usize> {
         let mut windows = Vec::new();
         for (window, manifest) in self.windows.iter().enumerate() {
             if let Some(bounds) = manifest.wall_ns {
@@ -644,7 +661,9 @@ impl Session {
                     continue;
                 }
             }
-            windows.push(window);
+            if retained.holds_any(manifest.identity.run.boot, manifest.continuous_ns) {
+                windows.push(window);
+            }
         }
 
         windows
@@ -656,6 +675,7 @@ impl Session {
                 .selected
                 .as_ref()
                 .ok_or(Error::Bound("no selected observation"))?;
+            self.selected_retained(selected)?;
             let mut current_slot = None;
             let mut previous_slot = None;
             self.cpu_detail_sample(selected, &mut current_slot)?;
@@ -741,6 +761,17 @@ impl Session {
         Ok(())
     }
 
+    /// Refuses a further read of a selected reading the retention period no longer covers, so a
+    /// hold keeps what it already holds in memory and pins nothing on disk.
+    pub(crate) fn selected_retained(&self, selected: &Observation) -> Result<()> {
+        let boot = self.windows[selected.window].identity.run.boot;
+        if !self.reader().retained().holds(boot, selected.continuous) {
+            return Err(Error::Bound("the selected second has expired"));
+        }
+
+        Ok(())
+    }
+
     pub fn page(&self, name: &str, offset: u64) -> Result<Value> {
         self.operation.run(|| self.page_inner(name, offset))
     }
@@ -751,6 +782,7 @@ impl Session {
             .selected
             .as_ref()
             .ok_or(Error::Bound("no selected observation"))?;
+        self.selected_retained(selected)?;
         let order = persistence::schema::TABLES
             .into_iter()
             .find(|table| table.name() == name)
@@ -849,9 +881,10 @@ impl Session {
     fn observations(&self, range: ContextRange) -> Result<Vec<Observation>> {
         self.span_check(range)?;
         let reader = self.reader();
+        let retained = reader.retained();
         let mut observations = Vec::new();
-        for window in self.context_windows(range) {
-            reader.window_observations(window, range, &mut observations)?;
+        for window in self.context_windows(range, &retained) {
+            reader.window_observations(window, range, &retained, &mut observations)?;
         }
         Ok(observations)
     }
@@ -1010,11 +1043,24 @@ impl Reader<'_> {
         )
     }
 
-    /// Appends to `observations` the readings of `window` that fall in `range`.
+    /// What the retention period still covers of the readings of these windows.
+    pub(crate) fn retained(&self) -> Retained {
+        Retained::read(
+            self.root,
+            self.windows
+                .iter()
+                .map(|manifest| manifest.identity.run.boot),
+        )
+    }
+
+    /// Appends to `observations` the readings of `window` that fall in `range` and that `retained`
+    /// holds. An expired reading stays readable through the tables, where the reading after it
+    /// takes its rates from it, and only this list says which readings a read returns.
     fn window_observations(
         &self,
         window: usize,
         range: ContextRange,
+        retained: &Retained,
         observations: &mut Vec<Observation>,
     ) -> Result<()> {
         let _observation = self.source_scope(window, Some("ticks"));
@@ -1030,8 +1076,12 @@ impl Reader<'_> {
             return Err(Error::Bound("context observations"));
         }
 
+        let boot = self.windows[window].identity.run.boot;
         for row in &ticks.rows {
-            observations.push(Observation::from_row(&ticks, row, window)?);
+            let observation = Observation::from_row(&ticks, row, window)?;
+            if retained.holds(boot, observation.continuous) {
+                observations.push(observation);
+            }
         }
         Ok(())
     }
@@ -1072,6 +1122,7 @@ fn context_read_part(
     reader: &Reader<'_>,
     windows: &[usize],
     range: ContextRange,
+    retained: &Retained,
 ) -> Result<(Vec<Observation>, Vec<Value>)> {
     let mut tables = metrics::Tables::new();
     let mut observations = Vec::new();
@@ -1079,7 +1130,7 @@ fn context_read_part(
     let mut batch = Vec::new();
     for &window in windows {
         batch.clear();
-        reader.window_observations(window, range, &mut batch)?;
+        reader.window_observations(window, range, retained, &mut batch)?;
         if !batch.is_empty() {
             if observations.len() + batch.len() > OBSERVATIONS_MAX {
                 return Err(Error::Bound("context observations"));
@@ -1162,6 +1213,8 @@ pub(crate) mod registered;
 mod registered_tests;
 #[cfg(test)]
 pub(crate) mod reopen_tests;
+#[cfg(test)]
+pub(crate) mod retention_tests;
 mod selection;
 pub use earlier::{
     CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS, LOADED_SECONDS,

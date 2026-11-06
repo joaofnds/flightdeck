@@ -9,6 +9,7 @@ use crate::live_app_history::{Selection, TracePoint};
 use crate::live_app_response::{KeyKind, Observation, Selected};
 use crate::live_apps::{Frame, committed::Endpoint};
 use collector::ring::{Identity, PROGRAM_PATH_BYTES_MAX, RunIdentity};
+use persistence::retention::Retained;
 use persistence::schema::APP_PARTS;
 use persistence::{Error, Result};
 use serde_json::Value;
@@ -414,6 +415,7 @@ impl Session {
         restore: &mut Restore,
     ) -> Result<bool> {
         assert!(self.windows.len() <= WINDOWS_MAX);
+        let retained = self.reader().retained();
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
             if app_history_replays(window, manifest, range, kept) {
@@ -423,7 +425,7 @@ impl Session {
                     window,
                     TICKS_PER_WINDOW_MAX,
                     &mut readings,
-                    |reading| sealed::observed_in(*range, &reading.observation),
+                    |reading| app_history_shows(*range, &retained, &reading.observation),
                 )?;
                 if !readings.is_empty() {
                     return Ok(true);
@@ -446,6 +448,7 @@ impl Session {
                 .saturating_add(1),
         );
         assert!(self.windows.len() <= WINDOWS_MAX);
+        let retained = self.reader().retained();
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
             if !app_history_replays(window, manifest, range, kept) {
@@ -457,7 +460,7 @@ impl Session {
                 window,
                 TICKS_PER_WINDOW_MAX,
                 &mut readings,
-                |reading| sealed::observed_in(*range, &reading.observation),
+                |reading| app_history_shows(*range, &retained, &reading.observation),
             )?;
             for mut reading in readings {
                 if self.app_history_window(&reading.observation)? != Some(window) {
@@ -843,6 +846,14 @@ fn app_history_replays(
     }
 
     window_overlaps(manifest, range)
+}
+
+/// Whether a replay of `range` plots `observation`. A reading before it that this leaves out
+/// still comes in as a predecessor, for its rates, and is never plotted.
+fn app_history_shows(range: ContextRange, retained: &Retained, observation: &Observation) -> bool {
+    let boot = Identity(observation.stamp.boot);
+
+    sealed::observed_in(range, observation) && retained.holds(boot, observation.stamp.continuous_ns)
 }
 
 /// Whether the window of `manifest` may hold a second of `range`, as one whose wall clock

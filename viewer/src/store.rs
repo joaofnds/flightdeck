@@ -35,6 +35,9 @@ mod activity_tests;
 mod resume_tests;
 
 #[cfg(test)]
+mod expiry_tests;
+
+#[cfg(test)]
 mod reconciliation_tests;
 
 #[cfg(test)]
@@ -44,7 +47,7 @@ mod retention_tests;
 mod stretch_tests;
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -74,9 +77,10 @@ pub use second::{
 pub use stretch::AppsStretch;
 
 use apps::TickApps;
-use collector::ring::RunIdentity;
+use collector::ring::{Identity, RunIdentity};
 use native::NativeRead;
 use native_acceptance::{make_ring, read_native};
+use persistence::retention::Retained;
 use ring::Ring;
 use stretch::Stretches;
 
@@ -276,6 +280,7 @@ impl Store {
             None => Held::new(),
         };
         let root = root.to_owned();
+        held.root = Some(root.clone());
         let operation = Arc::clone(&shared.cancellation)
             .operation(0)
             .map_err(io::Error::other)?;
@@ -413,6 +418,9 @@ impl Drop for Store {
 
 /// What the store thread holds between steps.
 struct Held {
+    /// The recording whose retention period says what the store may hold, none in a test of the
+    /// store's own bounds.
+    root: Option<PathBuf>,
     startup: StartupState,
     checked_catalog: Option<recording::CheckedCatalog>,
     source_generation: u64,
@@ -528,6 +536,7 @@ impl Held {
         });
 
         Self {
+            root: None,
             startup: StartupState::Complete,
             checked_catalog: None,
             source_generation: 0,
@@ -709,6 +718,7 @@ impl Held {
     ) {
         let pushed = self.span.push(|buffer| {
             *buffer = second.clone();
+            buffer.boot = run.boot.0;
             buffer.segment = segment;
         });
         assert!(pushed);
@@ -768,9 +778,52 @@ impl Held {
         }
     }
 
+    /// Lets go of what the retention period no longer covers, oldest first, so the next View
+    /// holds none of it. A View already handed over keeps what it holds until it is replaced.
+    /// A reader asked for an older second goes to the recording, which hides the same readings.
+    fn expire(&mut self) {
+        let Some(root) = &self.root else {
+            return;
+        };
+        let boots = self
+            .earlier
+            .held()
+            .chain(self.span.held())
+            .map(|second| Identity(second.boot));
+        let retained = Retained::read(root, boots);
+        let mut removed = self.stretches.expire(&retained);
+        for _ in 0..self.earlier.len() {
+            let Some(second) = self.earlier.oldest() else {
+                break;
+            };
+            if retained.holds(Identity(second.boot), second.continuous_ns) {
+                break;
+            }
+            self.earlier.remove_oldest();
+            if let Some(sampled) = &mut self.sampled {
+                sampled.remove_oldest();
+            }
+            removed = true;
+        }
+        for _ in 0..self.span.len() {
+            let Some(second) = self.span.oldest() else {
+                break;
+            };
+            if retained.holds(Identity(second.boot), second.continuous_ns) {
+                break;
+            }
+            self.span.remove_oldest();
+            self.apps.remove_oldest();
+            removed = true;
+        }
+
+        self.unpublished |= removed;
+    }
+
     /// Hands the main thread a View of what the store holds, or leaves it to the next step
     /// where the main thread holds every View.
     fn publish(&mut self, mailbox: &Mailbox<View>) {
+        self.expire();
         self.release_views();
         let version = self.version + 1;
         let span = &self.span;
@@ -1293,6 +1346,7 @@ fn run(
             shared.paused.store(false, Ordering::Release);
             continue;
         }
+        held.expire();
         if shared.catch_up.load(Ordering::Acquire) {
             shared.catching_up.store(true, Ordering::Release);
         }

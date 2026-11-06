@@ -136,6 +136,16 @@ impl<T> Span<T> {
         true
     }
 
+    /// Lets go of the oldest reading, which a View may go on holding.
+    pub(super) fn remove_oldest(&mut self) {
+        drop(self.held.pop_front());
+    }
+
+    /// The oldest reading the span holds.
+    pub(super) fn oldest(&self) -> Option<&T> {
+        self.held.front().map(AsRef::as_ref)
+    }
+
     /// Whether `push` finds a buffer to write: a free one, or the oldest reading's where the
     /// span is full and no View holds it.
     #[must_use]

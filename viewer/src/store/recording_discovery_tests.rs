@@ -676,3 +676,20 @@ fn short_windows(count: u64) -> Fixture {
 
     fixture
 }
+
+#[test]
+fn a_catalog_begins_at_the_oldest_second_the_period_covers() {
+    // Goal: the store says the recording begins at a second a read can still open, while the
+    // expired readings stay listed until physical removal reaches them.
+    // Method: place the cutoff inside a saved minute and load it.
+    let fixture = crate::session::retention_tests::saved_seconds();
+    crate::session::retention_tests::expire_before(&fixture.root, 5 * 1_000_000_000);
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+    let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {}).unwrap();
+
+    let checked = outcome.checked_catalog.unwrap();
+    assert_eq!(checked.first_known_second, Some(1006));
+    assert_eq!(checked.last_known_second, Some(1008));
+}

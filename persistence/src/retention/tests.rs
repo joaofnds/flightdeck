@@ -547,3 +547,109 @@ fn an_entry_names_the_raw_data_a_proof_that_does_not_read_cannot() {
 
     assert_eq!(listed[0].raw_names(), Some((text.as_str(), "ready")));
 }
+
+fn retained_at_ten_seconds() -> Retained {
+    Retained {
+        cutoff: Cutoff {
+            expired_below_ns: 10 * SECOND_NS,
+        },
+        offsets: vec![(THIS_BOOT, 3 * SECOND_NS)],
+    }
+}
+
+fn clock_bounds(first_seconds: u64, last_seconds: u64) -> TimeBounds {
+    TimeBounds {
+        min: first_seconds * SECOND_NS,
+        max: last_seconds * SECOND_NS,
+    }
+}
+
+#[test]
+fn a_reading_at_the_cutoff_is_retained_and_one_before_it_is_not() {
+    // Goal: the boundary falls exactly where the period ends, on the reading's own clock.
+    // Method: place readings either side of a cutoff that their boot's offset puts at 7 seconds.
+    let retained = retained_at_ten_seconds();
+
+    assert!(retained.holds(THIS_BOOT, Some(7 * SECOND_NS)));
+    assert!(!retained.holds(THIS_BOOT, Some(7 * SECOND_NS - 1)));
+    assert_eq!(retained.expired_by_ns(THIS_BOOT, 7 * SECOND_NS), 0);
+    assert_eq!(retained.expired_by_ns(THIS_BOOT, 6 * SECOND_NS), SECOND_NS);
+}
+
+#[test]
+fn a_reading_with_no_place_on_the_clock_stays() {
+    // Goal: a reading with no clock, or of a boot with no record, waits for physical removal,
+    // which is the visible limit on unknown time.
+    // Method: ask about each, however old a clock would make it.
+    let retained = retained_at_ten_seconds();
+
+    assert!(retained.holds(THIS_BOOT, None));
+    assert!(retained.holds(NEXT_BOOT, Some(0)));
+    assert_eq!(retained.expired_by_ns(NEXT_BOOT, 0), 0);
+}
+
+#[test]
+fn a_window_is_retained_whole_only_when_its_oldest_reading_is() {
+    // Goal: a derived table that adds up a window is read only where nothing in it has expired.
+    // Method: ask about windows either side of the cutoff, across it, and with no bounds.
+    let retained = retained_at_ten_seconds();
+
+    assert!(retained.holds_every(THIS_BOOT, Some(clock_bounds(7, 9))));
+    assert!(!retained.holds_every(THIS_BOOT, Some(clock_bounds(6, 9))));
+    assert!(!retained.holds_every(THIS_BOOT, None));
+    assert!(retained.holds_every(NEXT_BOOT, None));
+}
+
+#[test]
+fn a_window_holds_something_to_return_until_its_newest_reading_expires() {
+    // Goal: a window wholly past the cutoff is never read, and physical removal may take it.
+    // Method: ask about windows either side of the cutoff, across it, and with no bounds.
+    let retained = retained_at_ten_seconds();
+
+    assert!(retained.holds_any(THIS_BOOT, Some(clock_bounds(6, 7))));
+    assert!(!retained.holds_any(THIS_BOOT, Some(clock_bounds(5, 6))));
+    assert!(retained.holds_any(THIS_BOOT, None));
+}
+
+#[test]
+fn a_boot_record_that_does_not_read_hides_nothing() {
+    // Goal: damage in a record costs the cutoff and no reading, and the reader goes on.
+    // Method: leave a record of the wrong size, and read what the root retains.
+    let scratch = Scratch::new();
+    Clock::started_at(&reading(NEXT_BOOT, 0, 0))
+        .write(&scratch.root)
+        .unwrap();
+    private::atomic_write_in(&scratch.retention, &boot_record_name(THIS_BOOT), b"short").unwrap();
+
+    let retained = Retained::read(&scratch.path, [THIS_BOOT]);
+
+    assert!(retained.holds(THIS_BOOT, Some(0)));
+}
+
+#[test]
+fn a_boot_is_asked_about_once_however_many_windows_name_it() {
+    // Goal: a read of many windows reads each boot's record once.
+    // Method: read what the root retains for one boot named three times.
+    let scratch = Scratch::new();
+    Clock::started_at(&reading(NEXT_BOOT, 0, 0))
+        .write(&scratch.root)
+        .unwrap();
+    boot_offset_save(&scratch.root, THIS_BOOT, SECOND_NS).unwrap();
+
+    let retained = Retained::read(&scratch.path, [THIS_BOOT, THIS_BOOT, THIS_BOOT]);
+
+    assert_eq!(retained.offsets, [(THIS_BOOT, SECOND_NS)]);
+}
+
+#[test]
+fn a_clock_no_persister_has_saved_hides_nothing() {
+    // Goal: nothing expires before the retention clock has started, however long the Mac has been
+    // up, since a boot's offset alone places an early reading far in the past.
+    // Method: save a boot's offset and no clock, and ask about a reading the offset puts at zero.
+    let scratch = Scratch::new();
+    boot_offset_save(&scratch.root, THIS_BOOT, 0).unwrap();
+
+    let retained = Retained::read(&scratch.path, [THIS_BOOT]);
+
+    assert!(retained.holds(THIS_BOOT, Some(0)));
+}

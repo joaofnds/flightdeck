@@ -12,7 +12,8 @@ use super::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Attribution, Resident};
 use crate::EARLIER_STRIDE_SECONDS;
 use crate::app_attribution_history::AppAttributionMetric;
 use crate::live_app_response::{Measure, Metric, Observation, Rankable, RankedApp};
-use collector::ring::RunIdentity;
+use collector::ring::{Identity, RunIdentity};
+use persistence::retention::Retained;
 
 /// The Apps a stretch holds at most, as many as a second holds, past which it holds none and
 /// says so.
@@ -112,6 +113,28 @@ impl Stretches {
         });
         // A store that owes its stretches Apps hands over no View that holds one.
         assert!(replaced);
+    }
+
+    /// Lets go of each closed stretch that adds up an expired reading, which its first reading
+    /// is the oldest of. Whatever else that stretch holds stays readable second by second.
+    pub(super) fn expire(&mut self, retained: &Retained) -> bool {
+        let mut removed = false;
+        for _ in 0..self.closed.len() {
+            let Some(oldest) = self.closed.oldest() else {
+                break;
+            };
+            let Some(observation) = &oldest.observation else {
+                break;
+            };
+            let boot = Identity(observation.stamp.boot);
+            if retained.holds(boot, observation.stamp.continuous_ns) {
+                break;
+            }
+            self.closed.remove_oldest();
+            removed = true;
+        }
+
+        removed
     }
 
     /// The closed stretches, oldest first.

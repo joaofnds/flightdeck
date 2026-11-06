@@ -36,6 +36,7 @@ impl Session {
             .first()
             .ok_or(Error::Bound("missing selected tick"))?;
         let observation = Observation::from_row(&table, row, window)?;
+        self.selected_retained(&observation)?;
         for (name, value) in [
             ("publication", observation.publication),
             ("run_tick", observation.run_tick),

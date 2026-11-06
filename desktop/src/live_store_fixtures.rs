@@ -24,6 +24,7 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
     };
 
     MachineSecond {
+        boot: [0; 2],
         publication: wall_second,
         run_tick: wall_second,
         wall_ns: wall_second * NANOSECONDS_PER_SECOND + 250_000_000,

@@ -260,6 +260,120 @@ impl Cutoff {
     }
 }
 
+/// Which readings a reader may return, as the recording's clock stood when this was read. It holds
+/// the offset of each boot asked about, so a read of many windows reads each record once.
+#[derive(Debug)]
+pub struct Retained {
+    cutoff: Cutoff,
+    offsets: Vec<(Identity, u64)>,
+}
+
+impl Retained {
+    /// What `root` retains of readings of `boots`. A clock no persister has saved yet has not
+    /// started, so nothing has expired. A record that does not read is reported, and the readings
+    /// it would place stay shown, since a reader must go on and keeping errs on the side of the
+    /// user's readings.
+    #[must_use]
+    pub fn read(root: &std::path::Path, boots: impl IntoIterator<Item = Identity>) -> Self {
+        let mut offsets = Vec::new();
+        let cutoff = match Self::read_saved(root, boots, &mut offsets) {
+            Ok(cutoff) => cutoff,
+            Err(error) => {
+                collector::diagnostics::error(format_args!("retention: {error}"));
+                Cutoff {
+                    expired_below_ns: 0,
+                }
+            }
+        };
+
+        Self { cutoff, offsets }
+    }
+
+    fn read_saved(
+        root: &std::path::Path,
+        boots: impl IntoIterator<Item = Identity>,
+        offsets: &mut Vec<(Identity, u64)>,
+    ) -> io::Result<Cutoff> {
+        let directory = PrivateDirectory::open(root)?;
+        let Some(saved) = Clock::read_saved(&directory)? else {
+            return Ok(Cutoff {
+                expired_below_ns: 0,
+            });
+        };
+        let clock = saved.advanced_to(&ClockReading::now()?);
+        let cutoff = clock.cutoff(Period::read(&directory));
+        for boot in boots {
+            if offsets.iter().all(|(known, _)| *known != boot) {
+                if let Some(offset_ns) = boot_offset_ns(&directory, boot)? {
+                    offsets.push((boot, offset_ns));
+                }
+            }
+        }
+
+        Ok(cutoff)
+    }
+
+    fn offset_ns(&self, boot: Identity) -> Option<u64> {
+        self.offsets
+            .iter()
+            .find(|(known, _)| *known == boot)
+            .map(|(_, offset_ns)| *offset_ns)
+    }
+
+    /// Whether a reading of `boot` taken at `continuous_ns` may be returned. A reading with no
+    /// clock, or of a boot with no record, has no place on the clock, and stays until physical
+    /// removal takes its window.
+    #[must_use]
+    pub fn holds(&self, boot: Identity, continuous_ns: Option<u64>) -> bool {
+        let (Some(continuous_ns), Some(offset_ns)) = (continuous_ns, self.offset_ns(boot)) else {
+            return true;
+        };
+
+        !self.cutoff.expired(continuous_ns.saturating_add(offset_ns))
+    }
+
+    /// Whether every reading of a window of `boot` with these clock bounds may be returned. A
+    /// window with no bounds holds a reading with no clock and may hold others that have one, so
+    /// only a boot with no place on the clock answers for it.
+    #[must_use]
+    pub fn holds_every(&self, boot: Identity, continuous_ns: Option<TimeBounds>) -> bool {
+        let Some(bounds) = continuous_ns else {
+            return self.offset_ns(boot).is_none();
+        };
+
+        self.holds(boot, Some(bounds.min))
+    }
+
+    /// Whether a window of `boot` with these clock bounds may hold a reading to return, so a window
+    /// that holds none is never read and physical removal can take it from under a reader.
+    #[must_use]
+    pub fn holds_any(&self, boot: Identity, continuous_ns: Option<TimeBounds>) -> bool {
+        continuous_ns.is_none_or(|bounds| self.holds(boot, Some(bounds.max)))
+    }
+
+    /// How far on the clock a reading of `boot` at `continuous_ns` lies past the cutoff, none where
+    /// it has no place on the clock or has expired.
+    #[must_use]
+    pub fn retained_by_ns(&self, boot: Identity, continuous_ns: Option<u64>) -> Option<u64> {
+        let place_ns = continuous_ns?.saturating_add(self.offset_ns(boot)?);
+
+        place_ns.checked_sub(self.cutoff.expired_below_ns)
+    }
+
+    /// How far on the clock a reading of `boot` at `continuous_ns` lies below the cutoff, zero
+    /// where it is retained.
+    #[must_use]
+    pub fn expired_by_ns(&self, boot: Identity, continuous_ns: u64) -> u64 {
+        let Some(offset_ns) = self.offset_ns(boot) else {
+            return 0;
+        };
+
+        self.cutoff
+            .expired_below_ns
+            .saturating_sub(continuous_ns.saturating_add(offset_ns))
+    }
+}
+
 /// The retained time of a publication saved at `now`: the place on the retention clock of its
 /// newest reading, from the clocks a window's readings carry, or the clock's value for a
 /// publication with none, whose readings have no other time.
@@ -316,11 +430,7 @@ pub(crate) fn boot_offset_ns(root: &PrivateDirectory, boot: Identity) -> io::Res
 }
 
 /// Saves the offset of a boot that has none. No caller replaces one, so a reading keeps one place.
-pub(crate) fn boot_offset_save(
-    root: &PrivateDirectory,
-    boot: Identity,
-    offset_ns: u64,
-) -> io::Result<()> {
+pub fn boot_offset_save(root: &PrivateDirectory, boot: Identity, offset_ns: u64) -> io::Result<()> {
     let mut bytes = [0; BOOT_SIZE];
     bytes[..8].copy_from_slice(BOOT_MAGIC);
     bytes[8..].copy_from_slice(&offset_ns.to_be_bytes());

@@ -32,9 +32,15 @@ impl Session {
         self.operation.attach(&self.connection)?;
         self.span_check(range)?;
         assert!(self.windows.len() <= super::super::WINDOWS_MAX);
+        let retained = self.reader().retained();
         for (window, manifest) in self.windows.iter().enumerate() {
             self.operation.check()?;
             if !super::window_overlaps(manifest, &range) {
+                continue;
+            }
+            // A derived table adds up a whole window, so one with an expired reading is read from
+            // its readings instead, as a window sealed without the table is.
+            if !retained.holds_every(manifest.identity.run.boot, manifest.continuous_ns) {
                 continue;
             }
             let Some(table) = manifest.tables.iter().find(|table| table.name == name) else {

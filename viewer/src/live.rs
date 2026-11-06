@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use collector::recording::{Registry, identity_text};
 use collector::ring::{Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Tick};
+use persistence::retention::Retained;
 use persistence::{Error, Losses, NumberedEvent, Result, WindowIdentity};
 use serde_json::{Value, json};
 
@@ -601,14 +602,21 @@ impl LiveSession {
             .ok_or(Error::Bound("latest live raw observation unavailable"))?;
         let second = current.observation.wall / NANOSECONDS_PER_SECOND;
         let selected = current.json();
+        let retained_first = self
+            .retained_first_ns(current)
+            .ok_or(Error::Bound("no live observation"))?;
         let range = ContextRange::charted_ending_at(second)?;
 
         if let Err(error) = self.follow_restore(range) {
             self.history_failure(error)?;
         }
 
+        let retained = ContextRange {
+            first_ns: range.first_ns.max(retained_first),
+            ..range
+        };
         let mut trends = Vec::new();
-        self.follow_trends(range, &mut trends)?;
+        self.follow_trends(retained, &mut trends)?;
         let summary = trends
             .iter()
             .find(|point| same(point, &selected))
@@ -1358,6 +1366,10 @@ impl LiveSession {
     }
 
     fn poll_store(&mut self, mut current: LiveObservation) -> Result<()> {
+        // A ring outlives what the period covers where its collector stopped long ago.
+        let Some(retained_first) = self.retained_first_ns(&current) else {
+            return Ok(());
+        };
         let previous = self
             .observations
             .iter()
@@ -1389,9 +1401,10 @@ impl LiveSession {
             &mut app_point,
         );
         let second = current.observation.wall / NANOSECONDS_PER_SECOND;
-        let first = second.saturating_sub(899) * NANOSECONDS_PER_SECOND;
+        let first = (second.saturating_sub(899) * NANOSECONDS_PER_SECOND).max(retained_first);
         // The App history keeps the lead-in before the context as well, which its charts draw.
-        let charted_first = second.saturating_sub(CHARTED_SECONDS - 1) * NANOSECONDS_PER_SECOND;
+        let charted_first = (second.saturating_sub(CHARTED_SECONDS - 1) * NANOSECONDS_PER_SECOND)
+            .max(retained_first);
         self.poll_admit(&current, first, scalar_bytes)?;
         self.operation.check()?;
         self.poll_points(&current.point, first, scalar_bytes)?;
@@ -1408,6 +1421,26 @@ impl LiveSession {
         self.poll_store_accepted();
 
         Ok(())
+    }
+
+    /// The wall clock before which this session shows no reading: the retention period's cutoff,
+    /// as far back from `current` on the wall clock as it lies on the retention clock, none where
+    /// `current` has expired. A wall clock stepped within the session's few minutes moves it by the
+    /// step.
+    fn retained_first_ns(&self, current: &LiveObservation) -> Option<u64> {
+        let boot = current.identity.boot;
+        let continuous_ns = current.observation.continuous;
+        let wall_ns = current.observation.wall;
+        let retained = Retained::read(&self.root, [boot]);
+        if !retained.holds(boot, continuous_ns) {
+            return None;
+        }
+
+        Some(
+            retained
+                .retained_by_ns(boot, continuous_ns)
+                .map_or(0, |retained_by_ns| wall_ns.saturating_sub(retained_by_ns)),
+        )
     }
 
     fn poll_store_point(
