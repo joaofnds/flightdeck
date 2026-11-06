@@ -403,7 +403,8 @@ impl KeptTail {
     /// The tail of `range` from the kept minutes: readings in time order, numbered in segments,
     /// thinned to the first of each stretch, and joined to the full-detail context where the
     /// readings after the limit continue its last segment. The tail keeps every minute `range`
-    /// needs, with the point of every first reading of a stretch.
+    /// needs, with the point of every first reading of a stretch, so a stretch has no point only
+    /// where `retained` no longer covers its first reading.
     fn assemble(
         &self,
         history: &Session,
@@ -423,6 +424,7 @@ impl KeptTail {
                 .and_then(|minute| minute.points.get(&observation.publication));
             // A stretch whose first second expired has lost the one reading that stood for it.
             let Some(point) = point else {
+                assert!(self.assemble_stretch_expired(history, observation, retained));
                 continue;
             };
             let mut point = point.clone();
@@ -448,6 +450,24 @@ impl KeptTail {
     }
 
     /// The kept readings `range` holds, and those after its limit that decide its join.
+    /// Whether a reading before `observation` in its minute and its stretch has expired.
+    fn assemble_stretch_expired(
+        &self,
+        history: &Session,
+        observation: &Observation,
+        retained: &Retained,
+    ) -> bool {
+        let manifest = &history.windows[observation.window];
+        let stretch = observation.wall / NS / EARLIER_STRIDE_SECONDS;
+        self.kept(manifest).is_some_and(|minute| {
+            minute.readings.iter().any(|reading| {
+                reading.wall / NS / EARLIER_STRIDE_SECONDS == stretch
+                    && reading.publication < observation.publication
+                    && !retained.holds(manifest.identity.run.boot, reading.continuous)
+            })
+        })
+    }
+
     fn assemble_readings(
         &self,
         history: &Session,
