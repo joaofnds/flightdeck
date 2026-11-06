@@ -37,6 +37,11 @@ fn a_fragment_of_saved_rows_is_listed_as_an_event_object() {
         crate::canonical::catalog::EventObjectKind::Fragment
     );
     assert_eq!(page.objects[0].recovery.rows, 2);
+    assert!(
+        crate::retention::order_entry_names(&fixture.root)
+            .iter()
+            .any(|name| name.contains("-fragment-"))
+    );
 }
 fn registered_survivors(captured: bool) -> Fixture {
     let mut fixture = proof_fixture(captured, 1);

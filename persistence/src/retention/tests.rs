@@ -20,13 +20,42 @@ fn elapsed_seconds(from: &ClockReading, to: &ClockReading) -> u64 {
     (start.advanced_to(to).progress_ns() - start.progress_ns()) / SECOND_NS
 }
 
-fn scratch_root() -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "flightdeck-retention-{}",
-        collector::recording::identity_text(collector::recording::random_identity().unwrap())
-    ));
-    collector::recording::private::create_private_dir(&root).unwrap();
-    root
+/// A private root with the retention directory bootstrap makes, removed when the test ends.
+struct Scratch {
+    path: std::path::PathBuf,
+    root: PrivateDirectory,
+    retention: PrivateDirectory,
+}
+
+impl Scratch {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "flightdeck-retention-{}",
+            collector::recording::identity_text(collector::recording::random_identity().unwrap())
+        ));
+        private::create_private_dir(&path).unwrap();
+        let root = PrivateDirectory::open(&path).unwrap();
+        let retention = root.create_directory(DIRECTORY_NAME).unwrap();
+
+        Self {
+            path,
+            root,
+            retention,
+        }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.path).unwrap();
+    }
+}
+
+fn bounds(newest_continuous_seconds: u64) -> TimeBounds {
+    TimeBounds {
+        min: 0,
+        max: newest_continuous_seconds * SECOND_NS,
+    }
 }
 
 #[test]
@@ -106,58 +135,54 @@ fn a_continuous_clock_gone_back_within_a_boot_counts_no_time() {
 fn a_clock_keeps_its_value_across_a_save_and_a_restart() {
     // Goal: a restart within a boot measures from where the clock was (P03.4).
     // Method: advance a clock, save it, and read it a minute later.
-    let root = scratch_root();
+    let scratch = Scratch::new();
     let saved =
         Clock::started_at(&reading(THIS_BOOT, 10, 0)).advanced_to(&reading(THIS_BOOT, 70, 60));
-    saved.write(&root).unwrap();
+    saved.write(&scratch.root).unwrap();
 
-    let read = Clock::read(&root, &reading(THIS_BOOT, 130, 120));
+    let read = Clock::read(&scratch.root, &reading(THIS_BOOT, 130, 120));
 
     assert_eq!(read.progress_ns(), START_NS + 120 * SECOND_NS);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn a_saved_clock_measures_a_reboot_from_its_wall_clock() {
     // Goal: time away counts from when the record was saved (P03.4).
     // Method: save a clock, and read it under another boot an hour after the record's wall clock.
-    let root = scratch_root();
+    let scratch = Scratch::new();
     Clock::started_at(&reading(THIS_BOOT, 5_000, 60))
-        .write(&root)
+        .write(&scratch.root)
         .unwrap();
 
-    let read = Clock::read(&root, &reading(NEXT_BOOT, 1, 3_660));
+    let read = Clock::read(&scratch.root, &reading(NEXT_BOOT, 1, 3_660));
 
     assert_eq!(read.progress_ns(), START_NS + 3_660 * SECOND_NS);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn a_root_with_no_saved_clock_starts_at_the_wall_clock() {
     // Goal: a new recording needs nothing written before it can be read.
     // Method: read the clock of an empty root.
-    let root = scratch_root();
+    let scratch = Scratch::new();
 
-    let read = Clock::read(&root, &reading(THIS_BOOT, 10, 60));
+    let read = Clock::read(&scratch.root, &reading(THIS_BOOT, 10, 60));
 
     assert_eq!(read.progress_ns(), START_NS + 60 * SECOND_NS);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn a_damaged_clock_starts_over_and_stops_nothing() {
     // Goal: a save or a reader goes on past a record that does not read.
     // Method: write records of a wrong length and a wrong magic, and read the clock.
-    let root = scratch_root();
+    let scratch = Scratch::new();
 
-    collector::recording::private::atomic_write(&root, CLOCK_NAME, b"short").unwrap();
-    let short = Clock::read(&root, &reading(THIS_BOOT, 10, 60));
-    collector::recording::private::atomic_write(&root, CLOCK_NAME, &[7; CLOCK_SIZE]).unwrap();
-    let wrong = Clock::read(&root, &reading(THIS_BOOT, 10, 60));
+    private::atomic_write_in(&scratch.retention, CLOCK_NAME, b"short").unwrap();
+    let short = Clock::read(&scratch.root, &reading(THIS_BOOT, 10, 60));
+    private::atomic_write_in(&scratch.retention, CLOCK_NAME, &[7; CLOCK_SIZE]).unwrap();
+    let wrong = Clock::read(&scratch.root, &reading(THIS_BOOT, 10, 60));
 
     assert_eq!(short.progress_ns(), START_NS + 60 * SECOND_NS);
     assert_eq!(wrong.progress_ns(), START_NS + 60 * SECOND_NS);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -169,21 +194,9 @@ fn a_reading_expires_once_older_than_the_period() {
     let cutoff = clock.cutoff(period);
     let exact = START_NS - 3_600 * SECOND_NS;
 
-    assert!(cutoff.expired(exact - 1, 0));
-    assert!(!cutoff.expired(exact, 0));
-    assert!(!cutoff.expired(exact + 1, 0));
-}
-
-#[test]
-fn a_reading_takes_its_age_from_how_far_behind_its_window_newest_it_was() {
-    // Goal: a partly expired minute expires reading by reading (P03.1).
-    // Method: compare readings a second apart in one window whose newest sits on the cutoff.
-    let period = Period::from_seconds(3_600).unwrap();
-    let cutoff = Clock::started_at(&reading(THIS_BOOT, 0, 0)).cutoff(period);
-    let newest = START_NS - 3_600 * SECOND_NS;
-
-    assert!(!cutoff.expired(newest, 0));
-    assert!(cutoff.expired(newest, SECOND_NS));
+    assert!(cutoff.expired(exact - 1));
+    assert!(!cutoff.expired(exact));
+    assert!(!cutoff.expired(exact + 1));
 }
 
 #[test]
@@ -197,31 +210,32 @@ fn a_young_recording_has_nothing_expired() {
 
     let cutoff = clock.cutoff(Period::DEFAULT);
 
-    assert!(!cutoff.expired(0, 0));
+    assert!(!cutoff.expired(0));
 }
 
 #[test]
 fn a_root_with_no_period_keeps_one_day() {
     // Goal: the default is one day (P03.1).
     // Method: read the period of an empty root.
-    let root = scratch_root();
+    let scratch = Scratch::new();
 
-    let period = Period::read(&root);
+    let period = Period::read(&scratch.root);
 
     assert_eq!(period.seconds(), 86_400);
-    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn a_saved_period_is_what_the_next_read_finds() {
     // Goal: one persistent policy (P03.1).
     // Method: save a period and read it back.
-    let root = scratch_root();
+    let scratch = Scratch::new();
 
-    Period::from_seconds(600).unwrap().write(&root).unwrap();
+    Period::from_seconds(600)
+        .unwrap()
+        .write(&scratch.root)
+        .unwrap();
 
-    assert_eq!(Period::read(&root).seconds(), 600);
-    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(Period::read(&scratch.root).seconds(), 600);
 }
 
 #[test]
@@ -241,12 +255,179 @@ fn a_period_stays_within_its_bounds() {
 fn a_period_that_does_not_read_keeps_the_default() {
     // Goal: a damaged file errs on keeping readings (P03.1).
     // Method: write text, an out of bounds number and an overlong number, and read each.
-    let root = scratch_root();
+    let scratch = Scratch::new();
 
     for text in ["soon", "1", "99999999999999999999999"] {
-        collector::recording::private::atomic_write(&root, PERIOD_NAME, text.as_bytes()).unwrap();
+        private::atomic_write_in(&scratch.retention, PERIOD_NAME, text.as_bytes()).unwrap();
 
-        assert_eq!(Period::read(&root), Period::DEFAULT, "{text}");
+        assert_eq!(Period::read(&scratch.root), Period::DEFAULT, "{text}");
     }
-    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_window_saved_late_keeps_the_time_of_its_newest_reading() {
+    // Goal: seal lag ages nothing, and a window rebuilt after a crash is the same window (P03.1).
+    // Method: ask for the retained time of one window long after its reading, and again later.
+    let scratch = Scratch::new();
+    Clock::started_at(&reading(THIS_BOOT, 10, 0))
+        .write(&scratch.root)
+        .unwrap();
+
+    let soon = retained_from_ns(
+        &scratch.root,
+        &reading(THIS_BOOT, 100, 90),
+        THIS_BOOT,
+        Some(bounds(40)),
+    );
+    let later = retained_from_ns(
+        &scratch.root,
+        &reading(THIS_BOOT, 500, 490),
+        THIS_BOOT,
+        Some(bounds(40)),
+    );
+
+    assert_eq!(soon.unwrap(), START_NS + 30 * SECOND_NS);
+    assert_eq!(later.unwrap(), START_NS + 30 * SECOND_NS);
+}
+
+#[test]
+fn a_window_rebuilt_on_a_root_with_no_clock_keeps_its_time() {
+    // Goal: a wall clock read twice cannot give one window two times.
+    // Method: with no saved clock, ask for one window's time under wall clocks a minute apart.
+    let scratch = Scratch::new();
+
+    let first = retained_from_ns(
+        &scratch.root,
+        &reading(THIS_BOOT, 100, 0),
+        THIS_BOOT,
+        Some(bounds(40)),
+    );
+    let second = retained_from_ns(
+        &scratch.root,
+        &reading(THIS_BOOT, 100, 60),
+        THIS_BOOT,
+        Some(bounds(40)),
+    );
+
+    assert_eq!(first.unwrap(), second.unwrap());
+}
+
+#[test]
+fn a_window_of_an_earlier_boot_keeps_the_time_that_boot_gave_it() {
+    // Goal: a reboot between a reading and its save changes nothing that boot measured (P03.4).
+    // Method: save a window in one boot, then ask for another window of that boot after a reboot.
+    let scratch = Scratch::new();
+    Clock::started_at(&reading(THIS_BOOT, 10, 0))
+        .write(&scratch.root)
+        .unwrap();
+    retained_from_ns(
+        &scratch.root,
+        &reading(THIS_BOOT, 100, 90),
+        THIS_BOOT,
+        Some(bounds(40)),
+    )
+    .unwrap();
+
+    let after_reboot = retained_from_ns(
+        &scratch.root,
+        &reading(NEXT_BOOT, 1, 3_600),
+        THIS_BOOT,
+        Some(bounds(50)),
+    );
+
+    assert_eq!(after_reboot.unwrap(), START_NS + 40 * SECOND_NS);
+}
+
+#[test]
+fn a_window_of_a_boot_nothing_saved_in_counts_as_saved_now() {
+    // Goal: a boot with no record has no measure of its readings, so they keep the whole period.
+    // Method: ask for a window of a boot that never saved, under a later boot.
+    let scratch = Scratch::new();
+    Clock::started_at(&reading(THIS_BOOT, 10, 0))
+        .write(&scratch.root)
+        .unwrap();
+
+    let retained = retained_from_ns(
+        &scratch.root,
+        &reading(THIS_BOOT, 110, 100),
+        NEXT_BOOT,
+        Some(bounds(9_000)),
+    );
+
+    assert_eq!(retained.unwrap(), START_NS + 100 * SECOND_NS);
+}
+
+#[test]
+fn a_publication_with_no_clocks_takes_the_time_it_is_saved() {
+    // Goal: readings without clocks, and kinds without readings, still expire (P03.4).
+    // Method: ask for the time of a publication with no clock bounds.
+    let scratch = Scratch::new();
+    Clock::started_at(&reading(THIS_BOOT, 10, 0))
+        .write(&scratch.root)
+        .unwrap();
+
+    let retained = retained_from_ns(&scratch.root, &reading(THIS_BOOT, 70, 60), THIS_BOOT, None);
+
+    assert_eq!(retained.unwrap(), START_NS + 60 * SECOND_NS);
+}
+
+#[test]
+fn a_damaged_boot_record_stops_no_save() {
+    // Goal: new minutes save past a record that does not read (P02.3).
+    // Method: damage a boot's record and ask for a window of that boot.
+    let scratch = Scratch::new();
+    Clock::started_at(&reading(THIS_BOOT, 10, 0))
+        .write(&scratch.root)
+        .unwrap();
+    let name = format!("boot-{}", collector::recording::identity_text(THIS_BOOT));
+    private::atomic_write_in(&scratch.retention, &name, b"short").unwrap();
+
+    let retained = retained_from_ns(
+        &scratch.root,
+        &reading(THIS_BOOT, 70, 60),
+        THIS_BOOT,
+        Some(bounds(40)),
+    );
+
+    assert_eq!(retained.unwrap(), START_NS + 60 * SECOND_NS);
+}
+
+#[test]
+fn an_order_entry_links_the_proof_under_the_hour_of_its_time() {
+    // Goal: a pass finds the oldest publications by listing hours, and a repeat adds nothing.
+    // Method: link one proof twice and read what the order holds.
+    let scratch = Scratch::new();
+    let attempt = scratch.root.create_directory("attempt").unwrap();
+    let proof = attempt.create_file(crate::store::PROOF_NAME).unwrap();
+    let entry = OrderEntry {
+        retained_from_ns: 7_200 * SECOND_NS + 5,
+        transaction: Identity([1, 2]),
+        child: "ready",
+    };
+
+    entry.link(&scratch.root, &attempt, &mut 0).unwrap();
+    entry.link(&scratch.root, &attempt, &mut 0).unwrap();
+
+    let name = format!(
+        "{}-{}-ready",
+        7_200 * SECOND_NS + 5,
+        collector::recording::identity_text(Identity([1, 2]))
+    );
+    assert_eq!(
+        order_entry_names(&scratch.path),
+        std::slice::from_ref(&name)
+    );
+    assert!(
+        scratch
+            .path
+            .join(DIRECTORY_NAME)
+            .join(ORDER_NAME)
+            .join("2")
+            .join(&name)
+            .exists()
+    );
+    assert_eq!(
+        std::os::unix::fs::MetadataExt::nlink(&proof.metadata().unwrap()),
+        2
+    );
 }

@@ -213,6 +213,7 @@ impl Fixture {
             "observations-unknown",
             "terminal",
             "event-fragments",
+            "retention",
         ] {
             fs::remove_dir(recording.join(name)).unwrap();
         }

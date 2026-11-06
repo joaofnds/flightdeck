@@ -306,6 +306,11 @@ fn registered_zero_survivor_joint_loss_can_clear_and_advance() {
                 .unwrap()
                 .is_some()
         );
+        assert!(
+            crate::retention::order_entry_names(&fixture.root)
+                .iter()
+                .any(|name| name.ends_with("-loss"))
+        );
     }
 }
 
@@ -1131,7 +1136,8 @@ fn substituted_raw_inode_after_alias_refuses_final_gate_and_cleanup() {
     assert!(refused);
     assert_eq!(fixture.slot(), before);
     assert!(path.join("pending/events/index").exists());
-    assert_eq!(held.metadata().unwrap().nlink(), 1);
+    // Its alias and its retention order entry, with the raw name gone.
+    assert_eq!(held.metadata().unwrap().nlink(), 2);
 }
 
 #[test]

@@ -190,6 +190,51 @@ fn store_normal_ordinary_ready_reopen_without_transport_and_duplicate_applicatio
     println!("normal-store-observed {:?}", publication.work());
 }
 #[test]
+fn no_name_of_a_publication_appears_before_its_order_entry() {
+    // Goal: physical removal can find everything a reader can list, whenever a crash comes (P03.5).
+    // Method: step an ordinary publication, and after each step compare the proof's links with the
+    // order, since a link beyond the proof's own is either the entry or a name.
+    let mut fixture = Fixture::new(false);
+    let store = Store::open(&fixture.root).unwrap();
+    let attempt = store
+        .register_attempt(
+            &fixture.input(false),
+            &mut fixture.reader(),
+            &registration_budget(),
+        )
+        .unwrap();
+    let transaction = collector::recording::identity_text(attempt.transaction()).to_string();
+    publish_count(&mut fixture.writer, 1);
+    let (_manifest, attempt) = encode_original(attempt, &mut fixture, 2, &store);
+    let mut publication = attempt.normal_publication(&registration_budget()).unwrap();
+    advance_to_ready(&fixture, &mut publication);
+    let proof = fixture
+        .root
+        .join("data")
+        .join(&transaction)
+        .join("ready/metadata");
+
+    for _step in 0..4096 {
+        let step = publication.step().unwrap();
+        // A proof is finally moved aside when its publication ends, by which point it has an entry.
+        if step == PublicationStep::Idle {
+            break;
+        }
+        let links = fs::metadata(&proof).unwrap().nlink();
+        let entries = crate::retention::order_entry_names(&fixture.root).len();
+
+        assert!(
+            links == 1 || entries == 1,
+            "links={links} entries={entries}"
+        );
+    }
+
+    let entries = crate::retention::order_entry_names(&fixture.root);
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].ends_with(&format!("-{transaction}-ready")));
+}
+
+#[test]
 fn store_normal_terminal_commits_fixed_lifecycle_with_unchanged_event_endpoint() {
     // Goal: terminal registration publishes lifecycle independently of numeric endpoint growth.
     // Method: encode a zero-row fixed terminal, then read its certified canonical frontier.
@@ -200,6 +245,7 @@ fn store_normal_terminal_commits_fixed_lifecycle_with_unchanged_event_endpoint()
     let attempt = store
         .register_attempt(&input, &mut fixture.reader(), &registration_budget())
         .unwrap();
+    let transaction = collector::recording::identity_text(attempt.transaction()).to_string();
     drop(
         finish_proof(
             attempt
@@ -226,6 +272,11 @@ fn store_normal_terminal_commits_fixed_lifecycle_with_unchanged_event_endpoint()
     let attempt = store.resume_attempt().unwrap();
     let mut publication = attempt.normal_publication(&registration_budget()).unwrap();
     finish(&mut publication);
+    assert!(
+        crate::retention::order_entry_names(&fixture.root)
+            .iter()
+            .any(|name| name.ends_with(&format!("-{transaction}-ready")))
+    );
     let frontier = store
         .source_frontier(
             &fixture.run,
@@ -1713,7 +1764,8 @@ fn publishing_hints_cannot_skip_observations_or_duplicate_canonical_ownership() 
             .join("data")
             .join(collector::recording::identity_text(transaction).to_string())
             .join("ready/metadata");
-        assert_eq!(fs::metadata(metadata).unwrap().nlink(), 3);
+        // Its raw name, its one reading's name, its window's name and its retention order entry.
+        assert_eq!(fs::metadata(metadata).unwrap().nlink(), 4);
         assert_eq!(
             store
                 .source_frontier(
@@ -1966,7 +2018,7 @@ fn ordinary_routes_sixty_one_actual_clocks_and_keeps_partial_publication_busy() 
     assert!(done);
     assert_eq!(
         fs::metadata(object.join("ready/metadata")).unwrap().nlink(),
-        63
+        64
     );
     let metadata = fs::metadata(object.join("ready/metadata")).unwrap();
     for namespace in ["observations-known", "observations-unknown"] {

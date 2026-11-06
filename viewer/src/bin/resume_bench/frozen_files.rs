@@ -50,7 +50,7 @@ const COMPONENTS_MAX: usize = 8;
 /// More files and directories than the tree of 100,000 windows holds.
 const ENTRIES_MAX: usize = 1 << 28;
 /// The directories that hold what a recording saved. Their files never change once linked.
-const SAVED_DIRECTORIES: [&str; 7] = [
+const SAVED_DIRECTORIES: [&str; 8] = [
     "data",
     "recovery-data",
     "ordinary",
@@ -58,6 +58,7 @@ const SAVED_DIRECTORIES: [&str; 7] = [
     "observations-unknown",
     "terminal",
     "event-fragments",
+    "retention",
 ];
 /// The directories that name a window of the recording, by hard links to its proof.
 const WINDOW_NAMES: [&str; 3] = ["ordinary", "observations-known", "observations-unknown"];

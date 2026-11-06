@@ -4,18 +4,30 @@
 //! freezes changes no reading's age. Within a boot it follows the continuous clock, which counts
 //! sleep. Across a reboot only the wall clock can say how long the Mac was away, and a wall clock
 //! that went back counts as no time.
+//!
+//! A saved reading's place on that clock is its own continuous clock plus the offset its boot
+//! recorded, so nothing about a window's time has to be saved with the window, and a window
+//! rebuilt after a crash is the same window.
+//!
+//! All of it lies in the root's `retention` directory: the period, the clock, one record per boot,
+//! and the retention order, which names every publication under the hour of its retained time.
 
-use collector::recording::private::PrivateDirectory;
+use crate::metadata::TimeBounds;
+use collector::recording::private::{self, PrivateDirectory};
 use collector::ring::Identity;
 use std::io::{self, Read};
-use std::path::Path;
 
+const BOOT_MAGIC: &[u8; 8] = b"FDRETBT1";
+const BOOT_SIZE: usize = 16;
 const CLOCK_MAGIC: &[u8; 8] = b"FDRETCK1";
-const CLOCK_NAME: &str = "retention-clock";
+const CLOCK_NAME: &str = "clock";
 const CLOCK_SIZE: usize = 48;
-const PERIOD_NAME: &str = "retention-period";
-const PERIOD_DIGITS_MAX: usize = 20;
+const DIRECTORY_NAME: &str = "retention";
+const NANOSECONDS_PER_HOUR: u64 = 3_600 * NANOSECONDS_PER_SECOND;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+const ORDER_NAME: &str = "order";
+const PERIOD_DIGITS_MAX: usize = 20;
+const PERIOD_NAME: &str = "period";
 
 const _: () = assert!(
     Period::SECONDS_MAX
@@ -53,7 +65,7 @@ impl Period {
     /// The root's period. A root with none keeps the default, and so does one whose file does not
     /// read, reported, since keeping readings too long can be put right and losing them cannot.
     #[must_use]
-    pub fn read(root: &Path) -> Self {
+    pub fn read(root: &PrivateDirectory) -> Self {
         match Self::read_saved(root) {
             Ok(Some(period)) => period,
             Ok(None) => Self::DEFAULT,
@@ -64,7 +76,7 @@ impl Period {
         }
     }
 
-    fn read_saved(root: &Path) -> io::Result<Option<Self>> {
+    fn read_saved(root: &PrivateDirectory) -> io::Result<Option<Self>> {
         let mut text = [0; PERIOD_DIGITS_MAX + 1];
         let Some(length) = read_bounded(root, PERIOD_NAME, &mut text)? else {
             return Ok(None);
@@ -78,9 +90,9 @@ impl Period {
     }
 
     /// Saves the period where the persister and every reader read it on their next pass.
-    pub fn write(self, root: &Path) -> io::Result<()> {
-        collector::recording::private::atomic_write(
-            root,
+    pub fn write(self, root: &PrivateDirectory) -> io::Result<()> {
+        private::atomic_write_in(
+            &root.open_directory(DIRECTORY_NAME)?,
             PERIOD_NAME,
             self.seconds.to_string().as_bytes(),
         )
@@ -144,7 +156,7 @@ impl Clock {
     /// The clock at `now` from what the root saved. A root with no record starts one, and so does
     /// one whose record does not read, reported, since a reader or a save must go on without it.
     #[must_use]
-    pub fn read(root: &Path, now: &ClockReading) -> Self {
+    pub fn read(root: &PrivateDirectory, now: &ClockReading) -> Self {
         match Self::read_saved(root) {
             Ok(Some(saved)) => saved.advanced_to(now),
             Ok(None) => Self::started_at(now),
@@ -155,7 +167,7 @@ impl Clock {
         }
     }
 
-    fn read_saved(root: &Path) -> io::Result<Option<Self>> {
+    fn read_saved(root: &PrivateDirectory) -> io::Result<Option<Self>> {
         let mut bytes = [0; CLOCK_SIZE + 1];
         let Some(length) = read_bounded(root, CLOCK_NAME, &mut bytes)? else {
             return Ok(None);
@@ -176,7 +188,7 @@ impl Clock {
 
     /// Saves the clock. Losing this write loses nothing, since the next read advances from the
     /// older record to the same value.
-    pub fn write(&self, root: &Path) -> io::Result<()> {
+    pub fn write(&self, root: &PrivateDirectory) -> io::Result<()> {
         let mut bytes = [0; CLOCK_SIZE];
         bytes[..8].copy_from_slice(CLOCK_MAGIC);
         for (offset, word) in [
@@ -189,12 +201,23 @@ impl Clock {
             bytes[offset..offset + 8].copy_from_slice(&word.to_be_bytes());
         }
 
-        collector::recording::private::atomic_write(root, CLOCK_NAME, &bytes)
+        private::atomic_write_in(&root.open_directory(DIRECTORY_NAME)?, CLOCK_NAME, &bytes)
     }
 
     #[must_use]
     pub fn progress_ns(&self) -> u64 {
         self.progress_ns
+    }
+
+    /// What a reading of `boot` adds to its continuous clock to land on this clock. A boot this
+    /// clock is not running in can only count its newest reading as taken now, so a window saved
+    /// after an outage outlives the period by that outage at most.
+    fn boot_offset_ns(&self, boot: Identity, newest_continuous_ns: u64) -> u64 {
+        if boot == self.at.boot {
+            self.progress_ns.saturating_sub(self.at.continuous_ns)
+        } else {
+            self.progress_ns.saturating_sub(newest_continuous_ns)
+        }
     }
 
     /// What a reader or the worker compares a reading's retained time with.
@@ -215,19 +238,115 @@ pub struct Cutoff {
 }
 
 impl Cutoff {
-    /// Whether a reading has expired, given the retained time of its publication's newest reading
-    /// and how far behind that reading it was taken.
+    /// Whether a reading whose place on the retention clock is `retained_ns` has expired.
     #[must_use]
-    pub fn expired(self, retained_from_ns: u64, behind_newest_ns: u64) -> bool {
-        retained_from_ns.saturating_sub(behind_newest_ns) < self.expired_below_ns
+    pub fn expired(self, retained_ns: u64) -> bool {
+        retained_ns < self.expired_below_ns
     }
 }
 
-/// Reads a small file of the root into `bytes`, whose last byte is there to notice a longer file.
-/// None when the file is absent.
-fn read_bounded(root: &Path, name: &str, bytes: &mut [u8]) -> io::Result<Option<usize>> {
-    let directory = PrivateDirectory::open(root)?;
-    let mut file = match directory.open_file(name) {
+/// The retained time of a publication saved at `now`: the place on the retention clock of its
+/// newest reading, from the clocks a window's readings carry, or the clock's value for a
+/// publication with none, whose readings have no other time.
+pub(crate) fn retained_from_ns(
+    root: &PrivateDirectory,
+    now: &ClockReading,
+    boot: Identity,
+    continuous_ns: Option<TimeBounds>,
+) -> io::Result<u64> {
+    let clock = Clock::read(root, now);
+    let Some(bounds) = continuous_ns else {
+        return Ok(clock.progress_ns());
+    };
+
+    match retained_from_ns_boot_offset(root, &clock, boot, bounds.max) {
+        Ok(offset_ns) => Ok(bounds.max.saturating_add(offset_ns)),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            collector::diagnostics::error(format_args!("retention boot record: {error}"));
+            Ok(clock.progress_ns())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The boot's saved offset, saving one the first time a publication of that boot needs it. Once
+/// saved it never changes, so one reading keeps one place on the clock.
+fn retained_from_ns_boot_offset(
+    root: &PrivateDirectory,
+    clock: &Clock,
+    boot: Identity,
+    newest_continuous_ns: u64,
+) -> io::Result<u64> {
+    let name = format!("boot-{}", collector::recording::identity_text(boot));
+    let mut bytes = [0; BOOT_SIZE + 1];
+    if let Some(length) = read_bounded(root, &name, &mut bytes)? {
+        if length != BOOT_SIZE || bytes[..8] != BOOT_MAGIC[..] {
+            return Err(invalid());
+        }
+
+        return Ok(read_word(&bytes, 8));
+    }
+
+    let offset_ns = clock.boot_offset_ns(boot, newest_continuous_ns);
+    bytes[..8].copy_from_slice(BOOT_MAGIC);
+    bytes[8..BOOT_SIZE].copy_from_slice(&offset_ns.to_be_bytes());
+    private::atomic_write_in(
+        &root.open_directory(DIRECTORY_NAME)?,
+        &name,
+        &bytes[..BOOT_SIZE],
+    )?;
+
+    Ok(offset_ns)
+}
+
+/// A publication's name in the retention order, which physical removal walks oldest first. Its
+/// retained time lies in the name, since a resumed publication with no clocks may link a second
+/// entry with a later time, and removal treats each as naming the same proof.
+pub(crate) struct OrderEntry {
+    pub(crate) retained_from_ns: u64,
+    pub(crate) transaction: Identity,
+    pub(crate) child: &'static str,
+}
+
+impl OrderEntry {
+    /// Links the proof of `proof_directory` into the order and makes the name durable. A second
+    /// call with the same values changes nothing.
+    pub(crate) fn link(
+        &self,
+        root: &PrivateDirectory,
+        proof_directory: &PrivateDirectory,
+        syncs: &mut u64,
+    ) -> io::Result<()> {
+        let order = root
+            .open_directory(DIRECTORY_NAME)?
+            .create_directory_counted(ORDER_NAME, syncs)?;
+        // Floors, so a directory holds the retained times inside its hour.
+        let hour_index = self.retained_from_ns / NANOSECONDS_PER_HOUR;
+        let hour = order.create_directory_counted(&hour_index.to_string(), syncs)?;
+        let name = format!(
+            "{}-{}-{}",
+            self.retained_from_ns,
+            collector::recording::identity_text(self.transaction),
+            self.child
+        );
+        proof_directory.link_to(crate::store::PROOF_NAME, &hour, &name)?;
+        *syncs += 1;
+
+        hour.full_sync()
+    }
+}
+
+/// Reads a small file of the root's retention directory into `bytes`, whose last byte is there to
+/// notice a longer file. None when the file is absent.
+fn read_bounded(
+    root: &PrivateDirectory,
+    name: &str,
+    bytes: &mut [u8],
+) -> io::Result<Option<usize>> {
+    let opened = root
+        .open_directory(DIRECTORY_NAME)
+        .and_then(|directory| directory.open_file(name));
+    let mut file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -242,6 +361,23 @@ fn read_bounded(root: &Path, name: &str, bytes: &mut [u8]) -> io::Result<Option<
     }
 
     Ok(Some(length))
+}
+
+/// The names the retention order holds, whatever hour each lies under.
+#[cfg(test)]
+pub(crate) fn order_entry_names(root: &std::path::Path) -> Vec<String> {
+    let order = root.join(DIRECTORY_NAME).join(ORDER_NAME);
+    let mut names = Vec::new();
+    if !order.exists() {
+        return names;
+    }
+
+    for hour in std::fs::read_dir(order).unwrap() {
+        for entry in std::fs::read_dir(hour.unwrap().path()).unwrap() {
+            names.push(entry.unwrap().file_name().into_string().unwrap());
+        }
+    }
+    names
 }
 
 fn read_word(bytes: &[u8], offset: usize) -> u64 {

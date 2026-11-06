@@ -1280,6 +1280,7 @@ fn a_recording_keeps_no_file_a_restart_would_have_to_rebuild() {
             "persister.lock",
             "recovery-data",
             "registration.lock",
+            "retention",
             "terminal",
         ]
     );

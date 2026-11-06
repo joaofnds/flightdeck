@@ -16,7 +16,7 @@ use std::{
     io::{self, Read, Write},
 };
 
-const DIRECTORIES: [&str; 7] = [
+const DIRECTORIES: [&str; 8] = [
     "data",
     "recovery-data",
     "ordinary",
@@ -24,6 +24,7 @@ const DIRECTORIES: [&str; 7] = [
     "observations-unknown",
     "terminal",
     "event-fragments",
+    "retention",
 ];
 const CONTROLS: [&str; 3] = ["foreground", "maintenance", "namespace-state"];
 const ARTIFACTS: [&str; 5] = [
@@ -34,9 +35,9 @@ const ARTIFACTS: [&str; 5] = [
     "identity",
 ];
 const LOCKS: [&str; 3] = ["registration.lock", "collector.lock", "recorder.lock"];
-const INVENTORY_MAX: usize = 20;
+const INVENTORY_MAX: usize = 21;
 const CLASSIFY_ATTEMPTS_MAX: usize = 16;
-const _: () = assert!(INVENTORY_MAX == 7 + 3 + 1 + 1 + 5 + 3);
+const _: () = assert!(INVENTORY_MAX == 8 + 3 + 1 + 1 + 5 + 3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Classification {

@@ -74,7 +74,7 @@ pub fn ownership_contended(error: &io::Error) -> bool {
 
 const WINDOW_FILES_MAX: usize = 17;
 /// The file in a registered window's directory that its gates link.
-const PROOF_NAME: &str = "metadata";
+pub(crate) const PROOF_NAME: &str = "metadata";
 const _: () = {
     // An enumeration reads every table, held or derived, the metadata, and then its end.
     assert!(

@@ -1101,11 +1101,16 @@ impl<'store> NormalPublication<'store> {
         } else {
             self.link_next
         })?;
-        let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
         if self.state.structure.is_some() {
             return self.publish_structure();
         }
 
+        if self.link_next < self.links.len()
+            && (self.link_next == 0 || self.state.row_plan.is_some())
+        {
+            self.publish_link_order()?;
+        }
+        let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
         if let Some((namespace, key)) = self.links.get(self.link_next) {
             self.work.links += 1;
             let plan = insert::begin(
@@ -1134,6 +1139,37 @@ impl<'store> NormalPublication<'store> {
             self.commit_state(next)?;
         }
         Ok(())
+    }
+    /// Names the durable proof in the retention order before any name a reader can list, so
+    /// physical removal can find whatever a crash leaves. Each fragment of a row publication is a
+    /// proof of its own.
+    fn publish_link_order(&mut self) -> io::Result<()> {
+        let attempt = self.attempt.as_ref().ok_or_else(invalid)?;
+        let (child, continuous_ns) = if self.state.row_plan.is_some() {
+            let child = [RawChild::Fragment0, RawChild::Fragment1]
+                .get(self.link_next)
+                .ok_or_else(invalid)?;
+            (*child, None)
+        } else {
+            let metadata = self.metadata.as_ref().ok_or_else(invalid)?;
+            let continuous_ns = match &metadata.body {
+                Body::Ordinary(manifest) => manifest.continuous_ns,
+                _ => None,
+            };
+            (metadata.child, continuous_ns)
+        };
+        let entry = crate::retention::OrderEntry {
+            retained_from_ns: crate::retention::retained_from_ns(
+                attempt.root,
+                &crate::retention::ClockReading::now()?,
+                self.state.input.run.boot,
+                continuous_ns,
+            )?,
+            transaction: self.state.transaction,
+            child: child.name(),
+        };
+
+        entry.link(attempt.root, &attempt.directory, &mut self.work.full_syncs)
     }
     fn publish_structure(&mut self) -> io::Result<()> {
         self.select_row_source(if self.state.structure.is_some() {
