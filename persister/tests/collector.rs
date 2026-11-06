@@ -244,12 +244,18 @@ mod tests {
         fn terminate_with_children(&self) {
             const SIGTERM: c_int = 15;
             let pid = self.child.as_ref().unwrap().id();
-            let children = Command::new("/usr/bin/pgrep")
-                .args(["-P", &pid.to_string()])
-                .output()
-                .unwrap();
-            let children = String::from_utf8(children.stdout).unwrap();
-            assert_eq!(2, children.lines().count(), "{children}");
+            let mut children = String::new();
+            // The controller starts the persister a step after it first finds the collector
+            // working, which a collector's own publications do not wait for.
+            let started = wait_until(PUBLICATION_LIMIT, || {
+                let listed = Command::new("/usr/bin/pgrep")
+                    .args(["-P", &pid.to_string()])
+                    .output()
+                    .unwrap();
+                children = String::from_utf8(listed.stdout).unwrap();
+                children.lines().count() == 2
+            });
+            assert!(started, "{children}");
 
             for child in children.lines() {
                 assert_eq!(0, unsafe { kill(child.parse().unwrap(), SIGTERM) });
