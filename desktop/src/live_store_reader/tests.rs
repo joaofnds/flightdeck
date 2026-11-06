@@ -213,6 +213,68 @@ fn inspect_primary(
 }
 
 #[test]
+fn a_new_read_waits_for_a_store_behind_the_newest_reading() {
+    // Goal: a read that reaches the Store just before it reads a new reading is not a failure.
+    // Method: keep the Store a reading behind while the Worker asks, then let it catch up.
+    let mut harness = Harness::new();
+    harness.worker.request(request("memory")).unwrap();
+    harness.ready();
+    harness.store_behind_the_newest_reading();
+
+    let generation = harness.worker.request(request("memory")).unwrap();
+
+    harness.assert_no_update_over_several_polls();
+    harness.store_active();
+    assert_eq!(harness.ready_strict().generation, generation);
+}
+
+#[test]
+fn a_kept_refresh_waits_for_a_store_behind_the_newest_reading() {
+    // Goal: a held read that reaches the Store just before it reads a new reading stays held.
+    // Method: refresh a held Primary while the Store stays a reading behind, then let it catch up.
+    let (mut harness, primary, hold) = primary_sealed(Some(1063));
+    harness.store_behind_the_newest_reading();
+    let mut inspection = request("memory");
+    inspection.second = Some(1063);
+    inspection.identity = Some(primary.selection["selected"].clone());
+
+    let generation = harness.worker.inspect(inspection).unwrap();
+    hold.release();
+    drop(hold);
+
+    harness.assert_no_update_over_several_polls();
+    harness.store_active();
+    assert_eq!(harness.ready_strict().generation, generation);
+}
+
+#[test]
+fn an_inspected_overview_reading_waits_for_a_store_behind_the_newest_reading() {
+    // Goal: a picked reading of the Overview that reaches a Store just behind is not a failure.
+    // Method: pick the older of two readings while the Store stays behind, then let it catch up.
+    let mut harness = Harness::new();
+    harness.worker.request(request("overview")).unwrap();
+    let shown = harness.ready();
+    let older = shown.selection["trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|point| point["publication"] == 1)
+        .unwrap()
+        .clone();
+    harness.store_behind_the_newest_reading();
+    let mut inspection = request("overview");
+    inspection.second = Some(older["wall_ns"].as_u64().unwrap() / 1_000_000_000);
+    inspection.identity = Some(older);
+
+    harness.worker.inspect(inspection).unwrap();
+
+    harness.assert_no_update_over_several_polls();
+    harness.store_active();
+    let inspected = harness.ready_strict();
+    assert_eq!(inspected.selection["selected"]["publication"], 1);
+}
+
+#[test]
 fn a_store_continuation_with_no_reply_uses_the_nonzero_polling_cadence() {
     // Goal: asynchronous Store work cannot consume the Worker's local zero-delay lease.
     // Method: submit through the actual no-reply adapter while all source admission is denied.
@@ -545,6 +607,36 @@ impl Harness {
             lease,
             handle,
         )
+    }
+
+    fn store_behind_the_newest_reading(&mut self) {
+        let store = self.store.as_ref().unwrap();
+        store.set_active(false);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for _ in 0..1000 {
+            if store.is_paused() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Store never paused");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(store.is_paused());
+        self.recording.as_mut().unwrap().publish_resources();
+    }
+
+    fn store_active(&self) {
+        self.store.as_ref().unwrap().set_active(true);
+    }
+
+    fn assert_no_update_over_several_polls(&mut self) {
+        for _ in 0..3 {
+            std::thread::sleep(crate::live_source::POLL_INTERVAL);
+            match self.worker.take().unwrap() {
+                None => {}
+                Some(Update::Failed { message, .. }) => panic!("Store Worker failed: {message}"),
+                Some(Update::Ready(_)) => panic!("Store Worker answered from a Store behind"),
+            }
+        }
     }
 
     fn ready_strict(&mut self) -> Box<Snapshot> {

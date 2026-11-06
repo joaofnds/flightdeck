@@ -199,7 +199,10 @@ impl StoreReader {
                 self.context = Some(context);
                 self.snapshot_kept_present(command, shared)
             }
-            QueryOutcome::NeedsLoad(viewer::store::QueryNeedsLoad::AppsPending) => Ok(None),
+            QueryOutcome::NeedsLoad(
+                viewer::store::QueryNeedsLoad::AppsPending
+                | viewer::store::QueryNeedsLoad::UncheckedCoverage,
+            ) => Ok(None),
             QueryOutcome::NeedsLoad(reason) => Err(format!("Store kept coverage: {reason:?}")),
             QueryOutcome::Unavailable(reason) => Err(format!("Store kept unavailable: {reason:?}")),
         }
@@ -240,6 +243,9 @@ impl StoreReader {
         self.pending = None;
         let raw = match reply.outcome {
             QueryOutcome::Ready(raw) => raw,
+            QueryOutcome::NeedsLoad(viewer::store::QueryNeedsLoad::UncheckedCoverage) => {
+                return Ok(None);
+            }
             QueryOutcome::NeedsLoad(reason) => {
                 return Err(format!("Store inspection coverage: {reason:?}"));
             }
@@ -273,7 +279,10 @@ impl StoreReader {
         self.pending = None;
         let context = match reply.outcome {
             QueryOutcome::Ready(context) => context,
-            QueryOutcome::NeedsLoad(viewer::store::QueryNeedsLoad::AppsPending) => return Ok(None),
+            QueryOutcome::NeedsLoad(
+                viewer::store::QueryNeedsLoad::AppsPending
+                | viewer::store::QueryNeedsLoad::UncheckedCoverage,
+            ) => return Ok(None),
             QueryOutcome::NeedsLoad(reason) => {
                 return Err(format!("Store coverage unavailable: {reason:?}"));
             }
