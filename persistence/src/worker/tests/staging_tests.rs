@@ -2,62 +2,6 @@ use super::forged_source::{ForgedWord, HEADER_EVENT_NEWEST, WritableSource};
 use super::*;
 
 #[test]
-fn resumes_after_overwrites_exhaust_the_scan_budget() {
-    // Goal: continuous overwrite yields at the scan bound without losing recovery state.
-    // Method: advance a one-slot writer between actual scan steps, then finish and resume.
-    let root = Directory::new();
-    let store = Store::open(&root.0).unwrap();
-    let mut registered = registered(store.recording());
-    let mut ring = Ring::new(&root, &registered.identity, 1);
-    registered.ring_name = ring.0.name().to_owned();
-    let reader = RingReader::open_generation(ring.0.name()).unwrap();
-    let mut state = RunState {
-        next_publication: reader.next_publication(),
-        loaded: true,
-        ..RunState::default()
-    };
-    let mut scan = scanning::Scanning::new(reader, &registered, false).unwrap();
-    for step in 0..3 {
-        ring.publish(2 * step * 60);
-        ring.publish((2 * step + 1) * 60);
-        assert!(
-            scan.read(&store, &registered, &mut state)
-                .unwrap()
-                .is_none()
-        );
-    }
-    assert_eq!(state.next_publication, 6);
-    assert_eq!(state.losses.publications, 5);
-    ring.publish(6 * 60);
-
-    let result = scan.read(&store, &registered, &mut state).unwrap();
-
-    assert!(matches!(result, Some(Staged::Waiting)));
-    assert_eq!(state.next_publication, 6);
-    assert_eq!(state.losses.publications, 5);
-    assert!(store.saved_newest(&registered.identity).unwrap().is_none());
-    drop(scan);
-    ring.0.finish();
-    let writers = Writers {
-        encoder: Encoder,
-        derive: &Underived,
-    };
-    assert!(matches!(
-        persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
-        Progress::Sealed
-    ));
-    let saved = store.saved_newest(&registered.identity).unwrap().unwrap();
-    assert_eq!(saved.identity.window, 6);
-    assert_eq!((saved.publication_first, saved.publication_end), (7, 8));
-    assert_eq!(saved.losses.publications, 6);
-    assert_eq!(state.losses, Losses::default());
-    assert!(matches!(
-        persist_one(&store, &writers, &registered, false, &mut state).unwrap(),
-        Progress::Complete
-    ));
-}
-
-#[test]
 fn waits_for_the_open_successor_after_losing_the_selected_minute() {
     // Goal: losing a selected minute cannot seal its still-open successor.
     // Method: overwrite the minute before the worker reads it, then finish and inspect its seal.

@@ -134,9 +134,6 @@ impl Store {
         ledger: &super::super::PublicationLedger,
     ) -> io::Result<LossPublication<'_>> {
         ledger.require_budget(budget)?;
-        if !self.protocol_two {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
-        }
 
         if self
             .staging

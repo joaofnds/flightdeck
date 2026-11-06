@@ -69,7 +69,7 @@ fn evict(engine: &Engine, fixture: &Fixture) {
             .root
             .join(format!("pin_cache_{serial}_{index}.parquet"));
         let mut frame = DataFrame::new(1, vec![Column::new("number".into(), [1_u64])]).unwrap();
-        crate::encoder::encode_write(&mut frame, crate::encoder::encode_open(&path).unwrap())
+        crate::encoder::encode_write(&mut frame, private::open_private_file(&path, true).unwrap())
             .unwrap();
         engine.parquet_source(&path).unwrap();
     }

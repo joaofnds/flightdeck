@@ -63,9 +63,6 @@ impl Store {
         ledger: &PublicationLedger,
     ) -> io::Result<OrdinaryRecovery<'_>> {
         ledger.require_budget(budget)?;
-        if !self.protocol_two {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
-        }
 
         if self
             .staging

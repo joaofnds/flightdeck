@@ -110,9 +110,6 @@ impl Store {
         permit: Option<StagingPermit>,
     ) -> io::Result<FiniteEvents<'_>> {
         ledger.require_budget(budget)?;
-        if !self.protocol_two {
-            return Err(io::ErrorKind::Unsupported.into());
-        }
 
         let owner_reservation = budget.reserve(owner_bytes()).ok_or_else(memory)?;
         let permit = if let Some(permit) = permit {

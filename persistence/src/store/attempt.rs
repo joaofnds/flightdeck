@@ -235,11 +235,6 @@ impl Store {
 
     /// Reopens retained authority without requiring a surviving transport. It grants no append.
     pub fn resume_attempt(&self) -> io::Result<RegisteredAttempt<'_>> {
-        if !self.protocol_two {
-            return Err(unresolved(
-                "registered attempts require an initialized protocol-two root",
-            ));
-        }
         let mut bytes = [0; 4097];
         let length = read_slot(&self.directory, &mut bytes)?;
         let (_, input) = AttemptInput::decode_registered(&bytes[..length], self.recording)?;
@@ -254,11 +249,6 @@ impl Store {
         budget: Option<&Arc<crate::resources::ByteBudget>>,
         frontier: Option<crate::canonical::SourceFrontierRead<'_, '_>>,
     ) -> io::Result<RegisteredAttempt<'_>> {
-        if !self.protocol_two {
-            return Err(unresolved(
-                "registered attempts require an initialized protocol-two root",
-            ));
-        }
         input.validate()?;
         if self
             .staging
@@ -423,11 +413,6 @@ impl Store {
     }
 
     fn source_frontier_admit(&self, run: &collector::ring::RunIdentity) -> io::Result<()> {
-        if !self.protocol_two {
-            return Err(unresolved(
-                "canonical frontier requires protocol-two authority",
-            ));
-        }
         if run.recording != self.recording {
             return Err(invalid());
         }

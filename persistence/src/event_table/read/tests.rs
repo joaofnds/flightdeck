@@ -253,8 +253,11 @@ impl Fixture {
         let events = ready.path().join("events");
         collector::recording::private::create_private_dir(&events).unwrap();
         // The real encoder uses plain pages: repeated values still carry every native byte.
-        let file = crate::encoder::encode_open(&events.join(crate::event_recovery::batch_name(0)))
-            .unwrap();
+        let file = collector::recording::private::open_private_file(
+            &events.join(crate::event_recovery::batch_name(0)),
+            true,
+        )
+        .unwrap();
         if let Some(row_group) = row_group {
             ParquetWriter::new(file)
                 .with_row_group_size(Some(row_group))

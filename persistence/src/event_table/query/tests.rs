@@ -43,8 +43,11 @@ impl Fixture {
             let first = collector::u64_from_usize(index * rows) + 1;
             let mut frame = event_frame(first, rows);
             let path = events.join(crate::event_recovery::batch_name(index));
-            crate::encoder::encode_write(&mut frame, crate::encoder::encode_open(&path).unwrap())
-                .unwrap();
+            crate::encoder::encode_write(
+                &mut frame,
+                private::open_private_file(&path, true).unwrap(),
+            )
+            .unwrap();
             batches.push(Batch {
                 first,
                 end: first + collector::u64_from_usize(rows),
@@ -264,8 +267,11 @@ fn refuses_corrupt_detached_provenance_before_filtering() {
         .unwrap();
     let path = fixture.part(2);
     std::fs::remove_file(&path).unwrap();
-    crate::encoder::encode_write(&mut corrupt, crate::encoder::encode_open(&path).unwrap())
-        .unwrap();
+    crate::encoder::encode_write(
+        &mut corrupt,
+        private::open_private_file(&path, true).unwrap(),
+    )
+    .unwrap();
     let engine = Engine::new();
     let budget = budget();
     let source = fixture.source(&engine, &budget);
@@ -322,7 +328,7 @@ fn keeps_result_buffers_charged_after_cache_eviction_and_rebinds_the_alias() {
             )],
         )
         .unwrap();
-        crate::encoder::encode_write(&mut frame, crate::encoder::encode_open(&path).unwrap())
+        crate::encoder::encode_write(&mut frame, private::open_private_file(&path, true).unwrap())
             .unwrap();
         engine.parquet_source(&path).unwrap();
     }

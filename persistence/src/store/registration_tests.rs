@@ -277,9 +277,9 @@ fn longest_root_uses_registered_descriptor_payloads() {
 }
 
 #[test]
-fn conflicting_attempt_and_uncomposed_worker_frontier_leave_slot_unchanged() {
+fn a_conflicting_attempt_leaves_the_slot_unchanged() {
     // Goal: only a matching registered owner can regain an occupied attempt.
-    // Method: change the attempted window and enter the normal worker progress owner.
+    // Method: change the attempted window and register again.
     let fixture = Fixture::new(false);
     let store = Store::open(&fixture.root).unwrap();
     let input = fixture.input(false);
@@ -301,10 +301,6 @@ fn conflicting_attempt_and_uncomposed_worker_frontier_leave_slot_unchanged() {
             .unwrap()
             .kind(),
         io::ErrorKind::InvalidData
-    );
-    assert_eq!(
-        store.progress(&fixture.run).unwrap_err().kind(),
-        io::ErrorKind::Unsupported
     );
     assert_eq!(fixture.slot(), before);
 }

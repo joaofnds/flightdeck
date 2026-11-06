@@ -318,10 +318,6 @@ impl Store {
         budget: &Arc<ByteBudget>,
         ledger: Option<&super::PublicationLedger>,
     ) -> io::Result<NormalPublication<'_>> {
-        if !self.protocol_two {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
-        }
-
         if self
             .staging
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

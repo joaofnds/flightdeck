@@ -14,12 +14,12 @@ use collector::tracker::Event;
 
 use crate::resources::{WORKING_BYTES_MAX, Watchdog};
 use crate::{
-    Begin, Encoder, Limits, Losses, Manifest, NumberedEvent, Observation, Result, Store,
-    TableManifest, Window, WindowIdentity,
+    Encoder, Limits, Losses, Manifest, NumberedEvent, Observation, Result, Store, TableManifest,
+    Window, WindowIdentity,
 };
 
 mod registered;
-mod scanning;
+use registered::persist_one;
 mod staging;
 
 pub enum Outcome {
@@ -432,221 +432,6 @@ fn source_unavailable(
     state.source = SourceState::Unavailable;
 }
 
-fn persist_one(
-    store: &Store,
-    writers: &Writers<'_>,
-    registered: &RegisteredRun,
-    closed: bool,
-    state: &mut RunState,
-) -> Result<Progress> {
-    if store.registered() {
-        return registered::persist_one(store, writers, registered, closed, state);
-    }
-    if state.source == SourceState::Unavailable {
-        return Ok(Progress::Unavailable);
-    }
-    if registered.identity.recording != store.recording() {
-        source_unavailable(registered, state, "foreign recording identity");
-        return Ok(Progress::Unavailable);
-    }
-    if state.source == SourceState::Complete {
-        return Ok(Progress::Complete);
-    }
-    let Some(mut reader) = persist_one_open(registered, state)? else {
-        return Ok(Progress::Unavailable);
-    };
-    if !state.loaded {
-        let durable = store.progress(&registered.identity)?;
-        state.committed = durable
-            .as_ref()
-            .map_or(0, |manifest| manifest.publication_end - 1);
-        state.next_event = durable
-            .as_ref()
-            .map_or(reader.event_first(), |manifest| manifest.events_end);
-        state.next_publication = durable.map_or(reader.publication_first(), |manifest| {
-            manifest.publication_end
-        });
-        state.loaded = true;
-        if state.next_publication > 0 {
-            reader.seek_publication(state.next_publication)?;
-        }
-    }
-    match persist_one_stage(reader, store, registered, closed, state)? {
-        Staged::Window(staged) => {
-            let window = staged.window;
-            seal_pending(store, writers, &window, state, staged.pending)?;
-            let publication_end = window.publication_range().end;
-            // The worker runs its next pass at once after a seal, so a seal must move on.
-            assert!(state.next_publication < publication_end);
-            state.next_publication = publication_end;
-            state.next_event = window.event_range().end;
-            state.losses = Losses::default();
-            Ok(Progress::Sealed)
-        }
-        Staged::Waiting => Ok(Progress::Waiting),
-        Staged::Complete => Ok(Progress::Complete),
-        Staged::Terminal => persist_terminal(store, registered, state),
-    }
-}
-
-enum Staged {
-    Window(Box<StagedWindow>),
-    Waiting,
-    Complete,
-    Terminal,
-}
-
-struct StagedWindow {
-    window: Window,
-    pending: crate::PendingWindow,
-}
-
-// Owning the mapping here guarantees its release before the caller enters the engine.
-fn persist_one_stage(
-    reader: RingReader,
-    store: &Store,
-    registered: &RegisteredRun,
-    closed: bool,
-    state: &mut RunState,
-) -> Result<Staged> {
-    let mut scan = scanning::Scanning::new(reader, registered, closed)?;
-
-    for _step in 0..scan.steps() {
-        if let Some(result) = scan.read(store, registered, state)? {
-            return Ok(result);
-        }
-    }
-
-    unreachable!("recovery scan exceeded its step bound")
-}
-
-fn persist_one_stage_end(
-    reader: &RingReader,
-    _registered: &RegisteredRun,
-    closed: bool,
-    state: &mut RunState,
-) -> Result<Staged> {
-    let complete = closed || reader.completed();
-    if !complete {
-        return Ok(Staged::Waiting);
-    }
-
-    // Completion can follow a final publication after the read that returned Nothing.
-    // Observe its publication header after the completion acquire before retiring it.
-    if reader.next_publication() <= reader.publication_newest()? {
-        return Ok(Staged::Waiting);
-    }
-
-    let first = if state.next_event == 0 {
-        reader.event_first()
-    } else {
-        state.next_event
-    };
-    if first <= reader.event_newest()? || state.losses != Losses::default() {
-        return Ok(Staged::Terminal);
-    }
-
-    state.source = SourceState::Complete;
-
-    Ok(Staged::Complete)
-}
-
-fn persist_terminal(
-    store: &Store,
-    registered: &RegisteredRun,
-    state: &mut RunState,
-) -> Result<Progress> {
-    let pending = match store.begin_events(&registered.identity)? {
-        crate::store::EventBegin::Committed(manifest) => {
-            state.next_event = manifest.recovery.events_end;
-            state.losses = Losses::default();
-            state.source = SourceState::Complete;
-            return Ok(Progress::Complete);
-        }
-        crate::store::EventBegin::Pending(pending) => pending,
-    };
-    let Some(reader) = persist_one_open(registered, state)? else {
-        return Ok(Progress::Unavailable);
-    };
-    let first = if state.next_event == 0 {
-        reader.event_first()
-    } else {
-        state.next_event
-    };
-    let end = reader
-        .event_newest()?
-        .checked_add(1)
-        .ok_or(crate::Error::Bound("terminal event end"))?;
-    let memory_limit = if state.memory_limit == 0 {
-        WORKING_BYTES_MAX
-    } else {
-        state.memory_limit
-    };
-    let manifest = crate::event_recovery::write_tail(
-        &pending.path,
-        reader,
-        &registered.identity,
-        first..end,
-        state.losses,
-        usize::try_from(memory_limit).map_err(|_| crate::Error::Bound("terminal memory limit"))?,
-    )?;
-    let manifest = store.commit_events(pending, manifest, &mut |_| Ok(()))?;
-    state.next_event = manifest.recovery.events_end;
-    state.losses = Losses::default();
-    state.source = SourceState::Complete;
-    Ok(Progress::Complete)
-}
-
-fn persist_one_stage_selected(
-    store: &Store,
-    reader: &mut RingReader,
-    tick: &mut Tick,
-    identity: WindowIdentity,
-    limits: Limits,
-    state: &mut RunState,
-) -> Result<Option<StagedWindow>> {
-    let first = reader.next_publication();
-    if state.next_event == 0 {
-        state.next_event = reader.event_first();
-    }
-    reader.seek_event(state.next_event)?;
-    let pending = match store.begin(&identity)? {
-        Begin::Committed(manifest) => {
-            reader.seek_publication(manifest.publication_end)?;
-            state.next_publication = manifest.publication_end;
-            state.next_event = manifest.events_end;
-            return Ok(None);
-        }
-        Begin::Pending(pending) => pending,
-    };
-    let memory_limit = if state.memory_limit == 0 {
-        WORKING_BYTES_MAX
-    } else {
-        state.memory_limit
-    };
-    let events = crate::event_table::writer::Writer::new(
-        collector::recording::private::PrivateDirectory::open(pending.path())?
-            .create_directory("events")?,
-        identity,
-        reader.next_event(),
-        reader.dictionary_capacity().is_some(),
-        memory_limit,
-    )?;
-    let window = stage_window(reader, tick, identity, limits, &mut state.losses, events)?;
-    if window.tick_count() > 0 {
-        return Ok(Some(StagedWindow { window, pending }));
-    }
-
-    let next = reader.next_publication();
-    if next <= first {
-        return Err(crate::Error::Bound("lost selection without progress"));
-    }
-
-    state.next_publication = next;
-
-    Ok(None)
-}
-
 fn persist_one_open(
     registered: &RegisteredRun,
     state: &mut RunState,
@@ -697,25 +482,6 @@ fn window_ready(
         Some(timing) => Ok(timing_window_number(reader, timing)? > identity.window),
         None => Ok(false),
     }
-}
-
-fn stage_window(
-    reader: &mut RingReader,
-    tick: &mut Tick,
-    identity: WindowIdentity,
-    limits: Limits,
-    losses: &mut Losses,
-    events: crate::event_table::writer::Writer,
-) -> Result<Window> {
-    let mut staged = staging::Staging::new(reader, identity, limits, events);
-
-    for _step in 0..=reader.shape().slot_count {
-        if !staged.read(reader, tick, losses)? {
-            break;
-        }
-    }
-
-    staged.finish(reader, losses)
 }
 
 struct ReadEvents {
@@ -790,45 +556,6 @@ fn read_events(
     }
 
     Err(crate::Error::Bound("event scan"))
-}
-
-fn seal_pending(
-    store: &Store,
-    writers: &Writers<'_>,
-    window: &Window,
-    state: &mut RunState,
-    pending: crate::PendingWindow,
-) -> Result<()> {
-    let started = std::time::Instant::now();
-
-    let directory = collector::recording::private::PrivateDirectory::open(pending.path())?;
-    let mut tables = writers.encoder.encode_into(window, &directory)?;
-    tables.extend(seal_derived(
-        writers.derive,
-        &Derivation {
-            window,
-            pending: &directory,
-        },
-    )?);
-    drop(directory);
-
-    let manifest = seal_manifest(window, tables, state.losses)?;
-    let committed = store.commit(pending, manifest)?;
-    state.committed = committed.publication_end - 1;
-    collector::diagnostics::error(format_args!(
-        "persister sealed window={} publications={}..{} loss={} events_lost={} \
-        seal_ns={} staged_bytes={} tables={}",
-        committed.identity.window,
-        committed.publication_first,
-        committed.publication_end,
-        committed.losses.publications,
-        committed.losses.events,
-        started.elapsed().as_nanos(),
-        window.staged_bytes(),
-        committed.tables.len()
-    ));
-
-    Ok(())
 }
 
 pub(crate) fn seal_manifest(

@@ -34,12 +34,12 @@ pub use owned_identity::IdentitySource;
 pub use metadata::{Losses, Manifest, TimeBounds};
 pub use reader::{require_numeric_source, tick_buffer};
 pub use store::{
-    BatchFact, Begin, CommitBoundary, FileIdentity, FiniteEventRows, FiniteEvents, IndexFact,
-    InheritedAttempt, InventoryStep, InventoryWork, LossPublication, NormalProof,
-    NormalPublication, OrdinaryRecovery, OriginalFile, OriginalInventory, OriginalPlacement,
-    PendingWindow, ProofStep, PublicationLedger, PublicationStep, PublicationWork,
-    RegisteredAttempt, RegisteredFile, RowPublication, RowPublicationStep, Store, commitment_path,
-    list_committed, ownership_contended, read_committed, reread_committed,
+    BatchFact, FileIdentity, FiniteEventRows, FiniteEvents, IndexFact, InheritedAttempt,
+    InventoryStep, InventoryWork, LossPublication, NormalProof, NormalPublication,
+    OrdinaryRecovery, OriginalFile, OriginalInventory, OriginalPlacement, ProofStep,
+    PublicationLedger, PublicationStep, PublicationWork, RegisteredAttempt, RegisteredFile,
+    RowPublication, RowPublicationStep, Store, commitment_path, list_committed,
+    ownership_contended, read_committed, reread_committed,
 };
 
 pub use encoder::{

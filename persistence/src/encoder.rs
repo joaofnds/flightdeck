@@ -1,5 +1,3 @@
-use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use collector::recording::private::PrivateDirectory;
@@ -106,25 +104,6 @@ pub fn encode_derived(
 
 fn encode_create(pending: &PrivateDirectory, name: &str) -> Result<std::fs::File> {
     match pending.create_file(name) {
-        Ok(file) => Ok(file),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(Error::Bound("existing table"))
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub(crate) fn encode_open(path: &Path) -> Result<std::fs::File> {
-    if path.to_str().is_none() {
-        return Err(Error::Bound("path encoding"));
-    }
-
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-    {
         Ok(file) => Ok(file),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(Error::Bound("existing table"))

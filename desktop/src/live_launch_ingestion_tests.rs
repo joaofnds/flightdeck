@@ -9,7 +9,7 @@ use super::Backend;
 use crate::live_source::{Request, Snapshot, Update};
 use crate::live_source_mode::SourceMode;
 
-#[path = "../../viewer/src/bin/compatibility_fixture/source.rs"]
+#[path = "live_launch_ingestion_source.rs"]
 mod source;
 
 #[path = "live_launch_ingestion_output.rs"]

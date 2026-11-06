@@ -1346,9 +1346,6 @@ impl Store {
         ledger: &super::super::PublicationLedger,
     ) -> io::Result<Option<RowPublication<'_>>> {
         ledger.require_budget(budget)?;
-        if !self.protocol_two {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
-        }
         if self
             .staging
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

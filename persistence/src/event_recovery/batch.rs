@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender};
 
@@ -52,21 +51,6 @@ const _: () = {
 
 #[cfg(test)]
 mod tests;
-
-pub(crate) fn write_tail(
-    pending: &Path,
-    reader: RingReader,
-    run: &RunIdentity,
-    coverage: std::ops::Range<u64>,
-    losses: Losses,
-    memory_limit: usize,
-) -> Result<Manifest> {
-    let budget = Arc::new(ByteBudget::new(memory_limit));
-
-    write_tail_into(reader, run, coverage, losses, &budget, |index| {
-        crate::encoder::encode_open(&pending.join(super::batch_name(index)))
-    })
-}
 
 /// A batch's rows as the frame its file takes, checked before anything writes it, and what the
 /// index says of it.

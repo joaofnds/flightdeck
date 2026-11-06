@@ -1,6 +1,6 @@
 //! Immutable terminal events have run/event identity and no fabricated observation time.
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use collector::ring::RunIdentity;
 use polars::prelude::DataFrame;
@@ -11,7 +11,7 @@ pub(crate) mod batch;
 pub(crate) mod metadata;
 pub(crate) mod read;
 
-pub(crate) use batch::{write_tail, write_tail_into};
+pub(crate) use batch::write_tail_into;
 pub(crate) use metadata::Manifest;
 pub use read::{Pages, read_page};
 
@@ -38,22 +38,6 @@ pub struct Batch {
     pub first: u64,
     pub end: u64,
     pub rows: u64,
-}
-
-pub(crate) fn base(root: &Path) -> PathBuf {
-    root.join("event-recovery")
-}
-
-pub(crate) fn key(run: &RunIdentity) -> String {
-    format!(
-        "{}-{}",
-        collector::recording::identity_text(run.run),
-        collector::recording::identity_text(run.boot)
-    )
-}
-
-pub(crate) fn directory(root: &Path, run: &RunIdentity) -> PathBuf {
-    base(root).join(key(run))
 }
 
 #[must_use]

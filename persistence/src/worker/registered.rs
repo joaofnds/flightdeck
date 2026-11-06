@@ -826,12 +826,12 @@ fn staging_by_hand(
     reader: &RingReader,
     identity: WindowIdentity,
 ) -> Result<super::staging::Staging> {
-    let events = crate::event_table::writer::Writer::new(
+    let events = crate::event_table::writer::Writer::charged(
         attempt.events_directory()?,
         identity,
         reader.next_event(),
         reader.dictionary_capacity().is_some(),
-        256 * 1024 * 1024,
+        &Arc::new(ByteBudget::new(256 * 1024 * 1024)),
     )?;
 
     Ok(super::staging::Staging::new(

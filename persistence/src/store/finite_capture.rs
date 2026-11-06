@@ -30,9 +30,6 @@ impl Store {
         ledger: &PublicationLedger,
     ) -> io::Result<FiniteEventRows<'_>> {
         ledger.require_budget(budget)?;
-        if !self.protocol_two {
-            return Err(io::ErrorKind::Unsupported.into());
-        }
 
         let reservation = budget.reserve(batch::WORKING_BYTES).ok_or_else(memory)?;
         let control = CountedControl {
