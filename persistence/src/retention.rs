@@ -319,7 +319,15 @@ impl Retained {
         boots: impl IntoIterator<Item = Identity>,
         offsets: &mut Vec<(Identity, u64)>,
     ) -> io::Result<Cutoff> {
-        let directory = PrivateDirectory::open(root)?;
+        let directory = match PrivateDirectory::open(root) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(Cutoff {
+                    expired_below_ns: 0,
+                });
+            }
+            Err(error) => return Err(error),
+        };
         let Some(saved) = Clock::read_saved(&directory)? else {
             return Ok(Cutoff {
                 expired_below_ns: 0,

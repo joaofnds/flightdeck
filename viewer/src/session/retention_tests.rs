@@ -325,3 +325,131 @@ fn a_selected_second_gives_no_apps_once_it_has_expired() {
         Err(Error::Bound("the selected second has expired"))
     ));
 }
+
+/// Five readings of three saved minutes, with the tables `derive` derives, on a retention clock
+/// that has expired none of them: 1001 at 59 seconds, 1002 at 60 and 1003 at 119, then 1004 at 120
+/// and 1005 at 121.
+fn saved_across_three_minutes(derive: &dyn persistence::worker::Derive) -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    let boot = fixture.writer.identity().unwrap().boot;
+    expire_boot_before(&fixture.root, boot, 0);
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(1003);
+    fixture.publish_with_system_rows(1004);
+    fixture.publish_with_system_rows(1005);
+    fixture.seal_minute_derived(0, derive);
+    fixture.seal_minute_derived(1, derive);
+    fixture.seal_minute_derived(2, derive);
+
+    fixture
+}
+
+/// Moves the clock `saved_across_three_minutes` placed until the cutoff stands at `continuous_ns`,
+/// takes a pass of physical removal, and says how many publications it removed.
+fn expire_and_remove(root: &Path, continuous_ns: u64) -> u64 {
+    let now = ClockReading {
+        boot: Identity([9, 9]),
+        continuous_ns: 0,
+        wall_ns: CLOCK_NS + continuous_ns,
+    };
+    Clock::started_at(&now)
+        .write(&PrivateDirectory::open(root).unwrap())
+        .unwrap();
+    let store = persistence::Store::open(root).unwrap();
+    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+
+    store.retire_expired(&now, &[], &budget).unwrap()
+}
+
+/// A point without its segment, which numbers the stretches of a chart, so the same reading has
+/// another number once the stretches before it have gone.
+fn without_segment(mut point: Value) -> Value {
+    point.as_object_mut().unwrap().remove("segment");
+
+    point
+}
+
+/// What new readers say of `second`: its summary from the saved minutes alone, its summary with
+/// the ring as well, and the App's history.
+fn reading_of_second(root: &Path, second: u64) -> (Value, Value, Vec<Value>) {
+    let saved = Session::open(root).unwrap().select(second, 0).unwrap();
+    let mut session = LiveSession::open(root).unwrap();
+    let selected = session.select(second, 0).unwrap();
+    let history = session
+        .app_history(KeyKind::Bundle, b"/Apps/Current.app")
+        .unwrap();
+
+    (
+        without_segment(saved["summary"].clone()),
+        without_segment(selected["summary"].clone()),
+        history["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .cloned()
+            .map(without_segment)
+            .collect(),
+    )
+}
+
+#[test]
+fn the_first_retained_reading_stays_the_same_while_its_hidden_predecessor_keeps_a_minute() {
+    // Goal: the first reading of a minute takes its rates from the last of the minute before, so
+    // that minute stays, hidden, and the reading reads as it did.
+    // Method: read the first second of the second minute, place the cutoff on it, take a removal
+    // pass, and read that second in new sessions.
+    let fixture = saved_across_three_minutes(&persistence::sealed_apps::SealedApps::default());
+    let (saved, live, points) = reading_of_second(&fixture.root, 1002);
+
+    let removed = expire_and_remove(&fixture.root, 60 * NS);
+    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1002);
+
+    assert_eq!(removed, 0);
+    assert!(saved["cpu_percent"].is_number(), "{saved}");
+    assert!(live["cpu_percent"].is_number(), "{live}");
+    assert_eq!(retained_saved, saved);
+    assert_eq!(retained_live, live);
+    assert_eq!(retained_points, points[1..]);
+}
+
+#[test]
+fn the_first_retained_reading_stays_the_same_once_an_expired_minute_is_gone() {
+    // Goal: removing a minute no retained reading needs changes nothing the period covers.
+    // Method: read the first second of the third minute, place the cutoff on it, so the first
+    // minute goes and the second stays hidden, and read that second in new sessions.
+    let fixture = saved_across_three_minutes(&persistence::sealed_apps::SealedApps::default());
+    let (saved, live, points) = reading_of_second(&fixture.root, 1004);
+
+    let removed = expire_and_remove(&fixture.root, 120 * NS);
+    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1004);
+
+    assert_eq!(removed, 1);
+    assert_eq!(Session::open(&fixture.root).unwrap().windows.len(), 2);
+    assert!(saved["cpu_percent"].is_number(), "{saved}");
+    assert!(live["cpu_percent"].is_number(), "{live}");
+    assert_eq!(retained_saved, saved);
+    assert_eq!(retained_live, live);
+    assert_eq!(retained_points, points[3..]);
+}
+
+#[test]
+fn the_first_retained_reading_comes_from_raw_readings_alone() {
+    // Goal: no table a minute can rebuild is what makes the first retained reading what it was. A
+    // table a manifest lists and a reader cannot find is damage, so the state with none is a
+    // recording whose minutes never derived any.
+    // Method: as above, over minutes saved with no derived tables.
+    let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
+    let (saved, live, points) = reading_of_second(&fixture.root, 1004);
+
+    let removed = expire_and_remove(&fixture.root, 120 * NS);
+    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1004);
+
+    assert_eq!(removed, 1);
+    assert!(saved["cpu_percent"].is_number(), "{saved}");
+    assert_eq!(retained_saved, saved);
+    assert_eq!(retained_live, live);
+    assert_eq!(retained_points, points[3..]);
+}

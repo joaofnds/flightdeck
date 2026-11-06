@@ -80,6 +80,9 @@ pub struct LiveSession {
     earlier: KeptTail,
     sources: Vec<Source>,
     observations: VecDeque<LiveObservation>,
+    /// The newest reading the ring gave that the period no longer covers, which the first reading
+    /// it does cover takes its rates from.
+    expired_newest: Option<LiveObservation>,
     points: VecDeque<Value>,
     app_history: History,
     operation: Operation,
@@ -217,6 +220,7 @@ impl LiveSession {
             earlier: KeptTail::default(),
             sources: Vec::with_capacity(SOURCES_MAX),
             observations: VecDeque::with_capacity(OBSERVATIONS_MAX + 1),
+            expired_newest: None,
             points: VecDeque::with_capacity(OBSERVATIONS_MAX + 1),
             app_history: History::new(),
             operation,
@@ -1366,14 +1370,20 @@ impl LiveSession {
     }
 
     fn poll_store(&mut self, mut current: LiveObservation) -> Result<()> {
-        // A ring outlives what the period covers where its collector stopped long ago.
+        // A ring outlives what the period covers where its collector stopped long ago, and the
+        // first reading the period covers takes its rates from the last that it does not.
         let Some(retained_first) = self.retained_first_ns(&current) else {
+            self.cache_bytes += current.bytes;
+            if let Some(replaced) = self.expired_newest.replace(current) {
+                self.cache_bytes -= replaced.bytes;
+            }
             return Ok(());
         };
         let previous = self
             .observations
             .iter()
             .rev()
+            .chain(&self.expired_newest)
             .find(|observation| observation.identity == current.identity);
         Sample::capture(
             &current.app_frame,

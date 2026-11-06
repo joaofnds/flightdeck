@@ -103,6 +103,11 @@ impl Fixture {
         }
         .write(&root)
         .unwrap();
+        // These clocks count from this Mac's boot, which can lie past a shorter period.
+        persistence::retention::Period::from_seconds(10 * 365 * 86_400)
+            .unwrap()
+            .write(&directory)
+            .unwrap();
         let mut fixture = Self {
             root,
             writer,
