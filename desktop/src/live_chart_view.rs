@@ -247,7 +247,24 @@ impl LiveDashboard {
             return crate::live_views::pressure(&summary["pressure"]).to_owned();
         }
 
-        chart_reading(panel, index)
+        chart_reading(panel, |line| self.chart_value(panel, line, index))
+    }
+
+    /// What `line` of `panel` reads at the reading the page shows: its point at `index`, or what
+    /// the reading itself read where the chart draws no point of it, as under a peak's mark.
+    fn chart_value(&self, panel: &Panel, line: usize, index: Option<usize>) -> Option<f32> {
+        if index.is_some() {
+            return chart_line_value(panel, line, index);
+        }
+        let selection = &self.reading_snapshot()?.selection;
+        let summary = crate::live_views::matching_summary(selection);
+        match crate::live_projection::reading_value(&self.request.route, &panel.id, line, summary) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("Reading of a chart: {error}");
+                None
+            }
+        }
     }
 
     fn chart_line_reading(&self, panel: &Panel, line: usize, index: Option<usize>) -> String {
@@ -278,7 +295,7 @@ impl LiveDashboard {
                 |history| history.reading(line, index),
             );
         }
-        let value = chart_line_value(panel, line, index);
+        let value = self.chart_value(panel, line, index);
         let unit = panel
             .lines
             .get(line)
@@ -1263,13 +1280,13 @@ impl Render for ChartHelp {
     }
 }
 
-fn chart_reading(panel: &Panel, index: Option<usize>) -> String {
+fn chart_reading(panel: &Panel, line_value: impl Fn(usize) -> Option<f32>) -> String {
     let value = if panel.id == "live-power-breakdown" {
-        chart_line_value(panel, 0, index)
-            .zip(chart_line_value(panel, 1, index))
+        line_value(0)
+            .zip(line_value(1))
             .map(|(remainder, gpu)| remainder + gpu)
     } else {
-        chart_line_value(panel, 0, index)
+        line_value(0)
     };
     if let Some(states) = &panel.states {
         return states

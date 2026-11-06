@@ -62,6 +62,29 @@ fn older_reading(selection: &Value, second: u64) -> Option<&Value> {
         .get(older_index(selection, second)?)
 }
 
+/// What `line` of the chart `panel` of `route` reads at `point`, a reading the chart draws no
+/// point of, or `None` where the chart has no such line or the reading no such number.
+pub fn reading_value(
+    route: &str,
+    panel: &str,
+    line: usize,
+    point: &Value,
+) -> Result<Option<f32>, String> {
+    let points = std::slice::from_ref(point);
+    let specifications = specifications(route, points)?;
+    let reading = specifications
+        .iter()
+        .find(|specification| specification.id == panel)
+        .and_then(|specification| specification.lines.get(line));
+    let Some(reading) = reading else {
+        return Ok(None);
+    };
+
+    Ok(points
+        .value(reading, 0)?
+        .map(|value| value / reading.divisor))
+}
+
 /// The index among the older readings of the one that stands for `second`.
 #[must_use]
 pub fn older_index(selection: &Value, second: u64) -> Option<usize> {

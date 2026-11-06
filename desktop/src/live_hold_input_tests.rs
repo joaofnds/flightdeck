@@ -23,17 +23,69 @@ use crate::time_range::Range;
 /// The second the tests hold, 800 seconds before the newest, inside the newest fifteen minutes
 /// but outside the newest seven and a half, so a window centred on it would move.
 const HELD: u64 = HOUR_NEWEST - 800;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 /// A second of the older tail of the View `show_held_view_after` shows, which holds no Apps
 /// there.
 const TAIL: u64 = 9_500;
 /// The newest second of the View `show_view_over_tail` shows, the last of `held_seconds`, which
 /// the worker's readings lack.
 const TAIL_VIEW_NEWEST: u64 = 10_005;
+/// The first second of the stretch of the older tail that `recording_peaking_in_its_older_tail`
+/// peaks in, and the reading the chart draws for that stretch.
+const OLDER_STRETCH: u64 = HOUR_NEWEST - 2_000;
+/// The second of the peak in that stretch, which the chart draws no point of.
+const OLDER_PEAK: u64 = OLDER_STRETCH + 8;
 /// The window of the newest fifteen minutes the page draws before the click.
 const DRAWN: TimeWindow = TimeWindow {
     first: HOUR_NEWEST - 899,
     span: 900,
 };
+
+/// The worker's reply following the newest second of a recording whose older tail reads 10% CPU,
+/// with a stretch at `OLDER_STRETCH` that reaches 95% at `OLDER_PEAK`. The reply's own reading
+/// reads 33%, which no read of the peak may show.
+fn recording_peaking_in_its_older_tail() -> Box<Snapshot> {
+    let run = identity_text(collector::ring::Identity([1, 2])).to_string();
+    let boot = identity_text(collector::ring::Identity([3, 4])).to_string();
+    let mut older: Vec<serde_json::Value> = (0..300_u64)
+        .map(|index| {
+            let second = OLDER_STRETCH - 1_500 + index * 10;
+            serde_json::json!({"run": run, "boot": boot, "segment": 0, "publication": second,
+                "wall_ns": second * NANOSECONDS_PER_SECOND, "cpu_percent": 10.0})
+        })
+        .collect();
+    older[150]["reach"] = serde_json::json!({
+        "leaves": {"cpu_percent": [10.0, 95.0, 1]},
+        "places": [
+            [run, boot, OLDER_STRETCH, OLDER_STRETCH * NANOSECONDS_PER_SECOND],
+            [run, boot, OLDER_PEAK, OLDER_PEAK * NANOSECONDS_PER_SECOND],
+        ],
+    });
+    let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+    let selection = reply.selection.legacy_mut().unwrap();
+    selection["earlier_stride_seconds"] = serde_json::json!(10);
+    selection["earlier_trends"] = serde_json::json!(older);
+    selection["summary"] = selection["selected"].clone();
+    selection["summary"]["cpu_percent"] = serde_json::json!(33.0);
+
+    reply
+}
+
+/// Makes `selection` the reader's answer for `OLDER_PEAK`, whose reading read 95% CPU.
+fn older_peak_selection(selection: &mut serde_json::Value) {
+    let reading = serde_json::json!({
+        "run": identity_text(collector::ring::Identity([1, 2])).to_string(),
+        "boot": identity_text(collector::ring::Identity([3, 4])).to_string(),
+        "segment": 0,
+        "publication": OLDER_PEAK,
+        "wall_ns": OLDER_PEAK * NANOSECONDS_PER_SECOND,
+        "cpu_percent": 95.0,
+    });
+    selection["second"] = serde_json::json!(OLDER_PEAK);
+    selection["selected"] = reading.clone();
+    selection["summary"] = reading.clone();
+    selection["trends"] = serde_json::json!([reading]);
+}
 
 #[gpui::test]
 fn a_click_on_the_cpu_page_holds_the_second_without_reading_the_page_again(
@@ -710,6 +762,70 @@ fn a_click_on_a_saved_recording_selects_the_second_and_reads_the_window_around_i
     harness.driver.click_second_on("live-cpu-plot", HELD);
 
     assert_eq!(harness.driver.reader_asked_second(), Some(HELD));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_on_a_peaks_mark_on_a_saved_recording_shows_the_reading_that_read_it(
+    cx: &mut TestAppContext,
+) {
+    // Goal: a stem in the older tail of a saved recording shows the reading it names, while the
+    // reader reads the window around it and after, rather than the first reading of the stretch,
+    // which is the one the chart draws there.
+    // Method: the CPU page over the last hour, a click on the mark, the second the page shows,
+    // the reader's reply for that second, then the second and the reading the page shows.
+    let mut harness = InputHarness::open_recorded_route(cx, "cpu");
+    harness
+        .driver
+        .show_reply_at_the_hour(recording_peaking_in_its_older_tail());
+    let position = harness
+        .driver
+        .position_beside_peak("live-cpu-plot", OLDER_PEAK);
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+
+    harness
+        .driver
+        .context
+        .simulate_click(position, Modifiers::none());
+    harness.driver.context.run_until_parked();
+    let (shown_during_read, _) = harness.driver.chart_accessibility_reading("live-cpu");
+    harness
+        .driver
+        .reply_with_selection(OLDER_PEAK, OLDER_PEAK + 450, older_peak_selection);
+    let (shown, reading) = harness.driver.chart_accessibility_reading("live-cpu");
+
+    assert_eq!(shown_during_read, Some(OLDER_PEAK));
+    assert_eq!(shown, Some(OLDER_PEAK));
+    assert!(reading.ends_with("95%"), "{reading}");
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hover_of_a_peaks_mark_reads_out_the_reading_no_point_of_the_chart_holds(
+    cx: &mut TestAppContext,
+) {
+    // Goal: under a stem the chart reads out what the peak read, though it draws another reading
+    // for that stretch, and reads out no other reading while the peak's is on its way.
+    // Method: the CPU page over the last hour, a hover of the mark, the chart's reading, the
+    // reader's reply to the hover, then the chart's reading.
+    let mut harness = InputHarness::open_recorded_route(cx, "cpu");
+    harness
+        .driver
+        .show_reply_at_the_hour(recording_peaking_in_its_older_tail());
+    let position = harness
+        .driver
+        .position_beside_peak("live-cpu-plot", OLDER_PEAK);
+
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+    let (_, during_read) = harness.driver.chart_accessibility_reading("live-cpu");
+    harness.driver.answer_hover(older_peak_selection);
+    let (shown, reading) = harness.driver.chart_accessibility_reading("live-cpu");
+
+    assert!(during_read.ends_with("Unavailable"), "{during_read}");
+    assert_eq!(shown, Some(OLDER_PEAK));
+    assert!(reading.ends_with("95%"), "{reading}");
     harness.teardown();
 }
 
@@ -1753,6 +1869,19 @@ impl InputDriver {
         self.view_window()?.second_at(fraction)
     }
 
+    /// Hands the page the reader's answer to the hover's read, its selection changed by `edit`.
+    fn answer_hover(&mut self, edit: impl FnOnce(&mut serde_json::Value)) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.preview_tick(cx);
+            let generation = dashboard.preview.as_ref().unwrap().generation.unwrap();
+            let mut snapshot = super::accepted_snapshot(generation);
+            edit(snapshot.selection.legacy_mut().unwrap());
+            assert!(dashboard.preview_receive(Update::Ready(snapshot)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     /// The identity of the observation the page's request names.
     fn requested_identity(&self) -> Option<serde_json::Value> {
         self.view.read_with(&self.context, |dashboard, _| {
@@ -1770,8 +1899,19 @@ impl InputDriver {
 
     /// Shows the page over `reply`, the worker's reply to its request, following the newest
     /// second of `reply` at the newest fifteen minutes.
-    fn show_reply_at_fifteen_minutes(&mut self, mut reply: Box<Snapshot>) {
+    fn show_reply_at_fifteen_minutes(&mut self, reply: Box<Snapshot>) {
         self.show_range(Range::History);
+        self.show_reply(reply);
+    }
+
+    /// Shows the page over `reply`, following its newest second over the last hour.
+    fn show_reply_at_the_hour(&mut self, reply: Box<Snapshot>) {
+        self.show_range(Range::Last(3_600));
+        self.show_reply(reply);
+    }
+
+    /// Hands the page `reply`, the worker's reply to its request, in a window that fits its charts.
+    fn show_reply(&mut self, mut reply: Box<Snapshot>) {
         self.view.update(&mut self.context, |dashboard, cx| {
             reply.generation = dashboard.generation;
             assert!(dashboard.take_update(Update::Ready(reply)));
