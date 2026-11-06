@@ -1664,7 +1664,7 @@ fn hour_peaking_at(peak: u64) -> viewer::store::View {
 }
 
 /// `view` with another run having read the wall second `peak` after the reading of it the View
-/// holds, a second of 10% whose tick is `publication`.
+/// holds, a second of 10% whose tick is `publication`, and every second after it.
 fn hour_with_a_second_reading_of(
     mut view: viewer::store::View,
     peak: u64,
@@ -1675,17 +1675,26 @@ fn hour_with_a_second_reading_of(
         .iter()
         .position(|second| second.wall_ns / 1_000_000_000 == peak)
         .unwrap();
-    let mut other = viewer::store::MachineSecond::clone(&view.seconds[index]);
-    other.cpu_percent = Some(10.0);
-    other.run = [7, 8];
-    other.publication = publication;
-    other.segment += 1;
-    let mut apps = apps_at(&other, &[]);
-    let observation = apps.observation.as_mut().unwrap();
-    observation.stamp.run = [7, 8];
-    observation.stamp.publication = publication;
-    view.seconds.insert(index + 1, Arc::new(other));
-    view.apps.insert(index + 1, Arc::new(apps));
+    let read_again = viewer::store::MachineSecond {
+        cpu_percent: Some(10.0),
+        ..viewer::store::MachineSecond::clone(&view.seconds[index])
+    };
+    view.seconds.insert(index + 1, Arc::new(read_again));
+    view.apps.insert(index + 1, Arc::clone(&view.apps[index]));
+    for (read, at) in (publication..).zip(index + 1..view.seconds.len()) {
+        let second = viewer::store::MachineSecond {
+            run: [7, 8],
+            publication: read,
+            segment: view.seconds[at].segment + 1,
+            ..viewer::store::MachineSecond::clone(&view.seconds[at])
+        };
+        let mut apps = apps_at(&second, &[]);
+        let observation = apps.observation.as_mut().unwrap();
+        observation.stamp.run = [7, 8];
+        observation.stamp.publication = read;
+        view.seconds[at] = Arc::new(second);
+        view.apps[at] = Arc::new(apps);
+    }
     view
 }
 
