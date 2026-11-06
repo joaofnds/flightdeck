@@ -1,5 +1,5 @@
 use super::*;
-use crate::recording::discovery::tests::allocator_calls_in;
+use crate::allocator_count::allocator_calls_in;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Failure {

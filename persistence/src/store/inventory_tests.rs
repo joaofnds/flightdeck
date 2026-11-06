@@ -1,6 +1,8 @@
 use super::*;
 use crate::resources::ByteBudget;
-use crate::{BatchFact, IndexFact, InventoryStep, OriginalInventory, OriginalPlacement};
+use crate::{
+    BatchFact, IndexFact, InventoryStep, OriginalInventory, OriginalPlacement, WindowIdentity,
+};
 use std::os::unix::fs::PermissionsExt;
 
 fn budget() -> Arc<ByteBudget> {

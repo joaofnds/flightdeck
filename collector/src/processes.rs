@@ -639,7 +639,7 @@ mod tests {
         let own_pid = own_pid().unwrap();
         list_pids(&mut pids).unwrap();
 
-        let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let allocations = crate::allocator_count::allocator_calls_in(|| {
             for _ in 0..128 {
                 list_pids(&mut pids).unwrap();
                 assert!(pids.contains(&own_pid));

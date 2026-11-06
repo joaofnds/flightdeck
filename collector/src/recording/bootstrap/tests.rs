@@ -358,7 +358,7 @@ fn retained_root_survives_substitution_at_longest_admitted_path() {
     private::create_private_dir(&path).unwrap();
     assert_eq!(initialize(&root, &lock, &mut scratch).unwrap(), identity);
     assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0);
-    let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let calls = crate::allocator_count::allocator_calls_in(|| {
         assert_eq!(
             classify(&root, &mut scratch).unwrap(),
             Classification::Initialized(identity)

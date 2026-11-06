@@ -1,6 +1,5 @@
 use std::io::{self, Read, Write};
 
-pub use collector::recording::discovery::TimeBounds;
 use collector::ring::{Identity, RunIdentity};
 
 use crate::{TableManifest, WindowIdentity};
@@ -20,6 +19,12 @@ pub struct Manifest {
     pub tables: Vec<TableManifest>,
     /// None is the legacy single events.parquet; Some names a bounded physical event table.
     pub event_batches: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeBounds {
+    pub min: u64,
+    pub max: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

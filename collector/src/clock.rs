@@ -150,7 +150,7 @@ mod tests {
         })
         .unwrap();
 
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert_eq!(Timebase::NANOSECOND_TICKS.checked_nanoseconds(0), Some(0));
             assert_eq!(fractional.checked_nanoseconds(1), Some(41));
             assert_eq!(fractional.checked_nanoseconds(3), Some(125));

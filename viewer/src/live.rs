@@ -1210,19 +1210,12 @@ impl LiveSession {
                     run: source.identity,
                     window,
                 };
-                let registered = self
+                let saved = self
                     .history
                     .as_ref()
-                    .map(|history| history.registered_window_saved(&identity))
-                    .transpose()?
-                    .flatten();
-                let saved = match registered {
-                    Some(saved) => saved,
-                    None => persistence::layout::WindowKey::from(&identity)
-                        .marker(&self.root)
-                        .try_exists()?,
-                };
-                if saved {
+                    .map(|history| history.window_saved(&identity))
+                    .transpose()?;
+                if saved == Some(true) {
                     committed = true;
                 }
             }
@@ -3765,6 +3758,32 @@ mod tests {
     }
 
     #[test]
+    fn a_recording_of_an_older_format_reports_a_history_error() {
+        // Goal: saved history this version cannot read says so and never reads as no history.
+        // Method: open a live session over a root as the previous format left it.
+        let root = crate::root_fixture::older_root();
+
+        let session = LiveSession::open(&root).unwrap();
+
+        assert!(session.history.is_none());
+        assert!(session.history_error.is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_root_still_being_set_up_has_no_history_and_no_history_error() {
+        // Goal: the last moment of a first launch reads as nothing saved yet and not as a fault.
+        // Method: open a live session over a root whose setup stopped after its identity.
+        let root = crate::root_fixture::unfinished_root();
+
+        let session = LiveSession::open(&root).unwrap();
+
+        assert!(session.history.is_none());
+        assert_eq!(session.history_error, None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn keeps_null_context_gaps_when_optional_app_history_is_unreadable() {
         // Goal: missing saved facts remain explicit gaps beside independently available detail.
         // Method: discard compact facts after selection and withhold the committed data.
@@ -3775,7 +3794,7 @@ mod tests {
         let mut session = LiveSession::open(&fixture.root).unwrap();
         session.follow_latest().unwrap();
         session.app_history = History::new();
-        let data = persistence::layout::base(&fixture.root, persistence::layout::Kind::Data);
+        let data = fixture.root.join("data");
         let withheld = fixture.root.join("withheld-data");
         std::fs::rename(&data, &withheld).unwrap();
 

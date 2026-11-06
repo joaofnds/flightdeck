@@ -533,7 +533,7 @@ mod durability_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recording::discovery::tests::allocator_calls_in;
+    use crate::allocator_count::allocator_calls_in;
     use std::fs::OpenOptions;
     use std::os::unix::fs::OpenOptionsExt;
     use std::process::Command;

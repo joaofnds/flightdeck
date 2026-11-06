@@ -138,7 +138,7 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use crate::recording::discovery::tests::allocator_calls_in;
+    use crate::allocator_count::allocator_calls_in;
     use crate::recording::{Registration, private};
     use crate::ring::{Place, Shape, Writer, unlink_generation};
 

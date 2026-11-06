@@ -177,7 +177,7 @@ mod tests {
             .unwrap()
             .read_to_end(&mut before)
             .unwrap();
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert_eq!(read_identity(&root).unwrap(), recording);
             assert_eq!(crate::recording::read_identity(&root).unwrap(), recording);
             crate::recording::check_writer(&root).unwrap();
@@ -207,7 +207,7 @@ mod tests {
         let alias = root.0.join("alias");
         symlink(&root.0, &alias).unwrap();
         let overlong = PathBuf::from("x".repeat(private::PATH_MAX));
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert!(read_identity(&alias).is_err());
             assert_eq!(
                 read_identity(&overlong).unwrap_err().kind(),
@@ -216,7 +216,7 @@ mod tests {
         });
         assert_eq!(calls, 0);
         std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert_eq!(
                 read_identity(&root.0).unwrap_err().kind(),
                 io::ErrorKind::PermissionDenied
@@ -250,7 +250,7 @@ mod tests {
         ] {
             private::atomic_write(&root.0, "identity", bytes).unwrap();
             let before = std::fs::metadata(&identity).unwrap();
-            let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+            let calls = crate::allocator_count::allocator_calls_in(|| {
                 assert!(read_identity(&root.0).is_err());
                 assert!(crate::recording::check_writer(&root.0).is_err());
                 assert!(crate::recording::recording_identity(&root.0, &registration).is_err());
@@ -265,7 +265,7 @@ mod tests {
         std::fs::rename(&identity, &target).unwrap();
         let before = std::fs::read(&target).unwrap();
         symlink("target", &identity).unwrap();
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert!(read_identity(&root.0).is_err());
             assert!(crate::recording::recording_identity(&root.0, &registration).is_err());
         });
@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), before);
         std::fs::remove_file(&identity).unwrap();
         private::create_private_dir(&identity).unwrap();
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert!(read_identity(&root.0).is_err());
         });
         assert_eq!(calls, 0);
@@ -282,7 +282,7 @@ mod tests {
         std::fs::remove_dir(&identity).unwrap();
         std::fs::rename(&target, &identity).unwrap();
         std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert_eq!(
                 read_identity(&root.0).unwrap_err().kind(),
                 io::ErrorKind::PermissionDenied
@@ -326,7 +326,7 @@ mod tests {
             );
         }
         create(&root.0, Identity([1, 2])).unwrap();
-        let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+        let calls = crate::allocator_count::allocator_calls_in(|| {
             assert_eq!(read_identity(&root.0).unwrap(), Identity([1, 2]));
         });
         assert_eq!(calls, 0);

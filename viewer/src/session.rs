@@ -4,13 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use collector::recording::{identity_text, private};
-use collector::ring::Identity;
+use collector::recording::{bootstrap, identity_text, private};
 use persistence::engine::{Engine, Row};
-use persistence::layout::{self, Kind};
-use persistence::{
-    Error, Manifest, Result, TimeBounds, list_committed, read_committed, reread_committed,
-};
+use persistence::{Error, Manifest, Result, TimeBounds, read_committed, reread_committed};
 use serde_json::{Value, json};
 
 use crate::Cancellation;
@@ -47,8 +43,8 @@ pub struct Session {
     last: Option<u64>,
     /// The readings with no known clock, none where the recording's catalog has not counted them.
     unknown: Option<u64>,
-    /// How the session reaches its windows, none where it listed them from their markers.
-    registered: Option<registered::Registered>,
+    /// How the session reaches its windows.
+    registered: registered::Registered,
     selected: Option<Observation>,
     selected_context: Vec<crate::cpu_history_sample::Identity>,
     context_last_second: Option<u64>,
@@ -85,11 +81,9 @@ pub struct Session {
 /// What a session starts from, which `Session::reopen` found.
 struct Listed<'root> {
     root: &'root Path,
-    windows: Vec<Manifest>,
-    verified: Vec<AtomicBool>,
     connection: Engine,
     event_query_budget: Arc<persistence::resources::ByteBudget>,
-    registered: Option<registered::Registered>,
+    registered: registered::Registered,
     operation: Operation,
 }
 
@@ -231,10 +225,10 @@ impl Session {
         Self::reopen(root, cancellation, epoch, &Verified::default())
     }
 
-    /// Opens the recording again. It reads each window's marker and leaves the window's files
-    /// to its first read, which verifies them unless an earlier session's read verified them.
-    /// A sealed window's files never change, so rereading its marker shows its commitment
-    /// stands, as `validate_commitment` does around every read.
+    /// Opens the recording again. It leaves each window's files to its first read, which verifies
+    /// them unless an earlier session's read verified them. A sealed window's files never change,
+    /// so rereading its proof shows its commitment stands, as `validate_commitment` does around
+    /// every read.
     pub(crate) fn reopen(
         root: &Path,
         cancellation: Arc<Cancellation>,
@@ -244,33 +238,20 @@ impl Session {
         let operation = cancellation.operation(epoch)?;
         persistence::query::validate_root(root)?;
         private::verify_directory(root)?;
-        let recording = collector::recording::read_identity(root)?;
-        let earlier_markers = reopen_markers(root, recording, earlier);
         let event_query_budget = Arc::new(persistence::resources::ByteBudget::new(
             EVENT_QUERY_BYTES_MAX,
         ));
         let registered = registered::Registered::open(root, &event_query_budget, &operation)?;
-        let mut windows = Vec::new();
-        if registered.is_none() {
-            discover(root, recording, &mut windows, &operation)?;
-        }
-        let verified = reopen_verified(root, &windows, &earlier_markers);
         let connection = data::connection();
         operation.attach(&connection)?;
         let mut session = Self::listed(Listed {
             root,
-            windows,
-            verified,
             connection,
             event_query_budget,
             registered,
             operation,
         });
-        if session.registered.is_some() {
-            session.reopen_registered(epoch, earlier)?;
-        } else {
-            session.operation.begin(epoch)?.run(|| session.extent())?;
-        }
+        session.reopen_registered(epoch, earlier)?;
         Ok(session)
     }
 
@@ -278,8 +259,6 @@ impl Session {
     fn listed(listed: Listed<'_>) -> Self {
         let Listed {
             root,
-            windows,
-            verified,
             connection,
             event_query_budget,
             registered,
@@ -288,8 +267,8 @@ impl Session {
 
         Self {
             root: root.to_owned(),
-            windows,
-            verified,
+            windows: Vec::new(),
+            verified: Vec::new(),
             connection,
             context_connections: (0..CONTEXT_READERS).map(|_| data::connection()).collect(),
             event_query_budget,
@@ -337,11 +316,8 @@ impl Session {
     /// newest span. A window an earlier session's read verified stays verified.
     fn reopen_registered(&mut self, epoch: u64, earlier: &Verified) -> Result<()> {
         self.operation.begin(epoch)?.run(|| {
-            let Some(registered) = &self.registered else {
-                return Err(Error::Bound("registered session"));
-            };
-            let ends = registered.ends(&self.operation)?;
-            self.unknown = registered.unknown_clock_ticks(&self.operation)?;
+            let ends = self.registered.ends(&self.operation)?;
+            self.unknown = self.registered.unknown_clock_ticks(&self.operation)?;
             if let Some(ends) = ends {
                 self.first = Some(ends.first);
                 self.last = Some(ends.last);
@@ -870,81 +846,6 @@ impl Session {
         }
     }
 
-    fn extent(&mut self) -> Result<()> {
-        let mut wall_bounds = Vec::with_capacity(self.windows.len());
-        for window in 0..self.windows.len() {
-            let bounds = match self.windows[window].wall_ns {
-                Some(bounds) => Some(bounds),
-                None => self.extent_ticks(window)?,
-            };
-            if let Some(bounds) = bounds {
-                self.first = Some(
-                    self.first
-                        .map_or(bounds.min / NS, |v| v.min(bounds.min / NS)),
-                );
-                self.last = Some(
-                    self.last
-                        .map_or(bounds.max / NS, |v| v.max(bounds.max / NS)),
-                );
-            }
-            wall_bounds.push(bounds);
-        }
-
-        assert_eq!(wall_bounds.len(), self.windows.len());
-        self.wall_bounds = wall_bounds;
-        Ok(())
-    }
-
-    /// The wall-clock bounds of the ticks of a window whose manifest holds none, counting the
-    /// ticks without a wall time as unknown.
-    fn extent_ticks(&mut self, window: usize) -> Result<Option<TimeBounds>> {
-        let ticks = self.table(window, "ticks")?;
-        let mut bounds: Option<TimeBounds> = None;
-        for row in &ticks.rows {
-            if let Some(wall) = ticks.integer(row, "wall_ns")? {
-                bounds = Some(match bounds {
-                    Some(bounds) => TimeBounds {
-                        min: bounds.min.min(wall),
-                        max: bounds.max.max(wall),
-                    },
-                    None => TimeBounds {
-                        min: wall,
-                        max: wall,
-                    },
-                });
-            } else {
-                self.unknown = self.unknown.map(|unknown| unknown + 1);
-            }
-        }
-
-        Ok(bounds)
-    }
-
-    /// Whether the sealed windows on disk are the ones this session listed. A sealed window never
-    /// changes, so a walk of the markers' names shows it without reading a marker.
-    pub(crate) fn lists_every_sealed_window(&self) -> Result<bool> {
-        if self.registered.is_some() {
-            return self.span_lists_every_window();
-        }
-        let base = layout::base(&self.root, Kind::Commits);
-        if !base.try_exists()? {
-            return Ok(false);
-        }
-        let mut sealed = discover_markers(&base, &self.operation)?;
-        if sealed.len() != self.windows.len() {
-            return Ok(false);
-        }
-
-        let mut listed: Vec<PathBuf> = self
-            .windows
-            .iter()
-            .map(|manifest| layout::WindowKey::from(&manifest.identity).marker(&self.root))
-            .collect();
-        sealed.sort_unstable();
-        listed.sort_unstable();
-        Ok(sealed == listed)
-    }
-
     fn observations(&self, range: ContextRange) -> Result<Vec<Observation>> {
         self.span_check(range)?;
         let reader = self.reader();
@@ -956,15 +857,17 @@ impl Session {
     }
 }
 
-/// Whether `root` has anywhere saved history could be, which a recording with no window yet has
-/// once it is registered, and an older format only once its first window committed.
+/// Whether `root` has anywhere saved history could be, which one no writer finished setting up has
+/// not yet. A root of another format or a damaged one counts, so that opening it says what is
+/// wrong.
 pub(crate) fn saved_history_exists(root: &Path) -> io::Result<bool> {
-    if layout::base(root, Kind::Commits).try_exists()? {
-        return Ok(true);
-    }
+    let directory = private::PrivateDirectory::open(root)?;
+    let classification = bootstrap::classify_settled(&directory, &mut [0; 4097])?;
 
-    root.join(persistence::canonical::Namespace::Ordinary.name())
-        .try_exists()
+    Ok(!matches!(
+        classification,
+        bootstrap::Classification::Fresh | bootstrap::Classification::Initializing(_)
+    ))
 }
 
 /// Threads that read a context's windows. On an M5 Pro the newest sixteen minutes of a
@@ -1052,8 +955,8 @@ impl Reader<'_> {
         )
     }
 
-    /// Checks that a window `discover` listed is still committed unchanged. Readers call it
-    /// around every read, so it verifies the window's files on the first and rereads the marker
+    /// Checks that a window the session listed is still committed unchanged. Readers call it
+    /// around every read, so it verifies the window's files on the first and rereads the proof
     /// after. Two readers may both verify a window, which reads its files twice and changes
     /// nothing.
     fn validate_commitment(&self, window: usize) -> Result<()> {
@@ -1240,136 +1143,6 @@ pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
             .push(row.clone());
     }
     Ok(result)
-}
-
-/// Reuses verification only where the same marker still names the same full commitment.
-fn reopen_verified(
-    root: &Path,
-    windows: &[Manifest],
-    earlier: &BTreeMap<PathBuf, &Manifest>,
-) -> Vec<AtomicBool> {
-    windows
-        .iter()
-        .map(|manifest| {
-            let marker = persistence::commitment_path(root, manifest);
-            let kept = earlier.get(&marker).copied();
-            AtomicBool::new(kept == Some(manifest))
-        })
-        .collect()
-}
-
-/// The windows of `earlier` from the recording `recording`, by the path of their marker.
-fn reopen_markers<'earlier>(
-    root: &Path,
-    recording: Identity,
-    earlier: &'earlier Verified,
-) -> BTreeMap<PathBuf, &'earlier Manifest> {
-    let mut markers = BTreeMap::new();
-    for manifest in &earlier.0 {
-        if manifest.identity.run.recording == recording {
-            let marker = persistence::commitment_path(root, manifest);
-            markers.insert(marker, manifest);
-        }
-    }
-
-    markers
-}
-
-pub(crate) fn discover(
-    root: &Path,
-    recording: Identity,
-    windows: &mut Vec<Manifest>,
-    operation: &Operation,
-) -> Result<()> {
-    let base = layout::base(root, Kind::Commits);
-    if !base.try_exists()? {
-        return Err(io::Error::from(io::ErrorKind::InvalidData).into());
-    }
-    let markers = discover_markers(&base, operation)?;
-    discover_read(root, recording, &markers, windows, operation)?;
-    windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
-    Ok(())
-}
-
-/// The marker of every sealed window under `base`, in the order the walk meets them.
-fn discover_markers(base: &Path, operation: &Operation) -> Result<Vec<PathBuf>> {
-    let mut markers = Vec::new();
-    layout::visit_names(base, |run| -> Result<()> {
-        layout::validate_run(run)?;
-        let run_path = base.join(run);
-        layout::visit_names(&run_path, |day| -> Result<()> {
-            layout::validate_day(day)?;
-            layout::visit_names(&run_path.join(day), |name| -> Result<()> {
-                operation.check()?;
-                if name.starts_with('.') {
-                    return Ok(());
-                }
-                if Path::new(name).extension() != Some(std::ffi::OsStr::new("seal")) {
-                    return Err(Error::Bound("unexpected commit file"));
-                }
-                if markers.len() == WINDOWS_MAX {
-                    return Err(Error::Bound("catalog windows"));
-                }
-                markers.push(run_path.join(day).join(name));
-                Ok(())
-            })
-        })
-    })?;
-
-    Ok(markers)
-}
-
-/// Threads that read a catalog's markers. Each read waits on the file system for two files, and
-/// on an M5 Pro over 3300 windows four threads read them in about half the time of one, while
-/// more gained little.
-const DISCOVER_THREADS: usize = 4;
-
-/// Lists the windows of `markers`, in their order, split between `DISCOVER_THREADS` threads.
-fn discover_read(
-    root: &Path,
-    recording: Identity,
-    markers: &[PathBuf],
-    windows: &mut Vec<Manifest>,
-    operation: &Operation,
-) -> Result<()> {
-    let chunk = markers.len().div_ceil(DISCOVER_THREADS).max(1);
-    std::thread::scope(|scope| -> Result<()> {
-        let mut readers = Vec::with_capacity(DISCOVER_THREADS);
-        for part in markers.chunks(chunk) {
-            let reader = std::thread::Builder::new()
-                .name("flightdeck-discover".to_owned())
-                // Rust's default, since nothing has measured what a marker's read needs.
-                .stack_size(2 * 1024 * 1024)
-                .spawn_scoped(scope, move || {
-                    discover_read_part(root, recording, part, operation)
-                })?;
-            readers.push(reader);
-        }
-        assert!(readers.len() <= DISCOVER_THREADS);
-
-        for reader in readers {
-            let read = reader
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-            windows.extend(read);
-        }
-        Ok(())
-    })
-}
-
-/// The window's files are left to `validate_commitment` on its first read.
-fn discover_read_part(
-    root: &Path,
-    recording: Identity,
-    markers: &[PathBuf],
-    operation: &Operation,
-) -> Result<Vec<Manifest>> {
-    let mut windows = Vec::with_capacity(markers.len());
-    for marker in markers {
-        operation.check()?;
-        windows.push(list_committed(root, marker, recording)?);
-    }
-    Ok(windows)
 }
 
 #[path = "cpu_history_saved.rs"]

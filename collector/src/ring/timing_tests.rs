@@ -60,7 +60,7 @@ fn warm_timing_reads_use_no_rust_allocator_calls() {
     let mut timing = PublicationTiming::default();
     reader.read_timing_into(&mut timing).unwrap();
 
-    let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let calls = crate::allocator_count::allocator_calls_in(|| {
         reader.seek_publication(1).unwrap();
         assert!(matches!(
             reader.read_timing_into(&mut timing).unwrap(),

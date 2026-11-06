@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use persistence::Error;
 use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
 use persistence::resources::ByteBudget;
@@ -10,6 +11,7 @@ use persistence::resources::ByteBudget;
 use super::Session;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::KeyKind;
+use crate::root_fixture::{older_root, unfinished_root};
 
 /// The entries a boundary lookup of the canonical tree examines at most.
 const ENTRIES_OF_A_BOUNDARY_MAX: u64 = 4_224;
@@ -25,6 +27,34 @@ fn registered_two_minutes() -> Fixture {
     }
     fixture.seal();
     fixture
+}
+
+#[test]
+fn a_session_refuses_a_recording_of_an_older_format() {
+    // Goal: a recording this version cannot read is refused and never reads as an empty one.
+    // Method: open a session over a root as the previous format left it.
+    let root = older_root();
+
+    let opened = Session::open(&root);
+
+    assert!(
+        matches!(opened, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_session_finds_no_recording_in_a_root_still_being_set_up() {
+    // Goal: the last moment of a first launch reads as a recording not there yet.
+    // Method: open a session over a root whose setup stopped after its identity.
+    let root = unfinished_root();
+
+    let opened = Session::open(&root);
+
+    assert!(
+        matches!(opened, Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -188,7 +218,7 @@ fn a_read_past_the_listed_span_fails_rather_than_finding_nothing() {
 
     let read = session.context(range, &mut Vec::new());
 
-    assert!(matches!(read, Err(persistence::Error::Bound(_))));
+    assert!(matches!(read, Err(Error::Bound(_))));
 }
 
 #[test]
@@ -201,7 +231,7 @@ fn a_read_of_kept_parts_past_the_listed_span_fails_rather_than_finding_nothing()
 
     let read = session.visit_sealed_parts(range, KeyKind::Executable, b"app", |_part| Ok(()));
 
-    assert!(matches!(read, Err(persistence::Error::Bound(_))));
+    assert!(matches!(read, Err(Error::Bound(_))));
 }
 
 #[test]

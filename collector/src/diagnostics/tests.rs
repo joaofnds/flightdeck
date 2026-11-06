@@ -355,7 +355,7 @@ fn allocates_nothing_during_repeated_formatting_admission_and_rejection() {
             let reporter = Reporter::new();
             reporter.prepare();
             let mut scratch = Box::new(Group::empty());
-            let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+            let calls = crate::allocator_count::allocator_calls_in(|| {
                 for index in 0..1_000 {
                     reporter.diagnostic(format_args!("counter={index}"));
                     assert_eq!(Some(Stream::Stderr), take_into(&reporter, &mut scratch));

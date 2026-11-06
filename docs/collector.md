@@ -236,12 +236,11 @@ one bounded event-only object without inventing a minute or timestamp. The termi
 discovery and paging APIs expose these objects even after the run leaves the live registry.
 The ordinary saved-recording Session still needs an inspection route for them.
 
-New recording roots carry a 74-byte identity envelope with separate required reader and
-writer versions. Readers accept supported legacy roots, but new writers refuse them before
-taking ownership or changing their files. Older binaries reject the new envelope, so they
-cannot append an incompatible run. The transition requires a new recording root. The app's
-default launch makes one by deleting an older recording that no process holds, with the rings
-it kept. A recording `--recording PATH` names stays. A recorder or collector refuses an older
+A recording root carries a 74-byte identity envelope with separate required reader and writer
+versions. Readers and writers refuse a root of an older format, writers before taking ownership
+or changing its files. Older binaries reject the new envelope, so they cannot append an
+incompatible run. The transition requires a new recording root. The app's default launch makes
+one by deleting an older recording that no process holds, with the rings it kept. A recording `--recording PATH` names stays. A recorder or collector refuses an older
 root wherever it lies, including the default one before the app's next launch deletes it.
 
 The persister checks its current and kernel lifetime-peak physical footprint every 100 ms
@@ -654,8 +653,8 @@ and events (The persister and the recording).
 
 **Commit marker.** A hard link, under the recording's `ordinary` directory and its observation
 directories, to the metadata file of a window, made once every file of the window is synced to
-disk. A window belongs to the recording only once its marker exists. A legacy recording, which
-readers still accept, keeps its markers under `commits/` (The persister and the recording).
+disk. A window belongs to the recording only once its marker exists (The persister and the
+recording).
 
 **Registry.** The `runs` file in the recording, which names the active run and at most one
 earlier run, with each one's ring and collector pid (The persister and the recording).

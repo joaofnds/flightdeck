@@ -310,7 +310,6 @@ fn a_window_a_catalog_finds_reads_like_any_committed_window() {
 
     let read = crate::read_committed(&recording.root, &path).unwrap();
     let reread = crate::reread_committed(&recording.root, &path).unwrap();
-    let listed = crate::list_committed(&recording.root, &path, recording.run.recording).unwrap();
     let engine = crate::engine::Engine::new();
     let events = engine
         .event_source(&recording.root, &manifest, &budget)
@@ -321,7 +320,6 @@ fn a_window_a_catalog_finds_reads_like_any_committed_window() {
 
     assert_eq!(read, manifest);
     assert_eq!(reread, manifest);
-    assert_eq!(listed, manifest);
     assert_eq!(
         crate::engine::Row::new(&count, 0)
             .unwrap()

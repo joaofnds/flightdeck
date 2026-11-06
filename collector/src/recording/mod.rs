@@ -5,7 +5,6 @@ pub mod bootstrap;
 pub mod child;
 pub mod control;
 mod delete_older;
-pub mod discovery;
 pub mod exit_watch;
 pub mod format;
 mod holder;
@@ -380,7 +379,8 @@ impl Registration {
     }
 }
 
-/// Reads legacy or supported versioned roots without granting writer compatibility.
+/// Reads a root's identity, whichever version wrote it, which says nothing of whether this version
+/// can read its windows or write to it.
 pub fn read_identity(root: &Path) -> io::Result<Identity> {
     format::read_identity(root)
 }
@@ -510,7 +510,7 @@ pub(crate) fn write_atomic(root: &Path, name: &str, text: &str) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recording::discovery::tests::allocator_calls_in;
+    use crate::allocator_count::allocator_calls_in;
 
     #[test]
     fn canonical_identity_reads_and_refusals_allocate_nothing() {

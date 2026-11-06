@@ -221,7 +221,7 @@ fn reads_native_snapshots_without_rust_heap_activity() {
     disks.refresh(1).unwrap();
     let mut result = Ok(());
 
-    let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let calls = crate::allocator_count::allocator_calls_in(|| {
         result = disks.refresh(2);
     });
 

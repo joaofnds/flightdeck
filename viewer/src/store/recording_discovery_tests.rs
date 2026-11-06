@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
+use crate::root_fixture::{older_root, unfinished_root};
 use crate::store::{ByteBudget, Failure};
 
 #[test]
@@ -52,6 +53,38 @@ fn a_damaged_recording_reports_a_failure_instead_of_no_minutes() {
     );
 
     assert_eq!(left_out, Some(Failure::Commits(ErrorKind::InvalidData)));
+}
+
+macro_rules! a_root_it_cannot_read_reports_a_failure_instead_of_no_minutes {
+    ($($name:ident: $root:expr, $failure:expr,)+) => {$(
+        #[test]
+        fn $name() {
+            // Goal: a load names why it read nothing where the root holds nothing it can read.
+            // Method: load a root of another format or still being set up, by both of its routes.
+            let root = $root;
+            let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+            let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+
+            let load = super::load_since(
+                &root,
+                None,
+                &mut super::LoadBuffers::default(),
+                |_, _, _, _| {},
+            );
+            let payload = super::load_payload(&root, &budget, &operation, |_, _, _| {});
+
+            assert_eq!(load, Some($failure));
+            assert_eq!(payload.unwrap().left_out, Some($failure));
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    )+};
+}
+
+a_root_it_cannot_read_reports_a_failure_instead_of_no_minutes! {
+    a_load_refuses_a_recording_of_an_older_format:
+        older_root(), Failure::Commits(ErrorKind::Unsupported),
+    a_load_finds_no_recording_in_a_root_still_being_set_up:
+        unfinished_root(), Failure::Recording(ErrorKind::NotFound),
 }
 
 #[test]

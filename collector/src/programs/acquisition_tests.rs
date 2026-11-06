@@ -143,7 +143,7 @@ fn acquisition_reuses_only_caller_owned_storage() {
     let mut scratch = [0; 4096];
     let mut output = Acquisition::EMPTY;
     let mut numeric = 0;
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         for gate_status in [0, 5] {
             log.set(0);
             let mut calls = Calls {

@@ -166,13 +166,8 @@ impl Startup {
             .reserve(size_of::<Self>())
             .ok_or(Failure::Blocked)?;
         let mut found = Vec::with_capacity(MINUTES_MAX);
-        let checked = catalog::find(
-            input.root,
-            &mut found,
-            &LoadWindow::all(None),
-            input.operation,
-        )
-        .map_err(Failure::Catalog)?;
+        let checked = catalog::find(input.root, &mut found, &LoadWindow::all(None))
+            .map_err(Failure::Catalog)?;
         found.reverse();
         let path_bytes: usize = found
             .iter()

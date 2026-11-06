@@ -7,7 +7,7 @@ use super::Store;
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 #[test]
-fn a_legacy_root_is_readable_but_a_new_writer_refuses_without_changing_it() {
+fn a_legacy_root_refuses_its_reader_and_a_new_writer_without_changing_it() {
     // Goal: format transition never converts an active or dormant legacy recording in place.
     // Method: keep only legacy identity and an announcement, then compare the root on refusal.
     let serial = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -18,14 +18,15 @@ fn a_legacy_root_is_readable_but_a_new_writer_refuses_without_changing_it() {
     collector::recording::private::atomic_write(&root, "identity", identity).unwrap();
     collector::recording::private::atomic_write(&root, "collector.announcement", b"sentinel\n")
         .unwrap();
-    assert_eq!(
-        collector::recording::read_identity(&root).unwrap(),
-        collector::ring::Identity([1, 2])
-    );
-    let refused = Store::open(&root)
+    let budget = std::sync::Arc::new(crate::resources::ByteBudget::new(1024 * 1024));
+
+    let writer = Store::open(&root).err().unwrap();
+    let reader = crate::canonical::catalog::Catalog::open(&root, &budget)
         .err()
-        .expect("new writer accepted legacy root");
-    assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        .unwrap();
+
+    assert_eq!(writer.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(reader.kind(), std::io::ErrorKind::Unsupported);
     assert_eq!(fs::read(root.join("identity")).unwrap(), identity);
     assert_eq!(
         fs::read(root.join("collector.announcement")).unwrap(),

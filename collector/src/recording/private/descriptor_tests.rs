@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::recording::discovery::tests::allocator_calls_in;
+use crate::allocator_count::allocator_calls_in;
 use std::io::Read;
 use std::process::Command;
 

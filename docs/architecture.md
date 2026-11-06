@@ -87,10 +87,9 @@ ready. Only then does it allocate payload buffers, copy the readings and encode 
 still admits and maps the source on each pass, and releases that mapping before encoding.
 Its memory watchdog stays active between operations, including while the main worker waits.
 
-New recording roots declare separate reader and writer protocol requirements. The reader
-can inspect legacy roots; the writer requires a new root instead of converting legacy data
-in place, and the app's default launch deletes an older recording that no process holds to make
-one. Within one sealed window, Events is one logical table backed by bounded physical
+Recording roots declare separate reader and writer protocol requirements. Readers and writers
+refuse a root of an older format rather than convert it in place, and the app's default launch
+deletes an older recording that no process holds to make a new one. Within one sealed window, Events is one logical table backed by bounded physical
 parts and an index under the same canonical commit. Readers bind each opened part to the
 captured file identity before decoding, then validate row identity and provenance before
 exposing a budgeted frame.

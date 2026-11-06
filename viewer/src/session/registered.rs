@@ -13,7 +13,7 @@ use persistence::resources::ByteBudget;
 use persistence::{Error, Manifest, Result, WindowIdentity};
 
 use super::earlier::{LEAD_IN_SECONDS, LOADED_SECONDS};
-use super::{ContextRange, NS, Session};
+use super::{ContextRange, NS, Session, TimeBounds};
 use crate::cancellation::Operation;
 
 /// The seconds a span holds either side of what a read needs, so a walk along the clock loads a
@@ -49,23 +49,20 @@ pub(super) struct Ends {
 }
 
 impl Registered {
-    /// The catalog of `root`, or none when an older format wrote it.
+    /// The catalog of `root`.
     pub(super) fn open(
         root: &Path,
         budget: &Arc<ByteBudget>,
         operation: &Operation,
-    ) -> Result<Option<Self>> {
-        let opened = registered_retry(operation, || {
+    ) -> Result<Self> {
+        let catalog = registered_retry(operation, || {
             Catalog::open(root, budget).map_err(Error::from)
-        });
-        match opened {
-            Ok(catalog) => Ok(Some(Self {
-                catalog,
-                span: None,
-            })),
-            Err(Error::Io(error)) if error.kind() == io::ErrorKind::Unsupported => Ok(None),
-            Err(error) => Err(error),
-        }
+        })?;
+
+        Ok(Self {
+            catalog,
+            span: None,
+        })
     }
 
     pub(super) fn ends(&self, operation: &Operation) -> Result<Option<Ends>> {
@@ -97,11 +94,11 @@ impl Registered {
         })
     }
 
-    /// Lists the windows of the readings `span` holds, in the order `discover` lists a recording's
-    /// windows. A reading takes its rates only from one a second before it, so the margin around
-    /// what a read needs holds every window those rates come from. Only the windows of `needed` are
-    /// what a read asks for, so damage in the margin leaves its windows unlisted and stops nothing,
-    /// and a read that goes on to reach them finds out then.
+    /// Lists the windows of the readings `span` holds, by run and then publication. A reading takes
+    /// its rates only from one a second before it, so the margin around what a read needs holds
+    /// every window those rates come from. Only the windows of `needed` are what a read asks for,
+    /// so damage in the margin leaves its windows unlisted and stops nothing, and a read that goes
+    /// on to reach them finds out then.
     fn windows(
         &self,
         needed: ContextRange,
@@ -222,10 +219,8 @@ impl Session {
     /// span. A list that changes takes with it everything that names a window by its place.
     pub(crate) fn load_span(&mut self, last_second: u64) -> Result<()> {
         let needed = span_needed(last_second)?;
-        let Some(registered) = &self.registered else {
-            return Ok(());
-        };
-        if registered
+        if self
+            .registered
             .span
             .is_some_and(|span| span_covers(span.loaded, needed))
         {
@@ -233,18 +228,16 @@ impl Session {
         }
 
         let span = span_loaded(last_second)?;
-        let windows = registered.windows(needed, span, &self.operation)?;
+        let windows = self.registered.windows(needed, span, &self.operation)?;
         self.load_span_install(needed, span, windows)
     }
 
     /// Whether the session lists the windows a context ending at `last_second` reads.
     pub(crate) fn span_holds(&self, last_second: u64) -> Result<bool> {
         let needed = span_needed(last_second)?;
-        let Some(registered) = &self.registered else {
-            return Ok(true);
-        };
 
-        Ok(registered
+        Ok(self
+            .registered
             .span
             .is_some_and(|span| span_covers(span.loaded, needed)))
     }
@@ -252,11 +245,7 @@ impl Session {
     /// Refuses a read of `range` that reaches past the windows the session lists, since finding no
     /// readings there would say the recording has none.
     pub(super) fn span_check(&self, range: ContextRange) -> Result<()> {
-        let span = self
-            .registered
-            .as_ref()
-            .and_then(|registered| registered.span);
-        match span {
+        match self.registered.span {
             Some(span) if !span_covers(span.loaded, range) => {
                 Err(Error::Bound("read past the session's span"))
             }
@@ -291,11 +280,7 @@ impl Session {
         *self.app_history_ticks.get_mut() = super::app_history::Ticks::new();
         *self.app_history_kept_headers.get_mut() = super::app_history::KeptHeaders::new();
         self.parts_read.get_mut().take();
-        let registered = self
-            .registered
-            .as_mut()
-            .ok_or(Error::Bound("span of markers"))?;
-        registered.span = Some(Span {
+        self.registered.span = Some(Span {
             needed,
             loaded: span,
         });
@@ -306,41 +291,55 @@ impl Session {
     /// The wall-clock bounds of each listed window. The recording's ends and its count of readings
     /// with no clock come from the catalog, so a window read here adds to neither.
     pub(super) fn span_bounds(&mut self) -> Result<()> {
-        let unknown = self.unknown;
         let mut wall_bounds = Vec::with_capacity(self.windows.len());
         for window in 0..self.windows.len() {
             wall_bounds.push(match self.windows[window].wall_ns {
                 Some(bounds) => Some(bounds),
-                None => self.extent_ticks(window)?,
+                None => self.span_bounds_ticks(window)?,
             });
         }
-        self.unknown = unknown;
         self.wall_bounds = wall_bounds;
 
         Ok(())
     }
 
-    /// Whether the windows the session's span holds on disk are those it lists.
-    pub(super) fn span_lists_every_window(&self) -> Result<bool> {
-        let Some(registered) = &self.registered else {
-            return Err(Error::Bound("span of markers"));
-        };
-        let Some(span) = registered.span else {
-            return Ok(registered.ends(&self.operation)?.is_none());
-        };
+    /// The wall-clock bounds of the ticks of a window whose manifest holds none.
+    fn span_bounds_ticks(&self, window: usize) -> Result<Option<TimeBounds>> {
+        let ticks = self.table(window, "ticks")?;
+        let mut bounds: Option<TimeBounds> = None;
+        for row in &ticks.rows {
+            if let Some(wall) = ticks.integer(row, "wall_ns")? {
+                bounds = Some(match bounds {
+                    Some(bounds) => TimeBounds {
+                        min: bounds.min.min(wall),
+                        max: bounds.max.max(wall),
+                    },
+                    None => TimeBounds {
+                        min: wall,
+                        max: wall,
+                    },
+                });
+            }
+        }
 
-        Ok(registered.windows(span.needed, span.loaded, &self.operation)? == self.windows)
+        Ok(bounds)
     }
 
-    /// Whether `identity`'s window is saved, where a registered recording answers it.
-    pub(crate) fn registered_window_saved(
-        &self,
-        identity: &WindowIdentity,
-    ) -> Result<Option<bool>> {
-        match &self.registered {
-            Some(registered) => registered.window_saved(identity, &self.operation).map(Some),
-            None => Ok(None),
-        }
+    /// Whether the windows the session's span holds on disk are those it lists.
+    pub(crate) fn lists_every_sealed_window(&self) -> Result<bool> {
+        let Some(span) = self.registered.span else {
+            return Ok(self.registered.ends(&self.operation)?.is_none());
+        };
+
+        Ok(self
+            .registered
+            .windows(span.needed, span.loaded, &self.operation)?
+            == self.windows)
+    }
+
+    /// Whether `identity`'s window is saved.
+    pub(crate) fn window_saved(&self, identity: &WindowIdentity) -> Result<bool> {
+        self.registered.window_saved(identity, &self.operation)
     }
 }
 

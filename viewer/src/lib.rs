@@ -18,6 +18,8 @@ mod metric_view;
 mod metrics;
 pub mod recording;
 pub mod ring_tick;
+#[cfg(test)]
+mod root_fixture;
 mod session;
 pub mod store;
 

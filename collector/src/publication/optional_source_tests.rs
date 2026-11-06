@@ -1,7 +1,7 @@
 use super::*;
+use crate::allocator_count::allocator_calls_in;
 use crate::cost::{Snapshot, Source};
 use crate::ioreport::tests::read_tests as ioreport_fixture;
-use crate::recording::discovery::tests::allocator_calls_in;
 use crate::smc::tests::read_tests as smc_fixture;
 
 #[test]

@@ -24,6 +24,9 @@ pub mod system;
 pub mod tracker;
 
 #[cfg(test)]
+mod allocator_count;
+
+#[cfg(test)]
 #[path = "../tests/support/process.rs"]
 mod test_process;
 

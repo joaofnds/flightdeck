@@ -83,7 +83,7 @@ fn brackets_final_numeric_reads_without_heap_activity() {
     let mut output = ExitAcquisition::EMPTY;
     let mut numeric = 0;
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         for source in [Ok(CREATION), Err(CreationError::Gone(3))] {
             acquire_exit_using(
                 42,

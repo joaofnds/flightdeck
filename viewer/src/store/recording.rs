@@ -31,7 +31,6 @@ use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
 use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
-use persistence::layout::{self, Kind, WINDOWS_PER_DAY, WindowKey};
 
 use super::apps::{Kept, TickApps};
 use super::stretch::{Folded, Folding};
@@ -227,7 +226,7 @@ fn load_payload_window_using(
 ) -> persistence::Result<Outcome> {
     operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
-    let discovered = catalog::find(root, &mut found, window, operation);
+    let discovered = catalog::find(root, &mut found, window);
     operation.check()?;
     let checked = match discovered {
         Ok(checked) => checked,
@@ -1158,15 +1157,12 @@ fn find_window(
     for run in runs.iter().rev() {
         let finding = FindRun {
             root,
-            recording,
             run,
             span_ns: (window.seconds + LEAD_IN_SECONDS) * 1_000_000_000,
         };
-        let more = match &catalog {
-            Some(catalog) => finding.find_registered(catalog, &mut oldest_ns, found),
-            None => finding.find(&mut oldest_ns, found),
-        }
-        .map_err(|error| Failure::Commits(error.kind()))?;
+        let more = finding
+            .find(&catalog, &mut oldest_ns, found)
+            .map_err(|error| Failure::Commits(error.kind()))?;
         if !more {
             break;
         }
@@ -1183,18 +1179,18 @@ fn find_window(
     Ok(Continuity::Replace)
 }
 
-/// The catalog of a registered recording, none for an older format, whose windows have markers.
-pub(super) fn find_window_catalog(root: &Path) -> Result<Option<Catalog>, Failure> {
+/// The catalog of the recording at `root`. A root no writer finished setting up is a recording not
+/// there yet, as one with no identity is, however far its setup got.
+pub(super) fn find_window_catalog(root: &Path) -> Result<Catalog, Failure> {
     let budget = Arc::new(persistence::resources::ByteBudget::new(CATALOG_BYTES_MAX));
     let opened = catalog_retry(|| Catalog::open(root, &budget).map_err(persistence::Error::from));
-    match opened {
-        Ok(catalog) => Ok(Some(catalog)),
-        Err(persistence::Error::Io(error)) if error.kind() == io::ErrorKind::Unsupported => {
-            Ok(None)
+    opened.map_err(|error| match error {
+        persistence::Error::Io(error) if error.kind() == io::ErrorKind::NotFound => {
+            Failure::Recording(io::ErrorKind::NotFound)
         }
-        Err(persistence::Error::Io(error)) => Err(Failure::Commits(error.kind())),
-        Err(_) => Err(Failure::Commits(io::ErrorKind::InvalidData)),
-    }
+        persistence::Error::Io(error) => Failure::Commits(error.kind()),
+        _ => Failure::Commits(io::ErrorKind::InvalidData),
+    })
 }
 
 /// The index in `found`, newest first, of the newest minute the store holds whole, which seeds
@@ -1212,15 +1208,16 @@ fn find_predecessor(found: &[Found], since: &super::Newest) -> Option<usize> {
 /// The search for the sealed minutes of one run of the recording.
 struct FindRun<'a> {
     root: &'a Path,
-    recording: Identity,
     run: &'a RunIdentity,
     span_ns: u64,
 }
 
 impl FindRun<'_> {
-    /// Does what `find` does for a registered recording, whose catalog names the minute before a
-    /// minute, so it reads one proof for each minute it finds and no list of them.
-    fn find_registered(
+    /// Finds the run's sealed minutes newer than `oldest_ns` into `found`, newest first, where
+    /// the first minute found sets `oldest_ns`. Returns false at the old boundary and fails
+    /// if another required minute exceeds `found`'s capacity. The catalog names the minute before
+    /// a minute, so this reads one proof for each minute it finds and no list of them.
+    fn find(
         &self,
         catalog: &Catalog,
         oldest_ns: &mut Option<u64>,
@@ -1233,7 +1230,7 @@ impl FindRun<'_> {
                     .window_at_or_before(self.run, last, &mut ReadWork::default())
                     .map_err(persistence::Error::from)
             })
-            .map_err(find_registered_failure)?;
+            .map_err(find_failure)?;
             let Some(manifest) = manifest else {
                 return Ok(true);
             };
@@ -1263,64 +1260,9 @@ impl FindRun<'_> {
 
         Err(io::Error::from(io::ErrorKind::InvalidData))
     }
-
-    /// Finds the run's sealed minutes newer than `oldest_ns` into `found`, newest first, where
-    /// the first minute found sets `oldest_ns`. Returns false at the old boundary and fails
-    /// if another required minute exceeds `found`'s capacity.
-    fn find(&self, oldest_ns: &mut Option<u64>, found: &mut Vec<Found>) -> io::Result<bool> {
-        let run_path = layout::run(self.root, Kind::Commits, self.run.run);
-        let days = match newest_days(&run_path) {
-            Ok(days) => days,
-            Err(error) => {
-                // A run that sealed no minute yet has no commits.
-                if error.kind() == io::ErrorKind::NotFound {
-                    return Ok(true);
-                }
-                return Err(error);
-            }
-        };
-
-        let mut windows = Vec::with_capacity(WINDOWS_PER_DAY_COUNT);
-        for day in days.into_iter().flatten() {
-            windows.clear();
-            find_windows(&run_path.join(format!("{day:020}")), &mut windows)?;
-            windows.sort_unstable_by(|left, right| right.cmp(left));
-
-            for window in &windows {
-                let marker = WindowKey {
-                    run: self.run.run,
-                    window: *window,
-                }
-                .marker(self.root);
-                let manifest = persistence::list_committed(self.root, &marker, self.recording)?;
-                let oldest = *oldest_ns.get_or_insert_with(|| {
-                    manifest
-                        .wall_ns
-                        .map_or(0, |wall| wall.max.saturating_sub(self.span_ns))
-                });
-                if let Some(wall_ns) = manifest.wall_ns {
-                    if wall_ns.max < oldest {
-                        return Ok(false);
-                    }
-                }
-                if found.len() == MINUTES_MAX {
-                    return Err(io::Error::from(io::ErrorKind::InvalidData));
-                }
-                found.push(Found {
-                    run: *self.run,
-                    marker,
-                    wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
-                    publication_end: manifest.publication_end,
-                    previous_source: None,
-                });
-            }
-        }
-
-        Ok(true)
-    }
 }
 
-fn find_registered_failure(error: persistence::Error) -> io::Error {
+fn find_failure(error: persistence::Error) -> io::Error {
     match error {
         persistence::Error::Io(error) => error,
         _ => io::Error::from(io::ErrorKind::InvalidData),
@@ -1329,45 +1271,3 @@ fn find_registered_failure(error: persistence::Error) -> io::Error {
 
 /// The working memory of a load's catalog lookups, each of which reserves its cursor's.
 const CATALOG_BYTES_MAX: usize = 1024 * 1024;
-
-/// The windows a day of a run holds at most.
-const WINDOWS_PER_DAY_COUNT: usize = 1_440;
-
-const _: () = assert!(WINDOWS_PER_DAY == 1_440);
-
-/// The two newest days of the run whose commits are at `run_path`, newest first. The loaded
-/// hour spans at most two, since a minute of a run takes at least a minute of the wall clock.
-fn newest_days(run_path: &Path) -> io::Result<[Option<u64>; 2]> {
-    let mut days = [None, None];
-    layout::visit_names(run_path, |name| -> io::Result<()> {
-        let day = Some(layout::validate_day(name)?);
-        if day > days[0] {
-            days[1] = days[0];
-            days[0] = day;
-        } else {
-            if day > days[1] {
-                days[1] = day;
-            }
-        }
-        Ok(())
-    })?;
-
-    Ok(days)
-}
-
-/// The window of each minute sealed in the day at `day_path`, into `windows`.
-fn find_windows(day_path: &Path, windows: &mut Vec<u64>) -> io::Result<()> {
-    layout::visit_names(day_path, |name| -> io::Result<()> {
-        if windows.len() == WINDOWS_PER_DAY_COUNT {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        }
-
-        // A marker's name is its window's number as the persister names a day, as its own
-        // walk of the markers reads it.
-        let Some(window) = name.strip_suffix(".seal") else {
-            return Err(io::Error::from(io::ErrorKind::InvalidData));
-        };
-        windows.push(layout::validate_day(window)?);
-        Ok(())
-    })
-}

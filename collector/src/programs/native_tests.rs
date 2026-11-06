@@ -21,7 +21,7 @@ fn acquires_this_process_with_real_numeric_data_without_allocating() {
         numeric = Some(crate::processes::read(timebase, pid));
     });
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         acquire(pid, false, &mut scratch, &mut output, || {
             numeric = Some(crate::processes::read(timebase, pid));
         });
@@ -156,7 +156,7 @@ fn associates_actual_final_usage_with_owned_zombie_creation_without_allocating()
     let mut acquired = super::ExitAcquisition::EMPTY;
     let mut numeric = None;
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         super::acquire_exit(pid, &mut acquired, || {
             let mut exited = false;
             numeric = Some(crate::processes::read_exit_usage(

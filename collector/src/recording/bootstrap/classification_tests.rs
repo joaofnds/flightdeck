@@ -321,7 +321,7 @@ fn verify_stable_busy(foreground_transaction: Option<u8>, busy_transaction: u8, 
     .unwrap();
     private::atomic_write_in(&root, "namespace-state", &state).unwrap();
     let mut scratch = [0; 4097];
-    let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let calls = crate::allocator_count::allocator_calls_in(|| {
         let result = classify(&root, &mut scratch).unwrap();
         if corrupt {
             assert_eq!(result, Classification::Corrupt);

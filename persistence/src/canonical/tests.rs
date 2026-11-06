@@ -314,6 +314,68 @@ fn a_damaged_recording_is_explicit_corruption_and_not_another_format() {
 
     assert_eq!(opened.err().unwrap().kind(), io::ErrorKind::InvalidData);
 }
+macro_rules! a_root_no_writer_finished_setting_up_holds_no_recording {
+    ($($name:ident: $prepare:expr,)+) => {$(
+        #[test]
+        fn $name() {
+            // Goal: a reader can tell a recording still to come from one it must refuse.
+            // Method: leave a root at one stage of its setup, then open its catalog.
+            let root = std::env::temp_dir().join(format!(
+                "fd-unfinished-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            private::create_private_dir(&root).unwrap();
+            let prepare: fn(&std::path::Path) = $prepare;
+            prepare(&root);
+
+            let opened = catalog::Catalog::open(&root, &budget());
+
+            assert_eq!(opened.err().unwrap().kind(), io::ErrorKind::NotFound);
+            fs::remove_dir_all(root).unwrap();
+        }
+    )+};
+}
+
+a_root_no_writer_finished_setting_up_holds_no_recording! {
+    a_root_with_nothing_in_it_holds_no_recording_yet: |_root| {},
+    a_root_with_only_its_setup_record_holds_no_recording_yet: |root| {
+        let directory = PrivateDirectory::open(root).unwrap();
+        let mut bytes = [0; 64];
+        bootstrap::codec::encode_bootstrap(Identity([1, 2]), &mut bytes).unwrap();
+        private::atomic_write_in(&directory, "bootstrap", &bytes).unwrap();
+    },
+    a_root_whose_setup_stopped_after_its_identity_holds_no_recording_yet: |root| {
+        let directory = PrivateDirectory::open(root).unwrap();
+        let lock = FileLock::try_lock_in(&directory, "registration.lock").unwrap();
+        let recording = bootstrap::initialize(&directory, &lock, &mut [0; 4097]).unwrap();
+        let mut bytes = [0; 64];
+        bootstrap::codec::encode_bootstrap(recording, &mut bytes).unwrap();
+        private::atomic_write_in(&directory, "bootstrap", &bytes).unwrap();
+    },
+}
+
+#[test]
+fn a_recording_of_an_older_format_is_refused_as_unsupported() {
+    // Goal: no reader of this version takes a recording it cannot read for an empty one.
+    // Method: lay out a root as the previous format left it, then open its catalog.
+    let root = std::env::temp_dir().join(format!(
+        "fd-older-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    private::create_private_dir(&root).unwrap();
+    let identity =
+        b"flightdeck-recording-1\n00000001\n00000001\n00000000000000010000000000000002\n";
+    private::atomic_write(&root, "identity", identity).unwrap();
+
+    let opened = catalog::Catalog::open(&root, &budget());
+
+    assert_eq!(opened.err().unwrap().kind(), io::ErrorKind::Unsupported);
+    assert_eq!(fs::read(root.join("identity")).unwrap(), identity);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn raw_metadata_substitution_is_explicit_corruption() {
     // Goal: a path with equal bytes cannot replace the exact gate source inode.

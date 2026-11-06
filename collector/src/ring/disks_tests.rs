@@ -294,7 +294,7 @@ fn publishes_and_reads_disks_without_rust_heap_activity() {
     let mut reader = RingReader::open(&fixture.place.lock_path).unwrap();
     let mut tick = Tick::new(&fixture.writer.layout);
 
-    let calls = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let calls = crate::allocator_count::allocator_calls_in(|| {
         fixture.publish(Some(&snapshot));
         reader.read_into(&mut tick).unwrap();
     });

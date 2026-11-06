@@ -564,7 +564,7 @@ impl Drop for Reporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recording::discovery::tests::allocator_calls_in;
+    use crate::allocator_count::allocator_calls_in;
     use std::path::PathBuf;
 
     static NEXT: AtomicU64 = AtomicU64::new(0);

@@ -126,15 +126,21 @@ fn a_verified_window_stops_being_readable_once_its_marker_is_gone() {
 
 #[test]
 fn opening_refuses_a_window_sealed_for_another_recording() {
-    // Goal: reading only markers at open still refuses a window from another recording.
+    // Goal: a recording whose identity no longer matches its files is refused as damaged.
     // Method: seal a window, give the recording another identity, then open it.
     let mut fixture = Fixture::new();
     fixture.publish(1001);
     fixture.seal();
     let mut other = collector::recording::read_identity(&fixture.root).unwrap();
+    let text = collector::recording::identity_text(other).to_string();
     other.0[0] ^= 1;
-    let text = collector::recording::identity_text(other);
-    std::fs::write(fixture.root.join("identity"), format!("{text}\n")).unwrap();
+    let path = fixture.root.join("identity");
+    let identity = std::fs::read_to_string(&path).unwrap();
+    let changed = identity.replace(
+        &text,
+        &collector::recording::identity_text(other).to_string(),
+    );
+    std::fs::write(&path, changed).unwrap();
 
     let opened = Session::open(&fixture.root);
 
@@ -147,9 +153,8 @@ fn opening_refuses_a_window_sealed_for_another_recording() {
 
 #[test]
 fn opening_lists_every_sealed_minute_in_order() {
-    // Goal: an open lists each sealed window once and in publication order, however the
-    // markers are split between the threads that read them.
-    // Method: seal more minutes than there are reader threads, open, and list their minutes.
+    // Goal: an open lists each sealed window once and in publication order.
+    // Method: seal several minutes, open, and list their minutes.
     let count = u64::try_from(MINUTES).unwrap();
     let fixture = sealed_minutes(count);
 
@@ -166,7 +171,7 @@ fn opening_lists_every_sealed_minute_in_order() {
 #[test]
 fn opening_refuses_a_broken_marker_after_many_sound_ones() {
     // Goal: a marker that fails its read refuses the open wherever it sits in the listing.
-    // Method: seal more minutes than there are reader threads, break the last marker, open.
+    // Method: seal several minutes, break the last marker, open.
     let fixture = sealed_minutes(u64::try_from(MINUTES).unwrap());
     let last = Session::open(&fixture.root).unwrap().windows.pop().unwrap();
     let marker = fixture.marker(last.identity.window);
@@ -183,7 +188,7 @@ fn opening_refuses_a_broken_marker_after_many_sound_ones() {
 
 #[test]
 fn a_session_lists_every_sealed_window_until_another_is_sealed() {
-    // Goal: a walk of the markers' names tells a session whether a listing would change it.
+    // Goal: the catalog tells a session whether a listing would change it.
     // Method: open after the first minute seals, ask, seal the second minute, and ask again.
     let mut fixture = Fixture::new();
     fixture.publish(1001);
@@ -232,10 +237,8 @@ pub(crate) fn delete_window(root: &Path, window: &Manifest) {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-/// More minutes than `discover` has reader threads, so a thread reads several markers. The
-/// fixture's reader takes at most eight.
+/// The most the fixture's reader takes.
 const MINUTES: usize = 8;
-const _: () = assert!(MINUTES > super::DISCOVER_THREADS);
 
 fn sealed_minutes(count: u64) -> Fixture {
     let mut fixture = Fixture::new();

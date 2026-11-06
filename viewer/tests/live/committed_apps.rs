@@ -87,7 +87,7 @@ fn keeps_live_app_readings_when_committed_history_becomes_unreadable() {
     let kind = viewer::live_app_response::KeyKind::Bundle;
     let key = b"/Apps/Current.app";
     let before = session.app_history(kind, key).unwrap();
-    let data = persistence::layout::base(&fixture.root, persistence::layout::Kind::Data);
+    let data = fixture.root.join("data");
     let withheld = fixture.root.join("withheld-data");
     std::fs::rename(&data, &withheld).unwrap();
 

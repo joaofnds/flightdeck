@@ -12,7 +12,6 @@ pub mod event_recovery;
 pub mod event_table;
 pub mod identity;
 mod identity_encoder;
-pub mod layout;
 mod metadata;
 mod optional_column;
 mod owned_identity;
@@ -38,8 +37,8 @@ pub use store::{
     InventoryStep, InventoryWork, LossPublication, NormalProof, NormalPublication,
     OrdinaryRecovery, OriginalFile, OriginalInventory, OriginalPlacement, ProofStep,
     PublicationLedger, PublicationStep, PublicationWork, RegisteredAttempt, RegisteredFile,
-    RowPublication, RowPublicationStep, Store, commitment_path, list_committed,
-    ownership_contended, read_committed, reread_committed,
+    RowPublication, RowPublicationStep, Store, commitment_path, ownership_contended,
+    read_committed, reread_committed,
 };
 
 pub use encoder::{

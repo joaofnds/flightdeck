@@ -11,7 +11,7 @@ fn skips_payload_for_an_already_exited_process_when_its_start_fills_the_tick() {
     let before = tracker.counts();
     let attempted = tracker.exit_diagnostics().attempted;
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         tracker.observe(&[pid], &mut Meter::default()).unwrap();
     });
     let added = tracker.counts().since(&before);
@@ -49,7 +49,7 @@ fn skips_payload_for_a_watched_exit_when_its_start_fills_the_tick() {
     let dropped = tracker.counts().dropped_exits;
     tests::release(&mut child.0);
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         follow_until_exited(&mut tracker, pid);
     });
     let retained: Vec<_> = tracker.drain_observations().collect();
@@ -304,7 +304,7 @@ fn retains_the_observation_prefix_and_counts_each_rejected_kind_once() {
     ];
     let before = tracker.counts();
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         let wake = follow_until_handle(
             &notices,
             &mut tracker.events,

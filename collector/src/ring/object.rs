@@ -1001,7 +1001,7 @@ mod tests {
     fn formats_every_decimal_width_in_fixed_generation_storage() {
         // Goal: generation naming covers zero through the largest u64 without heap work.
         // Method: format boundary values into the shared buffer while counting allocations.
-        use crate::recording::discovery::tests::allocator_calls_in;
+        use crate::allocator_count::allocator_calls_in;
         let mut buffer = [0; GENERATION_BUFFER_SIZE];
 
         let calls = allocator_calls_in(|| {

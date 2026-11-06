@@ -630,7 +630,7 @@ fn drops_the_events_past_the_ring_s_room_without_allocating() {
     let mut children: Vec<HeldChild> = (0..5).map(|_| HeldChild::new()).collect();
     let deadline = crate::clock::now() + timebase.ticks(10_000_000).unwrap();
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         publication
             .wait_until(&mut collector, deadline, &mut meter, &mut harness.writer)
             .unwrap();
@@ -1105,7 +1105,7 @@ fn publishes_unavailable_process_gpu_without_losing_system_readings_or_allocatin
         allocated_bytes: Some(8192),
     };
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         publication
             .read(&mut collector, &mut meter, &mut harness.writer, None)
             .unwrap();

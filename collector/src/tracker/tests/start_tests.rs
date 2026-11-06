@@ -76,7 +76,7 @@ fn skips_program_capture_for_a_start_that_cannot_be_retained() {
     let mut child = tests::ExitChild(tests::spawn_held("/bin/cat", &[]));
     let pid = child.0.id().cast_signed();
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         tracker
             .observe_with_identity(&[pid], &mut meter, &mut sweep, &mut harness.writer)
             .unwrap();
@@ -120,7 +120,7 @@ fn captures_program_for_a_start_in_the_last_available_slot() {
     let mut creation = Err(programs::CreationError::NotRead);
     programs::read_creation(pid, false, &mut creation);
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         tracker
             .observe_with_identity(
                 &[pid],
@@ -187,7 +187,7 @@ fn retains_exec_and_exit_after_dropping_the_start_and_draining() {
     let mut exec = None;
     let mut exit = None;
 
-    let exec_allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let exec_allocations = crate::allocator_count::allocator_calls_in(|| {
         exec = Some(wait_for_exec(
             &mut tracker,
             &mut meter,
@@ -197,7 +197,7 @@ fn retains_exec_and_exit_after_dropping_the_start_and_draining() {
         ));
     });
     tests::release(&mut child.0);
-    let exit_allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let exit_allocations = crate::allocator_count::allocator_calls_in(|| {
         exit = Some(tests::follow_to_exit_observation(&mut tracker, pid));
     });
     child.0.wait().unwrap();
@@ -244,7 +244,7 @@ fn preserves_the_start_and_coalition_when_its_new_program_exhausts_the_dictionar
     let mut creation = Err(programs::CreationError::NotRead);
     programs::read_creation(pid, false, &mut creation);
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         tracker
             .observe_with_identity(
                 &[pid],
@@ -334,7 +334,7 @@ fn preserves_a_gone_discovery_reason_without_allocating() {
     };
     let mut reads = 0;
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         sweep.capture(&mut observation, &mut harness.writer, || reads += 1);
     });
 
@@ -376,7 +376,7 @@ fn retains_discovered_program_after_the_child_has_exited_without_allocating() {
     let mut bytes = None;
     programs::split_program(&scratch[..length], &mut bytes).unwrap();
 
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         tracker
             .observe_with_identity(
                 &[pid],
@@ -496,7 +496,7 @@ fn captures_the_program_during_the_wait_that_observes_exec() {
         .write_all(b"continue\n")
         .unwrap();
     let mut observation = None;
-    let allocations = crate::recording::discovery::tests::allocator_calls_in(|| {
+    let allocations = crate::allocator_count::allocator_calls_in(|| {
         observation = Some(wait_for_exec(
             &mut tracker,
             &mut meter,
