@@ -27,6 +27,30 @@ fn a_window_keeps_the_ranks_the_replay_of_its_minute_gives() {
 }
 
 #[test]
+fn a_partly_expired_minute_keeps_no_ranks_and_its_replay_gives_the_readings_still_covered() {
+    // Goal: the ranks a window keeps cover its whole minute, so one with an expired reading is read
+    // from its readings, and those give the ranks of the readings the period covers and no others.
+    // Method: seal three observations with their ranks, place the cutoff on the second, and read
+    // both what the window keeps and what a replay gives.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1000);
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
+    let session = Session::open(&fixture.root).unwrap();
+    let whole = kept_ranks(&session, 1002);
+    crate::session::retention_tests::expire_before(&fixture.root, 1_000_000_000);
+
+    let session = Session::open(&fixture.root).unwrap();
+    let kept = kept_ranks(&session, 1002);
+    let replayed = replayed_ranks(&session, &whole[2]);
+
+    assert_eq!(whole.len(), 3);
+    assert_eq!(kept, []);
+    assert_eq!(replayed, whole[1..]);
+}
+
+#[test]
 fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before() {
     // Goal: the first observation of a window ranks by the rates it takes from the last
     // observation of the sealed minute before it, as the replay ranks it.

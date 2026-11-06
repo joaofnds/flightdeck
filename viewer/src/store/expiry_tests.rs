@@ -24,6 +24,14 @@ fn wall_seconds(view: &View) -> Vec<u64> {
         .collect()
 }
 
+/// The wall second of the tick each second's Apps belong to.
+fn apps_seconds(view: &View) -> Vec<u64> {
+    view.apps
+        .iter()
+        .map(|apps| apps.observation.unwrap().wall_ns.unwrap() / NS)
+        .collect()
+}
+
 #[test]
 fn a_view_holds_no_second_the_period_no_longer_covers() {
     // Goal: a store started on a partly expired minute hands over only the seconds still covered,
@@ -36,7 +44,7 @@ fn a_view_holds_no_second_the_period_no_longer_covers() {
     let view = view_where(&store, |view| !view.seconds.is_empty());
 
     assert_eq!(wall_seconds(&view), [1006, 1007, 1008]);
-    assert_eq!(view.apps.len(), view.seconds.len());
+    assert_eq!(apps_seconds(&view), [1006, 1007, 1008]);
     assert_eq!(view.alternatives(1005), []);
     assert_eq!(view.alternatives(1006).len(), 1);
 }

@@ -32,6 +32,43 @@ fn restores_the_history_a_replay_gives_from_the_parts_a_window_keeps() {
 }
 
 #[test]
+fn a_read_stopped_past_the_grace_holds_up_no_removal_and_the_next_read_goes_on() {
+    // Goal: a read stopped partway pins nothing. Removal takes what it was reading without waiting
+    // for it, the read ends in an error rather than hanging or returning less than it read, and
+    // the next read shows what the period covers.
+    // Method: stop an App's history read between reading its minutes and checking them, take a
+    // removal pass from there that takes one of them, and read the history again.
+    const NS: u64 = 1_000_000_000;
+    let fixture = crate::session::retention_tests::saved_across_three_minutes(
+        &crate::live::identity_fixture::Underived,
+    );
+    let session = Session::open(&fixture.root).unwrap();
+    let mut selected = selected(&session, 1005);
+    selected.stamp.publication = 5;
+    selected.stamp.continuous_ns = Some(121 * NS);
+    selected.stamp.awake_ns = Some(121 * NS);
+    selected.run_tick = 121;
+    let ending = Selected::ending_at(selected).unwrap();
+    let root = fixture.root.clone();
+    let removed = std::rc::Rc::new(std::cell::Cell::new(0));
+    let removed_at_stop = std::rc::Rc::clone(&removed);
+    *session.before_app_history_install.borrow_mut() = Some(Box::new(move || {
+        removed_at_stop.set(crate::session::retention_tests::expire_and_remove(
+            &root,
+            121 * NS,
+        ));
+    }));
+
+    let stopped = session.with_app_history(&ending, &CURRENT, points);
+    let next = session.with_app_history(&ending, &CURRENT, points).unwrap();
+
+    assert_eq!(removed.get(), 1);
+    assert!(stopped.is_err());
+    assert_eq!(next.as_array().unwrap().len(), 1);
+    assert_eq!(next[0]["observation"], selected.json());
+}
+
+#[test]
 fn a_partly_expired_minute_gives_only_the_history_of_its_readings_still_covered() {
     // Goal: the parts a window keeps add up its whole minute, so one with an expired reading gives
     // its history from its readings, and each reading still covered keeps the point it had.

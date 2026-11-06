@@ -1,6 +1,5 @@
 //! What a session returns once the retention period has passed some of its readings.
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -648,47 +647,21 @@ fn a_reader_opening_beside_removal_meets_no_damage() {
 }
 
 #[test]
-fn a_reader_hung_on_an_open_file_stops_no_removal() {
-    // Goal: a read that hangs pins neither the recording nor the file's name, and what it holds
-    // open stays readable to it.
-    // Method: hold a saved table open, as a hung read does, remove its window, and read the table
-    // to its end.
-    let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
-    let oldest = Session::open(&fixture.root).unwrap().windows[0].clone();
-    let table = fixture
-        .root
-        .join(&oldest.data_directory)
-        .join("ticks.parquet");
-    let mut hung = std::fs::File::open(&table).unwrap();
-
-    let removed = expire_and_remove(&fixture.root, 200 * NS);
-
-    let mut bytes = Vec::new();
-    hung.read_to_end(&mut bytes).unwrap();
-    assert!(removed > 0);
-    assert!(!table.exists());
-    assert!(bytes.starts_with(b"PAR1"));
-}
-
-#[test]
 fn a_cancelled_read_leaves_nothing_in_the_way_of_removal_or_the_next_read() {
     // Goal: a read given up holds nothing, so removal goes on and the session goes on reading
     // whatever the period still covers.
-    // Method: cancel a session's reads, remove what expired, and read through a new epoch.
+    // Method: cancel a page partway through its rows, remove what expired, and read through a new
+    // epoch of the same session.
     let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
     let cancellation = Arc::new(crate::Cancellation::default());
-    let mut session = Session::open_with(&fixture.root, Arc::clone(&cancellation), 0).unwrap();
-    cancellation.cancel().unwrap();
-    let cancelled = session.select(1005, 0);
+    let mut session = LiveSession::open_with(&fixture.root, Arc::clone(&cancellation), 0).unwrap();
+    session.select(1005, 0).unwrap();
+    cancellation.interrupt_after_page_row();
+    let cancelled = session.page("ticks", 0);
 
     let removed = expire_and_remove(&fixture.root, 121 * NS);
-    let mut reopened = Session::open_with(
-        &fixture.root,
-        Arc::clone(&cancellation),
-        cancellation.epoch(),
-    )
-    .unwrap();
-    let selected = reopened.select(1005, 0).unwrap();
+    session.begin(cancellation.epoch()).unwrap();
+    let selected = session.select(1005, 0).unwrap();
 
     assert!(matches!(
         cancelled,
@@ -706,14 +679,10 @@ fn a_reader_leaves_nothing_on_disk_that_a_crash_could_strand() {
     let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
     let before = names_under(&fixture.root);
 
-    Session::open(&fixture.root)
-        .unwrap()
-        .select(1005, 0)
-        .unwrap();
-    LiveSession::open(&fixture.root)
-        .unwrap()
-        .select(1005, 0)
-        .unwrap();
+    let mut session = Session::open(&fixture.root).unwrap();
+    session.select(1005, 0).unwrap();
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    live.select(1005, 0).unwrap();
 
     assert_eq!(names_under(&fixture.root), before);
 }
