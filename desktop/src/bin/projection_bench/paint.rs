@@ -50,6 +50,12 @@ pub fn run(arguments: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The points of a chart a capture holds.
+fn points() -> usize {
+    usize::try_from(viewer::CHARTED_SECONDS)
+        .unwrap_or_else(|_| unreachable!("the seconds of a chart fit a supported pointer"))
+}
+
 fn decode(value: &Value) -> Result<Vec<Panel>, Box<dyn std::error::Error>> {
     let mut values = value
         .as_array()
@@ -80,17 +86,17 @@ fn decode(value: &Value) -> Result<Vec<Panel>, Box<dyn std::error::Error>> {
             continue;
         }
 
-        if panel.positions.as_ref().map(Vec::len) != Some(900) {
-            return Err("Paint comparison requires 900 positions per panel".into());
+        if panel.positions.as_ref().map(Vec::len) != Some(points()) {
+            return Err("Paint comparison requires a position per charted second".into());
         }
 
-        if panel.segments.as_ref().map(Vec::len) != Some(900) {
-            return Err("Paint comparison requires 900 segments per panel".into());
+        if panel.segments.as_ref().map(Vec::len) != Some(points()) {
+            return Err("Paint comparison requires a segment per charted second".into());
         }
 
         for line in &panel.lines {
-            if line.values.len() != 900 {
-                return Err("Paint comparison requires 900 values per line".into());
+            if line.values.len() != points() {
+                return Err("Paint comparison requires a value per charted second".into());
             }
         }
     }
@@ -203,7 +209,11 @@ fn varied_case(mut combined: Panel) -> Case {
             }
         }
     }
-    combined.segments = Some((0..900).map(|index| u64::from(index >= 450)).collect());
+    combined.segments = Some(
+        (0..points())
+            .map(|index| u64::from(index >= points() / 2))
+            .collect(),
+    );
     let hidden = vec![combined.lines[5].name.clone()];
     Case {
         name: "stacked-negative-gaps-segments-hidden",
@@ -250,7 +260,7 @@ fn measure(case: &Case, iterations: u32) -> io::Result<Value> {
         "{}",
         json!({"mode":"paint-preparation", "case":case.name,
         "panels":case.panels.len(), "series":case.panels.iter().map(|panel| panel.lines.len())
-            .sum::<usize>(), "source_points":900, "measurements":measurements,
+            .sum::<usize>(), "source_points":points(), "measurements":measurements,
         "peak_pick_ns":peak_pick_ns(case),
         "counter":"Rust GlobalAlloc requests during production prepare_lines only",
         "scope":"Prepared float bits/geometry/nulls/segments; excludes paths, GPU and pixels"})
@@ -268,7 +278,7 @@ fn peak_pick_ns(case: &Case) -> u128 {
         .map(|panel| Panel {
             window: Some(TimeWindow {
                 first: 1_000_000,
-                span: 900,
+                span: viewer::CHARTED_SECONDS,
             }),
             ..panel.clone()
         })
