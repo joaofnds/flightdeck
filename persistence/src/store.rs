@@ -30,7 +30,7 @@ pub use inventory::{
     BatchFact, FileIdentity, IndexFact, InventoryStep, InventoryWork, OriginalFile,
     OriginalInventory, OriginalPlacement,
 };
-pub(crate) use restage::Interrupted;
+pub(crate) use restage::{Interrupted, Kept};
 mod publication_ledger;
 pub use publication::{
     LossPublication, NormalProof, NormalPublication, ProofStep, PublicationStep, PublicationWork,

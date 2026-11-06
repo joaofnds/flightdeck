@@ -12,6 +12,7 @@ use crate::canonical::catalog::{Catalog, EventObject};
 use crate::resources::ByteBudget;
 use crate::sealed_apps::SealedApps;
 use crate::store::PublicationStep;
+use crate::transaction::normal::NormalState;
 use crate::{Encoder, Store};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -21,6 +22,9 @@ const HEADER_PUBLICATION_NEWEST: usize = 4;
 
 /// More passes than a worker takes from any interrupted attempt to the end of the run.
 const WORKER_PASSES_MAX: u32 = 8;
+
+/// More steps than publishing a run's loss takes.
+const PUBLICATION_STEPS_MAX: u32 = 1 << 20;
 
 /// A run that ended with nothing readable: its one-slot ring overwrote its only finished reading
 /// while the reading after it never finished, and it published no events.
@@ -90,6 +94,20 @@ impl LostRun {
     /// Takes `steps` steps of publishing the run's loss, or all it takes, then ends as a process
     /// that ended does, and gives the steps it took.
     fn interrupted_publication(&self, steps: u32) -> u32 {
+        self.interrupted_publication_when(|taken| taken == steps)
+    }
+
+    /// Ends the run's publication once the attempt in the slot has chosen a census.
+    fn interrupted_at_census(&self) {
+        let recording = Store::open(&self.root).unwrap().recording();
+        let slot = self.root.join("foreground");
+        self.interrupted_publication_when(|_taken| {
+            let bytes = std::fs::read(&slot).unwrap();
+            NormalState::decode(&bytes, recording).is_ok_and(|state| state.census.kind == 1)
+        });
+    }
+
+    fn interrupted_publication_when(&self, mut stop: impl FnMut(u32) -> bool) -> u32 {
         let budget = Arc::new(ByteBudget::new(1 << 28));
         let store = Store::open(&self.root).unwrap();
         let mut state = RunState::default();
@@ -102,13 +120,43 @@ impl LostRun {
             .register_attempt_from_frontier(&input, &mut reader, frontier)
             .unwrap();
         let mut proof = attempt.prove_loss(reader, &budget).unwrap();
-        for step in 0..steps {
-            if proof.step().unwrap() == PublicationStep::Idle {
+        for step in 0..PUBLICATION_STEPS_MAX {
+            if stop(step) || proof.step().unwrap() == PublicationStep::Idle {
                 return step;
             }
         }
 
-        steps
+        PUBLICATION_STEPS_MAX
+    }
+
+    /// Finishes from a new store what no run can, which takes no source, and expects a free slot.
+    fn expect_slot_freed(&self) {
+        let store = Store::open(&self.root).unwrap();
+
+        super::persist_unowned(&store, 0).unwrap();
+
+        assert!(store.interrupted().unwrap().is_none());
+        assert!(
+            std::fs::read_dir(self.root.join("recovery-data"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    /// Whatever a process left in the slot's waiting state, giving up the attempt frees the slot.
+    fn expect_slot_freed_beside(&self, waiting: &[u8]) {
+        use std::io::Write;
+        self.interrupted_at_census();
+        let mut file = collector::recording::private::open_private_file(
+            &self.root.join("foreground.pending"),
+            true,
+        )
+        .unwrap();
+        file.write_all(waiting).unwrap();
+        drop(file);
+
+        self.expect_slot_freed();
     }
 
     fn only_object(&self) -> EventObject {
@@ -218,7 +266,6 @@ fn a_loss_object_interrupted_along_its_publication_converges() {
     // store. Each drop costs most of a second, so walking all of a publication's 300 steps takes
     // minutes.
     const DROPS: u32 = 24;
-    const PUBLICATION_STEPS_MAX: u32 = 1 << 20;
     let total = {
         let lost = LostRun::new();
         lost.interrupted_publication(PUBLICATION_STEPS_MAX)
@@ -248,4 +295,78 @@ fn a_loss_object_interrupted_along_its_publication_converges() {
             "after {steps} steps"
         );
     }
+}
+
+#[test]
+fn a_loss_interrupted_along_its_publication_frees_the_slot_once_its_source_is_gone() {
+    // Goal: a process that ends anywhere in publishing a run's loss, whose source then goes, leaves
+    // nothing that keeps the other runs waiting (P02.3).
+    // Method: drop a publication after each of an even spread of its steps and finish in a new
+    // store, once more for the attempt that has chosen a census. Each drop costs most of a second.
+    const DROPS: u32 = 8;
+    let total = LostRun::new().interrupted_publication(PUBLICATION_STEPS_MAX);
+    for drop in 0..=DROPS {
+        let lost = LostRun::new();
+        lost.interrupted_publication(total * drop / DROPS);
+        let store = Store::open(&lost.root).unwrap();
+
+        super::persist_unowned(&store, 0).unwrap();
+
+        assert!(store.interrupted().unwrap().is_none());
+    }
+}
+
+#[test]
+fn a_loss_with_a_census_and_no_source_frees_the_slot() {
+    // Goal: nothing can prove what a run lost once its source goes, so its census holds nothing up.
+    // Method: end the publication once the slot names a census, and finish in a new store.
+    let lost = LostRun::new();
+    lost.interrupted_at_census();
+
+    lost.expect_slot_freed();
+}
+
+#[test]
+fn a_loss_given_up_after_its_object_went_frees_the_slot() {
+    // Goal: a process that ends between removing the object and clearing the slot leaves work the
+    // next one finishes.
+    // Method: remove the object as that process did, and finish in a new store.
+    let lost = LostRun::new();
+    lost.interrupted_at_census();
+    let object = std::fs::read_dir(lost.root.join("recovery-data"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_dir_all(object).unwrap();
+
+    lost.expect_slot_freed();
+}
+
+#[test]
+fn a_loss_given_up_beside_a_whole_idle_state_frees_the_slot() {
+    // Goal: a process that ends while clearing the slot leaves work the next one finishes.
+    // Method: leave the Idle state it wrote beside the slot, and finish in a new store.
+    let lost = LostRun::new();
+    let recording = Store::open(&lost.root).unwrap().recording();
+    let mut idle = [0; 4096];
+    collector::recording::bootstrap::codec::encode_idle(
+        recording,
+        collector::recording::bootstrap::codec::SlotKind::Foreground,
+        &mut idle,
+    )
+    .unwrap();
+
+    lost.expect_slot_freed_beside(&idle);
+}
+
+#[test]
+fn a_loss_given_up_beside_a_short_state_frees_the_slot() {
+    // Goal: the census's next state, torn as a process that ended leaves it, is intent and not
+    // authority, so it does not stop the slot clearing.
+    // Method: leave a short state beside the slot, and finish in a new store.
+    let lost = LostRun::new();
+
+    lost.expect_slot_freed_beside(&[7; 16]);
 }

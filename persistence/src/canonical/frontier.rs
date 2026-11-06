@@ -360,7 +360,7 @@ fn source_value(candidate: &AdmittedCanonical, ordered_window: Option<u64>) -> S
         timing: metadata.timing(),
         trailing_unknown: metadata.trailing_unknown,
         unknown_provenance: metadata.loss.inherited.unknown.clone(),
-        complete: metadata.certified_terminal(),
+        complete: metadata.certified_terminal() || metadata.kept_terminal(),
     }
 }
 fn choose(

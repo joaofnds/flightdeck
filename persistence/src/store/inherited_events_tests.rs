@@ -306,11 +306,11 @@ mod inherited_events_row_recovery_preserves_exact_fields {
         for _ in 0..20000 {
             match owner.step().unwrap() {
                 RowPublicationStep::Continue => {}
-                RowPublicationStep::Idle => panic!("lost boundary cannot clear authority"),
-                RowPublicationStep::Unresolved => {
+                RowPublicationStep::Idle => {
                     done = true;
                     break;
                 }
+                RowPublicationStep::Unresolved => panic!("a lost boundary clears the slot"),
             }
         }
         assert!(done);

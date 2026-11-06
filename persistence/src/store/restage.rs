@@ -2,7 +2,7 @@
 
 use super::attempt::{TABLE_FILES, validate_terminal_source};
 use super::inventory::{BatchFact, InventoryStep, OriginalFile};
-use super::{RegisteredAttempt, Store, publication_control};
+use super::{RegisteredAttempt, StagingPermit, Store, publication_control};
 use crate::canonical::CanonicalMetadata;
 use crate::event_recovery::{Batch, batch_name};
 use crate::resources::ByteBudget;
@@ -12,6 +12,7 @@ use collector::recording::private::PrivateDirectory;
 use collector::ring::RunIdentity;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// More inventory passes than the name scan and every numbered position take.
 const INVENTORY_STEPS_MAX: u32 = 1 << 16;
@@ -43,6 +44,8 @@ pub(crate) enum Interrupted {
     Publication,
     /// A run's end with nothing but what it lost, which its source may still have to prove.
     Loss(RunIdentity),
+    /// Saved rows on their way to a fragment, which takes no source.
+    Rows,
 }
 
 impl Store {
@@ -64,12 +67,17 @@ impl Store {
         else {
             return Ok(None);
         };
-        if state.row_plan.is_some() || state.input.is_finite() {
+        if state.input.is_finite() {
             return Err(interrupted_without_route());
+        }
+        if state.row_plan.is_some() {
+            return Ok(Some(Interrupted::Rows));
         }
         if state.census.kind != 0 || state.salvage.is_some() {
             return if matches!(state.input.operation, AttemptOperation::Terminal { .. }) {
                 Ok(Some(Interrupted::Loss(state.input.run)))
+            } else if state.salvage.is_none() {
+                Ok(Some(Interrupted::Rows))
             } else {
                 Err(interrupted_without_route())
             };
@@ -100,6 +108,15 @@ fn interrupted_without_route() -> io::Error {
         io::ErrorKind::Unsupported,
         "interrupted attempt has no worker route",
     )
+}
+
+/// What is left to publish of an attempt whose source can no longer supply its window.
+pub(crate) enum Kept {
+    Nothing,
+    /// Saved rows on their way to a fragment.
+    Rows,
+    /// A terminal's saved rows, whose proof is now whole.
+    Proof,
 }
 
 /// What an interrupted ordinary attempt left in its registered directories.
@@ -145,6 +162,70 @@ impl Store {
 
         attempt.abandon(&saved)?;
         Ok(true)
+    }
+
+    /// Takes the tables and any short proof from an attempt whose source can no longer supply its
+    /// window, which no reader could reach without a proof, and clears the slot if that leaves
+    /// nothing. Says whether rows are left to keep. The tables go first, so a process that ends
+    /// part way finds the same attempt again and this converges.
+    pub(crate) fn keep_only_rows(&self, budget: &Arc<ByteBudget>) -> crate::Result<Kept> {
+        let mut attempt = self.resume_attempt()?;
+        let terminal = matches!(attempt.input.operation, AttemptOperation::Terminal { .. });
+        if !terminal {
+            attempt.restage_tables()?;
+        }
+        restage_remove(attempt.original_directory(), "metadata")?;
+        attempt.original_directory().full_sync()?;
+        let saved = attempt.saved(budget)?;
+        if saved.nothing() {
+            attempt.abandon(&saved)?;
+            return Ok(Kept::Nothing);
+        }
+        if !terminal {
+            return Ok(Kept::Rows);
+        }
+        if let Some(ordinal) = saved.torn {
+            restage_remove(attempt.original_directory(), &batch_name(ordinal))?;
+        }
+        attempt.write_kept_terminal(&saved.batches)?;
+
+        Ok(Kept::Proof)
+    }
+
+    /// Clears the slot of a terminal that began counting what it lost and whose source is gone, so
+    /// that nothing can prove the count. Only a terminal with no rows goes that way, so all it can
+    /// leave is its census, a torn first batch and a short proof. They go before the slot, so a
+    /// process that ends between the two finds the same attempt again.
+    pub(crate) fn abandon_loss_attempt(&self) -> io::Result<()> {
+        if self
+            .staging
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        let _permit = StagingPermit(Arc::clone(&self.staging));
+        let state = publication_control::read_normal(&self.directory, self.recording)?;
+        if state.phase != Phase::Registered
+            || !matches!(state.input.operation, AttemptOperation::Terminal { .. })
+        {
+            return Err(restage_refused());
+        }
+        let base = self.directory.open_directory("recovery-data")?;
+        let name = collector::recording::identity_text(state.transaction).to_string();
+        match base.open_directory(&name) {
+            Ok(object) => {
+                abandon_loss_object(&object)?;
+                drop(object);
+                base.remove_directory(&name)?;
+                base.full_sync()?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let mut idle = [0; 4096];
+        codec::encode_idle(self.recording, codec::SlotKind::Foreground, &mut idle)?;
+        publication_control::clear_beside_intent(&self.directory, &idle, &mut 0)
     }
 
     /// Clears the slot of a terminal attempt that has rows but no proof and says whether it did. A
@@ -298,6 +379,23 @@ fn saved_batches(facts: &[BatchFact]) -> io::Result<(Vec<Batch>, Option<usize>)>
     }
 
     Ok((saved.clone(), has_torn.then_some(saved.len())))
+}
+
+fn abandon_loss_object(object: &PrivateDirectory) -> io::Result<()> {
+    match object.open_directory("pending") {
+        Ok(pending) => {
+            restage_remove(&pending, "metadata")?;
+            restage_remove(&pending, &batch_name(0))?;
+            pending.full_sync()?;
+            drop(pending);
+            object.remove_directory("pending")?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    restage_remove(object, "original-census")?;
+
+    object.full_sync()
 }
 
 fn restage_remove(directory: &PrivateDirectory, name: &str) -> io::Result<()> {

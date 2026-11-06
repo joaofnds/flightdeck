@@ -12,8 +12,8 @@ use crate::canonical::{ReadWork, SourceFrontier, SourceFrontierRead};
 use crate::event_recovery::Batch;
 use crate::resources::{ByteBudget, WORKING_BYTES_MAX};
 use crate::store::{
-    Interrupted, LossPublication, NormalProof, ProofStep, PublicationLedger, PublicationStep,
-    RegisteredAttempt,
+    Interrupted, Kept, LossPublication, NormalProof, ProofStep, PublicationLedger, PublicationStep,
+    RegisteredAttempt, RowPublicationStep,
 };
 use crate::transaction::{
     AttemptInput, AttemptOperation, LossTransfer, Predecessor, SourceTiming, UnknownProvenance,
@@ -33,10 +33,7 @@ pub(super) fn persist_one(
     if let Some(progress) = persist_one_settled(store, registered, state)? {
         return Ok(progress);
     }
-    let budget = Arc::new(ByteBudget::new(
-        usize::try_from(persist_one_memory_limit(state))
-            .map_err(|_| crate::Error::Bound("memory limit"))?,
-    ));
+    let budget = persist_budget(state.memory_limit)?;
     let turn = if state.loaded {
         SlotTurn::Free
     } else {
@@ -188,6 +185,10 @@ fn persist_one_slot(
         finish_publication(store.resume_publication(budget)?)?;
         return Ok(SlotTurn::Answered(Progress::Sealed));
     }
+    if attempt == Interrupted::Rows {
+        finish_rows(store, budget)?;
+        return Ok(SlotTurn::Answered(Progress::Sealed));
+    }
     if let Interrupted::Loss(run) = attempt {
         return persist_one_slot_loss(store, registered, &run, state, budget);
     }
@@ -229,12 +230,67 @@ fn persist_one_slot_loss(
     Ok(SlotTurn::InterruptedLoss)
 }
 
-fn persist_one_memory_limit(state: &RunState) -> u64 {
-    if state.memory_limit == 0 {
+fn persist_budget(memory_limit: u64) -> Result<Arc<ByteBudget>> {
+    let limit = if memory_limit == 0 {
         WORKING_BYTES_MAX
     } else {
-        state.memory_limit
+        memory_limit
+    };
+
+    Ok(Arc::new(ByteBudget::new(
+        usize::try_from(limit).map_err(|_| crate::Error::Bound("memory limit"))?,
+    )))
+}
+
+/// Finishes an attempt every run's turn left in the slot, whose own run cannot finish it because
+/// its source is gone or it left the registry, and says whether there was one.
+pub(super) fn persist_unowned(store: &Store, memory_limit: u64) -> Result<bool> {
+    let Some(attempt) = store.interrupted()? else {
+        return Ok(false);
+    };
+    let budget = persist_budget(memory_limit)?;
+    match attempt {
+        Interrupted::Publication => finish_publication(store.resume_publication(&budget)?)?,
+        Interrupted::Rows => finish_rows(store, &budget)?,
+        Interrupted::Staging(_) => keep_saved_rows(store, &budget)?,
+        Interrupted::Loss(_) => match store.resume_loss_publication(&budget) {
+            Ok(publication) => finish_loss(publication)?,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                store.abandon_loss_attempt()?;
+            }
+            Err(error) => return Err(error.into()),
+        },
     }
+
+    Ok(true)
+}
+
+/// Keeps what an attempt saved when its source can no longer supply its window, as a fragment of
+/// rows. The next scan counts the window's publications as lost, and finds any later events.
+fn keep_saved_rows(store: &Store, budget: &Arc<ByteBudget>) -> Result<()> {
+    match store.keep_only_rows(budget)? {
+        Kept::Nothing => Ok(()),
+        Kept::Rows => finish_rows(store, budget),
+        Kept::Proof => finish_publication(store.resume_publication(budget)?),
+    }
+}
+
+fn finish_rows(store: &Store, budget: &Arc<ByteBudget>) -> Result<()> {
+    let ledger = PublicationLedger::new(budget)?;
+    let Some(mut publishing) = store.resume_row_publication(None, budget, &ledger)? else {
+        return Ok(());
+    };
+    for _step in 0..PUBLICATION_STEPS_MAX {
+        match publishing.step()? {
+            RowPublicationStep::Idle => return Ok(()),
+            RowPublicationStep::Continue => {}
+            RowPublicationStep::Unresolved => {
+                return Err(crate::Error::Bound("row publication unresolved"));
+            }
+        }
+    }
+
+    Err(crate::Error::Bound("row publication steps"))
 }
 
 fn persist_one_load(
@@ -534,7 +590,7 @@ fn recover_staging(
     ));
 
     let Some(mut reader) = super::persist_one_open(registered, state)? else {
-        return Err(crate::Error::Bound("interrupted attempt lost its source"));
+        return keep_saved_rows(store, budget);
     };
     if writer_gone {
         reader.set_writer_gone();
@@ -602,8 +658,8 @@ fn recover_staging_again(
     };
     let saved = attempt.saved(budget)?;
     if seal_selection_lost(&mut reader, attempted_origin)? {
-        // Nothing has changed yet, so what the attempt saved stays as it was.
-        return Err(crate::Error::Bound("interrupted window overwritten"));
+        drop(attempt);
+        return keep_saved_rows(store, budget);
     }
     attempt.restage(&saved)?;
     let unknown_since = state.losses.unknown && input.losses.unknown.is_none();
@@ -629,7 +685,14 @@ fn recover_staging_again(
     // Events the ring lost since are the window's to count, but a lost publication would change
     // what the window holds, and the proof needs that unchanged.
     if state.losses.publications != input.losses.publications {
-        return Err(crate::Error::Bound("interrupted window overwritten"));
+        drop(window);
+        drop(attempt);
+        state.losses = crate::Losses {
+            publications: 0,
+            events: 0,
+            unknown: unknown_since,
+        };
+        return keep_saved_rows(store, budget);
     }
 
     clock.staged();

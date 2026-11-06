@@ -1378,16 +1378,21 @@ fn source_timing_mismatch_and_closed_slot_bytes_refuse_before_artifacts() {
 mod loss_proof_tests;
 
 #[test]
-fn only_an_attempt_that_chose_no_census_may_clear_to_idle_from_registered() {
+fn only_an_attempt_that_chose_no_census_or_a_terminal_may_clear_to_idle_from_registered() {
     // Goal: an Idle scratch stands beside a registered state only where giving the attempt up is
     // possible, since any other reading of it would hide authority the slot still holds.
-    // Method: ask of a registered ordinary state, of one with a census, of a finite one, and of
-    // later phases that do not clear.
+    // Method: ask of a registered ordinary state, of one with a census, of a terminal with one, of
+    // a finite one, and of later phases that do not clear.
     let fixture = Fixture::new(false);
     let ordinary =
         crate::transaction::normal::NormalState::registered(Identity([1, 2]), fixture.input(false));
     let mut with_census = ordinary.clone();
     with_census.census.kind = 1;
+    let mut terminal_input = fixture.input(false);
+    terminal_input.operation = AttemptOperation::Terminal { event_end: 1 };
+    let mut terminal_with_census =
+        crate::transaction::normal::NormalState::registered(Identity([1, 2]), terminal_input);
+    terminal_with_census.census.kind = 1;
     let mut finite_input = fixture.input(false);
     finite_input.operation = AttemptOperation::Finite {
         event_end: 1,
@@ -1401,6 +1406,7 @@ fn only_an_attempt_that_chose_no_census_may_clear_to_idle_from_registered() {
 
     assert!(publication_control::clears_to_idle(&ordinary));
     assert!(!publication_control::clears_to_idle(&with_census));
+    assert!(publication_control::clears_to_idle(&terminal_with_census));
     assert!(!publication_control::clears_to_idle(&finite));
     assert!(!publication_control::clears_to_idle(&publishing));
 }

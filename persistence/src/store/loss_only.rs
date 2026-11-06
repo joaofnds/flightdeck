@@ -157,6 +157,9 @@ impl Store {
         if state.row_plan.is_some() {
             return Err(io::Error::from(io::ErrorKind::Unsupported));
         }
+        if reader.is_none() && state.phase == Phase::Registered {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
         ledger.namespace_attempt();
         let base = self.directory.open_directory(base_name(&state.input))?;
         ledger.namespace_attempt();

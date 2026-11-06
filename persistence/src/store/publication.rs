@@ -43,7 +43,6 @@ pub struct NormalPublication<'store> {
     links: Vec<(Namespace, CanonicalKey)>,
     link_next: usize,
     done: bool,
-    row_unresolved: bool,
     draft: Option<CanonicalMetadata>,
     proof: Option<super::normal_proof::SourceProof>,
     work: PublicationWork,
@@ -176,6 +175,44 @@ impl RegisteredAttempt<'_> {
         };
         metadata.validate()?;
         Ok(metadata)
+    }
+
+    /// Writes the proof of a terminal whose source is gone, which keeps the rows it saved, counts
+    /// the rest of its span as lost and certifies no end, since only the source could. A process
+    /// that ends while writing leaves it short, so the next one writes it again.
+    pub(super) fn write_kept_terminal(
+        &self,
+        batches: &[crate::event_recovery::Batch],
+    ) -> io::Result<()> {
+        let AttemptOperation::Terminal { event_end } = self.input.operation else {
+            return Err(invalid());
+        };
+        let rows = batches
+            .iter()
+            .try_fold(0_u64, |total, batch| total.checked_add(batch.rows))
+            .ok_or_else(invalid)?;
+        let events_first = self.input.losses.event_start;
+        let recovery = crate::event_recovery::Recovery {
+            run: self.input.run,
+            events_first,
+            events_end: event_end,
+            rows,
+            losses: crate::Losses {
+                publications: self.input.losses.publications,
+                events: event_end
+                    .checked_sub(events_first)
+                    .and_then(|span| span.checked_sub(rows))
+                    .ok_or_else(invalid)?,
+                unknown: self.input.losses.unknown.is_some(),
+            },
+        };
+        let mut metadata = self.terminal_draft(&recovery, batches, Lifecycle::Active)?;
+        metadata.evidence = EndpointEvidence::SurvivingRow;
+        metadata.validate()?;
+        let mut file = self.directory.create_file("metadata")?;
+        metadata.write(&mut file)?;
+        private::full_sync(&file)?;
+        self.directory.full_sync()
     }
 }
 impl<'store> RegisteredAttempt<'store> {
@@ -484,7 +521,6 @@ impl<'store> NormalPublication<'store> {
             links: Vec::with_capacity(62),
             link_next: 0,
             done: false,
-            row_unresolved: false,
             draft: None,
             proof: None,
             work: PublicationWork::default(),
@@ -1215,12 +1251,7 @@ impl<'store> NormalPublication<'store> {
             &mut self.work.full_syncs,
         )?;
         let mut next = self.state.clone();
-        next.phase = if self.state.row_plan.is_some()
-            && ((self.state.original_end == 0 && !self.state.input.is_finite())
-                || self.row_unresolved)
-        {
-            Phase::UnresolvedExtent
-        } else if self.state.salvage.is_some() || self.state.row_plan.is_some() {
+        next.phase = if self.state.salvage.is_some() || self.state.row_plan.is_some() {
             Phase::SalvageCommitted
         } else {
             Phase::Cleanup
@@ -1685,8 +1716,9 @@ fn validate_metadata(metadata: &CanonicalMetadata, state: &NormalState) -> io::R
         AttemptOperation::Terminal { event_end }
             if metadata.kind == CanonicalKind::Terminal
                 && metadata.loss.event_end == event_end
-                && metadata.certified_terminal()
-                && metadata.evidence == EndpointEvidence::FixedSource
+                && ((metadata.certified_terminal()
+                    && metadata.evidence == EndpointEvidence::FixedSource)
+                    || metadata.kept_terminal())
                 && metadata.loss.publication_end == input.losses.publication_inherited_end => {}
         _ => return Err(invalid()),
     }

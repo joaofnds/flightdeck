@@ -144,6 +144,7 @@ fn metadata_census_child(root: &Path) {
     let log = PathBuf::from(std::env::var_os("FLIGHTDECK_PACED_LOG").unwrap());
     metadata_census_constructor_failures(root, &budget, &ledger, &arm, &log, &reader);
     let mut store = Some(Store::open(root).unwrap());
+    let expected = metadata_census_expected(root, &budget);
     let before = fs::metadata(&log).unwrap().len();
     let mut owner = store
         .as_ref()
@@ -186,7 +187,7 @@ fn metadata_census_child(root: &Path) {
             }
             Ok(RowPublicationStep::Continue) => {}
             Ok(result) => {
-                assert_eq!(result, RowPublicationStep::Unresolved);
+                assert_eq!(result, RowPublicationStep::Idle);
                 finished = true;
                 break;
             }
@@ -194,26 +195,21 @@ fn metadata_census_child(root: &Path) {
     }
     assert!(finished);
     assert_eq!(failures, 2);
-    metadata_census_oracle(root, &reader(), &budget, store.as_ref().unwrap());
+    metadata_census_oracle(root, &expected, &reader(), &budget, store.as_ref().unwrap());
     eprintln!(
         "paced129 constructor raw=0 each_step<=128 work={:?}",
         ledger.work()
     );
 }
 
-fn metadata_census_oracle(
-    root: &Path,
-    reader: &RingReader,
-    budget: &Arc<ByteBudget>,
-    store: &Store,
-) {
+fn metadata_census_expected(root: &Path, budget: &Arc<ByteBudget>) -> polars::prelude::DataFrame {
     let object = fs::read_dir(root.join("data"))
         .unwrap()
         .next()
         .unwrap()
         .unwrap()
         .path();
-    let expected = crate::event_recovery::read::read_batch_file(
+    crate::event_recovery::read::read_batch_file(
         private::open_private_file(&object.join("pending/events/4095.parquet"), false).unwrap(),
         &crate::event_recovery::Batch {
             first: 1,
@@ -224,10 +220,19 @@ fn metadata_census_oracle(
         true,
         budget,
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn metadata_census_oracle(
+    root: &Path,
+    expected: &polars::prelude::DataFrame,
+    reader: &RingReader,
+    budget: &Arc<ByteBudget>,
+    store: &Store,
+) {
     assert!(
         row_publication_canonical_at(root, &reader.identity().unwrap(), true, budget)
-            .equals_missing(&expected)
+            .equals_missing(expected)
     );
     metadata_census_frontier(store, reader, budget);
 }

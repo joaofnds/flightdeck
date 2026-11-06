@@ -15,7 +15,7 @@ use std::{io, sync::Arc};
 
 pub(super) struct CandidateHandoff<'store> {
     pub attempt: RegisteredAttempt<'store>,
-    pub source: super::normal_proof::SourceProof,
+    pub source: Option<super::normal_proof::SourceProof>,
     pub state: NormalState,
     pub facts: Vec<BatchFact>,
     pub unresolved: u64,
@@ -391,7 +391,7 @@ impl<'store> RowCandidates<'store> {
             self.step_census()?;
             return Ok(CandidateStep::Continue);
         }
-        if !self.merge.has_source() {
+        if !self.merge.has_source() && self.state.input.is_finite() {
             if self.state.phase == Phase::Registered {
                 self.step_plan()?;
                 return Ok(CandidateStep::Continue);

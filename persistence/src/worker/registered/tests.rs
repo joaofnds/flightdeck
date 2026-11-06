@@ -524,6 +524,7 @@ impl Recording {
         let mut manifests: Vec<_> = self
             .saved_windows()
             .iter()
+            .filter(|window| window.join("ready").exists())
             .map(|window| {
                 let mut file = std::fs::File::open(window.join("ready/metadata")).unwrap();
                 let metadata = CanonicalMetadata::read(&mut file).unwrap();
@@ -957,6 +958,133 @@ fn a_worker_refuses_a_saved_minute_whose_proof_another_file_replaced() {
 
 /// Two ticks with events in the first minute, one in the second, and a third minute that closes
 /// the second.
+#[test]
+fn saved_rows_outlive_the_publications_the_ring_overwrote() {
+    // Goal: a saved row stays when the ring moves past its minute, and the minute's publications
+    // stay counted as lost, once (P02.3, P02.5).
+    // Method: save the first minute's three rows without an index, publish past the ring's eight
+    // slots, restart, take one step to keep the rows and one to save a later minute, and read
+    // the event frontier and the later window's counts.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::EventIndexAbsent);
+    drop(first);
+    recording.publish_minutes(3..13);
+    let restarted = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+
+    let kept = recording.persist(&restarted, &mut state);
+    let frontier = recording.frontier(&restarted).unwrap();
+    let next = recording.persist(&restarted, &mut state);
+
+    assert!(matches!(kept, Progress::Sealed));
+    assert_eq!(frontier.event_end(), 4);
+    assert_eq!(frontier.publication_end(), 1);
+    assert!(matches!(next, Progress::Sealed));
+    assert_eq!(recording.saved_losses()[0].publications, 6);
+    assert_eq!(recording.saved_losses()[0].events, 0);
+}
+
+/// Stops a seal at the interruption, publishes past the ring's eight ticks, restarts, takes the
+/// step that keeps the rows, and expects the first minute's three rows and no claim on its
+/// publications.
+fn rows_outlive_their_window(interruption: Interruption) {
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, interruption);
+    drop(first);
+    recording.publish_minutes(3..13);
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let kept = recording.persist(&restarted, &mut RunState::default());
+
+    let frontier = recording.frontier(&restarted).unwrap();
+    assert!(matches!(kept, Progress::Sealed));
+    assert_eq!(frontier.event_end(), 4);
+    assert_eq!(frontier.publication_end(), 1);
+    assert!(!restarted.slot_occupied().unwrap());
+}
+
+macro_rules! rows_outlive_their_window_at {
+    ($($name:ident: $interruption:expr,)*) => {
+        $(
+            #[test]
+            fn $name() {
+                // Goal: rows stay and tables with no proof go, wherever the seal stopped (P02.3).
+                // Method: run the shared scenario with this interruption.
+                rows_outlive_their_window($interruption);
+            }
+        )*
+    };
+}
+
+rows_outlive_their_window_at! {
+    rows_with_no_index_outlive_their_window: Interruption::EventIndexAbsent,
+    rows_with_an_index_outlive_their_window: Interruption::EventsStaged,
+    rows_beside_a_missing_table_outlive_their_window: Interruption::TableMissing,
+    rows_beside_a_torn_table_outlive_their_window: Interruption::TableTorn,
+    rows_beside_every_table_outlive_their_window: Interruption::TablesWritten,
+}
+
+#[test]
+fn rows_whose_source_is_gone_let_another_run_go_on() {
+    // Goal: a reboot during a seal that saved rows keeps them and cannot stop new minutes (P02.3).
+    // Method: stop with the batch saved, remove the source as a reboot does, take the worker's
+    // turn for this run and the step after every run's turn, then step a new run.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let mut other = recording.another_run();
+    other.publish_in_minute(0);
+    other.publish_in_minute(1);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::EventIndexAbsent);
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let own = recording.persist(&restarted, &mut RunState::default());
+    let kept = super::persist_unowned(&restarted, 0).unwrap();
+    let frontier = recording.frontier(&restarted).unwrap();
+    let next = other.persist(&restarted, &mut RunState::default());
+
+    assert!(matches!(own, Progress::Unavailable));
+    assert!(kept);
+    assert_eq!(frontier.event_end(), 4);
+    assert_eq!(frontier.publication_end(), 1);
+    assert!(matches!(next, Progress::Sealed));
+}
+
+#[test]
+fn rows_of_a_run_that_left_the_registry_let_the_next_run_go_on() {
+    // Goal: an attempt whose run is no longer registered, so nobody takes its turn, cannot hold
+    // the slot for good (P02.3).
+    // Method: stop a seal with the batch saved, run the whole worker over another run alone, and
+    // read this run's frontier and the other run's saved minutes.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let mut other = recording.another_run();
+    for minute in 0..3 {
+        other.publish_in_minute(minute);
+    }
+    other.writer.finish();
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::EventIndexAbsent);
+    drop(first);
+    let runs = vec![other.registered()];
+
+    let outcome = whole_worker(&recording.root, runs, &mut |_pause| {
+        panic!("the only source is finished")
+    });
+
+    assert!(matches!(outcome, Outcome::Complete));
+    let restarted = Store::open(&recording.root).unwrap();
+    assert_eq!(recording.frontier(&restarted).unwrap().event_end(), 4);
+    assert!(!restarted.slot_occupied().unwrap());
+    assert!(!recording.saved_windows().is_empty());
+}
+
 fn publish_three_minutes(recording: &mut Recording) {
     recording.publish_events_in_minute(0, 2);
     recording.publish_events_in_minute(0, 1);
@@ -1505,28 +1633,6 @@ fn a_seal_with_no_rows_past_lost_events_counts_them_when_staged_again() {
 }
 
 #[test]
-fn a_seal_with_rows_saved_refuses_when_the_ring_overwrote_its_window() {
-    // Goal: rows no boundary can be proved for stop the run rather than publish a wrong window.
-    // Method: stop with the batch saved and no index, publish past the ring's eight ticks with
-    // no events, restart, and read the refusal.
-    let mut recording = Recording::new();
-    publish_three_minutes(&mut recording);
-    let first = Store::open(&recording.root).unwrap();
-    recording.interrupted_seal(&first, Interruption::EventIndexAbsent);
-    drop(first);
-    recording.publish_minutes(3..13);
-    let restarted = Store::open(&recording.root).unwrap();
-
-    let result = recording.persist_result(&restarted, &mut RunState::default());
-
-    let refusal = result.err().unwrap();
-    assert!(matches!(
-        refusal,
-        crate::Error::Bound("interrupted window overwritten")
-    ));
-}
-
-#[test]
 fn a_finished_run_certifies_its_end_after_its_last_minute() {
     // Goal: a finished run ends in a canonical terminal publication, so whichever process comes
     // next knows it is complete rather than rereading its source (P01.5, P02.3).
@@ -1719,10 +1825,11 @@ fn a_captured_run_keeps_the_identities_of_events_its_writer_never_published() {
 }
 
 #[test]
-fn a_terminal_with_rows_saved_and_no_source_holds_the_slot() {
-    // Goal: rows no proof covers are neither published nor dropped once the source is gone.
-    // Method: stop with the batch whole and no proof, remove the source, restart, and step this
-    // run and another, which both wait.
+fn a_terminal_with_rows_saved_and_no_source_keeps_them_and_clears_the_slot() {
+    // Goal: rows no source can prove stay readable once the source is gone, and leave the slot to
+    // the other runs.
+    // Method: stop with the batch whole and no proof, remove the source, restart, step this run
+    // and another, which waits, finish what neither could, and step the other run again.
     let mut recording = recording_with_withheld_events();
     let mut other = recording.another_run();
     other.publish_in_minute(0);
@@ -1735,9 +1842,188 @@ fn a_terminal_with_rows_saved_and_no_source_holds_the_slot() {
 
     let own = recording.persist(&restarted, &mut RunState::default());
     let next = other.persist(&restarted, &mut RunState::default());
+    let finished = super::persist_unowned(&restarted, 0).unwrap();
+    let after = other.persist(&restarted, &mut RunState::default());
 
     assert!(matches!(own, Progress::Unavailable));
     assert!(matches!(next, Progress::Deferred));
+    assert!(finished);
+    assert!(matches!(after, Progress::Sealed));
+    assert!(recording.frontier(&restarted).unwrap().complete());
+    let Body::Events(events) = recording.saved_terminal().body else {
+        panic!("a terminal holds events");
+    };
+    assert_eq!(events.recovery.rows, 2);
+    assert_eq!(events.recovery.losses, crate::Losses::default());
+}
+
+/// Stops a terminal seal before it saved a row, removes the source, and expects the slot free and
+/// nothing published.
+fn a_terminal_with_no_rows_and_no_source_clears_the_slot(interruption: Interruption) {
+    let mut recording = recording_with_withheld_events();
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_terminal(&first, interruption);
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let finished = super::persist_unowned(&restarted, 0).unwrap();
+
+    assert!(finished);
+    assert!(restarted.interrupted().unwrap().is_none());
+    assert!(recording.saved_windows().is_empty());
+}
+
+#[test]
+fn a_terminal_registered_with_no_source_clears_the_slot() {
+    // Goal: an attempt that saved nothing holds nothing up (P02.3).
+    // Method: see the helper.
+    a_terminal_with_no_rows_and_no_source_clears_the_slot(Interruption::Registered);
+}
+
+#[test]
+fn a_terminal_with_only_a_torn_batch_and_no_source_clears_the_slot() {
+    // Goal: a batch no row can be read from counts as saving nothing (P02.3).
+    // Method: see the helper.
+    a_terminal_with_no_rows_and_no_source_clears_the_slot(Interruption::EventBatchTorn);
+}
+
+#[test]
+fn a_terminal_with_a_torn_batch_after_its_rows_keeps_the_rows() {
+    // Goal: a batch no row can be read from goes, and the whole one before it stays (P02.3).
+    // Method: stop with the batch whole, add the file a process that ended while writing the next
+    // one leaves, remove the source, and finish in a new store.
+    let mut recording = recording_with_withheld_events();
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_terminal(&first, Interruption::EventsStaged);
+    let object = std::fs::read_dir(recording.root.join("recovery-data"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::copy(
+        object
+            .join("pending")
+            .join(crate::event_recovery::batch_name(0)),
+        object
+            .join("pending")
+            .join(crate::event_recovery::batch_name(1)),
+    )
+    .unwrap();
+    Recording::tear(
+        &object
+            .join("pending")
+            .join(crate::event_recovery::batch_name(1)),
+    );
+    drop(first);
+    recording.lose_source();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let finished = super::persist_unowned(&restarted, 0).unwrap();
+
+    assert!(finished);
+    assert!(restarted.interrupted().unwrap().is_none());
+    let Body::Events(events) = recording.saved_terminal().body else {
+        panic!("a terminal holds events");
+    };
+    assert_eq!(events.batches.len(), 1);
+    assert_eq!(events.recovery.rows, 2);
+    assert!(
+        !object
+            .join("ready")
+            .join(crate::event_recovery::batch_name(1))
+            .exists()
+    );
+}
+
+#[test]
+fn saved_rows_at_any_step_of_their_publication_reach_the_same_end() {
+    // Goal: a process that ends anywhere in publishing an ordinary attempt's kept rows leaves work
+    // the next one finishes, with the same rows and the slot free (P02.3).
+    // Method: keep the rows, take a growing number of publication steps, seven apart since a
+    // publication takes hundreds, end there, and finish in a new store, until the steps reach the
+    // end on their own.
+    const STEPS_APART: usize = 7;
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut finished = false;
+    for steps in (0..4096).step_by(STEPS_APART) {
+        let mut recording = Recording::new();
+        publish_three_minutes(&mut recording);
+        let first = Store::open(&recording.root).unwrap();
+        recording.interrupted_seal(&first, Interruption::EventsStaged);
+        assert!(matches!(
+            first.keep_only_rows(&budget).unwrap(),
+            crate::store::Kept::Rows
+        ));
+        let ledger = crate::store::PublicationLedger::new(&budget).unwrap();
+        let mut publishing = first
+            .resume_row_publication(None, &budget, &ledger)
+            .unwrap()
+            .unwrap();
+        for _step in 0..steps {
+            finished = publishing.step().unwrap() == crate::store::RowPublicationStep::Idle;
+            if finished {
+                break;
+            }
+        }
+        drop(publishing);
+        drop(first);
+        recording.lose_source();
+        let restarted = Store::open(&recording.root).unwrap();
+
+        super::persist_unowned(&restarted, 0).unwrap();
+
+        assert!(restarted.interrupted().unwrap().is_none());
+        assert_eq!(recording.frontier(&restarted).unwrap().event_end(), 4);
+        if finished {
+            break;
+        }
+    }
+    assert!(finished);
+}
+
+#[test]
+fn a_terminal_kept_at_any_step_of_its_publication_reaches_the_same_end() {
+    // Goal: a process that ends anywhere in publishing a terminal's kept rows leaves work the next
+    // one finishes with the same rows (P02.3).
+    // Method: keep the rows, take a growing number of publication steps, end there, and finish in
+    // a new store, until the steps reach the end on their own.
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut finished = false;
+    for steps in 0..256 {
+        let mut recording = recording_with_withheld_events();
+        let first = Store::open(&recording.root).unwrap();
+        recording.interrupted_terminal(&first, Interruption::EventsStaged);
+        recording.lose_source();
+        assert!(matches!(
+            first.keep_only_rows(&budget).unwrap(),
+            crate::store::Kept::Proof
+        ));
+        let mut publishing = first.resume_publication(&budget).unwrap();
+        for _step in 0..steps {
+            finished = publishing.step().unwrap() == PublicationStep::Idle;
+            if finished {
+                break;
+            }
+        }
+        drop(publishing);
+        drop(first);
+        let restarted = Store::open(&recording.root).unwrap();
+
+        super::persist_unowned(&restarted, 0).unwrap();
+
+        assert!(restarted.interrupted().unwrap().is_none());
+        assert!(recording.frontier(&restarted).unwrap().complete());
+        let Body::Events(events) = recording.saved_terminal().body else {
+            panic!("a terminal holds events");
+        };
+        assert_eq!(events.recovery.rows, 2);
+        if finished {
+            break;
+        }
+    }
+    assert!(finished);
 }
 
 /// Stops the terminal seal of two withheld events at the interruption, restarts, and expects the

@@ -361,7 +361,6 @@ impl NormalState {
             || (self.cleanup.region > 1 && self.cleanup.region != 8)
             || (self.cleanup.region == 8
                 && (phase != 7
-                    || (self.original_end == 0 && !self.input.is_finite())
                     || self.cleanup
                         != super::salvage::Cleanup {
                             region: 8,

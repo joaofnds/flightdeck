@@ -177,39 +177,6 @@ fn a_recovery_that_fails_while_it_publishes_stages_nothing_again() {
 }
 
 #[test]
-fn a_refused_seal_keeps_what_it_saved_and_refuses_the_same_way_again() {
-    // Goal: the refusal of a window the ring overwrote changes nothing on disk, so the slot still
-    // holds every piece of evidence a later route could use (P02.3).
-    // Method: stop with the tables written, overwrite the window, restart twice, and after each
-    // read the refusal, the slot, the batch, the index and the tables.
-    let mut recording = Recording::new();
-    publish_three_minutes(&mut recording);
-    let first = Store::open(&recording.root).unwrap();
-    recording.interrupted_seal(&first, Interruption::TablesWritten);
-    drop(first);
-    recording.publish_minutes(3..13);
-    let pending = attempt_directory(&recording.root, "data", "pending");
-
-    for _restart in 0..2 {
-        let restarted = Store::open(&recording.root).unwrap();
-
-        let refusal = recording
-            .persist_result(&restarted, &mut RunState::default())
-            .err()
-            .unwrap();
-
-        assert!(matches!(
-            refusal,
-            Error::Bound("interrupted window overwritten")
-        ));
-        assert!(restarted.interrupted().unwrap().is_some());
-        assert!(pending.join("events/index").exists());
-        assert!(pending.join("processes.parquet").exists());
-        assert!(Recording::only_event_batch(&pending).exists());
-    }
-}
-
-#[test]
 fn a_mark_of_unknown_extent_outlives_a_minute_staged_again() {
     // Goal: a minute staged again carries what its attempt registered, so a mark raised since
     // goes to the next minute rather than vanishing (P02.3).

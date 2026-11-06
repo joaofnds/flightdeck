@@ -1547,8 +1547,8 @@ fn row_publication_finish(owner: &mut RowPublication<'_>) -> RowPublicationStep 
     panic!("row publication budget");
 }
 #[test]
-fn row_publication_source_free_proof_retains_unknown_suffix() {
-    // Goal: durable row evidence survives source loss without certifying an unowned suffix.
+fn row_publication_source_free_proof_keeps_rows_and_clears_the_slot() {
+    // Goal: durable rows survive source loss and leave the slot to the next attempt.
     // Method: omit real derivatives before census; resume before gates or during cleanup.
     for captured in [false, true] {
         for committed in [false, true] {
@@ -1615,15 +1615,11 @@ fn row_publication_source_free_case(captured: bool, committed: bool) {
         .unwrap();
     assert_eq!(
         row_publication_finish(&mut resumed),
-        RowPublicationStep::Unresolved
+        RowPublicationStep::Idle
     );
-    let state =
-        crate::transaction::normal::NormalState::decode(&fixture.slot(), fixture.run.recording)
-            .unwrap();
-    assert_eq!(state.phase, bootstrap::codec::Phase::UnresolvedExtent);
-    assert_eq!(state.cleanup.ordinal, if committed { 128 } else { 0 });
+    assert!(store.interrupted().unwrap().is_none());
     assert!(row_publication_canonical(&fixture, &budget).equals_missing(&expected));
-    assert!(object.join("pending/events/4095.parquet").exists());
+    assert!(!object.join("pending/events/4095.parquet").exists());
 }
 
 #[test]
@@ -2527,8 +2523,9 @@ fn row_publication_read_metadata(
 }
 
 #[test]
-fn row_publication_missing_window_boundary_is_unresolved() {
-    // Goal: finite original rows do not manufacture an ordinary publication boundary.
+fn row_publication_missing_window_boundary_keeps_rows_and_clears_the_slot() {
+    // Goal: finite original rows do not manufacture an ordinary publication boundary, and they
+    // leave the slot to the next attempt.
     // Method: preserve sparse original rows while only same-window timing remains in the ring.
     let mut fixture = proof_fixture(false, 1);
     let store = Store::open(&fixture.root).unwrap();
@@ -2543,22 +2540,21 @@ fn row_publication_missing_window_boundary_is_unresolved() {
     let mut frame = crate::event_recovery::batch::frame(&rows, false).unwrap();
     crate::encoder::encode_write(&mut frame, attempt.create_event_batch(4095).unwrap()).unwrap();
     publish_numeric_events_at(&mut fixture, 3, 3, 0);
+    let object = fixture
+        .root
+        .join("data")
+        .join(collector::recording::identity_text(attempt.transaction()).to_string());
     let ledger = PublicationLedger::new(&budget).unwrap();
     let mut owner = attempt
         .recover_rows(fixture.reader(), &budget, &ledger)
         .unwrap();
-    assert_eq!(
-        row_publication_finish(&mut owner),
-        RowPublicationStep::Unresolved
-    );
+    assert_eq!(row_publication_finish(&mut owner), RowPublicationStep::Idle);
     let canonical = row_publication_canonical(&fixture, &budget);
     assert!(canonical.equals_missing(&crate::event_recovery::batch::frame(&rows, false).unwrap()));
-    let state =
-        crate::transaction::normal::NormalState::decode(&fixture.slot(), fixture.run.recording)
-            .unwrap();
-    assert_eq!(state.phase, bootstrap::codec::Phase::UnresolvedExtent);
-    assert_eq!(state.original_end, 0);
-    assert_eq!(state.loss.publications_new, 0);
+    assert!(store.interrupted().unwrap().is_none());
+    let metadata = row_publication_read_metadata(&object, 0);
+    assert_eq!(metadata.original_end, 0);
+    assert_eq!(metadata.loss.publications_new, 0);
 }
 
 #[test]

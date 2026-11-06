@@ -192,15 +192,17 @@ impl<'store> RowMerge<'store> {
         mut self,
     ) -> io::Result<(
         RegisteredAttempt<'store>,
-        SourceProof,
+        Option<SourceProof>,
         super::inventory::NormalInventory,
     )> {
         self.release_input();
         self.record();
         let inventory = self.inventory.0.take().ok_or_else(invalid)?;
         let (attempt, witness) = inventory.into_normal()?;
-        let mut source = self.source.0.take().ok_or_else(invalid)?;
-        source.release_workspace();
+        let mut source = self.source.0.take();
+        if let Some(source) = &mut source {
+            source.release_workspace();
+        }
         Ok((attempt, source, witness))
     }
     pub(super) fn fixed(&mut self, plan: crate::transaction::salvage::RowPlan) {
@@ -246,7 +248,7 @@ impl<'store> RowMerge<'store> {
             .ok_or_else(invalid)?;
         let relevant_first = self.next.max(self.source_first);
         let relevant_end = end.min(self.source_end);
-        if relevant_first < relevant_end {
+        if relevant_first < relevant_end && self.source.0.is_some() {
             let input = self.inventory.owner().input();
             let missing = self.source.checked_read(input, |reader| {
                 reader.seek_event(relevant_first)?;
@@ -365,7 +367,7 @@ impl<'store> RowMerge<'store> {
             self.inventory.step()?;
             return Ok(MergeStep::Continue);
         }
-        if self.source.0.is_none() {
+        if self.source.0.is_none() && self.inventory.owner().input().is_finite() {
             return Err(io::Error::from(io::ErrorKind::WouldBlock).into());
         }
 
@@ -478,28 +480,30 @@ impl<'store> RowMerge<'store> {
             if plan.first != input.losses.event_start || end > plan.end {
                 return Err(invalid().into());
             }
-            self.source.checked_read(input, |reader| {
-                let newest = reader.event_newest()?.checked_add(1).ok_or_else(invalid)?;
-                reader.seek_event(input.binding.event_first)?;
-                let first = match reader.read_event()? {
-                    FoundEvent::Missed { first, end }
-                        if first == input.binding.event_first && end > first =>
+            if self.source.0.is_some() {
+                self.source.checked_read(input, |reader| {
+                    let newest = reader.event_newest()?.checked_add(1).ok_or_else(invalid)?;
+                    reader.seek_event(input.binding.event_first)?;
+                    let first = match reader.read_event()? {
+                        FoundEvent::Missed { first, end }
+                            if first == input.binding.event_first && end > first =>
+                        {
+                            end
+                        }
+                        FoundEvent::Event { number, .. } if number == input.binding.event_first => {
+                            number
+                        }
+                        FoundEvent::Nothing if newest == input.binding.event_first => newest,
+                        _ => return Err(invalid()),
+                    };
+                    if plan.source_end > newest
+                        || (plan.source_first > plan.first && plan.source_first > first)
                     {
-                        end
+                        return Err(invalid());
                     }
-                    FoundEvent::Event { number, .. } if number == input.binding.event_first => {
-                        number
-                    }
-                    FoundEvent::Nothing if newest == input.binding.event_first => newest,
-                    _ => return Err(invalid()),
-                };
-                if plan.source_end > newest
-                    || (plan.source_first > plan.first && plan.source_first > first)
-                {
-                    return Err(invalid());
-                }
-                Ok(())
-            })?;
+                    Ok(())
+                })?;
+            }
             self.source_first = plan.source_first;
             self.source_end = plan.source_end;
             self.prefix_end = plan.source_first;
@@ -507,7 +511,11 @@ impl<'store> RowMerge<'store> {
             self.selected = Some(plan.first..plan.end);
             return Ok(());
         }
-        let (source_first, source_end, prefix_end) = self.freeze_source()?;
+        let (source_first, source_end, prefix_end) = if self.source.0.is_some() {
+            self.freeze_source()?
+        } else {
+            (end, end, end)
+        };
         let input = self.inventory.owner().input();
         // A surviving/indexed finite prefix proves preservation, never final lifecycle.
         // With no such prefix ordinary source selection needs a timing-domain proof first.
@@ -583,6 +591,10 @@ impl<'store> RowMerge<'store> {
         }
     }
     fn merge_one_source(&mut self, end: u64) -> crate::Result<(Option<batch::Row>, u64, bool)> {
+        // With no source left, a row the originals do not hold is one the writer counted as lost.
+        if self.source.0.is_none() {
+            return Ok((None, end, true));
+        }
         let input = self.inventory.owner().input();
         let position = self.next;
         let mut identity = IdentityObservation::EMPTY;

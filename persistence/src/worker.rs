@@ -341,6 +341,9 @@ fn run_pass(
             }
         }
     }
+    if registered::persist_unowned(store, recovery.memory_limit)? {
+        return Ok(Pass::Sealed);
+    }
     Ok(Pass::Drained)
 }
 

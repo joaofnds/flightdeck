@@ -66,8 +66,8 @@ fn second_case(captured: bool) {
             .unwrap(),
     );
     assert!(child.wait().success());
-    assert!(object.join("pending/events/0119.parquet").exists());
-    assert!(object.join("original-census").exists());
+    assert!(!object.join("pending/events/0119.parquet").exists());
+    assert!(!object.join("original-census").exists());
 }
 fn second_originals(attempt: &RegisteredAttempt<'_>, templates: &[Row], captured: bool) {
     let size = crate::event_observation::BATCH_ROWS_MAX;
@@ -172,7 +172,7 @@ fn second_child(root: &Path) {
         fs::remove_file(arm).unwrap();
         std::process::exit(0);
     }
-    assert_eq!(second_finish(&mut owner), RowPublicationStep::Unresolved);
+    assert_eq!(second_finish(&mut owner), RowPublicationStep::Idle);
     second_oracle(root, &object, &budget, &reader(), store.as_ref().unwrap());
     eprintln!(
         "candidate1 metadata exact union rows={} reserved_peak={} work={:?}",
@@ -219,7 +219,7 @@ fn second_oracle(
         assert_eq!(metadata.loss.inherited.events, 0);
         assert_eq!(metadata.loss.publications_new, 0);
         assert_eq!(metadata.lifecycle, crate::canonical::Lifecycle::Active);
-        assert!(metadata.trailing_unknown);
+        assert!(!metadata.trailing_unknown);
         let crate::canonical::metadata::Body::Events(manifest) = metadata.body else {
             panic!("event candidate");
         };

@@ -1,4 +1,5 @@
 //! Exact control replacement and typed reconciliation of deterministic slot scratch.
+use crate::transaction::AttemptOperation;
 use crate::transaction::normal::NormalState;
 use collector::recording::bootstrap::codec::{self, NamespaceState, Phase};
 use collector::recording::private::{self, PrivateDirectory};
@@ -128,14 +129,34 @@ pub(super) fn read_normal(
         Err(error) => Err(error),
     }
 }
-/// Whether a whole Idle state may wait beside this one: the end of cleanup, or the end of an
-/// ordinary or terminal attempt given up before any proof, which has chosen no census.
+/// Whether a whole Idle state may wait beside this one: the end of cleanup, the end of an ordinary
+/// or terminal attempt given up before any proof, which has chosen no census, or the end of a
+/// terminal given up because no source remains to prove what it lost.
 pub(super) fn clears_to_idle(state: &NormalState) -> bool {
     match state.phase {
         Phase::Cleanup | Phase::SalvageCommitted => true,
-        Phase::Registered => state.census.kind == 0 && !state.input.is_finite(),
+        Phase::Registered => match state.census.kind {
+            0 => !state.input.is_finite(),
+            1 => matches!(state.input.operation, AttemptOperation::Terminal { .. }),
+            _ => false,
+        },
         _ => false,
     }
+}
+/// Clears a slot whose attempt is given up with its census begun. A next state waiting beside it,
+/// whole or short, is intent only that attempt's proof could have adopted.
+pub(super) fn clear_beside_intent(
+    root: &impl ControlDirectory,
+    idle: &[u8],
+    syncs: &mut u64,
+) -> io::Result<()> {
+    let old = read(root, "foreground", idle.len())?;
+    if optional_read(root, "foreground.pending", idle.len())?.is_some_and(|bytes| bytes != idle) {
+        root.remove_file("foreground.pending")?;
+        sync_directory(root, syncs)?;
+    }
+
+    replace(root, "foreground", &old, idle, syncs)
 }
 fn legal_next(old: &NormalState, new: &NormalState) -> bool {
     if old.transaction != new.transaction || old.input != new.input {
@@ -264,8 +285,8 @@ fn legal_next_phase(old: &NormalState, new: &NormalState) -> bool {
         (Phase::Publishing, Phase::Published) => {
             old.sequence == new.sequence && old.structure.is_none() && new.structure.is_none()
         }
-        (Phase::Published, Phase::Cleanup | Phase::SalvageCommitted | Phase::UnresolvedExtent)
-        | (Phase::SalvageCommitted, Phase::SalvageCommitted | Phase::UnresolvedExtent) => {
+        (Phase::Published, Phase::Cleanup | Phase::SalvageCommitted)
+        | (Phase::SalvageCommitted, Phase::SalvageCommitted) => {
             old.sequence == new.sequence && old.next == new.next
         }
         _ => false,

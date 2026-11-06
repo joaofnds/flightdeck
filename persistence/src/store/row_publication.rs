@@ -29,7 +29,6 @@ pub struct RowPublication<'store> {
     identity_position: usize,
     source: Option<super::super::normal_proof::SourceProof>,
     proved: Option<bool>,
-    transport: bool,
     verified: bool,
     adopted: bool,
     facts_reservation: Option<ByteReservation>,
@@ -94,7 +93,6 @@ impl<'store> RowPublication<'store> {
             identity_position: 0,
             source: None,
             proved: None,
-            transport: true,
             verified: false,
             adopted: false,
             facts_reservation: None,
@@ -282,21 +280,8 @@ impl<'store> RowPublication<'store> {
                 inner.acquire_busy()?;
             }
             Phase::Publishing => inner.publish_link()?,
-            Phase::Published => {
-                inner.row_unresolved = (!self.transport && !inner.state.input.is_finite())
-                    || !self.proved.ok_or_else(invalid)?;
-                inner.finish_quiet()?;
-            }
+            Phase::Published => inner.finish_quiet()?,
             Phase::UnresolvedExtent => return Ok(RowPublicationStep::Unresolved),
-            Phase::SalvageCommitted
-                if !self.transport
-                    && !inner.state.input.is_finite()
-                    && inner.state.cleanup.region != 8 =>
-            {
-                let mut state = inner.state.clone();
-                state.phase = Phase::UnresolvedExtent;
-                inner.commit_state(state)?;
-            }
             Phase::SalvageCommitted => self.cleanup()?,
             _ => return Err(invalid()),
         }
@@ -353,9 +338,11 @@ impl<'store> RowPublication<'store> {
             return Err(io::Error::from(io::ErrorKind::WouldBlock));
         }
         let mut source = handoff.source;
-        source.reads = 0;
-        source.observations.set(0);
-        source.operations = 0;
+        if let Some(source) = &mut source {
+            source.reads = 0;
+            source.observations.set(0);
+            source.operations = 0;
+        }
         let reservation = self
             .budget
             .reserve(256 * 1024)
@@ -382,7 +369,7 @@ impl<'store> RowPublication<'store> {
         self.inner = Some(Box::new(inner));
         self.adopted = true;
         self.candidate_names = 2;
-        self.source = Some(source);
+        self.source = source;
         self.facts = handoff.facts;
         self.original_witness = Some(handoff.witness);
         self.identity_position = self.facts.len();
@@ -556,14 +543,22 @@ impl<'store> RowPublication<'store> {
         let inner = self.inner.as_mut().ok_or_else(invalid)?;
         let input = &inner.state.input;
         let plan = inner.state.row_plan.ok_or_else(invalid)?;
-        let source = self.source.as_mut().ok_or_else(invalid)?;
-        let end = if input.is_finite() {
-            Ok(input.losses.publication_start)
+        let end = if let Some(source) = self.source.as_mut() {
+            let end = if input.is_finite() {
+                Ok(input.losses.publication_start)
+            } else {
+                source.ordinary_end(input, plan.end, &self.budget)
+            };
+            inner.work.source_reads = source.reads;
+            inner.work.source_observations = source.observations.get();
+            end
+        } else if input.is_finite() {
+            return Err(invalid());
         } else {
-            source.ordinary_end(input, plan.end, &self.budget)
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
         };
-        inner.work.source_reads = source.reads;
-        inner.work.source_observations = source.observations.get();
+        // An end no source can prove stays where the attempt inherited it, so the next scan counts
+        // the publications past it as lost, once.
         let (publication_end, proved) = match end {
             Ok(end) => (end, true),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -663,7 +658,7 @@ impl<'store> RowPublication<'store> {
             },
             lifecycle: Lifecycle::Active,
             captured: input.captured,
-            trailing_unknown: !proved,
+            trailing_unknown: false,
             loss: loss.clone(),
             body: self.build_metadata_events(candidate, first, end, &loss)?,
         };
@@ -1296,9 +1291,6 @@ impl<'store> RowPublication<'store> {
         Ok(position)
     }
     fn clear(&mut self) -> io::Result<()> {
-        if self.proved != Some(true) {
-            return Err(invalid());
-        }
         let inner = self.inner.as_mut().ok_or_else(invalid)?;
         let attempt = inner.attempt.as_ref().ok_or_else(invalid)?;
         let object = Self::object(attempt, &mut inner.work)?;
@@ -1513,9 +1505,6 @@ impl Store {
         budget: &Arc<ByteBudget>,
         ledger: &super::super::PublicationLedger,
     ) -> io::Result<RowPublication<'a>> {
-        if reader.is_none() && !state.input.is_finite() {
-            return Err(io::ErrorKind::WouldBlock.into());
-        }
         let mut opens = 0;
         let result = if state.input.is_finite() {
             super::super::inventory::select_finite_original(object, &mut opens)
@@ -1553,7 +1542,6 @@ impl Store {
         ledger: &super::super::PublicationLedger,
     ) -> io::Result<RowPublication<'a>> {
         let mut owner = self.row_publication_owner(state, permit, object, budget, ledger)?;
-        owner.transport = reader.is_some();
         owner.load_metadata(object)?;
         if let Some(reader) = reader {
             owner.admit_source(reader)?;

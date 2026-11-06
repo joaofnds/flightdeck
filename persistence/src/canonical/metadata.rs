@@ -501,6 +501,14 @@ impl CanonicalMetadata {
                 EndpointEvidence::FixedSource | EndpointEvidence::ReadyManifest
             )
     }
+    /// A terminal whose source went before it could prove its end. It certifies no end, and the
+    /// run is over for the worker, since only that source could add to it.
+    pub(crate) fn kept_terminal(&self) -> bool {
+        self.kind == CanonicalKind::Terminal
+            && self.lifecycle == Lifecycle::Active
+            && self.evidence == EndpointEvidence::SurvivingRow
+            && !self.trailing_unknown
+    }
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.timing().validate(self.captured)?;
         crate::transaction::source_binding::validate(&self.binding)?;
