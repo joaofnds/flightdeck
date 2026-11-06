@@ -3,12 +3,15 @@
 //! saved rows and not the ring means one route whichever of the two still holds that tick.
 use model::columns::TickColumns;
 use model::programs::Programs;
-use polars::prelude::{DataFrame, DataType, Expr, LazyFrame, Null, UInt64Type, col, lit};
+use polars::prelude::{DataFrame, DataType, Expr, IntoLazy, LazyFrame, Null, UInt64Type, col, lit};
 
 use crate::canonical::ReadWork;
 use crate::canonical::catalog::Catalog;
 use crate::canonical::rows::{admission_error, read_error};
 use crate::engine::{AdmittedTable, Cells};
+use crate::event_observation::BATCH_ROWS_MAX;
+use crate::event_table::query::ordinary_error;
+use crate::event_table::{EventPart, EventTable};
 use crate::identity::{validate, validation_columns};
 use crate::schema::{PROCESS_GPU_FIELD, Table};
 use crate::tick_rows::{COLUMNS, TickPlace, TickRows, USAGE_COLUMNS, read_tick};
@@ -37,7 +40,8 @@ pub(super) fn seed(
         return Ok(());
     };
     let (seed_tick, place) = seed_last_tick(saved, &manifest)?;
-    let frame = seed_rows(saved, &manifest, &place)?;
+    let mut frame = seed_rows(saved, &manifest, &place)?;
+    frame.vstack_mut_owned(seed_events(saved, &manifest, &place)?)?;
     let rows = TickRows::new(&frame)?;
     let order: Vec<usize> = (0..frame.height()).collect();
 
@@ -108,7 +112,7 @@ fn seed_last_tick(saved: SavedRecording<'_>, manifest: &Manifest) -> Result<(See
     ))
 }
 
-/// The tick's process rows, which are all the App rule reads of a tick before the one it derives.
+/// The tick's process rows, in the columns `read_tick` reads.
 fn seed_rows(
     saved: SavedRecording<'_>,
     manifest: &Manifest,
@@ -141,6 +145,71 @@ fn seed_rows(
 
 fn seed_rows_of_tick(plan: LazyFrame, place: &TickPlace) -> LazyFrame {
     plan.filter(col("publication").eq(lit(place.publication)))
+}
+
+/// The tick's events, in event order and the columns `read_tick` reads. The App rule names a
+/// process it never read from its start or exec in the tick before its exit, so a seed without
+/// them gives that exit no App where a replay gives it one.
+fn seed_events(
+    saved: SavedRecording<'_>,
+    manifest: &Manifest,
+    place: &TickPlace,
+) -> Result<DataFrame> {
+    let mut rows = seed_events_of_tick(EventTable::empty_frame()?, place)?;
+    if place.events_first == place.events_end {
+        return Ok(rows);
+    }
+
+    let table =
+        EventTable::open_budgeted(saved.root, manifest, saved.budget).map_err(ordinary_error)?;
+    for index in 0..table.len() {
+        let part = table.part(index).map_err(ordinary_error)?;
+        let events = part.events();
+        if events.start < place.events_end && place.events_first < events.end {
+            rows.vstack_mut_owned(seed_events_of_part(saved, part, place)?)?;
+        }
+    }
+
+    Ok(rows)
+}
+
+fn seed_events_of_part(
+    saved: SavedRecording<'_>,
+    part: EventPart,
+    place: &TickPlace,
+) -> Result<DataFrame> {
+    let count = u32::try_from(BATCH_ROWS_MAX).map_err(|_| Error::Bound("event batch rows"))?;
+    let part = part
+        .capture_with(saved.budget, AdmittedTable::from_file_budgeted)
+        .map_err(ordinary_error)?;
+    let mut rows = seed_events_of_tick(EventTable::empty_frame()?, place)?;
+    for slice in 0..part.rows().div_ceil(u64::from(count)) {
+        let frame = part
+            .read_slice(slice * u64::from(count), count, saved.budget)
+            .map_err(ordinary_error)?
+            .associated(saved.budget)
+            .map_err(ordinary_error)?;
+        rows.vstack_mut_owned(seed_events_of_tick(frame, place)?)?;
+    }
+
+    Ok(rows)
+}
+
+/// The rows of `frame`, which holds associated events, that are events of the tick.
+fn seed_events_of_tick(frame: DataFrame, place: &TickPlace) -> Result<DataFrame> {
+    let columns = [
+        lit(1_u8).cast(DataType::UInt8).alias("app_origin"),
+        col("event").alias("app_event"),
+        col("kind").alias("app_kind"),
+        col("run_tick").alias("app_tick"),
+        seed_null("threads", DataType::Int32),
+        seed_null("gpu_ns", DataType::UInt64),
+    ];
+
+    Ok(seed_rows_of_tick(frame.lazy(), place)
+        .with_columns(columns)
+        .select(COLUMNS.map(col))
+        .collect()?)
 }
 
 /// A column named `name` of type `data_type` holding no values.

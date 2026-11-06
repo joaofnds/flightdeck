@@ -16,6 +16,10 @@ pub(crate) struct Named<'a> {
     app: &'a [u8],
     pub usage: Option<Usage>,
     pub exited: bool,
+    /// Whether the tick holds only the process's start, with no reading of it.
+    pub started: bool,
+    /// Whether the tick holds only the process's exec, with no reading of it.
+    pub execed: bool,
     pub version: i32,
     pub unique_id: u64,
     pub threads: i32,
@@ -30,10 +34,19 @@ pub(crate) fn member<'a>(pid: i32, name: &'a [u8], app: &'a [u8], usage: Usage) 
         app,
         usage: Some(usage),
         exited: false,
+        started: false,
+        execed: false,
         version: 1,
         unique_id: u64::try_from(pid).unwrap() * 100,
         threads: 1,
         gpu_ns: None,
+    }
+}
+
+impl Named<'_> {
+    /// Whether the tick holds a reading of the process rather than an event of it.
+    fn read(&self) -> bool {
+        !self.exited && !self.started && !self.execed
     }
 }
 
@@ -134,25 +147,25 @@ pub(crate) fn publish_at(
     let identities: Vec<_> = rows.iter().map(|row| identity(fixture, row)).collect();
     let processes: Vec<_> = rows
         .iter()
-        .filter(|row| !row.exited)
+        .filter(|row| row.read())
         .filter_map(process)
         .collect();
     let live: Vec<_> = rows
         .iter()
         .zip(&identities)
-        .filter(|(row, _)| !row.exited)
+        .filter(|(row, _)| row.read())
         .map(|(_, identity)| *identity)
         .collect();
     let event_identities: Vec<_> = rows
         .iter()
         .zip(&identities)
-        .filter(|(row, _)| row.exited)
+        .filter(|(row, _)| !row.read())
         .map(|(_, identity)| *identity)
         .collect();
     let events = publish_at_events(rows);
     let gpu_ns: Vec<_> = rows
         .iter()
-        .filter(|row| !row.exited)
+        .filter(|row| row.read())
         .map(|row| row.gpu_ns)
         .collect();
     let readings = Readings {
@@ -190,14 +203,25 @@ pub(crate) fn publish_at(
     );
 }
 
-/// The exit of each row that exited.
+/// The event of each row the tick holds as an event rather than as a reading.
 fn publish_at_events(rows: &[Named<'_>]) -> Vec<collector::tracker::Event> {
     rows.iter()
-        .filter(|row| row.exited)
-        .map(|row| collector::tracker::Event::Exit {
-            pid: row.pid,
-            last: row.usage.ok_or(collector::processes::Unreadable::Refused),
-            noticed: collector::tracker::Noticed::OnExit,
+        .filter(|row| !row.read())
+        .map(|row| {
+            if row.started {
+                collector::tracker::Event::Start {
+                    pid: row.pid,
+                    coalition: None,
+                }
+            } else if row.execed {
+                collector::tracker::Event::Exec { pid: row.pid }
+            } else {
+                collector::tracker::Event::Exit {
+                    pid: row.pid,
+                    last: row.usage.ok_or(collector::processes::Unreadable::Refused),
+                    noticed: collector::tracker::Noticed::OnExit,
+                }
+            }
         })
         .collect()
 }
@@ -274,7 +298,9 @@ fn identity(fixture: &mut Fixture, row: &Named<'_>) -> IdentityObservation {
         .unwrap();
     IdentityObservation {
         pid: row.pid,
-        usage: if row.usage.is_some() {
+        usage: if row.started || row.execed {
+            UsageAvailability::NotApplicable
+        } else if row.usage.is_some() {
             UsageAvailability::Measured
         } else {
             UsageAvailability::Refused

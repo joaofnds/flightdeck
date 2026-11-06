@@ -253,6 +253,88 @@ fn a_restart_changes_nothing_for_a_process_that_exited() {
 }
 
 #[test]
+fn a_restart_changes_nothing_for_a_process_that_exited_just_after_it() {
+    // Goal: a process read in a minute's last tick and gone in the next minute's first tick keeps
+    // across a restart the program a replay gives its exit.
+    // Method: publish the process in one tick and its exit in the next, with a restart between.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+    let helper = || named::member(8, b"helper", b"/A.app", usage);
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| named::publish(fixture, 0, &[helper()]),
+        |fixture| {
+            let mut exited = helper();
+            exited.exited = true;
+            named::publish(fixture, 1, &[exited]);
+        },
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert!(!kept.is_empty());
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_known_only_from_its_start_in_the_tick_before_its_exit() {
+    // Goal: the App rule names a process it never read from its start in the tick before its exit,
+    // so a restart between the two keeps the App a replay gives it.
+    // Method: publish only the start in a minute's last tick and only the exit in the next
+    // minute's first tick, with a restart between.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+    let brief = || named::member(8, b"brief", b"/A.app", usage);
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| {
+            let mut started = brief();
+            started.started = true;
+            named::publish(fixture, 0, &[started]);
+        },
+        |fixture| {
+            let mut exited = brief();
+            exited.exited = true;
+            named::publish(fixture, 1, &[exited]);
+        },
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_known_only_from_its_exec_in_the_tick_before_its_exit() {
+    // Goal: the App rule names a process it never read from its exec in the tick before its exit,
+    // so a restart between the two keeps the App a replay gives it.
+    // Method: publish only the exec in a minute's last tick and only the exit in the next
+    // minute's first tick, with a restart between.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+    let brief = || named::member(8, b"brief", b"/A.app", usage);
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| {
+            let mut execed = brief();
+            execed.execed = true;
+            named::publish(fixture, 0, &[execed]);
+        },
+        |fixture| {
+            let mut exited = brief();
+            exited.exited = true;
+            named::publish(fixture, 1, &[exited]);
+        },
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept, replayed);
+}
+
+#[test]
 fn a_restart_changes_nothing_for_a_process_that_used_the_gpu() {
     // Goal: GPU time is read back with the rest of a saved tick, so a restart keeps its rate.
     // Method: publish a process with GPU time on each side of a boundary, restart between them,
