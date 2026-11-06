@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use collector::processes::Usage;
 use collector::recording::RegisteredRun;
 use persistence::Error;
 use persistence::canonical::ReadWork;
@@ -575,6 +576,82 @@ fn a_restart_on_a_long_run_reads_its_tail_and_not_what_it_saved_before() {
         assert_eq!(frontier.unwrap().publication_end(), windows + 2);
         assert!(work.entries <= 2 * ENTRIES_OF_A_BOUNDARY_MAX);
     }
+}
+
+/// The usage the baseline fixture of the older formats recorded.
+const BASELINE_USAGE: Usage = Usage {
+    awake_ns_at_start: 70_000_000_000,
+    user_ns: 9_007_199_254_740_993,
+    system_ns: 9_007_199_254_741_003,
+    energy_nj: 9_007_199_254_741_093,
+    instructions: 9_007_199_254_741_993,
+    super_instructions: 9_007_199_254_742_993,
+    cycles: 18_446_744_073_709_551_605,
+    idle_wakeups: 11,
+    interrupt_wakeups: 12,
+    pageins: 13,
+    resident_bytes: 104_857_600,
+    footprint_bytes: 125_829_120,
+    disk_read_bytes: 9_007_199_254_743_993,
+    disk_written_bytes: 9_007_199_254_744_993,
+};
+
+#[test]
+fn a_saved_process_keeps_the_counters_the_format_baseline_recorded() {
+    // Goal: counters no double holds exactly and counters near the top of a u64 read back the same
+    // once saved, as the baseline fixture of the older formats recorded them (P02.5).
+    // Method: publish that fixture's usage, save it, open a session, and read each cell by column.
+    let mut fixture = Fixture::registered();
+    fixture.publish_with_usage(SECOND_FIRST, &BASELINE_USAGE);
+    fixture.seal();
+    let mut session = Session::open(&fixture.root).unwrap();
+    session.select(SECOND_FIRST, 0).unwrap();
+
+    let page = session.page("processes", 0).unwrap();
+
+    let columns = page["columns"].as_array().unwrap();
+    let measured = &page["rows"][1];
+    let cell = |name: &str| {
+        let column = columns.iter().position(|column| column == name).unwrap();
+        measured[column].as_str().unwrap().to_owned()
+    };
+    let saved: Vec<String> = [
+        "awake_ns_at_start",
+        "user_ns",
+        "system_ns",
+        "energy_nj",
+        "instructions",
+        "super_instructions",
+        "cycles",
+        "idle_wakeups",
+        "interrupt_wakeups",
+        "pageins",
+        "resident_bytes",
+        "footprint_bytes",
+        "disk_read_bytes",
+        "disk_written_bytes",
+    ]
+    .map(cell)
+    .into();
+    assert_eq!(
+        saved,
+        [
+            "70000000000",
+            "9007199254740993",
+            "9007199254741003",
+            "9007199254741093",
+            "9007199254741993",
+            "9007199254742993",
+            "18446744073709551605",
+            "11",
+            "12",
+            "13",
+            "104857600",
+            "125829120",
+            "9007199254743993",
+            "9007199254744993",
+        ]
+    );
 }
 
 /// Links a window of one reading for each publication of `publications`, a second apart from
