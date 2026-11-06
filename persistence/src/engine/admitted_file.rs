@@ -249,6 +249,8 @@ pub(super) fn refuse(error: Error) -> AdmissionRefusal {
             kind: error.kind(),
             raw_os_error: error.raw_os_error(),
         },
-        Error::Engine(_) => unreachable!("admission does not decode values"),
+        Error::Engine(_) | Error::SecondExpired => {
+            unreachable!("admission does not decode values or select a second")
+        }
     }
 }

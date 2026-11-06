@@ -240,7 +240,7 @@ fn find_runs(root: &Path, recording: Identity) -> Result<Vec<RunIdentity>, Failu
 fn find_failure(error: Error) -> Failure {
     let kind = match error {
         Error::Io(error) => error.kind(),
-        Error::Bound(_) | Error::Engine(_) => io::ErrorKind::InvalidData,
+        Error::Bound(_) | Error::Engine(_) | Error::SecondExpired => io::ErrorKind::InvalidData,
     };
     Failure::Commits(kind)
 }

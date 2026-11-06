@@ -95,8 +95,10 @@ fn read_failure(error: PrepareError) -> Failure {
     match error {
         PrepareError::Admission(_) => Failure::Budget,
         PrepareError::Source(persistence::Error::Io(error)) => Failure::Ring(error.kind()),
-        PrepareError::Source(persistence::Error::Bound(_) | persistence::Error::Engine(_)) => {
-            Failure::Refused
-        }
+        PrepareError::Source(
+            persistence::Error::Bound(_)
+            | persistence::Error::Engine(_)
+            | persistence::Error::SecondExpired,
+        ) => Failure::Refused,
     }
 }

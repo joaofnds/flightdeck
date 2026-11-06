@@ -55,6 +55,8 @@ pub enum Error {
     Bound(&'static str),
     Engine(polars::error::PolarsError),
     Io(std::io::Error),
+    /// A selected second the retention period no longer covers.
+    SecondExpired,
 }
 
 impl std::fmt::Display for Error {
@@ -63,6 +65,7 @@ impl std::fmt::Display for Error {
             Self::Bound(message) => write!(formatter, "persistence bound: {message}"),
             Self::Engine(error) => write!(formatter, "persistence engine: {error}"),
             Self::Io(error) => write!(formatter, "persistence I/O: {error}"),
+            Self::SecondExpired => write!(formatter, "the selected second has expired"),
         }
     }
 }

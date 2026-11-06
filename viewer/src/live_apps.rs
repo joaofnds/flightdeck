@@ -195,7 +195,7 @@ impl AggregateError {
             Self::Input(error) | Self::View(error) => {
                 matches!(error, apps::Error::ProcessBound | apps::Error::ProgramBound)
             }
-            Self::Presentation(Error::Bound(_)) => true,
+            Self::Presentation(Error::Bound(_) | Error::SecondExpired) => true,
             Self::Presentation(Error::Engine(_) | Error::Io(_)) => false,
         }
     }

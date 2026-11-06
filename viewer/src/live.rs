@@ -1033,7 +1033,7 @@ impl LiveSession {
     ) -> Result<Value> {
         self.operation.check()?;
         match &error {
-            Error::Bound(_) => return Err(error),
+            Error::Bound(_) | Error::SecondExpired => return Err(error),
             Error::Io(problem) if problem.kind() == std::io::ErrorKind::Interrupted => {
                 return Err(error);
             }

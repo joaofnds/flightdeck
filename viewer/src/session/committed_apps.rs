@@ -98,7 +98,7 @@ impl Session {
             .retained()
             .holds(boot, endpoint.stamp.continuous_ns)
         {
-            return Err(Error::Bound("the selected second has expired"));
+            return Err(Error::SecondExpired);
         }
 
         with_app_sample_selection(selected, &endpoint)?;

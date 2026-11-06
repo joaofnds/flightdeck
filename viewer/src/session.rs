@@ -766,7 +766,7 @@ impl Session {
     pub(crate) fn selected_retained(&self, selected: &Observation) -> Result<()> {
         let boot = self.windows[selected.window].identity.run.boot;
         if !self.reader().retained().holds(boot, selected.continuous) {
-            return Err(Error::Bound("the selected second has expired"));
+            return Err(Error::SecondExpired);
         }
 
         Ok(())

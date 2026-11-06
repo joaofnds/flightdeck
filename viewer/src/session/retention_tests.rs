@@ -132,14 +132,49 @@ fn a_selection_says_its_second_expired_when_it_asks_again() {
     let page = session.page("ticks", 0);
     let detail = session.cpu_detail();
 
-    assert!(matches!(
-        page,
-        Err(Error::Bound("the selected second has expired"))
-    ));
-    assert!(matches!(
-        detail,
-        Err(Error::Bound("the selected second has expired"))
-    ));
+    assert!(matches!(page, Err(Error::SecondExpired)));
+    assert!(matches!(detail, Err(Error::SecondExpired)));
+}
+
+#[test]
+fn an_expired_selection_says_so_in_the_words_a_page_shows() {
+    // Goal: a page that asks again for a second it holds shows why it cannot, in the user's words
+    // rather than as a limit of the store.
+    // Method: select a second, expire it, and read the text of the refusal.
+    let fixture = saved_seconds();
+    let mut session = Session::open(&fixture.root).unwrap();
+    session.select(1003, 0).unwrap();
+    expire_before(&fixture.root, 5 * NS);
+
+    let refused = session.page("ticks", 0).unwrap_err();
+
+    assert_eq!(refused.to_string(), "the selected second has expired");
+}
+
+#[test]
+fn a_period_raised_before_removal_shows_what_it_hid_again() {
+    // Goal: a shortened period hides before it deletes, so raising it again in time loses nothing.
+    // Method: place the cutoff past a second, select it, raise the period, and select it in a
+    // session opened after that.
+    const YEAR_SECONDS: u64 = 365 * 86_400;
+    let fixture = saved_seconds();
+    expire_before(&fixture.root, 5 * NS);
+    let hidden = Session::open(&fixture.root)
+        .unwrap()
+        .select(1003, 0)
+        .unwrap();
+
+    Period::from_seconds(YEAR_SECONDS)
+        .unwrap()
+        .write(&PrivateDirectory::open(&fixture.root).unwrap())
+        .unwrap();
+    let shown = Session::open(&fixture.root)
+        .unwrap()
+        .select(1003, 0)
+        .unwrap();
+
+    assert!(hidden["selected"].is_null());
+    assert_eq!(shown["selected"]["wall_ns"], 1003 * NS);
 }
 
 #[test]
@@ -386,10 +421,7 @@ fn a_selection_restored_after_its_second_expired_says_so() {
         .unwrap()
         .restore_selection(&selected);
 
-    assert!(matches!(
-        restored,
-        Err(Error::Bound("the selected second has expired"))
-    ));
+    assert!(matches!(restored, Err(Error::SecondExpired)));
 }
 
 #[test]
@@ -403,10 +435,7 @@ fn a_selected_second_gives_no_apps_once_it_has_expired() {
 
     let apps = session.with_app_sample(&selected, |_sample| Ok(Value::Null));
 
-    assert!(matches!(
-        apps,
-        Err(Error::Bound("the selected second has expired"))
-    ));
+    assert!(matches!(apps, Err(Error::SecondExpired)));
 }
 
 /// Five readings of three saved minutes, with the tables `derive` derives, on a retention clock
