@@ -19,21 +19,21 @@ mod tests;
 pub(crate) struct Writer {
     directory: PrivateDirectory,
     index: Index,
-    filling: Filling,
+    open_batch: OpenBatch,
     next_event: u64,
     _reservation: crate::resources::ByteReservation,
 }
 
 /// The batch being filled, and what all the rows so far say that the index will need.
-struct Filling {
+struct OpenBatch {
     rows: Vec<Row>,
     bytes: usize,
     first: u64,
-    count: u64,
+    rows_total: u64,
     previous: Option<u64>,
 }
 
-impl Filling {
+impl OpenBatch {
     fn full(&self) -> bool {
         self.rows.len() == BATCH_ROWS_MAX || self.bytes + PROGRAM_BYTES_MAX > BATCH_BYTES_MAX
     }
@@ -45,13 +45,13 @@ impl Filling {
         {
             return Err(Error::Bound("event stream order"));
         }
-        if self.count == 0 {
+        if self.rows_total == 0 {
             self.first = row.event.number;
         }
         self.bytes += row.name.as_ref().map_or(0, Vec::len) + row.app.as_ref().map_or(0, Vec::len);
         assert!(self.bytes <= BATCH_BYTES_MAX);
-        self.count += 1;
-        if self.count > collector::u64_from_usize(crate::event_observation::ROWS_MAX) {
+        self.rows_total += 1;
+        if self.rows_total > collector::u64_from_usize(crate::event_observation::ROWS_MAX) {
             return Err(Error::Bound("event stream rows"));
         }
         self.previous = Some(row.event.number);
@@ -130,11 +130,11 @@ impl Writer {
                 identities,
                 batches: Vec::with_capacity(batch::BATCHES_MAX),
             },
-            filling: Filling {
+            open_batch: OpenBatch {
                 rows: Vec::with_capacity(BATCH_ROWS_MAX),
                 bytes: ROWS_BYTES_MAX,
                 first,
-                count: 0,
+                rows_total: 0,
                 previous: None,
             },
             next_event: first,
@@ -145,11 +145,11 @@ impl Writer {
     /// Continues after the batches an interrupted attempt saved, so their rows stay as they
     /// are and the same events read again are not written twice.
     pub(crate) fn resume(mut self, saved: &[Batch]) -> Self {
-        assert_eq!(self.filling.count, 0);
+        assert_eq!(self.open_batch.rows_total, 0);
         if let (Some(first), Some(last)) = (saved.first(), saved.last()) {
-            self.filling.first = first.first;
-            self.filling.count = saved.iter().map(|batch| batch.rows).sum();
-            self.filling.previous = Some(last.end - 1);
+            self.open_batch.first = first.first;
+            self.open_batch.rows_total = saved.iter().map(|batch| batch.rows).sum();
+            self.open_batch.previous = Some(last.end - 1);
             self.index.end = last.end;
             self.index.batches.extend_from_slice(saved);
             self.next_event = last.end;
@@ -181,7 +181,7 @@ impl Writer {
             } else {
                 (None, None)
             };
-            self.filling.push(Row {
+            self.open_batch.push(Row {
                 publication: Some(tick.observation.publication),
                 event: event.clone(),
                 identity,
@@ -205,15 +205,15 @@ impl Writer {
         let source = PrefixSource::of(reader);
         let start = self.next_event;
         let identities = self.index.identities;
-        let filling = &mut self.filling;
+        let open_batch = &mut self.open_batch;
         batch::read_ahead(
-            |batches| prefix_read(&source, start..end, identities, filling, losses, batches),
+            |batches| prefix_read(&source, start..end, identities, open_batch, losses, batches),
             |framed| write_batch(&self.directory, &mut self.index, framed),
         )
     }
 
     fn room(&mut self, reader: &mut RingReader) -> Result<()> {
-        if self.filling.full() {
+        if self.open_batch.full() {
             remap(reader)?;
             self.flush()?;
         }
@@ -221,22 +221,22 @@ impl Writer {
     }
 
     fn flush(&mut self) -> Result<()> {
-        if self.filling.rows.is_empty() {
+        if self.open_batch.rows.is_empty() {
             return Ok(());
         }
-        let framed = self.filling.framed(self.index.identities)?;
+        let framed = self.open_batch.framed(self.index.identities)?;
         write_batch(&self.directory, &mut self.index, framed)
     }
 
     pub(crate) fn finish(mut self, reader: &mut RingReader, empty_first: u64) -> Result<Index> {
         remap(reader)?;
         self.flush()?;
-        self.index.first = if self.filling.count == 0 {
+        self.index.first = if self.open_batch.rows_total == 0 {
             empty_first
         } else {
-            self.filling.first
+            self.open_batch.first
         };
-        self.index.rows = self.filling.count;
+        self.index.rows = self.open_batch.rows_total;
         self.index
             .write_file(&mut self.directory.create_file("index")?)?;
         Ok(self.index)
@@ -263,7 +263,7 @@ fn prefix_read(
     source: &PrefixSource,
     events: std::ops::Range<u64>,
     identities: bool,
-    filling: &mut Filling,
+    open_batch: &mut OpenBatch,
     losses: &mut Losses,
     batches: &std::sync::mpsc::SyncSender<FramedBatch>,
 ) -> Result<()> {
@@ -279,11 +279,11 @@ fn prefix_read(
         if reader.next_event() >= events.end {
             return Ok(());
         }
-        if filling.full() {
+        if open_batch.full() {
             let event = reader.next_event();
             reader = source.open()?;
             reader.seek_event(event)?;
-            if batches.send(filling.framed(identities)?).is_err() {
+            if batches.send(open_batch.framed(identities)?).is_err() {
                 return Ok(());
             }
         }
@@ -309,7 +309,7 @@ fn prefix_read(
                     &buffers,
                     lengths,
                 )?;
-                filling.push(row)?;
+                open_batch.push(row)?;
             }
             FoundEvent::Missed { first, end: missed } => {
                 losses.events += missed.min(events.end).saturating_sub(first);

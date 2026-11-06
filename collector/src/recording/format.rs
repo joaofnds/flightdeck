@@ -1,4 +1,4 @@
-//! Read-only compatibility and writer admission for immutable recording root formats.
+//! Reads what a recording root's identity file requires of its readers and writers.
 use std::io::{self, Read};
 use std::path::Path;
 

@@ -338,7 +338,10 @@ fn export_windows(
             .manifest
             .tables
             .iter()
-            .flat_map(|table| export_table_files(&directory, &window.manifest, table))
+            .map(|table| export_table_files(&directory, &window.manifest, table))
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .map(|path| Ok(json!({"path": path, "sha256": file_hash(&path)?})))
             .collect::<io::Result<Vec<_>>>()?;
         windows.push(json!({"manifest": format!("{:?}", window.manifest),
@@ -353,19 +356,21 @@ fn export_table_files(
     directory: &Path,
     manifest: &persistence::Manifest,
     table: &persistence::TableManifest,
-) -> Vec<PathBuf> {
+) -> io::Result<Vec<PathBuf>> {
     if table.name != persistence::schema::Table::Events.name() {
-        return vec![directory.join(format!("{}.parquet", table.name))];
+        return Ok(vec![directory.join(format!("{}.parquet", table.name))]);
     }
     let events = directory.join("events");
-    let batches = manifest.event_batches.unwrap_or(0);
-    std::iter::once(events.join("index"))
+    let batches = manifest
+        .event_batches
+        .ok_or_else(|| io::Error::other("sealed window without event batches"))?;
+    Ok(std::iter::once(events.join("index"))
         .chain((0..batches).map(|batch| {
             events.join(persistence::event_recovery::batch_name(
                 collector::usize_from_u32(batch),
             ))
         }))
-        .collect()
+        .collect())
 }
 
 fn file_hash(path: &Path) -> io::Result<String> {

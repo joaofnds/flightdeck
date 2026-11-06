@@ -142,10 +142,9 @@ fn classify_observed(
     }
 }
 
-/// Future production initializer. Caller must own the exclusive registration
+/// Creates the recording every writer starts from. Caller must own the exclusive registration
 /// lock for this root throughout, with role lock acquired first where applicable.
 /// A genuine `FileLock` is required and its inode must match this root's lock name.
-/// This does not enable protocol-two selection in any existing creator.
 pub fn initialize(
     root: &PrivateDirectory,
     registration: &FileLock,

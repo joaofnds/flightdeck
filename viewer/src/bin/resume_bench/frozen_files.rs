@@ -88,7 +88,9 @@ impl FrozenFiles {
         for window in &windows {
             if window.manifest.identity.run == *active {
                 let proof = fs::metadata(&window.marker)?.ino();
-                let links = names.remove(&proof).unwrap_or_default();
+                let links = names
+                    .remove(&proof)
+                    .ok_or_else(|| io::Error::other("frozen recording window without a name"))?;
                 markers.push(FrozenMarker {
                     names: frozen_names(directories.target, links)?,
                     publication_end: window.manifest.publication_end,
@@ -201,9 +203,9 @@ fn reveal(marker: &FrozenMarker) -> io::Result<()> {
 /// Links the files under `relative` of the source into the target, with their directories.
 fn capture_tree(directories: &Directories<'_>, relative: &Path) -> io::Result<()> {
     create_directory(&directories.target.join(relative))?;
-    let mut walking = vec![relative.to_path_buf()];
+    let mut unread = vec![relative.to_path_buf()];
     let mut entries = 0;
-    while let Some(directory) = walking.pop() {
+    while let Some(directory) = unread.pop() {
         for entry in fs::read_dir(directories.source.join(&directory))? {
             entries += 1;
             if entries == ENTRIES_MAX {
@@ -217,7 +219,7 @@ fn capture_tree(directories: &Directories<'_>, relative: &Path) -> io::Result<()
             }
             if kind.is_dir() {
                 create_directory(&directories.target.join(&child))?;
-                walking.push(child);
+                unread.push(child);
             } else {
                 fs::hard_link(entry.path(), directories.target.join(&child))?;
             }
@@ -232,9 +234,16 @@ fn capture_windows(target: &Path) -> io::Result<Vec<CapturedWindow>> {
     let mut windows = Vec::new();
     for attempt in fs::read_dir(target.join("data"))? {
         let marker = attempt?.path().join("ready").join("metadata");
-        if !marker.exists() {
+        let proof = match fs::metadata(&marker) {
+            Ok(proof) => proof,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        // A proof no name links to was never published, so no reader ever listed its window.
+        if proof.nlink() < 2 {
             continue;
         }
+
         if windows.len() == WINDOWS_MAX {
             return Err(io::Error::other("frozen recording window bound"));
         }
@@ -248,9 +257,9 @@ fn capture_windows(target: &Path) -> io::Result<Vec<CapturedWindow>> {
 /// The names of each proof in the directories that name windows, by the proof's inode.
 fn capture_names(target: &Path) -> io::Result<HashMap<u64, Vec<PathBuf>>> {
     let mut names: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let mut walking: Vec<PathBuf> = WINDOW_NAMES.iter().map(|name| target.join(name)).collect();
+    let mut unread: Vec<PathBuf> = WINDOW_NAMES.iter().map(|name| target.join(name)).collect();
     let mut entries = 0;
-    while let Some(directory) = walking.pop() {
+    while let Some(directory) = unread.pop() {
         for entry in fs::read_dir(&directory)? {
             entries += 1;
             if entries == ENTRIES_MAX {
@@ -258,7 +267,7 @@ fn capture_names(target: &Path) -> io::Result<HashMap<u64, Vec<PathBuf>>> {
             }
             let entry = entry?;
             if entry.file_type()?.is_dir() {
-                walking.push(entry.path());
+                unread.push(entry.path());
             } else {
                 let inode = entry.metadata()?.ino();
                 names.entry(inode).or_default().push(entry.path());

@@ -13,11 +13,11 @@ const LIFETIME_LOCKS: [&str; 3] = ["recorder.lock", "collector.lock", "persister
 /// that the next recorder starts a new one at `root`, and returns whether it did. A recording a
 /// process still uses stays, since that process goes on using its path. The recording takes a name
 /// beside `root` in one step before any file goes, so an interruption leaves the whole recording
-/// or a directory the next call finishes deleting, and never a part of one at `root`, which a
-/// recorder would refuse as corrupt.
+/// or a directory whose deletion the next call finishes, and never a part of one at `root`, which
+/// a recorder would refuse as corrupt.
 pub fn delete_older(root: &Path) -> io::Result<bool> {
-    let deleting = root.with_extension("deleting");
-    delete_older_finish(&deleting)?;
+    let deletion = root.with_extension("deleting");
+    delete_older_finish(&deletion)?;
     if !is_older(root)? {
         return Ok(false);
     }
@@ -28,11 +28,11 @@ pub fn delete_older(root: &Path) -> io::Result<bool> {
         if delete_older_held(root)? || !is_older(root)? {
             return Ok(false);
         }
-        std::fs::rename(root, &deleting)?;
-        private::sync_parent(&deleting)?;
+        std::fs::rename(root, &deletion)?;
+        private::sync_parent(&deletion)?;
     }
 
-    delete_older_finish(&deleting)?;
+    delete_older_finish(&deletion)?;
     Ok(true)
 }
 
@@ -46,32 +46,32 @@ fn delete_older_held(root: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
-/// Removes what the deleting name holds. A launch may name any path as its recording, so this name
+/// Removes what the deletion name holds. A launch may name any path as its recording, so this name
 /// may hold one in use, which stays, or a link, whose target's rings are not this call's to remove.
-fn delete_older_finish(deleting: &Path) -> io::Result<()> {
-    match private::PrivateDirectory::open(deleting) {
+fn delete_older_finish(deletion: &Path) -> io::Result<()> {
+    match private::PrivateDirectory::open(deletion) {
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     }
-    if delete_older_held(deleting)? {
+    if delete_older_held(deletion)? {
         return Ok(());
     }
 
-    delete_older_finish_rings(deleting);
-    std::fs::remove_dir_all(deleting)
+    delete_older_finish_rings(deletion);
+    std::fs::remove_dir_all(deletion)
 }
 
 /// Removes the rings the recording's run list names, since each holds its memory until the Mac
 /// restarts and no later collector reclaims a ring that names a run. A list or a ring that cannot
 /// be read is reported and stops nothing, so it can never keep a new recording from starting.
-fn delete_older_finish_rings(deleting: &Path) {
-    let registry = match Registry::read(deleting) {
+fn delete_older_finish_rings(deletion: &Path) {
+    let registry = match Registry::read(deletion) {
         Ok(registry) => registry,
         Err(error) => {
             diagnostics::error(format_args!(
                 "Could not read the rings of the older recording at {}: {error}",
-                deleting.display()
+                deletion.display()
             ));
             return;
         }
@@ -137,7 +137,7 @@ mod tests {
             fixture
         }
 
-        fn deleting(&self) -> PathBuf {
+        fn deletion(&self) -> PathBuf {
             self.parent.join("flightdeck.deleting")
         }
 
@@ -194,7 +194,7 @@ mod tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) {
-            for directory in [self.root.join("data"), self.deleting().join("data")] {
+            for directory in [self.root.join("data"), self.deletion().join("data")] {
                 if directory.exists() {
                     set_mode(&directory, 0o700);
                 }
@@ -455,47 +455,47 @@ mod tests {
 
         assert!(stopped.is_err());
         assert!(!fixture.root.exists());
-        assert!(fixture.deleting().join("data/saved").exists());
+        assert!(fixture.deletion().join("data/saved").exists());
     }
 
     #[test]
     fn finishes_a_deletion_an_earlier_launch_left() {
         // Goal: an interrupted deletion does not hold its files on disk for good, whatever the
         // recording at the path is by the next launch.
-        // Method: leave a part of a recording under the deleting name, with no recording at the
+        // Method: leave a part of a recording under the deletion name, with no recording at the
         // path, and ask again.
         let fixture = Fixture::empty();
-        private::create_private_dir(&fixture.deleting()).unwrap();
-        private::atomic_write(&fixture.deleting(), "saved", b"saved").unwrap();
+        private::create_private_dir(&fixture.deletion()).unwrap();
+        private::atomic_write(&fixture.deletion(), "saved", b"saved").unwrap();
 
         let deleted = delete_older(&fixture.root).unwrap();
 
         assert!(!deleted);
-        assert!(!fixture.deleting().exists());
+        assert!(!fixture.deletion().exists());
     }
 
     #[test]
     fn keeps_what_a_process_holds_under_the_deleting_name() {
-        // Goal: a launch may name any path, so a recording in use at the deleting name stays.
+        // Goal: a launch may name any path, so a recording in use at the deletion name stays.
         // Method: hold a controller's lifetime lock in a directory of that name and ask again.
         let fixture = Fixture::empty();
-        private::create_private_dir(&fixture.deleting()).unwrap();
-        private::atomic_write(&fixture.deleting(), "saved", b"saved").unwrap();
+        private::create_private_dir(&fixture.deletion()).unwrap();
+        private::atomic_write(&fixture.deletion(), "saved", b"saved").unwrap();
         let _recorder =
-            private::FileLock::try_lock(&fixture.deleting().join("recorder.lock")).unwrap();
+            private::FileLock::try_lock(&fixture.deletion().join("recorder.lock")).unwrap();
 
         delete_older(&fixture.root).unwrap();
 
-        assert!(fixture.deleting().join("saved").exists());
+        assert!(fixture.deletion().join("saved").exists());
     }
 
     #[test]
     fn leaves_the_rings_of_what_a_link_at_the_deleting_name_points_to() {
-        // Goal: a link at the deleting name costs the directory it points to nothing.
+        // Goal: a link at the deletion name costs the directory it points to nothing.
         // Method: link that name to a recording naming a real ring, ask again, and open the ring.
         let fixture = Fixture::with_identity(OLDER_IDENTITY);
         let ring_name = fixture.with_retained_ring();
-        std::os::unix::fs::symlink(&fixture.root, fixture.deleting()).unwrap();
+        std::os::unix::fs::symlink(&fixture.root, fixture.deletion()).unwrap();
 
         let refusal = delete_older(&fixture.root);
 
