@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use collector::recording::identity_text;
 use gpui::{Modifiers, MouseButton, TestAppContext};
 
 use super::range::cpu_by_app_lines_drawing;
@@ -11,7 +12,9 @@ use super::{InputDriver, InputHarness, PlotExit};
 use crate::chart_axes::TimeWindow;
 use crate::live_hover::{Preview, Target};
 use crate::live_source::{Snapshot, Update};
-use crate::live_store_app_fixtures::{HOUR_NEWEST, hour, hour_led_from_its_older_part, hour_until};
+use crate::live_store_app_fixtures::{
+    HOUR_NEWEST, apps_at, hour, hour_led_from_its_older_part, hour_until,
+};
 use crate::live_store_fixtures::{reading_at, trend_point};
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
 use crate::live_views::summary;
@@ -1500,6 +1503,187 @@ fn a_drag_on_the_cpu_page_at_the_hour_reads_once_and_keeps_the_chart_by_app(
     harness.teardown();
 }
 
+/// The View of the hour, at whose second `peak` the CPU reads 95% where it reads 10% elsewhere.
+fn hour_peaking_at(peak: u64) -> viewer::store::View {
+    let (mut view, _) = hour();
+    for second in &mut view.seconds {
+        let wall_second = second.wall_ns / 1_000_000_000;
+        let cpu = if wall_second == peak { 95.0 } else { 10.0 };
+        *second = Arc::new(viewer::store::MachineSecond {
+            cpu_percent: Some(cpu),
+            ..viewer::store::MachineSecond::clone(second)
+        });
+    }
+    view
+}
+
+/// `view` with another run having read the wall second `peak` after the reading of it the View
+/// holds, a second of 10% whose tick is `publication`.
+fn hour_with_a_second_reading_of(
+    mut view: viewer::store::View,
+    peak: u64,
+    publication: u64,
+) -> viewer::store::View {
+    let index = view
+        .seconds
+        .iter()
+        .position(|second| second.wall_ns / 1_000_000_000 == peak)
+        .unwrap();
+    let mut other = viewer::store::MachineSecond::clone(&view.seconds[index]);
+    other.cpu_percent = Some(10.0);
+    other.run = [7, 8];
+    other.publication = publication;
+    other.segment += 1;
+    let mut apps = apps_at(&other, &[]);
+    let observation = apps.observation.as_mut().unwrap();
+    observation.stamp.run = [7, 8];
+    observation.stamp.publication = publication;
+    view.seconds.insert(index + 1, Arc::new(other));
+    view.apps.insert(index + 1, Arc::new(apps));
+    view
+}
+
+#[gpui::test]
+fn a_click_on_a_peaks_mark_ranks_the_short_lived_app_no_chart_draws(cx: &mut TestAppContext) {
+    // Goal: an App that ran for the one second of a peak is found from the peak, though its mean
+    // over the range puts it on no line of a chart by App.
+    // Method: Overview of an hour whose CPU peaks at one second, whose Apps that second are led
+    // by one no other second holds. Read the chart by App, click the mark, read the top Apps.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    let mut view = hour_peaking_at(HELD);
+    let at = view
+        .seconds
+        .iter()
+        .position(|second| second.wall_ns / 1_000_000_000 == HELD)
+        .unwrap();
+    view.apps[at] = Arc::new(apps_at(
+        &view.seconds[at],
+        &[("Brief", 950_000_000), ("A", 10_000_000)],
+    ));
+    harness.driver.show_view_at_fifteen_minutes(view);
+    let drawn = harness.driver.chart_line_names("live-cpu-apps");
+    assert!(drawn.iter().any(|name| name == "A"), "{drawn:?}");
+    assert!(!drawn.iter().any(|name| name == "Brief"), "{drawn:?}");
+    let position = harness.driver.position_beside_peak("live-cpu-plot", HELD);
+
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+    harness
+        .driver
+        .context
+        .simulate_click(position, Modifiers::none());
+    harness.driver.context.run_until_parked();
+
+    assert_eq!(harness.driver.ranked_second(), HELD);
+    assert_eq!(harness.driver.leading_cpu_app(), "Brief");
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_peaks_mark_stays_a_target_through_a_hold_and_after_letting_go(cx: &mut TestAppContext) {
+    // Goal: holding another second and letting go leave a peak's mark where it was, so a peak seen
+    // before a hold can still be held during it and after it.
+    // Method: Overview of an hour whose CPU peaks at one second. Hold another second, click beside
+    // the mark, let go, and click beside it again, reading what the page asks the reader for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_peaking_at(HELD));
+    let plot = "live-cpu-plot";
+
+    harness.driver.click_second_on(plot, HELD + 200);
+    assert_eq!(harness.driver.requested_second(), Some(HELD + 200));
+    let during_hold = harness.driver.position_beside_peak(plot, HELD);
+    harness.driver.hover_position(during_hold);
+    harness.driver.context.run_until_parked();
+    harness
+        .driver
+        .context
+        .simulate_click(during_hold, Modifiers::none());
+    harness.driver.context.run_until_parked();
+    assert_eq!(harness.driver.requested_second(), Some(HELD));
+
+    harness.driver.follow_latest();
+    harness.driver.context.run_until_parked();
+    assert_ne!(harness.driver.requested_second(), Some(HELD));
+    let after_resume = harness.driver.position_beside_peak(plot, HELD);
+    harness.driver.hover_position(after_resume);
+    harness.driver.context.run_until_parked();
+    harness
+        .driver
+        .context
+        .simulate_click(after_resume, Modifiers::none());
+    harness.driver.context.run_until_parked();
+
+    assert_eq!(harness.driver.requested_second(), Some(HELD));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_on_a_peaks_mark_holds_the_reading_that_read_it(cx: &mut TestAppContext) {
+    // Goal: a peak's mark is a target of its own, so a click within reach of it holds the reading
+    // the mark stands for, and that reading's own second, rather than the second under the pointer.
+    // Method: Overview of an hour whose CPU peaks at one second, a click eight points before the
+    // peak near the top of the plot, then what the page asks the reader for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    let view = hour_peaking_at(HELD);
+    harness.driver.show_view_at_fifteen_minutes(view);
+    let position = harness.driver.position_beside_peak("live-cpu-plot", HELD);
+    assert_ne!(
+        harness.driver.second_at_plot_x("live-cpu-plot", position.x),
+        Some(HELD)
+    );
+
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+    harness
+        .driver
+        .context
+        .simulate_click(position, Modifiers::none());
+    harness.driver.context.run_until_parked();
+
+    assert_eq!(harness.driver.requested_second(), Some(HELD));
+    assert_eq!(
+        harness.driver.requested_identity(),
+        Some(serde_json::json!({
+            "run": identity_text(collector::ring::Identity([1, 2])).to_string(),
+            "boot": identity_text(collector::ring::Identity([3, 4])).to_string(),
+            "publication": HELD,
+        }))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_click_on_a_peaks_mark_holds_its_run_where_another_read_the_same_second(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the peak's own reading is held where two runs read its wall second, though a plain
+    // click on that second holds the newest of them.
+    // Method: the hour with a second reading of the peak's wall second by another run, read after
+    // the peak, a click on the mark, then the run and publication the page asks the reader for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    let view = hour_with_a_second_reading_of(hour_peaking_at(HELD), HELD, 900_000);
+    harness.driver.show_view_at_fifteen_minutes(view);
+    let position = harness.driver.position_beside_peak("live-cpu-plot", HELD);
+
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+    harness
+        .driver
+        .context
+        .simulate_click(position, Modifiers::none());
+    harness.driver.context.run_until_parked();
+
+    let identity = harness.driver.requested_identity().unwrap();
+    assert_eq!(identity["publication"], HELD);
+    assert_eq!(
+        identity["run"],
+        identity_text(collector::ring::Identity([1, 2])).to_string()
+    );
+    harness.teardown();
+}
+
 impl InputDriver {
     /// Shows the page over the View of the hour and the worker's reply to its request, the
     /// readings of the hour's newest two seconds, following the newest second at the newest
@@ -1534,6 +1718,46 @@ impl InputDriver {
             cx.notify();
         });
         self.context.run_until_parked();
+    }
+
+    /// Shows the page over `view` and the worker's reply to its request, the readings of the
+    /// hour's newest two seconds, following the newest second at the newest fifteen minutes.
+    fn show_view_at_fifteen_minutes(&mut self, view: viewer::store::View) {
+        let reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
+        self.show_reply_at_fifteen_minutes(reply);
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_view(Arc::new(view)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// A place eight points before the mark of a peak at `second` on the chart whose plot is
+    /// `plot`, close enough to its top to be on any peak that stands beyond its axis.
+    fn position_beside_peak(
+        &mut self,
+        plot: &'static str,
+        second: u64,
+    ) -> gpui::Point<gpui::Pixels> {
+        let at = self.held_second_position(plot, second);
+        let bounds = self.plot_bounds(plot);
+
+        gpui::point(at.x - gpui::px(8.0), bounds.top() + gpui::px(1.0))
+    }
+
+    /// The second a plain hover at `x` across the chart whose plot is `plot` shows.
+    fn second_at_plot_x(&mut self, plot: &'static str, x: gpui::Pixels) -> Option<u64> {
+        let bounds = self.plot_bounds(plot);
+        let fraction = f32::from(x - bounds.left()) / f32::from(bounds.size.width);
+
+        self.view_window()?.second_at(fraction)
+    }
+
+    /// The identity of the observation the page's request names.
+    fn requested_identity(&self) -> Option<serde_json::Value> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.request.identity.clone()
+        })
     }
 
     /// Shows the page of a saved recording over the worker's reply to its request, the readings
@@ -1840,6 +2064,33 @@ impl InputDriver {
         let (_, reading) = self.chart_accessibility_reading("live-cpu-apps");
 
         reading.splitn(3, "; ").nth(2).unwrap().to_owned()
+    }
+
+    /// The name of each line of the chart `panel_id`.
+    fn chart_line_names(&self, panel_id: &str) -> Vec<String> {
+        self.view.read_with(&self.context, |dashboard, _| {
+            let panel = dashboard
+                .panels
+                .iter()
+                .find(|panel| panel.id == panel_id)
+                .unwrap();
+
+            panel.lines.iter().map(|line| line.name.clone()).collect()
+        })
+    }
+
+    /// The name of the App the page's CPU ranking leads with.
+    fn leading_cpu_app(&self) -> String {
+        self.view.read_with(&self.context, |dashboard, _| {
+            let (rankings, _) = dashboard.ranking_reading().unwrap();
+            let cpu = rankings
+                .metrics
+                .iter()
+                .find(|ranking| ranking.metric == crate::live_rankings::Metric::Cpu)
+                .unwrap();
+
+            cpu.entries[0].app.name.clone()
+        })
     }
 
     /// The second the page's top Apps read.

@@ -31,14 +31,16 @@ mod tests;
 pub struct MachineSecond {
     /// The boot the second's clocks belong to, which the store sets as it takes the second in.
     pub boot: [u64; 2],
+    /// The run that read the second, which the store sets as it takes the second in.
+    pub run: [u64; 2],
     pub publication: u64,
     pub run_tick: u64,
     pub wall_ns: u64,
     pub continuous_ns: Option<u64>,
     pub awake_ns: Option<u64>,
-    /// Whether the rates are over the interval since the run's previous reading, which holds
-    /// only where the two readings are consecutive (doc-30).
-    pub follows: bool,
+    /// The interval since the run's previous reading, which the rates are over, where the two
+    /// readings are consecutive (doc-30).
+    pub elapsed_ns: Option<u64>,
     /// The breaks in the store's readings before this second, so two seconds share it where
     /// every reading between them follows the one before it in one run. The store sets it as
     /// it takes the second in.
@@ -116,6 +118,12 @@ pub struct Reading<'a> {
 }
 
 impl MachineSecond {
+    /// Whether the second's rates are over the interval since the run's previous reading.
+    #[must_use]
+    pub fn follows(&self) -> bool {
+        self.elapsed_ns.is_some()
+    }
+
     /// The second `reading` shows, its rates over the interval since `previous`, the run's
     /// reading before it, where the two are consecutive. `None` when the tick has no wall
     /// clock, since a second without one has no place on a chart.
@@ -124,7 +132,7 @@ impl MachineSecond {
         let mut second = Self::gauges(reading)?;
         if let Some(previous) = previous {
             if let Some(elapsed_ns) = interval_ns(previous.tick, reading.tick) {
-                second.follows = true;
+                second.elapsed_ns = Some(elapsed_ns);
                 second.cpu_percent = cpu_percent(reading.cpus, previous.cpus);
                 second.cpu_percent_one_core = cpu_percent_one_core(reading.cpus, previous.cpus);
                 second.cpu_level_percent = cpu_level_percent(reading, previous);
@@ -152,9 +160,8 @@ impl MachineSecond {
         match CompleteMachine::capture(reading, previous, budget) {
             Ok(complete) => {
                 let point = complete.point();
-                second.follows = previous
-                    .and_then(|previous| interval_ns(previous.tick, reading.tick))
-                    .is_some();
+                second.elapsed_ns =
+                    previous.and_then(|previous| interval_ns(previous.tick, reading.tick));
                 second.cpu_percent = point.cpu_percent;
                 if previous.is_some_and(|old| cpu_order_matches(reading.cpus, old.cpus)) {
                     second.cpu_percent_one_core = point.cpu_percent_one_core;
@@ -196,12 +203,13 @@ impl MachineSecond {
 
         let second = Self {
             boot: [0; 2],
+            run: [0; 2],
             publication: reading.tick.publication,
             run_tick: reading.tick.run_tick,
             wall_ns,
             continuous_ns: reading.tick.continuous_ns,
             awake_ns: reading.tick.awake_ns,
-            follows: false,
+            elapsed_ns: None,
             segment: 0,
             cpu_percent: None,
             cpu_percent_one_core: None,

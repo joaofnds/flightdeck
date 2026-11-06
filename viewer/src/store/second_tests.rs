@@ -727,7 +727,7 @@ mod when_the_previous_reading_is_not_the_one_just_before {
         // one CPU's ticks with no previous reading.
         let second = Machine::at(1).cpus(&[(1, 1)]).first_second();
 
-        assert!(!second.follows);
+        assert!(!second.follows());
         assert_eq!(second.cpu_percent, None);
         assert_eq!(second.network, None);
     }
@@ -744,7 +744,7 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
         let second = after.second_after(&before);
 
-        assert!(!second.follows);
+        assert!(!second.follows());
         assert_eq!(second.cpu_percent, None);
     }
 
@@ -757,7 +757,7 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
         let second = after.second_after(&before);
 
-        assert!(!second.follows);
+        assert!(!second.follows());
     }
 
     #[test]
@@ -769,7 +769,7 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
         let second = after.second_after(&before);
 
-        assert!(!second.follows);
+        assert!(!second.follows());
     }
 
     #[test]
@@ -781,7 +781,7 @@ mod when_the_previous_reading_is_not_the_one_just_before {
 
         let second = after.second_after(&before);
 
-        assert!(!second.follows);
+        assert!(!second.follows());
     }
 }
 
@@ -814,7 +814,7 @@ mod when_the_readings_do_not_match {
 
         let second = after.second_after(&before);
 
-        assert!(second.follows);
+        assert!(second.follows());
         assert_eq!(second.cpu_percent, None);
     }
 
@@ -827,7 +827,7 @@ mod when_the_readings_do_not_match {
 
         let second = after.second_after(&before);
 
-        assert!(second.follows);
+        assert!(second.follows());
         assert_eq!(second.cpu_percent_one_core, None);
     }
 

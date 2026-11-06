@@ -3,15 +3,17 @@
 //! sending every second of it. A live session keeps each sealed minute the tail needs, read
 //! once, and assembles each stride's tail from the minutes it keeps.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use persistence::retention::Retained;
 use persistence::{Error, Manifest, Result, TimeBounds};
 use serde_json::Value;
 
+use super::earlier_reach::Reach;
 use super::{CONTEXT_READERS, NS, OBSERVATIONS_MAX, Observation, Reader, Session};
 use crate::data::Table;
 use crate::metrics;
+use crate::store::MachinePlace;
 
 /// The seconds of history the longest range a chart shows holds. The viewer loads
 /// `LEAD_IN_SECONDS` more before them.
@@ -133,7 +135,18 @@ struct KeptMinute {
     /// first of a stretch across minutes is the first of it inside its own minute, so the tail
     /// finds here the point of every stretch whose first reading the period still covers.
     points: BTreeMap<u64, Value>,
+    /// How far the minute's readings of each stretch went, by the stretch's wall seconds divided
+    /// by the stride, which the tail adds up across the minutes a stretch spans.
+    reaches: BTreeMap<u64, StretchPart>,
     last: Last,
+}
+
+/// What one minute's readings of one stretch reached.
+struct StretchPart {
+    /// The clock of the first of those readings. The tail leaves out a part whose first reading
+    /// the period no longer covers, so no chart finds a peak the recording has let go of.
+    first_continuous: Option<u64>,
+    reach: Reach,
 }
 
 /// One reading of a kept minute. It holds no index of its minute, since a reopened session
@@ -429,6 +442,10 @@ impl KeptTail {
             };
             let mut point = point.clone();
             point["segment"] = (SEGMENT_BASE + segments[index]).into();
+            let stretch = observation.wall / NS / EARLIER_STRIDE_SECONDS;
+            point["reach"] = self
+                .assemble_reach(history, needed, stretch, retained)
+                .json();
             points.push(point);
         }
         if let Some(last) = observations.last() {
@@ -445,8 +462,39 @@ impl KeptTail {
             }
         }
         super::context_points_order(&mut points);
+        // The seconds between the tail's limit and the first full-detail second lie in no point,
+        // so the point after the join takes what their stretch reached.
+        if let Some(last) = points.last_mut() {
+            let joined = range.limit_second / EARLIER_STRIDE_SECONDS;
+            last["reach_after"] = self
+                .assemble_reach(history, needed, joined, retained)
+                .json();
+        }
 
         Ok(points)
+    }
+
+    /// How far the readings of `stretch` the period still covers went, in each minute they lie in.
+    fn assemble_reach(
+        &self,
+        history: &Session,
+        needed: &[usize],
+        stretch: u64,
+        retained: &Retained,
+    ) -> Reach {
+        let mut reach = Reach::default();
+        for &window in needed {
+            let manifest = &history.windows[window];
+            let part = self
+                .kept(manifest)
+                .and_then(|minute| minute.reaches.get(&stretch))
+                .filter(|part| retained.holds(manifest.identity.run.boot, part.first_continuous));
+            if let Some(part) = part {
+                reach.merge(&part.reach);
+            }
+        }
+
+        reach
     }
 
     /// The kept readings `range` holds, and those after its limit that decide its join.
@@ -581,9 +629,14 @@ impl Session {
         metrics::cells_check(metrics::trends_cell_count(&tables))?;
         let readings = earlier_minute_readings(&tables, window)?;
 
+        let firsts: BTreeSet<u64> = earlier_minute_firsts(&readings, window)
+            .iter()
+            .map(|first| first.publication)
+            .collect();
         let mut first_missing = false;
         let mut points = BTreeMap::new();
-        for reading in earlier_minute_firsts(&readings, window) {
+        let mut reaches: BTreeMap<u64, StretchPart> = BTreeMap::new();
+        for reading in readings.values() {
             let current = reading.observation(window);
             match earlier_minute_previous(&readings, &current, manifest, holder) {
                 Previous::Missing => first_missing = true,
@@ -595,7 +648,10 @@ impl Session {
                         previous.as_ref(),
                         0,
                     )?;
-                    points.insert(reading.publication, point);
+                    earlier_minute_reach(&mut reaches, manifest, reading, &point);
+                    if firsts.contains(&reading.publication) {
+                        points.insert(reading.publication, point);
+                    }
                 }
             }
         }
@@ -607,9 +663,34 @@ impl Session {
             first_missing,
             readings: readings.into_values().collect(),
             points,
+            reaches,
             last,
         })
     }
+}
+
+/// Adds the reading whose point is `point` to what its stretch reached.
+fn earlier_minute_reach(
+    reaches: &mut BTreeMap<u64, StretchPart>,
+    manifest: &Manifest,
+    reading: &Reading,
+    point: &Value,
+) {
+    let part = reaches
+        .entry(reading.wall / NS / EARLIER_STRIDE_SECONDS)
+        .or_insert_with(|| StretchPart {
+            first_continuous: reading.continuous,
+            reach: Reach::default(),
+        });
+    part.reach.add(
+        point,
+        MachinePlace {
+            boot: manifest.identity.run.boot.0,
+            run: manifest.identity.run.run.0,
+            publication: reading.publication,
+            wall_ns: reading.wall,
+        },
+    );
 }
 
 /// Adds `window` to the minutes a batch reads, once, while it holds fewer than

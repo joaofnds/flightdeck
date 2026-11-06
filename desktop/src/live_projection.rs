@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use serde_json::Value;
 
-use crate::data::{Line, Panel};
+use crate::data::{Line, LineExtremes, LineReach, MachinePlace, Panel};
 use crate::live_inventory::PerformanceLevel;
 
 #[path = "live_held_projection.rs"]
@@ -173,7 +174,15 @@ const OBSERVATION_FIELDS: [&str; 7] = [
 /// The older tail followed by the recent readings, which every index of a chart counts through.
 fn joined_points<'a>(earlier: Option<&'a [Value]>, recent: &'a [Value]) -> Cow<'a, [Value]> {
     match earlier {
-        Some(older) if !older.is_empty() => Cow::Owned([older, recent].concat()),
+        Some(older) if !older.is_empty() => {
+            let mut joined = [older, recent].concat();
+            // The seconds at the join lie in no point of their own, so the first point after it
+            // shows what their stretch reached.
+            if let Some(first_recent) = joined.get_mut(older.len()) {
+                first_recent["reach"] = older[older.len() - 1]["reach_after"].clone();
+            }
+            Cow::Owned(joined)
+        }
         _ => Cow::Borrowed(recent),
     }
 }
@@ -242,6 +251,7 @@ pub fn empty_panels(route: &str) -> Result<Vec<Rc<Panel>>, String> {
         detail_first: 0,
         positions: Vec::new(),
         segments: Vec::new(),
+        places: Vec::new().into(),
         selected_index: None,
     };
     // One second, which holds no reading, so a state chart draws as its timeline.
@@ -347,6 +357,8 @@ struct Coordinates {
     detail_first: u64,
     positions: Vec<f32>,
     segments: Vec<u64>,
+    /// The reading at each position.
+    places: Arc<[MachinePlace]>,
     selected_index: Option<usize>,
 }
 
@@ -377,6 +389,9 @@ struct Reading {
     resource: Option<&'static str>,
     axis: Option<&'static str>,
     follows: Option<&'static str>,
+    /// The reading whose peaks stand for this line's, on a line whose own peaks are not the chart's
+    /// to show: a stack's total, which holds the readings of one instant, on the stack's top line.
+    reach: Option<&'static str>,
 }
 
 impl Domain {
@@ -439,6 +454,7 @@ fn coordinates(
     assert!(points.len() <= OBSERVATIONS_MAX);
     let mut positions = Vec::with_capacity(points.len());
     let mut segments = Vec::with_capacity(points.len());
+    let mut places = Vec::with_capacity(points.len());
     let mut identities = BTreeMap::new();
     let target = if selected.is_null() {
         None
@@ -448,7 +464,8 @@ fn coordinates(
     let mut selected_index = None;
     for (index, point) in points.iter().enumerate() {
         let observation = if app { &point["observation"] } else { point };
-        positions.push(domain.position(integer(&observation["wall_ns"])?)?);
+        let wall_ns = integer(&observation["wall_ns"])?;
+        positions.push(domain.position(wall_ns)?);
         let stamp = if app {
             &observation["stamp"]
         } else {
@@ -461,8 +478,15 @@ fn coordinates(
         );
         let next = u64::try_from(identities.len()).map_err(|error| error.to_string())?;
         segments.push(*identities.entry(key).or_insert(next));
+        let publication = integer(&stamp["publication"])?;
+        places.push(MachinePlace {
+            run: key.0,
+            boot: key.1,
+            publication,
+            wall_ns,
+        });
         if let Some(target) = &target {
-            let observed = (key.0, key.1, integer(&stamp["publication"])?);
+            let observed = (key.0, key.1, publication);
             if observed == *target {
                 if selected_index.is_some() {
                     return Err("Duplicate selected live chart observation".to_owned());
@@ -479,6 +503,7 @@ fn coordinates(
         detail_first: domain.recent_first,
         positions,
         segments,
+        places: places.into(),
         selected_index,
     })
 }
@@ -694,6 +719,10 @@ trait Observations {
 
     /// What `reading` reads at observation `index`, before its divisor.
     fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String>;
+
+    /// How low and how high `reading` reached over what observation `index` stands for, before its
+    /// divisor, or `None` where it stands only for itself.
+    fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String>;
 }
 
 impl Observations for [Value] {
@@ -708,13 +737,118 @@ impl Observations for [Value] {
     fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String> {
         panel_reading_value(reading, &self[index])
     }
+
+    fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String> {
+        let reach = &self[index]["reach"];
+        if reach.is_null() {
+            return Ok(None);
+        }
+        let key = reading.reach.unwrap_or(reading.key);
+        let path = match (reading.resource, reading.channel) {
+            (Some(resource), Some(channel)) => format!("{resource}/{key}/{channel}"),
+            (Some(resource), None) => format!("{resource}/{key}"),
+            (None, Some(channel)) => format!("{key}/{channel}"),
+            (None, None) => key.to_owned(),
+        };
+        let reached = &reach["leaves"][path.as_str()];
+        let Some((low, high)) = number(&reached[0])?.zip(number(&reached[1])?) else {
+            return Ok(None);
+        };
+        let place = usize::try_from(integer(&reached[2])?).map_err(|error| error.to_string())?;
+        let place = &reach["places"][place];
+
+        Ok(Some(LineReach {
+            low,
+            high,
+            peak: MachinePlace {
+                run: identity(&place[0])?,
+                boot: identity(&place[1])?,
+                publication: integer(&place[2])?,
+                wall_ns: integer(&place[3])?,
+            },
+        }))
+    }
 }
+
+/// What the line of `reading` reaches at each point, on the chart's scale, for a line that names
+/// that reach. A stacked line reaches only as its whole stack, which only the line that names the
+/// stack's total can say. A line none of whose points stands for more than itself names no reach.
+fn panel_extremes<O: Observations + ?Sized>(
+    specification: &Specification,
+    reading: &Reading,
+    points: &O,
+) -> Result<Option<LineExtremes>, String> {
+    let stacked = specification.stack && reading.stack != Some(false);
+    if stacked && reading.reach.is_none() {
+        return Ok(None);
+    }
+
+    let mut extremes = Vec::with_capacity(points.count());
+    for index in 0..points.count() {
+        let reach = points.reach(reading, index)?;
+        extremes.push(reach.map(|reach| LineReach {
+            low: reach.low / reading.divisor,
+            high: reach.high / reading.divisor,
+            ..reach
+        }));
+    }
+    if !stacked && extremes.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+
+    Ok(Some(extremes))
+}
+
+/// What a line chart's marks stand for, which its help says beside what it measures.
+pub(crate) const LINE_STATISTICS_HELP: &str = "Each point is the mean of the readings of its \
+    seconds. A stem marks a single reading that went well past its line, and picking the stem \
+    holds that reading.";
+
+/// What a point of a chart of states stands for, which its help says beside what it measures.
+pub(crate) const STATE_STATISTICS_HELP: &str = "A cell that covers several seconds shows the \
+    highest state among them.";
 
 fn panel<O: Observations + ?Sized>(
     specification: &Specification,
     points: &O,
     coordinates: &Coordinates,
 ) -> Result<Panel, String> {
+    let lines = panel_lines(specification, points)?;
+    let maximum = panel_maximum(specification, &lines);
+
+    Ok(Panel {
+        id: specification.id.to_owned(),
+        title: specification.title.to_owned(),
+        unit: specification.unit.to_owned(),
+        kind: "line".to_owned(),
+        lines,
+        minimum: Some(0.0),
+        maximum,
+        stack: Some(specification.stack),
+        fill: Some(specification.fill),
+        caption: specification.caption.map(str::to_owned),
+        help: Some(format!("{} {LINE_STATISTICS_HELP}", specification.help)),
+        source: Some("Live recording".into()),
+        quantities: None,
+        states: None,
+        table_headings: None,
+        table_rows: None,
+        positions: Some(coordinates.positions.clone()),
+        segments: Some(coordinates.segments.clone()),
+        selected_index: coordinates.selected_index,
+        window: Some(coordinates.window),
+        places: Some(Arc::clone(&coordinates.places)),
+        detail_first: Some(coordinates.detail_first),
+        reading_seconds: crate::charts::TICK_SECONDS,
+        sliding: false,
+        chart_width: std::cell::Cell::new(None),
+    })
+}
+
+fn panel_lines<O: Observations + ?Sized>(
+    specification: &Specification,
+    points: &O,
+) -> Result<Vec<Line>, String> {
     let mut lines = Vec::with_capacity(specification.lines.len());
     for reading in &specification.lines {
         let mut values = Vec::with_capacity(points.count());
@@ -738,45 +872,26 @@ fn panel<O: Observations + ?Sized>(
                     .to_owned(),
             ),
             fill: reading.fill,
+            extremes: panel_extremes(specification, reading, points)?,
         });
     }
-    let maximum = if specification.id == "live-gpu-activity" {
-        Some(
-            lines[0]
-                .values
-                .iter()
-                .flatten()
-                .fold(100.0_f32, |high, value| high.max(*value)),
-        )
-    } else {
-        specification.maximum
-    };
-    Ok(Panel {
-        id: specification.id.to_owned(),
-        title: specification.title.to_owned(),
-        unit: specification.unit.to_owned(),
-        kind: "line".to_owned(),
-        lines,
-        minimum: Some(0.0),
-        maximum,
-        stack: Some(specification.stack),
-        fill: Some(specification.fill),
-        caption: specification.caption.map(str::to_owned),
-        help: Some(specification.help.to_owned()),
-        source: Some("Live recording".into()),
-        quantities: None,
-        states: None,
-        table_headings: None,
-        table_rows: None,
-        positions: Some(coordinates.positions.clone()),
-        segments: Some(coordinates.segments.clone()),
-        selected_index: coordinates.selected_index,
-        window: Some(coordinates.window),
-        detail_first: Some(coordinates.detail_first),
-        reading_seconds: crate::charts::TICK_SECONDS,
-        sliding: false,
-        chart_width: std::cell::Cell::new(None),
-    })
+
+    Ok(lines)
+}
+
+fn panel_maximum(specification: &Specification, lines: &[Line]) -> Option<f32> {
+    if specification.id != "live-gpu-activity" {
+        return specification.maximum;
+    }
+
+    Some(
+        lines[0]
+            .values
+            .iter()
+            .flatten()
+            .copied()
+            .fold(100.0_f32, f32::max),
+    )
 }
 
 fn panel_reading_value(reading: &Reading, point: &Value) -> Result<Option<f32>, String> {
@@ -857,6 +972,7 @@ fn reading(key: &'static str, name: &'static str, color: &'static str, divisor: 
         resource: None,
         axis: None,
         follows: None,
+        reach: None,
     }
 }
 
@@ -992,6 +1108,8 @@ fn cpu_level_name(level: &PerformanceLevel) -> &str {
 }
 
 fn memory() -> Specification {
+    let mut compressed = reading("memory_compressed_bytes", "Compressed", "#b877d9", GIBIBYTE);
+    compressed.reach = Some("memory_used_bytes");
     let mut installed = reading("memory_total_bytes", "Installed", "#ccccdc", GIBIBYTE);
     installed.dashed = true;
     installed.stack = Some(false);
@@ -1003,7 +1121,7 @@ fn memory() -> Specification {
         vec![
             reading("memory_app_bytes", "App memory", "#73bf69", GIBIBYTE),
             reading("memory_wired_bytes", "Wired", "#5794f2", GIBIBYTE),
-            reading("memory_compressed_bytes", "Compressed", "#b877d9", GIBIBYTE),
+            compressed,
             installed,
         ],
     );
@@ -1207,6 +1325,8 @@ fn area_maxima() -> Specification {
 }
 
 fn power_breakdown() -> Specification {
+    let mut gpu = reading("gpu_watts", "GPU", "#b877d9", 1.0);
+    gpu.reach = Some("power_watts");
     let mut specification = specification(
         "live-power-breakdown",
         "Power",
@@ -1218,7 +1338,7 @@ fn power_breakdown() -> Specification {
                 "#ff9830",
                 1.0,
             ),
-            reading("gpu_watts", "GPU", "#b877d9", 1.0),
+            gpu,
         ],
     );
     specification.stack = true;
@@ -1282,12 +1402,11 @@ fn pressure_cells<O: Observations + ?Sized>(
 ) -> Result<(), String> {
     timeline_cells(panel, domain, points, coordinates, pressure_state)?;
     panel.states = Some(vec!["Normal".into(), "Warning".into(), "Critical".into()]);
-    panel.help = Some(
+    panel.help = Some(format!(
         "macOS memory pressure by observed second. The chosen same-second \
         publication takes priority; otherwise the latest reading is shown. Blank means \
-        unavailable or unrecognized, including gaps."
-            .to_owned(),
-    );
+        unavailable or unrecognized, including gaps. {STATE_STATISTICS_HELP}"
+    ));
 
     Ok(())
 }
@@ -1305,11 +1424,10 @@ fn thermal_cells<O: Observations + ?Sized>(
         "Serious".into(),
         "Critical".into(),
     ]);
-    panel.help = Some(
+    panel.help = Some(format!(
         "macOS thermal pressure by observed second, as Nominal, Fair, Serious or Critical. \
-        Blank means unavailable, including gaps."
-            .to_owned(),
-    );
+        Blank means unavailable, including gaps. {STATE_STATISTICS_HELP}"
+    ));
 
     Ok(())
 }
@@ -1342,7 +1460,14 @@ fn timeline_cells<O: Observations + ?Sized>(
         let cell = usize::try_from(second - domain.first).map_err(|error| error.to_string())?;
         assert!(cell < span);
         if Some(cell) != selected {
-            let value = state(panel.lines[0].values[index]);
+            // A point that stands for a stretch shows the worst state the stretch reached, since
+            // a state has no mean and a short spell in a worse one is what the chart is for.
+            let reached = panel.lines[0]
+                .extremes
+                .as_ref()
+                .and_then(|extremes| extremes[index])
+                .map(|reach| reach.high);
+            let value = state(reached.or(panel.lines[0].values[index]));
             if second < domain.recent_first {
                 let stretch = domain.stride.min(domain.recent_first - second);
                 let stretch = usize::try_from(stretch).map_err(|error| error.to_string())?;
@@ -1358,6 +1483,7 @@ fn timeline_cells<O: Observations + ?Sized>(
 
     "timeline".clone_into(&mut panel.kind);
     panel.lines[0].values = cells;
+    panel.lines[0].extremes = None;
     panel.positions = Some(
         (0..domain.span)
             .map(|cell| (f32::from(cell) + 0.5) / f32::from(domain.span))

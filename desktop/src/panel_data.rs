@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use serde::Deserialize;
+pub use viewer::store::MachinePlace;
 
 pub const LIVE_SAMPLE_LIMIT: usize = 4096;
 
@@ -33,6 +36,10 @@ pub struct Panel {
     /// the clock. A panel with none draws each reading on its own.
     #[serde(skip)]
     pub window: Option<crate::chart_axes::TimeWindow>,
+    /// The reading at each position, which picking a peak of a reading on its own holds. A panel
+    /// with none picks a peak by its second alone.
+    #[serde(skip)]
+    pub places: Option<Arc<[MachinePlace]>>,
     /// The first second of full-detail readings, before which each reading stands for several
     /// seconds, so no average mixes the two.
     #[serde(skip)]
@@ -55,6 +62,18 @@ pub struct Panel {
     pub chart_width: std::cell::Cell<Option<f32>>,
 }
 
+/// The lowest and highest reading each value of a line stands for, where it names them.
+pub type LineExtremes = Vec<Option<LineReach>>;
+
+/// What the readings one point of a line stands for reached.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineReach {
+    pub low: f32,
+    pub high: f32,
+    /// The reading that read `high`.
+    pub peak: MachinePlace,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[cfg_attr(test, derive(serde::Serialize))]
 #[serde(rename_all = "camelCase")]
@@ -71,4 +90,9 @@ pub struct Line {
     pub follows: Option<String>,
     pub unit: Option<String>,
     pub fill: Option<f32>,
+    /// The lowest and highest reading each of `values` stands for, on the chart's own scale, where
+    /// a value stands for more than itself. A stacked line's reach the whole stack beneath it at
+    /// one reading, and `None` leaves each value standing for itself alone.
+    #[serde(skip)]
+    pub extremes: Option<LineExtremes>,
 }

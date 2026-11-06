@@ -250,6 +250,7 @@ fn panels_panel(
             .iter()
             .position(|point| point.observation == payload.selected),
         window: Some(window),
+        places: None,
         detail_first: None,
         reading_seconds: crate::charts::TICK_SECONDS,
         sliding: false,
@@ -382,6 +383,7 @@ fn panels_panel_line(
         follows: None,
         unit: None,
         fill: None,
+        extremes: None,
     }
 }
 
@@ -405,6 +407,7 @@ fn panels_panel_line_missing(
         follows: None,
         unit: None,
         fill: None,
+        extremes: None,
     }
 }
 

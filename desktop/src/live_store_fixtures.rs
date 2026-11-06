@@ -24,13 +24,14 @@ pub fn reading_at(wall_second: u64, segment: u64) -> MachineSecond {
     };
 
     MachineSecond {
-        boot: [0; 2],
+        boot: [3, 4],
+        run: [1, 2],
         publication: wall_second,
         run_tick: wall_second,
         wall_ns: wall_second * NANOSECONDS_PER_SECOND + 250_000_000,
         continuous_ns: Some(wall_second * NANOSECONDS_PER_SECOND),
         awake_ns: Some(wall_second * NANOSECONDS_PER_SECOND),
-        follows: true,
+        elapsed_ns: Some(1_000_000_000),
         segment,
         cpu_percent: half(200),
         cpu_percent_one_core: half(140).map(|value| value * 18.0),

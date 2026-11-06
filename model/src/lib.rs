@@ -6,6 +6,7 @@ pub mod columns;
 pub mod programs;
 pub mod ranks;
 pub mod rates;
+pub mod summary;
 
 /// Widens `value`, which a `usize` holds on every 64-bit Mac.
 #[must_use]

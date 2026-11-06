@@ -423,6 +423,7 @@ fn chart_panel(
             follows: None,
             unit: None,
             fill: None,
+            extremes: None,
         })
         .collect();
     Panel {
@@ -447,6 +448,7 @@ fn chart_panel(
         table_headings: None,
         table_rows: None,
         window: Some(window),
+        places: None,
         detail_first: None,
         reading_seconds: match definition.group {
             Group::Ticks => crate::self_reports::TICK_REPORT_SECONDS,

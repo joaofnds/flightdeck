@@ -20,6 +20,8 @@ pub(crate) struct ChartInspector {
 struct SampleSummary {
     mean: Option<f32>,
     maximum: Option<f32>,
+    /// The wall second of the reading that read the maximum, where the chart names it.
+    maximum_second: Option<u64>,
     available: u32,
     total: usize,
 }
@@ -131,8 +133,9 @@ impl LiveDashboard {
             }))
             .child(self.chart_inspector_table(panel, inspector))
             .child(div().text_color(rgb(MUTED)).child(
-                "Recorded samples in the visible chart. Mean and maximum summarize available \
-                samples; they do not recover between-sample peaks.",
+                "Recorded samples in the visible chart. A sample that covers several seconds \
+                counts toward the mean once, and toward the maximum by the highest reading of \
+                those seconds. They do not recover peaks between readings.",
             ))
     }
 
@@ -182,6 +185,7 @@ impl LiveDashboard {
                 "Selected".into(),
                 "Sample mean".into(),
                 "Sample maximum".into(),
+                "Maximum read at".into(),
                 "Available samples".into(),
             ])
             .font_weight(gpui::FontWeight::SEMIBOLD),
@@ -201,6 +205,9 @@ impl LiveDashboard {
                 self.chart_line_reading(panel, line_index, index),
                 super::line_reading(panel, summary.mean, unit),
                 super::line_reading(panel, summary.maximum, unit),
+                summary
+                    .maximum_second
+                    .map_or_else(String::new, |second| crate::chart_axes::clock(second, true)),
                 format!("{} / {}", summary.available, summary.total),
             ]));
         }
@@ -349,7 +356,7 @@ fn split_reading(reading: &str) -> (&str, Option<&str>) {
     (value, Some(rest.trim_start_matches(" · ").trim()))
 }
 
-fn chart_data_row(values: [String; 5]) -> gpui::Div {
+fn chart_data_row(values: [String; 6]) -> gpui::Div {
     let mut row = div()
         .flex()
         .border_b_1()
@@ -376,18 +383,18 @@ fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
         .map(|line| {
             assert!(line.values.len() <= crate::data::LIVE_SAMPLE_LIMIT);
             let mut sum = 0.0_f64;
-            let mut maximum: Option<f32> = None;
+            let mut maximum: Option<(f32, Option<u64>)> = None;
             let mut available = 0_u32;
-            for value in line
-                .values
-                .iter()
-                .take(crate::data::LIVE_SAMPLE_LIMIT)
-                .flatten()
-            {
-                if value.is_finite() {
-                    sum += f64::from(*value);
-                    maximum = Some(maximum.map_or(*value, |maximum| maximum.max(*value)));
-                    available += 1;
+            let values = line.values.iter().take(crate::data::LIVE_SAMPLE_LIMIT);
+            for (index, value) in values.enumerate() {
+                let Some(value) = value.filter(|value| value.is_finite()) else {
+                    continue;
+                };
+                sum += f64::from(value);
+                available += 1;
+                let reading = chart_summaries_reading(panel, line, index, value);
+                if maximum.is_none_or(|(highest, _)| reading.0 > highest) {
+                    maximum = Some(reading);
                 }
             }
             let mean = if available == 0 {
@@ -397,7 +404,8 @@ fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
             };
             SampleSummary {
                 mean,
-                maximum,
+                maximum: maximum.map(|(value, _)| value),
+                maximum_second: maximum.and_then(|(_, second)| second),
                 available,
                 total: line.values.len(),
             }
@@ -405,11 +413,32 @@ fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
         .collect()
 }
 
+/// The highest reading the sample `value` at `index` of `line` stands for, and that reading's wall
+/// second, where the chart names it. A stacked line's reach is the stack's total and not its own.
+fn chart_summaries_reading(
+    panel: &Panel,
+    line: &crate::data::Line,
+    index: usize,
+    value: f32,
+) -> (f32, Option<u64>) {
+    let reach = line
+        .extremes
+        .as_ref()
+        .filter(|_| panel.stack != Some(true))
+        .and_then(|extremes| extremes[index]);
+    if let Some(reach) = reach {
+        return (reach.high.max(value), Some(reach.peak.second()));
+    }
+    let place = panel.places.as_ref().and_then(|places| places.get(index));
+
+    (value, place.map(crate::data::MachinePlace::second))
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{Context, Render, TestAppContext, Window, div, prelude::*, px};
 
-    use super::{split_reading, tooltip_row};
+    use super::{chart_summaries, split_reading, tooltip_row};
 
     struct Probe;
 
@@ -441,6 +470,50 @@ mod tests {
         assert!(name.size.width >= px(60.0), "{name:?}");
         assert!(detail.right() <= tooltip.right(), "{detail:?} {tooltip:?}");
         assert!(detail.top() >= name.bottom());
+    }
+
+    /// A panel of one line, its second sample said to reach 95 at wall second 9,000.
+    fn reaching_panel(stack: bool) -> crate::data::Panel {
+        let mut panel: crate::data::Panel = serde_json::from_value(serde_json::json!({
+            "id": "cpu", "title": "CPU", "unit": "%", "kind": "line", "stack": stack,
+            "lines": [{"name": "All cores", "color": "#5794f2", "values": [10.0, 20.0]}]}))
+        .unwrap();
+        panel.lines[0].extremes = Some(vec![
+            None,
+            Some(crate::data::LineReach {
+                low: 1.0,
+                high: 95.0,
+                peak: crate::data::MachinePlace {
+                    wall_ns: 9_000_000_000_000,
+                    ..crate::data::MachinePlace::default()
+                },
+            }),
+        ]);
+
+        panel
+    }
+
+    #[test]
+    fn a_samples_maximum_is_the_highest_reading_it_covers_and_when_that_was_read() {
+        // Goal: a chart's table of statistics gives the peak its stem marks and when it was read,
+        // which is how a reader on the keyboard reaches a peak, and leaves the mean a mean.
+        // Method: a sample that reaches past its own mean, and read the summary.
+        let summaries = chart_summaries(&reaching_panel(false));
+
+        assert_eq!(summaries[0].maximum, Some(95.0));
+        assert_eq!(summaries[0].maximum_second, Some(9_000));
+        assert_eq!(summaries[0].mean, Some(15.0));
+    }
+
+    #[test]
+    fn a_stacked_lines_maximum_is_its_own_and_not_the_total_of_its_stack() {
+        // Goal: a stack's top line names how far the stack reaches, which is no reading of that
+        // line, so its row keeps to its own samples.
+        // Method: the same line in a stack, and read the summary.
+        let summaries = chart_summaries(&reaching_panel(true));
+
+        assert_eq!(summaries[0].maximum, Some(20.0));
+        assert_eq!(summaries[0].maximum_second, None);
     }
 
     #[test]

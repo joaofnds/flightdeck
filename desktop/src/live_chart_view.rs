@@ -457,8 +457,30 @@ impl LiveDashboard {
             cx.notify();
         }
         self.drag_move(source, measured.get(), position.x, cx);
+        if let Some(target) = self.chart_hover_peak(panel, measured.get(), position) {
+            self.hover_reading_target(source.clone(), target, hovered_at, cx);
+            return;
+        }
         let second = chart_hover_second(self.view_window(), measured.get(), position);
         self.chart_hover_update(source, second, hovered_at, cx);
+    }
+
+    /// The target of the peak of `panel` whose mark the pointer at `position` is on, which is the
+    /// reading the peak stands for rather than the second under the pointer.
+    fn chart_hover_peak(
+        &self,
+        panel: &Panel,
+        bounds: Bounds<gpui::Pixels>,
+        position: gpui::Point<gpui::Pixels>,
+    ) -> Option<crate::live_hover::Target> {
+        let inspection = chart_inspection(panel, self.chart_inspection_index(panel));
+        let hidden = self.chart_hidden(panel);
+        let pick = charts::peak_under(panel, bounds, inspection, &hidden, position)?;
+
+        Some(match pick.place {
+            Some(place) => crate::live_hover::Target::of_place(&place),
+            None => self.hover_target(self.snapshot.as_deref()?, pick.second),
+        })
     }
 
     fn chart_hover_update(

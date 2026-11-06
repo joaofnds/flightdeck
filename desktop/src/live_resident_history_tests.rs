@@ -26,6 +26,18 @@ fn context_admission_metadata_preserves_the_same_resident_readings() {
 }
 
 #[test]
+fn a_chart_of_resident_memory_says_its_points_are_means() {
+    // Goal: a reader of the chart of resident memory learns its statistic, as on any chart by App.
+    // Method: read the help of the chart.
+    let history = ResidentHistory::prepare(&fixture(), &selection());
+
+    let panel = history.panel().unwrap();
+
+    let help = panel.help.as_ref().unwrap();
+    assert!(help.contains(crate::live_app_attribution_history::APP_STATISTICS_HELP));
+}
+
+#[test]
 fn history_without_cache_or_context_accounting_is_unavailable() {
     // Goal: the adapter still refuses a response that supplies no storage accounting.
     // Method: remove the sole bookkeeping field from an otherwise valid response.

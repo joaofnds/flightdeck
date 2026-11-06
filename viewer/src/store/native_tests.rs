@@ -167,7 +167,7 @@ fn a_terminal_workspace_admission_retry_keeps_the_saved_predecessor() {
     let mut accepted = None;
     ring.read_prepared(&budget, &operation, None, |_, prepared| {
         assert_eq!(prepared.observation.stamp.publication, 3);
-        assert!(prepared.machine.as_ref().unwrap().follows);
+        assert!(prepared.machine.as_ref().unwrap().follows());
         accepted = Some(cpu_amount(prepared.apps()));
         true
     })
@@ -624,7 +624,7 @@ fn a_clockless_native_tick_keeps_raw_input_without_inventing_a_chart_second() {
                         cpu_amount(prepared.apps()),
                         Amount::Unavailable(crate::apps::Unavailable::Interval)
                     );
-                    assert!(!prepared.machine.as_ref().unwrap().follows);
+                    assert!(!prepared.machine.as_ref().unwrap().follows());
                 }
                 true
             })

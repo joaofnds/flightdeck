@@ -70,12 +70,13 @@ pub(super) fn charging_cells<O: Observations + ?Sized>(
 ) -> Result<(), String> {
     super::timeline_cells(panel, domain, points, coordinates, |value| value)?;
     panel.states = Some(vec!["Not charging".into(), "Charging".into()]);
-    panel.help = Some(
+    panel.help = Some(format!(
         "Battery-controller charging state by observed second. The chosen \
         same-second publication takes priority; otherwise the latest reading is shown. \
-        Blank means unavailable or unobserved. This state does not imply external power."
-            .into(),
-    );
+        Blank means unavailable or unobserved. This state does not imply external power. \
+        {}",
+        super::STATE_STATISTICS_HELP
+    ));
     Ok(())
 }
 

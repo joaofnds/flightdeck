@@ -696,7 +696,7 @@ fn a_clockless_source_tail_is_handed_off_once_after_an_earlier_displayable_selec
 
     assert_eq!(held.newest.unwrap().publication, 3);
     assert_eq!(held.span.newest().unwrap().cpu_percent, None);
-    assert!(!held.span.newest().unwrap().follows);
+    assert!(!held.span.newest().unwrap().follows());
     let apps = held.apps.newest().unwrap();
     let payload = apps.processes.as_ref().unwrap();
     assert_eq!(payload.previous.unwrap().publication, 2);

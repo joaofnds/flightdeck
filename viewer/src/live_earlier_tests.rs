@@ -387,6 +387,214 @@ fn makes_each_point_as_the_full_detail_context_makes_the_same_reading() {
     assert_eq!(older, detailed);
 }
 
+/// The lowest and highest `name` the readings of `points` in `point`'s stretch read.
+fn earlier_stretch_reach(points: &Value, point: &Value, name: &str) -> (f64, f64) {
+    let stretch = |point: &Value| {
+        point["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND / EARLIER_STRIDE_SECONDS
+    };
+    let read = points
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|other| stretch(other) == stretch(point))
+        .map(|other| other[name].as_f64().unwrap());
+
+    read.fold((f64::MAX, f64::MIN), |(low, high), value| {
+        (low.min(value), high.max(value))
+    })
+}
+
+#[test]
+fn each_point_reaches_what_the_readings_of_its_stretch_read() {
+    // Goal: a point that stands for ten seconds says what all ten read, so a chart can show a
+    // reading that lasted one of them. Method: read the tail, select a second inside it so the
+    // full-detail context holds every second of those stretches, and compare what each point says
+    // with what they read.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish(&mut fixture);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let tail = session
+        .earlier_context(earlier_context_last(EARLIER_LIMIT))
+        .unwrap();
+
+    let context = Session::open(&fixture.root)
+        .unwrap()
+        .select(EARLIER_BASE + 1200, 0)
+        .unwrap();
+
+    let walls = |point: &Value| point["wall_ns"].as_u64().unwrap();
+    let held = &context["trends"];
+    let first = walls(&held[0]) / NANOSECONDS_PER_SECOND;
+    let shared: Vec<&Value> = tail["earlier_trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|point| walls(point) / NANOSECONDS_PER_SECOND > first + EARLIER_STRIDE_SECONDS)
+        .filter(|point| walls(point) < walls(held.as_array().unwrap().last().unwrap()))
+        .collect();
+    assert!(shared.len() > 10);
+    for point in shared {
+        let (low, high) = earlier_stretch_reach(held, point, "memory_active_bytes");
+        let reach = &point["reach"]["leaves"]["memory_active_bytes"];
+        assert_eq!(reach[0].as_f64(), Some(low), "{}", point["wall_ns"]);
+        assert_eq!(reach[1].as_f64(), Some(high), "{}", point["wall_ns"]);
+        assert!(low < high);
+    }
+}
+
+#[test]
+fn a_stretch_two_minutes_share_reaches_the_readings_of_both() {
+    // Goal: a stretch does not start with a minute, so its reach adds up what each minute holds of
+    // it. Method: readings placed so that a stretch holds the last ticks of one minute and the
+    // first of the next, whose memory rises with the tick.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..15, |tick| EARLIER_BASE + tick + 5);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+
+    let tail = session
+        .earlier_context(earlier_context_last(EARLIER_BASE + 240))
+        .unwrap();
+
+    // Ticks 55 to 64 are the stretch of 10,060, which minute 0 ends and minute 1 begins.
+    let shared = tail["earlier_trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|point| {
+            point["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND == EARLIER_BASE + 60
+        })
+        .unwrap();
+    let mib = 1024.0 * 1024.0;
+    assert_eq!(
+        shared["reach"]["leaves"]["memory_active_bytes"].as_array().unwrap()[..2],
+        [serde_json::json!(55.0 * mib), serde_json::json!(64.0 * mib)]
+    );
+}
+
+/// The reading `point` names as the peak of `name`: its identity, as a hover names one, and its
+/// wall second.
+fn earlier_peak_of(point: &Value, name: &str) -> (Value, u64) {
+    let reach = &point["reach"];
+    let place = usize::try_from(reach["leaves"][name][2].as_u64().unwrap()).unwrap();
+    let place = &reach["places"][place];
+    let identity =
+        serde_json::json!({"run": place[0], "boot": place[1], "publication": place[2]});
+
+    (identity, place[3].as_u64().unwrap() / NANOSECONDS_PER_SECOND)
+}
+
+#[test]
+fn inspecting_the_place_a_point_names_loads_the_reading_that_read_its_peak() {
+    // Goal: picking a peak loads the exact reading the peak was read at, through the route a hold
+    // reads a second by, and not the one reading the point stands for the stretch with.
+    // Method: read the tail, whose readings grow so each stretch peaks at its last second, inspect
+    // what a point names, and compare the reading with what the point says it reached.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish(&mut fixture);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let tail = session
+        .earlier_context(earlier_context_last(EARLIER_LIMIT))
+        .unwrap();
+    let point = &tail["earlier_trends"][5];
+    let (identity, second) = earlier_peak_of(point, "memory_active_bytes");
+    assert_ne!(identity["publication"], point["publication"]);
+
+    let inspected = session.inspect(second, &identity).unwrap();
+
+    assert_eq!(inspected["selected"]["publication"], identity["publication"]);
+    assert_eq!(
+        inspected["summary"]["memory_active_bytes"].as_f64(),
+        point["reach"]["leaves"]["memory_active_bytes"][1].as_f64()
+    );
+}
+
+#[test]
+fn a_stretch_two_runs_read_names_the_run_that_read_its_peak() {
+    // Goal: where two runs read the same wall seconds the peak's reading is named by its own run,
+    // so a pick loads it and not the newer run's reading of that second.
+    // Method: a run whose readings climb, then one read over its last seconds from low readings,
+    // the tail's point of those seconds, and an inspection of what the point names.
+    let mut fixture = RingFixture::new_following();
+    let first_run = fixture.writer.identity().unwrap().run;
+    earlier_publish_minutes(&mut fixture, 0..8, earlier_wall);
+    let mut restarted = fixture.next_run();
+    earlier_publish_minutes(&mut restarted, 0..8, |tick| earlier_wall(tick) + 8 * 60 - 20);
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let tail = session
+        .earlier_context(earlier_context_last(EARLIER_LIMIT))
+        .unwrap();
+    let shared_second = earlier_wall(8 * 60 - 5);
+    let point = tail["earlier_trends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|point| {
+            point["wall_ns"].as_u64().unwrap() / NANOSECONDS_PER_SECOND / EARLIER_STRIDE_SECONDS
+                == shared_second / EARLIER_STRIDE_SECONDS
+        })
+        .unwrap();
+    let (identity, second) = earlier_peak_of(point, "memory_active_bytes");
+    assert_eq!(identity["run"], identity_text(first_run).to_string());
+
+    let inspected = session.inspect(second, &identity).unwrap();
+
+    assert_eq!(inspected["selected"]["run"], identity["run"]);
+    assert_eq!(
+        inspected["summary"]["memory_active_bytes"].as_f64(),
+        point["reach"]["leaves"]["memory_active_bytes"][1].as_f64()
+    );
+}
+
+#[test]
+fn a_point_reaches_no_reading_the_period_no_longer_covers() {
+    // Goal: a peak that has expired leaves the chart with its reading, though a later run of the
+    // recording read the same wall seconds. Method: a run whose wall clock stepped back over the
+    // seconds of the run before, and a cutoff between the two.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..1, |tick| EARLIER_BASE + tick + 2_000);
+    let boot_cut = 60 * NANOSECONDS_PER_SECOND;
+    let mut restarted = fixture.next_run();
+    earlier_publish_minutes(&mut restarted, 1..2, |tick| EARLIER_BASE + tick - 60 + 2_000);
+    let seconds = EARLIER_BASE + 2_100;
+    crate::session::retention_tests::expire_before(&fixture.root, boot_cut);
+
+    let tail = LiveSession::open(&fixture.root)
+        .unwrap()
+        .earlier_context(earlier_context_last(seconds))
+        .unwrap();
+
+    let mib = 1024.0 * 1024.0;
+    let points = tail["earlier_trends"].as_array().unwrap();
+    assert!(points.len() > 2, "{points:?}");
+    for point in points {
+        let low = point["reach"]["leaves"]["memory_active_bytes"][0].as_f64().unwrap();
+        assert!(low >= 61.0 * mib, "{}", point["wall_ns"]);
+    }
+}
+
+#[test]
+fn the_last_point_says_what_the_seconds_at_the_join_reached() {
+    // Goal: the seconds between the tail's limit and the first full-detail second lie in no point,
+    // so a peak there stays findable until it ages into a stretch of the tail.
+    // Method: a context whose first charted second lies inside a stretch, and read what the tail's
+    // last point says of that stretch.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..15, |tick| EARLIER_BASE + tick);
+    let limit = EARLIER_BASE + 240;
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+
+    let tail = session
+        .earlier_context(earlier_context_last(limit + 4))
+        .unwrap();
+
+    let last = tail["earlier_trends"].as_array().unwrap().last().unwrap();
+    let mib = 1024.0 * 1024.0;
+    assert_eq!(
+        last["reach_after"]["leaves"]["memory_active_bytes"].as_array().unwrap()[..2],
+        [serde_json::json!(240.0 * mib), serde_json::json!(249.0 * mib)]
+    );
+}
+
 #[test]
 fn makes_each_point_from_the_reading_before_it_in_its_own_run() {
     // Goal: where a recording continues across a collector restart, the point of a minute's
@@ -533,7 +741,11 @@ fn earlier_shared(older: &Value, detailed: &[&Value]) -> (Vec<Value>, Vec<Value>
 
 fn earlier_unsegmented(point: &Value) -> Value {
     let mut point = point.clone();
-    point.as_object_mut().unwrap().remove("segment");
+    let fields = point.as_object_mut().unwrap();
+    fields.remove("segment");
+    // What the tail adds of the other readings of a stretch, which a point of one reading lacks.
+    fields.remove("reach");
+    fields.remove("reach_after");
     point
 }
 
@@ -627,4 +839,67 @@ fn earlier_reads(session: &LiveSession) -> u64 {
 /// state in a performance level.
 fn earlier_tables() -> u64 {
     u64::try_from(metrics::TABLE_NAMES.len() + 1).unwrap()
+}
+
+/// The Mac's readings of the stretch at `at` of a store started on `fixture`, once it holds the
+/// `seconds` seconds the fixture published.
+fn earlier_store_stretch(
+    fixture: &RingFixture,
+    seconds: usize,
+    at: usize,
+) -> crate::store::MachineStretch {
+    let store = crate::store::Store::start(&fixture.root).unwrap();
+    let view = crate::store::tests::view_where(&store, |view| view.seconds.len() == seconds);
+
+    *view.stretches[at].machine
+}
+
+#[test]
+fn a_stretch_reaches_the_same_readings_live_and_saved() {
+    // Goal: what a stretch finds while its minute is live it still finds once that minute is saved,
+    // naming the same readings, so a peak neither moves nor goes as it ages out of the ring.
+    // Method: a store started on the ring alone and one started after the first minute's seal,
+    // over fans that read higher each second, so a stretch's peak is its last reading.
+    let mut fixture = RingFixture::new_following();
+    for tick in 1..=70 {
+        fixture.publish_following_wall(tick, 10_000 + u64::from(tick));
+    }
+    let live = earlier_store_stretch(&fixture, 70, 3);
+
+    fixture.seal_through(0);
+    let saved = earlier_store_stretch(&fixture, 70, 3);
+
+    assert_eq!(saved, live);
+    let fans = saved.fan_mean_rpm.measured.unwrap();
+    assert_eq!(fans.maximum.place.second(), 10_039);
+    assert!(fans.minimum.value < fans.maximum.value);
+}
+
+#[test]
+fn a_points_reach_holds_no_more_than_its_stretch_however_long_the_recording() {
+    // Goal: what a point carries of its stretch is bounded by the stretch and not by how much the
+    // recording holds, so a longer recording costs a chart more points and not larger ones.
+    // Method: read the tail of a short recording and of one twice as long, and compare the reach
+    // of each one's oldest whole stretch.
+    let reach_of = |minutes: u64| {
+        let mut fixture = RingFixture::new_following();
+        earlier_publish_minutes(&mut fixture, 0..minutes, earlier_wall);
+        let mut session = LiveSession::open(&fixture.root).unwrap();
+        let limit = earlier_wall(minutes * 60);
+        let tail = session
+            .earlier_context(earlier_context_last(limit))
+            .unwrap();
+
+        tail["earlier_trends"][1]["reach"].clone()
+    };
+
+    let short = reach_of(2);
+    let long = reach_of(4);
+
+    assert_eq!(short["places"].as_array().unwrap().len(), 10);
+    assert_eq!(long["places"].as_array().unwrap().len(), 10);
+    assert_eq!(
+        short["leaves"].as_object().unwrap().len(),
+        long["leaves"].as_object().unwrap().len()
+    );
 }

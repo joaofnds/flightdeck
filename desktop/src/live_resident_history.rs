@@ -297,6 +297,7 @@ impl History {
                 follows: None,
                 unit: Some("GiB".into()),
                 fill: None,
+                extremes: None,
             });
         }
 
@@ -321,6 +322,7 @@ impl History {
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
             window: Some(self.window),
+            places: None,
             detail_first: self.detail_first,
             reading_seconds: crate::charts::TICK_SECONDS,
             sliding: false,
@@ -335,6 +337,10 @@ impl History {
             Some(_) => "Eight leaders use their mean over the range shown.",
             None => "Eight leaders use the complete interval's mean.",
         };
+        let leaders = format!(
+            "{leaders} {}",
+            crate::live_app_attribution_history::APP_STATISTICS_HELP
+        );
         format!(
             "Process resident memory counts shared pages for each process. It can \
             exceed machine memory. {leaders} Other sums remaining captured Apps. Known \

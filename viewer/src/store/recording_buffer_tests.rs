@@ -74,7 +74,7 @@ fn decoder_storage_does_not_carry_rows_or_rates_between_recordings() {
     for fixture in [&first, &next, &first] {
         let expected = capture(fixture, &mut LoadBuffers::default());
         assert_eq!(capture(fixture, &mut buffers), expected);
-        assert!(!expected[0].1.follows);
+        assert!(!expected[0].1.follows());
         assert_eq!(expected[0].1.cpu_percent, None);
     }
 }

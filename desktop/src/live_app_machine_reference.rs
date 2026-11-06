@@ -157,6 +157,7 @@ impl History {
             follows: None,
             unit: Some(self.metric.unit().into()),
             fill: Some(0.0),
+            extremes: None,
         });
     }
 

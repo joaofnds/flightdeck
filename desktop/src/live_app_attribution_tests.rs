@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use super::{AppAttributionHistory, Metric};
+use super::{APP_STATISTICS_HELP, AppAttributionHistory, Metric};
 use crate::live_hover::Target;
 
 #[test]
@@ -16,6 +16,17 @@ fn cpu_rates_preserve_multicore_values_and_captured_positions() {
     assert_eq!(history.reading(1, Some(0)), "120%");
     assert_eq!(history.headline(Some(1)), "250% captured");
     assert!(panel.positions.as_ref().unwrap()[0] < panel.positions.as_ref().unwrap()[1]);
+}
+
+#[test]
+fn a_chart_by_app_says_its_points_are_means_and_where_a_short_lived_app_is_found() {
+    // Goal: a reader who finds no line for an App that ran for a short peak learns why, and where
+    // that App is named. Method: read the help of a chart by App.
+    let history = AppAttributionHistory::prepare(Metric::Cpu, &fixture(Metric::Cpu), &selection());
+
+    let panel = history.panel().unwrap();
+
+    assert!(panel.help.as_ref().unwrap().contains(APP_STATISTICS_HELP));
 }
 
 #[test]

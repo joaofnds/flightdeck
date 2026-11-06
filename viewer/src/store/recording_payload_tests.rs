@@ -114,7 +114,7 @@ fn cursor_steps_preserve_the_first_live_successor() {
     let expected = terminal_successor(&fixture.root, expected);
     let actual = terminal_successor(&fixture.root, actual);
 
-    assert!(expected.0.follows);
+    assert!(expected.0.follows());
     assert_eq!(expected.0.cpu_percent, Some(50.0));
     assert_eq!(expected.1.elapsed_ns, Some(1_000_000_000));
     assert_eq!(actual, expected);
@@ -219,18 +219,18 @@ fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
 
     cursor
         .step(&input, &found[0], |_, second, _| {
-            accepted.push((second.publication, second.follows));
+            accepted.push((second.publication, second.follows()));
         })
         .unwrap();
     cursor
         .step(&input, &found[1], |_, second, _| {
-            accepted.push((second.publication, second.follows));
+            accepted.push((second.publication, second.follows()));
         })
         .unwrap();
     assert_eq!(accepted, [(1, false)]);
     cursor
         .step(&input, &found[2], |_, second, _| {
-            accepted.push((second.publication, second.follows));
+            accepted.push((second.publication, second.follows()));
         })
         .unwrap();
     let outcome = cursor.finish(&operation).unwrap();
@@ -435,7 +435,7 @@ fn terminal_only_load_preserves_the_full_decoders_first_successor() {
     let expected = terminal_successor(&fixture.root, full);
     let resumed = terminal_successor(&fixture.root, terminal);
 
-    assert!(expected.0.follows);
+    assert!(expected.0.follows());
     assert_eq!(expected.0.cpu_percent, Some(50.0));
     assert_eq!(expected.1.elapsed_ns, Some(1_000_000_000));
     assert_eq!(resumed, expected);
@@ -976,7 +976,7 @@ fn a_minute_whose_proof_names_another_boot_stops_the_load_and_seeds_no_rate() {
 
     assert_eq!(successors[0].publication, 2);
     assert_eq!(successors[0].cpu_percent, None);
-    assert!(!successors[0].follows);
+    assert!(!successors[0].follows());
     assert!(accepted.is_empty());
     assert_eq!(
         outcome.left_out,
@@ -1715,7 +1715,7 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
     .unwrap();
 
     let (machine, apps) = selected.unwrap();
-    assert!(machine.follows);
+    assert!(machine.follows());
     assert_eq!(machine.cpu_percent, Some(50.0));
     assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
     assert_eq!(

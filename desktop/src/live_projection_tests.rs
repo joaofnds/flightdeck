@@ -780,7 +780,8 @@ fn pressure_timeline_uses_exact_selected_alternatives_and_blanks_unknown_states(
         Some(
             "macOS memory pressure by observed second. The chosen same-second \
             publication takes priority; otherwise the latest reading is shown. Blank means \
-            unavailable or unrecognized, including gaps."
+            unavailable or unrecognized, including gaps. A cell that covers several seconds \
+            shows the highest state among them."
         )
     );
 }

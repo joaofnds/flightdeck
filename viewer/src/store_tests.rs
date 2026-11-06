@@ -783,7 +783,7 @@ pub(super) fn empty_ticks_file(fixture: &Fixture, minute: u64) {
 }
 
 /// The first View the store hands over that `holds` accepts, failing after ten seconds.
-pub(super) fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<View> {
+pub(crate) fn view_where(store: &Store, holds: impl Fn(&View) -> bool) -> Arc<View> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(view) = store.take() {
@@ -1173,7 +1173,7 @@ mod when_the_readings_break {
 
     fn following(wall_second: u64, follows: bool) -> super::super::MachineSecond {
         super::super::MachineSecond {
-            follows,
+            elapsed_ns: follows.then_some(1),
             ..second_at(wall_second)
         }
     }

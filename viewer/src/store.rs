@@ -10,6 +10,7 @@ mod context_cpu;
 mod context_response;
 mod coverage;
 mod key_order;
+mod machine_stretch;
 mod native;
 mod native_acceptance;
 mod payload;
@@ -61,6 +62,8 @@ pub use attribution::{
 };
 pub use buffers::{Buffers, Mailbox, Span};
 pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
+pub use machine_stretch::{Category, Gauge, MachinePlace, MachineStretch, Rate, pressure_level};
+pub use model::summary::{Mark, Reduction};
 pub use native::AppMetadata;
 pub use payload::{AppDetails, Payload, ProcessName, ProcessRow};
 pub use query::{
@@ -92,7 +95,7 @@ use crate::session::EARLIER_STRIDE_SECONDS;
 
 #[cfg(test)]
 #[path = "store_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// The seconds the store holds: the sixteen minutes a live chart draws a second apart, and
 /// the two minutes the collector has not sealed yet.
@@ -730,6 +733,7 @@ impl Held {
         let pushed = self.span.push(|buffer| {
             *buffer = second.clone();
             buffer.boot = run.boot.0;
+            buffer.run = run.run.0;
             buffer.segment = segment;
         });
         assert!(pushed);
@@ -754,7 +758,7 @@ impl Held {
         if let Some(observation) = newest.observation {
             assert_eq!(observation.stamp.publication, second.publication);
         }
-        self.stretches.take(stretch(second), newest);
+        self.stretches.take(stretch(second), newest, run, second);
         if let Some(folded) = folded {
             self.stretches.add_folded(folded);
         }
@@ -947,7 +951,7 @@ fn segment(newest: Option<&Newest>, run: &RunIdentity, second: &MachineSecond) -
     };
 
     if newest.run == *run {
-        if second.follows {
+        if second.follows() {
             return newest.segment;
         }
     }

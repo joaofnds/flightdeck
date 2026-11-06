@@ -180,7 +180,7 @@ fn a_new_generation_of_the_same_run_preserves_the_readers_predecessor() {
     assert_eq!(replacement.seconds.len(), 2);
     assert_eq!(replacement.seconds[1].publication, 2);
     assert_eq!(replacement.seconds[1].cpu_percent, Some(50.0));
-    assert!(replacement.seconds[1].follows);
+    assert!(replacement.seconds[1].follows());
     assert_eq!(replacement.apps[1].elapsed_ns, Some(1_000_000_000));
     assert_eq!(replacement.apps[1].apps.len(), 1);
     let app = &replacement.apps[1].apps[0];

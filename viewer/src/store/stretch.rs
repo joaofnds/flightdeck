@@ -8,6 +8,7 @@ use std::sync::Arc;
 use super::attribution::{self, Completeness, PointApps, PointRow, Totals};
 use super::buffers::{Buffers, Span};
 use super::key_order::{self, key_of};
+use super::machine_stretch::MachineStretch;
 use super::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Attribution, Resident};
 use crate::EARLIER_STRIDE_SECONDS;
 use crate::app_attribution_history::AppAttributionMetric;
@@ -66,8 +67,15 @@ impl Stretches {
     }
 
     /// Adds `apps`, the Apps of a second of stretch `stretch`, closing the open stretch first
-    /// where `apps` belongs to another.
-    pub(super) fn take(&mut self, stretch: u64, apps: &AppsSecond) {
+    /// where `apps` belongs to another, and `second`, what that second of run `run` read of the
+    /// Mac.
+    pub(super) fn take(
+        &mut self,
+        stretch: u64,
+        apps: &AppsSecond,
+        run: &RunIdentity,
+        second: &super::MachineSecond,
+    ) {
         if self.closes(stretch) {
             self.open.close();
             let open = &mut self.open;
@@ -78,6 +86,7 @@ impl Stretches {
         }
 
         self.open.add_second(stretch, apps, &mut self.spare);
+        self.open.machine.add(run, second);
     }
 
     /// Adds `folded`, what a loader added up of the Apps of seconds of the open stretch that the
@@ -226,6 +235,8 @@ pub struct AppsStretch {
     rows: Vec<StretchRow>,
     /// Every App of `rows` added up, once the stretch is closed.
     totals: Totals,
+    /// What the stretch's seconds read of the whole Mac.
+    pub machine: Box<MachineStretch>,
 }
 
 /// One App's readings added up over the seconds of a stretch that hold it.
@@ -281,6 +292,7 @@ impl AppsStretch {
         self.too_many = false;
         self.rows.clear();
         self.totals = Totals::default();
+        *self.machine = MachineStretch::default();
     }
 
     /// Copies out what the stretch holds, and holds no second. Its rows are copied rather than
@@ -305,6 +317,7 @@ impl AppsStretch {
             too_many,
             rows,
             totals,
+            machine,
         } = other;
         self.stretch = *stretch;
         self.observation = *observation;
@@ -312,6 +325,7 @@ impl AppsStretch {
         self.elapsed_ns = *elapsed_ns;
         self.elapsed_overflowed = *elapsed_overflowed;
         self.completeness = *completeness;
+        self.machine.clone_from(machine);
         self.too_many = *too_many;
         self.rows.clone_from(rows);
         self.totals = *totals;

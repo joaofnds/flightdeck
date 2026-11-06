@@ -44,7 +44,7 @@ fn an_event_count_refusal_accepts_machine_facts_and_allows_the_next_publication(
     ring.read_prepared(&budget, &operation, None, |_, prepared| {
         assert_eq!(prepared.observation.stamp.publication, 2);
         let machine = prepared.machine.as_ref().unwrap();
-        assert!(machine.follows);
+        assert!(machine.follows());
         assert_eq!(machine.cpu_percent, Some(50.0));
         assert_eq!(prepared.apps.elapsed_ns, None);
         assert_eq!(prepared.apps.missing, None);

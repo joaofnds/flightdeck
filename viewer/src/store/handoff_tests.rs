@@ -85,7 +85,7 @@ fn changed_clocks(
 }
 
 fn assert_rates(observed: &(MachineSecond, AppsSecond), machine: bool, process: bool) {
-    assert_eq!(observed.0.follows, machine);
+    assert_eq!(observed.0.follows(), machine);
     assert_eq!(observed.0.cpu_percent, machine.then_some(50.0));
     assert_eq!(observed.1.elapsed_ns, process.then_some(1_000_000_000));
     assert_rates_amounts(&observed.1, process);
@@ -340,7 +340,7 @@ fn a_refused_terminal_presentation_preserves_the_valid_input_predecessor() {
 
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].0.publication, 3);
-    assert!(observed[0].0.follows);
+    assert!(observed[0].0.follows());
     assert_eq!(
         observed[0]
             .1

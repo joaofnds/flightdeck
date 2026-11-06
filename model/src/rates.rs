@@ -86,7 +86,8 @@ pub fn events_per_second(rate: EventRate) -> Option<f64> {
     Some(number(rate.events) / number(rate.elapsed_ns) * 1_000_000_000.0)
 }
 
-fn number(value: u64) -> f64 {
+#[must_use]
+pub fn number(value: u64) -> f64 {
     let upper = u32::try_from(value >> 32).unwrap_or_else(|_| unreachable!());
     let lower = u32::try_from(value & u64::from(u32::MAX)).unwrap_or_else(|_| unreachable!());
     f64::from(upper) * 4_294_967_296.0 + f64::from(lower)

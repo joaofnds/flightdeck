@@ -1,6 +1,57 @@
-use super::super::{empty_panels, panels};
-use super::{overview_panels, overview_point_second};
-use crate::live_store_fixtures::{levels, reading_at, selection, view};
+use std::sync::Arc;
+
+use collector::machine::Pressure;
+use collector::ring::{Identity, RunIdentity};
+use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View};
+
+use super::super::{empty_panels, overview, panels};
+use super::{Observations, OverviewPoints, overview_panels, overview_point_second};
+use crate::data::Panel;
+use crate::live_store_fixtures::{levels, reading_at, selection, trend_point, view};
+
+const RUN: RunIdentity = RunIdentity {
+    recording: Identity([1, 1]),
+    run: Identity([2, 2]),
+    boot: Identity([3, 3]),
+};
+
+/// What the store reduces `seconds` to, all of one stretch.
+fn stretch_of(stretch: u64, seconds: &[MachineSecond]) -> Arc<AppsStretch> {
+    let mut held = AppsStretch::of_seconds(stretch, &[Arc::new(AppsSecond::default())]);
+    let mut machine = MachineStretch::default();
+    for second in seconds {
+        machine.add(&RUN, second);
+    }
+    *held.machine = machine;
+
+    Arc::new(held)
+}
+
+/// The ten seconds of the stretch from 9,020, each read by `read`.
+fn older_seconds(read: impl Fn(&mut MachineSecond, u64)) -> Vec<MachineSecond> {
+    (9_020..9_030)
+        .map(|wall_second| {
+            let mut second = reading_at(wall_second, 3);
+            read(&mut second, wall_second);
+            second
+        })
+        .collect()
+}
+
+/// The Overview of the store that holds `older` and a second past the charts' full-detail seconds,
+/// and what it reduced them to.
+fn overview_of_older(older: &[MachineSecond]) -> Vec<std::rc::Rc<Panel>> {
+    let newest = reading_at(10_000, 3);
+    let mut view: View = view(1, older, &[newest]);
+    view.stretches = vec![stretch_of(902, older)];
+
+    overview_panels(&view, levels().as_ref()).unwrap()
+}
+
+/// The panel the Overview names `id`.
+fn panel_named<'panels>(panels: &'panels [std::rc::Rc<Panel>], id: &str) -> &'panels Panel {
+    panels.iter().find(|panel| panel.id == id).unwrap()
+}
 
 #[test]
 fn a_view_draws_the_overview_the_trend_points_of_its_seconds_draw() {
@@ -188,5 +239,220 @@ mod point_second {
             .iter()
             .map(|second| reading_at(*second, 0))
             .collect()
+    }
+}
+
+mod when_a_chart_draws_one_reading_of_a_stretch {
+    use super::*;
+
+    #[test]
+    fn a_peak_of_one_second_reaches_the_chart_at_every_offset() {
+        // Goal: a reading that lasted one second stays on the chart once the chart draws one
+        // reading of its ten seconds, wherever in those seconds it fell. The first regression of
+        // this work, since the chart used to keep only the stretch's first second.
+        // Method: for each second of a stretch, a CPU that peaks at that second alone, and read
+        // what the chart's line says of the stretch's one point.
+        for offset in 0..10 {
+            let peak = 9_020 + offset;
+            let older = older_seconds(|second, wall_second| {
+                second.cpu_percent = Some(if wall_second == peak { 95.0 } else { 10.0 });
+            });
+
+            let panels = overview_of_older(&older);
+
+            let line = &panel_named(&panels, "live-cpu").lines[0];
+            let reach = line.extremes.as_ref().unwrap()[0].unwrap();
+            assert_eq!((reach.low, reach.high), (10.0, 95.0), "offset {offset}");
+            assert_eq!(reach.peak.second(), peak, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn a_chart_keeps_the_reading_a_point_shows_beside_its_reach() {
+        // Goal: drawing a stretch's reach leaves what its point reads alone, since the raw readings
+        // a chart shows stay what they were. Method: a CPU that peaks past the stretch's first
+        // second, and read both.
+        let older = older_seconds(|second, wall_second| {
+            second.cpu_percent = Some(if wall_second == 9_025 { 95.0 } else { 10.0 });
+        });
+
+        let panels = overview_of_older(&older);
+
+        let line = &panel_named(&panels, "live-cpu").lines[0];
+        assert_eq!(line.values[0], Some(10.0));
+    }
+
+    #[test]
+    fn the_stack_of_memory_reaches_its_total_at_one_instant_and_no_more() {
+        // Goal: a stacked chart's peak is what the stack held at one reading, not its layers'
+        // separate peaks added up, which it never held. Method: wired peaks in one second and
+        // compressed in another, and read the stack's reach beside each layer.
+        let older = older_seconds(|second, wall_second| {
+            let memory = second.memory.as_mut().unwrap();
+            memory.app_bytes = Some(1 << 30);
+            memory.wired_bytes = if wall_second == 9_023 {
+                3 << 30
+            } else {
+                1 << 30
+            };
+            memory.compressed_bytes = if wall_second == 9_027 {
+                3 << 30
+            } else {
+                1 << 30
+            };
+        });
+
+        let panels = overview_of_older(&older);
+
+        let lines = &panel_named(&panels, "live-memory").lines;
+        assert_eq!(lines[0].extremes, None);
+        assert_eq!(lines[1].extremes, None);
+        let reach = lines[2].extremes.as_ref().unwrap()[0].unwrap();
+        assert_eq!((reach.low, reach.high), (3.0, 5.0));
+    }
+
+    #[test]
+    fn a_stretch_of_one_second_reaches_what_that_second_reads_on_every_chart() {
+        // Goal: a chart's reach reads the series the chart's line reads, on every line the Overview
+        // draws, so no chart bands one reading under another's curve. Method: reduce one second,
+        // then compare what each line reads of it with what it reaches.
+        let second = reading_at(9_020, 3);
+        let stretch = stretch_of(902, std::slice::from_ref(&second));
+        let seconds = [&second];
+        let stretches = [Some(&*stretch.machine)];
+        let points = OverviewPoints {
+            seconds: &seconds,
+            stretches: &stretches,
+        };
+
+        let readings = overview(levels().as_ref())
+            .into_iter()
+            .flat_map(|specification| specification.lines)
+            .filter(|reading| reading.reach.is_none());
+        for reading in readings {
+            let expected = points.value(&reading, 0).unwrap().map(|read| (read, read));
+
+            let reach = points.reach(&reading, 0).unwrap();
+
+            let reach = reach.map(|reach| (reach.low, reach.high));
+            assert_eq!(reach, expected, "{}", reading.key);
+        }
+    }
+    #[test]
+    fn a_chart_says_what_its_points_and_marks_stand_for() {
+        // Goal: a reader who sees a line and a stem can learn which statistic each one is, and that
+        // a state's cell is no mean. Method: read the help of a chart of numbers and of states.
+        let older = older_seconds(|_, _| {});
+
+        let panels = overview_of_older(&older);
+
+        let help = |id| panel_named(&panels, id).help.clone().unwrap();
+        assert!(help("live-cpu").contains(crate::live_projection::LINE_STATISTICS_HELP));
+        assert!(
+            help("live-memory-pressure").contains(crate::live_projection::STATE_STATISTICS_HELP)
+        );
+    }
+
+    #[test]
+    fn a_state_chart_shows_the_worst_state_a_stretch_reached() {
+        // Goal: a chart of states keeps a short spell in a worse state once it draws one reading of
+        // its ten seconds, and no state between them, since a state has no mean.
+        // Method: a stretch Normal but for one Critical second past its first, and read the cells.
+        let older = older_seconds(|second, wall_second| {
+            let memory = second.memory.as_mut().unwrap();
+            memory.pressure = if wall_second == 9_026 {
+                Pressure::Critical
+            } else {
+                Pressure::Normal
+            };
+        });
+
+        let panels = overview_of_older(&older);
+
+        let panel = panel_named(&panels, "live-memory-pressure");
+        let first = usize::try_from(9_020 - panel.window.unwrap().first).unwrap();
+        assert_eq!(panel.lines[0].values[first..first + 10], [Some(2.0); 10]);
+    }
+
+    #[test]
+    fn a_stretch_reaches_the_same_from_the_store_as_from_its_trend_points() {
+        // Goal: the two routes to a chart agree on a stretch's reach as they agree on its readings.
+        // Method: the Overview of a store's stretch, and of the trend points that carry the reach
+        // the viewer writes for the same seconds.
+        let older = older_seconds(|second, wall_second| {
+            second.cpu_percent = Some(if wall_second == 9_024 { 95.0 } else { 10.0 });
+        });
+        let newest = reading_at(10_000, 3);
+        let mut point = trend_point(&older[0]);
+        let drawn = overview_of_older(&older);
+        let line = &panel_named(&drawn, "live-cpu").lines[0];
+        let peak = line.extremes.as_ref().unwrap()[0].unwrap().peak;
+        point["reach"] = serde_json::json!({"leaves": {"cpu_percent": [10.0, 95.0, 0]},
+            "places": [[peak.run, peak.boot, peak.publication, peak.wall_ns]]});
+        let mut selected = selection(&[], std::slice::from_ref(&newest));
+        selected["earlier_trends"] = serde_json::json!([point]);
+
+        let expected = panels("overview", &selected, None).unwrap();
+
+        let expected_line = &panel_named(&expected, "live-cpu").lines[0];
+        assert_eq!(peak.second(), 9_024);
+        assert_eq!(expected_line.extremes, line.extremes);
+    }
+    #[test]
+    fn a_peak_in_the_seconds_at_the_join_stays_on_the_chart() {
+        // Goal: the seconds of the stretch that holds the first full-detail second, before that
+        // second, lie in no point, so a peak there stays on the chart until it ages into a stretch
+        // of the tail. Method: a peak in the second before the first full-detail second, with the
+        // view at each offset of a stretch, and read what the first full-detail point reaches.
+        for offset in 0..9 {
+            let last = 10_000 + offset;
+            let recent_first = last - 959;
+            let seconds: Vec<_> = ((recent_first - 1)..=last)
+                .map(|wall_second| {
+                    let mut second = reading_at(wall_second, 3);
+                    let peak = wall_second == recent_first - 1;
+                    second.cpu_percent = Some(if peak { 95.0 } else { 10.0 });
+                    second
+                })
+                .collect();
+            let joined: Vec<_> = seconds
+                .iter()
+                .filter(|second| second.wall_ns / 1_000_000_000 / 10 == (recent_first / 10))
+                .cloned()
+                .collect();
+            let mut view = view(1, &[], &seconds);
+            view.stretches = vec![stretch_of(recent_first / 10, &joined)];
+
+            let panels = overview_panels(&view, levels().as_ref()).unwrap();
+
+            let line = &panel_named(&panels, "live-cpu").lines[0];
+            assert_eq!(
+                line.extremes.as_ref().unwrap()[0].map(|reach| reach.high),
+                Some(95.0),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_point_after_the_tail_takes_what_the_seconds_at_the_join_reached() {
+        // Goal: the trend route shows the join's peak as the store route does.
+        // Method: a tail whose last point names what the join reached, and read the first
+        // full-detail point of the chart.
+        let mut older = trend_point(&reading_at(9_020, 3));
+        older["reach_after"] = serde_json::json!({"leaves": {"cpu_percent": [10.0, 95.0, 0]},
+            "places": [[[1, 2], [3, 4], 7, 9_031_000_000_000_u64]]});
+        let newest = reading_at(10_000, 3);
+        let mut selected = selection(&[], std::slice::from_ref(&newest));
+        selected["earlier_trends"] = serde_json::json!([older]);
+
+        let drawn = panels("overview", &selected, None).unwrap();
+
+        let line = &panel_named(&drawn, "live-cpu").lines[0];
+        let reach = line.extremes.as_ref().unwrap()[1].unwrap();
+        assert_eq!((reach.low, reach.high), (10.0, 95.0));
+        let peak = reach.peak;
+        assert_eq!((peak.run, peak.boot, peak.publication), ([1, 2], [3, 4], 7));
+        assert_eq!(peak.second(), 9_031);
     }
 }

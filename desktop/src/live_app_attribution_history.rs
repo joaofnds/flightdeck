@@ -20,6 +20,11 @@ pub(crate) mod view;
 
 use machine_reference::MachineReference;
 
+/// What a chart by App leaves out, and where to find it.
+pub(crate) const APP_STATISTICS_HELP: &str = "Each point is the App's mean over the seconds it \
+    covers. An App that ran only for a short peak may have no line here: pick the peak's stem on \
+    the Mac's chart and read the top Apps of that reading.";
+
 pub enum AppAttributionHistory {
     Ready(History),
     Unavailable(String),
@@ -388,6 +393,7 @@ impl History {
                 follows: None,
                 unit: Some(self.metric.unit().into()),
                 fill: None,
+                extremes: None,
             });
         }
 
@@ -414,6 +420,7 @@ impl History {
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
             window: Some(self.window),
+            places: None,
             detail_first: self.detail_first,
             reading_seconds: crate::charts::TICK_SECONDS,
             sliding: false,
@@ -428,6 +435,7 @@ impl History {
             Some(_) => "Eight leaders use their mean rate over the range shown.",
             None => "Eight leaders use the complete context's mean rate.",
         };
+        let leaders = format!("{leaders} {APP_STATISTICS_HELP}");
         match self.metric {
             Metric::Cpu => format!(
                 "Captured process CPU time per interval. 100% equals one core; \

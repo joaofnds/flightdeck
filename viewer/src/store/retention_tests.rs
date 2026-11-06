@@ -9,6 +9,19 @@ const RUN: collector::ring::RunIdentity = collector::ring::RunIdentity {
 };
 
 #[test]
+fn a_second_the_store_holds_names_the_run_and_boot_that_read_it() {
+    // Goal: a chart that picks a second of the store names its exact reading.
+    // Method: take in a second, and read what the View says of it.
+    let mut held = Held::without_recording();
+
+    take(&mut held, &second(1));
+
+    let view = publish(&mut held);
+    assert_eq!(view.seconds[0].run, RUN.run.0);
+    assert_eq!(view.seconds[0].boot, RUN.boot.0);
+}
+
+#[test]
 fn complete_retention_admits_an_explicit_refusal_before_evicting_its_recent_owner() {
     // Goal: complete native retention never installs an older Budget in place of a refusal.
     // Method: deny the exact fallible ranking seam with a real shared reservation, then retry.

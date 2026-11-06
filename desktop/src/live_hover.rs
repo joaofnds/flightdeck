@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use collector::recording::identity_text;
+use collector::ring::Identity;
 use serde_json::{Value, json};
 use viewer::live_app_response::Page;
 use viewer::store::MachineSecond;
@@ -74,6 +76,18 @@ impl Target {
             second,
             identity: Some(json!({"run":run,"boot":boot,"publication":publication})),
         })
+    }
+
+    /// The reading `place`, whatever else read its wall second.
+    pub fn of_place(place: &crate::data::MachinePlace) -> Self {
+        Self {
+            second: place.second(),
+            identity: Some(json!({
+                "run": identity_text(Identity(place.run)).to_string(),
+                "boot": identity_text(Identity(place.boot)).to_string(),
+                "publication": place.publication,
+            })),
+        }
     }
 
     pub fn regular(snapshot: &Snapshot, second: u64) -> Self {

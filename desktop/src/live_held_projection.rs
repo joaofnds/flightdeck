@@ -3,12 +3,13 @@
 
 use std::rc::Rc;
 
-use collector::machine::Pressure;
 use num_traits::ToPrimitive;
-use viewer::store::{AppsSecond, AppsStretch, MachineSecond, View};
+use viewer::store::{
+    AppsSecond, AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, Reduction, View,
+};
 
 use super::{
-    Coordinates, Domain, FAN_MEAN_KEY, NANOSECONDS_PER_SECOND, OBSERVATIONS_MAX,
+    Coordinates, Domain, FAN_MEAN_KEY, LineReach, NANOSECONDS_PER_SECOND, OBSERVATIONS_MAX,
     OVERVIEW_PANELS_MAX, Observations, Panel, PerformanceLevel, Reading,
 };
 
@@ -27,13 +28,18 @@ pub fn overview_panels(
     };
 
     let domain = overview_panels_domain(newest)?;
-    let points = overview_panels_points(view, &domain);
-    let coordinates = overview_panels_coordinates(&points, &domain)?;
+    let seconds = overview_panels_points(view, &domain);
+    let coordinates = overview_panels_coordinates(&seconds, &domain)?;
     let specifications = super::overview(levels);
+    let stretches = overview_panels_stretches(view, &seconds, &domain);
+    let points = OverviewPoints {
+        seconds: &seconds,
+        stretches: &stretches,
+    };
 
     let mut result = Vec::with_capacity(specifications.len());
     for specification in &specifications {
-        let panel = super::panels_panel(specification, &domain, points.as_slice(), &coordinates)?;
+        let panel = super::panels_panel(specification, &domain, &points, &coordinates)?;
         result.push(Rc::new(panel));
     }
     assert!(result.len() <= OVERVIEW_PANELS_MAX);
@@ -134,6 +140,67 @@ fn overview_panels_indices(view: &View, domain: &Domain) -> Vec<usize> {
 
     assert!(indices.len() <= OBSERVATIONS_MAX);
     indices
+}
+
+/// What each of the seconds the charts of `domain` draw stands for: the stretch of a point older
+/// than the full-detail seconds, where the store holds it, and only itself after them. The first
+/// of those also stands for the seconds before it that lie in no point, which are of its stretch.
+fn overview_panels_stretches<'view>(
+    view: &'view View,
+    seconds: &[&MachineSecond],
+    domain: &Domain,
+) -> Vec<Option<&'view MachineStretch>> {
+    assert_eq!(domain.stride, viewer::EARLIER_STRIDE_SECONDS);
+
+    // The store's stretches run oldest first, as the points do.
+    let mut stretches = view.stretches.iter().peekable();
+    let mut detail_began = false;
+    seconds
+        .iter()
+        .map(|second| {
+            let mut wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
+            if wall_second >= domain.recent_first {
+                if detail_began {
+                    return None;
+                }
+                detail_began = true;
+                wall_second = domain.recent_first;
+            }
+            let stretch = viewer::store::stretch_of_wall_second(wall_second);
+            while stretches.next_if(|held| held.stretch < stretch).is_some() {}
+            let held = stretches.next_if(|held| held.stretch == stretch)?;
+
+            Some(&*held.machine)
+        })
+        .collect()
+}
+
+/// The seconds a chart drawn from the store draws, with what each of them stands for.
+struct OverviewPoints<'view> {
+    seconds: &'view [&'view MachineSecond],
+    stretches: &'view [Option<&'view MachineStretch>],
+}
+
+impl Observations for OverviewPoints<'_> {
+    fn count(&self) -> usize {
+        self.seconds.count()
+    }
+
+    fn wall_ns(&self, index: usize) -> Result<u64, String> {
+        self.seconds.wall_ns(index)
+    }
+
+    fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String> {
+        self.seconds.value(reading, index)
+    }
+
+    fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String> {
+        let Some(stretch) = self.stretches[index] else {
+            return Ok(None);
+        };
+
+        stretch_reach(reading, stretch)
+    }
 }
 
 /// The second at `index` among the seconds of `view`'s older tail and then its live span.
@@ -262,10 +329,17 @@ fn overview_panels_coordinates(
 ) -> Result<Coordinates, String> {
     let mut positions = Vec::with_capacity(points.len());
     let mut segments = Vec::with_capacity(points.len());
+    let mut places = Vec::with_capacity(points.len());
     let mut segment_count = 0_u64;
     let mut previous = None;
     for second in points {
         positions.push(domain.position(second.wall_ns)?);
+        places.push(MachinePlace {
+            boot: second.boot,
+            run: second.run,
+            publication: second.publication,
+            wall_ns: second.wall_ns,
+        });
         if previous != Some(second.segment) {
             segment_count += 1;
             previous = Some(second.segment);
@@ -281,6 +355,7 @@ fn overview_panels_coordinates(
         detail_first: domain.recent_first,
         positions,
         segments,
+        places: places.into(),
         selected_index: points.len().checked_sub(1),
     })
 }
@@ -304,6 +379,66 @@ impl Observations for [&MachineSecond] {
 
         Ok(value)
     }
+
+    fn reach(&self, _reading: &Reading, _index: usize) -> Result<Option<LineReach>, String> {
+        Ok(None)
+    }
+}
+
+/// How low and how high `reading` reached over `stretch`, as `second_value` reads one second. A
+/// category has no height between its levels, so it reaches its highest level alone.
+fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<LineReach>, String> {
+    let key = reading.reach.unwrap_or(reading.key);
+    let reach = match (reading.resource, key, reading.channel) {
+        (None, "cpu_percent", None) => stretch_reach_measured(&stretch.cpu_percent),
+        (None, "cpu_level_percent", Some(level)) => stretch
+            .cpu_level_percent
+            .get(level)
+            .and_then(|percent| stretch_reach_measured(percent)),
+        (None, "gpu_active_percent", None) => stretch_reach_measured(&stretch.gpu_active_percent),
+        (None, "memory_app_bytes", None) => stretch_reach_measured(&stretch.memory_app_bytes),
+        (None, "memory_wired_bytes", None) => stretch_reach_measured(&stretch.memory_wired_bytes),
+        (None, "memory_compressed_bytes", None) => {
+            stretch_reach_measured(&stretch.memory_compressed_bytes)
+        }
+        (None, "memory_total_bytes", None) => stretch_reach_measured(&stretch.memory_total_bytes),
+        (None, "memory_used_bytes", None) => stretch_reach_measured(&stretch.memory_used_bytes),
+        (None, "network_rx_bps", None) => stretch_reach_measured(&stretch.network_received_bps),
+        (None, "network_tx_bps", None) => stretch_reach_measured(&stretch.network_sent_bps),
+        (Some("storage"), "read_bps", None) => stretch_reach_measured(&stretch.disk_read_bps),
+        (Some("storage"), "write_bps", None) => stretch_reach_measured(&stretch.disk_written_bps),
+        (None, "power_watts", None) => stretch_reach_measured(&stretch.power_watts),
+        (None, "soc_celsius", None) => stretch_reach_measured(&stretch.soc_celsius),
+        (None, FAN_MEAN_KEY, None) => stretch_reach_measured(&stretch.fan_mean_rpm),
+        (None, "pressure", None) => stretch_reach_category(stretch.pressure.highest),
+        (None, "thermal_pressure", None) => {
+            stretch_reach_category(stretch.thermal_pressure.highest)
+        }
+        _ => return Err(format!("The store reduces no reading {key}")),
+    };
+
+    Ok(reach)
+}
+
+fn stretch_reach_measured(reduction: &Reduction<MachinePlace>) -> Option<LineReach> {
+    let measured = reduction.measured.as_ref()?;
+
+    Some(LineReach {
+        low: measured.minimum.value.to_f32()?,
+        high: measured.maximum.value.to_f32()?,
+        peak: measured.maximum.place,
+    })
+}
+
+fn stretch_reach_category(highest: Option<Mark<u8, MachinePlace>>) -> Option<LineReach> {
+    let highest = highest?;
+    let level = f32::from(highest.category);
+
+    Some(LineReach {
+        low: level,
+        high: level,
+        peak: highest.place,
+    })
 }
 
 /// What `reading` reads of `second`, as it reads the trend point of that second.
@@ -337,15 +472,7 @@ fn second_value(reading: &Reading, second: &MachineSecond) -> Result<Option<f32>
     Ok(value)
 }
 
-/// The level the recording writes for `pressure`, which the memory pressure chart and readout
-/// read.
-pub(crate) fn pressure_level(pressure: Pressure) -> u8 {
-    match pressure {
-        Pressure::Normal => 0,
-        Pressure::Warning => 1,
-        Pressure::Critical => 2,
-    }
-}
+pub(crate) use viewer::store::pressure_level;
 
 /// The nearest `f32` to `value`.
 fn narrow(value: Option<f64>) -> Option<f32> {

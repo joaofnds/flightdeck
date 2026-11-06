@@ -55,7 +55,8 @@ fn battery_projects_charge_signed_flow_and_binary_charging_history() {
         Some(
             "Battery-controller charging state by observed second. The chosen \
             same-second publication takes priority; otherwise the latest reading is shown. \
-            Blank means unavailable or unobserved. This state does not imply external power."
+            Blank means unavailable or unobserved. This state does not imply external power. \
+            A cell that covers several seconds shows the highest state among them."
         )
     );
 }

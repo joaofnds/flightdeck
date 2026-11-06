@@ -245,7 +245,7 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
     let mut consecutive = Vec::new();
     ring.read(|_, second, _| {
         publications.push(second.publication);
-        consecutive.push(second.follows);
+        consecutive.push(second.follows());
         true
     })
     .unwrap();

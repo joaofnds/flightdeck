@@ -5,8 +5,8 @@ use super::apps::TickApps;
 use super::stretch::{Folded, Folding, StretchRow};
 use super::{
     APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Cohorts, Held, Leaders,
-    MachineSecond, Mailbox, Missing, Readings, SECONDS_HELD_MAX, STRETCHES_MAX, View, WallSeconds,
-    recording,
+    MachinePlace, MachineSecond, Mailbox, MemorySecond, Missing, Readings, SECONDS_HELD_MAX,
+    SECONDS_MAX, STRETCHES_MAX, View, WallSeconds, recording,
 };
 use crate::AppAttributionMetric;
 use crate::live::identity_fixture::Fixture;
@@ -1301,4 +1301,142 @@ fn published(held: &mut Held) -> Arc<View> {
     let mailbox = Mailbox::new();
     held.publish(&mailbox);
     mailbox.take().unwrap()
+}
+
+/// Seconds 1,000 to 1,010, each following the one before, with `reading` writing into each what
+/// the second at `wall_second` read.
+fn stretch_of_mac_readings(reading: impl Fn(&mut MachineSecond, u64)) -> Arc<AppsStretch> {
+    let mut held = Held::without_recording();
+    for wall_second in 1_000..=1_010 {
+        let mut second = second_at(wall_second);
+        second.elapsed_ns = Some(NANOSECONDS_PER_SECOND);
+        reading(&mut second, wall_second);
+        assert!(held.take(&RUN, &second, TickApps::Missing(&Missing::Unread)));
+    }
+
+    Arc::clone(&published(&mut held).stretches[0])
+}
+
+#[test]
+fn a_closed_stretch_finds_a_second_long_peak_of_the_mac_at_every_offset() {
+    // Goal: a reading that lasted one second stays findable once a chart draws one reading of its
+    // stretch, wherever in the stretch it fell, and names the reading it came from.
+    // Method: for each second of a stretch, read a stretch whose CPU peaks at that second alone,
+    // and compare its peak with the reading.
+    for offset in 0..10 {
+        let peak = 1_000 + offset;
+        let stretch = stretch_of_mac_readings(|second, wall_second| {
+            second.cpu_percent = Some(if wall_second == peak { 95.0 } else { 10.0 });
+        });
+
+        let maximum = stretch.machine.cpu_percent.measured.unwrap().maximum;
+
+        assert!((maximum.value - 95.0).abs() < 0.01, "peak at {peak}");
+        assert_eq!(
+            maximum.place,
+            MachinePlace {
+                boot: RUN.boot.0,
+                run: RUN.run.0,
+                publication: peak,
+                wall_ns: peak * NANOSECONDS_PER_SECOND,
+            },
+            "peak at {peak}",
+        );
+    }
+}
+
+#[test]
+fn a_peak_keeps_its_place_on_either_side_of_the_seconds_a_store_holds_whole() {
+    // Goal: a reading that lasted one second stays findable as it leaves the seconds a store holds
+    // whole, wherever in its stretch it fell, and names its reading once no second shows it.
+    // Method: take a span past those seconds with the CPU peaking at one second, for each second
+    // around where the held seconds begin, and read that second's stretch.
+    let newest = 1_020 + u64::try_from(SECONDS_MAX).unwrap();
+    let first_held = newest - u64::try_from(SECONDS_MAX).unwrap() + 1;
+    for peak in first_held - 10..first_held + 10 {
+        let mut held = Held::without_recording();
+        for wall_second in 1_000..=newest {
+            let mut second = second_at(wall_second);
+            second.elapsed_ns = Some(NANOSECONDS_PER_SECOND);
+            second.cpu_percent = Some(if wall_second == peak { 95.0 } else { 10.0 });
+            assert!(held.take(&RUN, &second, TickApps::Missing(&Missing::Unread)));
+        }
+
+        let view = published(&mut held);
+
+        assert_eq!(view.seconds[0].wall_ns, first_held * NANOSECONDS_PER_SECOND);
+        let stretch = view
+            .stretches
+            .iter()
+            .find(|stretch| stretch.stretch == peak / 10)
+            .unwrap();
+        let maximum = stretch.machine.cpu_percent.measured.unwrap().maximum;
+        assert!((maximum.value - 95.0).abs() < 0.01, "peak at {peak}");
+        assert_eq!(maximum.place.publication, peak, "peak at {peak}");
+    }
+}
+
+#[test]
+fn a_closed_stretch_adds_up_what_the_memory_chart_stacks_at_each_reading() {
+    // Goal: the highest stack a stretch shows is one the Mac reached, and not the most of each
+    // part added up from different seconds.
+    // Method: read a stretch where wired memory peaks at one second and App memory at another.
+    let memory = |app_bytes, wired_bytes| MemorySecond {
+        total_bytes: 1_000,
+        app_bytes: Some(app_bytes),
+        wired_bytes,
+        compressed_bytes: 0,
+        pressure: collector::machine::Pressure::Normal,
+        swap_used_bytes: 0,
+        swap_total_bytes: 0,
+    };
+    let stretch = stretch_of_mac_readings(|second, wall_second| {
+        second.memory = Some(match wall_second {
+            1_002 => memory(500, 100),
+            1_004 => memory(100, 500),
+            _ => memory(100, 100),
+        });
+    });
+
+    let used = stretch.machine.memory_used_bytes.measured.unwrap();
+
+    assert!((used.maximum.value - 600.0).abs() < 0.01);
+    assert!((used.minimum.value - 200.0).abs() < 0.01);
+}
+
+#[test]
+fn a_closed_stretch_keeps_the_thermal_states_it_changed_through() {
+    // Goal: a thermal state of one second stays visible, with no mean of states standing for it.
+    // Method: read a stretch of one second at a higher state among seconds at a lower one.
+    let stretch = stretch_of_mac_readings(|second, wall_second| {
+        second.thermal_pressure = Some(if wall_second == 1_003 { 2 } else { 0 });
+    });
+
+    let thermal = &stretch.machine.thermal_pressure;
+
+    let changes: Vec<_> = thermal
+        .changes()
+        .map(|change| (change.category, change.place.publication))
+        .collect();
+    assert_eq!(changes, [(2, 1_003), (0, 1_004)]);
+    assert_eq!(thermal.highest.map(|mark| mark.category), Some(2));
+}
+
+#[test]
+fn a_closed_stretch_weighs_each_rate_by_its_interval() {
+    // Goal: a late tick's rate counts for the time it covered, as the counter behind it grew.
+    // Method: read a stretch whose one high rate covers three seconds.
+    let stretch = stretch_of_mac_readings(|second, wall_second| {
+        let late = wall_second == 1_005;
+        second.elapsed_ns = Some(if late { 3 } else { 1 } * NANOSECONDS_PER_SECOND);
+        second.disk_read_bps = Some(if late { 120.0 } else { 0.0 });
+    });
+
+    let read = &stretch.machine.disk_read_bps;
+
+    assert_eq!(
+        read.covered_ns(),
+        Some(12 * i128::from(NANOSECONDS_PER_SECOND))
+    );
+    assert!((read.mean().unwrap() - 30.0).abs() < 0.01);
 }

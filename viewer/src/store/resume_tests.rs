@@ -203,7 +203,7 @@ fn resuming_preserves_the_first_unsealed_readings_machine_and_app_rates() {
         .iter()
         .position(|second| second.publication == 2)
         .unwrap();
-    assert!(expected.follows);
+    assert!(expected.follows());
     assert_eq!(*resumed.seconds[index], expected);
     assert_eq!(resumed.apps[index], expected_apps);
 }

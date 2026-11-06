@@ -7,7 +7,7 @@ pub const SAMPLE_COUNT: usize = 121;
 pub const PANEL_LIMIT: usize = 128;
 #[path = "panel_data.rs"]
 mod panel_data;
-pub use panel_data::{LIVE_SAMPLE_LIMIT, Line, Panel};
+pub use panel_data::{LIVE_SAMPLE_LIMIT, Line, LineExtremes, LineReach, MachinePlace, Panel};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
