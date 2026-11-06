@@ -59,6 +59,23 @@ fn overview_of_older(older: &[MachineSecond]) -> Vec<std::rc::Rc<Panel>> {
     overview_panels(&view, levels().as_ref()).unwrap()
 }
 
+#[test]
+fn a_stretch_older_than_every_point_of_a_chart_costs_it_none_of_its_later_stretches() {
+    // Goal: a store holds stretches further back than a chart draws, which it passes over.
+    // Method: an Overview of older seconds, with and without a stretch none of its seconds lies
+    // in, drawn both ways.
+    let older = older_seconds(|second, wall_second| {
+        second.cpu_percent = Some(if wall_second == 9_024 { 95.0 } else { 10.0 });
+    });
+    let expected = overview_of_older(&older);
+    let mut view: View = view(1, &older, &[reading_at(10_000, 3)]);
+    view.stretches = vec![stretch_of(1, &[reading_at(10, 3)]), stretch_of(902, &older)];
+
+    let drawn = overview_panels(&view, levels().as_ref()).unwrap();
+
+    assert_eq!(drawn, expected);
+}
+
 /// The panel the Overview names `id`.
 fn panel_named<'panels>(panels: &'panels [std::rc::Rc<Panel>], id: &str) -> &'panels Panel {
     panels.iter().find(|panel| panel.id == id).unwrap()

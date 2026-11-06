@@ -1533,6 +1533,19 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn a_pointer_on_a_chart_of_states_takes_the_cell_nearest_it() {
+        // Goal: hovering a cell of a chart of states reads that cell rather than the next one.
+        // Method: a chart of three cells, and a pointer on each side of the middle between two.
+        let panel: Panel = serde_json::from_value(json!({
+            "id": "pressure", "title": "Pressure", "unit": "", "kind": "timeline", "lines": [],
+            "positions": [0.0, 0.5, 1.0]}))
+        .unwrap();
+
+        assert_eq!(state_cell(&panel, 0.6), Some(1));
+        assert_eq!(state_cell(&panel, 0.9), Some(2));
+    }
+
+    #[test]
     fn keyboard_steps_walk_from_the_stepped_second_within_the_recording() {
         // Goal: the second a step shows is the next step's input, held to the recording's edges.
         // Method: step both ways from a stepped second, then outward from each edge.

@@ -542,6 +542,19 @@ mod tests {
     }
 
     #[test]
+    fn a_reach_under_a_samples_own_reading_leaves_that_reading_the_maximum() {
+        // Goal: a stretch's reach leaves out the reading a chart draws, so the higher of the two
+        // is what the line reached.
+        // Method: a sample that reads past what its reach names, and read the summary.
+        let mut panel = reaching_panel(false);
+        panel.lines[0].values[1] = Some(99.0);
+
+        let summaries = chart_summaries(&panel);
+
+        assert_eq!(summaries[0].maximum, Some(99.0));
+    }
+
+    #[test]
     fn a_sample_with_no_reading_of_its_own_still_gives_how_far_it_reaches() {
         // Goal: a stretch whose first second has no rate marks its peak on the chart, so the table
         // gives that peak too, and the mean keeps to the samples that have a value.

@@ -1303,6 +1303,67 @@ fn published(held: &mut Held) -> Arc<View> {
     mailbox.take().unwrap()
 }
 
+/// Takes the seconds of `wall_seconds` into `held`, each reading `cpu_percent` and no Apps.
+fn take_mac_readings(held: &mut Held, wall_seconds: Range<u64>, cpu_percent: f64) {
+    for wall_second in wall_seconds {
+        let mut second = second_at(wall_second);
+        second.elapsed_ns = Some(NANOSECONDS_PER_SECOND);
+        second.cpu_percent = Some(cpu_percent);
+        assert!(held.take(&RUN, &second, TickApps::Missing(&Missing::Unread)));
+    }
+}
+
+#[test]
+fn a_stretch_reads_nothing_of_the_stretches_let_go_before_it() {
+    // Goal: the buffer a stretch was let go from leaves none of its readings of the Mac in the
+    // next stretch it holds, so a chart marks no peak the store no longer holds.
+    // Method: stretches reading 95, a reset of the store, stretches reading 10, and how far the
+    // first of those reached.
+    let mut held = Held::without_recording();
+    take_mac_readings(&mut held, 1_000..1_021, 95.0);
+
+    held.reset();
+    take_mac_readings(&mut held, 2_000..2_021, 10.0);
+
+    let maximum = published(&mut held).stretches[0]
+        .machine
+        .cpu_percent
+        .measured
+        .unwrap()
+        .maximum;
+    assert!((maximum.value - 10.0).abs() < 0.01);
+}
+
+#[test]
+fn a_stretch_that_takes_its_owed_apps_keeps_what_it_read_of_the_mac() {
+    // Goal: the Apps a load owed a closed stretch cost it none of what it read of the Mac, which
+    // a chart marks the stretch's peak from.
+    // Method: close a stretch that read 95 and no Apps, hand it the Apps a load added up, and
+    // read both.
+    let mut held = Held::without_recording();
+    take_mac_readings(&mut held, 1_000..1_011, 95.0);
+    let mut folding = Folding::new();
+    assert!(
+        folding
+            .add(100, &second_with(1_000, &[cpu(b"/A.app", 1_000)]))
+            .is_none()
+    );
+    let folded = folding.finish().unwrap();
+
+    held.stretches.add_owed(&RUN, 1_000, &folded);
+
+    let view = published(&mut held);
+    let shown = view.stretches[0].attribution(AppAttributionMetric::Cpu, &[name(b"/A.app")]);
+    let maximum = view.stretches[0]
+        .machine
+        .cpu_percent
+        .measured
+        .unwrap()
+        .maximum;
+    assert_eq!(first_app_amount(&shown), 1_000);
+    assert!((maximum.value - 95.0).abs() < 0.01);
+}
+
 /// Seconds 1,000 to 1,010, each following the one before, with `reading` writing into each what
 /// the second at `wall_second` read.
 fn stretch_of_mac_readings(reading: impl Fn(&mut MachineSecond, u64)) -> Arc<AppsStretch> {

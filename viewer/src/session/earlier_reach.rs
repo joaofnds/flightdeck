@@ -319,12 +319,12 @@ mod tests {
         let mut reach = Reach::default();
         reach.add(
             &json!({"cpu_percent": 1.0, "cpu_level_percent": [2.0],
-                "storage": {"read_bps": 3.0, "queue": [4.0]}}),
+                "storage": {"read_bps": 3.0, "queue": [4.0, 5.0]}}),
             &MachinePlace::default(),
         );
         reach.add(
             &json!({"cpu_percent": 11.0, "cpu_level_percent": [12.0],
-                "storage": {"read_bps": 13.0, "queue": [14.0]}}),
+                "storage": {"read_bps": 13.0, "queue": [14.0, 15.0]}}),
             &peak,
         );
         let reach = reach.json();
@@ -334,12 +334,12 @@ mod tests {
         let plain = number(number_path(None, "cpu_percent", None));
         let channel = number(number_path(None, "cpu_level_percent", Some(0)));
         let resource = number(number_path(Some("storage"), "read_bps", None));
-        let both = number(number_path(Some("storage"), "queue", Some(0)));
+        let both = number(number_path(Some("storage"), "queue", Some(1)));
 
         assert_eq!(plain, reached(1.0, 11.0));
         assert_eq!(channel, reached(2.0, 12.0));
         assert_eq!(resource, reached(3.0, 13.0));
-        assert_eq!(both, reached(4.0, 14.0));
+        assert_eq!(both, reached(5.0, 15.0));
     }
 
     #[test]
@@ -351,6 +351,16 @@ mod tests {
 
         assert!(number_reach(&past, "cpu_percent").is_err());
         assert!(number_reach(&short, "cpu_percent").is_err());
+    }
+
+    #[test]
+    fn a_reach_whose_number_is_not_a_list_is_refused() {
+        // Goal: a number the reach writer did not write is an error, not a number that did not
+        // move, which a chart would draw as flat.
+        // Method: a number written as a plain value.
+        let plain = json!({"leaves": {"cpu_percent": 1.0}, "places": []});
+
+        assert!(number_reach(&plain, "cpu_percent").is_err());
     }
 
     #[test]
