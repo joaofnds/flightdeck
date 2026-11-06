@@ -70,6 +70,10 @@ pub fn reading_value(
     line: usize,
     point: &Value,
 ) -> Result<Option<f32>, String> {
+    // A chart by App names numbers the Mac's reading holds too, and they are not the App's.
+    if route == "apps" {
+        return Ok(None);
+    }
     let points = std::slice::from_ref(point);
     let specifications = specifications(route, points)?;
     let reading = specifications
@@ -1476,6 +1480,7 @@ fn timeline_cells<O: Observations + ?Sized>(
 ) -> Result<(), String> {
     let span = usize::from(domain.span);
     let mut cells = vec![None; span];
+    let mut reaches = vec![None; span];
     let mut selected = None;
 
     for index in 0..points.count() {
@@ -1484,19 +1489,24 @@ fn timeline_cells<O: Observations + ?Sized>(
         assert!(cell < span);
         if Some(cell) != selected {
             // A point that stands for a stretch shows the worst state the stretch reached, since
-            // a state has no mean and a short spell in a worse one is what the chart is for.
-            let reached = panel.lines[0]
+            // a state has no mean and a short spell in a worse one is what the chart is for. The
+            // cell names the reading that read it only where the point draws another reading.
+            let own = state(panel.lines[0].values[index]);
+            let reach = panel.lines[0]
                 .extremes
                 .as_ref()
-                .and_then(|extremes| extremes[index])
-                .map(|reach| reach.high);
-            let value = state(reached.or(panel.lines[0].values[index]));
+                .and_then(|extremes| extremes[index]);
+            let highest_state = reach.and_then(|reach| state(Some(reach.high)));
+            let value = highest_state.or(own);
+            let named = reach.filter(|_| highest_state.is_some() && highest_state != own);
             if second < domain.recent_first {
                 let stretch = domain.stride.min(domain.recent_first - second);
                 let stretch = usize::try_from(stretch).map_err(|error| error.to_string())?;
                 cells[cell..cell + stretch].fill(value);
+                reaches[cell..cell + stretch].fill(named);
             } else {
                 cells[cell] = value;
+                reaches[cell] = named;
             }
         }
         if Some(index) == coordinates.selected_index {
@@ -1506,7 +1516,8 @@ fn timeline_cells<O: Observations + ?Sized>(
 
     "timeline".clone_into(&mut panel.kind);
     panel.lines[0].values = cells;
-    panel.lines[0].extremes = None;
+    panel.lines[0].extremes = Some(reaches);
+    panel.places = None;
     panel.positions = Some(
         (0..domain.span)
             .map(|cell| (f32::from(cell) + 0.5) / f32::from(domain.span))

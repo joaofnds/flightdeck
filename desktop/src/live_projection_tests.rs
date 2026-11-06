@@ -1163,3 +1163,15 @@ fn a_step_leaves_the_older_stretch_it_shows() {
     assert_eq!(stepped_second(&selection, 4101, 1), 4102);
     assert_eq!(stepped_second(&selection, 4101, -1), 4100);
 }
+
+#[test]
+fn a_chart_by_app_reads_nothing_of_the_macs_reading() {
+    // Goal: a chart by App and the Mac's reading name the same number, so a readout where the App
+    // has no point stays unavailable rather than showing the whole Mac.
+    // Method: read the App's CPU line from a reading of the Mac.
+    let reading = serde_json::json!({"cpu_percent_one_core": 742.0});
+
+    let read = super::reading_value("apps", "live-app-cpu", 0, &reading);
+
+    assert_eq!(read, Ok(None));
+}

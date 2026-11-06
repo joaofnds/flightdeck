@@ -61,6 +61,7 @@ impl Reach {
                     let items = items.iter().enumerate();
                     pending.extend(items.map(|(at, item)| (format!("{path}/{at}"), item)));
                 }
+                Value::Bool(flag) => self.take(path, f64::from(u8::from(*flag))),
                 Value::Object(fields) => reach_fields(&mut pending, &path, fields),
                 _ => {}
             }
@@ -217,6 +218,19 @@ mod tests {
             json!({"cpu_percent": [10.0, 95.0, 1], "storage/read_bps": [2.0, 5.0, 0],
                 "cpu_level_percent/0": [1.0, 3.0, 1], "cpu_level_percent/1": [4.0, 4.0, 1]})
         );
+    }
+
+    #[test]
+    fn a_reach_takes_a_flag_as_zero_or_one() {
+        // Goal: a chart draws a flag as the state it names, so a stretch that charged for one
+        // second reaches that state and names the reading that read it.
+        // Method: a reading of each value of the flag.
+        let reach = reach_of(&[
+            json!({"battery": {"charging": false}}),
+            json!({"battery": {"charging": true}}),
+        ]);
+
+        assert_eq!(reach, json!({"battery/charging": [0.0, 1.0, 1]}));
     }
 
     #[test]

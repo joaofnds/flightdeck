@@ -802,6 +802,36 @@ fn a_click_on_a_peaks_mark_on_a_saved_recording_shows_the_reading_that_read_it(
 }
 
 #[gpui::test]
+fn a_click_on_a_state_cell_holds_the_reading_that_reached_its_state(cx: &mut TestAppContext) {
+    // Goal: a stretch's cells show the worst state of its ten seconds, so a click holds the reading
+    // that read it and the page does not read Normal under a Critical cell.
+    // Method: the Memory page over the last hour, a stretch that read Critical at its peak, and a
+    // click on one of its cells.
+    let mut harness = InputHarness::open_recorded_route(cx, "memory");
+    let mut reply = recording_peaking_in_its_older_tail();
+    let older = &mut reply.selection.legacy_mut().unwrap()["earlier_trends"][150];
+    older["pressure"] = serde_json::json!(0);
+    older["reach"]["leaves"] = serde_json::json!({"pressure": [0.0, 2.0, 1]});
+    harness.driver.show_reply_at_the_hour(reply);
+    let position = harness
+        .driver
+        .held_second_position("live-memory-pressure-plot", OLDER_STRETCH + 4);
+    harness.driver.hover_position(position);
+    harness.driver.context.run_until_parked();
+
+    harness
+        .driver
+        .context
+        .simulate_click(position, Modifiers::none());
+    harness.driver.context.run_until_parked();
+
+    let identity = harness.driver.requested_identity().unwrap();
+    assert_eq!(harness.driver.reader_asked_second(), Some(OLDER_PEAK));
+    assert_eq!(identity["publication"], serde_json::json!(OLDER_PEAK));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_hover_of_a_peaks_mark_reads_out_the_reading_no_point_of_the_chart_holds(
     cx: &mut TestAppContext,
 ) {

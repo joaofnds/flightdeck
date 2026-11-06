@@ -375,6 +375,74 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
     }
 
     #[test]
+    fn a_state_cell_names_the_reading_that_reached_its_state() {
+        // Goal: a pick of ten cells that read Critical for one second holds that second, and no
+        // reading stays named by the cell of another.
+        // Method: a stretch Normal but for one Critical second past its first, and read a cell.
+        let older = older_seconds(|second, wall_second| {
+            let memory = second.memory.as_mut().unwrap();
+            memory.pressure = if wall_second == 9_026 {
+                Pressure::Critical
+            } else {
+                Pressure::Normal
+            };
+        });
+
+        let panels = overview_of_older(&older);
+
+        let panel = panel_named(&panels, "live-memory-pressure");
+        let cell = usize::try_from(9_023 - panel.window.unwrap().first).unwrap();
+        let reach = panel.lines[0].extremes.as_ref().unwrap()[cell].unwrap();
+        assert_eq!(reach.peak.second(), 9_026);
+        assert!(panel.places.is_none());
+    }
+
+    #[test]
+    fn a_state_cell_whose_own_reading_read_its_state_names_no_other() {
+        // Goal: a pick of a cell whose point already reads what it shows stays on the second under
+        // the pointer. Method: a stretch whose first second is its worst, and read a cell.
+        let older = older_seconds(|second, wall_second| {
+            let memory = second.memory.as_mut().unwrap();
+            memory.pressure = if wall_second == 9_020 {
+                Pressure::Critical
+            } else {
+                Pressure::Normal
+            };
+        });
+
+        let panels = overview_of_older(&older);
+
+        let panel = panel_named(&panels, "live-memory-pressure");
+        let cell = usize::try_from(9_023 - panel.window.unwrap().first).unwrap();
+        assert_eq!(panel.lines[0].extremes.as_ref().unwrap()[cell], None);
+    }
+
+    #[test]
+    fn a_state_no_chart_knows_leaves_a_cell_what_its_own_reading_read() {
+        // Goal: a recording can hold a level the chart has no state for, and that level blanks no
+        // stretch. Method: a point reading fair that names a reach of an unknown level.
+        let older = older_seconds(|second, wall_second| {
+            second.cpu_percent = Some(if wall_second == 9_024 { 95.0 } else { 10.0 });
+        });
+        let drawn = overview_of_older(&older);
+        let line = &panel_named(&drawn, "live-cpu").lines[0];
+        let peak = line.extremes.as_ref().unwrap()[0].unwrap().peak;
+        let newest = reading_at(10_000, 3);
+        let mut point = trend_point(&older[0]);
+        point["thermal_pressure"] = serde_json::json!(1);
+        point["reach"] = serde_json::json!({"leaves": {"thermal_pressure": [1.0, 9.0, 0]},
+            "places": [[peak.run, peak.boot, peak.publication, peak.wall_ns]]});
+        let mut selected = selection(&[], std::slice::from_ref(&newest));
+        selected["earlier_trends"] = serde_json::json!([point]);
+
+        let panels = panels("energy", &selected, None).unwrap();
+
+        let panel = panel_named(&panels, crate::live_projection::THERMAL_STATE_ID);
+        let cell = usize::try_from(9_020 - panel.window.unwrap().first).unwrap();
+        assert_eq!(panel.lines[0].values[cell], Some(1.0));
+    }
+
+    #[test]
     fn a_stretch_reaches_the_same_from_the_store_as_from_its_trend_points() {
         // Goal: the two routes to a chart agree on a stretch's reach as they agree on its readings.
         // Method: the Overview of a store's stretch, and of the trend points that carry the reach

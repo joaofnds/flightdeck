@@ -438,6 +438,24 @@ fn default_all_process_groups_loads_twelve_histories_before_app_totals() {
 }
 
 #[test]
+fn a_chart_of_process_groups_says_what_its_points_and_marks_stand_for() {
+    // Goal: a chart of groups draws means and marks peaks as every line chart does, so its help
+    // says so. Method: project the two-name recording and read the first chart's help.
+    let recording = named_recording();
+    let mut request = named_request();
+    request.executable = None;
+    let snapshot = recording.read(request.clone()).unwrap();
+
+    let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
+
+    let help = presentation.panels[0].help.as_ref().unwrap();
+    assert!(
+        help.contains(crate::live_projection::LINE_STATISTICS_HELP),
+        "{help}"
+    );
+}
+
+#[test]
 fn all_groups_disk_draws_written_bytes_below_zero() {
     // Goal: as in the prototype, each group's reads rise above the axis and its writes fall
     // below it. Method: project the two-name recording and read the disk lines' directions.

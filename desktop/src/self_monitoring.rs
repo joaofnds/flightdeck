@@ -441,7 +441,10 @@ fn chart_panel(
         // The prototype draws the Self charts as bare lines.
         fill: Some(0.0),
         caption: Some(definition.caption.into()),
-        help: Some(HELP.into()),
+        help: Some(format!(
+            "{HELP} {}",
+            crate::live_projection::LINE_STATISTICS_HELP
+        )),
         source: None,
         quantities: None,
         states: None,

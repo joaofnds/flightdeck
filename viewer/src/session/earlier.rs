@@ -435,10 +435,13 @@ impl KeptTail {
             let point = self
                 .kept(&history.windows[observation.window])
                 .and_then(|minute| minute.points.get(&observation.publication));
-            // A stretch whose first second expired has lost the one reading that stood for it.
+            // A stretch whose first second expired has lost the one reading that stood for it. Any
+            // other stretch with no point lies in a file whose clocks no run read.
             let Some(point) = point else {
-                assert!(self.assemble_stretch_expired(history, observation, retained));
-                continue;
+                if self.assemble_stretch_expired(history, observation, retained) {
+                    continue;
+                }
+                return Err(Error::Bound("older tail point"));
             };
             let mut point = point.clone();
             point["segment"] = (SEGMENT_BASE + segments[index]).into();
@@ -611,22 +614,7 @@ impl Session {
     fn earlier_minute_inner(&self, step: Step, minute_tables: MinuteTables) -> Result<KeptMinute> {
         let Step { window, holder } = step;
         let manifest = &self.windows[window];
-        let mut tables = metrics::Tables::new();
-        if let Holder::Kept {
-            window: before,
-            last,
-        } = holder
-        {
-            for (name, rows) in &last.tables {
-                tables.insert((before, *name), rows.clone());
-            }
-        }
-        for (name, rows) in minute_tables {
-            tables.insert((window, name), rows);
-        }
-        // The cells of the rows the minute before lends count toward the bound, as a context
-        // counts its predecessor's tables.
-        metrics::cells_check(metrics::trends_cell_count(&tables))?;
+        let tables = earlier_minute_tables(window, holder, minute_tables)?;
         let readings = earlier_minute_readings(&tables, window)?;
 
         let firsts: BTreeSet<u64> = earlier_minute_firsts(&readings, window)
@@ -636,24 +624,38 @@ impl Session {
         let mut first_missing = false;
         let mut points = BTreeMap::new();
         let mut reaches: BTreeMap<u64, StretchPart> = BTreeMap::new();
+        let mut unread = None;
         for reading in readings.values() {
             let current = reading.observation(window);
             match earlier_minute_previous(&readings, &current, manifest, holder) {
                 Previous::Missing => first_missing = true,
                 Previous::Known(previous) => {
+                    let first = firsts.contains(&reading.publication);
                     let point = metrics::trends_point(
                         &self.reader(),
                         &tables,
                         &current,
                         previous.as_ref(),
                         0,
-                    )?;
+                    );
+                    // A reading no chart draws costs only what it reached.
+                    let point = match point {
+                        Err(Error::Bound(reason)) if !first => {
+                            unread = Some(reason);
+                            continue;
+                        }
+                        point => point?,
+                    };
                     earlier_minute_reach(&mut reaches, manifest, reading, &point);
-                    if firsts.contains(&reading.publication) {
+                    if first {
                         points.insert(reading.publication, point);
                     }
                 }
             }
+        }
+
+        if let Some(reason) = unread {
+            eprintln!("flightdeck history: a saved minute left readings out of a reach: {reason}");
         }
 
         let last = earlier_minute_last(&tables, &readings, window, manifest);
@@ -667,6 +669,33 @@ impl Session {
             last,
         })
     }
+}
+
+/// The tables a minute's points read: its own, and the last reading of the minute before where
+/// the tail keeps it.
+fn earlier_minute_tables(
+    window: usize,
+    holder: Holder,
+    minute_tables: MinuteTables,
+) -> Result<metrics::Tables> {
+    let mut tables = metrics::Tables::new();
+    if let Holder::Kept {
+        window: before,
+        last,
+    } = holder
+    {
+        for (name, rows) in &last.tables {
+            tables.insert((before, *name), rows.clone());
+        }
+    }
+    for (name, rows) in minute_tables {
+        tables.insert((window, name), rows);
+    }
+    // The cells of the rows the minute before lends count toward the bound, as a context
+    // counts its predecessor's tables.
+    metrics::cells_check(metrics::trends_cell_count(&tables))?;
+
+    Ok(tables)
 }
 
 /// Adds the reading whose point is `point` to what its stretch reached.

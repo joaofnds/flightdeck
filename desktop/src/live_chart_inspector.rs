@@ -387,12 +387,14 @@ fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
             let mut available = 0_u32;
             let values = line.values.iter().take(crate::data::LIVE_SAMPLE_LIMIT);
             for (index, value) in values.enumerate() {
-                let Some(value) = value.filter(|value| value.is_finite()) else {
+                let value = value.filter(|value| value.is_finite());
+                if let Some(value) = value {
+                    sum += f64::from(value);
+                    available += 1;
+                }
+                let Some(reading) = chart_summaries_reading(panel, line, index, value) else {
                     continue;
                 };
-                sum += f64::from(value);
-                available += 1;
-                let reading = chart_summaries_reading(panel, line, index, value);
                 if maximum.is_none_or(|(highest, _)| reading.0 > highest) {
                     maximum = Some(reading);
                 }
@@ -419,19 +421,20 @@ fn chart_summaries_reading(
     panel: &Panel,
     line: &crate::data::Line,
     index: usize,
-    value: f32,
-) -> (f32, Option<u64>) {
+    value: Option<f32>,
+) -> Option<(f32, Option<u64>)> {
     let reach = line
         .extremes
         .as_ref()
         .filter(|_| panel.stack != Some(true))
-        .and_then(|extremes| extremes[index]);
+        .and_then(|extremes| extremes[index])
+        .filter(|reach| value.is_none_or(|value| reach.high >= value));
     if let Some(reach) = reach {
-        return (reach.high.max(value), Some(reach.peak.second()));
+        return Some((reach.high, Some(reach.peak.second())));
     }
     let place = panel.places.as_ref().and_then(|places| places.get(index));
 
-    (value, place.map(crate::data::MachinePlace::second))
+    value.map(|value| (value, place.map(crate::data::MachinePlace::second)))
 }
 
 #[cfg(test)]
@@ -503,6 +506,21 @@ mod tests {
         assert_eq!(summaries[0].maximum, Some(95.0));
         assert_eq!(summaries[0].maximum_second, Some(9_000));
         assert_eq!(summaries[0].mean, Some(15.0));
+    }
+
+    #[test]
+    fn a_sample_with_no_reading_of_its_own_still_gives_how_far_it_reaches() {
+        // Goal: a stretch whose first second has no rate marks its peak on the chart, so the table
+        // gives that peak too, and the mean keeps to the samples that have a value.
+        // Method: the sample that reaches past the others with no value of its own.
+        let mut panel = reaching_panel(false);
+        panel.lines[0].values[1] = None;
+
+        let summaries = chart_summaries(&panel);
+
+        assert_eq!(summaries[0].maximum, Some(95.0));
+        assert_eq!(summaries[0].maximum_second, Some(9_000));
+        assert_eq!(summaries[0].mean, Some(10.0));
     }
 
     #[test]

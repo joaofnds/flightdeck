@@ -232,12 +232,12 @@ fn panels_panel(
         stack: Some(definition.stacked),
         fill: Some(if definition.stacked { 0.45 } else { 0.1 }),
         caption: None,
-        help: Some(
+        help: Some(format!(
             "Seven groups with highest known mean CPU over captured context; Other includes \
             every remaining captured named group. Unknown names are excluded and reported. \
-            Missing readings remain gaps. Groups use executable bytes across PID lifetimes."
-                .into(),
-        ),
+            Missing readings remain gaps. Groups use executable bytes across PID lifetimes. {}",
+            crate::live_projection::LINE_STATISTICS_HELP
+        )),
         source: Some("Captured process intervals".into()),
         quantities: None,
         states: None,

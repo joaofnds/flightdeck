@@ -490,6 +490,10 @@ impl LiveDashboard {
         bounds: Bounds<gpui::Pixels>,
         position: gpui::Point<gpui::Pixels>,
     ) -> Option<crate::live_hover::Target> {
+        if panel.kind == "timeline" {
+            let reach = state_reach(panel, chart_hover_fraction(bounds, position)?)?;
+            return Some(crate::live_hover::Target::of_place(&reach.peak));
+        }
         let inspection = chart_inspection(panel, self.chart_inspection_index(panel));
         let hidden = self.chart_hidden(panel);
         let pick = charts::peak_under(panel, bounds, inspection, &hidden, position)?;
@@ -1096,13 +1100,20 @@ fn chart_hover_second(
     bounds: Bounds<gpui::Pixels>,
     position: gpui::Point<gpui::Pixels>,
 ) -> Option<u64> {
+    window?.second_at(chart_hover_fraction(bounds, position)?)
+}
+
+/// How far across the plot in `bounds` the pointer at `position` lies, if it lies on the plot.
+fn chart_hover_fraction(
+    bounds: Bounds<gpui::Pixels>,
+    position: gpui::Point<gpui::Pixels>,
+) -> Option<f32> {
     let rect = charts::plot_bounds(bounds);
     if !rect.contains(&position) {
         return None;
     }
 
-    let fraction = f32::from(position.x - rect.origin.x) / f32::from(rect.size.width);
-    window?.second_at(fraction)
+    Some(f32::from(position.x - rect.origin.x) / f32::from(rect.size.width))
 }
 
 /// The selected App's disk chart, one line of the bytes read and written together as the
@@ -1422,6 +1433,35 @@ fn line_reading(panel: &Panel, value: Option<f32>, unit: &str) -> String {
     )
 }
 
+/// How far the cell at `fraction` across the plot of the chart of states `panel` reached, where a
+/// reading other than the one its point draws read the state the cell shows. A range moves the
+/// cells' positions and keeps every cell, so a cell is found by where it lies.
+fn state_reach(panel: &Panel, fraction: f32) -> Option<crate::data::LineReach> {
+    let cell = state_cell(panel, fraction)?;
+
+    panel
+        .lines
+        .first()?
+        .extremes
+        .as_ref()?
+        .get(cell)
+        .copied()
+        .flatten()
+}
+
+/// The cell of a chart of states whose position lies nearest `fraction`.
+fn state_cell(panel: &Panel, fraction: f32) -> Option<usize> {
+    let positions = panel.positions.as_deref()?;
+    let after = positions.partition_point(|position| *position < fraction);
+    let nearer_before = after.checked_sub(1).filter(|before| {
+        positions
+            .get(after)
+            .is_none_or(|next| fraction - positions[*before] <= next - fraction)
+    });
+
+    Some(nearer_before.unwrap_or(after))
+}
+
 fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> Option<usize> {
     let Some(second) = second else {
         return panel.selected_index;
@@ -1446,15 +1486,7 @@ fn inspection_index(panel: &Panel, snapshot: &Snapshot, second: Option<u64>) -> 
     }
 
     if panel.kind == "timeline" {
-        let first = match panel.window {
-            Some(window) => window.first,
-            None => crate::live_projection::context_last_second(&snapshot.selection)?
-                .saturating_sub(899),
-        };
-        let Ok(offset) = usize::try_from(second.checked_sub(first)?) else {
-            return None;
-        };
-        return (offset < panel.lines.first()?.values.len()).then_some(offset);
+        return state_cell(panel, panel.window?.fraction_of(second)?);
     }
 
     let at_second = |point: &Value| {
@@ -1635,6 +1667,12 @@ mod tests {
         snapshot
     }
 
+    fn cell_positions(count: u16) -> Vec<f32> {
+        (0..count)
+            .map(|cell| (f32::from(cell) + 0.5) / f32::from(count))
+            .collect()
+    }
+
     fn long_panel(kind: &str, readings: usize) -> Panel {
         let mut panel: Panel = serde_json::from_value(json!({"id":"live-cpu","title":"CPU",
             "kind":kind,"unit":"%","lines":[{"name":"a","color":"#fff",
@@ -1668,11 +1706,31 @@ mod tests {
     }
 
     #[test]
+    fn a_range_keeps_each_second_of_a_timeline_in_its_own_cell() {
+        // Goal: a range moves a timeline's cells and keeps all of them, so the readout under a
+        // second stays that second's. Method: an hour's cells zoomed to their last half, and ask
+        // for a second inside it.
+        let snapshot = long_snapshot();
+        let mut panel = long_panel("timeline", 3600);
+        panel.positions = Some(cell_positions(3600));
+        crate::time_range::zoom(
+            &mut panel,
+            charts::TimeWindow {
+                first: 3201,
+                span: 1800,
+            },
+        );
+
+        assert_eq!(inspection_index(&panel, &snapshot, Some(4101)), Some(2700));
+    }
+
+    #[test]
     fn a_timeline_over_the_whole_hour_hovers_the_cell_of_the_second() {
         // Goal: a state timeline holds a cell per second of the hour, so hover names the cell
         // from the chart's own first second. Method: ask for an older and a recent second.
         let snapshot = long_snapshot();
-        let panel = long_panel("timeline", 3600);
+        let mut panel = long_panel("timeline", 3600);
+        panel.positions = Some(cell_positions(3600));
 
         assert_eq!(inspection_index(&panel, &snapshot, Some(2013)), Some(612));
         assert_eq!(inspection_index(&panel, &snapshot, Some(4101)), Some(2700));

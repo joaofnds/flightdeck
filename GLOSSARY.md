@@ -110,6 +110,9 @@ line at any bucket with no readings of its own, and each point beside the break 
 of its buckets. A chart of readings a second apart takes the shortest length, of at least one
 second, that leaves each bucket a pixel of the chart, so a wider chart or a shorter span draws
 shorter buckets, and each point covers at least four seconds and a second more than its bucket.
+Each point also keeps what its bucket's readings reached, the lowest and the highest and the reading
+that read the highest, so a peak the mean hides stays findable as it ages. A chart of states draws
+the highest state its readings reached.
 Buckets start at multiples of their length, so a point keeps its place as the chart scrolls.
 Readings further apart, such as the collector's ten-second reports or the older readings of a
 chart that reaches back more than sixteen minutes, which stand ten seconds apart, make buckets

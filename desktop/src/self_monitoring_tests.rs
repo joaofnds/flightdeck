@@ -2,6 +2,7 @@ use super::{
     axis, cards, charts, minute_rows, nearest, report_rows, run_status, seal_rows, sources,
 };
 use crate::chart_axes::TimeWindow;
+use crate::live_projection::LINE_STATISTICS_HELP;
 use crate::self_reports::{MinuteReport, Seal, SealTotals, SelfReports, TickReport};
 
 const WINDOW: TimeWindow = TimeWindow {
@@ -455,4 +456,17 @@ fn the_run_status_says_the_reports_come_from_the_collector_this_app_started() {
         "Flightdeck diagnostic run · 1:14 elapsed · 10-second reports from the collector this \
          app started."
     );
+}
+
+#[test]
+fn a_self_chart_says_what_its_points_and_marks_stand_for() {
+    // Goal: a chart of reports draws means and marks peaks as every line chart does, so its help
+    // says so. Method: the charts of one report.
+    let mut reports = started();
+    reports.ticks.push_back(tick(1_010));
+
+    let charts = charts(&reports, WINDOW, None);
+
+    let help = charts[0].panel.help.as_ref().unwrap();
+    assert!(help.contains(LINE_STATISTICS_HELP), "{help}");
 }

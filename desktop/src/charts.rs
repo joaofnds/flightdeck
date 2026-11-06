@@ -500,18 +500,22 @@ fn run_curves(
         .collect()
 }
 
-/// Whether `line` marks the peaks its curve smooths. A dashed line or a restated one marks a level
-/// and has no peak of its own. A stacked line reaches only as its whole stack, so only the line
-/// that names that reach marks it, and not with part of the stack hidden.
+/// Whether `line` marks the peaks its curve smooths. A restated line has no peak of its own. A
+/// stacked line reaches only as its whole stack, so only the line that names that reach marks it,
+/// and not with part of the stack hidden.
 fn line_marks_peaks(panel: &Panel, line: &crate::data::Line, hidden: &[String]) -> bool {
-    if line.dashed == Some(true) || line.follows.is_some() {
+    if line.follows.is_some() {
         return false;
     }
     if !stacked(panel, line) {
         return true;
     }
 
-    line.extremes.is_some() && !panel.lines.iter().any(|shown| hidden.contains(&shown.name))
+    line.extremes.is_some()
+        && !panel
+            .lines
+            .iter()
+            .any(|shown| stacked(panel, shown) && hidden.contains(&shown.name))
 }
 
 /// Draws a stem from the curve to each peak that stands out of `line`, and a cap at its tip, so a
@@ -992,6 +996,11 @@ const BUCKET_SECONDS: [u64; 28] = [
 ];
 /// How far beyond its curve a peak must lie to draw. A shorter mark is too small to read.
 const PEAK_OVERSHOOT_HEIGHT_MIN: Pixels = px(6.0);
+/// How few buckets a chart can mark a peak in. Two buckets show a rise and not a peak, which needs
+/// readings on both sides or a line to stand out of, and the curve reaches the newer of them as
+/// soon as more readings join it.
+const PEAK_BUCKETS_MIN: usize = 3;
+
 /// How many times the overshoot three quarters of its line's buckets stay within a peak must reach
 /// to draw. Drawing how far every bucket reaches read as shaky on a 15-minute chart, so a chart
 /// marks what stands out of its noise. Half a line's buckets lie under its curve, so the median
@@ -1474,7 +1483,9 @@ struct StandingPeak {
 }
 
 /// The peaks of `line` that stand out, in time order: those at least `overshoot_min` beyond the
-/// curve, and `PEAK_OVERSHOOT_TYPICAL_RATIO` times as far as three quarters of its buckets reach.
+/// curve, and `PEAK_OVERSHOOT_TYPICAL_RATIO` times as far as three quarters of its other buckets
+/// reach, and the tallest of them wherever it goes past those buckets at all, since a line that
+/// peaks often still has one reading above the rest.
 fn standing_peaks(
     line: &crate::data::Line,
     values: &[Option<(f32, f32)>],
@@ -1501,12 +1512,21 @@ fn standing_peaks(
         .map(|peak| (peak.peak - peak.base).abs())
         .collect();
     overshoots.sort_unstable_by(f32::total_cmp);
+    if overshoots.len() < PEAK_BUCKETS_MIN {
+        return Vec::new();
+    }
+    let Some((&tallest, others)) = overshoots.split_last() else {
+        return peaks;
+    };
     // Floors, which only matters for a chart of a few buckets.
-    let typical = overshoots
-        .get(overshoots.len() * 3 / 4)
-        .copied()
-        .unwrap_or(0.0);
-    let least = overshoot_min.max(PEAK_OVERSHOOT_TYPICAL_RATIO * typical);
+    let typical = others.get(others.len() * 3 / 4).copied().unwrap_or(0.0);
+    let stands_out = PEAK_OVERSHOOT_TYPICAL_RATIO * typical;
+    let least = if tallest > typical {
+        stands_out.min(tallest)
+    } else {
+        stands_out
+    };
+    let least = overshoot_min.max(least);
     peaks.retain(|peak| (peak.peak - peak.base).abs() >= least);
     peaks
 }
@@ -1544,39 +1564,60 @@ fn standing_peaks_of_bucket(
 }
 
 /// The range of the reading at `position` of the panel, if it lies in a bucket a range stands for:
-/// the reach the line names for it, or else `value`'s own top, which it has with or without a stack
-/// beneath it.
+/// the reach the line names for it, widened by `value`'s own top, which it has with or without a
+/// stack beneath it. The first detailed point names the reach of the stretch it joins, which can
+/// end before a gap, so its own reading can lie past that reach.
 fn reading_range(
     line: &crate::data::Line,
     value: Option<(f32, f32)>,
     position: usize,
     clock: Clock<'_>,
 ) -> Option<BucketRange> {
+    let mirrored = line.negative == Some(true);
+    let at = clock.positions[position];
+    let index = clock.buckets.range_index(at, clock.sliding)?;
     let named = line
         .extremes
         .as_deref()
-        .and_then(|extremes| extremes.get(position).copied().flatten());
-    let at = clock.positions[position];
-    let index = clock.buckets.range_index(at, clock.sliding);
-    let (lowest, highest, place) = match named {
-        Some(reach) if line.negative == Some(true) => (-reach.high, -reach.low, Some(reach.peak)),
-        Some(reach) => (reach.low, reach.high, Some(reach.peak)),
-        None => {
-            let (top, _) = value?;
-            (top, top, clock.places.map(|places| places[position]))
-        }
-    };
-    let second = match place {
-        Some(place) => place.second(),
-        None => clock.buckets.second_of(at)?,
-    };
+        .and_then(|extremes| extremes.get(position).copied().flatten())
+        .map(|reach| {
+            let (lowest, highest) = if mirrored {
+                (-reach.high, -reach.low)
+            } else {
+                (reach.low, reach.high)
+            };
+            let pick = PeakPick {
+                second: reach.peak.second(),
+                place: Some(reach.peak),
+            };
+            BucketRange {
+                index,
+                lowest,
+                highest,
+                pick,
+            }
+        });
+    let own = value.and_then(|(top, _)| {
+        let place = clock.places.map(|places| places[position]);
+        let second = match place {
+            Some(place) => place.second(),
+            None => clock.buckets.second_of(at)?,
+        };
+        Some(BucketRange {
+            index,
+            lowest: top,
+            highest: top,
+            pick: PeakPick { second, place },
+        })
+    });
 
-    Some(BucketRange {
-        index: index?,
-        lowest,
-        highest,
-        pick: PeakPick { second, place },
-    })
+    match (named, own) {
+        (Some(mut named), Some(own)) => {
+            named.widen(mirrored, own);
+            Some(named)
+        }
+        (named, own) => named.or(own),
+    }
 }
 
 /// Where a reading or a curve's point sits on the plot: the top of its line and the bottom of
@@ -3054,18 +3095,94 @@ mod live_tests {
     }
 
     #[test]
-    fn a_line_that_marks_a_level_draws_no_range() {
-        // Goal: a dashed line or one that restates another marks a level, so it adds no band.
-        // Method: ask for each.
+    fn a_line_that_restates_another_marks_no_peak_of_its_own() {
+        // Goal: the line it restates already marks the peak.
+        // Method: ask for a line and for one that follows it.
         let panel = live_panel(1000, &[Some(10.0); 900]);
-        let mut dashed = panel.lines[0].clone();
-        dashed.dashed = Some(true);
         let mut restated = panel.lines[0].clone();
         restated.follows = Some("cpu".into());
 
         assert!(line_marks_peaks(&panel, &panel.lines[0], &[]));
-        assert!(!line_marks_peaks(&panel, &dashed, &[]));
         assert!(!line_marks_peaks(&panel, &restated, &[]));
+    }
+
+    #[test]
+    fn a_dashed_line_marks_its_peaks() {
+        // Goal: a dash is how a line looks, and the Overview's fans draw theirs dashed, so a fan's
+        // spike marks that chart. A dashed level never rises past its line, so it marks nothing.
+        // Method: ask for a dashed line.
+        let panel = live_panel(1000, &[Some(10.0); 900]);
+        let mut dashed = panel.lines[0].clone();
+        dashed.dashed = Some(true);
+
+        assert!(line_marks_peaks(&panel, &dashed, &[]));
+    }
+
+    #[test]
+    fn hiding_a_line_outside_a_stack_keeps_the_marks_of_the_stack() {
+        // Goal: a guide drawn beside a stack is no part of its total, so hiding it leaves what the
+        // top line names true. Method: a stack, a line outside it, and that line hidden.
+        let mut panel = live_panel(1000, &[Some(10.0); 900]);
+        panel.stack = Some(true);
+        let mut top = panel.lines[0].clone();
+        top.extremes = Some(vec![None; 900]);
+        let mut guide = panel.lines[0].clone();
+        guide.name = "guide".into();
+        guide.stack = Some(false);
+        panel.lines = vec![top.clone(), guide];
+
+        assert!(line_marks_peaks(&panel, &top, &["guide".to_owned()]));
+    }
+
+    #[test]
+    fn a_lone_peak_marks_a_chart_of_few_buckets() {
+        // Goal: a short recording's one peak has no others to be ordinary among, so it does not
+        // have to reach twice itself. Method: three readings, the middle one far above the others.
+        let line = reaching_line(None);
+        let mut values = vec![None; 900];
+        values[100] = Some((10.0, 0.0));
+        values[101] = Some((95.0, 0.0));
+        values[102] = Some((10.0, 0.0));
+
+        let peaks = peaks_at_width(&line, &values, 900.0, 1.0);
+
+        assert_eq!(peaks.len(), 1, "{peaks:?}");
+        assert!((peaks[0].peak - 95.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_tallest_peak_marks_a_line_that_peaks_often() {
+        // Goal: a line peaking in over a quarter of its buckets still shows the one reading that
+        // went past all the others. Method: 60 in every third ten-second bucket and one 95.
+        let line = reaching_line(None);
+        let mut values: Vec<_> = (0..900)
+            .map(|second| Some((if second % 30 == 5 { 60.0 } else { 10.0 }, 0.0)))
+            .collect();
+        values[405] = Some((95.0, 0.0));
+
+        let peaks = peaks_at_width(&line, &values, TEN_SECOND_CARD, 1.0);
+
+        assert_eq!(peaks.len(), 1, "{peaks:?}");
+        assert!((peaks[0].peak - 95.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_reading_past_what_its_line_names_widens_the_range() {
+        // Goal: a point takes the reach of the stretch it joins, which may end before a gap, and
+        // the point's own reading stays on the chart past that reach, picked by its own second.
+        // Method: a reading of 95 whose line names a reach of 5 to 20.
+        let mut values = vec![None; 900];
+        values[100] = Some((95.0, 0.0));
+        let mut extremes = vec![None; 900];
+        extremes[100] = Some(line_reach(5.0, 20.0));
+        let line = reaching_line(Some(extremes));
+
+        let (ranges, _) = ranges_at_width(&line, &values, TEN_SECOND_CARD);
+
+        assert_eq!(ranges.len(), 1);
+        assert!((ranges[0].highest - 95.0).abs() < f32::EPSILON);
+        assert!((ranges[0].lowest - 5.0).abs() < f32::EPSILON);
+        assert_eq!(ranges[0].pick.second, 1100);
     }
 
     #[test]
