@@ -72,7 +72,7 @@ impl SourceFrontier {
         if self.complete {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "source already has a certified terminal disposition",
+                "source's run has already ended",
             ));
         }
         if self.trailing_unknown {
@@ -360,7 +360,7 @@ fn source_value(candidate: &AdmittedCanonical, ordered_window: Option<u64>) -> S
         timing: metadata.timing(),
         trailing_unknown: metadata.trailing_unknown,
         unknown_provenance: metadata.loss.inherited.unknown.clone(),
-        complete: metadata.certified_terminal() || metadata.kept_terminal(),
+        complete: metadata.ends_run(),
     }
 }
 fn choose(
@@ -412,7 +412,7 @@ fn choose_validate_successor(
     let domain = &later.loss.inherited;
     if earlier.timing() != later.timing()
         || earlier.captured != later.captured
-        || earlier.certified_terminal()
+        || earlier.ends_run()
         || earlier.loss.publication_end > domain.publication_start
         || earlier.loss.event_end > domain.event_start
         || earlier.effective_window() > domain.prior_window

@@ -522,11 +522,14 @@ fn event_metadata(fixture: &Fixture, fragment: bool) -> CanonicalMetadata {
     metadata
 }
 fn event_frame(associated: bool) -> polars::prelude::DataFrame {
+    event_frame_of(associated, 1)
+}
+fn event_frame_of(associated: bool, number: u64) -> polars::prelude::DataFrame {
     crate::event_recovery::batch::frame(
         &[crate::event_recovery::batch::Row {
             publication: associated.then_some(1),
             event: crate::window::EventRecord {
-                number: 1,
+                number,
                 tick: 1,
                 pid: 41,
                 kind: 1,
@@ -1021,6 +1024,56 @@ fn terminal_and_fragment_tails_cannot_cross_ownership_frontiers() {
             .kind(),
         io::ErrorKind::InvalidData
     );
+}
+
+#[test]
+fn nothing_follows_a_terminal_kept_without_its_source() {
+    // Goal: a terminal kept when its source went ends its run as a certified one does, so a
+    // frontier refuses an object past it rather than reading the run as going on (P02.5).
+    // Method: publish a kept terminal and a fragment that starts where it ends, and read the
+    // frontier.
+    let fixture = Fixture::new();
+    let mut terminal = event_metadata(&fixture, false);
+    terminal.evidence = EndpointEvidence::SurvivingRow;
+    assert!(terminal.kept_terminal());
+    let (raw, _) = fixture.publish(&terminal, Namespace::Terminal, &[]);
+    crate::encoder::encode_write(
+        &mut event_frame(false),
+        PrivateDirectory::open(&raw)
+            .unwrap()
+            .create_file("0000.parquet")
+            .unwrap(),
+    )
+    .unwrap();
+    let mut fragment = event_metadata(&fixture, true);
+    fragment.transaction = Identity([32, 33]);
+    fragment.loss.inherited.publication_start = 2;
+    fragment.loss.inherited.publication_inherited_end = 2;
+    fragment.loss.inherited.event_start = 2;
+    fragment.loss.inherited.event_inherited_end = 2;
+    fragment.loss.publication_end = 3;
+    fragment.loss.event_end = 3;
+    if let Body::Events(inner) = &mut fragment.body {
+        inner.recovery.events_first = 2;
+        inner.recovery.events_end = 3;
+        inner.batches[0].first = 2;
+        inner.batches[0].end = 3;
+    }
+    let (raw, _) = fixture.publish(&fragment, Namespace::Fragments, &[]);
+    crate::encoder::encode_write(
+        &mut event_frame_of(true, 2),
+        PrivateDirectory::open(&raw)
+            .unwrap()
+            .create_file("0000.parquet")
+            .unwrap(),
+    )
+    .unwrap();
+
+    let result = fixture
+        .store()
+        .source_frontier(&fixture.run, &budget(), &mut ReadWork::default());
+
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
 }
 
 #[test]

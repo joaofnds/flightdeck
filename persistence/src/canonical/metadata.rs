@@ -509,6 +509,10 @@ impl CanonicalMetadata {
             && self.evidence == EndpointEvidence::SurvivingRow
             && !self.trailing_unknown
     }
+    /// Whether nothing can follow this object in its run.
+    pub(crate) fn ends_run(&self) -> bool {
+        self.certified_terminal() || self.kept_terminal()
+    }
     pub(crate) fn validate(&self) -> io::Result<()> {
         self.timing().validate(self.captured)?;
         crate::transaction::source_binding::validate(&self.binding)?;
