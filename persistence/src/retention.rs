@@ -35,6 +35,11 @@ const PERIOD_NAME: &str = "period";
 /// How long physical removal waits past a reading's expiry, which a read under way has to finish
 /// or be cancelled in.
 const READER_GRACE_SECONDS: u64 = 60;
+const RESERVE_NAME: &str = "reserve";
+/// Room set aside for removal on a full disk. APFS volumes of 256 MiB and 2 GiB that refused a new
+/// file took the file and the rename the state of a removal needs once 256 KiB came free, and
+/// refused the rename at 64 KiB. A removal then frees more than it uses.
+const RESERVE_BYTES: usize = 1 << 20;
 const ORDER_HOURS_MAX: usize = 1 << 20;
 
 const _: () = assert!(
@@ -558,6 +563,28 @@ fn boot_records_settle_one(
     }
 
     Ok(())
+}
+
+/// Sets room aside for a full disk to give up, unless it already is. A refused write can leave part
+/// of it in a file the next write replaces.
+pub(crate) fn reserve_keep(root: &PrivateDirectory) -> io::Result<()> {
+    let directory = root.open_directory(DIRECTORY_NAME)?;
+    match directory.open_file(RESERVE_NAME) {
+        Ok(_reserve) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            private::atomic_write_in(&directory, RESERVE_NAME, &vec![0; RESERVE_BYTES])
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Gives up the room `reserve_keep` set aside, if there is any.
+pub(crate) fn reserve_release(root: &PrivateDirectory) -> io::Result<()> {
+    let directory = root.open_directory(DIRECTORY_NAME)?;
+    match directory.remove_file(RESERVE_NAME) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        Ok(()) | Err(_) => Ok(()),
+    }
 }
 
 /// A publication's name in the retention order, which physical removal walks oldest first. Its

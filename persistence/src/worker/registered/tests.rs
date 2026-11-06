@@ -183,8 +183,12 @@ impl Recording {
     }
 
     fn create(captured: bool, shape: Shape) -> Self {
+        Self::create_in(&std::env::temp_dir(), captured, shape)
+    }
+
+    fn create_in(directory: &Path, captured: bool, shape: Shape) -> Self {
         let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-        let base = std::env::temp_dir().join(format!("fd-worker-{}-{serial}", std::process::id()));
+        let base = directory.join(format!("fd-worker-{}-{serial}", std::process::id()));
         private::create_private_dir(&base).unwrap();
         let root = base.join("recording");
         private::create_private_dir(&root).unwrap();
@@ -332,6 +336,10 @@ impl Recording {
 
     /// Takes a worker step with this test process standing in for a collector that still runs.
     fn persist_live(&self, store: &Store, state: &mut RunState) -> Progress {
+        self.persist_live_result(store, state).unwrap()
+    }
+
+    fn persist_live_result(&self, store: &Store, state: &mut RunState) -> crate::Result<Progress> {
         let derive = SealedApps::default();
         let writers = Writers {
             encoder: Encoder,
@@ -341,7 +349,7 @@ impl Recording {
             collector_pid: std::process::id(),
             ..self.registered()
         };
-        persist_one(store, &writers, &registered, false, state).unwrap()
+        persist_one(store, &writers, &registered, false, state)
     }
 
     /// A second collector run of the same recording, with a ring of its own.
@@ -3202,6 +3210,9 @@ fn a_window_stays_until_the_reading_after_it_has_outlived_the_period() {
 
 #[path = "kill_tests.rs"]
 mod kill_tests;
+
+#[path = "full_disk_tests.rs"]
+mod full_disk_tests;
 
 #[path = "keep_tests.rs"]
 mod keep_tests;

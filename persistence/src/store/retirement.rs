@@ -41,24 +41,56 @@ impl Store {
         runs: &[RunIdentity],
         budget: &Arc<ByteBudget>,
     ) -> io::Result<u64> {
+        let clock = Clock::read_for_removal(&self.directory, now)?;
+        let period = Period::read(&self.directory);
+        self.retire_expired_room(&clock, period)?;
+        if let Err(error) = retention::boot_records_settle(&self.directory, &clock) {
+            collector::diagnostics::error(format_args!("retention boot records: {error}"));
+        }
         self.retire_expired_settle()?;
+
+        self.retire_expired_entries(&clock, period, runs, budget)
+    }
+
+    /// Saves the clock, which loses nothing if a full disk refuses it. What that refuses, the state
+    /// a removal writes meets too, so a disk with something to remove gives up the room set aside
+    /// for this. With nothing to remove the room stays, since a save would take it and leave a
+    /// later removal with none. A disk that takes the clock has room to set aside again.
+    fn retire_expired_room(&self, clock: &Clock, period: Period) -> io::Result<()> {
+        if let Err(error) = clock.write(&self.directory) {
+            collector::diagnostics::error(format_args!("retention clock save: {error}"));
+            if retention::expired_entries(&self.directory, clock.removal_cutoff(period), 1)?
+                .is_empty()
+            {
+                return Ok(());
+            }
+
+            return retention::reserve_release(&self.directory);
+        }
+        if let Err(error) = retention::reserve_keep(&self.directory) {
+            if error.kind() != io::ErrorKind::StorageFull {
+                collector::diagnostics::error(format_args!("retention reserve: {error}"));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn retire_expired_entries(
+        &self,
+        clock: &Clock,
+        period: Period,
+        runs: &[RunIdentity],
+        budget: &Arc<ByteBudget>,
+    ) -> io::Result<u64> {
         let mut work = super::PublicationWork::default();
         let under_way = read_optional_normal(&self.retire_control(), self.recording, &mut work)?;
         // Once a publication has taken the namespace it expects the sequence it left there. Before
-        // that it reads the namespace when it takes it, so a full disk can still be given room.
+        // that it reads the namespace when it takes it.
         if under_way.as_ref().is_some_and(|state| state.sequence > 0) {
             return Ok(0);
         }
 
-        let clock = Clock::read_for_removal(&self.directory, now)?;
-        // A full disk can refuse this write, and the clock loses nothing by it.
-        if let Err(error) = clock.write(&self.directory) {
-            collector::diagnostics::error(format_args!("retention clock save: {error}"));
-        }
-        if let Err(error) = retention::boot_records_settle(&self.directory, &clock) {
-            collector::diagnostics::error(format_args!("retention boot records: {error}"));
-        }
-        let period = Period::read(&self.directory);
         let entries = retention::expired_entries(
             &self.directory,
             clock.removal_cutoff(period),
