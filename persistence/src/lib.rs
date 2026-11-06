@@ -24,6 +24,7 @@ pub mod sealed_apps;
 mod store;
 mod system;
 mod temperatures;
+pub mod tick_rows;
 pub mod transaction;
 mod window;
 pub mod window_ticks;

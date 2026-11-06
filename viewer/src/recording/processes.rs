@@ -11,6 +11,7 @@ use persistence::schema::{
     IDENTITY_FIELDS, IDENTITY_ROWS_MAX, PROCESS_GPU_FIELD, Table, availability,
     identity_availability,
 };
+use persistence::tick_rows::USAGE_COLUMNS;
 use polars::prelude::{
     DataFrame, DataType, Expr, IntoLazy, Null, UInt32Type, UInt64Type, col, lit,
 };
@@ -24,24 +25,6 @@ use crate::live_app_response::Sample;
 use crate::live_apps::Frame;
 use crate::live_apps::committed::{ENDPOINTS_MAX, Endpoint};
 
-/// The columns of a process or event row the frames take besides its identity, each by the
-/// name the assembly reads it under.
-const USAGE_COLUMNS: [&str; 14] = [
-    "awake_ns_at_start",
-    "user_ns",
-    "system_ns",
-    "energy_nj",
-    "instructions",
-    "super_instructions",
-    "cycles",
-    "idle_wakeups",
-    "interrupt_wakeups",
-    "pageins",
-    "resident_bytes",
-    "footprint_bytes",
-    "disk_read_bytes",
-    "disk_written_bytes",
-];
 /// Every column the assembly reads of a row.
 const BATCH_COLUMNS: [&str; 28] = [
     "identity_availability",
