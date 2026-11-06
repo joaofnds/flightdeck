@@ -139,6 +139,7 @@ impl RegisteredAttempt<'_> {
         recovery: &crate::event_recovery::Recovery,
         batches: &[crate::event_recovery::Batch],
         lifecycle: Lifecycle,
+        evidence: EndpointEvidence,
     ) -> io::Result<CanonicalMetadata> {
         let AttemptOperation::Terminal { event_end } = self.input.operation else {
             return Err(invalid());
@@ -162,7 +163,7 @@ impl RegisteredAttempt<'_> {
             binding: self.input.binding,
             source_layout: self.input.source.layout,
             source_origin: self.input.source.origin_continuous_ns,
-            evidence: EndpointEvidence::FixedSource,
+            evidence,
             lifecycle,
             captured: self.input.captured,
             trailing_unknown: false,
@@ -206,9 +207,12 @@ impl RegisteredAttempt<'_> {
                 unknown: self.input.losses.unknown.is_some(),
             },
         };
-        let mut metadata = self.terminal_draft(&recovery, batches, Lifecycle::Active)?;
-        metadata.evidence = EndpointEvidence::SurvivingRow;
-        metadata.validate()?;
+        let metadata = self.terminal_draft(
+            &recovery,
+            batches,
+            Lifecycle::Active,
+            EndpointEvidence::SurvivingRow,
+        )?;
         let mut file = self.directory.create_file("metadata")?;
         metadata.write(&mut file)?;
         private::full_sync(&file)?;
@@ -257,7 +261,8 @@ impl<'store> RegisteredAttempt<'store> {
         } else {
             Lifecycle::DeadGeneration
         };
-        let draft = self.terminal_draft(recovery, batches, lifecycle)?;
+        let draft =
+            self.terminal_draft(recovery, batches, lifecycle, EndpointEvidence::FixedSource)?;
         self.begin_proof(draft, reader, budget, reservation)
     }
     fn begin_proof(

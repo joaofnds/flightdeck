@@ -271,20 +271,7 @@ impl<'store> RowCandidates<'store> {
         Ok((state, initial))
     }
     pub(super) fn into_publication(self) -> io::Result<CandidateHandoff<'store>> {
-        for kind in [
-            super::OriginalFile::Ticks,
-            super::OriginalFile::Memory,
-            super::OriginalFile::Cpus,
-            super::OriginalFile::Interfaces,
-            super::OriginalFile::GpuStates,
-            super::OriginalFile::CoreStates,
-            super::OriginalFile::Fans,
-            super::OriginalFile::Processes,
-            super::OriginalFile::Coalitions,
-            super::OriginalFile::AppRanks,
-            super::OriginalFile::AppParts,
-            super::OriginalFile::Metadata,
-        ] {
+        for kind in super::restage::TABLE_KINDS {
             if self.merge.inventory.file(kind).is_some() {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,

@@ -18,7 +18,7 @@ use std::sync::atomic::Ordering;
 const INVENTORY_STEPS_MAX: u32 = 1 << 16;
 
 /// Every original an ordinary attempt writes other than its event batches and index.
-const TABLE_KINDS: [OriginalFile; 12] = [
+pub(super) const TABLE_KINDS: [OriginalFile; 12] = [
     OriginalFile::Ticks,
     OriginalFile::Memory,
     OriginalFile::Cpus,
@@ -225,7 +225,7 @@ impl Store {
         }
         let mut idle = [0; 4096];
         codec::encode_idle(self.recording, codec::SlotKind::Foreground, &mut idle)?;
-        publication_control::clear_beside_intent(&self.directory, &idle, &mut 0)
+        publication_control::clear_beside_intent(&self.directory, &idle)
     }
 
     /// Clears the slot of a terminal attempt that has rows but no proof and says whether it did. A

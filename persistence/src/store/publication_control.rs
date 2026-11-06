@@ -145,18 +145,15 @@ pub(super) fn clears_to_idle(state: &NormalState) -> bool {
 }
 /// Clears a slot whose attempt is given up with its census begun. A next state waiting beside it,
 /// whole or short, is intent only that attempt's proof could have adopted.
-pub(super) fn clear_beside_intent(
-    root: &impl ControlDirectory,
-    idle: &[u8],
-    syncs: &mut u64,
-) -> io::Result<()> {
+pub(super) fn clear_beside_intent(root: &impl ControlDirectory, idle: &[u8]) -> io::Result<()> {
+    let mut syncs = 0;
     let old = read(root, "foreground", idle.len())?;
     if optional_read(root, "foreground.pending", idle.len())?.is_some_and(|bytes| bytes != idle) {
         root.remove_file("foreground.pending")?;
-        sync_directory(root, syncs)?;
+        sync_directory(root, &mut syncs)?;
     }
 
-    replace(root, "foreground", &old, idle, syncs)
+    replace(root, "foreground", &old, idle, &mut syncs)
 }
 fn legal_next(old: &NormalState, new: &NormalState) -> bool {
     if old.transaction != new.transaction || old.input != new.input {
