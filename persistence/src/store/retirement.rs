@@ -29,8 +29,10 @@ use std::sync::Arc;
 const RETIRED_PER_PASS: u64 = 16;
 /// How many expired entries one pass lists, which leaves room to pass over those that must wait.
 const ENTRIES_PER_PASS: usize = 256;
-const RAW_NAMES_MAX: usize = 64;
-const RAW_EVENT_NAMES_MAX: usize = 8_192;
+/// A raw directory holds its tables and metadata, and a saved part of a run's events holds its
+/// batches beside them.
+const RAW_NAMES_MAX: usize = 8_192;
+const _: () = assert!(RAW_NAMES_MAX > crate::event_recovery::batch::BATCHES_MAX);
 const RAW_BASES: [&str; 2] = ["data", "recovery-data"];
 
 impl Store {
@@ -454,7 +456,7 @@ fn retire_one_raw_child(object: &PrivateDirectory, child: &str) -> io::Result<()
     let mut events = Vec::new();
     match raw.open_directory("events") {
         Ok(directory) => {
-            directory.visit_names(RAW_EVENT_NAMES_MAX, |name| {
+            directory.visit_names(RAW_NAMES_MAX, |name| {
                 events.push(name.to_owned());
                 Ok(())
             })?;
@@ -467,7 +469,7 @@ fn retire_one_raw_child(object: &PrivateDirectory, child: &str) -> io::Result<()
         Err(error) => return Err(error),
     }
 
-    let mut names = Vec::with_capacity(RAW_NAMES_MAX);
+    let mut names = Vec::new();
     raw.visit_names(RAW_NAMES_MAX, |name| {
         names.push(name.to_owned());
         Ok(())

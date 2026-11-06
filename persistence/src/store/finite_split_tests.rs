@@ -67,6 +67,7 @@ mod finite_events_logical_m_split_replays_and_preserves_both_kinds {
             (&first, &template),
             &budget,
         );
+        finite_split_retirement(&store, &fixture, &object, &budget);
         eprintln!(
             "finite M captured={captured} M={maximum} total={} peak={} time={:?} footprint={:?}",
             maximum + 1,
@@ -76,6 +77,69 @@ mod finite_events_logical_m_split_replays_and_preserves_both_kinds {
         );
     }
 }
+/// Takes the two parts of the transaction out one at a time. The older goes when the period has
+/// passed it alone, and leaves the newer whole in the directory they share.
+fn finite_split_retirement(
+    store: &Store,
+    fixture: &Fixture,
+    object: &Path,
+    budget: &Arc<crate::resources::ByteBudget>,
+) {
+    const PERIOD_SECONDS: u64 = 60;
+    const GRACE_SECONDS: u64 = 60;
+    let boot = Identity([5, 5]);
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    crate::retention::Period::from_seconds(PERIOD_SECONDS)
+        .unwrap()
+        .write(&root)
+        .unwrap();
+    crate::retention::Clock::started_at(&crate::retention::ClockReading {
+        boot,
+        continuous_ns: 0,
+        wall_ns: 0,
+    })
+    .write(&root)
+    .unwrap();
+    let mut parts: Vec<(u64, String)> = crate::retention::order_entry_names(&fixture.root)
+        .into_iter()
+        .filter(|name| name.contains("-fragment-"))
+        .map(|name| {
+            let (place, rest) = name.split_once('-').unwrap();
+            (
+                place.parse().unwrap(),
+                rest.rsplit('-').next().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    parts.sort_unstable();
+    assert_eq!(parts.len(), 2);
+    let keeping_newer = parts[1].0 + (PERIOD_SECONDS + GRACE_SECONDS) * 1_000_000_000;
+    let at = |clock_ns| crate::retention::ClockReading {
+        boot,
+        continuous_ns: clock_ns,
+        wall_ns: clock_ns,
+    };
+
+    assert_eq!(
+        store
+            .retire_expired(&at(keeping_newer), &[], budget)
+            .unwrap(),
+        1
+    );
+
+    assert!(!object.join(format!("fragment-{}", parts[0].1)).exists());
+    assert!(
+        object
+            .join(format!("fragment-{}", parts[1].1))
+            .join(PROOF_NAME)
+            .exists()
+    );
+
+    assert_eq!(store.retire_expired(&at(1 << 62), &[], budget).unwrap(), 1);
+
+    assert!(!object.exists());
+}
+
 fn finite_split_setup(
     captured: bool,
     maximum: u64,
