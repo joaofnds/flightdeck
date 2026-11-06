@@ -156,6 +156,19 @@ fn saved_on_placed_clock(
     volume: &Volume,
     removal_cutoff_ns: u64,
 ) -> (Recording, Store, ClockReading) {
+    let (recording, store, now) = published_on_placed_clock(volume, removal_cutoff_ns);
+    let mut state = RunState::default();
+    persist_until_quiet(&recording, &store, &mut state);
+    assert_eq!(recording.saved_manifests().len(), 3);
+
+    (recording, store, now)
+}
+
+/// As above with three minutes published and none saved yet.
+fn published_on_placed_clock(
+    volume: &Volume,
+    removal_cutoff_ns: u64,
+) -> (Recording, Store, ClockReading) {
     const GRACE_SECONDS: u64 = 60;
     let mut recording = Recording::create_in(&volume.mount, false, shape());
     let root = PrivateDirectory::open(&recording.root).unwrap();
@@ -177,9 +190,6 @@ fn saved_on_placed_clock(
     recording.publish_in_minute(1);
     recording.publish_in_minute(1);
     recording.publish_in_minute(2);
-    let mut state = RunState::default();
-    persist_until_quiet(&recording, &store, &mut state);
-    assert_eq!(recording.saved_manifests().len(), 3);
 
     (recording, store, now)
 }
@@ -216,7 +226,8 @@ fn a_full_disk_with_nothing_to_remove_keeps_its_room_aside() {
     // Method: as above with a clock that has expired nothing.
     let volume = Volume::new("nothing-expired");
     let (recording, store, now) = saved_on_placed_clock(&volume, 0);
-    volume.fill();
+    let filler = volume.fill();
+    assert!(volume_refuses_a_small_file(&filler));
 
     let removed = store.retire_expired(&now, &[], &super::super::persist_budget(0).unwrap());
 
@@ -250,10 +261,56 @@ fn a_full_disk_with_no_room_aside_says_the_disk_is_full() {
     let volume = Volume::new("no-room-aside");
     let (recording, store, now) = saved_on_placed_clock(&volume, 60_000_000_003);
     std::fs::remove_file(recording.root.join("retention/reserve")).unwrap();
-    volume.fill();
+    let filler = volume.fill();
+    assert!(volume_refuses_a_small_file(&filler));
 
     let refused = store.retire_expired(&now, &[], &super::super::persist_budget(0).unwrap());
 
     assert_eq!(refused.unwrap_err().kind(), ErrorKind::StorageFull);
     assert_eq!(recording.saved_manifests().len(), 3);
+}
+
+#[test]
+fn a_worker_restarted_on_a_full_disk_makes_room_and_saves_what_the_disk_refused() {
+    // Goal: the save a full disk refused goes through at the next start with nobody freeing
+    // anything, since a removal pass comes before the save resumes.
+    // Method: save minutes on a clock that has expired the first, let a full volume refuse the next
+    // save, and run the whole worker over the finished ring with the volume still full.
+    let volume = Volume::new("restart-full");
+    let (mut recording, store, _now) = published_on_placed_clock(&volume, 60_000_000_003);
+    let mut state = RunState::default();
+    recording.persist_live(&store, &mut state);
+    recording.persist_live(&store, &mut state);
+    assert_eq!(recording.saved_manifests().len(), 2);
+    recording.publish_in_minute(3);
+    recording.writer.finish();
+    let registry = Registry {
+        runs: vec![recording.registered()],
+        evictions: 0,
+    };
+    registry.write(&recording.root).unwrap();
+    let filler = volume.fill();
+    assert!(volume_refuses_a_small_file(&filler));
+    let refused = recording.persist_live_result(&store, &mut state);
+    drop(store);
+
+    let outcome = run_paced(
+        &recording.root,
+        crate::resources::WORKING_BYTES_MAX,
+        &SealedApps::default(),
+        &mut |_pause| panic!("the ring is finished"),
+        None,
+    );
+
+    assert!(matches!(
+        refused,
+        Err(crate::Error::Io(error)) if error.kind() == ErrorKind::StorageFull
+    ));
+    assert!(matches!(outcome, Ok(Outcome::Complete)));
+    let newest: Vec<_> = recording
+        .saved_manifests()
+        .iter()
+        .map(|manifest| manifest.continuous_ns.unwrap().max)
+        .collect();
+    assert_eq!(newest, [60_000_000_003, 120_000_000_004, 180_000_000_005]);
 }
