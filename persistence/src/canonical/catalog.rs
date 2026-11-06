@@ -10,7 +10,7 @@ use crate::resources::ByteBudget;
 use collector::recording::bootstrap::{Classification, classify};
 use collector::recording::private::PrivateDirectory;
 use collector::ring::{Identity, RunIdentity};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,6 +31,7 @@ const RANGE_WINDOWS_MAX: usize = 4096;
 /// The pages one clock range reads, more than a second's readings of every window it may touch.
 const RANGE_PAGES_MAX: usize = 1 << 12;
 
+const NAMESPACE_STATE_BYTES: usize = 256;
 const NS_PER_HOUR: u64 = 3_600_000_000_000;
 
 const KNOWN_SOURCE_OFFSET: usize = 12;
@@ -291,6 +292,7 @@ impl Catalog {
         let mut windows = Vec::new();
         let mut after = None;
         for _page in 0..RANGE_PAGES_MAX {
+            let state = self.namespace_state()?;
             let page = self.known_page(first_ns, end_ns, after, work)?;
             for reading in &page.readings {
                 if windows_in_listed(&windows, reading) {
@@ -299,9 +301,12 @@ impl Catalog {
                 if windows.len() == RANGE_WINDOWS_MAX {
                     return Err(crate::Error::Bound("catalog range windows"));
                 }
-                // A reading's window outlives its links, so a reading with no window is damage.
-                let window = self.window_holding(&reading.run, reading.publication, work)?;
-                windows.push(window.ok_or_else(invalid)?);
+                windows.push(self.window_of_listed(
+                    &reading.run,
+                    reading.publication,
+                    &state,
+                    work,
+                )?);
             }
             let Some(next) = page.next else {
                 return Ok(windows);
@@ -419,6 +424,7 @@ impl Catalog {
         let mut counted: Option<(Manifest, u64)> = None;
         let mut after = None;
         for _page in 0..RANGE_PAGES_MAX {
+            let state = self.namespace_state()?;
             let page = self.unknown_page(after, work)?;
             for reading in &page.readings {
                 if let Some((window, readings)) = &mut counted
@@ -428,10 +434,8 @@ impl Catalog {
                     continue;
                 }
                 windows_without_clock_keep(&mut windows, counted.take())?;
-                // A reading's window outlives its links, so a reading with no window is damage.
-                let window = self
-                    .window_holding(&reading.run, reading.publication, work)?
-                    .ok_or_else(invalid)?;
+                let window =
+                    self.window_of_listed(&reading.run, reading.publication, &state, work)?;
                 counted = Some((window, 1));
             }
             let Some(next) = page.next else {
@@ -457,6 +461,35 @@ impl Catalog {
         }
 
         Err(invalid())
+    }
+
+    /// The window of a reading a page listed, with `state` the namespace's state from before the
+    /// page. A reading's window outlives its links, so a reading with no window is damage, unless
+    /// physical removal ran since the page, and then the list has to be read again.
+    pub(crate) fn window_of_listed(
+        &self,
+        run: &RunIdentity,
+        publication: u64,
+        state: &[u8; NAMESPACE_STATE_BYTES],
+        work: &mut ReadWork,
+    ) -> io::Result<Manifest> {
+        if let Some(window) = self.window_holding(run, publication, work)? {
+            return Ok(window);
+        }
+        if self.namespace_state()? == *state {
+            return Err(invalid());
+        }
+
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+
+    pub(crate) fn namespace_state(&self) -> io::Result<[u8; NAMESPACE_STATE_BYTES]> {
+        let mut state = [0; NAMESPACE_STATE_BYTES];
+        self.root
+            .open_file("namespace-state")?
+            .read_exact(&mut state)?;
+
+        Ok(state)
     }
 
     /// What `run` saved of its events on ending and where under the root its batches lie, none
@@ -583,6 +616,25 @@ impl Catalog {
             (manifest.publication_first..manifest.publication_end).contains(&publication)
         }))
     }
+}
+
+/// The first window `run` saved from `publication` on, none where it saved no later window.
+pub(crate) fn window_at_or_after(
+    root: &PrivateDirectory,
+    recording: Identity,
+    run: &RunIdentity,
+    publication: u64,
+    budget: &Arc<ByteBudget>,
+) -> io::Result<Option<Manifest>> {
+    let range = SeekRange {
+        first: CanonicalKey::source(Namespace::Ordinary, run, publication)?,
+        last: CanonicalKey::source(Namespace::Ordinary, run, u64::MAX)?,
+        direction: Direction::Forward,
+    };
+    let mut cursor =
+        CanonicalCursor::begin_owned(root, recording, Namespace::Ordinary, range, budget)?;
+
+    window_holding_gate(&mut cursor, run)
 }
 
 /// Keeps the window just counted if `readings`, its readings with no clock, are all it saved.

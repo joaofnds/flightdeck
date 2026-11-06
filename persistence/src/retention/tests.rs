@@ -431,3 +431,119 @@ fn an_order_entry_links_the_proof_under_the_hour_of_its_time() {
         2
     );
 }
+
+fn linked_entry(scratch: &Scratch, retained_from_ns: u64, transaction: u64) {
+    let attempt = scratch
+        .root
+        .create_directory(&format!("attempt-{transaction}"))
+        .unwrap();
+    attempt.create_file(crate::store::PROOF_NAME).unwrap();
+    OrderEntry {
+        retained_from_ns,
+        transaction: Identity([1, transaction]),
+        child: "ready",
+    }
+    .link(&scratch.root, &attempt, &mut 0)
+    .unwrap();
+}
+
+fn cutoff_at(expired_below_ns: u64) -> Cutoff {
+    Cutoff { expired_below_ns }
+}
+
+fn listed_times(scratch: &Scratch, cutoff: Cutoff, entries_max: usize) -> Vec<u64> {
+    expired_entries(&scratch.root, cutoff, entries_max)
+        .unwrap()
+        .iter()
+        .map(|entry| entry.retained_from_ns)
+        .collect()
+}
+
+const HOUR_NS: u64 = 3_600 * SECOND_NS;
+
+#[test]
+fn the_listing_gives_what_expired_oldest_first() {
+    // Goal: a pass removes the oldest first, and nothing at the cutoff or past it (P03.1).
+    // Method: link entries across hours in another order, and list at a cutoff inside an hour.
+    let scratch = Scratch::new();
+    for (transaction, retained) in [
+        (1, 3 * HOUR_NS),
+        (2, HOUR_NS + 5),
+        (3, 2 * HOUR_NS),
+        (4, HOUR_NS),
+        (5, 3 * HOUR_NS + 2),
+    ] {
+        linked_entry(&scratch, retained, transaction);
+    }
+
+    let listed = listed_times(&scratch, cutoff_at(3 * HOUR_NS + 2), 16);
+
+    assert_eq!(listed, [HOUR_NS, HOUR_NS + 5, 2 * HOUR_NS, 3 * HOUR_NS]);
+}
+
+#[test]
+fn the_listing_stops_at_its_bound() {
+    // Goal: a pass costs its bound however much has expired, in a dense hour as across hours
+    // (P03.2).
+    // Method: list fewer entries than one hour holds, then fewer than the next hours hold.
+    let scratch = Scratch::new();
+    for transaction in 1..=3 {
+        linked_entry(&scratch, transaction, transaction);
+    }
+    linked_entry(&scratch, HOUR_NS, 4);
+    linked_entry(&scratch, 2 * HOUR_NS, 5);
+
+    assert_eq!(listed_times(&scratch, cutoff_at(u64::MAX), 2).len(), 2);
+    assert_eq!(
+        listed_times(&scratch, cutoff_at(u64::MAX), 4),
+        [1, 2, 3, HOUR_NS]
+    );
+}
+
+#[test]
+fn the_listing_passes_over_names_no_link_made() {
+    // Goal: a stray name reports and cannot stop expiry (P03.5).
+    // Method: put a stray hour and a stray entry beside a real one.
+    let scratch = Scratch::new();
+    linked_entry(&scratch, 7, 1);
+    let order = order_directory(&scratch.root).unwrap();
+    order.create_directory("stray").unwrap();
+    order
+        .open_directory("0")
+        .unwrap()
+        .create_file("stray")
+        .unwrap();
+
+    assert_eq!(listed_times(&scratch, cutoff_at(8), 16), [7]);
+}
+
+#[test]
+fn removing_an_entry_takes_the_hour_it_empties() {
+    // Goal: 30 days of hours leave no directory behind, and a repeat after a crash is done (P03.3).
+    // Method: remove each of two entries of an hour, and the second again.
+    let scratch = Scratch::new();
+    linked_entry(&scratch, 7, 1);
+    linked_entry(&scratch, 8, 2);
+    let listed = expired_entries(&scratch.root, cutoff_at(9), 16).unwrap();
+    let hours = || order_directory(&scratch.root).unwrap();
+
+    listed[0].remove(&scratch.root).unwrap();
+    assert!(hours().open_directory("0").is_ok());
+
+    listed[1].remove(&scratch.root).unwrap();
+    let empty_hour = hours().open_directory("0").err().unwrap();
+    assert_eq!(empty_hour.kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn an_entry_names_the_raw_data_a_proof_that_does_not_read_cannot() {
+    // Goal: an unreadable proof still gives up its raw data (P03.5).
+    // Method: read the names back from a linked entry.
+    let scratch = Scratch::new();
+    linked_entry(&scratch, 7, 1);
+    let text = collector::recording::identity_text(Identity([1, 1])).to_string();
+
+    let listed = expired_entries(&scratch.root, cutoff_at(8), 16).unwrap();
+
+    assert_eq!(listed[0].raw_names(), Some((text.as_str(), "ready")));
+}

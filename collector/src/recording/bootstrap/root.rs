@@ -1,6 +1,7 @@
 use super::codec::{
-    BOOTSTRAP_BYTES, NamespaceState, Slot, SlotKind, decode_bootstrap, decode_slot, decode_state,
-    encode_bootstrap, encode_idle, encode_idle_header, encode_state, encode_state_header, invalid,
+    BOOTSTRAP_BYTES, NamespaceState, RETIREMENT_TRANSACTION, Slot, SlotKind, decode_bootstrap,
+    decode_slot, decode_state, encode_bootstrap, encode_idle, encode_idle_header, encode_state,
+    encode_state_header, invalid,
 };
 use crate::{
     recording::{
@@ -313,7 +314,7 @@ fn validate_runtime_controls(
         transaction: busy, ..
     } = decode_state(state_bytes, identity)?
     {
-        if transaction != Some(busy) {
+        if transaction != Some(busy) && busy != RETIREMENT_TRANSACTION {
             return Err(invalid());
         }
     }

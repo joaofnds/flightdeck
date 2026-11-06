@@ -28,9 +28,13 @@ const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const ORDER_NAME: &str = "order";
 const PERIOD_DIGITS_MAX: usize = 20;
 const PERIOD_NAME: &str = "period";
+/// How long physical removal waits past a reading's expiry, which a read under way has to finish
+/// or be cancelled in.
+const READER_GRACE_SECONDS: u64 = 60;
+const ORDER_HOURS_MAX: usize = 1 << 20;
 
 const _: () = assert!(
-    Period::SECONDS_MAX
+    (Period::SECONDS_MAX + READER_GRACE_SECONDS)
         .checked_mul(NANOSECONDS_PER_SECOND)
         .is_some()
 );
@@ -229,6 +233,17 @@ impl Clock {
                 .saturating_sub(period.seconds * NANOSECONDS_PER_SECOND),
         }
     }
+
+    /// What physical removal compares a publication's retained time with, later than readers stop
+    /// returning it by the grace a read under way has.
+    #[must_use]
+    pub(crate) fn removal_cutoff(&self, period: Period) -> Cutoff {
+        Cutoff {
+            expired_below_ns: self
+                .progress_ns
+                .saturating_sub((period.seconds + READER_GRACE_SECONDS) * NANOSECONDS_PER_SECOND),
+        }
+    }
 }
 
 /// The clock's value below which a reading has outlived the retention period.
@@ -277,26 +292,48 @@ fn retained_from_ns_boot_offset(
     boot: Identity,
     newest_continuous_ns: u64,
 ) -> io::Result<u64> {
-    let name = format!("boot-{}", collector::recording::identity_text(boot));
-    let mut bytes = [0; BOOT_SIZE + 1];
-    if let Some(length) = read_bounded(root, &name, &mut bytes)? {
-        if length != BOOT_SIZE || bytes[..8] != BOOT_MAGIC[..] {
-            return Err(invalid());
-        }
-
-        return Ok(read_word(&bytes, 8));
+    if let Some(offset_ns) = boot_offset_ns(root, boot)? {
+        return Ok(offset_ns);
     }
 
     let offset_ns = clock.boot_offset_ns(boot, newest_continuous_ns);
-    bytes[..8].copy_from_slice(BOOT_MAGIC);
-    bytes[8..BOOT_SIZE].copy_from_slice(&offset_ns.to_be_bytes());
-    private::atomic_write_in(
-        &root.open_directory(DIRECTORY_NAME)?,
-        &name,
-        &bytes[..BOOT_SIZE],
-    )?;
+    boot_offset_save(root, boot, offset_ns)?;
 
     Ok(offset_ns)
+}
+
+/// What `boot` saved as its offset, none where no publication of that boot has needed one.
+pub(crate) fn boot_offset_ns(root: &PrivateDirectory, boot: Identity) -> io::Result<Option<u64>> {
+    let mut bytes = [0; BOOT_SIZE + 1];
+    let Some(length) = read_bounded(root, &boot_record_name(boot), &mut bytes)? else {
+        return Ok(None);
+    };
+    if length != BOOT_SIZE || bytes[..8] != BOOT_MAGIC[..] {
+        return Err(invalid());
+    }
+
+    Ok(Some(read_word(&bytes, 8)))
+}
+
+/// Saves the offset of a boot that has none. No caller replaces one, so a reading keeps one place.
+pub(crate) fn boot_offset_save(
+    root: &PrivateDirectory,
+    boot: Identity,
+    offset_ns: u64,
+) -> io::Result<()> {
+    let mut bytes = [0; BOOT_SIZE];
+    bytes[..8].copy_from_slice(BOOT_MAGIC);
+    bytes[8..].copy_from_slice(&offset_ns.to_be_bytes());
+
+    private::atomic_write_in(
+        &root.open_directory(DIRECTORY_NAME)?,
+        &boot_record_name(boot),
+        &bytes,
+    )
+}
+
+fn boot_record_name(boot: Identity) -> String {
+    format!("boot-{}", collector::recording::identity_text(boot))
 }
 
 /// A publication's name in the retention order, which physical removal walks oldest first. Its
@@ -334,6 +371,155 @@ impl OrderEntry {
 
         hour.full_sync()
     }
+}
+
+/// An entry of the retention order as a pass of physical removal lists it.
+#[derive(Debug)]
+pub(crate) struct ListedEntry {
+    hour: String,
+    name: String,
+    retained_from_ns: u64,
+}
+
+impl ListedEntry {
+    /// None for a name no link made, which a pass reports and passes over.
+    fn parse(hour: &str, name: &str) -> Option<Self> {
+        let (retained, _rest) = name.split_once('-')?;
+
+        Some(Self {
+            hour: hour.to_owned(),
+            name: name.to_owned(),
+            retained_from_ns: retained.parse().ok()?,
+        })
+    }
+
+    /// The transaction and child the name gives, for removing what a proof that does not read
+    /// cannot name.
+    pub(crate) fn raw_names(&self) -> Option<(&str, &str)> {
+        let (_retained, rest) = self.name.split_once('-')?;
+        rest.split_once('-')
+    }
+
+    pub(crate) fn open_proof(&self, root: &PrivateDirectory) -> io::Result<std::fs::File> {
+        order_directory(root)?
+            .open_directory(&self.hour)?
+            .open_file(&self.name)
+    }
+
+    /// Removes the entry, the last step of a removal, since the entry keeps the proof a repeat
+    /// after a crash starts from. An hour left empty goes with it.
+    pub(crate) fn remove(&self, root: &PrivateDirectory) -> io::Result<()> {
+        let order = order_directory(root)?;
+        let hour = order.open_directory(&self.hour)?;
+        match hour.remove_file(&self.name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        hour.full_sync()?;
+        drop(hour);
+
+        order_remove_hour(&order, &self.hour)
+    }
+}
+
+fn order_directory(root: &PrivateDirectory) -> io::Result<PrivateDirectory> {
+    root.open_directory(DIRECTORY_NAME)?
+        .open_directory(ORDER_NAME)
+}
+
+fn order_remove_hour(order: &PrivateDirectory, hour: &str) -> io::Result<()> {
+    match order.remove_directory(hour) {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    }
+
+    order.full_sync()
+}
+
+/// The entries whose retained time lies below `cutoff`, oldest hours first and oldest first, at
+/// most `entries_max` of them, so a pass costs its bound however much has expired.
+pub(crate) fn expired_entries(
+    root: &PrivateDirectory,
+    cutoff: Cutoff,
+    entries_max: usize,
+) -> io::Result<Vec<ListedEntry>> {
+    let order = match order_directory(root) {
+        Ok(order) => order,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut hours = Vec::new();
+    order.visit_names(ORDER_HOURS_MAX, |name| {
+        match name.parse::<u64>() {
+            Ok(hour) => hours.push(hour),
+            Err(_) => {
+                collector::diagnostics::error(format_args!("retention order: unknown hour {name}"));
+            }
+        }
+        Ok(())
+    })?;
+    hours.sort_unstable();
+
+    let mut entries = Vec::with_capacity(entries_max.min(256));
+    for hour in hours {
+        let hour_start_ns = hour.saturating_mul(NANOSECONDS_PER_HOUR);
+        if hour_start_ns >= cutoff.expired_below_ns || entries.len() == entries_max {
+            break;
+        }
+        expired_entries_of_hour(&order, hour, cutoff, entries_max, &mut entries)?;
+    }
+    entries.sort_unstable_by_key(|entry| entry.retained_from_ns);
+
+    Ok(entries)
+}
+
+fn expired_entries_of_hour(
+    order: &PrivateDirectory,
+    hour: u64,
+    cutoff: Cutoff,
+    entries_max: usize,
+    entries: &mut Vec<ListedEntry>,
+) -> io::Result<()> {
+    let hour_name = hour.to_string();
+    let directory = order.open_directory(&hour_name)?;
+    let mut names = 0_usize;
+    // A full list stops the walk by an error of its own, since a dense hour must not be a refusal.
+    let walked = directory.visit_names(ORDER_HOURS_MAX, |name| {
+        names += 1;
+        match ListedEntry::parse(&hour_name, name) {
+            Some(entry) if entry.retained_from_ns < cutoff.expired_below_ns => entries.push(entry),
+            Some(_) => {}
+            None => {
+                collector::diagnostics::error(format_args!(
+                    "retention order: unknown entry {name}"
+                ));
+            }
+        }
+        if entries.len() == entries_max {
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+        Ok(())
+    });
+    match walked {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+        Err(error) => return Err(error),
+    }
+    if names == 0 {
+        drop(directory);
+        order_remove_hour(order, &hour_name)?;
+    }
+
+    Ok(())
 }
 
 /// Reads a small file of the root's retention directory into `bytes`, whose last byte is there to

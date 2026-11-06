@@ -13,21 +13,21 @@ pub(crate) enum Node {
 fn invalid() -> io::Error {
     io::Error::from(io::ErrorKind::InvalidData)
 }
-fn root_locator(namespace: Namespace) -> io::Result<NodeLocator> {
+pub(super) fn root_locator(namespace: Namespace) -> io::Result<NodeLocator> {
     NodeLocator::from_key(
         namespace,
         CanonicalKey::from_bytes(namespace, &vec![0; namespace.width()])?,
         0,
     )
 }
-fn full(namespace: Namespace, key: &CanonicalKey) -> io::Result<NodeLocator> {
+pub(super) fn full(namespace: Namespace, key: &CanonicalKey) -> io::Result<NodeLocator> {
     NodeLocator::from_key(
         namespace,
         *key,
         u8::try_from(namespace.width() * 2).map_err(|_| invalid())?,
     )
 }
-fn suffix(parent: &NodeLocator, child: &NodeLocator) -> io::Result<String> {
+pub(super) fn suffix(parent: &NodeLocator, child: &NodeLocator) -> io::Result<String> {
     if !prefix_of(parent, child) || child.nibbles <= parent.nibbles {
         return Err(invalid());
     }
@@ -39,7 +39,7 @@ fn suffix(parent: &NodeLocator, child: &NodeLocator) -> io::Result<String> {
     }
     Ok(name)
 }
-fn read_node(
+pub(super) fn read_node(
     directory: &PrivateDirectory,
     locator: &NodeLocator,
     work: &mut ReadWork,
@@ -837,12 +837,12 @@ fn cleanup_prove_links(
     Ok(())
 }
 
-fn sync(directory: &PrivateDirectory, work: &mut ReadWork) -> io::Result<()> {
+pub(super) fn sync(directory: &PrivateDirectory, work: &mut ReadWork) -> io::Result<()> {
     work.full_syncs += 1;
     directory.full_sync()
 }
 
-trait NamespaceAccess {
+pub(super) trait NamespaceAccess {
     fn open_node(&self, name: &str, work: &mut ReadWork) -> io::Result<PrivateDirectory>;
 }
 impl NamespaceAccess for PrivateDirectory {

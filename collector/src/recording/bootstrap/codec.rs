@@ -212,6 +212,10 @@ pub(super) fn encode_state_header(
     Ok(())
 }
 
+/// The transaction a namespace's Busy names while physical removal holds it, which no publication
+/// can be, since each draws its identity at random from 128 bits.
+pub const RETIREMENT_TRANSACTION: Identity = Identity([u64::MAX, u64::MAX]);
+
 pub fn decode_state(bytes: &[u8], recording: Identity) -> io::Result<NamespaceState> {
     if bytes.len() != STATE_BYTES || &bytes[..8] != b"FDNSP002" {
         return Err(invalid());

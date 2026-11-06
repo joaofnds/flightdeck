@@ -2328,3 +2328,6 @@ fn advance_to_gate_plan(fixture: &Fixture, publication: &mut NormalPublication<'
     }
     panic!("final gate plan continuation bound");
 }
+
+#[path = "retirement_tests.rs"]
+mod retirement_tests;

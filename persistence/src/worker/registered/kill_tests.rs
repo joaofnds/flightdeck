@@ -13,7 +13,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// More changes than a run of a few minutes makes, so a worker that never stops fails the test.
@@ -41,7 +41,21 @@ const KILLED_TWICE_SECONDS: u64 = 12;
 /// More events than one batch holds, so a crashed run's terminal holds two batches.
 const CRASHED_RUN_EVENTS: usize = 16_390;
 
-const CHILD_TEST: &str = "worker::registered::tests::kill_tests::killed_worker_child";
+const WORKER_CHILD: KilledChild = KilledChild {
+    test: "worker::registered::tests::kill_tests::killed_worker_child",
+    root_variable: "FLIGHTDECK_KILLED_WORKER_ROOT",
+};
+
+const RETIREMENT_CHILD: KilledChild = KilledChild {
+    test: "worker::registered::tests::kill_tests::killed_retirement_child",
+    root_variable: "FLIGHTDECK_KILLED_RETIREMENT_ROOT",
+};
+
+/// A test that runs in a process of its own when a parent names a recording in its variable.
+struct KilledChild {
+    test: &'static str,
+    root_variable: &'static str,
+}
 
 /// Holds these tests to one at a time, so the processes they start never crowd the native tests
 /// beside them, which wait on the disk under bounds of their own.
@@ -318,14 +332,24 @@ fn killed_worker_run(
     fault: Fault,
     after: &str,
 ) -> bool {
+    killed_child_run(&WORKER_CHILD, recording, interposer, fault, after)
+}
+
+fn killed_child_run(
+    child: &KilledChild,
+    recording: &Recording,
+    interposer: &Interposer,
+    fault: Fault,
+    after: &str,
+) -> bool {
     let root = recording.root.canonicalize().unwrap();
     let log = recording.base.join("killed-worker.log");
     let output = std::fs::File::create(&log).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", CHILD_TEST, "--nocapture"])
+        .args(["--exact", child.test, "--nocapture"])
         .env("DYLD_INSERT_LIBRARIES", &interposer.library)
-        .env("FLIGHTDECK_KILLED_WORKER_ROOT", &root)
+        .env(child.root_variable, &root)
         .env("FLIGHTDECK_KILL_ROOT", &root)
         .stdin(Stdio::null())
         .stdout(output.try_clone().unwrap())
@@ -362,6 +386,193 @@ fn killed_worker_run(
         std::fs::read_to_string(&log).unwrap()
     );
     false
+}
+
+#[test]
+fn killed_retirement_child() {
+    // Goal: give the kill tests passes of physical removal in a process of their own to end.
+    // Method: run only when a parent names a recording, which no ordinary test run does.
+    let Some(root) = std::env::var_os(RETIREMENT_CHILD.root_variable) else {
+        return;
+    };
+
+    match killed_retirement_passes(Path::new(&root)) {
+        Ok(()) => {}
+        Err(error) => {
+            eprintln!("the pass stopped: {error}");
+            std::process::exit(STOPPED);
+        }
+    }
+}
+
+/// Passes at a clock past everything saved until one removes nothing.
+fn killed_retirement_passes(root: &Path) -> std::io::Result<()> {
+    let store = Store::open(root)?;
+    let budget = Arc::new(crate::resources::ByteBudget::new(256 * 1024 * 1024));
+    let now = crate::retention::ClockReading {
+        boot: collector::ring::Identity([9, 9]),
+        continuous_ns: 1 << 62,
+        wall_ns: 1 << 62,
+    };
+    for _pass in 0..16 {
+        if store.retire_expired(&now, &[], &budget)? == 0 {
+            return Ok(());
+        }
+    }
+    panic!("removal did not finish");
+}
+
+/// A run the worker has saved whole and retired, a window and a terminal, with nothing left of it
+/// but what a pass removes.
+fn killed_retirement_recording(interposer: &Interposer) -> Recording {
+    let recording = killed_worker_finished_run();
+    killed_worker_finish(&recording, interposer, "the save");
+
+    recording
+}
+
+/// Every path in the recording, which removal leaves the same whichever way it was ended. A retired
+/// run's receipt takes its name from the ring, which each recording names at random.
+fn killed_retirement_paths(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    for _directory in 0..1 << 16 {
+        let Some(directory) = directories.pop() else {
+            paths.sort();
+            return paths;
+        };
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                directories.push(path.clone());
+            }
+            let relative = path.strip_prefix(root).unwrap();
+            if relative.starts_with("retired") && !path.is_dir() {
+                paths.push(PathBuf::from("retired/receipt"));
+            } else {
+                paths.push(relative.to_path_buf());
+            }
+        }
+    }
+    panic!("a recording of more directories than this test saves");
+}
+
+/// What a reader meets where a pass ended: what the run saved, or less of it, or a wait. A window
+/// with only some of its names is one a reader could misread, so only a Busy may leave one.
+fn killed_retirement_reader(recording: &Recording, saved_windows: usize) {
+    let budget = Arc::new(crate::resources::ByteBudget::new(256 * 1024 * 1024));
+    let catalog = crate::canonical::catalog::Catalog::open(&recording.root, &budget).unwrap();
+    let run = recording.registered().identity;
+    match catalog.windows_of(&run, &mut crate::canonical::ReadWork::default()) {
+        Ok(windows) => assert!(windows.len() <= saved_windows),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+    }
+
+    let names_of_readings = killed_retirement_names(&recording.root, "observations-known");
+    let names_of_windows = killed_retirement_names(&recording.root, "ordinary");
+    if names_of_readings != names_of_windows {
+        let state = std::fs::read(recording.root.join("namespace-state")).unwrap();
+        assert!(matches!(
+            collector::recording::bootstrap::codec::decode_state(&state, run.recording).unwrap(),
+            collector::recording::bootstrap::codec::NamespaceState::Busy { .. }
+        ));
+    }
+}
+
+/// How many names a namespace holds, whichever nodes route to them.
+fn killed_retirement_names(root: &Path, namespace: &str) -> usize {
+    killed_retirement_paths(&root.join(namespace))
+        .iter()
+        .filter(|path| !root.join(namespace).join(path).is_dir())
+        .count()
+}
+
+fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
+    let interposer = Interposer::build();
+    let (uninterrupted, saved_windows) = {
+        let recording = killed_retirement_recording(&interposer);
+        let saved_windows = recording.saved_windows().len();
+        killed_child_run(
+            &RETIREMENT_CHILD,
+            &recording,
+            &interposer,
+            Fault::Nothing,
+            "never ended",
+        );
+        (killed_retirement_paths(&recording.root), saved_windows)
+    };
+    assert!(saved_windows > 0);
+    let saved = killed_retirement_recording(&interposer);
+    // One reading a window, so a window's names are whole when these two counts agree.
+    assert_eq!(
+        killed_retirement_names(&saved.root, "observations-known"),
+        killed_retirement_names(&saved.root, "ordinary")
+    );
+    drop(saved);
+    let next = AtomicU64::new(1);
+    let changes = AtomicU64::new(0);
+
+    std::thread::scope(|scope| {
+        for _worker in 0..KILLED_WORKERS {
+            scope.spawn(|| {
+                for _attempt in 0..CHANGES_MAX {
+                    let number = next.fetch_add(stride, Ordering::Relaxed);
+                    let recording = killed_retirement_recording(&interposer);
+                    let ended = killed_child_run(
+                        &RETIREMENT_CHILD,
+                        &recording,
+                        &interposer,
+                        fault(number),
+                        "first",
+                    );
+                    let after = format!("ended at change {number}");
+                    if ended {
+                        killed_retirement_reader(&recording, saved_windows);
+                    }
+                    killed_child_run(
+                        &RETIREMENT_CHILD,
+                        &recording,
+                        &interposer,
+                        Fault::Nothing,
+                        &after,
+                    );
+
+                    assert_eq!(
+                        killed_retirement_paths(&recording.root),
+                        uninterrupted,
+                        "{after}"
+                    );
+                    if !ended {
+                        return;
+                    }
+                    changes.fetch_max(number, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+
+    let changes = changes.into_inner();
+    assert!(changes > 0, "no change was numbered");
+    assert!(changes < CHANGES_MAX, "removal kept making changes");
+}
+
+#[test]
+fn a_pass_killed_at_each_change_of_a_removal_comes_to_the_same_end() {
+    // Goal: no change a removal makes leaves a recording that a reader misreads or a restart cannot
+    // finish the same way (P03.5).
+    // Method: for each numbered change, end a pass there in its own process, read the run as a
+    // reader would, restart, and compare what is left with a pass that was never ended.
+    let _one = one_kill_test();
+    killed_retirement_converges(1, Fault::Kill);
+}
+
+#[test]
+fn a_pass_refused_a_change_comes_to_the_same_end_once_the_disk_has_room() {
+    // Goal: a change the file system refuses is an error, never a panic or a state a restart cannot
+    // finish (P03.5).
+    // Method: refuse each fourth change and all after it, then restart with nothing refused.
+    let _one = one_kill_test();
+    killed_retirement_converges(4, Fault::Refuse);
 }
 
 #[test]

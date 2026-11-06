@@ -3097,6 +3097,43 @@ fn the_whole_worker_marks_what_an_evicted_ring_may_have_held() {
 #[path = "catalog_tests.rs"]
 mod catalog_tests;
 
+#[test]
+fn a_window_stays_until_the_reading_after_it_has_outlived_the_period() {
+    // Goal: the first reading after a gap keeps the window its rates come from, and then lets it
+    // go, while the run's newest window stays however old it is (P03.1).
+    // Method: save a minute and, two hours on, another. Pass where only the first is past the
+    // period, then where the second is too.
+    let mut recording = Recording::new();
+    let store = Store::open(&recording.root).unwrap();
+    let root = PrivateDirectory::open(&recording.root).unwrap();
+    let run = recording.registered().identity;
+    crate::retention::Period::from_seconds(60)
+        .unwrap()
+        .write(&root)
+        .unwrap();
+    crate::retention::boot_offset_save(&root, run.boot, 0).unwrap();
+    recording.publish_in_minute(0);
+    recording.publish_in_minute(120);
+    recording.publish_in_minute(121);
+    let mut state = RunState::default();
+    recording.persist_live(&store, &mut state);
+    recording.persist_live(&store, &mut state);
+    assert_eq!(recording.saved_manifests().len(), 2);
+    let clock = |minute: u64| crate::retention::ClockReading {
+        boot: run.boot,
+        continuous_ns: minute * 60_000_000_000,
+        wall_ns: minute * 60_000_000_000,
+    };
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+
+    let beside_the_later_reading = store.retire_expired(&clock(120), &[run], &budget).unwrap();
+    let past_the_later_reading = store.retire_expired(&clock(200), &[run], &budget).unwrap();
+
+    assert_eq!(beside_the_later_reading, 0);
+    assert_eq!(past_the_later_reading, 1);
+    assert_eq!(recording.saved_manifests().len(), 1);
+}
+
 #[path = "kill_tests.rs"]
 mod kill_tests;
 

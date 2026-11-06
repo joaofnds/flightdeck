@@ -23,6 +23,7 @@ mod publication;
 pub use ordinary_recovery::OrdinaryRecovery;
 mod publication_control;
 mod restage;
+mod retirement;
 mod row_candidates;
 mod row_merge;
 pub use attempt::{InheritedAttempt, RegisteredAttempt, RegisteredFile};

@@ -421,6 +421,31 @@ impl CanonicalMetadata {
         }
     }
     pub(crate) fn validate_key(&self, namespace: Namespace, key: &CanonicalKey) -> io::Result<()> {
+        if CanonicalKey::source(namespace, &self.run, self.origin_in(namespace)?)? != *key {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
+    /// The names a proof can hold in the trees other than a window's one name per reading.
+    pub(crate) fn source_names(&self) -> io::Result<Vec<(Namespace, CanonicalKey)>> {
+        let mut names = Vec::with_capacity(2);
+        for namespace in [
+            Namespace::Ordinary,
+            Namespace::Terminal,
+            Namespace::Fragments,
+        ] {
+            if let Ok(origin) = self.origin_in(namespace) {
+                names.push((
+                    namespace,
+                    CanonicalKey::source(namespace, &self.run, origin)?,
+                ));
+            }
+        }
+        Ok(names)
+    }
+
+    fn origin_in(&self, namespace: Namespace) -> io::Result<u64> {
         let origin = match (namespace, self.kind) {
             (Namespace::Ordinary, CanonicalKind::Ordinary) => self.canonical_origin,
             (Namespace::Ordinary, CanonicalKind::LossOnly)
@@ -452,10 +477,7 @@ impl CanonicalMetadata {
             }
             _ => return Err(invalid()),
         };
-        if CanonicalKey::source(namespace, &self.run, origin)? != *key {
-            return Err(invalid());
-        }
-        Ok(())
+        Ok(origin)
     }
     pub(crate) fn effective_window(&self) -> Option<u64> {
         if self.kind == CanonicalKind::Ordinary {

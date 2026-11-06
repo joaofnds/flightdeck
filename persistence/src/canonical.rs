@@ -6,6 +6,7 @@ pub(crate) mod metadata;
 mod node;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod ready_fixture;
+pub(crate) mod removal;
 pub(crate) mod rows;
 pub(crate) mod tree;
 pub use frontier::{FrontierStep, SourceFrontier, SourceFrontierRead};
