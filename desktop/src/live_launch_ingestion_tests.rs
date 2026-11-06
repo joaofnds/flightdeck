@@ -55,6 +55,11 @@ impl Harness {
             identity_text(random_identity().unwrap())
         ));
         let store = persistence::Store::open(&root).unwrap();
+        // These clocks count from this Mac's boot, which can lie past a shorter period.
+        persistence::retention::Period::from_seconds(10 * 365 * 86_400)
+            .unwrap()
+            .write(&collector::recording::private::PrivateDirectory::open(&root).unwrap())
+            .unwrap();
         let mut captured = None;
         match input {
             Input::Sealed(layout) => {

@@ -10,6 +10,7 @@ pub struct Settings {
     pub animate_fans: bool,
     pub notice: Option<String>,
     pub(crate) animation_focus: Option<gpui::FocusHandle>,
+    pub(crate) retention: crate::live_settings_retention::RetentionChoice,
 }
 
 impl Default for Settings {
@@ -19,6 +20,7 @@ impl Default for Settings {
             animate_fans: ANIMATE_FANS_DEFAULT,
             notice: None,
             animation_focus: None,
+            retention: crate::live_settings_retention::RetentionChoice::default(),
         }
     }
 }
@@ -40,6 +42,7 @@ impl LiveDashboard {
     /// Opens app settings without sending a resource request to the reader.
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.settings.open = true;
+        self.open_settings_retention();
         self.native.time_menu_open = false;
         self.picker = None;
         self.chart_inspector = None;
@@ -87,6 +90,7 @@ impl LiveDashboard {
             .gap(px(32.0))
             .child(settings_header())
             .child(self.settings_view_appearance(cx))
+            .child(self.settings_view_retention(cx))
     }
 
     fn settings_view_appearance(&self, cx: &mut Context<Self>) -> impl IntoElement {

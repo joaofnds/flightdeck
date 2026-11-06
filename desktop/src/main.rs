@@ -43,6 +43,7 @@ mod live_resume_metrics;
 mod live_row_splice;
 mod live_sections;
 mod live_settings;
+mod live_settings_retention;
 mod live_source;
 mod live_source_mode;
 mod live_tables;

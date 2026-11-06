@@ -50,6 +50,8 @@ mod scroll;
 mod sections;
 #[path = "live_settings_input_tests.rs"]
 mod settings;
+#[path = "live_settings_retention_tests.rs"]
+mod settings_retention;
 #[path = "live_source_mode_input_tests.rs"]
 pub(crate) mod source_mode;
 #[path = "live_store_view_hover_input_tests.rs"]

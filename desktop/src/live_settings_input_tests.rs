@@ -337,7 +337,7 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    fn release_settings_key(&mut self, key: &str) {
+    pub(super) fn release_settings_key(&mut self, key: &str) {
         self.context.simulate_event(gpui::KeyUpEvent {
             keystroke: gpui::Keystroke::parse(key).unwrap(),
         });

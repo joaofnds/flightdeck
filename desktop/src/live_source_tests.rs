@@ -892,6 +892,7 @@ impl SnapshotReader {
     /// the test steps the reader itself.
     fn hand_over(&self) -> Worker {
         let mut closing = Worker {
+            root: std::path::PathBuf::new(),
             shared: Arc::clone(&self.shared),
             thread: None,
             mode: crate::live_source_mode::SourceMode::Live,
@@ -1454,6 +1455,7 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
     // Goal: an old worker result cannot replace the latest requested generation.
     // Method: publish both generations through the real mailbox without a background thread.
     let mut worker = Worker {
+        root: std::path::PathBuf::new(),
         shared: Arc::new(Shared::new()),
         thread: None,
         mode: crate::live_source_mode::SourceMode::Live,
@@ -1507,6 +1509,7 @@ fn a_new_request_ends_the_pause_between_polls() {
     // the real mailbox, send a request, and wait up to ten seconds for the pause to end, which
     // keeps the verdict independent of how busy the machine is.
     let mut worker = Worker {
+        root: std::path::PathBuf::new(),
         shared: Arc::new(Shared::new()),
         thread: None,
         mode: crate::live_source_mode::SourceMode::Live,

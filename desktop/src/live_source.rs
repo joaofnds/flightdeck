@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "automation")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +18,7 @@ pub use store_reader::ownership::{Part, PartsWindow, RanksWindow};
 pub use store_reader::presentation::Presentation;
 
 pub struct Worker {
+    root: PathBuf,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     mode: SourceMode,
@@ -348,6 +349,7 @@ impl Worker {
         assert!(steps_max > 0);
         let shared = Arc::new(Shared::with_rest(rest));
         let control = Arc::clone(&shared);
+        let worker_root = root.clone();
         let observation =
             persistence::work::ingestion::inherit(persistence::work::ingestion::Producer::Worker);
         let thread = thread::Builder::new()
@@ -355,15 +357,21 @@ impl Worker {
             .stack_size(4 * 1024 * 1024)
             .spawn(move || {
                 let observation = observation.enter();
-                worker_run(&root, &control, store, steps_max);
+                worker_run(&worker_root, &control, store, steps_max);
                 drop(observation);
             })?;
 
         Ok(Self {
+            root,
             shared,
             thread: Some(thread),
             mode,
         })
+    }
+
+    /// The recording this worker reads.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn request(&mut self, request: Request) -> Result<u64, String> {
@@ -497,6 +505,7 @@ impl Worker {
         let refusing = Shared::new();
         refusing.stopped.store(true, Ordering::Release);
         Ok(Some(Worker {
+            root: self.root.clone(),
             shared: std::mem::replace(&mut self.shared, Arc::new(refusing)),
             thread: self.thread.take(),
             mode: self.mode,
