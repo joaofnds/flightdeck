@@ -91,17 +91,13 @@ impl Store {
             return Ok(0);
         }
 
-        let entries = retention::expired_entries(
-            &self.directory,
-            clock.removal_cutoff(period),
-            ENTRIES_PER_PASS,
-        )?;
+        let cutoff = clock.removal_cutoff(period);
+        let entries = retention::expired_entries(&self.directory, cutoff, ENTRIES_PER_PASS)?;
         if entries.is_empty() {
             return Ok(0);
         }
 
         let held = self.retire_expired_held(under_way.as_ref(), runs, budget)?;
-        let cutoff = clock.cutoff(period);
         let mut retired = 0;
         for entry in &entries {
             if retired == RETIRED_PER_PASS {
@@ -211,7 +207,8 @@ impl Store {
     }
 
     /// Whether a window must stay for the reading after it: that reading's rates need this window
-    /// until it has expired too. A window with no later window waits for nothing.
+    /// until it has expired too, and past that by the grace a read under way has. A window with no
+    /// later window waits for nothing.
     fn retire_one_waits(
         &self,
         metadata: &CanonicalMetadata,

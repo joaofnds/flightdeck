@@ -90,8 +90,8 @@ fn retirement_names_under(fixture: &Fixture, directory: &str) -> usize {
 #[test]
 fn a_pass_removes_what_outlived_the_period_and_keeps_the_rest() {
     // Goal: saved readings go once they have outlived the period, and nothing younger goes.
-    // Method: save four one-reading windows, and pass at the clock that puts the cutoff at the
-    // third, so its own retained time is not below it.
+    // Method: save four one-reading windows, and pass at the clock that puts the cutoff just past
+    // the third, which then waits for the fourth, whose first reading has not expired.
     let mut fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
     retirement_windows(&mut fixture, &store, 4);
@@ -99,7 +99,7 @@ fn a_pass_removes_what_outlived_the_period_and_keeps_the_rest() {
 
     let retired = store
         .retire_expired(
-            &retirement_at(&fixture, retirement_clock_keeping(places[2])),
+            &retirement_at(&fixture, retirement_clock_keeping(places[2] + 1)),
             &[fixture.run],
             &registration_budget(),
         )
@@ -449,6 +449,38 @@ fn a_window_waits_for_a_successor_inside_the_period_or_off_the_clock() {
 }
 
 #[test]
+fn a_window_stays_through_the_grace_of_the_reading_after_it() {
+    // Goal: a read of the first retained reading loads the window before it, so that window lasts
+    // as long as a read under way may go on returning the reading.
+    // Method: pass where the second window's first reading has only just outlived the period, and
+    // again once the grace has passed too.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let successor_first_ns = retirement_places(&fixture)[1];
+    let just_expired_ns = successor_first_ns + 1 + PERIOD_SECONDS * SECOND_NS;
+    let no_runs: &[RunIdentity] = &[];
+
+    let within_the_grace = store
+        .retire_expired(
+            &retirement_at(&fixture, just_expired_ns + GRACE_SECONDS * SECOND_NS - 1),
+            no_runs,
+            &registration_budget(),
+        )
+        .unwrap();
+    let past_the_grace = store
+        .retire_expired(
+            &retirement_at(&fixture, just_expired_ns + GRACE_SECONDS * SECOND_NS),
+            no_runs,
+            &registration_budget(),
+        )
+        .unwrap();
+
+    assert_eq!(within_the_grace, 0);
+    assert_eq!(past_the_grace, 1);
+}
+
+#[test]
 fn a_successor_that_does_not_read_stops_no_removal() {
     // Goal: damage to what comes after an expired window cannot keep it from going.
     // Method: damage the second window's proof and pass where both have expired.
@@ -484,22 +516,19 @@ fn a_successor_that_does_not_read_stops_no_removal() {
 fn a_clock_that_lost_its_record_stands_no_lower_than_the_newest_entry() {
     // Goal: a lost clock record cannot make a saved publication look young, however far back the
     // wall clock stands.
-    // Method: lose the record, take a pass with the wall clock at zero, and see what the newest
-    // entry's place expired.
+    // Method: lose the record, take a pass with the wall clock at zero, and see that the newest
+    // entry's place expired the oldest.
     let mut fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
-    retirement_windows(&mut fixture, &store, 4);
+    retirement_windows(&mut fixture, &store, 5);
     let places = retirement_places(&fixture);
-    let newest = *places.last().unwrap();
-    let kept_from = newest - (PERIOD_SECONDS + GRACE_SECONDS) * SECOND_NS;
-    assert!(places[0] < kept_from);
     fs::remove_file(fixture.root.join("retention/clock")).unwrap();
 
     store
         .retire_expired(&retirement_at(&fixture, 0), &[], &registration_budget())
         .unwrap();
 
-    assert!(retirement_places(&fixture)[0] >= kept_from);
+    assert_eq!(retirement_places(&fixture), places[1..]);
 }
 
 #[test]
@@ -523,7 +552,7 @@ fn a_boot_record_stays_until_nothing_of_that_boot_can_need_it() {
     // Goal: boot records plateau, and a record outlives its publications, since a reader shows a
     // reading whose boot has no record.
     // Method: run a pass in another boot, expire all but the entry at the value that pass recorded,
-    // and then that one too.
+    // which a registered run holds, and then that one too.
     let mut fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
     let root = PrivateDirectory::open(&fixture.root).unwrap();
@@ -536,10 +565,14 @@ fn a_boot_record_stays_until_nothing_of_that_boot_can_need_it() {
         .unwrap();
     let budget = registration_budget();
 
-    let keeping = retirement_clock_keeping(newest);
+    let keeping = retirement_clock_keeping(newest + 1);
     for clock_ns in [newest, keeping, keeping] {
         store
-            .retire_expired(&retirement_in_another_boot(clock_ns), &[], &budget)
+            .retire_expired(
+                &retirement_in_another_boot(clock_ns),
+                &[fixture.run],
+                &budget,
+            )
             .unwrap();
     }
     assert_eq!(retirement_places(&fixture), [newest]);

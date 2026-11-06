@@ -203,6 +203,11 @@ pub fn read_committed(root: &Path, marker: &Path) -> io::Result<Manifest> {
     read_committed_file(root, marker, &mut file)
 }
 
+/// How long a window read waits on writers changing the namespace's state, which each take far less
+/// than this across a whole removal pass.
+const CLASSIFY_ATTEMPTS_MAX: u32 = 2_000;
+const CLASSIFY_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(5);
+
 /// Reads the caller's opened proof so its identity can be bound across parsing.
 pub(crate) fn read_committed_file(
     root: &Path,
@@ -214,7 +219,7 @@ pub(crate) fn read_committed_file(
     Store::validate_window_files(root, &manifest)?;
     validate_link(file)?;
     let directory = private::PrivateDirectory::open(root)?;
-    match collector::recording::bootstrap::classify(&directory, &mut [0; 4097])? {
+    match read_committed_classification(&directory)? {
         collector::recording::bootstrap::Classification::Initialized(recording)
             if recording == manifest.identity.run.recording =>
         {
@@ -222,6 +227,23 @@ pub(crate) fn read_committed_file(
         }
         _ => Err(invalid("recording identity mismatch")),
     }
+}
+
+/// What the root is. A writer that changes the namespace's state during the check leaves it without
+/// an answer, which says nothing about this window, so the check runs again.
+fn read_committed_classification(
+    root: &private::PrivateDirectory,
+) -> io::Result<collector::recording::bootstrap::Classification> {
+    for _attempt in 0..CLASSIFY_ATTEMPTS_MAX {
+        match collector::recording::bootstrap::classify(root, &mut [0; 4097]) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(CLASSIFY_RETRY_WAIT);
+            }
+            result => return result,
+        }
+    }
+
+    Err(io::Error::from(io::ErrorKind::WouldBlock))
 }
 
 /// Rereads a proof that `read_committed` accepted, for a reader holding the window open. A sealed

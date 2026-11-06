@@ -423,13 +423,13 @@ fn the_first_retained_reading_stays_the_same_while_its_hidden_predecessor_keeps_
 #[test]
 fn the_first_retained_reading_stays_the_same_once_an_expired_minute_is_gone() {
     // Goal: removing a minute no retained reading needs changes nothing the period covers.
-    // Method: read the first second of the third minute, place the cutoff on it, so the first
+    // Method: read the last second of the third minute, place the cutoff on it, so the first
     // minute goes and the second stays hidden, and read that second in new sessions.
     let fixture = saved_across_three_minutes(&persistence::sealed_apps::SealedApps::default());
-    let (saved, live, points) = reading_of_second(&fixture.root, 1004);
+    let (saved, live, points) = reading_of_second(&fixture.root, 1005);
 
-    let removed = expire_and_remove(&fixture.root, 120 * NS);
-    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1004);
+    let removed = expire_and_remove(&fixture.root, 121 * NS);
+    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1005);
 
     assert_eq!(removed, 1);
     assert_eq!(Session::open(&fixture.root).unwrap().windows.len(), 2);
@@ -437,7 +437,7 @@ fn the_first_retained_reading_stays_the_same_once_an_expired_minute_is_gone() {
     assert!(live["cpu_percent"].is_number(), "{live}");
     assert_eq!(retained_saved, saved);
     assert_eq!(retained_live, live);
-    assert_eq!(retained_points, points[3..]);
+    assert_eq!(retained_points, points[4..]);
 }
 
 #[test]
@@ -447,16 +447,16 @@ fn the_first_retained_reading_comes_from_raw_readings_alone() {
     // recording whose minutes never derived any.
     // Method: as above, over minutes saved with no derived tables.
     let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
-    let (saved, live, points) = reading_of_second(&fixture.root, 1004);
+    let (saved, live, points) = reading_of_second(&fixture.root, 1005);
 
-    let removed = expire_and_remove(&fixture.root, 120 * NS);
-    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1004);
+    let removed = expire_and_remove(&fixture.root, 121 * NS);
+    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1005);
 
     assert_eq!(removed, 1);
     assert!(saved["cpu_percent"].is_number(), "{saved}");
     assert_eq!(retained_saved, saved);
     assert_eq!(retained_live, live);
-    assert_eq!(retained_points, points[3..]);
+    assert_eq!(retained_points, points[4..]);
 }
 
 /// Nine saved minutes of one reading each, at the start of its minute on the continuous clock.
@@ -479,13 +479,14 @@ const READER_WAIT_MAX: Duration = Duration::from_secs(120);
 const NAMES_MAX: usize = 1 << 16;
 
 /// Moves the cutoff a minute at a time up to the newest reading, with a pass at each, and lets
-/// `read_count` go up twice after each. A read takes far less than the grace physical removal
-/// leaves a read under way, so no read sees the clock stand two passes behind what has gone.
+/// `read_count` go up twice after each, so the second of those reads started after the pass. A
+/// read takes far less than the grace physical removal leaves a read under way, so no read sees the
+/// clock stand two passes behind what has gone.
 fn removal_beside_reads(root: &Path, read_count: &AtomicU64) -> u64 {
     let mut removed = 0;
     for minute in 1..NINE_MINUTES - 1 {
-        let reads = read_count.load(Ordering::Acquire);
         removed += expire_and_remove(root, (minute + 1) * 60 * NS);
+        let reads = read_count.load(Ordering::Acquire);
         let waited = Instant::now();
         while read_count.load(Ordering::Acquire) < reads + 2 {
             assert!(
