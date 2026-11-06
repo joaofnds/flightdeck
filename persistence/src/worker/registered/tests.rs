@@ -31,6 +31,7 @@ const LIVE_MINUTE: u64 = 1 << 20;
 enum Interruption {
     Registered,
     EventIndexAbsent,
+    EventIndexTorn,
     EventBatchTorn,
     EventsStaged,
     TableMissing,
@@ -743,6 +744,10 @@ impl Recording {
                 std::fs::remove_file(pending.join("events/index")).unwrap();
                 true
             }
+            Interruption::EventIndexTorn => {
+                Self::tear(&pending.join("events/index"));
+                true
+            }
             Interruption::EventBatchTorn => {
                 std::fs::remove_file(pending.join("events/index")).unwrap();
                 Self::tear(&Self::only_event_batch(pending));
@@ -1242,6 +1247,45 @@ fn interrupted_seal_converges(
 }
 
 #[test]
+fn a_recording_keeps_no_file_a_restart_would_have_to_rebuild() {
+    // Goal: every fact lives in the canonical places, so no checkpoint or index exists to go
+    // stale, run ahead or be lost, and a new one has to answer for those cases here (P02.3).
+    // Method: save a minute through the worker, and read the names at the recording's root.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let store = Store::open(&recording.root).unwrap();
+    assert!(matches!(
+        recording.persist(&store, &mut RunState::default()),
+        Progress::Sealed
+    ));
+
+    let mut names: Vec<String> = std::fs::read_dir(&recording.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+
+    assert_eq!(
+        names,
+        [
+            "data",
+            "event-fragments",
+            "foreground",
+            "identity",
+            "maintenance",
+            "namespace-state",
+            "observations-known",
+            "observations-unknown",
+            "ordinary",
+            "persister.lock",
+            "recovery-data",
+            "registration.lock",
+            "terminal",
+        ]
+    );
+}
+
+#[test]
 fn a_seal_interrupted_after_registering_converges() {
     // Goal: a registration with nothing staged is finished at restart, not refused (P02.3).
     // Method: stop after registering, restart the worker, and compare with an uninterrupted run.
@@ -1255,6 +1299,17 @@ fn a_seal_interrupted_before_the_event_index_converges() {
     interrupted_seal_converges(
         Recording::new(),
         Interruption::EventIndexAbsent,
+        &UNINTERRUPTED,
+    );
+}
+
+#[test]
+fn a_seal_interrupted_inside_its_event_index_converges() {
+    // Goal: the index is the last of the events a seal writes, so a torn one costs no row (P02.3).
+    // Method: stage the window, tear its index, and compare with an uninterrupted run.
+    interrupted_seal_converges(
+        Recording::new(),
+        Interruption::EventIndexTorn,
         &UNINTERRUPTED,
     );
 }

@@ -254,6 +254,47 @@ fn an_unavailable_old_window_stops_no_reader_of_a_newer_one() {
 }
 
 #[test]
+fn a_second_name_for_an_old_minute_adds_no_minute_and_stops_no_reader() {
+    // Goal: a retry reuses a seal's one name, so a second name is damage, which neither counts as
+    // another minute nor changes what a reader finds at either end (P02.3).
+    // Method: save three minutes far apart, link the oldest's seal under the free name of its
+    // second publication, then open a session and select a second of the newest and of the oldest.
+    let mut fixture = Fixture::registered();
+    fixture.publish_with_system_rows(SECOND_FIRST);
+    fixture.publish_with_system_rows(SECOND_FIRST + 1);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(SECOND_FAR);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(SECOND_FAR + 60);
+    fixture.seal();
+    let seal = registered_oldest_seal(&fixture.root);
+    let name = seal.file_name().unwrap().to_str().unwrap();
+    assert!(name.ends_with("1.seal"));
+    std::fs::hard_link(&seal, seal.with_file_name(name.replace("1.seal", "2.seal"))).unwrap();
+
+    let mut session = Session::open(&fixture.root).unwrap();
+    let new = session.select(SECOND_FAR + 60, 0).unwrap();
+    let old = session.select(SECOND_FIRST, 0).unwrap();
+
+    assert_eq!(new["selected"]["publication"], 4);
+    assert_eq!(old["selected"]["publication"], 1);
+    assert_eq!(registered_numbers(&session), [0]);
+}
+
+/// The seal of the oldest minute saved, whose name sorts first in its leaf.
+fn registered_oldest_seal(root: &std::path::Path) -> PathBuf {
+    let mut leaves = std::fs::read_dir(root.join("ordinary")).unwrap();
+    let leaf = leaves.next().unwrap().unwrap().path();
+    assert!(leaves.next().is_none());
+
+    std::fs::read_dir(leaf)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .min()
+        .unwrap()
+}
+
+#[test]
 fn damage_in_the_margin_of_a_span_stops_no_reader_of_what_it_needs() {
     // Goal: a span's margin is only there to save a load later, so damage in it costs a reader
     // nothing it asked for, and it is explicit once a reader asks for it (P02.3).

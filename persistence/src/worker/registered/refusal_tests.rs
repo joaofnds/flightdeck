@@ -5,6 +5,7 @@ use super::{
     publish_three_minutes, recording_with_withheld_events, whole_worker, whole_worker_of,
 };
 use crate::Store;
+use crate::event_table::index::Index;
 use crate::resources::ByteBudget;
 use crate::sealed_apps::SealedApps;
 use crate::store::PublicationLedger;
@@ -13,6 +14,7 @@ use crate::worker::registered::Selection;
 use crate::worker::{Progress, RunState, WindowIdentity, Writers, persist_one};
 use crate::{Encoder, Error};
 use collector::recording::bootstrap::codec;
+use collector::recording::private::open_private_file;
 use collector::recording::{RegisteredRun, Registry};
 use collector::ring::{Identity, Place, RingReader, RunIdentity, Writer};
 use std::io::{ErrorKind, Write};
@@ -103,6 +105,80 @@ fn a_batch_its_index_names_that_is_gone_stops_the_worker() {
 
     assert!(result.is_err());
     assert!(pending.join("events/index").exists());
+}
+
+#[test]
+fn an_event_index_behind_its_batch_stops_the_worker() {
+    // Goal: staging writes the index last and counts every batch in it, so an index that counts
+    // fewer is damage, which stays to be read rather than being staged over (P02.3).
+    // Method: stop with the events staged, write the index again holding no batch, restart, and
+    // read the refusal and the batch.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let first = Store::open(&recording.root).unwrap();
+    recording.interrupted_seal(&first, Interruption::EventsStaged);
+    drop(first);
+    let pending = attempt_directory(&recording.root, "data", "pending");
+    let batch = Recording::only_event_batch(&pending);
+    let path = pending.join("events/index");
+    let identity = WindowIdentity {
+        run: recording.run,
+        window: 0,
+    };
+    let staged =
+        Index::read_attempt_file(&mut std::fs::File::open(&path).unwrap(), &identity, None)
+            .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let behind = Index {
+        rows: 0,
+        batches: vec![],
+        ..staged
+    };
+    behind
+        .write_file(&mut open_private_file(&path, true).unwrap())
+        .unwrap();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let result = recording.persist_result(&restarted, &mut RunState::default());
+
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == ErrorKind::Unsupported));
+    assert!(batch.exists());
+}
+
+#[test]
+fn a_second_name_for_a_saved_minute_stops_the_worker() {
+    // Goal: a retry reuses the seal's one name, so a second name is damage. It may not count as a
+    // second minute or take the first one away (P02.3).
+    // Method: save a minute, link its seal under the name of the next publication, restart, and
+    // read the refusal and the first name.
+    let mut recording = Recording::new();
+    publish_three_minutes(&mut recording);
+    let store = Store::open(&recording.root).unwrap();
+    recording.persist(&store, &mut RunState::default());
+    drop(store);
+    let seal = only_seal(&recording.root.join("ordinary"));
+    let name = seal.file_name().unwrap().to_str().unwrap();
+    assert!(name.ends_with("1.seal"));
+    let second = seal.with_file_name(name.replace("1.seal", "2.seal"));
+    std::fs::hard_link(&seal, &second).unwrap();
+    let restarted = Store::open(&recording.root).unwrap();
+
+    let result = recording.persist_result(&restarted, &mut RunState::default());
+
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == ErrorKind::InvalidData));
+    assert!(seal.exists());
+}
+
+/// The one seal under a namespace that holds a single leaf.
+fn only_seal(namespace: &Path) -> PathBuf {
+    let mut leaves = std::fs::read_dir(namespace).unwrap();
+    let leaf = leaves.next().unwrap().unwrap().path();
+    assert!(leaves.next().is_none());
+    let mut seals = std::fs::read_dir(leaf).unwrap();
+    let seal = seals.next().unwrap().unwrap().path();
+    assert!(seals.next().is_none());
+
+    seal
 }
 
 #[test]
