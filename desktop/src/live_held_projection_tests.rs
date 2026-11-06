@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use collector::machine::Pressure;
+use collector::recording::identity_text;
 use collector::ring::{Identity, RunIdentity};
 use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View};
 
@@ -8,6 +9,16 @@ use super::super::{empty_panels, overview, panels};
 use super::{Observations, OverviewPoints, overview_panels, overview_point_second};
 use crate::data::Panel;
 use crate::live_store_fixtures::{levels, reading_at, selection, trend_point, view};
+
+/// `place` as a trend point's reach names a reading.
+fn reach_place(place: &crate::data::MachinePlace) -> serde_json::Value {
+    serde_json::json!([
+        identity_text(Identity(place.run)).to_string(),
+        identity_text(Identity(place.boot)).to_string(),
+        place.publication,
+        place.wall_ns,
+    ])
+}
 
 const RUN: RunIdentity = RunIdentity {
     recording: Identity([1, 1]),
@@ -431,7 +442,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let mut point = trend_point(&older[0]);
         point["thermal_pressure"] = serde_json::json!(1);
         point["reach"] = serde_json::json!({"leaves": {"thermal_pressure": [1.0, 9.0, 0]},
-            "places": [[peak.run, peak.boot, peak.publication, peak.wall_ns]]});
+            "places": [reach_place(&peak)]});
         let mut selected = selection(&[], std::slice::from_ref(&newest));
         selected["earlier_trends"] = serde_json::json!([point]);
 
@@ -456,7 +467,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let line = &panel_named(&drawn, "live-cpu").lines[0];
         let peak = line.extremes.as_ref().unwrap()[0].unwrap().peak;
         point["reach"] = serde_json::json!({"leaves": {"cpu_percent": [10.0, 95.0, 0]},
-            "places": [[peak.run, peak.boot, peak.publication, peak.wall_ns]]});
+            "places": [reach_place(&peak)]});
         let mut selected = selection(&[], std::slice::from_ref(&newest));
         selected["earlier_trends"] = serde_json::json!([point]);
 
@@ -508,8 +519,14 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         // Method: a tail whose last point names what the join reached, and read the first
         // full-detail point of the chart.
         let mut older = trend_point(&reading_at(9_020, 3));
+        let joined = crate::data::MachinePlace {
+            run: [1, 2],
+            boot: [3, 4],
+            publication: 7,
+            wall_ns: 9_031_000_000_000,
+        };
         older["reach_after"] = serde_json::json!({"leaves": {"cpu_percent": [10.0, 95.0, 0]},
-            "places": [[[1, 2], [3, 4], 7, 9_031_000_000_000_u64]]});
+            "places": [reach_place(&joined)]});
         let newest = reading_at(10_000, 3);
         let mut selected = selection(&[], std::slice::from_ref(&newest));
         selected["earlier_trends"] = serde_json::json!([older]);

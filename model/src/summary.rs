@@ -57,14 +57,6 @@ impl<Place: Copy> Reduction<Place> {
         Some(value_from_fixed(measured.total / measured.weight))
     }
 
-    /// The lowest and highest reading, or `None` with no reading.
-    #[must_use]
-    pub fn reach(&self) -> Option<(f64, f64)> {
-        let measured = self.measured.as_ref()?;
-
-        Some((measured.minimum.value, measured.maximum.value))
-    }
-
     fn push(&mut self, value: Option<f64>, weight: u64, follows: bool, place: Place) {
         if !follows {
             self.breaks += 1;
@@ -291,6 +283,23 @@ where
     }
 }
 
+/// The reading of the Mac a reduction found its value at, which holding it shows again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MachinePlace {
+    pub boot: [u64; 2],
+    pub run: [u64; 2],
+    pub publication: u64,
+    pub wall_ns: u64,
+}
+
+impl MachinePlace {
+    /// The wall second of the reading. Floors, so a reading belongs to the second it was taken in.
+    #[must_use]
+    pub fn second(&self) -> u64 {
+        self.wall_ns / 1_000_000_000
+    }
+}
+
 /// `value` in the total's fixed point, rounded toward zero, which keeps its grouping exact. Reads
 /// the float's own bits, since a cast is what the project does not write. `None` where `value` is
 /// not finite or no quantity the Mac reports.
@@ -320,7 +329,9 @@ fn fixed_from_value(value: f64) -> Option<i128> {
     } else {
         significand >> (aligned - scale)
     };
-    let magnitude = i128::try_from(magnitude).ok()?;
+    // At most `READING_WHOLE_BITS_MAX` whole bits and the fraction, which the const assertion above
+    // keeps under 64.
+    let magnitude = i128::try_from(magnitude).unwrap_or_else(|_| unreachable!());
 
     if bits >> 63 == 1 {
         Some(-magnitude)
@@ -329,18 +340,11 @@ fn fixed_from_value(value: f64) -> Option<i128> {
     }
 }
 
-/// The reading the total's fixed point `fixed` stands for. A mean's total divided by its weight
-/// fits an `i64`, and each half of it fits a float exactly enough for a chart.
+/// The reading the total's fixed point `fixed` stands for. A mean lies between its readings, each
+/// of which `fixed_from_value` kept under 64 bits.
 fn value_from_fixed(fixed: i128) -> f64 {
-    const WORD: f64 = 4_294_967_296.0;
-
-    let magnitude = fixed.unsigned_abs();
-    let low = u32::try_from(magnitude & 0xffff_ffff).unwrap_or(0);
-    let middle = u32::try_from((magnitude >> 32) & 0xffff_ffff).unwrap_or(0);
-    let high = u32::try_from((magnitude >> 64) & 0xffff_ffff).unwrap_or(0);
-    let whole = (f64::from(high) * WORD + f64::from(middle)) * WORD + f64::from(low);
-    let scale = f64::from(1_u32 << TOTAL_FRACTION_BITS);
-    let value = whole / scale;
+    let magnitude = u64::try_from(fixed.unsigned_abs()).unwrap_or_else(|_| unreachable!());
+    let value = crate::rates::number(magnitude) / f64::from(1_u32 << TOTAL_FRACTION_BITS);
 
     if fixed < 0 { -value } else { value }
 }

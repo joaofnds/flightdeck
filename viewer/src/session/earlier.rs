@@ -13,7 +13,7 @@ use super::earlier_reach::Reach;
 use super::{CONTEXT_READERS, NS, OBSERVATIONS_MAX, Observation, Reader, Session};
 use crate::data::Table;
 use crate::metrics;
-use crate::store::MachinePlace;
+use crate::store::{MachinePlace, stretch_of_wall_second};
 
 /// The seconds of history the longest range a chart shows holds. The viewer loads
 /// `LEAD_IN_SECONDS` more before them.
@@ -428,6 +428,7 @@ impl KeptTail {
         let (mut observations, after) = self.assemble_readings(history, range, needed, retained)?;
         observations.sort_by_key(|value| (value.wall, value.window, value.publication));
         let segments = segment_numbers(&observations);
+        let reaches = self.assemble_reaches(history, needed, retained);
 
         let mut points = Vec::new();
         for index in thin(&observations) {
@@ -445,10 +446,9 @@ impl KeptTail {
             };
             let mut point = point.clone();
             point["segment"] = (SEGMENT_BASE + segments[index]).into();
-            let stretch = observation.wall / NS / EARLIER_STRIDE_SECONDS;
-            point["reach"] = self
-                .assemble_reach(history, needed, stretch, retained)
-                .json();
+            if let Some(reach) = reaches.get(&stretch_of_wall_second(observation.wall / NS)) {
+                point["reach"] = reach.json();
+            }
             points.push(point);
         }
         if let Some(last) = observations.last() {
@@ -467,37 +467,34 @@ impl KeptTail {
         super::context_points_order(&mut points);
         // The seconds between the tail's limit and the first full-detail second lie in no point,
         // so the point after the join takes what their stretch reached.
-        if let Some(last) = points.last_mut() {
-            let joined = range.limit_second / EARLIER_STRIDE_SECONDS;
-            last["reach_after"] = self
-                .assemble_reach(history, needed, joined, retained)
-                .json();
+        let joined = reaches.get(&stretch_of_wall_second(range.limit_second));
+        if let Some((last, reach)) = points.last_mut().zip(joined) {
+            last["reach_after"] = reach.json();
         }
 
         Ok(points)
     }
 
-    /// How far the readings of `stretch` the period still covers went, in each minute they lie in.
-    fn assemble_reach(
+    /// How far the readings of each stretch the period still covers went, in every minute they
+    /// lie in.
+    fn assemble_reaches(
         &self,
         history: &Session,
         needed: &[usize],
-        stretch: u64,
         retained: &Retained,
-    ) -> Reach {
-        let mut reach = Reach::default();
+    ) -> BTreeMap<u64, Reach> {
+        let mut reaches: BTreeMap<u64, Reach> = BTreeMap::new();
         for &window in needed {
             let manifest = &history.windows[window];
-            let part = self
-                .kept(manifest)
-                .and_then(|minute| minute.reaches.get(&stretch))
-                .filter(|part| retained.holds(manifest.identity.run.boot, part.first_continuous));
-            if let Some(part) = part {
-                reach.merge(&part.reach);
+            let parts = self.kept(manifest).map(|minute| &minute.reaches);
+            for (stretch, part) in parts.into_iter().flatten() {
+                if retained.holds(manifest.identity.run.boot, part.first_continuous) {
+                    reaches.entry(*stretch).or_default().merge(&part.reach);
+                }
             }
         }
 
-        reach
+        reaches
     }
 
     /// Whether a reading before `observation` in its minute and its stretch has expired.
@@ -508,10 +505,10 @@ impl KeptTail {
         retained: &Retained,
     ) -> bool {
         let manifest = &history.windows[observation.window];
-        let stretch = observation.wall / NS / EARLIER_STRIDE_SECONDS;
+        let stretch = stretch_of_wall_second(observation.wall / NS);
         self.kept(manifest).is_some_and(|minute| {
             minute.readings.iter().any(|reading| {
-                reading.wall / NS / EARLIER_STRIDE_SECONDS == stretch
+                stretch_of_wall_second(reading.wall / NS) == stretch
                     && reading.publication < observation.publication
                     && !retained.holds(manifest.identity.run.boot, reading.continuous)
             })
@@ -706,14 +703,14 @@ fn earlier_minute_reach(
     point: &Value,
 ) {
     let part = reaches
-        .entry(reading.wall / NS / EARLIER_STRIDE_SECONDS)
+        .entry(stretch_of_wall_second(reading.wall / NS))
         .or_insert_with(|| StretchPart {
             first_continuous: reading.continuous,
             reach: Reach::default(),
         });
     part.reach.add(
         point,
-        MachinePlace {
+        &MachinePlace {
             boot: manifest.identity.run.boot.0,
             run: manifest.identity.run.run.0,
             publication: reading.publication,
@@ -846,7 +843,7 @@ fn thin(observations: &[Observation]) -> Vec<usize> {
     let mut kept = Vec::new();
     let mut stretch = None;
     for (index, observation) in observations.iter().enumerate() {
-        let current = observation.wall / NS / EARLIER_STRIDE_SECONDS;
+        let current = stretch_of_wall_second(observation.wall / NS);
         if stretch != Some(current) {
             kept.push(index);
             stretch = Some(current);

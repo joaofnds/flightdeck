@@ -766,33 +766,17 @@ impl Observations for [Value] {
     }
 
     fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String> {
-        let reach = &self[index]["reach"];
-        if reach.is_null() {
-            return Ok(None);
-        }
         let key = reading.reach.unwrap_or(reading.key);
-        let path = match (reading.resource, reading.channel) {
-            (Some(resource), Some(channel)) => format!("{resource}/{key}/{channel}"),
-            (Some(resource), None) => format!("{resource}/{key}"),
-            (None, Some(channel)) => format!("{key}/{channel}"),
-            (None, None) => key.to_owned(),
-        };
-        let reached = &reach["leaves"][path.as_str()];
-        let Some((low, high)) = number(&reached[0])?.zip(number(&reached[1])?) else {
-            return Ok(None);
-        };
-        let place = usize::try_from(integer(&reached[2])?).map_err(|error| error.to_string())?;
-        let place = &reach["places"][place];
+        let path = viewer::number_path(reading.resource, key, reading.channel);
+        let reach = viewer::number_reach(&self[index]["reach"], &path)
+            .map_err(|error| error.to_string())?;
 
-        Ok(Some(LineReach {
-            low,
-            high,
-            peak: MachinePlace {
-                run: identity(&place[0])?,
-                boot: identity(&place[1])?,
-                publication: integer(&place[2])?,
-                wall_ns: integer(&place[3])?,
-            },
+        Ok(reach.and_then(|reach| {
+            Some(LineReach {
+                low: reach.low.to_f32()?,
+                high: reach.high.to_f32()?,
+                peak: reach.peak,
+            })
         }))
     }
 }

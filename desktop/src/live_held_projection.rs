@@ -2,6 +2,7 @@
 //! reads as values rather than as trend points.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use viewer::store::{
@@ -152,7 +153,6 @@ fn overview_panels_stretches<'view>(
 ) -> Vec<Option<&'view MachineStretch>> {
     assert_eq!(domain.stride, viewer::EARLIER_STRIDE_SECONDS);
 
-    // The store's stretches run oldest first, as the points do.
     let mut stretches = view.stretches.iter().peekable();
     let mut detail_began = false;
     seconds
@@ -166,13 +166,23 @@ fn overview_panels_stretches<'view>(
                 detail_began = true;
                 wall_second = domain.recent_first;
             }
-            let stretch = viewer::store::stretch_of_wall_second(wall_second);
-            while stretches.next_if(|held| held.stretch < stretch).is_some() {}
-            let held = stretches.next_if(|held| held.stretch == stretch)?;
+            let held = overview_stretch(&mut stretches, wall_second)?;
 
             Some(&*held.machine)
         })
         .collect()
+}
+
+/// The stretch `stretches` holds for `wall_second`. They run oldest first, as the points do, so
+/// the stretches before it are passed for good.
+fn overview_stretch<'view>(
+    stretches: &mut std::iter::Peekable<std::slice::Iter<'view, Arc<AppsStretch>>>,
+    wall_second: u64,
+) -> Option<&'view Arc<AppsStretch>> {
+    let stretch = viewer::store::stretch_of_wall_second(wall_second);
+    while stretches.next_if(|held| held.stretch < stretch).is_some() {}
+
+    stretches.next_if(|held| held.stretch == stretch)
 }
 
 /// The seconds a chart drawn from the store draws, with what each of them stands for.
@@ -183,15 +193,22 @@ struct OverviewPoints<'view> {
 
 impl Observations for OverviewPoints<'_> {
     fn count(&self) -> usize {
-        self.seconds.count()
+        self.seconds.len()
     }
 
     fn wall_ns(&self, index: usize) -> Result<u64, String> {
-        self.seconds.wall_ns(index)
+        Ok(self.seconds[index].wall_ns)
     }
 
     fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String> {
-        self.seconds.value(reading, index)
+        let value = second_value(reading, self.seconds[index])?;
+        if let Some(value) = value {
+            if !value.is_finite() {
+                return Err("Nonfinite live chart quantity".to_owned());
+            }
+        }
+
+        Ok(value)
     }
 
     fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String> {
@@ -303,15 +320,12 @@ fn overview_app_points_apps<'view>(
     assert_eq!(seconds.len(), indices.len());
     assert_eq!(domain.stride, viewer::EARLIER_STRIDE_SECONDS);
 
-    // The store's stretches run oldest first, as the points do.
     let mut stretches = view.stretches.iter().peekable();
     let mut apps = Vec::with_capacity(seconds.len());
     for (second, index) in seconds.iter().zip(indices) {
         let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
         if wall_second < domain.recent_first {
-            let stretch = viewer::store::stretch_of_wall_second(wall_second);
-            while stretches.next_if(|held| held.stretch < stretch).is_some() {}
-            let held = stretches.next_if(|held| held.stretch == stretch);
+            let held = overview_stretch(&mut stretches, wall_second);
             apps.push(held.map(|held| OverviewApps::Stretch(held)));
         } else {
             let live = index.checked_sub(view.earlier.len());
@@ -358,31 +372,6 @@ fn overview_panels_coordinates(
         places: places.into(),
         selected_index: points.len().checked_sub(1),
     })
-}
-
-impl Observations for [&MachineSecond] {
-    fn count(&self) -> usize {
-        self.len()
-    }
-
-    fn wall_ns(&self, index: usize) -> Result<u64, String> {
-        Ok(self[index].wall_ns)
-    }
-
-    fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String> {
-        let value = second_value(reading, self[index])?;
-        if let Some(value) = value {
-            if !value.is_finite() {
-                return Err("Nonfinite live chart quantity".to_owned());
-            }
-        }
-
-        Ok(value)
-    }
-
-    fn reach(&self, _reading: &Reading, _index: usize) -> Result<Option<LineReach>, String> {
-        Ok(None)
-    }
 }
 
 /// How low and how high `reading` reached over `stretch`, as `second_value` reads one second. A

@@ -1185,15 +1185,11 @@ impl Buckets {
         Some(second / self.length_seconds)
     }
 
-    /// The seconds the bucket `index` starts and ends at, as far as the window shows it.
-    fn range_edges(&self, index: u64) -> (u64, u64) {
-        let start = index * self.length_seconds;
-        let end = start + self.length_seconds;
+    /// The second the bucket `index` ends at, as far as the window shows it.
+    fn range_end(&self, index: u64) -> u64 {
+        let end = (index + 1) * self.length_seconds;
 
-        (
-            start.max(self.window.first),
-            end.min(self.window.first + self.window.span),
-        )
+        end.min(self.window.first + self.window.span)
     }
 
     /// Whether the join of thinned and full-detail readings cuts the bucket from `start`, which
@@ -1556,7 +1552,7 @@ fn standing_peaks_of_bucket(
     };
 
     StandingPeak {
-        end: buckets.range_edges(range.index).1,
+        end: buckets.range_end(range.index),
         base,
         peak,
         pick: range.pick,

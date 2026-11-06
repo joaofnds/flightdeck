@@ -1216,6 +1216,7 @@ mod committed_apps;
 mod context_tests;
 mod earlier;
 mod earlier_reach;
+pub use earlier_reach::{NumberReach, number_path, number_reach};
 pub(crate) mod registered;
 #[cfg(test)]
 mod registered_tests;

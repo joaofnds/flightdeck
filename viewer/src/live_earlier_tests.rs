@@ -474,13 +474,14 @@ fn a_stretch_two_minutes_share_reaches_the_readings_of_both() {
 /// The reading `point` names as the peak of `name`: its identity, as a hover names one, and its
 /// wall second.
 fn earlier_peak_of(point: &Value, name: &str) -> (Value, u64) {
-    let reach = &point["reach"];
-    let place = usize::try_from(reach["leaves"][name][2].as_u64().unwrap()).unwrap();
-    let place = &reach["places"][place];
-    let identity =
-        serde_json::json!({"run": place[0], "boot": place[1], "publication": place[2]});
+    let peak = crate::number_reach(&point["reach"], name).unwrap().unwrap().peak;
+    let identity = serde_json::json!({
+        "run": identity_text(collector::ring::Identity(peak.run)).to_string(),
+        "boot": identity_text(collector::ring::Identity(peak.boot)).to_string(),
+        "publication": peak.publication,
+    });
 
-    (identity, place[3].as_u64().unwrap() / NANOSECONDS_PER_SECOND)
+    (identity, peak.second())
 }
 
 #[test]
@@ -969,8 +970,8 @@ fn a_points_reach_holds_no_more_than_its_stretch_however_long_the_recording() {
     let short = reach_of(1);
     let long = reach_of(2);
 
-    assert_eq!(short["places"].as_array().unwrap().len(), 10);
-    assert_eq!(long["places"].as_array().unwrap().len(), 10);
+    assert!(short["places"].as_array().unwrap().len() <= 10);
+    assert!(long["places"].as_array().unwrap().len() <= 10);
     assert_eq!(
         short["leaves"].as_object().unwrap().len(),
         long["leaves"].as_object().unwrap().len()

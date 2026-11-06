@@ -4,6 +4,7 @@
 use collector::machine::Pressure;
 use collector::ring::RunIdentity;
 use model::rates::number;
+pub use model::summary::MachinePlace;
 use model::summary::{CategorySummary, GaugeSummary, RateSummary};
 
 use super::{MachineSecond, STRETCHES_MAX};
@@ -18,23 +19,6 @@ const _: () = {
     assert!(size_of::<MachineStretch>() <= 6 * 1024);
     assert!(STRETCHES_MAX * size_of::<MachineStretch>() <= 2_300 * 1024);
 };
-
-/// The reading a reduction found its value at, which holding it shows again.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MachinePlace {
-    pub boot: [u64; 2],
-    pub run: [u64; 2],
-    pub publication: u64,
-    pub wall_ns: u64,
-}
-
-impl MachinePlace {
-    /// The wall second of the reading. Floors, so a reading belongs to the second it was taken in.
-    #[must_use]
-    pub fn second(&self) -> u64 {
-        self.wall_ns / 1_000_000_000
-    }
-}
 
 pub type Gauge = GaugeSummary<MachinePlace>;
 pub type Rate = RateSummary<MachinePlace>;
@@ -58,8 +42,6 @@ pub struct MachineStretch {
     pub memory_wired_bytes: Gauge,
     pub power_watts: Gauge,
     pub soc_celsius: Gauge,
-    pub cpu_celsius: Gauge,
-    pub gpu_celsius: Gauge,
     pub fan_mean_rpm: Gauge,
     pub pressure: Category,
     pub thermal_pressure: Category,
@@ -82,10 +64,6 @@ impl MachineStretch {
             .push(second.power_watts.map(f64::from), follows, place);
         self.soc_celsius
             .push(second.soc_celsius.map(f64::from), follows, place);
-        self.cpu_celsius
-            .push(second.cpu_celsius.map(f64::from), follows, place);
-        self.gpu_celsius
-            .push(second.gpu_celsius.map(f64::from), follows, place);
         self.fan_mean_rpm
             .push(second.fan_mean_rpm.map(f64::from), follows, place);
         self.thermal_pressure
