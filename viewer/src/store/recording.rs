@@ -31,6 +31,7 @@ use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
 use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
+use persistence::retention::Retained;
 
 use super::apps::{Kept, TickApps};
 use super::stretch::{Folded, Folding};
@@ -1154,11 +1155,13 @@ fn find_window(
     // the hour, and the hour reaches back into the runs before `since`'s.
     let mut oldest_ns = None;
     let catalog = find_window_catalog(root)?;
+    let retained = Retained::read(root, runs.iter().map(|run| run.boot));
     for run in runs.iter().rev() {
         let finding = FindRun {
             root,
             run,
             span_ns: (window.seconds + LEAD_IN_SECONDS) * 1_000_000_000,
+            retained: &retained,
         };
         let more = finding
             .find(&catalog, &mut oldest_ns, found)
@@ -1210,13 +1213,16 @@ struct FindRun<'a> {
     root: &'a Path,
     run: &'a RunIdentity,
     span_ns: u64,
+    retained: &'a Retained,
 }
 
 impl FindRun<'_> {
     /// Finds the run's sealed minutes newer than `oldest_ns` into `found`, newest first, where
     /// the first minute found sets `oldest_ns`. Returns false at the old boundary and fails
     /// if another required minute exceeds `found`'s capacity. The catalog names the minute before
-    /// a minute, so this reads one proof for each minute it finds and no list of them.
+    /// a minute, so this reads one proof for each minute it finds and no list of them. The walk
+    /// ends at the minute just before the oldest with a second to show, which gives that second
+    /// its rates, since removal may take any minute older than that from under this list.
     fn find(
         &self,
         catalog: &Catalog,
@@ -1224,6 +1230,7 @@ impl FindRun<'_> {
         found: &mut Vec<Found>,
     ) -> io::Result<bool> {
         let mut last = u64::MAX;
+        let mut shows_newer = false;
         for _minute in 0..=MINUTES_MAX {
             let manifest = catalog_retry(|| {
                 catalog
@@ -1242,6 +1249,12 @@ impl FindRun<'_> {
             if manifest.wall_ns.is_some_and(|wall| wall.max < oldest) {
                 return Ok(false);
             }
+            let shows = self
+                .retained
+                .holds_any(self.run.boot, manifest.continuous_ns);
+            if !shows && !shows_newer {
+                return Ok(true);
+            }
             if found.len() == MINUTES_MAX {
                 return Err(io::Error::from(io::ErrorKind::InvalidData));
             }
@@ -1252,6 +1265,10 @@ impl FindRun<'_> {
                 publication_end: manifest.publication_end,
                 previous_source: None,
             });
+            if !shows {
+                return Ok(true);
+            }
+            shows_newer = true;
             let Some(before) = manifest.publication_first.checked_sub(1) else {
                 return Ok(true);
             };

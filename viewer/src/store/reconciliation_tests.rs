@@ -94,7 +94,7 @@ fn an_overwrite_after_attachment_stays_unqualified_at_the_newest_cursor() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     held.enable_payload(Arc::new(super::ByteBudget::new(256 * 1024 * 1024)));
     let mut ring = super::make_ring(&fixture.root, held.payload_budget.as_ref());
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
@@ -128,7 +128,7 @@ fn a_missing_replacement_generation_republishes_unqualified_metadata() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     held.enable_payload(Arc::new(super::ByteBudget::new(256 * 1024 * 1024)));
     let mut ring = super::make_ring(&fixture.root, held.payload_budget.as_ref());
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
@@ -164,7 +164,7 @@ fn a_new_generation_of_the_same_run_preserves_the_readers_predecessor() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
@@ -202,7 +202,7 @@ fn an_unplaced_tick_cannot_qualify_older_held_readings() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
@@ -271,7 +271,7 @@ fn a_restarted_publication_sequence_cannot_reuse_a_registered_run_identity() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
@@ -302,7 +302,7 @@ fn a_completion_read_failure_stays_unqualified_after_the_header_recovers() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
@@ -349,7 +349,7 @@ fn changed_recording(change: impl FnOnce(&std::path::Path) -> super::Failure) {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);

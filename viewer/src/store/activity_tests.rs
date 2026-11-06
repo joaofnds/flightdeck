@@ -57,7 +57,7 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
     fixture.seal_minute(0);
     fixture.skip_run_ticks(59);
     fixture.publish_with_system_rows(160);
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let shared = super::Shared {
         queries: None,
@@ -209,7 +209,7 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
     for second in 100..103 {
         fixture.publish_with_system_rows(second);
     }
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     ring.follow().unwrap();
     ring.read(|run, second, apps| held.take(run, second, apps))

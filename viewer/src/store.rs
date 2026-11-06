@@ -275,12 +275,11 @@ impl Store {
             paused: AtomicBool::new(false),
             cancellation: Arc::new(Cancellation::default()),
         });
-        let mut held = match budget {
-            Some(budget) => Held::with_payload(budget),
-            None => Held::new(),
-        };
         let root = root.to_owned();
-        held.root = Some(root.clone());
+        let mut held = match budget {
+            Some(budget) => Held::with_payload(root.clone(), budget),
+            None => Held::new(root.clone()),
+        };
         let operation = Arc::clone(&shared.cancellation)
             .operation(0)
             .map_err(io::Error::other)?;
@@ -420,7 +419,7 @@ impl Drop for Store {
 struct Held {
     /// The recording whose retention period says what the store may hold, none in a test of the
     /// store's own bounds.
-    root: Option<PathBuf>,
+    root: PathBuf,
     startup: StartupState,
     checked_catalog: Option<recording::CheckedCatalog>,
     source_generation: u64,
@@ -507,17 +506,29 @@ enum StartupState {
 }
 
 impl Held {
-    fn new() -> Self {
-        Self::with_apps(AppsSecond::with_room)
+    fn new(root: PathBuf) -> Self {
+        Self::with_apps(root, AppsSecond::with_room)
     }
 
-    fn with_payload(budget: Arc<ByteBudget>) -> Self {
-        let mut held = Self::with_apps(AppsSecond::default);
+    fn with_payload(root: PathBuf, budget: Arc<ByteBudget>) -> Self {
+        let mut held = Self::with_apps(root, AppsSecond::default);
         held.enable_payload(budget);
         held
     }
 
-    fn with_apps(make_apps: impl FnMut() -> AppsSecond) -> Self {
+    /// A store with no recording behind it, where no retention period applies.
+    #[cfg(test)]
+    fn without_recording() -> Self {
+        Self::new(PathBuf::new())
+    }
+
+    /// As `without_recording`, for a store that holds samples.
+    #[cfg(test)]
+    fn without_recording_with_payload(budget: Arc<ByteBudget>) -> Self {
+        Self::with_payload(PathBuf::new(), budget)
+    }
+
+    fn with_apps(root: PathBuf, make_apps: impl FnMut() -> AppsSecond) -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
         let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, make_apps);
         let earlier = Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, MachineSecond::default);
@@ -536,7 +547,7 @@ impl Held {
         });
 
         Self {
-            root: None,
+            root,
             startup: StartupState::Complete,
             checked_catalog: None,
             source_generation: 0,
@@ -782,36 +793,21 @@ impl Held {
     /// holds none of it. A View already handed over keeps what it holds until it is replaced.
     /// A reader asked for an older second goes to the recording, which hides the same readings.
     fn expire(&mut self) {
-        let Some(root) = &self.root else {
-            return;
-        };
         let boots = self
             .earlier
             .held()
             .chain(self.span.held())
             .map(|second| Identity(second.boot));
-        let retained = Retained::read(root, boots);
+        let retained = Retained::read(&self.root, boots);
         let mut removed = self.stretches.expire(&retained);
-        for _ in 0..self.earlier.len() {
-            let Some(second) = self.earlier.oldest() else {
-                break;
-            };
-            if retained.holds(Identity(second.boot), second.continuous_ns) {
-                break;
-            }
+        for _ in 0..self.earlier.expired_count(&retained, expire_place) {
             self.earlier.remove_oldest();
             if let Some(sampled) = &mut self.sampled {
                 sampled.remove_oldest();
             }
             removed = true;
         }
-        for _ in 0..self.span.len() {
-            let Some(second) = self.span.oldest() else {
-                break;
-            };
-            if retained.holds(Identity(second.boot), second.continuous_ns) {
-                break;
-            }
+        for _ in 0..self.span.expired_count(&retained, expire_place) {
             self.span.remove_oldest();
             self.apps.remove_oldest();
             removed = true;
@@ -1005,6 +1001,11 @@ fn startup(
 
 /// Loads the sealed hour with the Apps of the live span's minutes, and notes the older minutes,
 /// whose Apps the store adds to its stretches once it hands over its first View.
+/// Where `second` lies on the retention clock, which one with no clock has no place on.
+fn expire_place(second: &MachineSecond) -> Option<(Identity, u64)> {
+    Some((Identity(second.boot), second.continuous_ns?))
+}
+
 fn startup_launch(root: &Path, held: &mut Held) {
     let launch = recording::load_launch(root, |run, second, apps| {
         // No View is out during startup, so every buffer is free.

@@ -16,7 +16,7 @@ fn primary_startup_serves_selected_apps_before_historical_apps() {
         .operation(0)
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
 
     held.startup = super::StartupState::Loading;
@@ -183,7 +183,7 @@ fn cancellation_between_primary_and_complete_releases_only_unretained_startup_ow
     let cancellation = Arc::new(crate::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
     let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
     let mut startup = super::recording::staged::Startup::new();
@@ -214,9 +214,9 @@ fn cancellation_between_primary_and_complete_releases_only_unretained_startup_ow
 fn payload_construction_keeps_legacy_app_row_capacity_outside_the_opt_in_owner() {
     // Goal: opt-in buffers cannot preallocate unadmitted legacy App rows.
     // Method: inspect every free pool slot immediately after both real Held constructors.
-    let mut legacy = super::Held::new();
+    let mut legacy = super::Held::without_recording();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut payload = super::Held::with_payload(Arc::clone(&budget));
+    let mut payload = super::Held::without_recording_with_payload(Arc::clone(&budget));
     let mut legacy_count = 0;
     let mut payload_count = 0;
 
@@ -315,7 +315,7 @@ fn staged_history_then_a_clock_set_back_leave_the_leaders_of_the_seconds_after_i
         .operation(0)
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
     let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
     let mut startup = super::recording::staged::Startup::new();
@@ -475,7 +475,7 @@ fn selected_apps_use_an_available_source_predecessor_below_wall_pruning() {
         .operation(0)
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
     let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
     let mut startup = super::recording::staged::Startup::new();
@@ -513,7 +513,7 @@ fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
         .operation(0)
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.span = super::Span::new(2, super::Buffers::new(3, super::MachineSecond::default));
     held.apps = super::Span::new(2, super::Buffers::new(3, AppsSecond::default));
     held.startup = super::StartupState::Loading;
@@ -563,7 +563,7 @@ fn unread_machine_retention_needs_no_admission_even_after_recent_and_older_evict
     let run = fixture.writer.identity().unwrap();
     let budget = Arc::new(ByteBudget::new(1024));
     let lease = budget.reserve(budget.maximum()).unwrap();
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
 
     for publication in 1..=1200 {
@@ -616,7 +616,7 @@ fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_bou
         .operation(0)
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.span = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
     held.apps = super::Span::new(1, super::Buffers::new(2, AppsSecond::default));
     held.earlier = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
@@ -679,7 +679,7 @@ fn a_clockless_source_tail_is_handed_off_once_after_an_earlier_displayable_selec
         .operation(0)
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
     let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
     let mut startup = super::recording::staged::Startup::new();
@@ -727,7 +727,7 @@ fn cancellation_immediately_before_publication_leaves_no_startup_view() {
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     held.enable_payload(Arc::clone(&budget));
     let outcome =
         super::recording::load_payload(&fixture.root, &budget, &operation, |run, second, apps| {
@@ -821,7 +821,7 @@ fn cancellation_after_last_consumption_rejects_the_terminal_handoff() {
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     held.enable_payload(Arc::clone(&budget));
     let mut accepted = 0;
 

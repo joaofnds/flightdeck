@@ -139,7 +139,7 @@ pub(super) fn expand_program_dictionary(fixture: &mut Fixture) {
 
 fn sealed_payload_view(fixture: &Fixture) -> Arc<View> {
     let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     held.enable_payload(Arc::clone(&budget));
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
@@ -377,7 +377,7 @@ fn sealed_payloads_match_ring_payloads_including_refused_processes() {
 fn an_older_sample_keeps_its_identity_and_ranked_apps_without_a_recording() {
     // Goal: a thirty-minute-back hover uses resident machine readings and rankings together.
     // Method: advance a store directly, then inspect its sampled payload with no source reader.
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
     held.enable_payload(Arc::clone(&budget));
     for second in 100..=1_900 {
@@ -649,7 +649,7 @@ fn a_sampled_refusal_reserves_its_owned_reason() {
 fn a_retained_older_sample_stays_immutable_after_its_tail_expires() {
     // Goal: recycling the sampled tail never changes a sample held by an older reader.
     // Method: retain just its first sample, advance past the tail, and inspect both Views.
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let budget = Arc::new(super::ByteBudget::new(4 * 1024 * 1024));
     held.enable_payload(Arc::clone(&budget));
     for second in 100..=1_900 {
@@ -1054,7 +1054,7 @@ mod when_the_live_span_lets_go_of_a_second {
         // Goal: a chart of the loaded hour draws one reading in every ten seconds past the live
         // span, as the older tail draws them. Method: take in 25 seconds more than the live span
         // holds, from a wall second that starts no stretch, and read the older seconds.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         let first = 1_005;
         let last = first + u64::try_from(SECONDS_MAX).unwrap() + 25;
 
@@ -1070,7 +1070,7 @@ mod when_the_live_span_lets_go_of_a_second {
     fn the_store_lets_go_of_the_oldest_stretch_past_the_loaded_hour() {
         // Goal: the older seconds stay within their bound. Method: let the live span go of one
         // stretch more than the older seconds hold, and read the oldest of them.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         let let_go = (u64::try_from(EARLIER_MAX).unwrap() + 1) * 10;
         let last = 1_000 + u64::try_from(SECONDS_MAX).unwrap() + let_go;
 
@@ -1093,7 +1093,7 @@ mod when_a_second_reaches_the_store_twice {
     fn the_store_holds_it_once() {
         // Goal: a tick the recording sealed and the ring still holds shows once. Method: take in
         // one run's second, then that second and the one before it again.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         assert!(held.take(&RUN, &second_at(101), UNREAD));
 
         assert!(held.take(&RUN, &second_at(100), UNREAD));
@@ -1108,7 +1108,7 @@ mod when_a_second_reaches_the_store_twice {
         // Goal: a collector that starts again numbers its publications afresh, so the store
         // tells its seconds from the run's before by the run. Method: take in a second of one
         // run, then a second of another run with a lower publication.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         let next = RunIdentity {
             run: Identity([4, 4]),
             ..RUN
@@ -1131,7 +1131,7 @@ mod when_the_readings_break {
     fn a_second_that_does_not_follow_the_one_before_starts_a_segment() {
         // Goal: a chart breaks its line where the readings break. Method: take in two pairs of
         // seconds, each second of a pair following the one before it, and read their segments.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
 
         for (wall_second, follows) in [(100, false), (101, true), (102, false), (103, true)] {
             assert!(held.take(&RUN, &following(wall_second, follows), UNREAD));
@@ -1144,7 +1144,7 @@ mod when_the_readings_break {
     fn a_second_of_another_run_starts_a_segment() {
         // Goal: a line never joins the readings of two runs. Method: take in a second of the
         // next run that follows a second of its own run, after a second of this run.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         let next = RunIdentity {
             run: Identity([4, 4]),
             ..RUN
@@ -1161,7 +1161,7 @@ mod when_the_readings_break {
         // Goal: the older seconds, one in ten, break their line where the readings between them
         // broke. Method: break the readings at a second the older seconds leave out, let the
         // live span go of three stretches, and read the older seconds' segments.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         let last = 1_030 + u64::try_from(SECONDS_MAX).unwrap();
 
         for wall_second in 1_000..last {
@@ -1195,7 +1195,7 @@ mod when_the_app_rule_refuses_a_tick {
         // Goal: a chart places a second whose Apps the App rule refused, and breaks its line
         // around it, as the worker's App histories do. Method: take in a refused tick and read
         // the tick its second names.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         let second = MachineSecond {
             continuous_ns: Some(7_000_000_000),
             awake_ns: Some(6_000_000_000),
@@ -1229,7 +1229,7 @@ mod when_a_tick_is_missed {
         // Goal: an App chart breaks its line where the worker's App histories break it, before
         // a second whose tick is not the one after the tick before it. Method: take in seconds
         // 100, 101 and 103, each with the clocks the rule compares, and read which follow.
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
 
         for wall_second in [100, 101, 103] {
             assert!(held.take(&RUN, &clocked(wall_second), UNREAD));
@@ -1994,7 +1994,7 @@ fn held_through(view: &View, wall_second: u64) -> bool {
 fn releasing_a_retained_view_allows_ingestion_after_the_spare_slots_fill() {
     // Goal: backpressure ends when the reader releases its View, without another publication.
     // Method: pin a full span, exhaust every spare slot, release the reader and retry the tick.
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let full = u64::try_from(super::SECONDS_MAX).unwrap();
     for second in 1..=full {
         assert!(held.take(&RUN, &second_at(second), UNREAD));

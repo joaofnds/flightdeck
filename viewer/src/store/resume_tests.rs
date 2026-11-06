@@ -99,7 +99,7 @@ fn a_ring_overrun_during_a_resume_reads_only_the_minutes_sealed_since_its_newest
 /// The store thread's held hour over `fixture` before its first step, following the ring past
 /// the newest sealed minute.
 fn reconciliation_held(fixture: &Fixture) -> (super::Held, super::Ring) {
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let cancellation = std::sync::Arc::new(crate::cancellation::Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
@@ -477,7 +477,7 @@ fn ordinary_ingestion_delivers_a_replacement_before_its_retained_view_exhausts_b
     // Method: retain a full span, queue 65 real ring ticks, take the next View, then finish.
     let mut fixture = pressure_recording();
     let run = fixture.writer.identity().unwrap();
-    let mut held = super::Held::new();
+    let mut held = super::Held::without_recording();
     for publication in 1..=1080 {
         fixture.publish_with_system_rows(publication);
         let second = MachineSecond {

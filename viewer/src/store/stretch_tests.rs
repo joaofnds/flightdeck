@@ -27,7 +27,7 @@ fn a_closed_stretch_adds_up_the_apps_of_its_seconds() {
     // the seconds themselves add up. Method: take in seconds 1,000 to 1,010, A using 1,000 ns
     // of CPU times its wall second at each, so 1,010 closes the stretch of 1,000 to 1,009, over
     // which A used 10,045,000 ns, and read that stretch.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 1_000..=1_010 {
         take(
             &mut held,
@@ -53,7 +53,7 @@ fn a_closed_stretch_adds_up_the_energy_and_the_disk_bytes_of_its_seconds() {
     // used of their own resource over those seconds. Method: take in seconds 1,000 to 1,010, A
     // using 1,000 ns of CPU, 2,000 nJ and 3,000 bytes of disk at each, so 1,010 closes the
     // stretch of 1,000 to 1,009, and read what A used of energy and disk over the stretch.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 1_000..=1_010 {
         let used = Used {
             energy_nj: Some(2_000),
@@ -77,7 +77,7 @@ fn a_closed_stretch_adds_up_the_gpu_time_of_its_seconds() {
     // the GPU over those seconds. Method: take in seconds 1,000 to 1,010, A using 4,000 ns of
     // GPU time at each, so 1,010 closes the stretch of 1,000 to 1,009, and read what A used of
     // the GPU over the stretch.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 1_000..=1_010 {
         let used = Used {
             gpu_ns: Some(4_000),
@@ -97,7 +97,7 @@ fn an_app_missing_from_a_second_holds_no_memory_there() {
     // Goal: the chart of resident memory stacks a stretch's Apps to what they held on average
     // over its seconds. Method: A holds four kibibytes at each second of the stretch of 1,000 to
     // 1,009, and B two at the first five only, so B holds one on average.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 1_000..=1_010 {
         let mut used = vec![resident(b"/A.app", 4_096)];
         if wall_second < 1_005 {
@@ -121,7 +121,7 @@ fn a_second_without_its_apps_adds_no_interval() {
     // Goal: a second whose Apps the store did not read leaves a stretch's rates those of its
     // other seconds. Method: A uses a microsecond of CPU at each second of the stretch of 1,000
     // to 1,009 but 1,003, whose Apps are unread, and its rate is compared with one second's.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 1_000..=1_010 {
         if wall_second == 1_003 {
             let unread = TickApps::Missing(&Missing::Unread);
@@ -147,7 +147,7 @@ fn a_stretch_whose_intervals_add_up_past_a_counter_draws_no_rate() {
     // rate rather than stopping the app. Method: A uses a microsecond of CPU at each second of
     // the stretch of 1,000 to 1,009, each measured over just over half the nanoseconds a u64
     // counts, so two of them add up past it.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 1_000..=1_010 {
         let mut apps = second_with(wall_second, &[cpu(b"/A.app", 1_000)]);
         apps.elapsed_ns = Some(u64::MAX / 2 + 1);
@@ -168,7 +168,7 @@ fn a_second_measured_over_no_interval_adds_no_use() {
     // stretch's rates those of its other seconds. Method: A uses a microsecond of CPU at each
     // second of the stretch of 1,000 to 1,009, 1,000 measured over no interval, and its rate is
     // compared with one second's.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 1_000..=1_010 {
         let mut apps = second_with(wall_second, &[cpu(b"/A.app", 1_000)]);
         if wall_second == 1_000 {
@@ -192,7 +192,7 @@ fn a_second_measured_over_no_interval_adds_no_use() {
 fn the_store_lets_go_of_the_oldest_stretch_past_the_loaded_hour() {
     // Goal: the stretches stay within their bound. Method: close two stretches more than the
     // store holds, from wall second 1,000, and read the oldest stretch left.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     let closed = u64::try_from(STRETCHES_MAX).unwrap() + 2;
 
     for wall_second in 1_000..=1_000 + closed * 10 {
@@ -210,7 +210,7 @@ fn a_reset_store_holds_no_stretch_of_the_seconds_before_it() {
     // Goal: a store reset for a load that replaces what it held keeps no stretch of the seconds
     // it held before, closed or open. Method: close stretch 100 and open 101, each holding A,
     // reset the store, take wall seconds 10,000 and 10,010, and read the View's stretches.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     take(&mut held, 1_000, &[cpu(b"/A.app", 1_000)]);
     take(&mut held, 1_010, &[cpu(b"/A.app", 1_000)]);
 
@@ -234,7 +234,7 @@ fn a_view_of_the_whole_loaded_hour_holds_back_no_second_the_live_span_has_room_f
     // than there are spare ones. Method: fill every span from wall second 1,000 up to the last
     // second of a stretch, hold the View, take a second at a time until the store refuses one,
     // and count the seconds it took beside the spare seconds.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     let newest = 1_000 + (u64::try_from(STRETCHES_MAX).unwrap() + 2) * 10 - 1;
     for wall_second in 1_000..=newest {
         let unread = TickApps::Missing(&Missing::Unread);
@@ -262,7 +262,7 @@ fn a_stretch_of_more_apps_than_it_holds_holds_none() {
     // Goal: a stretch past its bound says it holds no Apps rather than showing some of them.
     // Method: seconds 1,000 and 1,001 each hold a different half of one App more than a
     // stretch holds, and the chart's Other of the stretch is read.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     take_more_apps_than_a_stretch_holds(&mut held, 1_000);
     take(&mut held, 1_010, &[]);
 
@@ -286,7 +286,7 @@ fn a_stretch_a_load_added_up_part_of_holds_none_where_that_part_holds_more_apps_
         apps: folding.finish().unwrap(),
         publication: 1_001,
     };
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     assert!(held.take(&RUN, &second_at(1_000), TickApps::Folded(&folded)));
     let unread = TickApps::Missing(&Missing::Unread);
     assert!(held.take(&RUN, &second_at(1_001), unread));
@@ -342,7 +342,7 @@ fn a_catch_up_adds_up_no_second_the_store_holds() {
     let older = [(0, 55..60), (1, 0..5)];
     let newer = [(21, 0..5)];
     let mut fixture = recording_of(&older);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     let failure = recording::load_hour(
         &fixture.root,
         None,
@@ -422,7 +422,7 @@ fn a_launch_that_owes_older_minutes_apps_hands_over_no_stretch() {
     // 0 and 1 are older than the seconds whose Apps the store holds one by one, and launch a
     // store on the recording.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
 
     super::startup_launch(&fixture.root, &mut held);
 
@@ -440,7 +440,7 @@ fn a_launch_adds_up_the_apps_it_owes_once_the_main_thread_takes_its_first_view()
     // first frame. Method: seal a few ticks of run minutes 0, 1 and 21, launch a store, hand over
     // its first View, and run the pass while that View waits and again once it is taken.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     super::startup_launch(&fixture.root, &mut held);
     let mailbox = Mailbox::new();
     held.publish(&mailbox);
@@ -514,7 +514,7 @@ fn a_launch_adds_up_the_apps_it_owes_while_a_view_holds_every_stretch_the_store_
     let mut fixture = recording_of(&minutes);
     seal_minutes(&mut fixture, 9 * 60 + 5, &[(59, 0..5)]);
     let whole = loaded(&fixture);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     super::startup_launch(&fixture.root, &mut held);
     // The launch closed ten stretches and opened an eleventh, which wall second 10,000 closes.
     let closed = u64::try_from(STRETCHES_MAX).unwrap() - 11;
@@ -550,7 +550,7 @@ fn a_launch_adds_up_the_apps_it_owes_once_it_catches_up_on_newer_minutes() {
     // and catch the store up on them. Add up the Apps the store owes and compare its stretches
     // with a whole load's.
     let mut fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     super::startup_launch(&fixture.root, &mut held);
     seal_minutes(&mut fixture, 21 * 60 + 5, &[(22, 0..5)]);
     catch_up(&mut held, &fixture);
@@ -575,7 +575,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete()
     // 0, 1 and 21, launch a store, empty minute 0's ticks table, then add up the Apps the store
     // owes.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     super::startup_launch(&fixture.root, &mut held);
     assert!(held.covers_hour);
     let owed = held.owed.take().unwrap();
@@ -601,7 +601,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_adds_up_those_of_the_other_mi
     // ticks table, add up the Apps the store owes, and compare that stretch with a whole load's.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (2, 0..5), (21, 0..5)]);
     let whole = loaded(&fixture);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     super::startup_launch(&fixture.root, &mut held);
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
@@ -636,7 +636,7 @@ fn a_launch_adds_up_no_apps_it_owes_a_stretch_the_store_let_go_of() {
     // lets go of every stretch the launch handed over. Add up the Apps the store owes and read
     // its stretches.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     super::startup_launch(&fixture.root, &mut held);
     let closed = u64::try_from(STRETCHES_MAX).unwrap() + 2;
     for wall_second in 10_000..=10_000 + closed * 10 {
@@ -721,7 +721,7 @@ fn a_window_chooses_the_leaders_of_each_resource_by_what_they_used_of_it() {
     // uses the most CPU and GPU time, B the most energy and C the most disk bytes, each in a
     // different order after the first, and the window of 100 to 129 is chosen from the View's
     // stretches and its seconds from 125 on.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 100..=139 {
         let used = |key, [cpu_ns, energy_nj, disk_io_bytes, gpu_ns]: [u64; 4]| Used {
             energy_nj: Some(energy_nj),
@@ -782,7 +782,7 @@ fn a_window_counts_no_stretch_from_before_the_clock_was_set_back() {
     // to 129, then the clock goes back to 105 and Y uses 20 at every second to 119, so the View
     // holds the stretches of 100 to 129 and then that of 105 to 109. The window of 100 to 119
     // is compared with the same View's seconds one by one.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 100..=129 {
         take(&mut held, wall_second, &[cpu(b"/X.app", 90)]);
     }
@@ -831,7 +831,7 @@ fn a_window_chooses_its_apps_past_a_stretch_of_more_apps_than_it_holds() {
     // leaves the chart the Apps of its other seconds. Method: seconds 1,000 and 1,001 each hold
     // a different half of one App more than a stretch holds, and A uses CPU at every second
     // from 1,010 to 1,020. The window of 1,000 to 1,020 is chosen from the View's stretches.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     take_more_apps_than_a_stretch_holds(&mut held, 1_000);
     for wall_second in 1_010..=1_020 {
         take(&mut held, wall_second, &[cpu(b"/A.app", 1_000)]);
@@ -903,7 +903,7 @@ fn seal_minutes(fixture: &mut Fixture, mut run_tick: u64, minutes: &[(u64, Range
 
 /// The View of a store that loaded `fixture`'s recording.
 fn loaded(fixture: &Fixture) -> Arc<View> {
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     load_into(&mut held, fixture);
 
     published(&mut held)
@@ -933,7 +933,7 @@ fn assert_stopped_loads_catch_up(fixture: &Fixture, stop_seconds: Range<u64>) {
     }
 
     for stop_second in stop_seconds {
-        let mut held = Held::new();
+        let mut held = Held::without_recording();
         let failure = recording::load_hour(
             &fixture.root,
             None,
@@ -960,7 +960,7 @@ fn assert_owed_apps_add_up(fixture: &Fixture) {
     for expected in &whole.stretches {
         assert!(expected.holds_apps());
     }
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     super::startup_launch(&fixture.root, &mut held);
     let owed = held.owed.take().unwrap();
 
@@ -1057,7 +1057,7 @@ fn resident_measured_of(stretch: &AppsStretch) -> Vec<Option<(u64, u32)>> {
 
 /// A View of seconds 100 to 139, each with the Apps `window_used` names.
 fn window_view() -> Arc<View> {
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for wall_second in 100..=139 {
         take(&mut held, wall_second, &window_used(wall_second));
     }

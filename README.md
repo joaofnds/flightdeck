@@ -82,9 +82,10 @@ owner-only access; files use mode 0600 and inherited access-control entries are 
 
 New process and App GPU time is unavailable because the driver client counters do not prove
 process ownership. Machine GPU activity, energy and memory remain recorded when available,
-and older recordings retain their values. Saved-history retention is not implemented yet,
-so disk use continues to grow. See the [collector guide](docs/collector.md#the-ring) for
-the ring's memory costs and the [current limits](docs/collector.md#limits).
+and older recordings retain their values. The recording keeps its readings for a retention
+period, one day unless Settings says otherwise, and deletes them after it. See the
+[collector guide](docs/collector.md#the-ring) for the ring's memory costs and the
+[current limits](docs/collector.md#limits).
 
 The diagnostic query API is `persistence::query::processes_at_second`. The native viewer
 uses `viewer::Session` for complete saved-tick inspection. `recording_check` compares a live

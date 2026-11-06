@@ -513,8 +513,15 @@ Without root, about a third of processes, those of other users such as `launchd`
 and part of their usage through coalition totals. A ring stays in memory or swap after its
 collector exits, and the registry keeps at most the active ring and one earlier one. A lock
 file lost or rewritten by another program makes the next collector name its rings afresh, and
-the rings named under the old lock file stay until the Mac restarts (Security). The retention
-period is not built yet, so the recording grows until it is.
+the rings named under the old lock file stay until the Mac restarts (Security).
+
+The retention period is one day unless set otherwise, in Settings or, for a recorder run without
+the app, in `retention/period` inside the recording, a file holding a whole number of seconds from
+60 up. A reading stops showing as soon as it passes the period. Its minute is deleted about a
+minute after that, at most 16 minutes in each minute, so a much shorter period takes a while to
+free the disk. A disk with no room for a save and nothing expired still refuses the save, which
+leaves a gap. A process stuck in a read keeps the files it has open until it exits, which macOS
+gives no other process a way to end.
 
 ## Terms
 

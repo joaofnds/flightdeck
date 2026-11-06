@@ -7,6 +7,7 @@ use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
 use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
+use persistence::retention::Retained;
 use persistence::{Error, Manifest};
 
 use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_predecessor};
@@ -102,6 +103,7 @@ fn find_windows(
                 .map_err(find_failure)?,
         );
     }
+    let minutes = find_windows_covered(root, minutes);
     find_windows_range(root, catalog, &minutes, runs, found)?;
     find_order(found, runs, window);
 
@@ -117,6 +119,34 @@ fn find_windows(
         // With no clock to start from, the range took in every window the recording holds.
         decoded_is_whole: first_ns.is_none(),
     })
+}
+
+/// The minutes that may hold a second to show, and the minute just before each, whose last tick
+/// gives its first second the rates. Removal may take any other minute from under this list, and
+/// waits a grace past the period for those it leaves, so no read of them meets a removal.
+fn find_windows_covered(root: &Path, minutes: Vec<Manifest>) -> Vec<Manifest> {
+    let boots = minutes.iter().map(|manifest| manifest.identity.run.boot);
+    let retained = Retained::read(root, boots);
+    let covered: Vec<&Manifest> = minutes
+        .iter()
+        .filter(|manifest| retained.holds_any(manifest.identity.run.boot, manifest.continuous_ns))
+        .collect();
+    let kept: Vec<bool> = minutes
+        .iter()
+        .map(|manifest| {
+            covered.iter().any(|next| {
+                next.identity.run == manifest.identity.run
+                    && (next.publication_first == manifest.publication_first
+                        || next.publication_first == manifest.publication_end)
+            })
+        })
+        .collect();
+
+    minutes
+        .into_iter()
+        .zip(kept)
+        .filter_map(|(manifest, keep)| keep.then_some(manifest))
+        .collect()
 }
 
 /// The clocks of the recording's oldest and newest readings.

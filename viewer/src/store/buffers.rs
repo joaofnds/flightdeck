@@ -6,6 +6,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, TryLockError};
 
+use collector::ring::Identity;
+use persistence::retention::Retained;
+
 #[cfg(test)]
 #[path = "buffers_tests.rs"]
 mod tests;
@@ -141,9 +144,26 @@ impl<T> Span<T> {
         drop(self.held.pop_front());
     }
 
-    /// The oldest reading the span holds.
-    pub(super) fn oldest(&self) -> Option<&T> {
-        self.held.front().map(AsRef::as_ref)
+    /// How many of the oldest readings have expired: those through the newest that expired before
+    /// the first still covered. `place` gives a reading's boot and clock, and a reading with none
+    /// has no place on the retention clock, so it stops nothing.
+    pub(super) fn expired_count(
+        &self,
+        retained: &Retained,
+        place: impl Fn(&T) -> Option<(Identity, u64)>,
+    ) -> usize {
+        let mut count = 0;
+        for (index, reading) in self.held.iter().enumerate() {
+            let Some((boot, continuous_ns)) = place(reading) else {
+                continue;
+            };
+            if retained.holds(boot, Some(continuous_ns)) {
+                break;
+            }
+            count = index + 1;
+        }
+
+        count
     }
 
     /// Whether `push` finds a buffer to write: a free one, or the oldest reading's where the

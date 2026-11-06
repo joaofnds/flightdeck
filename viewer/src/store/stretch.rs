@@ -118,23 +118,16 @@ impl Stretches {
     /// Lets go of each closed stretch that adds up an expired reading, which its first reading
     /// is the oldest of. Whatever else that stretch holds stays readable second by second.
     pub(super) fn expire(&mut self, retained: &Retained) -> bool {
-        let mut removed = false;
-        for _ in 0..self.closed.len() {
-            let Some(oldest) = self.closed.oldest() else {
-                break;
-            };
-            let Some(observation) = &oldest.observation else {
-                break;
-            };
-            let boot = Identity(observation.stamp.boot);
-            if retained.holds(boot, observation.stamp.continuous_ns) {
-                break;
-            }
+        let expired = self.closed.expired_count(retained, |stretch| {
+            let stamp = &stretch.observation.as_ref()?.stamp;
+
+            Some((Identity(stamp.boot), stamp.continuous_ns?))
+        });
+        for _ in 0..expired {
             self.closed.remove_oldest();
-            removed = true;
         }
 
-        removed
+        expired > 0
     }
 
     /// The closed stretches, oldest first.

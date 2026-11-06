@@ -91,7 +91,7 @@ fn retired_private_apps_release_budget_before_the_next_real_source_capture() {
     fixture.publish_with_usage(100, &usage(0));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::with_payload(Arc::clone(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     held.span = crate::store::Span::new(
         1,
         crate::store::Buffers::new(2, crate::store::MachineSecond::default),
@@ -173,7 +173,7 @@ fn staged_small_span(
 fn staged_before_primary(
     input: &crate::store::recording::staged::Input<'_>,
 ) -> (Held, Ring, crate::store::recording::staged::Startup) {
-    let mut held = Held::with_payload(Arc::clone(input.budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(input.budget));
     held.span = crate::store::Span::new(
         2,
         crate::store::Buffers::new(3, crate::store::MachineSecond::default),
@@ -390,7 +390,7 @@ fn accepted_app_rows_keep_the_capacity_their_reservation_admitted() {
     fixture.publish_with_usage(100, &usage(0));
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     held.enable_payload(Arc::clone(&budget));
     let mut ring = make_ring(&fixture.root, Some(&budget));
     ring.follow().unwrap();
@@ -524,7 +524,7 @@ fn resetting_the_store_preserves_charges_for_retained_app_row_capacity() {
     fixture.publish_with_usage(100, &usage(0));
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     held.enable_payload(Arc::clone(&budget));
     let mut ring = make_ring(&fixture.root, Some(&budget));
     ring.follow().unwrap();
@@ -591,7 +591,7 @@ fn the_complete_store_retains_native_facets_from_one_ingestion() {
     let scope = trace.enter();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     held.enable_payload(Arc::clone(&budget));
     let mut ring = make_ring(&fixture.root, Some(&budget));
     crate::store::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();

@@ -368,7 +368,7 @@ fn cancellation_rejects_a_finished_report_before_installing_its_handoff() {
         checked_catalog: None,
         decoded_catalog: recording::DecodedCatalog::default(),
     };
-    let mut held = crate::store::Held::new();
+    let mut held = crate::store::Held::without_recording();
     let mut ring = Ring::new(fixture.root.clone());
     let mailbox = crate::store::Mailbox::new();
     cancellation.cancel().unwrap();

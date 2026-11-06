@@ -272,7 +272,7 @@ fn machine_pool_reclamation_releases_complete_owners_after_the_last_view() {
         .unwrap()
         .unwrap();
     let charged = second.complete().unwrap().bytes();
-    let mut held = crate::store::Held::new();
+    let mut held = crate::store::Held::without_recording();
     let run = RunIdentity {
         recording: Identity([1, 2]),
         run: Identity([3, 4]),

@@ -13,7 +13,7 @@ fn complete_retention_admits_an_explicit_refusal_before_evicting_its_recent_owne
     // Goal: complete native retention never installs an older Budget in place of a refusal.
     // Method: deny the exact fallible ranking seam with a real shared reservation, then retry.
     let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
-    let mut held = Held::with_payload(Arc::clone(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     held.span = super::Span::new(1, super::Buffers::new(2, MachineSecond::default));
     held.apps = super::Span::new(1, super::Buffers::new(2, super::AppsSecond::default));
     let mut refused = super::AppsSecond::default();
@@ -54,7 +54,7 @@ fn complete_retention_admits_an_explicit_refusal_before_evicting_its_recent_owne
 fn a_sparse_history_without_eviction_preserves_its_gaps() {
     // Goal: the first retained reading does not turn a valid preceding gap into an eviction.
     // Method: retain two distant observations without filling the full-detail span.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     take(&mut held, &second(100));
     take(&mut held, &second(1_000));
 
@@ -68,7 +68,7 @@ fn a_sparse_history_without_eviction_preserves_its_gaps() {
 fn an_eviction_records_the_departed_time_without_moving_an_older_view() {
     // Goal: full-detail availability records actual eviction rather than the next reading's time.
     // Method: retain a full View, then evict its first reading across a large wall-clock gap.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     take(&mut held, &second(1));
     for publication in 2..=u64::try_from(super::SECONDS_MAX).unwrap() {
         take(
@@ -151,7 +151,7 @@ fn a_load_reset_starts_a_new_eviction_account_without_mutating_old_views() {
 fn repeated_wall_publications_keep_their_shared_eviction_time() {
     // Goal: losing one sibling makes that wall time incomplete even while another remains.
     // Method: evict two same-wall siblings separately before evicting their later successor.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for publication in 1..=2 {
         take(
             &mut held,
@@ -194,7 +194,7 @@ fn repeated_wall_publications_keep_their_shared_eviction_time() {
 fn a_backward_clock_cannot_restore_already_evicted_detail() {
     // Goal: a later eviction at an earlier clock cannot erase an already recorded loss.
     // Method: evict a wall-500 reading, then a wall-100 reading in publication order.
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     take(
         &mut held,
         &MachineSecond {
@@ -255,7 +255,7 @@ fn an_already_accepted_publication_cannot_advance_the_eviction_account() {
 }
 
 fn full_span() -> Held {
-    let mut held = Held::new();
+    let mut held = Held::without_recording();
     for publication in 1..=u64::try_from(super::SECONDS_MAX).unwrap() {
         take(&mut held, &second(publication));
     }
