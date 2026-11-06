@@ -381,11 +381,11 @@ const WINDOW_COUNTS_OF_DAYS: [u64; 1] = [1_440];
 #[test]
 fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
     // Goal: a recording keeps opening and answering at its oldest and newest seconds at 65,535,
-    // 65,536, 65,537 and 131,072 windows, a live reader goes on across the old cap, and neither
-    // lists or reads what lies between (P02.1, P02.2).
+    // 65,536, 65,537 and 131,072 windows, a live reader goes on across the old cap, neither lists
+    // or reads what lies between, and two runs on one second both stay selectable (P02.1, P02.2).
     // Method: save real minutes at both ends through the worker and link windows between them whose
     // proofs do not read, so that admitting any of them fails the read. Then cross the cap with
-    // real saves while a live session polls.
+    // real saves while a live session polls, and save another run over the oldest second.
     const SECOND_BETWEEN: u64 = SECOND_FIRST + 20_000;
     let [below, at, above, twice] = WINDOW_COUNTS;
     let newest = SECOND_BETWEEN + twice + 20_000;
@@ -412,7 +412,17 @@ fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
     registered_save_minute(&mut fixture, newest + 180);
     live.poll().unwrap();
     let listed_twice = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 180);
+    let mut sharing = Fixture::new_mode(true, 2, Some(&fixture));
+    sharing.start_at_run_tick(58);
+    sharing.publish_with_system_rows(SECOND_FIRST);
+    sharing.seal();
+    live.poll().unwrap();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let one = session.select(SECOND_FIRST, 0).unwrap();
+    let other = session.select(SECOND_FIRST, 1).unwrap();
 
+    assert_eq!(one["alternatives"].as_array().unwrap().len(), 2);
+    assert_ne!(one["selected"]["run"], other["selected"]["run"]);
     assert_eq!(live_at, newest + 60);
     assert_eq!(live_above, newest + 120);
     assert_eq!(live.catalog()["last_second"], newest + 180);
@@ -463,7 +473,7 @@ fn what_a_lookup_reads_stays_within_the_tree_however_long_the_recording() {
 /// `second`, under a run of their own.
 fn registered_link_between(fixture: &Fixture, second: u64, publications: std::ops::Range<u64>) {
     let mut run = fixture.writer.identity().unwrap();
-    run.run.0[0] ^= 1;
+    run.run.0[1] ^= 1;
     let readings: Vec<_> = publications
         .map(
             |publication| persistence::canonical::catalog::KnownReading {
