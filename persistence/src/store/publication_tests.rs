@@ -1022,7 +1022,10 @@ fn write_derivatives(attempt: &RegisteredAttempt<'_>, fixture: &Fixture, manifes
         .derive(&crate::worker::Derivation {
             window: &window,
             pending: &PrivateDirectory::open(&derived).unwrap(),
-            saved: None,
+            saved: crate::worker::SavedRecording {
+                root: &fixture.root,
+                budget: &Arc::new(crate::resources::ByteBudget::new(256 * 1024 * 1024)),
+            },
         })
         .unwrap();
     for table in &tables {

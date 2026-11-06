@@ -292,7 +292,7 @@ fn tick_frame(
     }
     tick_columns(&table, raw_work)
 }
-fn admit_tick_file(
+pub(crate) fn admit_tick_file(
     file: File,
     budget: &Arc<ByteBudget>,
     work: Option<&dyn crate::engine::RawTableWork>,

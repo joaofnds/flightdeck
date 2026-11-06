@@ -6,15 +6,9 @@
 use std::sync::Arc;
 
 use persistence::engine::Cells;
-use persistence::identity::{validate, validation_columns};
-use persistence::schema::{
-    IDENTITY_FIELDS, IDENTITY_ROWS_MAX, PROCESS_GPU_FIELD, Table, availability,
-    identity_availability,
-};
-use persistence::tick_rows::USAGE_COLUMNS;
-use polars::prelude::{
-    DataFrame, DataType, Expr, IntoLazy, Null, UInt32Type, UInt64Type, col, lit,
-};
+use persistence::identity::validate;
+use persistence::schema::{IDENTITY_FIELDS, IDENTITY_ROWS_MAX, PROCESS_GPU_FIELD, Table};
+use polars::prelude::{DataFrame, IntoLazy, UInt32Type, UInt64Type, col};
 
 use super::apps::AppMinute;
 use super::ticks_input::TicksTable;
@@ -297,23 +291,7 @@ pub(crate) fn read_processes_batch_with_endpoints(
     minute: &SealedMinute,
     endpoints: Vec<Endpoint>,
 ) -> Result<ProcessBatch, Refused> {
-    let processes = minute.table(Table::Processes)?;
-    let gpu_ns = if processes.holds(&[PROCESS_GPU_FIELD.0])? {
-        col("gpu_ns")
-    } else {
-        null("gpu_ns", DataType::UInt64)
-    };
-    let mut rows = read_processes_rows(
-        processes,
-        [
-            lit(0_u8).cast(DataType::UInt8).alias("app_origin"),
-            null("app_event", DataType::UInt64),
-            null("app_kind", DataType::UInt8),
-            null("app_tick", DataType::UInt64),
-            col("threads"),
-            gpu_ns,
-        ],
-    )?;
+    let mut rows = read_processes_rows(minute.table(Table::Processes)?)?;
 
     let events = read_processes_batch_events(minute)?;
     rows.vstack_mut_owned(events)
@@ -333,19 +311,11 @@ pub(crate) fn read_processes_batch_with_endpoints(
 }
 
 fn read_processes_batch_events(minute: &SealedMinute) -> Result<DataFrame, Refused> {
-    let origin = [
-        lit(1_u8).cast(DataType::UInt8).alias("app_origin"),
-        col("event").alias("app_event"),
-        col("kind").alias("app_kind"),
-        col("run_tick").alias("app_tick"),
-        null("threads", DataType::Int32),
-        null("gpu_ns", DataType::UInt64),
-    ];
     // Parts validate their native event order, so associated rows already have the assembly's
     // order. Keep leased chunks instead of copying them into an unleased sort.
     Ok(super::events::associated(minute)?
         .lazy()
-        .with_columns(origin)
+        .with_columns(persistence::tick_rows::event_columns())
         .select(BATCH_COLUMNS.map(col))
         .collect()
         .map_err(persistence::Error::from)?)
@@ -412,21 +382,12 @@ pub(super) fn read_processes_endpoints_rows(
     Ok(endpoints)
 }
 
-/// The rows of the minute's process `table`, in the columns the assembly reads, with
-/// `origin` the columns where processes differ from events. Rows of a table
-/// that holds the identity fields pass the identity admission rule, and a table sealed before
-/// them holds processes of unsupported identity, as the SQL replay reads it.
-fn read_processes_rows(mut table: SealedTable, origin: [Expr; 6]) -> Result<DataFrame, Refused> {
+/// The rows of the minute's process `table`, in the columns the assembly reads. Rows of a table
+/// that holds the identity fields pass the identity admission rule.
+fn read_processes_rows(mut table: SealedTable) -> Result<DataFrame, Refused> {
     let held = table.holds(&IDENTITY_FIELDS.map(|(name, _)| name))?;
-    let mut columns = if held {
-        validation_columns(Table::Processes)
-    } else {
-        read_processes_rows_legacy()
-    };
-    columns.push(col("pid"));
-    columns.extend(USAGE_COLUMNS.map(col));
-    columns.push(col("publication"));
-    columns.extend(origin);
+    let columns =
+        persistence::tick_rows::process_columns(held, table.holds(&[PROCESS_GPU_FIELD.0])?);
 
     let limit = u32::try_from(IDENTITY_ROWS_MAX + 1)
         .map_err(|_| persistence::Error::Bound("process identity rows"))?;
@@ -442,26 +403,4 @@ fn read_processes_rows(mut table: SealedTable, origin: [Expr; 6]) -> Result<Data
     Ok(frame
         .select(BATCH_COLUMNS)
         .map_err(persistence::Error::from)?)
-}
-
-/// The identity columns of a process table sealed before processes carried their
-/// identity, as the SQL replay normalizes them.
-fn read_processes_rows_legacy() -> Vec<Expr> {
-    vec![
-        lit(identity_availability::UNSUPPORTED)
-            .cast(DataType::UInt8)
-            .alias("identity_availability"),
-        null("process_unique_id", DataType::UInt64),
-        null("pid_version", DataType::Int32),
-        null("executable_name", DataType::Binary),
-        null("app_path", DataType::Binary),
-        lit(availability::MEASURED)
-            .cast(DataType::UInt8)
-            .alias("usage_availability"),
-    ]
-}
-
-/// A column named `name` of type `data_type` holding no values.
-fn null(name: &str, data_type: DataType) -> Expr {
-    lit(Null {}).cast(data_type).alias(name)
 }

@@ -51,11 +51,11 @@ fn keeps_a_row_for_each_ranking_that_ranks_no_app() {
 }
 
 #[test]
-fn a_derivation_goes_back_to_the_saved_minute_unless_it_read_the_tick_before() {
+fn a_window_follows_only_a_tick_read_before_it_of_its_own_run() {
     // Goal: a derivation takes a window's first rates from what it read only where that is the
-    // tick before, so another run's tick or a later one sends it to the saved minute instead.
+    // tick before, so another run's or boot's tick or a later one sends it to the saved minute.
     // Method: read a window of a run, and ask about that run's next window, about an earlier one,
-    // and about another run's.
+    // about another run's and about another boot's.
     let mut state = state();
     let mut read_window = legacy_window(0);
     stage_legacy(&mut read_window, 5, &[process(3, 30)], &[]);
@@ -67,10 +67,13 @@ fn a_derivation_goes_back_to_the_saved_minute_unless_it_read_the_tick_before() {
     };
     let mut another_run = staged_at(6);
     another_run.identity.run.run = collector::ring::Identity([77, 78]);
+    let mut another_boot = staged_at(6);
+    another_boot.identity.run.boot = collector::ring::Identity([79, 80]);
 
     assert!(state.ticks.follows(&staged_at(6)));
     assert!(!state.ticks.follows(&staged_at(5)));
     assert!(!state.ticks.follows(&another_run));
+    assert!(!state.ticks.follows(&another_boot));
     state.ticks.clear();
     assert!(!state.ticks.follows(&staged_at(6)));
 }
@@ -111,15 +114,18 @@ fn a_full_index_refuses_one_window_and_not_the_next() {
         &[],
         &[],
     );
-    let first = ring.stage(0);
+    let mut first = ring.stage(0);
     let unmet_identity = [identity(1, UsageAvailability::Measured, unmet)];
     ring.publish(1, &[process(1, 11)], &unmet_identity, &[], &[]);
-    let refused = ring.stage(1);
+    let mut refused = ring.stage(1);
     ring.publish(2, &[process(1, 12)], &unmet_identity, &[], &[]);
-    let next = ring.stage(2);
+    let mut next = ring.stage(2);
     let (pending, pending_next) = (Pending::new(), Pending::new());
+    first.identity.run.recording = pending.1;
+    refused.identity.run.recording = pending.1;
+    next.identity.run.recording = pending.1;
     let apps = SealedApps::default();
-    apps.derive(&derivation(&first, &pending.directory()))
+    apps.derive(&derivation(&first, &pending.directory(), &pending.0))
         .unwrap();
     let mut filler = 0_u32;
     while apps
@@ -133,8 +139,10 @@ fn a_full_index_refuses_one_window_and_not_the_next() {
     }
 
     let directory = pending_next.directory();
-    let error = apps.derive(&derivation(&refused, &directory)).unwrap_err();
-    let derived = apps.derive(&derivation(&next, &directory));
+    let error = apps
+        .derive(&derivation(&refused, &directory, &pending.0))
+        .unwrap_err();
+    let derived = apps.derive(&derivation(&next, &directory, &pending.0));
 
     assert!(matches!(error, Error::Bound("window program index")));
     assert_eq!(derived.unwrap().len(), 2);
@@ -208,9 +216,10 @@ fn derives_the_ranks_and_the_parts_of_a_window() {
     let mut window = legacy_window(0);
     stage_legacy(&mut window, 0, &[process(3, 30)], &[]);
     let pending = Pending::new();
+    window.identity.run.recording = pending.1;
 
     let tables = SealedApps::default()
-        .derive(&derivation(&window, &pending.directory()))
+        .derive(&derivation(&window, &pending.directory(), &pending.0))
         .unwrap();
 
     let names: Vec<&str> = tables.iter().map(|table| table.name).collect();
@@ -229,7 +238,7 @@ fn removes_the_parts_a_window_failed_to_write() {
 
     let parts = derive_parts(
         Err(Error::Bound("sealed parts rows")),
-        &derivation(&window, &pending.directory()),
+        &derivation(&window, &pending.directory(), &pending.0),
     )
     .unwrap();
 
@@ -248,16 +257,25 @@ fn read(state: &mut State, window: &Window) -> crate::Result<()> {
 fn derivation<'seal>(
     window: &'seal Window,
     pending: &'seal collector::recording::private::PrivateDirectory,
+    root: &'seal std::path::Path,
 ) -> Derivation<'seal> {
+    static BUDGET: std::sync::LazyLock<std::sync::Arc<crate::resources::ByteBudget>> =
+        std::sync::LazyLock::new(|| {
+            std::sync::Arc::new(crate::resources::ByteBudget::new(256 * 1024 * 1024))
+        });
+
     Derivation {
         window,
         pending,
-        saved: None,
+        saved: crate::worker::SavedRecording {
+            root,
+            budget: &BUDGET,
+        },
     }
 }
 
-/// A pending directory of its own, removed with it.
-struct Pending(PathBuf);
+/// A pending directory of its own, removed with it, which is also a recording of this identity.
+struct Pending(PathBuf, collector::ring::Identity);
 
 impl Pending {
     fn new() -> Self {
@@ -266,7 +284,12 @@ impl Pending {
         let directory =
             std::env::temp_dir().join(format!("sealed-apps-{}-{number}", std::process::id()));
         collector::recording::private::create_private_dir(&directory).unwrap();
-        Self(directory)
+        let root = collector::recording::private::PrivateDirectory::open(&directory).unwrap();
+        let lock = collector::recording::private::FileLock::try_lock_in(&root, "registration.lock")
+            .unwrap();
+        let recording =
+            collector::recording::bootstrap::initialize(&root, &lock, &mut [0; 4097]).unwrap();
+        Self(directory, recording)
     }
 
     fn directory(&self) -> collector::recording::private::PrivateDirectory {

@@ -1,21 +1,23 @@
 //! The last tick saved before a window, read back from its minute for a derivation that did not
 //! read it itself, which is every derivation's first window of a run after a restart. Reading the
-//! saved rows and not the ring means one route whichever of the two still holds that tick.
+//! saved rows and not the ring means one route whichever of the two still holds that tick. The
+//! whole minute passes what a replay of it checks, so a minute a replay refuses lends no rates,
+//! and this costs what the replay of one minute costs, once a restart.
 use model::columns::TickColumns;
 use model::programs::Programs;
-use polars::prelude::{DataFrame, DataType, Expr, IntoLazy, LazyFrame, Null, UInt64Type, col, lit};
+use polars::prelude::{DataFrame, IntoLazy, LazyFrame, UInt64Type, col, lit};
 
 use crate::canonical::ReadWork;
 use crate::canonical::catalog::Catalog;
-use crate::canonical::rows::{admission_error, read_error};
+use crate::canonical::rows::{admission_error, admit_tick_file, read_error};
 use crate::engine::{AdmittedTable, Cells};
-use crate::event_observation::BATCH_ROWS_MAX;
+use crate::event_observation::{BATCH_ROWS_MAX, ROWS_MAX};
+use crate::event_table::EventTable;
 use crate::event_table::query::ordinary_error;
-use crate::event_table::{EventPart, EventTable};
-use crate::identity::{validate, validation_columns};
-use crate::schema::{PROCESS_GPU_FIELD, Table};
-use crate::tick_rows::{COLUMNS, TickPlace, TickRows, USAGE_COLUMNS, read_tick};
-use crate::window_ticks::{SeedTick, WindowTicks};
+use crate::identity::validate;
+use crate::schema::{IDENTITY_FIELDS, IDENTITY_ROWS_MAX, PROCESS_GPU_FIELD, Table};
+use crate::tick_rows::{COLUMNS, TickPlace, TickRows, event_columns, process_columns, read_tick};
+use crate::window_ticks::WindowTicks;
 use crate::worker::SavedRecording;
 use crate::{Error, Manifest, Observation, Result, Window};
 
@@ -25,7 +27,7 @@ pub(super) fn seed(
     ticks: &mut WindowTicks,
     programs: &mut Programs,
     window: &Window,
-    saved: SavedRecording<'_>,
+    saved: &SavedRecording<'_>,
 ) -> Result<()> {
     let Some(first) = window.ticks.first() else {
         return Ok(());
@@ -39,38 +41,65 @@ pub(super) fn seed(
     let Some(manifest) = manifest else {
         return Ok(());
     };
-    let (seed_tick, place) = seed_last_tick(saved, &manifest)?;
-    let mut frame = seed_rows(saved, &manifest, &place)?;
-    frame.vstack_mut_owned(seed_events(saved, &manifest, &place)?)?;
+    let minute = seed_minute(saved, &manifest)?;
+    let mut frame = seed_rows(saved, &manifest, &minute)?;
+    frame.vstack_mut_owned(seed_events(saved, &manifest, &minute.last)?)?;
     let rows = TickRows::new(&frame)?;
     let order: Vec<usize> = (0..frame.height()).collect();
 
-    ticks.seed(window, &seed_tick, |columns: &mut TickColumns| {
-        let placed = read_tick(&rows, &order, &place, programs, columns)?;
-        assert_eq!(placed, order.len());
+    ticks.seed(
+        window,
+        &minute.last_observation,
+        minute.last.run_tick,
+        |columns: &mut TickColumns| {
+            let placed = read_tick(&rows, &order, &minute.last, programs, columns)?;
+            assert_eq!(placed, order.len());
 
-        Ok(())
-    })
+            Ok(())
+        },
+    )
+}
+
+/// What a saved minute's table of ticks says of it.
+struct SeedMinute {
+    /// The publication of each of its ticks, each after the one before.
+    publications: Vec<u64>,
+    /// Its last tick, which the window's first follows.
+    last: TickPlace,
+    last_observation: Observation,
 }
 
 fn seed_table(
-    saved: SavedRecording<'_>,
+    saved: &SavedRecording<'_>,
     manifest: &Manifest,
     table: Table,
 ) -> Result<AdmittedTable> {
-    let path = saved
-        .root
-        .join(&manifest.data_directory)
-        .join(format!("{}.parquet", table.name()));
-    let file = collector::recording::private::open_private_file(&path, false)?;
+    let file = seed_file(saved, manifest, table)?;
 
     AdmittedTable::from_file_budgeted(file, saved.budget)
         .map_err(|error| admission_error(error).into())
 }
 
-/// The newest tick of `manifest`'s window. A window's ticks lie in publication order.
-fn seed_last_tick(saved: SavedRecording<'_>, manifest: &Manifest) -> Result<(SeedTick, TickPlace)> {
-    let table = seed_table(saved, manifest, Table::Ticks)?;
+fn seed_file(
+    saved: &SavedRecording<'_>,
+    manifest: &Manifest,
+    table: Table,
+) -> Result<std::fs::File> {
+    let path = saved
+        .root
+        .join(&manifest.data_directory)
+        .join(format!("{}.parquet", table.name()));
+
+    Ok(collector::recording::private::open_private_file(
+        &path, false,
+    )?)
+}
+
+/// The ticks of `manifest`'s window, refused as a replay refuses them unless they stand in
+/// publication order, each with an event range.
+fn seed_minute(saved: &SavedRecording<'_>, manifest: &Manifest) -> Result<SeedMinute> {
+    let file = seed_file(saved, manifest, Table::Ticks)?;
+    let table = admit_tick_file(file, saved.budget, None)?;
     let frame = table
         .read_metadata_budgeted(
             &[
@@ -85,111 +114,141 @@ fn seed_last_tick(saved: SavedRecording<'_>, manifest: &Manifest) -> Result<(See
             None,
         )
         .map_err(read_error)?;
+    let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
+    let events_first = Cells::<UInt64Type>::named(&frame, "events_first")?;
+    let events_end = Cells::<UInt64Type>::named(&frame, "events_end")?;
+    let mut publications = Vec::with_capacity(frame.height());
+    for row in 0..frame.height() {
+        if events_first.get(row)? > events_end.get(row)? {
+            return Err(Error::Bound("sealed tick event range"));
+        }
+        publications.push(publication.get(row)?);
+    }
+    if !publications.is_sorted_by(|before, after| before < after) {
+        return Err(Error::Bound("process tick order"));
+    }
     let last = frame
         .height()
         .checked_sub(1)
         .ok_or(Error::Bound("saved window without ticks"))?;
-    let publication = Cells::<UInt64Type>::named(&frame, "publication")?.get(last)?;
-    let run_tick = Cells::<UInt64Type>::named(&frame, "run_tick")?.get(last)?;
 
-    Ok((
-        SeedTick {
-            observation: Observation {
-                publication,
-                wall_ns: Cells::<UInt64Type>::named(&frame, "wall_ns")?.optional(last)?,
-                continuous_ns: Cells::<UInt64Type>::named(&frame, "continuous_ns")?
-                    .optional(last)?,
-                awake_ns: Cells::<UInt64Type>::named(&frame, "awake_ns")?.optional(last)?,
-            },
-            run_tick,
+    Ok(SeedMinute {
+        last_observation: Observation {
+            publication: publication.get(last)?,
+            wall_ns: Cells::<UInt64Type>::named(&frame, "wall_ns")?.optional(last)?,
+            continuous_ns: Cells::<UInt64Type>::named(&frame, "continuous_ns")?.optional(last)?,
+            awake_ns: Cells::<UInt64Type>::named(&frame, "awake_ns")?.optional(last)?,
         },
-        TickPlace {
-            publication,
-            run_tick,
-            events_first: Cells::<UInt64Type>::named(&frame, "events_first")?.get(last)?,
-            events_end: Cells::<UInt64Type>::named(&frame, "events_end")?.get(last)?,
+        last: TickPlace {
+            publication: publication.get(last)?,
+            run_tick: Cells::<UInt64Type>::named(&frame, "run_tick")?.get(last)?,
+            events_first: events_first.get(last)?,
+            events_end: events_end.get(last)?,
         },
-    ))
+        publications,
+    })
 }
 
-/// The tick's process rows, in the columns `read_tick` reads.
+/// The last tick's process rows, in the columns `read_tick` reads, once every row of the minute
+/// has passed what a replay checks.
 fn seed_rows(
-    saved: SavedRecording<'_>,
+    saved: &SavedRecording<'_>,
     manifest: &Manifest,
-    place: &TickPlace,
+    minute: &SeedMinute,
 ) -> Result<DataFrame> {
     let table = seed_table(saved, manifest, Table::Processes)?;
-    let gpu_ns = if table.contains_column(PROCESS_GPU_FIELD.0) {
-        col("gpu_ns")
-    } else {
-        seed_null("gpu_ns", DataType::UInt64)
-    };
+    let identity_held = seed_rows_identity_held(&table)?;
+    let gpu_held = table.contains_column(PROCESS_GPU_FIELD.0);
     let (plan, _columns) = table.into_scan()?;
-    let mut columns = validation_columns(Table::Processes);
-    columns.push(col("pid"));
-    columns.extend(USAGE_COLUMNS.map(col));
-    columns.extend([
-        col("publication"),
-        lit(0_u8).cast(DataType::UInt8).alias("app_origin"),
-        seed_null("app_event", DataType::UInt64),
-        seed_null("app_kind", DataType::UInt8),
-        seed_null("app_tick", DataType::UInt64),
-        col("threads"),
-        gpu_ns,
-    ]);
-    let frame = seed_rows_of_tick(plan, place).select(columns).collect()?;
-    validate(Table::Processes, &frame, 0..frame.height())?;
+    let limit =
+        u32::try_from(IDENTITY_ROWS_MAX + 1).map_err(|_| Error::Bound("process identity rows"))?;
+    let frame = plan
+        .limit(limit)
+        .select(process_columns(identity_held, gpu_held))
+        .collect()?;
+    if collector::u64_from_usize(frame.height()) > IDENTITY_ROWS_MAX {
+        return Err(Error::Bound("process identity rows"));
+    }
+    if identity_held {
+        validate(Table::Processes, &frame, 0..frame.height())?;
+    }
+    let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
+    for row in 0..frame.height() {
+        if minute
+            .publications
+            .binary_search(&publication.get(row)?)
+            .is_err()
+        {
+            return Err(Error::Bound("process of no tick"));
+        }
+    }
 
-    Ok(frame.select(COLUMNS)?)
+    Ok(seed_rows_of_tick(frame.lazy(), &minute.last)
+        .select(COLUMNS.map(col))
+        .collect()?)
+}
+
+/// Whether `table` has the identity fields. A table with only some of them is refused.
+fn seed_rows_identity_held(table: &AdmittedTable) -> Result<bool> {
+    let held = IDENTITY_FIELDS
+        .iter()
+        .filter(|(name, _)| table.contains_column(name))
+        .count();
+    if held != 0 && held != IDENTITY_FIELDS.len() {
+        return Err(Error::Bound("incomplete column group"));
+    }
+
+    Ok(held != 0)
 }
 
 fn seed_rows_of_tick(plan: LazyFrame, place: &TickPlace) -> LazyFrame {
     plan.filter(col("publication").eq(lit(place.publication)))
 }
 
-/// The tick's events, in event order and the columns `read_tick` reads. The App rule names a
-/// process it never read from its start or exec in the tick before its exit, so a seed without
-/// them gives that exit no App where a replay gives it one.
+/// The last tick's events, in event order and the columns `read_tick` reads, once all the minute's
+/// events have read. The App rule names a process it never read from its start or exec in the tick
+/// before its exit, so a seed without them gives that exit no App where a replay gives it one.
 fn seed_events(
-    saved: SavedRecording<'_>,
+    saved: &SavedRecording<'_>,
     manifest: &Manifest,
     place: &TickPlace,
 ) -> Result<DataFrame> {
-    let mut rows = seed_events_of_tick(EventTable::empty_frame()?, place)?;
-    if place.events_first == place.events_end {
-        return Ok(rows);
+    let expected = manifest
+        .tables
+        .iter()
+        .find(|table| table.name == "events")
+        .ok_or(Error::Bound("events table"))?
+        .rows;
+    if expected > collector::u64_from_usize(ROWS_MAX) {
+        return Err(Error::Bound("event rows"));
     }
-
     let table =
         EventTable::open_budgeted(saved.root, manifest, saved.budget).map_err(ordinary_error)?;
+    let mut rows = seed_events_of_tick(EventTable::empty_frame()?, place)?;
+    let mut read = 0_u64;
+    let mut associated = 0_u64;
+    let count = u32::try_from(BATCH_ROWS_MAX).map_err(|_| Error::Bound("event batch rows"))?;
     for index in 0..table.len() {
-        let part = table.part(index).map_err(ordinary_error)?;
-        let events = part.events();
-        if events.start < place.events_end && place.events_first < events.end {
-            rows.vstack_mut_owned(seed_events_of_part(saved, part, place)?)?;
+        let part = table
+            .part(index)
+            .map_err(ordinary_error)?
+            .capture_with(saved.budget, AdmittedTable::from_file_budgeted)
+            .map_err(ordinary_error)?;
+        for slice in 0..part.rows().div_ceil(u64::from(count)).max(1) {
+            let frame = part
+                .read_slice(slice * u64::from(count), count, saved.budget)
+                .map_err(ordinary_error)?;
+            read += collector::u64_from_usize(frame.rows().height());
+            let frame = frame.associated(saved.budget).map_err(ordinary_error)?;
+            associated += collector::u64_from_usize(frame.height());
+            if associated > IDENTITY_ROWS_MAX {
+                return Err(Error::Bound("process identity rows"));
+            }
+            rows.vstack_mut_owned(seed_events_of_tick(frame, place)?)?;
         }
     }
-
-    Ok(rows)
-}
-
-fn seed_events_of_part(
-    saved: SavedRecording<'_>,
-    part: EventPart,
-    place: &TickPlace,
-) -> Result<DataFrame> {
-    let count = u32::try_from(BATCH_ROWS_MAX).map_err(|_| Error::Bound("event batch rows"))?;
-    let part = part
-        .capture_with(saved.budget, AdmittedTable::from_file_budgeted)
-        .map_err(ordinary_error)?;
-    let mut rows = seed_events_of_tick(EventTable::empty_frame()?, place)?;
-    for slice in 0..part.rows().div_ceil(u64::from(count)) {
-        let frame = part
-            .read_slice(slice * u64::from(count), count, saved.budget)
-            .map_err(ordinary_error)?
-            .associated(saved.budget)
-            .map_err(ordinary_error)?;
-        rows.vstack_mut_owned(seed_events_of_tick(frame, place)?)?;
+    if read != expected {
+        return Err(Error::Bound("event row count"));
     }
 
     Ok(rows)
@@ -197,22 +256,8 @@ fn seed_events_of_part(
 
 /// The rows of `frame`, which holds associated events, that are events of the tick.
 fn seed_events_of_tick(frame: DataFrame, place: &TickPlace) -> Result<DataFrame> {
-    let columns = [
-        lit(1_u8).cast(DataType::UInt8).alias("app_origin"),
-        col("event").alias("app_event"),
-        col("kind").alias("app_kind"),
-        col("run_tick").alias("app_tick"),
-        seed_null("threads", DataType::Int32),
-        seed_null("gpu_ns", DataType::UInt64),
-    ];
-
     Ok(seed_rows_of_tick(frame.lazy(), place)
-        .with_columns(columns)
+        .with_columns(event_columns())
         .select(COLUMNS.map(col))
         .collect()?)
-}
-
-/// A column named `name` of type `data_type` holding no values.
-fn seed_null(name: &str, data_type: DataType) -> Expr {
-    lit(Null {}).cast(data_type).alias(name)
 }

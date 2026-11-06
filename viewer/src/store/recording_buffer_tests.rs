@@ -36,19 +36,26 @@ fn reloading_reuses_app_decode_storage_without_retaining_previous_rows() {
 #[test]
 fn a_store_shows_the_rates_of_a_minutes_first_second_after_a_restart() {
     // Goal: a persister restarted between two minutes costs the store's route no App rate.
-    // Method: seal run ticks 59 and 60 in two minutes, each through a derivation of its own, and
-    // load them as a store does.
-    let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(59);
-    fixture.publish_with_system_rows(1059);
-    fixture.publish_with_system_rows(1060);
-    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
-    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+    // Method: seal run ticks 59 and 60 in two minutes in two recordings, through one derivation and
+    // through one for each minute, load them as a store does, and compare what each second holds.
+    let seconds_through = |derive: &dyn persistence::worker::Derive| {
+        let mut fixture = Fixture::new();
+        fixture.start_at_run_tick(59);
+        fixture.publish_with_system_rows(1059);
+        fixture.publish_with_system_rows(1060);
+        fixture.seal_minute_derived(0, derive);
+        fixture.seal_minute_derived(1, derive);
+        capture(&fixture, &mut LoadBuffers::default())
+    };
+    let stayed = seconds_through(&persistence::sealed_apps::SealedApps::default());
 
-    let seconds = capture(&fixture, &mut LoadBuffers::default());
+    let restarted = seconds_through(&persistence::canonical::ready_fixture::Restarted);
 
-    assert_eq!(seconds.len(), 2);
-    assert_eq!(seconds[1].2.elapsed_ns, Some(1_000_000_000));
+    assert_eq!(restarted.len(), 2);
+    assert_eq!(restarted[1].2.elapsed_ns, Some(1_000_000_000));
+    assert_eq!(restarted[1].2.apps, stayed[1].2.apps);
+    assert_eq!(restarted[1].2.totals, stayed[1].2.totals);
+    assert_ne!(restarted[1].2.totals, restarted[0].2.totals);
 }
 
 #[test]

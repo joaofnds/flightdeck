@@ -1,6 +1,6 @@
 //! The ticks of a window the persister staged, as the columns the model's App rule reads, each
-//! beside the tick before it, so the persister derives a window's Apps from what it staged
-//! without reading back the tables it wrote.
+//! beside the tick before it, so the persister derives a window's Apps from what it staged, and
+//! reads back saved tables only for the tick before a window whose predecessor it did not read.
 use collector::ring::{ProcessCreation, RunIdentity};
 use model::apps::{Creation, Measurement, ProgramUnavailable, Stamp, Tick, Usage};
 use model::columns::{EventRow, ExitRow, Full, ProcessRow, Refusal, TickColumns};
@@ -104,7 +104,8 @@ impl WindowTicks {
     pub fn seed(
         &mut self,
         window: &Window,
-        before: &SeedTick,
+        before: &Observation,
+        run_tick: u64,
         read: impl FnOnce(&mut TickColumns) -> Result<()>,
     ) -> Result<()> {
         assert!(self.run.is_none());
@@ -113,12 +114,13 @@ impl WindowTicks {
             recording: window.identity.run.recording.0,
             boot: window.identity.run.boot.0,
             run: window.identity.run.run.0,
-            tick: before.run_tick,
-            continuous_ns: before.observation.continuous_ns,
+            tick: run_tick,
+            continuous_ns: before.continuous_ns,
         });
         read(columns)?;
         columns.finish();
-        self.observations = [None, Some(before.observation)];
+        self.observations = [None, Some(*before)];
+        self.run = Some(window.identity.run);
 
         Ok(())
     }
@@ -165,12 +167,6 @@ impl WindowTicks {
         }
         Ok(())
     }
-}
-
-/// A saved tick to seed a derivation with.
-pub struct SeedTick {
-    pub observation: Observation,
-    pub run_tick: u64,
 }
 
 /// The run's index of programs, and where each program of the window lies in it.

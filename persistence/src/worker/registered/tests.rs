@@ -2563,6 +2563,37 @@ fn events_before_the_kept_publications_are_saved(captured: bool) {
 }
 
 #[test]
+fn a_restart_reads_a_minute_of_more_events_than_one_batch_holds() {
+    // Goal: a restart reads back all of a minute's events as a replay does, so one that holds more
+    // than a batch costs the next minute no derived tables.
+    // Method: save a minute of events past two batches and then the next, each through a derivation
+    // of its own, and look at which tables the next was saved with.
+    let batch = crate::event_observation::BATCH_ROWS_MAX;
+    let capacity = u64::try_from(3 * batch).unwrap();
+    let mut recording = Recording::with_event_capacity_captured(capacity, true);
+    recording.publish_events_in_minute(0, batch);
+    recording.publish_events_in_minute(0, batch);
+    recording.publish_events_in_minute(0, batch);
+    recording.publish_in_minute(1);
+    recording.publish_in_minute(2);
+    recording.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+
+    persist_until_quiet(&recording, &store, &mut state);
+
+    let manifests = recording.saved_manifests();
+    assert!(manifests.len() >= 2);
+    let derived = |manifest: &crate::Manifest| {
+        manifest
+            .tables
+            .iter()
+            .any(|table| crate::schema::DERIVED_TABLES.contains(&table.name))
+    };
+    assert!(manifests.iter().all(derived));
+}
+
+#[test]
 fn events_of_overwritten_publications_fill_several_batches_each_saved_once() {
     // Goal: events older than the kept publications, more than a batch of them and read ahead of
     // the thread writing them, are each saved once and in order, and missed ones are counted.

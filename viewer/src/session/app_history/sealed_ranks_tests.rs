@@ -74,7 +74,7 @@ fn a_window_keeps_the_rates_its_first_observation_takes_from_the_minute_before()
 }
 
 #[test]
-fn a_window_derived_after_a_restart_keeps_the_ranks_of_a_derivation_that_stayed_up() {
+fn a_window_derived_after_a_restart_keeps_the_ranks_a_replay_gives() {
     // Goal: restarting only the persister changes no saved ranking at the boundary between minutes.
     // Method: seal run ticks 59 and 60 in two minutes, each through a derivation of its own, and
     // compare tick 60's ranks with those a replay of both minutes gives.
@@ -92,6 +92,34 @@ fn a_window_derived_after_a_restart_keeps_the_ranks_of_a_derivation_that_stayed_
     assert_eq!(kept[1].metrics[0].metric, Metric::Cpu);
     assert!(!kept[1].metrics[0].entries.is_empty());
     assert_eq!(kept, replayed_ranks(&session, &kept[1]));
+}
+
+#[test]
+fn a_restart_saves_the_ranks_a_persister_that_stayed_up_saves() {
+    // Goal: given the same readings, restarting the persister changes no ranking at the boundary.
+    // Method: save one input twice, through one derivation and through one for each minute, and
+    // compare the rankings of every tick.
+    let saved_through = |derive: &dyn Derive| {
+        let mut fixture = Fixture::new();
+        fixture.start_at_run_tick(58);
+        fixture.publish_with_system_rows(1058);
+        fixture.publish_with_system_rows(1059);
+        fixture.publish_with_system_rows(1060);
+        fixture.seal_minute_derived(0, derive);
+        fixture.seal_minute_derived(1, derive);
+        let session = Session::open(&fixture.root).unwrap();
+        let kept = kept_ranks(&session, 1060);
+        kept.into_iter()
+            .map(|ranks| ranks.metrics)
+            .collect::<Vec<_>>()
+    };
+
+    let stayed = saved_through(&persistence::sealed_apps::SealedApps::default());
+    let restarted = saved_through(&persistence::canonical::ready_fixture::Restarted);
+
+    assert_eq!(stayed.len(), 3);
+    assert!(!stayed[2][0].entries.is_empty());
+    assert_eq!(restarted, stayed);
 }
 
 #[test]

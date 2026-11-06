@@ -40,12 +40,11 @@ pub struct Derivation<'seal> {
     /// The directory the window's tables go in, which the persister's own may reach only after.
     pub pending: &'seal collector::recording::private::PrivateDirectory,
     /// The recording the window joins, whose saved minute before it gives the first tick its
-    /// rates where the derivation did not read that minute itself, none where nothing is saved.
-    pub saved: Option<SavedRecording<'seal>>,
+    /// rates where the derivation did not read that minute itself.
+    pub saved: SavedRecording<'seal>,
 }
 
 /// Where a derivation reads what the recording has saved.
-#[derive(Clone, Copy)]
 pub struct SavedRecording<'seal> {
     pub root: &'seal Path,
     pub budget: &'seal Arc<crate::resources::ByteBudget>,

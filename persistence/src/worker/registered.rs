@@ -916,7 +916,7 @@ fn seal_write(
         &Derivation {
             window,
             pending: directory,
-            saved: Some(saved),
+            saved,
         },
     )?;
     let mut tables = writers.encoder.encode_into(window, directory)?;

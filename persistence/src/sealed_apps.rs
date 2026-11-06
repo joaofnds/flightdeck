@@ -112,15 +112,12 @@ impl State {
         }
         self.ticks.clear();
         self.programs = Programs::new(PROGRAMS_CAPACITY);
-        let Some(saved) = derivation.saved else {
-            return Ok(());
-        };
 
         predecessor::seed(
             &mut self.ticks,
             &mut self.programs,
             derivation.window,
-            saved,
+            &derivation.saved,
         )
     }
 
@@ -251,7 +248,7 @@ impl WindowApps {
         self.ticks.push(TickApps {
             observation: tick.observation,
             run_tick: tick.selected.stamp.tick,
-            previous: elapsed_ns.and(tick.previous_observation),
+            previous: tick.previous_observation,
             elapsed_ns,
             ungrouped_members: apps.ungrouped_members(),
             live_ungrouped_members: apps.live_ungrouped_members(),

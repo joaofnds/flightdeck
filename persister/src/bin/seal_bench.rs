@@ -28,7 +28,7 @@ use collector::ring::{
 use collector::tracker::{Event, Noticed};
 use persistence::worker::{Derivation, Derive};
 
-const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|none";
+const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|restarted|none";
 const TICKS_PER_WINDOW: u64 = 60;
 /// Bounds the run, since every tick stays in the ring until the worker seals it.
 const WINDOWS_MAX: u64 = 10;
@@ -71,6 +71,8 @@ struct Options {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Deriving {
     Apps,
+    /// The App tables, as a persister restarted before each window derives them.
+    Restarted,
     Nothing,
 }
 
@@ -90,6 +92,7 @@ fn options_from(words: &[String]) -> Result<Options, String> {
             "--derive" => {
                 derive = match value.as_str() {
                     "apps" => Some(Deriving::Apps),
+                    "restarted" => Some(Deriving::Restarted),
                     "none" => Some(Deriving::Nothing),
                     _ => return Err(USAGE.to_owned()),
                 }
@@ -184,6 +187,7 @@ fn run_seal(root: &Path, deriving: Deriving) -> Result<Vec<Mark>, Box<dyn std::e
     let apps = persistence::sealed_apps::SealedApps::default();
     let inner: &dyn Derive = match deriving {
         Deriving::Apps => &apps,
+        Deriving::Restarted => &Restarted,
         Deriving::Nothing => &Underived,
     };
     let timed = Timed {
@@ -253,6 +257,18 @@ impl Derive for Timed<'_> {
     }
 }
 
+/// Derives through a derivation of its own each time.
+struct Restarted;
+
+impl Derive for Restarted {
+    fn derive(
+        &self,
+        derivation: &Derivation<'_>,
+    ) -> persistence::Result<Vec<persistence::TableManifest>> {
+        persistence::sealed_apps::SealedApps::default().derive(derivation)
+    }
+}
+
 /// Derives no table, as the persister did before it derived the App tables.
 struct Underived;
 
@@ -297,6 +313,7 @@ fn report(options: &Options, marks: &[Mark]) -> Result<(), Box<dyn std::error::E
         options.processes,
         match options.derive {
             Deriving::Apps => "apps",
+            Deriving::Restarted => "restarted",
             Deriving::Nothing => "none",
         },
         milliseconds(median(steady.iter().map(|window| window.cpu_ns_seal))),

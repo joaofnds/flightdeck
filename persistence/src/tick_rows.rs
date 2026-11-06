@@ -6,11 +6,13 @@ use model::apps::{Creation, Measurement, ProgramUnavailable, Usage};
 use model::columns::{EventRow, ExitRow, Full, ProcessRow, Refusal, TickColumns};
 use model::programs::{Program, Programs};
 use polars::prelude::{
-    BinaryType, DataFrame, Int32Type, PolarsPhysicalType, UInt8Type, UInt64Type,
+    BinaryType, DataFrame, DataType, Expr, Int32Type, Null, PolarsPhysicalType, UInt8Type,
+    UInt64Type, col, lit,
 };
 
 use crate::engine::Cells;
-use crate::schema::{availability, event_kind, identity_availability};
+use crate::identity::validation_columns;
+use crate::schema::{Table, availability, event_kind, identity_availability};
 use crate::{Error, Result};
 
 /// The usage columns of a process or event row, each by the name the row is read under.
@@ -58,6 +60,77 @@ pub const COLUMNS: [&str; 24] = [
     "threads",
     "gpu_ns",
 ];
+
+/// What `app_origin` says of a row of a process table.
+const ORIGIN_PROCESS: u8 = 0;
+/// What `app_origin` says of an event row.
+const ORIGIN_EVENT: u8 = 1;
+
+/// The columns a reader selects from a saved process table, among them what `validate` checks
+/// where `identity_held` says the table has the identity fields. One sealed before them holds
+/// processes of unsupported identity, as the SQL replay reads it. `gpu_held` says the same of the
+/// process's GPU time.
+#[must_use]
+pub fn process_columns(identity_held: bool, gpu_held: bool) -> Vec<Expr> {
+    let mut columns = if identity_held {
+        validation_columns(Table::Processes)
+    } else {
+        process_columns_unidentified()
+    };
+    columns.push(col("pid"));
+    columns.extend(USAGE_COLUMNS.map(col));
+    columns.extend([
+        col("publication"),
+        lit(ORIGIN_PROCESS)
+            .cast(DataType::UInt8)
+            .alias("app_origin"),
+        column_of_nulls("app_event", DataType::UInt64),
+        column_of_nulls("app_kind", DataType::UInt8),
+        column_of_nulls("app_tick", DataType::UInt64),
+        col("threads"),
+        if gpu_held {
+            col("gpu_ns")
+        } else {
+            column_of_nulls("gpu_ns", DataType::UInt64)
+        },
+    ]);
+
+    columns
+}
+
+/// The identity columns of a process table sealed before processes carried their identity, as the
+/// SQL replay normalizes them.
+fn process_columns_unidentified() -> Vec<Expr> {
+    vec![
+        lit(identity_availability::UNSUPPORTED)
+            .cast(DataType::UInt8)
+            .alias("identity_availability"),
+        column_of_nulls("process_unique_id", DataType::UInt64),
+        column_of_nulls("pid_version", DataType::Int32),
+        column_of_nulls("executable_name", DataType::Binary),
+        column_of_nulls("app_path", DataType::Binary),
+        lit(availability::MEASURED)
+            .cast(DataType::UInt8)
+            .alias("usage_availability"),
+    ]
+}
+
+/// The columns where a saved event's associated row differs from a process row.
+pub fn event_columns() -> [Expr; 6] {
+    [
+        lit(ORIGIN_EVENT).cast(DataType::UInt8).alias("app_origin"),
+        col("event").alias("app_event"),
+        col("kind").alias("app_kind"),
+        col("run_tick").alias("app_tick"),
+        column_of_nulls("threads", DataType::Int32),
+        column_of_nulls("gpu_ns", DataType::UInt64),
+    ]
+}
+
+/// A column named `name` of type `data_type` holding no values.
+fn column_of_nulls(name: &str, data_type: DataType) -> Expr {
+    lit(Null {}).cast(data_type).alias(name)
+}
 
 /// Where a tick's rows lie among the rows given to `read_tick`.
 pub struct TickPlace {
@@ -151,11 +224,11 @@ pub fn read_tick(
         count += 1;
 
         match required(&rows.app_origin, row)? {
-            0 => {
+            ORIGIN_PROCESS => {
                 let process = read_tick_process(rows, row, programs)?;
                 columns.push_process(&process).map_err(process_refused)?;
             }
-            1 => read_tick_event(rows, row, place, &mut next, programs, columns)?,
+            ORIGIN_EVENT => read_tick_event(rows, row, place, &mut next, programs, columns)?,
             _ => return Err(Error::Bound("sealed tick row origin")),
         }
     }

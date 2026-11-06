@@ -214,6 +214,15 @@ pub fn publish_window(
     })
 }
 
+/// Derives through a derivation of its own each time, as a persister restarted before each minute.
+pub struct Restarted;
+
+impl Derive for Restarted {
+    fn derive(&self, derivation: &Derivation<'_>) -> Result<Vec<TableManifest>> {
+        crate::sealed_apps::SealedApps::default().derive(derivation)
+    }
+}
+
 /// `publish_window` with the tables `derive` derives from the window.
 pub fn publish_window_derived(
     root: &Path,
@@ -225,7 +234,10 @@ pub fn publish_window_derived(
         tables.extend(derive.derive(&Derivation {
             window,
             pending: &directory,
-            saved: None,
+            saved: crate::worker::SavedRecording {
+                root,
+                budget: &Arc::new(ByteBudget::new(256 * 1024 * 1024)),
+            },
         })?);
         Ok(())
     })

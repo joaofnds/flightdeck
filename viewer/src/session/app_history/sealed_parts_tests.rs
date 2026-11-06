@@ -150,7 +150,7 @@ fn a_window_keeps_the_facts_of_each_second_for_an_app_that_ran_at_none() {
 }
 
 #[test]
-fn a_window_derived_after_a_restart_keeps_what_a_derivation_that_stayed_up_keeps() {
+fn a_window_derived_after_a_restart_keeps_what_a_replay_gives() {
     // Goal: restarting only the persister changes no saved App rate, since the minute before a
     // window is on disk whichever derivation saved it.
     // Method: seal run ticks 58 and 59 in one minute and tick 60 in the next, each minute through
@@ -167,11 +167,154 @@ fn a_window_derived_after_a_restart_keeps_what_a_derivation_that_stayed_up_keeps
     let samples = replayed_samples(&session, 1060);
     let keys = app_keys(&samples[2]);
 
-    let kept = kept_parts(&session, 1060, &keys[0]);
+    let kept: Vec<Vec<Shown>> = keys
+        .iter()
+        .map(|key| kept_parts(&session, 1060, key))
+        .collect();
 
-    assert_eq!(kept.len(), 3);
-    assert_ne!(kept[2].paging["previous"], Value::Null);
-    assert_eq!(vec![kept], replayed_parts(&samples, &keys[..1]));
+    assert_eq!(kept[0].len(), 3);
+    assert_ne!(kept[0][2].paging["previous"], Value::Null);
+    assert_eq!(kept, replayed_parts(&samples, &keys));
+}
+
+/// A recording of run ticks 58 and 59 in one minute and tick 60 in the next, saved through
+/// `derive`.
+fn recording_of_a_boundary(derive: &dyn persistence::worker::Derive) -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(58);
+    fixture.publish_with_system_rows(1058);
+    fixture.publish_with_system_rows(1059);
+    fixture.publish_with_system_rows(1060);
+    fixture.seal_minute_derived(0, derive);
+    fixture.seal_minute_derived(1, derive);
+
+    fixture
+}
+
+/// What `parts` show, less the identities of `fixture`'s recording and run, which no other
+/// recording shares.
+fn shown_apart_from_identities(fixture: &Fixture, parts: &[Vec<Shown>]) -> String {
+    let identity = fixture.writer.identity().unwrap();
+    let mut text = format!("{parts:?}");
+    for named in [identity.recording, identity.run] {
+        let [first, second] = named.0;
+        text = text
+            .replace(&format!("[{first}, {second}]"), "identity")
+            .replace(
+                &format!("[String(\"{first}\"), String(\"{second}\")]"),
+                "identity",
+            );
+    }
+
+    text
+}
+
+/// What `fixture` keeps of every App of tick 60, less the identities no other recording shares.
+fn kept_at_a_boundary(fixture: &Fixture) -> String {
+    let session = Session::open(&fixture.root).unwrap();
+    let samples = replayed_samples(&session, 1060);
+    let kept: Vec<Vec<Shown>> = app_keys(samples.last().unwrap())
+        .iter()
+        .map(|key| kept_parts(&session, 1060, key))
+        .collect();
+
+    shown_apart_from_identities(fixture, &kept)
+}
+
+/// Every table a window of `fixture` saves but those derived from the others, by name.
+fn raw_tables(fixture: &Fixture) -> Vec<(String, DataFrame)> {
+    let mut tables = Vec::new();
+    for window in Session::open(&fixture.root).unwrap().windows {
+        let directory = fixture.root.join(&window.data_directory);
+        let mut files = vec![];
+        for table in &window.tables {
+            if table.name != "events" && !persistence::schema::DERIVED_TABLES.contains(&table.name)
+            {
+                files.push((
+                    table.name.to_owned(),
+                    directory.join(format!("{}.parquet", table.name)),
+                ));
+            }
+        }
+        for batch in std::fs::read_dir(directory.join("events")).unwrap() {
+            let batch = batch.unwrap();
+            if batch
+                .path()
+                .extension()
+                .is_some_and(|name| name == "parquet")
+            {
+                files.push((
+                    batch.file_name().to_string_lossy().into_owned(),
+                    batch.path(),
+                ));
+            }
+        }
+        files.sort();
+        for (name, path) in files {
+            let frame = persistence::engine::scan(&path).unwrap().collect().unwrap();
+            tables.push((name, frame));
+        }
+    }
+
+    tables
+}
+
+#[test]
+fn a_restart_saves_what_a_persister_that_stayed_up_saves() {
+    // Goal: given the same readings, restarting the persister changes neither the raw rows it saves
+    // nor any App's parts at the boundary.
+    // Method: save one input twice, through one derivation and through one for each minute, and
+    // compare every table and what the parts of every App show, less the ids of each recording.
+    let stayed = recording_of_a_boundary(&persistence::sealed_apps::SealedApps::default());
+    let restarted = recording_of_a_boundary(&persistence::canonical::ready_fixture::Restarted);
+
+    let (stayed_raw, restarted_raw) = (raw_tables(&stayed), raw_tables(&restarted));
+
+    assert!(kept_at_a_boundary(&stayed).contains("publication: 3"));
+    assert_eq!(kept_at_a_boundary(&restarted), kept_at_a_boundary(&stayed));
+    assert!(!stayed_raw.is_empty());
+    assert_eq!(restarted_raw, stayed_raw);
+}
+
+#[test]
+fn a_window_saved_without_derived_tables_replays_what_a_persister_that_stayed_up_keeps() {
+    // Goal: a window that lost its derived tables to damage since repaired reads as if nothing
+    // happened, since a replay rebuilds it.
+    // Method: save the boundary with the minute before damaged at the restart, repair it, and
+    // compare the replay with what a persister that stayed up keeps of the same input.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(58);
+    fixture.publish_with_system_rows(1058);
+    fixture.publish_with_system_rows(1059);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    let saved = Session::open(&fixture.root).unwrap().windows[0].clone();
+    let processes = fixture
+        .root
+        .join(&saved.data_directory)
+        .join("processes.parquet");
+    let bytes = std::fs::read(&processes).unwrap();
+    std::fs::write(&processes, b"damaged").unwrap();
+    fixture.publish_with_system_rows(1060);
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+    std::fs::write(&processes, bytes).unwrap();
+    let stayed = recording_of_a_boundary(&persistence::sealed_apps::SealedApps::default());
+    let session = Session::open(&fixture.root).unwrap();
+    let mut tick_60 = replayed_samples(&session, 1060).last().unwrap().selected;
+    tick_60.stamp.publication += 1;
+    tick_60.stamp.continuous_ns = tick_60.stamp.continuous_ns.map(|ns| ns + 1_000_000_000);
+    tick_60.stamp.awake_ns = tick_60.stamp.awake_ns.map(|ns| ns + 1_000_000_000);
+    tick_60.run_tick += 1;
+    tick_60.wall_ns = tick_60.wall_ns.map(|ns| ns + 1_000_000_000);
+    let samples = replayed_samples_ending_at(&session, tick_60);
+
+    let replayed = replayed_parts(&samples, &app_keys(samples.last().unwrap()));
+
+    assert_eq!(samples.len(), 3);
+    assert!(!holds_derived_tables(&session.windows[1]));
+    assert_eq!(
+        shown_apart_from_identities(&fixture, &replayed),
+        kept_at_a_boundary(&stayed)
+    );
 }
 
 /// Seals what `publish` publishes as minute 0 and what `publish_next` publishes as minute 1, each
@@ -216,6 +359,33 @@ fn a_restart_changes_nothing_for_a_process_that_replaced_a_pid() {
         |fixture| named::publish(fixture, 0, &[worker()]),
         |fixture| {
             let mut replaced = worker();
+            replaced.unique_id = 701;
+            named::publish(fixture, 1, &[replaced]);
+        },
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert!(!kept.is_empty());
+    assert_eq!(kept[0][1].detail["app"]["cpu_ns"]["unavailable_members"], 1);
+    assert!(!shown(&kept, "app_attribution").contains(&json!("exec")));
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_that_replaced_its_program() {
+    // Goal: a process that replaced its own program between two minutes stays the same process
+    // across a restart, as it does in a replay.
+    // Method: publish one process in one minute and its next pid version in the next, restart
+    // between them, and compare what is kept with the replay.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+    let worker = || named::member(7, b"worker", b"/A.app", usage);
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| named::publish(fixture, 0, &[worker()]),
+        |fixture| {
+            let mut replaced = worker();
             replaced.version = 2;
             named::publish(fixture, 1, &[replaced]);
         },
@@ -223,13 +393,59 @@ fn a_restart_changes_nothing_for_a_process_that_replaced_a_pid() {
 
     let (kept, replayed) = kept_and_replayed(&fixture, 1001);
     assert!(!kept.is_empty());
-    assert_ne!(kept[0][1].paging["previous"], Value::Null);
+    assert!(shown(&kept, "app_attribution").contains(&json!("exec")));
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_changes_nothing_for_a_process_that_exited_with_nothing_before_it() {
+    // Goal: an exit no tick before it names gives no App across a restart, as it gives none in a
+    // replay.
+    // Method: publish another process in one minute and only the exit in the next, restart between
+    // them, and compare what is kept with the replay, which names the other App and not this one.
+    let mut fixture = Fixture::new();
+    let usage = usage();
+
+    sealed_across_a_restart(
+        &mut fixture,
+        |fixture| named::publish(fixture, 0, &[named::member(7, b"other", b"/B.app", usage)]),
+        |fixture| {
+            let mut exited = named::member(8, b"unseen", b"/A.app", usage);
+            exited.exited = true;
+            let other = named::member(7, b"other", b"/B.app", usage);
+            named::publish(fixture, 1, &[other, exited]);
+        },
+    );
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1001);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_restart_takes_the_newest_minute_saved_before_a_window() {
+    // Goal: a restart with several minutes saved takes its rates from the last of them.
+    // Method: save ticks 59, 60 and 119, restart, save tick 120, and compare what is kept of tick
+    // 120 with the replay. An older minute's tick would leave tick 120 no rates.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.publish_with_system_rows(1060);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(1119);
+    fixture.publish_with_system_rows(1120);
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+
+    fixture.seal_minute_derived(2, &persistence::sealed_apps::SealedApps::default());
+
+    let (kept, replayed) = kept_and_replayed(&fixture, 1120);
+    assert_ne!(kept[0].last().unwrap().paging["previous"], Value::Null);
     assert_eq!(kept, replayed);
 }
 
 #[test]
 fn a_restart_changes_nothing_for_a_process_that_exited() {
-    // Goal: a process seen only in its exit keeps the state a replay gives across a restart.
+    // Goal: a process whose exit lies in the tick before a restart keeps the state a replay gives.
     // Method: publish a process and its exit in the last tick of a minute and the process alone in
     // the next tick, restart between them, and compare what is kept with the replay.
     let mut fixture = Fixture::new();
@@ -360,31 +576,11 @@ fn a_restart_changes_nothing_for_a_process_that_used_the_gpu() {
 }
 
 #[test]
-fn a_restart_changes_nothing_for_a_process_whose_program_changed() {
-    // Goal: an exec between two minutes reads across a restart as it reads in a replay.
-    // Method: publish a tick with an exec on each side of the boundary, restart between them, and
-    // compare what is kept with the replay.
-    let mut fixture = Fixture::new();
-
-    sealed_across_a_restart(
-        &mut fixture,
-        |fixture| fixture.publish(1059),
-        |fixture| fixture.publish(1060),
-    );
-
-    let (kept, replayed) = kept_and_replayed(&fixture, 1060);
-    assert!(!kept.is_empty());
-    assert_ne!(kept[0][1].paging["previous"], Value::Null);
-    assert_eq!(kept, replayed);
-}
-
-#[test]
 fn a_restart_bridges_no_missed_tick() {
-    // Goal: the minute before gives no rate across a tick nobody read, restarted or not. A replay
-    // names the reading before and calls its rates unavailable, where a saved part names none, so
-    // a derivation that stayed up differs from a replay in that one field too.
+    // Goal: the minute before gives no rate across a tick nobody read, restarted or not, and a
+    // saved part names the reading before as a replay does.
     // Method: publish run ticks 59 and 61 either side of the boundary, restart between them, and
-    // compare tick 61's parts with the replay's with that field set aside.
+    // compare tick 61's parts with the replay's.
     let mut fixture = Fixture::new();
 
     sealed_across_a_restart(
@@ -396,92 +592,251 @@ fn a_restart_bridges_no_missed_tick() {
         },
     );
 
-    let (mut kept, mut replayed) = kept_and_replayed(&fixture, 1061);
-    assert_eq!(kept[0][1].paging["previous"], Value::Null);
-    for part in kept.iter_mut().chain(&mut replayed).flatten() {
-        part.paging["previous"] = Value::Null;
-        part.detail["previous"] = Value::Null;
-    }
+    let (kept, replayed) = kept_and_replayed(&fixture, 1061);
+    assert_eq!(kept[0][1].detail["app"]["cpu_ns"]["measured_members"], 0);
     assert_eq!(kept, replayed);
 }
 
-#[test]
-fn a_saved_minute_that_does_not_read_costs_the_next_its_derived_tables_and_nothing_more() {
-    // Goal: damage in the minute a restart reads back stops no save. The next window is saved with
-    // no derived tables for a reader to rebuild or refuse, and the window after it derives again.
-    // Method: save a minute, damage its processes, restart, and save two more minutes.
+/// The windows saved when a restart reads back a minute of run ticks 58 and 59 that `damage`
+/// changed in its directory.
+fn windows_after_damage_to_the_minute_before(
+    damage: impl FnOnce(&Path),
+) -> Vec<persistence::Manifest> {
     let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(59);
+    fixture.start_at_run_tick(58);
+    fixture.publish_with_system_rows(1058);
     fixture.publish_with_system_rows(1059);
     fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
     let saved = Session::open(&fixture.root).unwrap().windows[0].clone();
-    let processes = fixture
-        .root
-        .join(&saved.data_directory)
-        .join("processes.parquet");
-    let bytes = std::fs::read(&processes).unwrap();
-    std::fs::write(&processes, b"damaged").unwrap();
-    let derivation = persistence::sealed_apps::SealedApps::default();
+    damage(&fixture.root.join(&saved.data_directory));
     fixture.publish_with_system_rows(1060);
 
-    fixture.seal_minute_derived(1, &derivation);
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
 
-    let mut session = crate::LiveSession::open(&fixture.root).unwrap();
-    session.select(1060, 0).unwrap();
-    let read_with_damage = session.app_history(KeyKind::Bundle, b"/Apps/Current.app");
-    drop(session);
-    std::fs::write(&processes, bytes).unwrap();
-    fixture.skip_run_ticks(59);
-    fixture.publish_with_system_rows(1120);
-    fixture.publish_with_system_rows(1121);
-    fixture.seal_minute_derived(2, &derivation);
-    let windows = Session::open(&fixture.root).unwrap().windows;
-    let derived =
-        |window: &persistence::Manifest| window.tables.iter().any(|table| table.name == APP_PARTS);
-    assert!(matches!(read_with_damage, Err(Error::Bound(_))));
-    assert_eq!(windows.len(), 3);
-    assert!(derived(&windows[0]));
-    assert!(!derived(&windows[1]));
-    assert!(derived(&windows[2]));
+    Session::open(&fixture.root).unwrap().windows
+}
+
+fn holds_derived_tables(window: &persistence::Manifest) -> bool {
+    window
+        .tables
+        .iter()
+        .any(|table| persistence::schema::DERIVED_TABLES.contains(&table.name))
+}
+
+/// Puts the value `first` gives the first row of `column`, which holds that many.
+fn table_first_row_rewrite(frame: &mut DataFrame, column: &str, first: u64) {
+    let mut values: Vec<u64> = frame
+        .column(column)
+        .unwrap()
+        .u64()
+        .unwrap()
+        .into_no_null_iter()
+        .collect();
+    values[0] = first;
+    frame
+        .replace(column, Column::new(column.into(), values))
+        .unwrap();
 }
 
 #[test]
-fn a_saved_minute_of_an_identity_version_this_build_does_not_read_gives_the_next_no_rates() {
-    // Goal: rows a restart reads back pass the checks a replay of them passes, so a minute a replay
-    // refuses costs the next window its derived tables rather than lending it rates.
-    // Method: save a minute, rewrite its processes to a later identity version, restart, and save
-    // the next minute.
-    let mut fixture = Fixture::new();
+fn a_saved_minute_that_does_not_read_costs_the_next_its_derived_tables() {
+    // Goal: damage in the minute a restart reads back stops no save, and the next window is saved
+    // with no derived tables for a reader to rebuild or refuse.
+    // Method: save a minute, damage its processes, restart, and save the next minute.
+    let windows = windows_after_damage_to_the_minute_before(|directory| {
+        std::fs::write(directory.join("processes.parquet"), b"damaged").unwrap();
+    });
+
+    assert_eq!(windows.len(), 2);
+    assert!(holds_derived_tables(&windows[0]));
+    assert!(!holds_derived_tables(&windows[1]));
+}
+
+#[test]
+fn a_saved_minute_with_one_tick_a_replay_refuses_gives_the_next_no_derived_tables() {
+    // Goal: a restart checks the whole minute a replay of it checks, so damage in an earlier tick
+    // of the minute lends the next window no rates.
+    // Method: save ticks 58 and 59, rewrite only tick 58's processes to a later identity version,
+    // restart, and save the next minute.
+    let windows = windows_after_damage_to_the_minute_before(|directory| {
+        crate::recording::damage_table_file(&directory.join("processes.parquet"), |mut frame| {
+            let first = frame.column("publication").unwrap().u64().unwrap().get(0);
+            let versions: Vec<_> = frame
+                .column("publication")
+                .unwrap()
+                .u64()
+                .unwrap()
+                .into_no_null_iter()
+                .map(|publication| {
+                    let later = Some(publication) == first;
+                    persistence::schema::IDENTITY_VERSION + u8::from(later)
+                })
+                .collect();
+            frame
+                .replace(
+                    "identity_version",
+                    Column::new("identity_version".into(), versions),
+                )
+                .unwrap();
+            frame
+        });
+    });
+
+    assert_eq!(windows.len(), 2);
+    assert!(!holds_derived_tables(&windows[1]));
+}
+
+#[test]
+fn a_saved_minute_of_ticks_out_of_order_gives_the_next_no_derived_tables() {
+    // Goal: a restart refuses ticks out of publication order as a replay does, rather than taking
+    // the row that happens to lie last for the tick before the window.
+    // Method: save ticks 58 and 59, reverse the minute's tick rows, restart, and save the next.
+    let windows = windows_after_damage_to_the_minute_before(|directory| {
+        crate::recording::damage_table_file(&directory.join("ticks.parquet"), |frame| {
+            frame.reverse()
+        });
+    });
+
+    assert_eq!(windows.len(), 2);
+    assert!(!holds_derived_tables(&windows[1]));
+}
+
+#[test]
+fn a_saved_minute_with_a_tick_of_an_inverted_event_range_gives_the_next_no_derived_tables() {
+    // Goal: a restart refuses an event range no tick can hold as a replay does, in any of the
+    // minute's ticks.
+    // Method: save ticks 58 and 59, put tick 58's first event past its end, restart, and save the
+    // next minute.
+    let windows = windows_after_damage_to_the_minute_before(|directory| {
+        crate::recording::damage_table_file(&directory.join("ticks.parquet"), |mut frame| {
+            table_first_row_rewrite(&mut frame, "events_first", u64::MAX);
+            frame
+        });
+    });
+
+    assert_eq!(windows.len(), 2);
+    assert!(!holds_derived_tables(&windows[1]));
+}
+
+#[test]
+fn a_saved_minute_with_a_process_of_no_tick_gives_the_next_no_derived_tables() {
+    // Goal: a restart refuses a process row no tick of the minute names, as a replay does.
+    // Method: save ticks 58 and 59, move one process row to a publication no tick has, restart,
+    // and save the next minute.
+    let windows = windows_after_damage_to_the_minute_before(|directory| {
+        crate::recording::damage_table_file(&directory.join("processes.parquet"), |mut frame| {
+            table_first_row_rewrite(&mut frame, "publication", 1 << 40);
+            frame
+        });
+    });
+
+    assert_eq!(windows.len(), 2);
+    assert!(!holds_derived_tables(&windows[1]));
+}
+
+#[test]
+fn a_saved_minute_missing_a_table_gives_the_next_no_derived_tables() {
+    // Goal: a restart refuses a minute a replay refuses for a missing file, even one it reads
+    // nothing from.
+    // Method: save a minute, remove its table of network interfaces, restart, and save the next.
+    let windows = windows_after_damage_to_the_minute_before(|directory| {
+        std::fs::remove_file(directory.join("interfaces.parquet")).unwrap();
+    });
+
+    assert_eq!(windows.len(), 2);
+    assert!(!holds_derived_tables(&windows[1]));
+}
+
+#[test]
+fn a_saved_minute_of_a_damaged_event_batch_gives_the_next_no_derived_tables() {
+    // Goal: a restart refuses events it cannot read rather than giving an exit no App, which is
+    // what a seed that went without them would give it.
+    // Method: save ticks 58 and 59, damage the minute's event batch, restart, and save the next.
+    let windows = windows_after_damage_to_the_minute_before(|directory| {
+        let batches = directory.join("events");
+        let batch = std::fs::read_dir(&batches)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        std::fs::write(batch.path(), b"damaged").unwrap();
+    });
+
+    assert_eq!(windows.len(), 2);
+    assert!(!holds_derived_tables(&windows[1]));
+}
+
+#[test]
+fn a_saved_minute_of_a_ring_without_identities_keeps_the_next_its_derived_tables() {
+    // Goal: a restart reads a minute with no identity columns as a replay does, as processes of
+    // unsupported identity, so it costs the next window nothing.
+    // Method: save ticks 59 and 60 of a ring that keeps no identities in two minutes, restart
+    // between them, and compare what is kept with the replay.
+    let mut fixture = Fixture::new_mode(false, 2, None);
     fixture.start_at_run_tick(59);
     fixture.publish_with_system_rows(1059);
     fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
-    let saved = Session::open(&fixture.root).unwrap().windows[0].clone();
-    let processes = fixture
-        .root
-        .join(&saved.data_directory)
-        .join("processes.parquet");
-    crate::recording::damage_table_file(&processes, |mut frame| {
-        let versions = vec![persistence::schema::IDENTITY_VERSION + 1; frame.height()];
-        frame
-            .replace(
-                "identity_version",
-                Column::new("identity_version".into(), versions),
-            )
-            .unwrap();
-        frame
-    });
     fixture.publish_with_system_rows(1060);
 
     fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
 
     let windows = Session::open(&fixture.root).unwrap().windows;
-    assert_eq!(windows.len(), 2);
-    assert!(
-        !windows[1]
-            .tables
-            .iter()
-            .any(|table| table.name == APP_PARTS)
-    );
+    let (kept, replayed) = kept_and_replayed(&fixture, 1060);
+    assert!(holds_derived_tables(&windows[1]));
+    assert_eq!(kept, replayed);
+}
+
+#[test]
+fn a_window_derives_again_while_the_minute_two_before_it_stays_damaged() {
+    // Goal: a damaged minute costs only the window after it. The one after that takes its rates
+    // from the window saved with no derived tables, whose raw rows read.
+    // Method: save tick 59, damage its processes, restart, and save ticks 60 and 61 in two more
+    // minutes through derivations of their own.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    let saved = Session::open(&fixture.root).unwrap().windows[0].clone();
+    let processes = fixture
+        .root
+        .join(&saved.data_directory)
+        .join("processes.parquet");
+    std::fs::write(&processes, b"damaged").unwrap();
+    fixture.publish_with_system_rows(1060);
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(1120);
+
+    fixture.seal_minute_derived(2, &persistence::sealed_apps::SealedApps::default());
+
+    let windows = Session::open(&fixture.root).unwrap().windows;
+    assert_eq!(windows.len(), 3);
+    assert!(!holds_derived_tables(&windows[1]));
+    assert!(holds_derived_tables(&windows[2]));
+}
+
+#[test]
+fn a_reader_of_a_window_saved_without_derived_tables_is_told_the_minute_before_is_damaged() {
+    // Goal: where damage cost a window its derived tables, the replay that reads it says so.
+    // Method: save tick 59, damage its processes, restart, save tick 60, and read an App's history.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(1059);
+    fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
+    let saved = Session::open(&fixture.root).unwrap().windows[0].clone();
+    let processes = fixture
+        .root
+        .join(&saved.data_directory)
+        .join("processes.parquet");
+    std::fs::write(&processes, b"damaged").unwrap();
+    fixture.publish_with_system_rows(1060);
+    fixture.seal_minute_derived(1, &persistence::sealed_apps::SealedApps::default());
+    let mut session = crate::LiveSession::open(&fixture.root).unwrap();
+    session.select(1060, 0).unwrap();
+
+    let read = session.app_history(KeyKind::Bundle, b"/Apps/Current.app");
+
+    assert!(matches!(read, Err(Error::Bound("parquet file framing"))));
 }
 
 #[test]

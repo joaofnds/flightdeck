@@ -567,6 +567,24 @@ fn the_first_retained_reading_comes_from_raw_readings_alone() {
 }
 
 #[test]
+fn the_first_retained_reading_is_what_it_was_when_a_restart_saved_each_minute() {
+    // Goal: a first retained reading whose rates a restart took from the minute before keeps them
+    // once that minute expires, and shows no expired reading.
+    // Method: as above, over minutes each saved through a derivation of its own.
+    let fixture = saved_across_three_minutes(&persistence::canonical::ready_fixture::Restarted);
+    let (saved, live, points) = reading_of_second(&fixture.root, 1005);
+
+    let removed = expire_and_remove(&fixture.root, 121 * NS);
+    let (retained_saved, retained_live, retained_points) = reading_of_second(&fixture.root, 1005);
+
+    assert_eq!(removed, 1);
+    assert!(saved["cpu_percent"].is_number(), "{saved}");
+    assert_eq!(retained_saved, saved);
+    assert_eq!(retained_live, live);
+    assert_eq!(retained_points, points[4..]);
+}
+
+#[test]
 fn an_app_history_reads_on_past_a_minute_removal_took_from_under_its_list() {
     // Goal: a session whose list still names a minute removal took reads an App's history without
     // calling a healthy recording damaged.
