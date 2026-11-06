@@ -447,6 +447,9 @@ pub(crate) fn saved_clocks_rewrite(commitment: &Path, observations: &[persistenc
         .unwrap()
         .into_no_null_iter()
         .collect();
+    for observation in observations {
+        assert!(publications.contains(&observation.publication));
+    }
     let clocks: [(&str, Clock); 3] = [
         ("wall_ns", |observation| observation.wall_ns),
         ("continuous_ns", |observation| observation.continuous_ns),

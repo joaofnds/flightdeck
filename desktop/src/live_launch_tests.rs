@@ -29,7 +29,8 @@ fn a_timed_window_leaves_an_older_recording() {
 #[test]
 fn a_named_recording_stays_where_the_launch_named_it() {
     // Goal: a recording the user names is theirs to keep, so no launch deletes it.
-    // Method: launch on an older root that --recording names, and look for it afterwards.
+    // Method: launch with --recording over an older recording at the root the launch would
+    // otherwise clear, and look for it afterwards.
     assert!(older_recording_outlives(&["--recording", "/tmp/unused"]));
 }
 

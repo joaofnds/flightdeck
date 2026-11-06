@@ -938,8 +938,9 @@ fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
 }
 
 #[test]
-fn a_sealed_boot_mismatch_cannot_seed_machine_rates_under_the_registry_identity() {
-    // Goal: a committed minute from another boot cannot be labelled as the registry's run.
+fn a_minute_whose_proof_names_another_boot_stops_the_load_and_seeds_no_rate() {
+    // Goal: a minute whose proof disagrees with the name that links it stops the load before it
+    // decodes anything, so no reading of it seeds a rate under the registry's run.
     // Method: change only its manifest boot, preserving the hard link, and overwrite its ring tick.
     let mut fixture = Fixture::new();
     fixture.start_at_run_tick(59);
