@@ -497,7 +497,6 @@ impl KeptTail {
         reach
     }
 
-    /// The kept readings `range` holds, and those after its limit that decide its join.
     /// Whether a reading before `observation` in its minute and its stretch has expired.
     fn assemble_stretch_expired(
         &self,
@@ -516,6 +515,7 @@ impl KeptTail {
         })
     }
 
+    /// The kept readings `range` holds, and those after its limit that decide its join.
     fn assemble_readings(
         &self,
         history: &Session,

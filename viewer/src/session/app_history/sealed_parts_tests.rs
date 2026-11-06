@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use polars::prelude::Column;
+use polars::prelude::{ChunkCompareEq, Column};
 use serde_json::{Value, json};
 
 use super::super::sealed::fixture::{range, rewrite};
@@ -690,10 +690,17 @@ fn a_saved_minute_with_one_tick_a_replay_refuses_gives_the_next_no_derived_table
 fn a_saved_minute_of_ticks_out_of_order_gives_the_next_no_derived_tables() {
     // Goal: a restart refuses ticks out of publication order as a replay does, rather than taking
     // the row that happens to lie last for the tick before the window.
-    // Method: save ticks 58 and 59, reverse the minute's tick rows, restart, and save the next.
+    // Method: save ticks 58 and 59, reverse the minute's tick rows, keep only tick 58's process
+    // rows, which a search of those reversed ticks still finds, restart, and save the next minute.
     let windows = windows_after_damage_to_the_minute_before(|directory| {
         crate::recording::damage_table_file(&directory.join("ticks.parquet"), |frame| {
             frame.reverse()
+        });
+        crate::recording::damage_table_file(&directory.join("processes.parquet"), |frame| {
+            let publications = frame.column("publication").unwrap().u64().unwrap();
+            let first = publications.into_no_null_iter().min().unwrap();
+            let first_tick = publications.equal(first);
+            frame.filter(&first_tick).unwrap()
         });
     });
 
