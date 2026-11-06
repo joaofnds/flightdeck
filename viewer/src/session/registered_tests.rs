@@ -378,15 +378,17 @@ const WINDOW_COUNTS_OF_DAYS: [u64; 3] = [1_440, 10_080, 43_200];
 #[cfg(not(feature = "long-recording"))]
 const WINDOW_COUNTS_OF_DAYS: [u64; 1] = [1_440];
 
+/// Where linked windows start, far enough past the first second that no real save reaches them.
+const SECOND_BETWEEN: u64 = SECOND_FIRST + 20_000;
+
 #[test]
 fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
     // Goal: a recording keeps opening and answering at its oldest and newest seconds at 65,535,
-    // 65,536, 65,537 and 131,072 windows, a live reader goes on across the old cap, neither lists
-    // or reads what lies between, and two runs on one second both stay selectable (P02.1, P02.2).
+    // 65,536, 65,537 and 131,072 windows, a live reader goes on across the old cap, and neither
+    // lists or reads what lies between (P02.1, P02.2).
     // Method: save real minutes at both ends through the worker and link windows between them whose
     // proofs do not read, so that admitting any of them fails the read. Then cross the cap with
-    // real saves while a live session polls, and save another run over the oldest second.
-    const SECOND_BETWEEN: u64 = SECOND_FIRST + 20_000;
+    // real saves while a live session polls.
     let [below, at, above, twice] = WINDOW_COUNTS;
     let newest = SECOND_BETWEEN + twice + 20_000;
     let mut fixture = Fixture::registered();
@@ -412,17 +414,7 @@ fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
     registered_save_minute(&mut fixture, newest + 180);
     live.poll().unwrap();
     let listed_twice = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 180);
-    let mut sharing = Fixture::new_mode(true, 2, Some(&fixture));
-    sharing.start_at_run_tick(58);
-    sharing.publish_with_system_rows(SECOND_FIRST);
-    sharing.seal();
-    live.poll().unwrap();
-    let mut session = Session::open(&fixture.root).unwrap();
-    let one = session.select(SECOND_FIRST, 0).unwrap();
-    let other = session.select(SECOND_FIRST, 1).unwrap();
 
-    assert_eq!(one["alternatives"].as_array().unwrap().len(), 2);
-    assert_ne!(one["selected"]["run"], other["selected"]["run"]);
     assert_eq!(live_at, newest + 60);
     assert_eq!(live_above, newest + 120);
     assert_eq!(live.catalog()["last_second"], newest + 180);
@@ -431,6 +423,36 @@ fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
     assert!(listed_at <= 4);
     assert!(listed_above <= 4);
     assert!(listed_twice <= 4);
+}
+
+#[test]
+fn two_runs_on_one_second_stay_selectable_past_the_old_cap() {
+    // Goal: a second two runs share stays selectable in both, with a live reader open, in a
+    // recording past the old cap of windows (P02.1).
+    // Method: save minutes at both ends, link windows past the cap between them whose proofs do
+    // not read, open a live session, save another run over the oldest second, poll, and select
+    // each run there.
+    let [below, ..] = WINDOW_COUNTS;
+    let mut fixture = Fixture::registered();
+    fixture.publish_with_system_rows(SECOND_FIRST);
+    fixture.seal();
+    registered_link_between(&fixture, SECOND_BETWEEN, 1..below + 2);
+    registered_save_minute(&mut fixture, SECOND_BETWEEN + below + 20_000);
+    let mut live = crate::LiveSession::open(&fixture.root).unwrap();
+    live.poll().unwrap();
+    let mut sharing = Fixture::new_mode(true, 2, Some(&fixture));
+    sharing.start_at_run_tick(58);
+    sharing.publish_with_system_rows(SECOND_FIRST);
+
+    sharing.seal();
+
+    live.poll().unwrap();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let one = session.select(SECOND_FIRST, 0).unwrap();
+    let other = session.select(SECOND_FIRST, 1).unwrap();
+    assert_eq!(one["alternatives"].as_array().unwrap().len(), 2);
+    assert_ne!(one["selected"]["run"], other["selected"]["run"]);
+    assert_eq!(live.catalog()["history_error"], serde_json::Value::Null);
 }
 
 #[test]
@@ -472,6 +494,8 @@ fn what_a_lookup_reads_stays_within_the_tree_however_long_the_recording() {
 /// Links a window of one reading for each publication of `publications`, a second apart from
 /// `second`, under a run of their own.
 fn registered_link_between(fixture: &Fixture, second: u64, publications: std::ops::Range<u64>) {
+    // Not the first word, which the next run's fixture flips: a save reads its own run's windows,
+    // and these proofs do not read.
     let mut run = fixture.writer.identity().unwrap();
     run.run.0[1] ^= 1;
     let readings: Vec<_> = publications
