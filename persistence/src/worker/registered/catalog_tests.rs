@@ -704,6 +704,34 @@ fn a_window_with_no_clock_is_listed_once_and_a_clock_range_never_lists_it() {
 }
 
 #[test]
+fn a_window_with_no_clock_leaves_no_reading_behind_when_it_goes() {
+    // Goal: removal takes the names of readings with no clock as well, since one left behind would
+    // send a reader to a window that is gone.
+    // Method: save a window of two readings with no clock, and pass at a clock past everything.
+    let mut recording = Recording::new();
+    catalog_tests_publish_without_clock(&mut recording, 0);
+    catalog_tests_publish_without_clock(&mut recording, 0);
+    recording.publish_in_minute(1);
+    let store = Store::open(&recording.root).unwrap();
+    let mut state = RunState::default();
+    recording.persist(&store, &mut state);
+    let far = ClockReading {
+        boot: Identity([5, 5]),
+        continuous_ns: 1 << 62,
+        wall_ns: 1 << 62,
+    };
+
+    let removed = store.retire_expired(&far, &[], &catalog_tests_budget());
+
+    assert_eq!(removed.unwrap(), 1);
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+    let left = catalog
+        .windows_without_clock(&mut ReadWork::default())
+        .unwrap();
+    assert_eq!(catalog_tests_window_numbers(&left), [0_u64; 0]);
+}
+
+#[test]
 fn a_window_with_one_clock_among_its_readings_is_left_to_the_clock_range() {
     // Goal: a window one of whose readings has a clock is the clock range's to find, so listing it
     // here as well would show it twice.

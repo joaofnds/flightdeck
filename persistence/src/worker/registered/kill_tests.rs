@@ -554,6 +554,7 @@ fn killed_retirement_uninterrupted(interposer: &Interposer) -> Vec<PathBuf> {
         "never ended",
     );
     assert_eq!(recording.saved_windows().len(), 1);
+    assert_eq!(killed_retirement_names(&recording.root, "terminal"), 0);
 
     killed_retirement_paths(&recording.root)
 }
@@ -621,6 +622,43 @@ fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
     let changes = changes.into_inner();
     assert!(changes > 0, "no change was numbered");
     assert!(changes < CHANGES_MAX, "removal kept making changes");
+}
+
+#[test]
+fn a_terminal_whose_proof_does_not_read_still_goes() {
+    // Goal: damage cannot keep a run's last record on disk for good, wherever that record lies.
+    // Method: save a run whole, damage the proof of its terminal, and pass at a clock past
+    // everything.
+    let recording = killed_worker_finished_run();
+    let outcome = run_paced(
+        &recording.root,
+        crate::resources::WORKING_BYTES_MAX,
+        &SealedApps::default(),
+        &mut |_pause| panic!("the ring is finished"),
+        None,
+    );
+    assert!(matches!(outcome, Ok(Outcome::Complete)));
+    let base = recording.root.join("recovery-data");
+    for object in std::fs::read_dir(&base).unwrap() {
+        let proof = object.unwrap().path().join("ready/metadata");
+        std::fs::write(proof, b"damaged").unwrap();
+    }
+    let store = Store::open(&recording.root).unwrap();
+    let far = crate::retention::ClockReading {
+        boot: collector::ring::Identity([5, 5]),
+        continuous_ns: 1 << 62,
+        wall_ns: 1 << 62,
+    };
+
+    store
+        .retire_expired(
+            &far,
+            &[],
+            &crate::resources::ByteBudget::new(1 << 28).into(),
+        )
+        .unwrap();
+
+    assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
 }
 
 #[test]

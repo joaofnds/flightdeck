@@ -43,6 +43,78 @@ fn a_fragment_of_saved_rows_is_listed_as_an_event_object() {
             .any(|name| name.contains("-fragment-"))
     );
 }
+#[test]
+fn a_fragment_of_saved_rows_outlives_its_period_like_anything_else_saved() {
+    // Goal: rows saved apart from a minute leave the recording at the end of the period, each part
+    // through the retention order, and leave no name a reader would follow to nothing.
+    // Method: publish a fragment through the interrupted Store path, list the order, and take
+    // passes at a clock past everything.
+    let fixture = registered_survivors(false);
+    let budget = registration_budget();
+    let parts = crate::retention::order_entry_names(&fixture.root)
+        .iter()
+        .filter(|name| name.contains("-fragment-"))
+        .count();
+    let store = Store::open(&fixture.root).unwrap();
+    let far = crate::retention::ClockReading {
+        boot: Identity([5, 5]),
+        continuous_ns: 1 << 62,
+        wall_ns: 1 << 62,
+    };
+
+    for _pass in 0..8 {
+        store.retire_expired(&far, &[], &budget).unwrap();
+    }
+
+    let catalog = crate::canonical::catalog::Catalog::open(&fixture.root, &budget).unwrap();
+    let terminals = catalog
+        .event_objects_page(None, 8, &mut ReadWork::default())
+        .unwrap();
+    let page = catalog
+        .event_objects_page(terminals.next.as_ref(), 8, &mut ReadWork::default())
+        .unwrap();
+    assert_eq!(parts, 1);
+    assert_eq!(page.objects.len(), 0);
+    assert_eq!(crate::retention::order_entry_names(&fixture.root).len(), 0);
+    assert_eq!(
+        fs::read_dir(fixture.root.join("recovery-data"))
+            .unwrap()
+            .count()
+            + fs::read_dir(fixture.root.join("data")).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn a_fragment_whose_proof_does_not_read_still_goes() {
+    // Goal: damage cannot keep a part of a run's events on disk for good, and its directory is
+    // found by the entry's name, whose child holds a hyphen of its own.
+    // Method: publish a fragment, damage its proof, and pass at a clock past everything.
+    let fixture = registered_survivors(false);
+    let names = crate::retention::order_entry_names(&fixture.root);
+    let name = names
+        .iter()
+        .find(|name| name.contains("-fragment-"))
+        .unwrap();
+    let object = fixture
+        .root
+        .join("data")
+        .join(name.split('-').nth(1).unwrap());
+    fs::write(object.join("fragment-0/metadata"), b"damaged").unwrap();
+    let store = Store::open(&fixture.root).unwrap();
+    let far = crate::retention::ClockReading {
+        boot: Identity([5, 5]),
+        continuous_ns: 1 << 62,
+        wall_ns: 1 << 62,
+    };
+
+    store
+        .retire_expired(&far, &[], &registration_budget())
+        .unwrap();
+
+    assert!(!object.exists());
+}
+
 fn registered_survivors(captured: bool) -> Fixture {
     let mut fixture = proof_fixture(captured, 1);
     let store = Store::open(&fixture.root).unwrap();
