@@ -1,6 +1,7 @@
 //! Physical removal through the real publication route, with the clock given to it.
 
 use super::*;
+use crate::canonical::Namespace;
 use crate::retention::{
     Clock, ClockReading, Period, boot_offset_ns, boot_offset_save, order_entry_names,
 };
@@ -322,6 +323,86 @@ fn a_reading_removed_after_it_was_listed_asks_for_the_list_again() {
     );
 
     assert_eq!(lookup.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+
+/// A walk of the run's windows stopped on the name of the oldest, and that name.
+fn retirement_walk_to_oldest<'root>(
+    fixture: &Fixture,
+    root: &'root PrivateDirectory,
+) -> (
+    crate::canonical::tree::CanonicalCursor<'root, 'static>,
+    crate::canonical::tree::CanonicalKey,
+) {
+    let range = crate::canonical::tree::SeekRange {
+        first: crate::canonical::tree::CanonicalKey::source(Namespace::Ordinary, &fixture.run, 0)
+            .unwrap(),
+        last: crate::canonical::tree::CanonicalKey::source(
+            Namespace::Ordinary,
+            &fixture.run,
+            u64::MAX,
+        )
+        .unwrap(),
+        direction: crate::canonical::tree::Direction::Forward,
+    };
+    let mut cursor = crate::canonical::tree::CanonicalCursor::begin_owned(
+        root,
+        fixture.run.recording,
+        Namespace::Ordinary,
+        range,
+        &registration_budget(),
+    )
+    .unwrap();
+    for _step in 0..64 {
+        if let crate::canonical::tree::ReadStep::Found(key) = cursor.step().unwrap() {
+            return (cursor, key);
+        }
+    }
+
+    panic!("the walk found no window");
+}
+
+#[test]
+fn a_name_removed_after_a_walk_found_it_asks_for_the_walk_again() {
+    // Goal: a removal between a walk finding a window's name and opening it never reads as a
+    // window gone missing, so a reader beside removal looks again.
+    // Method: walk to the oldest window's name, pass, and open the name the walk found.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 4);
+    let places = retirement_places(&fixture);
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    let (mut cursor, oldest) = retirement_walk_to_oldest(&fixture, &root);
+    let removed = store
+        .retire_expired(
+            &retirement_at(&fixture, retirement_clock_keeping(places[2])),
+            &[fixture.run],
+            &registration_budget(),
+        )
+        .unwrap();
+
+    let opened = cursor.open_gate(&oldest);
+
+    assert!(removed > 0);
+    assert_eq!(opened.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+
+#[test]
+fn a_name_gone_with_no_change_under_way_reads_as_gone() {
+    // Goal: only a change of the namespace turns a missing name into a retry, so a name that is
+    // gone with the namespace still stays an answer, and no reader waits on it.
+    // Method: walk to a window's name and, with nothing changing, open a name no window holds.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 2);
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    let (mut cursor, _oldest) = retirement_walk_to_oldest(&fixture, &root);
+    let missing =
+        crate::canonical::tree::CanonicalKey::source(Namespace::Ordinary, &fixture.run, 1 << 40)
+            .unwrap();
+
+    let opened = cursor.open_gate(&missing);
+
+    assert_eq!(opened.unwrap_err().kind(), io::ErrorKind::NotFound);
 }
 
 #[test]

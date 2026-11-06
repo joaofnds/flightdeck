@@ -489,6 +489,16 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         Ok(directory)
     }
     pub(crate) fn open_gate(&mut self, key: &CanonicalKey) -> io::Result<std::fs::File> {
+        let gate = self.open_gate_name(key);
+        // This check dominates absence here as it does in the walk, since a removal may have taken
+        // the name since the step that found it.
+        if gate.is_err() {
+            self.check_snapshot()?;
+        }
+
+        gate
+    }
+    fn open_gate_name(&mut self, key: &CanonicalKey) -> io::Result<std::fs::File> {
         let directory = self.open_current()?;
         self.work.namespace_attempts += 1;
         self.work.metadata_admissions += 1;
