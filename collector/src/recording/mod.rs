@@ -473,7 +473,7 @@ fn observation_times_at(timebase: Timebase, wall: SystemTime) -> io::Result<Obse
     })
 }
 
-pub(crate) fn boot_identity() -> io::Result<Identity> {
+pub fn boot_identity() -> io::Result<Identity> {
     let mut bytes = [0_u8; 64];
     let mut length = bytes.len();
     let result = unsafe {

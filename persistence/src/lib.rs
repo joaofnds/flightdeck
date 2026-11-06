@@ -18,6 +18,7 @@ mod owned_identity;
 pub mod query;
 mod reader;
 pub mod resources;
+pub mod retention;
 pub mod schema;
 pub mod sealed_apps;
 mod store;
