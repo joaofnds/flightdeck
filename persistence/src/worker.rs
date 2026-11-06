@@ -145,6 +145,17 @@ fn run_paced(
     pause: &mut dyn FnMut(Duration),
     control: Option<collector::recording::control::Control>,
 ) -> Result<Outcome> {
+    run_paced_clocked(root, memory_limit, derive, pause, control, &Instant::now)
+}
+
+fn run_paced_clocked(
+    root: &Path,
+    memory_limit: u64,
+    derive: &dyn Derive,
+    pause: &mut dyn FnMut(Duration),
+    control: Option<collector::recording::control::Control>,
+    now: &dyn Fn() -> Instant,
+) -> Result<Outcome> {
     let watchdog = Watchdog::start(memory_limit)?;
     let operation = watchdog.operation()?;
     let store = match Store::open(root) {
@@ -168,7 +179,9 @@ fn run_paced(
     for _pass in 0..u64::MAX {
         let operation = watchdog.operation()?;
         let runs = run_registry(&registry_path, &mut registry_buffer, &mut recovery)?;
-        run_retirement(&store, &runs, &mut retirement_last, memory_limit);
+        if run_retirement_due(&mut retirement_last, now()) {
+            run_retirement(&store, &runs, memory_limit);
+        }
         let pass = run_pass(root, &store, &writers, &runs, &mut recovery)?;
         report_progress(&mut health, &recovery)?;
         match pass {
@@ -245,18 +258,10 @@ fn report_progress(
 
 const RETIREMENT_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Removes what has outlived the retention period, at most once a minute. The first pass comes
-/// before a restart resumes anything, so a save that failed on a full disk finds the space when it
-/// tries again. A failure here is reported and stops no save.
-fn run_retirement(
-    store: &Store,
-    runs: &[RegisteredRun],
-    last: &mut Option<Instant>,
-    memory_limit: u64,
-) {
-    if !run_retirement_due(last, Instant::now()) {
-        return;
-    }
+/// Removes what has outlived the retention period. The first pass comes before a restart resumes
+/// anything, so a save that failed on a full disk finds the space when it tries again. A failure
+/// here is reported and stops no save.
+fn run_retirement(store: &Store, runs: &[RegisteredRun], memory_limit: u64) {
     if let Err(error) = run_retirement_pass(store, runs, memory_limit) {
         collector::diagnostics::error(format_args!("retention removal: {error}"));
     }

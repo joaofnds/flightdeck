@@ -1,7 +1,7 @@
 use super::super::tests::forged_source::{ForgedWord, WritableSource};
 use super::super::{
     Outcome, Progress, RunState, WindowIdentity, Writers, persist_one, run_paced,
-    run_retirement_due,
+    run_paced_clocked, run_retirement_due,
 };
 use crate::canonical::metadata::{Body, EndpointEvidence, Lifecycle};
 use crate::canonical::{CanonicalMetadata, ReadWork, SourceFrontier};
@@ -3185,6 +3185,113 @@ fn the_whole_worker_removes_what_outlived_the_retention_period() {
         .collect();
     assert_eq!(newest, [middle_newest_ns, 120_000_000_000 + 4]);
     assert_eq!(recording.saved_windows().len(), 2);
+}
+
+#[test]
+fn a_worker_left_running_removes_what_expires_a_minute_after_its_last_pass() {
+    // Goal: removal goes on while the worker runs, so a recording never restarted still loses what
+    // outlives its period, and no pass comes before the minute is up.
+    // Method: run the whole worker beside a live ring on a clock the test advances in its pauses.
+    // Move the retention clock past the oldest saved minute in the first pause, stop the worker's
+    // clock a second short of the minute, then let the minute pass, and count the saved minutes at
+    // each pause.
+    const CLOCK_NS: u64 = 1 << 62;
+    const PERIOD_SECONDS: u64 = 60;
+    const GRACE_SECONDS: u64 = 60;
+    let cutoff_ns = CLOCK_NS - (PERIOD_SECONDS + GRACE_SECONDS) * 1_000_000_000;
+    let mut recording = Recording::new();
+    recording.publish_in_minute(LIVE_MINUTE);
+    recording.publish_in_minute(LIVE_MINUTE + 1);
+    recording.publish_in_minute(LIVE_MINUTE + 1);
+    recording.publish_in_minute(LIVE_MINUTE + 2);
+    let middle_newest_ns = (LIVE_MINUTE + 1) * 60_000_000_000 + 3;
+    let root = recording.root.clone();
+    let directory = PrivateDirectory::open(&root).unwrap();
+    Period::from_seconds(PERIOD_SECONDS)
+        .unwrap()
+        .write(&directory)
+        .unwrap();
+    boot_offset_save(&directory, recording.run.boot, cutoff_ns - middle_newest_ns).unwrap();
+    let placed = |wall_ns| {
+        Clock::started_at(&ClockReading {
+            boot: Identity([9, 9]),
+            continuous_ns: 0,
+            wall_ns,
+        })
+    };
+    placed(CLOCK_NS - 3_600_000_000_000)
+        .write(&directory)
+        .unwrap();
+    let run = RegisteredRun {
+        collector_pid: std::process::id(),
+        ..recording.registered()
+    };
+    let registry = Registry {
+        runs: vec![run],
+        evictions: 0,
+    };
+    registry.write(&root).unwrap();
+    let start = Instant::now();
+    let elapsed = std::cell::Cell::new(Duration::ZERO);
+    let mut saved_at_each_pause = Vec::new();
+
+    let outcome = run_paced_clocked(
+        &root,
+        crate::resources::WORKING_BYTES_MAX,
+        &SealedApps::default(),
+        &mut |_pause| {
+            saved_at_each_pause.push(recording.saved_manifests().len());
+            match saved_at_each_pause.len() {
+                1 => {
+                    placed(CLOCK_NS).write(&directory).unwrap();
+                    elapsed.set(Duration::from_secs(59));
+                }
+                2 => elapsed.set(Duration::from_secs(60)),
+                _ => recording.writer.finish(),
+            }
+        },
+        None,
+        &|| start + elapsed.get(),
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, Outcome::Complete));
+    assert_eq!(saved_at_each_pause, [2, 2, 1]);
+}
+
+#[test]
+fn a_worker_refused_the_recording_removes_nothing() {
+    // Goal: only the worker that owns a recording removes from it, so a second one started beside
+    // it leaves every reading alone, expired or not.
+    // Method: save minutes, place the retention clock past them, and run the whole worker while
+    // the store is held.
+    let mut recording = Recording::new();
+    for minute in 0..4 {
+        recording.publish_in_minute(minute);
+    }
+    recording.writer.finish();
+    let store = Store::open(&recording.root).unwrap();
+    persist_until_quiet(&recording, &store, &mut RunState::default());
+    let saved = recording.saved_manifests().len();
+    let directory = PrivateDirectory::open(&recording.root).unwrap();
+    Period::from_seconds(60).unwrap().write(&directory).unwrap();
+    boot_offset_save(&directory, recording.run.boot, 0).unwrap();
+    Clock::started_at(&ClockReading {
+        boot: Identity([9, 9]),
+        continuous_ns: 0,
+        wall_ns: 1 << 62,
+    })
+    .write(&directory)
+    .unwrap();
+
+    let outcome = whole_worker(
+        &recording.root,
+        vec![recording.registered()],
+        &mut |_pause| panic!("a worker refused the recording exits"),
+    );
+
+    assert!(matches!(outcome, Outcome::Owned));
+    assert_eq!(recording.saved_manifests().len(), saved);
 }
 
 #[test]
