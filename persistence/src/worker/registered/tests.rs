@@ -3214,6 +3214,9 @@ mod kill_tests;
 #[path = "full_disk_tests.rs"]
 mod full_disk_tests;
 
+#[path = "plateau_tests.rs"]
+mod plateau_tests;
+
 #[path = "keep_tests.rs"]
 mod keep_tests;
 

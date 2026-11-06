@@ -22,6 +22,8 @@ persistence = { path = ".", features = ["fixtures"] }
 [features]
 # A test of every pair of kills, which takes about an hour and so stays out of the checks.
 kill-every-pair = []
+# What a recording holds over thirty days, which takes hours and so stays out of the checks.
+long-recording = []
 # What another crate's tests save a live run's minutes through.
 fixtures = []
 

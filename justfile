@@ -95,7 +95,7 @@ fmt:
 # Lint the root workspace.
 clippy:
     cargo clippy --locked --workspace --all-targets -- --deny warnings
-    cargo clippy --locked -p persistence --all-targets --features kill-every-pair -- --deny warnings
+    cargo clippy --locked -p persistence --all-targets --features kill-every-pair,long-recording -- --deny warnings
 
 # Test the root workspace.
 test:
