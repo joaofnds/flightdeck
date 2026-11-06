@@ -117,7 +117,7 @@ fn a_successful_load_reports_the_actual_catalog_pruning_floor() {
 #[test]
 fn a_registered_recording_loads_its_minutes_through_its_catalog() {
     // Goal: the store's load reaches a registered recording's minutes with no list of them, and
-    // reports what it read (P02.1).
+    // reports what it read.
     // Method: save two minutes far apart through the worker and load the newest hour.
     let mut fixture = Fixture::registered();
     fixture.publish_with_events(10_000, &[]);

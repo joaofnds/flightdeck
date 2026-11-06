@@ -324,7 +324,7 @@ fn a_loss_stopped_after(changes: usize) -> bool {
 #[test]
 fn a_loss_stopped_at_each_change_of_the_slot_frees_it_once_its_source_is_gone() {
     // Goal: a process that ends at any point of publishing a run's loss that the next one can tell
-    // apart, whose source then goes, leaves nothing that keeps the other runs waiting (P02.3).
+    // apart, whose source then goes, leaves nothing that keeps the other runs waiting.
     // Method: stop the publication after one more change of the slot each time, until it ends
     // first.
     let changes = (0..SLOT_CHANGES_MAX).find(|changes| a_loss_stopped_after(*changes));

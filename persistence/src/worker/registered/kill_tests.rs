@@ -559,7 +559,7 @@ fn killed_retirement_converges(stride: u64, fault: fn(u64) -> Fault) {
 #[test]
 fn a_pass_killed_at_each_change_of_a_removal_comes_to_the_same_end() {
     // Goal: no change a removal makes leaves a recording that a reader misreads or a restart cannot
-    // finish the same way (P03.5).
+    // finish the same way.
     // Method: for each numbered change, end a pass there in its own process, read the run as a
     // reader would, restart, and compare what is left with a pass that was never ended.
     let _one = one_kill_test();
@@ -569,7 +569,7 @@ fn a_pass_killed_at_each_change_of_a_removal_comes_to_the_same_end() {
 #[test]
 fn a_pass_refused_a_change_comes_to_the_same_end_once_the_disk_has_room() {
     // Goal: a change the file system refuses is an error, never a panic or a state a restart cannot
-    // finish (P03.5).
+    // finish.
     // Method: refuse each fourth change and all after it, then restart with nothing refused.
     let _one = one_kill_test();
     killed_retirement_converges(4, Fault::Refuse);
@@ -578,7 +578,7 @@ fn a_pass_refused_a_change_comes_to_the_same_end_once_the_disk_has_room() {
 #[test]
 fn a_worker_killed_at_each_change_of_a_finished_run_comes_to_the_same_end() {
     // Goal: no change the worker makes to a recording leaves one that a restart cannot finish
-    // the same way (P02.3).
+    // the same way.
     // Method: for each numbered change, end a worker there in its own process, restart it, and
     // compare what the run comes to with a worker that was never ended.
     let _one = one_kill_test();
@@ -588,7 +588,7 @@ fn a_worker_killed_at_each_change_of_a_finished_run_comes_to_the_same_end() {
 #[test]
 fn a_worker_killed_during_a_crashed_run_comes_to_the_same_end() {
     // Goal: the same for a dead writer's window and a terminal of two batches, which a finished
-    // run does not reach (P02.3).
+    // run does not reach.
     // Method: as above at every third change, since much of the run is what the finished run makes.
     let _one = one_kill_test();
     killed_worker_converges(killed_worker_crashed_run, 3, Fault::Kill);
@@ -596,7 +596,7 @@ fn a_worker_killed_during_a_crashed_run_comes_to_the_same_end() {
 
 #[test]
 fn a_worker_killed_during_a_run_that_overran_its_ring_comes_to_the_same_end() {
-    // Goal: what the ring overwrote is counted once whatever a restart finds saved (P01.2, P02.3).
+    // Goal: what the ring overwrote is counted once whatever a restart finds saved.
     // Method: as above at every third change, over a run with publications and events lost.
     let _one = one_kill_test();
     killed_worker_converges(killed_worker_lagging_run, 3, Fault::Kill);
@@ -605,7 +605,7 @@ fn a_worker_killed_during_a_run_that_overran_its_ring_comes_to_the_same_end() {
 #[test]
 fn a_worker_refused_a_change_comes_to_the_same_end_once_the_disk_has_room() {
     // Goal: a change the file system refuses is an error, never a panic or a saved state a restart
-    // cannot finish (P02.3).
+    // cannot finish.
     // Method: refuse each fourth change and all after it, then restart with nothing refused.
     let _one = one_kill_test();
     killed_worker_converges(killed_worker_finished_run, 4, Fault::Refuse);
@@ -650,7 +650,7 @@ fn killed_worker_converges(recording_new: fn() -> Recording, stride: u64, fault:
 
 #[test]
 fn a_worker_killed_again_while_it_recovers_comes_to_the_same_end() {
-    // Goal: the recovery of a killed worker can itself be killed (P02.3).
+    // Goal: the recovery of a killed worker can itself be killed.
     // Method: end a worker at a first change, end its restart at a second, restart it again, and
     // compare with a worker that was never ended, over the pairs a check can afford. A restart
     // makes its recovery's own changes first, and past them it is a run the single kills cover.
@@ -683,7 +683,7 @@ fn a_worker_killed_again_while_it_gives_up_a_terminal_comes_to_the_same_end() {
 #[test]
 fn a_worker_killed_again_while_it_removes_a_terminals_batches_comes_to_the_same_end() {
     // Goal: a terminal's batches go newest first, so a process that ends between two removals
-    // leaves the order the writer leaves, which the sampled kills above seldom reach (P02.3).
+    // leaves the order the writer leaves, which the sampled kills above seldom reach.
     // Method: end a worker just before it creates the terminal's proof, the only time both its
     // batches are whole with nothing after them, then end its restart at each of the first
     // changes, which take in both removals.
@@ -711,7 +711,7 @@ fn a_worker_killed_again_while_it_removes_a_terminals_batches_comes_to_the_same_
 #[test]
 fn a_worker_refused_a_change_while_it_recovers_comes_to_the_same_end() {
     // Goal: a failure during recovery removes nothing a later restart needs, so it finishes once
-    // the disk has room (P02.3).
+    // the disk has room.
     // Method: end a worker at a first change, refuse its restart from a second on, restart it with
     // nothing refused, and compare with a worker that was never ended.
     let _one = one_kill_test();

@@ -69,7 +69,7 @@ fn time_on_the_continuous_clock_is_time_within_a_boot() {
 
 #[test]
 fn a_wall_clock_stepping_forward_within_a_boot_ages_nothing() {
-    // Goal: a clock set forward does not expire readings early (P03.4).
+    // Goal: a clock set forward does not expire readings early.
     // Method: step the wall clock a year ahead while a minute passes.
     let elapsed = elapsed_seconds(
         &reading(THIS_BOOT, 10, 0),
@@ -81,7 +81,7 @@ fn a_wall_clock_stepping_forward_within_a_boot_ages_nothing() {
 
 #[test]
 fn a_wall_clock_stepping_back_within_a_boot_extends_nothing() {
-    // Goal: a clock set back grants no reading more time (P03.4).
+    // Goal: a clock set back grants no reading more time.
     // Method: step the wall clock back a day while a minute passes, from a day after the start.
     let elapsed = elapsed_seconds(&reading(THIS_BOOT, 10, 86_400), &reading(THIS_BOOT, 70, 60));
 
@@ -90,7 +90,7 @@ fn a_wall_clock_stepping_back_within_a_boot_extends_nothing() {
 
 #[test]
 fn a_frozen_wall_clock_stops_no_time() {
-    // Goal: a wall clock that does not move cannot let a recording grow without end (P03.3).
+    // Goal: a wall clock that does not move cannot let a recording grow without end.
     // Method: hold the wall clock still while the continuous clock runs.
     let elapsed = elapsed_seconds(
         &reading(THIS_BOOT, 10, 500),
@@ -102,7 +102,7 @@ fn a_frozen_wall_clock_stops_no_time() {
 
 #[test]
 fn a_reboot_counts_the_time_the_wall_clock_says_passed() {
-    // Goal: time away counts, though the continuous clock starts over (P03.4).
+    // Goal: time away counts, though the continuous clock starts over.
     // Method: reboot an hour later on a continuous clock that reads less than before.
     let elapsed = elapsed_seconds(&reading(THIS_BOOT, 5_000, 0), &reading(NEXT_BOOT, 1, 3_600));
 
@@ -111,8 +111,7 @@ fn a_reboot_counts_the_time_the_wall_clock_says_passed() {
 
 #[test]
 fn a_reboot_onto_an_earlier_clock_counts_no_time() {
-    // Goal: a clock gone back across a reboot takes no time off and grants only the time it hides
-    // (P03.4).
+    // Goal: a clock gone back across a reboot takes no time off and grants only the time it hides.
     // Method: reboot onto a wall clock a day earlier.
     let elapsed = elapsed_seconds(
         &reading(THIS_BOOT, 5_000, 86_400),
@@ -133,7 +132,7 @@ fn a_continuous_clock_gone_back_within_a_boot_counts_no_time() {
 
 #[test]
 fn a_clock_keeps_its_value_across_a_save_and_a_restart() {
-    // Goal: a restart within a boot measures from where the clock was (P03.4).
+    // Goal: a restart within a boot measures from where the clock was.
     // Method: advance a clock, save it, and read it a minute later.
     let scratch = Scratch::new();
     let saved =
@@ -147,7 +146,7 @@ fn a_clock_keeps_its_value_across_a_save_and_a_restart() {
 
 #[test]
 fn a_saved_clock_measures_a_reboot_from_its_wall_clock() {
-    // Goal: time away counts from when the record was saved (P03.4).
+    // Goal: time away counts from when the record was saved.
     // Method: save a clock, and read it under another boot an hour after the record's wall clock.
     let scratch = Scratch::new();
     Clock::started_at(&reading(THIS_BOOT, 5_000, 60))
@@ -187,7 +186,7 @@ fn a_damaged_clock_starts_over_and_stops_nothing() {
 
 #[test]
 fn a_reading_expires_once_older_than_the_period() {
-    // Goal: the boundary is exact to the nanosecond, and the older side expires (P03.1).
+    // Goal: the boundary is exact to the nanosecond, and the older side expires.
     // Method: read an hour's cutoff against readings on both sides of it.
     let period = Period::from_seconds(3_600).unwrap();
     let clock = Clock::started_at(&reading(THIS_BOOT, 0, 0));
@@ -215,7 +214,7 @@ fn a_young_recording_has_nothing_expired() {
 
 #[test]
 fn a_root_with_no_period_keeps_one_day() {
-    // Goal: the default is one day (P03.1).
+    // Goal: the default is one day.
     // Method: read the period of an empty root.
     let scratch = Scratch::new();
 
@@ -226,7 +225,7 @@ fn a_root_with_no_period_keeps_one_day() {
 
 #[test]
 fn a_saved_period_is_what_the_next_read_finds() {
-    // Goal: one persistent policy (P03.1).
+    // Goal: one persistent policy.
     // Method: save a period and read it back.
     let scratch = Scratch::new();
 
@@ -253,7 +252,7 @@ fn a_period_stays_within_its_bounds() {
 
 #[test]
 fn a_period_that_does_not_read_keeps_the_default() {
-    // Goal: a damaged file errs on keeping readings (P03.1).
+    // Goal: a damaged file errs on keeping readings.
     // Method: write text, an out of bounds number and an overlong number, and read each.
     let scratch = Scratch::new();
 
@@ -266,7 +265,7 @@ fn a_period_that_does_not_read_keeps_the_default() {
 
 #[test]
 fn a_window_saved_late_keeps_the_time_of_its_newest_reading() {
-    // Goal: seal lag ages nothing, and a window rebuilt after a crash is the same window (P03.1).
+    // Goal: seal lag ages nothing, and a window rebuilt after a crash is the same window.
     // Method: ask for the retained time of one window long after its reading, and again later.
     let scratch = Scratch::new();
     Clock::started_at(&reading(THIS_BOOT, 10, 0))
@@ -314,7 +313,7 @@ fn a_window_rebuilt_on_a_root_with_no_clock_keeps_its_time() {
 
 #[test]
 fn a_window_of_an_earlier_boot_keeps_the_time_that_boot_gave_it() {
-    // Goal: a reboot between a reading and its save changes nothing that boot measured (P03.4).
+    // Goal: a reboot between a reading and its save changes nothing that boot measured.
     // Method: save a window in one boot, then ask for another window of that boot after a reboot.
     let scratch = Scratch::new();
     Clock::started_at(&reading(THIS_BOOT, 10, 0))
@@ -359,7 +358,7 @@ fn a_window_of_a_boot_nothing_saved_in_counts_as_saved_now() {
 
 #[test]
 fn a_publication_with_no_clocks_takes_the_time_it_is_saved() {
-    // Goal: readings without clocks, and kinds without readings, still expire (P03.4).
+    // Goal: readings without clocks, and kinds without readings, still expire.
     // Method: ask for the time of a publication with no clock bounds.
     let scratch = Scratch::new();
     Clock::started_at(&reading(THIS_BOOT, 10, 0))
@@ -373,7 +372,7 @@ fn a_publication_with_no_clocks_takes_the_time_it_is_saved() {
 
 #[test]
 fn a_damaged_boot_record_stops_no_save() {
-    // Goal: new minutes save past a record that does not read (P02.3).
+    // Goal: new minutes save past a record that does not read.
     // Method: damage a boot's record and ask for a window of that boot.
     let scratch = Scratch::new();
     Clock::started_at(&reading(THIS_BOOT, 10, 0))
@@ -463,7 +462,7 @@ const HOUR_NS: u64 = 3_600 * SECOND_NS;
 
 #[test]
 fn the_listing_gives_what_expired_oldest_first() {
-    // Goal: a pass removes the oldest first, and nothing at the cutoff or past it (P03.1).
+    // Goal: a pass removes the oldest first, and nothing at the cutoff or past it.
     // Method: link entries across hours in another order, and list at a cutoff inside an hour.
     let scratch = Scratch::new();
     for (transaction, retained) in [
@@ -483,8 +482,7 @@ fn the_listing_gives_what_expired_oldest_first() {
 
 #[test]
 fn the_listing_stops_at_its_bound() {
-    // Goal: a pass costs its bound however much has expired, in a dense hour as across hours
-    // (P03.2).
+    // Goal: a pass costs its bound however much has expired, in a dense hour as across hours.
     // Method: list fewer entries than one hour holds, then fewer than the next hours hold.
     let scratch = Scratch::new();
     for transaction in 1..=3 {
@@ -502,7 +500,7 @@ fn the_listing_stops_at_its_bound() {
 
 #[test]
 fn the_listing_passes_over_names_no_link_made() {
-    // Goal: a stray name reports and cannot stop expiry (P03.5).
+    // Goal: a stray name reports and cannot stop expiry.
     // Method: put a stray hour and a stray entry beside a real one.
     let scratch = Scratch::new();
     linked_entry(&scratch, 7, 1);
@@ -519,7 +517,7 @@ fn the_listing_passes_over_names_no_link_made() {
 
 #[test]
 fn removing_an_entry_takes_the_hour_it_empties() {
-    // Goal: 30 days of hours leave no directory behind, and a repeat after a crash is done (P03.3).
+    // Goal: 30 days of hours leave no directory behind, and a repeat after a crash is done.
     // Method: remove each of two entries of an hour, and the second again.
     let scratch = Scratch::new();
     linked_entry(&scratch, 7, 1);
@@ -537,7 +535,7 @@ fn removing_an_entry_takes_the_hour_it_empties() {
 
 #[test]
 fn an_entry_names_the_raw_data_a_proof_that_does_not_read_cannot() {
-    // Goal: an unreadable proof still gives up its raw data (P03.5).
+    // Goal: an unreadable proof still gives up its raw data.
     // Method: read the names back from a linked entry.
     let scratch = Scratch::new();
     linked_entry(&scratch, 7, 1);

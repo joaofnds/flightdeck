@@ -234,28 +234,28 @@ fn ordinary_missing_source_before_proof_does_not_become_loss_captured() {
 
 #[test]
 fn ordinary_reconstruction_never_undoes_selected_salvage_census_numeric_kind_1() {
-    // Goal: once EXEC-11 consumes normal authority, reconstruction cannot reacquire it.
+    // Goal: once a census consumes normal authority, reconstruction cannot reacquire it.
     // Method: stop at both actual committed census states and try ordinary entrypoints.
     ordinary_reconstruction_never_undoes_selected_salvage_census(false, 1);
 }
 
 #[test]
 fn ordinary_reconstruction_never_undoes_selected_salvage_census_numeric_kind_2() {
-    // Goal: once EXEC-11 consumes normal authority, reconstruction cannot reacquire it.
+    // Goal: once a census consumes normal authority, reconstruction cannot reacquire it.
     // Method: stop at both actual committed census states and try ordinary entrypoints.
     ordinary_reconstruction_never_undoes_selected_salvage_census(false, 2);
 }
 
 #[test]
 fn ordinary_reconstruction_never_undoes_selected_salvage_census_captured_kind_1() {
-    // Goal: once EXEC-11 consumes normal authority, reconstruction cannot reacquire it.
+    // Goal: once a census consumes normal authority, reconstruction cannot reacquire it.
     // Method: stop at both actual committed census states and try ordinary entrypoints.
     ordinary_reconstruction_never_undoes_selected_salvage_census(true, 1);
 }
 
 #[test]
 fn ordinary_reconstruction_never_undoes_selected_salvage_census_captured_kind_2() {
-    // Goal: once EXEC-11 consumes normal authority, reconstruction cannot reacquire it.
+    // Goal: once a census consumes normal authority, reconstruction cannot reacquire it.
     // Method: stop at both actual committed census states and try ordinary entrypoints.
     ordinary_reconstruction_never_undoes_selected_salvage_census(true, 2);
 }

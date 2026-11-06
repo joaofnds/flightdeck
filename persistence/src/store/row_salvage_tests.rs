@@ -17,7 +17,7 @@ fn captured_registered_survivors_require_a_durable_row_bearing_disposition() {
 #[test]
 fn a_fragment_of_saved_rows_is_listed_as_an_event_object() {
     // Goal: rows saved apart from a minute are found like a terminal's, and typed so that a
-    // fragment is never taken for a minute's completion (P02.1).
+    // fragment is never taken for a minute's completion.
     // Method: publish a fragment through the interrupted Store path and list the event objects.
     let fixture = registered_survivors(false);
     let budget = registration_budget();

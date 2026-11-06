@@ -1,4 +1,4 @@
-//! EXEC-11 deterministic fixed original census encoding.
+//! Deterministic fixed original census encoding.
 use super::{
     BatchFact, FileIdentity, IndexFact, NormalInventory, OriginalInventory, OriginalPlacement,
 };

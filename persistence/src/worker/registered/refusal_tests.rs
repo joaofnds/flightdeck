@@ -35,7 +35,7 @@ pub(super) fn attempt_directory(root: &Path, base: &str, child: &str) -> PathBuf
 #[test]
 fn a_saved_batch_that_reads_as_no_batch_stops_the_worker() {
     // Goal: a whole file in a batch's place whose rows do not read is damage, never a write a
-    // process left torn, so it is reported rather than removed with no trace (P02.3).
+    // process left torn, so it is reported rather than removed with no trace.
     // Method: put a saved table in the batch's place with nothing else saved, remove the source so
     // that nothing could rewrite it, restart, and read the refusal and the file.
     let mut recording = Recording::new();
@@ -65,7 +65,7 @@ fn a_saved_batch_that_reads_as_no_batch_stops_the_worker() {
 #[test]
 fn a_batch_saved_past_a_missing_one_stops_the_worker() {
     // Goal: the writer creates batches in order, so a batch past a missing ordinal is not what a
-    // process leaves, and it stays to be read rather than being taken for nothing saved (P02.3).
+    // process leaves, and it stays to be read rather than being taken for nothing saved.
     // Method: stop before the event index, move the only batch one ordinal on, restart, and read
     // the refusal and the batch.
     let mut recording = Recording::new();
@@ -89,7 +89,7 @@ fn a_batch_saved_past_a_missing_one_stops_the_worker() {
 #[test]
 fn a_batch_its_index_names_that_is_gone_stops_the_worker() {
     // Goal: the writer finishes every batch before their index, so an index that names a batch no
-    // longer there is damage, which stays to be read rather than being staged over (P02.3).
+    // longer there is damage, which stays to be read rather than being staged over.
     // Method: stop with the index and tables written, remove the batch, restart with the source
     // still holding the minute, and read the refusal and the index.
     let mut recording = Recording::new();
@@ -110,7 +110,7 @@ fn a_batch_its_index_names_that_is_gone_stops_the_worker() {
 #[test]
 fn an_event_index_behind_its_batch_stops_the_worker() {
     // Goal: staging writes the index last and counts every batch in it, so an index that counts
-    // fewer is damage, which stays to be read rather than being staged over (P02.3).
+    // fewer is damage, which stays to be read rather than being staged over.
     // Method: stop with the events staged, write the index again holding no batch, restart, and
     // read the refusal and the batch.
     let mut recording = Recording::new();
@@ -148,7 +148,7 @@ fn an_event_index_behind_its_batch_stops_the_worker() {
 #[test]
 fn a_second_name_for_a_saved_minute_stops_the_worker() {
     // Goal: a retry reuses the seal's one name, so a second name is damage. It may not count as a
-    // second minute or take the first one away (P02.3).
+    // second minute or take the first one away.
     // Method: save a minute, link its seal under the name of the next publication, restart, and
     // read the refusal and the first name.
     let mut recording = Recording::new();
@@ -184,7 +184,7 @@ fn only_seal(namespace: &Path) -> PathBuf {
 #[test]
 fn a_whole_proof_that_does_not_read_stops_the_worker_with_its_tables_in_place() {
     // Goal: a proof file of its full length that does not decode is damage, not a short write, so
-    // recovery neither rewrites nor removes anything around it (P02.3).
+    // recovery neither rewrites nor removes anything around it.
     // Method: stop with the tables written and no proof, give the attempt a proof taken from a
     // twin recording with its first byte damaged, restart, and read the refusal and that the
     // tables are the same files.
@@ -224,7 +224,7 @@ fn a_whole_proof_that_does_not_read_stops_the_worker_with_its_tables_in_place() 
 #[test]
 fn a_recovery_that_fails_while_it_publishes_stages_nothing_again() {
     // Goal: a recovery that has begun to publish needs every original it proved, so a failure from
-    // there on stops the worker with them in place, whatever kind of failure it is (P02.3).
+    // there on stops the worker with them in place, whatever kind of failure it is.
     // Method: stop with the tables written and no proof, put a file in the known namespace, which
     // only publication reads, restart, and read the refusal and that the table is the same file.
     let mut recording = Recording::new();
@@ -255,7 +255,7 @@ fn a_recovery_that_fails_while_it_publishes_stages_nothing_again() {
 #[test]
 fn a_mark_of_unknown_extent_outlives_a_minute_staged_again() {
     // Goal: a minute staged again carries what its attempt registered, so a mark raised since
-    // goes to the next minute rather than vanishing (P02.3).
+    // goes to the next minute rather than vanishing.
     // Method: stop a seal registered with no mark inside a table, count an eviction in the registry
     // as one that happened while the worker was down, run the whole worker, and read what each
     // minute names.
@@ -288,7 +288,7 @@ fn a_mark_of_unknown_extent_outlives_a_minute_staged_again() {
 #[test]
 fn a_mark_its_attempt_registered_stays_on_the_minute_staged_again() {
     // Goal: a mark the attempt registered is the minute's own, so the next minute claims no unknown
-    // extent it does not have (P02.3).
+    // extent it does not have.
     // Method: stop a seal registered with the mark inside a table, restart the whole worker in a
     // registry that still counts the eviction, and read what each minute names.
     let mut recording = Recording::new();
@@ -326,7 +326,7 @@ fn a_mark_its_attempt_registered_stays_on_the_minute_staged_again() {
 #[test]
 fn the_whole_worker_saves_a_run_it_deferred_once_the_slot_comes_free() {
     // Goal: a run deferred behind another run's interrupted attempt loses nothing and is not
-    // retired early (P02.3).
+    // retired early.
     // Method: list the deferred run first, run the whole worker over both finished runs, and read
     // what each saved and whether each was retired.
     let mut recording = Recording::new();
@@ -354,7 +354,7 @@ fn the_whole_worker_saves_a_run_it_deferred_once_the_slot_comes_free() {
 #[test]
 fn a_recovery_the_machine_refuses_says_so_rather_than_staging_again() {
     // Goal: running out of memory says nothing about what the attempt saved, so it is not a reason
-    // to write any of it again (P02.3).
+    // to write any of it again.
     // Method: stop with the tables written, and prove them with a budget too small to read them.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
@@ -378,7 +378,7 @@ fn a_recovery_the_machine_refuses_says_so_rather_than_staging_again() {
 #[test]
 fn a_deferred_run_reads_only_whether_the_slot_is_still_held() {
     // Goal: a held slot costs a deferred run one read each pass, not a walk of what the attempt
-    // saved, which would repeat every second for as long as the slot stays held (P02.3).
+    // saved, which would repeat every second for as long as the slot stays held.
     // Method: defer a run, damage what the attempt saved, which any walk of it would report, and
     // step the run again.
     let mut recording = Recording::new();
@@ -406,7 +406,7 @@ fn a_deferred_run_reads_only_whether_the_slot_is_still_held() {
 #[test]
 fn a_ring_with_no_identity_is_a_source_the_worker_goes_on_without() {
     // Goal: a ring a collector wrote with no registered identity cannot prove what it holds, and
-    // that must not stop every later run (P02.3).
+    // that must not stop every later run.
     // Method: register a ring created with no identity under an identity of its own, as capturing
     // the previous ring does, and take a worker step.
     let recording = Recording::new();
@@ -523,7 +523,7 @@ fn a_run_of_another_recording_is_a_source_the_worker_goes_on_without() {
 #[test]
 fn an_idle_scratch_beside_a_registered_slot_is_taken_for_an_attempt_given_up() {
     // Goal: a process that ended while giving up an attempt, its directories gone and its Idle
-    // scratch not yet renamed, leaves a state a restart finishes the same way (P02.3).
+    // scratch not yet renamed, leaves a state a restart finishes the same way.
     // Method: leave exactly that, restart, and compare with an uninterrupted run.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
@@ -556,7 +556,7 @@ fn an_idle_scratch_beside_a_registered_slot_is_taken_for_an_attempt_given_up() {
 
 #[test]
 fn a_later_minute_interrupted_inside_a_table_converges() {
-    // Goal: recovery stages the minute the attempt names, not the oldest the ring holds (P02.3).
+    // Goal: recovery stages the minute the attempt names, not the oldest the ring holds.
     // Method: save the first minute, stop the second inside a table with the first still in the
     // ring, restart, and compare with an uninterrupted run.
     let mut recording = Recording::new();
@@ -658,7 +658,7 @@ fn a_terminal_charges_its_event_writer_to_the_one_budget_it_was_given() {
 
 #[test]
 fn a_torn_frontier_table_stops_the_next_minute_with_its_error() {
-    // Goal: the frontier's own table torn is reported as its removal is (P02.3).
+    // Goal: the frontier's own table torn is reported as its removal is.
     // Method: seal a minute, tear its ticks, and take a worker step through a new Store.
     let mut recording = Recording::new();
     recording.publish_minutes(0..3);
@@ -677,7 +677,7 @@ fn a_torn_frontier_table_stops_the_next_minute_with_its_error() {
 #[test]
 fn a_terminal_with_saved_rows_stays_while_its_source_has_not_ended() {
     // Goal: rows are given up only for a source that reads the same again, so one that has not
-    // ended keeps them (P02.3).
+    // ended keeps them.
     // Method: stop a terminal with its rows saved, and ask a restarted store to give it up with a
     // reader that does not say the writer is gone.
     let recording = recording_with_withheld_events();

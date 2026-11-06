@@ -52,7 +52,7 @@ fn catalog_tests_reading(recording: &Recording, wall_ns: u64, publication: u64) 
 #[test]
 fn a_recording_with_nothing_saved_has_no_readings() {
     // Goal: an empty recording answers as empty, which is the end of the question and not an
-    // absence of the catalog (P02.3).
+    // absence of the catalog.
     // Method: open a catalog over a recording no minute reached, and read both ends and a page.
     let recording = Recording::new();
     let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
@@ -70,7 +70,7 @@ fn a_recording_with_nothing_saved_has_no_readings() {
 
 #[test]
 fn the_ends_of_a_recording_name_their_readings_exactly() {
-    // Goal: the oldest and newest saved readings come with their full identity (P02.1).
+    // Goal: the oldest and newest saved readings come with their full identity.
     // Method: save two minutes and read both ends.
     let recording = catalog_tests_two_saved_minutes();
     let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
@@ -88,7 +88,7 @@ fn the_ends_of_a_recording_name_their_readings_exactly() {
 
 #[test]
 fn a_page_holds_only_the_readings_of_its_range() {
-    // Goal: a known range returns the readings whose clock lies in it, its end excluded (P02.5).
+    // Goal: a known range returns the readings whose clock lies in it, its end excluded.
     // Method: save two minutes and ask for a range that starts on a reading and ends on another.
     let recording = catalog_tests_two_saved_minutes();
     let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
@@ -105,7 +105,7 @@ fn a_page_holds_only_the_readings_of_its_range() {
 #[test]
 fn a_full_page_continues_after_its_last_reading() {
     // Goal: readings past one page are reached through its continuation and none is lost or
-    // repeated, including readings that share a clock across runs (P02.1, P02.5).
+    // repeated, including readings that share a clock across runs.
     // Method: make a known range of two pages of hand-made links in the namespace, half of them
     // two runs on one second, and read it page by page.
     let recording = Recording::new();
@@ -184,7 +184,7 @@ fn catalog_tests_link(recording: &Recording, namespace: Namespace, keys: &[Canon
 
 #[test]
 fn a_window_is_found_by_the_publication_it_holds() {
-    // Goal: exact identity reaches its window with no clock and no window number (P02.2).
+    // Goal: exact identity reaches its window with no clock and no window number.
     // Method: save two minutes, then ask for a publication in each and for one past them both.
     let recording = catalog_tests_two_saved_minutes();
     let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
@@ -212,7 +212,7 @@ fn a_window_is_found_by_the_publication_it_holds() {
 #[test]
 fn a_lookup_leaves_every_other_window_unread() {
     // Goal: finding a window admits that window alone, so an unavailable old file elsewhere
-    // cannot stop a reader of a newer one (P02.3).
+    // cannot stop a reader of a newer one.
     // Method: save two minutes, damage the first window's proof, and find the second.
     let recording = catalog_tests_two_saved_minutes();
     let first = catalog_tests_first_window_proof(&recording);
@@ -232,7 +232,7 @@ fn a_lookup_leaves_every_other_window_unread() {
 #[test]
 fn a_clock_range_finds_each_window_it_touches_once() {
     // Goal: a range of the clock reaches every window holding a reading in it, and none other,
-    // however many of a window's readings fall in it (P02.1, P02.2).
+    // however many of a window's readings fall in it.
     // Method: save two minutes and ask for ranges over both, over the second alone and past them.
     let recording = catalog_tests_two_saved_minutes();
     let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
@@ -258,7 +258,7 @@ fn a_clock_range_finds_each_window_it_touches_once() {
 #[test]
 fn a_clock_range_leaves_the_windows_outside_it_unread() {
     // Goal: damage outside a range stops no reader of the range, and damage inside it is explicit
-    // rather than a window quietly missing (P02.3).
+    // rather than a window quietly missing.
     // Method: save two minutes, damage the first window's proof, and ask for a range over the
     // second and one over both.
     let recording = catalog_tests_two_saved_minutes();
@@ -296,7 +296,7 @@ fn catalog_tests_first_window_proof(recording: &Recording) -> PathBuf {
 #[test]
 fn a_window_a_catalog_finds_reads_like_any_committed_window() {
     // Goal: the reads a commitment guards take a registered window as they take any other, so a
-    // reader needs one path for its files and its events (P02.5).
+    // reader needs one path for its files and its events.
     // Method: save two minutes, find the first through the catalog, read its commitment by every
     // route, and count its events through the engine.
     let recording = catalog_tests_two_saved_minutes();
@@ -332,7 +332,7 @@ fn a_window_a_catalog_finds_reads_like_any_committed_window() {
 #[test]
 fn a_commitment_refuses_a_stray_file_in_its_window() {
     // Goal: the first read of a registered window holds its files to its manifest, as a legacy
-    // window's does (P02.5).
+    // window's does.
     // Method: save two minutes, add a file beside the first window's tables, and read it.
     let recording = catalog_tests_two_saved_minutes();
     let budget = catalog_tests_budget();
@@ -361,7 +361,7 @@ fn catalog_tests_found_or_waited<T>(read: crate::Result<T>) -> Option<T> {
 #[test]
 fn a_read_during_a_publication_waits_or_finds_each_window_whole() {
     // Goal: a reader that meets a publication at any of its steps learns nothing false, and finds
-    // the minute once the publication ends (P02.3, P02.5).
+    // the minute once the publication ends.
     // Method: save a minute, stop the next one's publication before its first step, and read the
     // windows of every clock between its steps.
     let recording = catalog_tests_two_saved_minutes_and_one_publishing();
@@ -447,7 +447,7 @@ fn catalog_tests_terminal_only(recording: &mut Recording) {
 #[test]
 fn a_recording_with_no_minute_lists_the_events_of_its_terminal() {
     // Goal: events a run saved apart from any minute are found with no window to lead to them, and
-    // what they cover comes with them (P02.1).
+    // what they cover comes with them.
     // Method: save only a terminal, and read the event objects and the known readings.
     let mut recording = Recording::new();
     catalog_tests_terminal_only(&mut recording);
@@ -466,7 +466,7 @@ fn a_recording_with_no_minute_lists_the_events_of_its_terminal() {
 #[test]
 fn a_run_the_registry_forgot_keeps_its_event_objects() {
     // Goal: an evicted run's saved events are reached through the recording and never through the
-    // registry that named its source (P02.3).
+    // registry that named its source.
     // Method: save only a terminal, empty the registry as an eviction does, and list the objects.
     let mut recording = Recording::new();
     catalog_tests_terminal_only(&mut recording);
@@ -486,7 +486,7 @@ fn a_run_the_registry_forgot_keeps_its_event_objects() {
 
 #[test]
 fn event_objects_continue_page_by_page_with_none_lost_or_repeated() {
-    // Goal: a page is a bounded part of the objects, and its continuation reaches the rest (P02.2).
+    // Goal: a page is a bounded part of the objects, and its continuation reaches the rest.
     // Method: save a terminal for each of two runs, and read them one to a page and then together.
     let mut recording = Recording::new();
     catalog_tests_terminal_only(&mut recording);
@@ -515,7 +515,7 @@ fn event_objects_continue_page_by_page_with_none_lost_or_repeated() {
 
 #[test]
 fn a_damaged_event_object_is_explicit_rather_than_a_shorter_list() {
-    // Goal: a partial inventory is never presented as the whole of it (P02.3).
+    // Goal: a partial inventory is never presented as the whole of it.
     // Method: save a terminal, damage its proof, and read the objects.
     let mut recording = Recording::new();
     catalog_tests_terminal_only(&mut recording);
@@ -531,7 +531,7 @@ fn a_damaged_event_object_is_explicit_rather_than_a_shorter_list() {
 
 #[test]
 fn a_proof_under_another_objects_name_is_refused() {
-    // Goal: a gate moved onto another key never lists its proof as that key's object (P02.3).
+    // Goal: a gate moved onto another key never lists its proof as that key's object.
     // Method: save a terminal, rename its gate so the name holds another run, and read the objects.
     let mut recording = Recording::new();
     catalog_tests_terminal_only(&mut recording);
@@ -617,7 +617,7 @@ fn catalog_tests_link_unknown(recording: &Recording, readings: &[UnknownReading]
 #[test]
 fn a_page_of_unknown_readings_continues_after_its_last_reading() {
     // Goal: readings with no clock past one page are reached through its continuation and none is
-    // lost or repeated (P02.3).
+    // lost or repeated.
     // Method: link one reading more than a page holds and read it page by page.
     let recording = Recording::new();
     let readings_total = u64::try_from(PAGE_READINGS_MAX).unwrap() + 1;
@@ -656,7 +656,7 @@ fn a_page_ending_at_the_last_unknown_reading_names_no_next_page() {
 
 #[test]
 fn an_unknown_name_with_bytes_past_its_publication_is_refused() {
-    // Goal: a name no writer makes is damage rather than a reading (P02.3).
+    // Goal: a name no writer makes is damage rather than a reading.
     // Method: link a reading's name with its last padding byte set and read the page.
     let recording = Recording::new();
     let reading = UnknownReading {
@@ -681,7 +681,7 @@ fn an_unknown_name_with_bytes_past_its_publication_is_refused() {
 #[test]
 fn a_window_with_no_clock_is_listed_once_and_a_clock_range_never_lists_it() {
     // Goal: a window with no clock is reachable with no clock range, once however many readings it
-    // holds, and the windows a clock range reaches stay out of the list (P02.3).
+    // holds, and the windows a clock range reaches stay out of the list.
     // Method: save a window of two readings with no clock and a window with clocks, and read both
     // lists.
     let mut recording = Recording::new();
@@ -706,7 +706,7 @@ fn a_window_with_no_clock_is_listed_once_and_a_clock_range_never_lists_it() {
 #[test]
 fn a_window_with_one_clock_among_its_readings_is_left_to_the_clock_range() {
     // Goal: a window one of whose readings has a clock is the clock range's to find, so listing it
-    // here as well would show it twice (P02.3).
+    // here as well would show it twice.
     // Method: save a window of a reading with a clock and one without, and read both lists.
     let mut recording = Recording::new();
     recording.publish_in_minute(0);
@@ -731,7 +731,7 @@ fn a_window_with_one_clock_among_its_readings_is_left_to_the_clock_range() {
 
 #[test]
 fn windows_with_no_clock_are_reached_past_one_page_of_their_readings() {
-    // Goal: the list holds a window whose readings all lie past the first page (P02.3).
+    // Goal: the list holds a window whose readings all lie past the first page.
     // Method: save four minutes of 60 readings with no clock each, which leaves the last window
     // wholly on the second page of 128, and read the list.
     let mut recording = Recording::create(
@@ -764,7 +764,7 @@ fn windows_with_no_clock_are_reached_past_one_page_of_their_readings() {
 #[test]
 fn a_reading_with_no_clock_and_no_window_is_damage() {
     // Goal: a reading's window outlives its links, so one missing is explicit rather than a
-    // shorter list (P02.3).
+    // shorter list.
     // Method: link a reading no window holds and read the list.
     let recording = Recording::new();
     let reading = catalog_tests_unknown_readings(&recording, 1..2);
@@ -782,7 +782,7 @@ fn a_reading_with_no_clock_and_no_window_is_damage() {
 #[test]
 fn a_reading_of_another_run_is_never_taken_for_the_window_before_it() {
     // Goal: a window found for one run answers only for that run, although another run can use
-    // the same publication numbers (P02.3).
+    // the same publication numbers.
     // Method: save a window with no clock, link a reading of another run that no window holds under
     // the same publication, and read the list.
     let mut recording = Recording::new();
@@ -811,7 +811,7 @@ fn a_reading_of_another_run_is_never_taken_for_the_window_before_it() {
 #[test]
 fn a_short_proof_behind_a_window_gate_is_damage() {
     // Goal: a gate names a proof only once it is whole, so a short one reads as damage and never
-    // as the end of a file still being written (P02.3).
+    // as the end of a file still being written.
     // Method: save a window, cut its proof short through its gate, and find the window.
     let recording = catalog_tests_two_saved_minutes();
     let proof = std::fs::File::options()
@@ -831,8 +831,7 @@ fn a_short_proof_behind_a_window_gate_is_damage() {
 
 #[test]
 fn a_short_proof_behind_an_event_object_gate_is_damage() {
-    // Goal: as for a window, a short proof of an event object is damage and not a write going on
-    // (P02.3).
+    // Goal: as for a window, a short proof of an event object is damage and not a write going on.
     // Method: save a terminal, cut its proof short, and read the objects.
     let mut recording = Recording::new();
     catalog_tests_terminal_only(&mut recording);
@@ -856,7 +855,7 @@ fn a_short_proof_behind_an_event_object_gate_is_damage() {
 #[test]
 fn a_window_with_no_clock_and_lost_readings_is_still_listed() {
     // Goal: a reading the source overwrote is no reading with a clock, so a lost reading leaves
-    // the window on the list (P02.3).
+    // the window on the list.
     // Method: publish more readings with no clock than the source holds, save the window, and read
     // the list.
     let mut recording = Recording::new();
@@ -879,7 +878,7 @@ fn a_window_with_no_clock_and_lost_readings_is_still_listed() {
 #[test]
 fn a_window_with_no_clock_and_a_gap_among_its_readings_is_still_listed() {
     // Goal: the readings a window lost in its middle leave it on the list, since its publication
-    // range is wider than what it saved (P02.3).
+    // range is wider than what it saved.
     // Method: let the source overwrite the second reading of a window as it is being read, save the
     // window, and read the list.
     let mut recording = Recording::new();

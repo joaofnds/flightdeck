@@ -1802,7 +1802,7 @@ mod registered_checks {
     #[test]
     fn a_live_session_reads_a_saved_minute_of_a_registered_recording() {
         // Goal: everything a live session answers from a registered recording reaches it through
-        // the interface the desktop app uses (P02.5).
+        // the interface the desktop app uses.
         // Method: save a minute through the worker, open a live session and select its second.
         let mut fixture = Fixture::registered();
         fixture.publish_with_system_rows(1000);
@@ -1818,7 +1818,7 @@ mod registered_checks {
     #[test]
     fn a_live_session_counts_a_reading_with_no_clock_beside_the_one_it_selects() {
         // Goal: a reading no clock can place reaches the desktop app as a count, and costs it
-        // nothing of the reading beside it (P02.5).
+        // nothing of the reading beside it.
         // Method: save a minute of a reading with clocks and one without, and select the first.
         let mut fixture = Fixture::registered();
         fixture.publish_with_system_rows(1000);

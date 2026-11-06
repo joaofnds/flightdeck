@@ -1,4 +1,4 @@
-//! EXEC-11 occupied recovery commitment. This is not canonical row/loss authority.
+//! The occupied recovery commitment. This is not canonical row/loss authority.
 use crate::store::FileIdentity;
 use std::io;
 

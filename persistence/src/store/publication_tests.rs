@@ -191,7 +191,7 @@ fn store_normal_ordinary_ready_reopen_without_transport_and_duplicate_applicatio
 }
 #[test]
 fn no_name_of_a_publication_appears_before_its_order_entry() {
-    // Goal: physical removal can find everything a reader can list, whenever a crash comes (P03.5).
+    // Goal: physical removal can find everything a reader can list, whenever a crash comes.
     // Method: step an ordinary publication, and after each step compare the proof's links with the
     // order, since a link beyond the proof's own is either the entry or a name.
     let mut fixture = Fixture::new(false);

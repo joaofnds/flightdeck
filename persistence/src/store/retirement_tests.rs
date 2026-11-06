@@ -89,8 +89,7 @@ fn retirement_names_under(fixture: &Fixture, directory: &str) -> usize {
 
 #[test]
 fn a_pass_removes_what_outlived_the_period_and_keeps_the_rest() {
-    // Goal: saved readings go once they have outlived the period, and nothing younger goes
-    // (P03.1, P03.2).
+    // Goal: saved readings go once they have outlived the period, and nothing younger goes.
     // Method: save four one-reading windows, and pass at the clock that puts the cutoff at the
     // third, so its own retained time is not below it.
     let mut fixture = Fixture::new(false);
@@ -120,8 +119,7 @@ fn a_pass_removes_what_outlived_the_period_and_keeps_the_rest() {
 #[test]
 fn a_pass_before_the_period_and_the_grace_are_up_removes_nothing() {
     // Goal: a reading keeps its whole period and the grace a read under way has, which only a
-    // window with no reading after it depends on, since the reading after one waits longer
-    // (P03.1, P03.2).
+    // window with no reading after it depends on, since the reading after one waits longer.
     // Method: pass at the last clock at which a lone window's retained time is not below the
     // cutoff, and at the next.
     let mut fixture = Fixture::new(false);
@@ -168,8 +166,7 @@ fn a_registered_run_keeps_its_newest_publication_however_old_it_is() {
 
 #[test]
 fn a_run_no_longer_registered_goes_whole_with_the_directories_it_grew() {
-    // Goal: 30 days of history leaves no directory behind, and later saves route around what went
-    // (P03.3).
+    // Goal: 30 days of history leaves no directory behind, and later saves route around what went.
     // Method: save enough windows to split a leaf, expire them all, then save a new run.
     let mut fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
@@ -199,7 +196,7 @@ fn a_run_no_longer_registered_goes_whole_with_the_directories_it_grew() {
 
 #[test]
 fn a_crash_under_a_removal_busy_settles_at_the_next_pass() {
-    // Goal: a removal cut short cannot stop readers or saves for good (P03.5).
+    // Goal: a removal cut short cannot stop readers or saves for good.
     // Method: leave the namespace as a crash would, reopen the root and pass.
     let fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
@@ -270,7 +267,7 @@ fn a_proof_that_does_not_read_stops_no_removal() {
 
 #[test]
 fn a_reading_removed_after_it_was_listed_asks_for_the_list_again() {
-    // Goal: a removal between a reader's list and its lookup never reads as damage (P03.5).
+    // Goal: a removal between a reader's list and its lookup never reads as damage.
     // Method: list the readings, pass, and look up the window of the oldest of them.
     let mut fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
@@ -302,7 +299,7 @@ fn a_reading_removed_after_it_was_listed_asks_for_the_list_again() {
 
 #[test]
 fn a_reader_waits_while_a_removal_holds_the_namespace() {
-    // Goal: names vanishing under a reader are a wait and never damage (P03.5).
+    // Goal: names vanishing under a reader are a wait and never damage.
     // Method: leave the namespace as a removal under way does, and read the recording's end.
     let fixture = Fixture::new(false);
     drop(retirement_store(&fixture));
@@ -328,7 +325,7 @@ fn a_reader_waits_while_a_removal_holds_the_namespace() {
 #[test]
 fn a_publication_past_its_period_still_finishes_beside_a_pass() {
     // Goal: a publication held up past the period keeps its raw data and its Busy, and what it
-    // reads as its predecessor (P03.5).
+    // reads as its predecessor.
     // Method: pass at a far clock before a publication takes the namespace and after each step
     // once it has, then read what it saved.
     let mut fixture = Fixture::new(false);
@@ -378,7 +375,7 @@ fn a_publication_past_its_period_still_finishes_beside_a_pass() {
 #[test]
 fn a_pass_removes_no_more_than_its_bound() {
     // Goal: a pass costs its bound however much has expired, so a shortened period cannot stall
-    // the saves that share its thread (P03.2).
+    // the saves that share its thread.
     // Method: expire more windows than a pass removes, and pass twice.
     let mut fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
@@ -396,7 +393,7 @@ fn a_pass_removes_no_more_than_its_bound() {
 #[test]
 fn a_pass_saves_the_clock_it_read() {
     // Goal: the clock moves on whether or not anything expired, so a later read cannot run behind
-    // a pass (P03.4).
+    // a pass.
     // Method: pass at one clock on an empty recording, and read the saved clock from an earlier
     // one.
     let fixture = Fixture::new(false);
@@ -418,7 +415,7 @@ fn a_pass_saves_the_clock_it_read() {
 #[test]
 fn a_window_waits_for_a_successor_inside_the_period_or_off_the_clock() {
     // Goal: the reading after a window takes its rates from that window, so the window goes only
-    // once that reading has expired (P03.1).
+    // once that reading has expired.
     // Method: compare each kind of successor with a cutoff at a known time.
     let cutoff = Clock::started_at(&ClockReading {
         boot: Identity([1, 2]),
@@ -524,7 +521,7 @@ fn a_saved_clock_behind_the_newest_entry_stays_where_it_is() {
 #[test]
 fn a_boot_record_stays_until_nothing_of_that_boot_can_need_it() {
     // Goal: boot records plateau, and a record outlives its publications, since a reader shows a
-    // reading whose boot has no record (P03.3).
+    // reading whose boot has no record.
     // Method: run a pass in another boot, expire all but the entry at the value that pass recorded,
     // and then that one too.
     let mut fixture = Fixture::new(false);

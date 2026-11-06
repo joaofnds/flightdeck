@@ -902,7 +902,7 @@ fn a_restarted_worker_continues_at_the_frontier() {
 
 #[test]
 fn an_unavailable_old_table_does_not_stop_a_new_minute() {
-    // Goal: damage to a window behind the frontier cannot block new live minutes (P02.3).
+    // Goal: damage to a window behind the frontier cannot block new live minutes.
     // Method: seal two minutes, remove every table of the older one, then seal the next minute
     // through a new Store and read the frontier through a third.
     let mut recording = Recording::new();
@@ -948,7 +948,7 @@ fn an_unavailable_frontier_table_stops_the_next_minute_with_its_error() {
 #[test]
 fn a_worker_saves_its_next_minute_without_reading_the_minute_it_just_saved() {
     // Goal: a minute costs what it saves and not the rows of the one before, which this process
-    // proved before it published them (P02.4).
+    // proved before it published them.
     // Method: seal a minute, remove its tables, and seal the next with the same Store and state.
     let mut recording = Recording::new();
     for minute in 0..3 {
@@ -967,7 +967,7 @@ fn a_worker_saves_its_next_minute_without_reading_the_minute_it_just_saved() {
 
 #[test]
 fn a_worker_finishes_a_run_without_reading_the_minute_it_just_saved() {
-    // Goal: a run's end costs what its tail holds and not the rows of its last minute (P02.4).
+    // Goal: a run's end costs what its tail holds and not the rows of its last minute.
     // Method: seal a finished run's only minute, remove its tables, and take the last step.
     let mut recording = Recording::new();
     recording.publish_in_minute(0);
@@ -986,7 +986,7 @@ fn a_worker_finishes_a_run_without_reading_the_minute_it_just_saved() {
 
 #[test]
 fn a_worker_refuses_a_saved_minute_whose_proof_another_file_replaced() {
-    // Goal: leaving a saved minute's rows unread leaves the identity of its proof checked (P02.5).
+    // Goal: leaving a saved minute's rows unread leaves the identity of its proof checked.
     // Method: seal a minute, swap its proof for a private copy of the same bytes, and take a step.
     let mut recording = Recording::new();
     for minute in 0..3 {
@@ -1009,7 +1009,7 @@ fn a_worker_refuses_a_saved_minute_whose_proof_another_file_replaced() {
 #[test]
 fn saved_rows_outlive_the_publications_the_ring_overwrote() {
     // Goal: a saved row stays when the ring moves past its minute, and the minute's publications
-    // stay counted as lost, once (P02.3, P02.5).
+    // stay counted as lost, once.
     // Method: save the first minute's three rows without an index, publish past the ring's eight
     // slots, restart, take one step to keep the rows and one to save a later minute, and read
     // the event frontier and the later window's counts.
@@ -1062,7 +1062,7 @@ macro_rules! rows_outlive_their_window_at {
         $(
             #[test]
             fn $name() {
-                // Goal: rows stay and tables with no proof go, wherever the seal stopped (P02.3).
+                // Goal: rows stay and tables with no proof go, wherever the seal stopped.
                 // Method: run the shared scenario with this interruption.
                 rows_outlive_their_window($interruption);
             }
@@ -1080,7 +1080,7 @@ rows_outlive_their_window_at! {
 
 #[test]
 fn rows_of_a_captured_run_outlive_their_window() {
-    // Goal: rows that carry their programs' identities keep them when the tables go (P02.3, P02.5).
+    // Goal: rows that carry their programs' identities keep them when the tables go.
     // Method: stop a captured run's seal with the batch saved, publish past the ring's eight slots,
     // restart, take the step that keeps the rows, and read them as a captured reader does.
     let mut recording = Recording::captured();
@@ -1099,7 +1099,7 @@ fn rows_of_a_captured_run_outlive_their_window() {
 
 #[test]
 fn rows_whose_source_is_gone_let_another_run_go_on() {
-    // Goal: a reboot during a seal that saved rows keeps them and cannot stop new minutes (P02.3).
+    // Goal: a reboot during a seal that saved rows keeps them and cannot stop new minutes.
     // Method: stop with the batch saved, remove the source as a reboot does, take the worker's
     // turn for this run and the step after every run's turn, then step a new run.
     let mut recording = Recording::new();
@@ -1130,7 +1130,7 @@ fn rows_whose_source_is_gone_let_another_run_go_on() {
 #[test]
 fn rows_of_a_run_that_left_the_registry_let_the_next_run_go_on() {
     // Goal: an attempt whose run is no longer registered, so nobody takes its turn, cannot hold
-    // the slot for good (P02.3).
+    // the slot for good.
     // Method: stop a seal with the batch saved, run the whole worker over another run alone, and
     // read this run's frontier and the other run's saved minutes.
     let mut recording = Recording::new();
@@ -1261,7 +1261,7 @@ fn interrupted_seal_converges(
 #[test]
 fn a_recording_keeps_no_file_a_restart_would_have_to_rebuild() {
     // Goal: every fact lives in the canonical places, so no checkpoint or index exists to go
-    // stale, run ahead or be lost, and a new one has to answer for those cases here (P02.3).
+    // stale, run ahead or be lost, and a new one has to answer for those cases here.
     // Method: save a minute through the worker, and read the names at the recording's root.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
@@ -1300,14 +1300,14 @@ fn a_recording_keeps_no_file_a_restart_would_have_to_rebuild() {
 
 #[test]
 fn a_seal_interrupted_after_registering_converges() {
-    // Goal: a registration with nothing staged is finished at restart, not refused (P02.3).
+    // Goal: a registration with nothing staged is finished at restart, not refused.
     // Method: stop after registering, restart the worker, and compare with an uninterrupted run.
     interrupted_seal_converges(Recording::new(), Interruption::Registered, &UNINTERRUPTED);
 }
 
 #[test]
 fn a_seal_interrupted_before_the_event_index_converges() {
-    // Goal: a complete event batch without its index survives a restart (P02.3).
+    // Goal: a complete event batch without its index survives a restart.
     // Method: stage the window, remove the index, and compare with an uninterrupted run.
     interrupted_seal_converges(
         Recording::new(),
@@ -1318,7 +1318,7 @@ fn a_seal_interrupted_before_the_event_index_converges() {
 
 #[test]
 fn a_seal_interrupted_inside_its_event_index_converges() {
-    // Goal: the index is the last of the events a seal writes, so a torn one costs no row (P02.3).
+    // Goal: the index is the last of the events a seal writes, so a torn one costs no row.
     // Method: stage the window, tear its index, and compare with an uninterrupted run.
     interrupted_seal_converges(
         Recording::new(),
@@ -1329,7 +1329,7 @@ fn a_seal_interrupted_inside_its_event_index_converges() {
 
 #[test]
 fn a_seal_interrupted_inside_an_event_batch_converges() {
-    // Goal: a torn event batch holds no row a restart must keep, and is written again (P02.3).
+    // Goal: a torn event batch holds no row a restart must keep, and is written again.
     // Method: stage the window, tear its batch, and compare with an uninterrupted run.
     interrupted_seal_converges(
         Recording::new(),
@@ -1340,28 +1340,28 @@ fn a_seal_interrupted_inside_an_event_batch_converges() {
 
 #[test]
 fn a_seal_interrupted_after_staging_its_events_converges() {
-    // Goal: complete events with no table yet are finished at restart (P02.3).
+    // Goal: complete events with no table yet are finished at restart.
     // Method: stop after staging, restart the worker, and compare with an uninterrupted run.
     interrupted_seal_converges(Recording::new(), Interruption::EventsStaged, &UNINTERRUPTED);
 }
 
 #[test]
 fn a_seal_interrupted_with_a_table_missing_converges() {
-    // Goal: a partial table set is finished at restart (P02.3).
+    // Goal: a partial table set is finished at restart.
     // Method: write the tables, remove one, and compare with an uninterrupted run.
     interrupted_seal_converges(Recording::new(), Interruption::TableMissing, &UNINTERRUPTED);
 }
 
 #[test]
 fn a_seal_interrupted_inside_a_table_converges() {
-    // Goal: a torn table is written again at restart rather than refused (P02.3).
+    // Goal: a torn table is written again at restart rather than refused.
     // Method: write the tables, tear one, and compare with an uninterrupted run.
     interrupted_seal_converges(Recording::new(), Interruption::TableTorn, &UNINTERRUPTED);
 }
 
 #[test]
 fn a_seal_interrupted_after_its_tables_converges() {
-    // Goal: complete originals with no proof are proved and published at restart (P02.3).
+    // Goal: complete originals with no proof are proved and published at restart.
     // Method: stop after the tables, restart the worker, and compare with an uninterrupted run.
     interrupted_seal_converges(
         Recording::new(),
@@ -1372,14 +1372,14 @@ fn a_seal_interrupted_after_its_tables_converges() {
 
 #[test]
 fn a_seal_interrupted_after_its_proof_converges() {
-    // Goal: durable proof metadata goes on to publication at restart (P02.3).
+    // Goal: durable proof metadata goes on to publication at restart.
     // Method: stop after the proof, restart the worker, and compare with an uninterrupted run.
     interrupted_seal_converges(Recording::new(), Interruption::Proved, &UNINTERRUPTED);
 }
 
 #[test]
 fn a_seal_interrupted_at_each_publication_step_converges() {
-    // Goal: every durable step of a publication goes on to the same end at restart (P02.3).
+    // Goal: every durable step of a publication goes on to the same end at restart.
     // Method: stop after every third step, since the kill tests end a worker at each change a step
     // makes, restart the worker, and compare with an uninterrupted run.
     for steps in (1..PUBLICATION_STEPS).step_by(3) {
@@ -1485,7 +1485,7 @@ fn another_run_waits_while_an_interrupted_attempt_holds_the_slot() {
 
 #[test]
 fn a_seal_interrupted_again_while_it_is_recovered_converges() {
-    // Goal: recovery is itself interruptible and comes to the same end (P02.3).
+    // Goal: recovery is itself interruptible and comes to the same end.
     // Method: tear a table, stage the window again as a restart does, stop before its tables,
     // restart once more, and compare with an uninterrupted run.
     let mut recording = Recording::new();
@@ -1507,7 +1507,7 @@ fn a_seal_interrupted_again_while_it_is_recovered_converges() {
 
 #[test]
 fn a_seal_with_nothing_saved_counts_what_the_ring_overwrote_meanwhile() {
-    // Goal: publications overwritten while the worker was down are counted once as lost (P02.3).
+    // Goal: publications overwritten while the worker was down are counted once as lost.
     // Method: stop after registering, publish past the ring's eight slots, restart, and read the
     // first saved window's counts, against the fourteen published and eight the ring holds.
     let mut recording = Recording::new();
@@ -1531,7 +1531,7 @@ fn a_seal_with_nothing_saved_counts_what_the_ring_overwrote_meanwhile() {
 
 #[test]
 fn a_seal_that_saved_tables_and_no_rows_is_finished_rather_than_abandoned() {
-    // Goal: a minute with no events saves no rows, so its tables alone keep the attempt (P02.3).
+    // Goal: a minute with no events saves no rows, so its tables alone keep the attempt.
     // Method: stop with all but one table written on such a minute, restart, read the frontier.
     let mut recording = Recording::new();
     recording.publish_minutes(0..2);
@@ -1549,7 +1549,7 @@ fn a_seal_that_saved_tables_and_no_rows_is_finished_rather_than_abandoned() {
 #[test]
 fn a_seal_abandoned_up_to_its_slot_is_abandoned_again() {
     // Goal: a process that ends after removing an empty attempt's directories, before its slot,
-    // stops nothing, since a restart finds the same empty attempt (P02.3).
+    // stops nothing, since a restart finds the same empty attempt.
     // Method: stop after registering, remove those directories, restart, and read what remains.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
@@ -1569,7 +1569,7 @@ fn a_seal_abandoned_up_to_its_slot_is_abandoned_again() {
 
 #[test]
 fn a_seal_with_nothing_saved_lets_another_run_go_on_when_its_source_is_gone() {
-    // Goal: a reboot during a seal that saved nothing cannot stop new minutes (P02.3).
+    // Goal: a reboot during a seal that saved nothing cannot stop new minutes.
     // Method: stop after registering, remove the source as a reboot does, and step a new run.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
@@ -1631,7 +1631,7 @@ fn lagging_recording() -> Recording {
 #[test]
 fn what_the_ring_overwrote_past_the_frontier_is_counted_once_across_restarts() {
     // Goal: publications and events overwritten while the worker lagged are counted as lost
-    // exactly once, whichever process saves them, and every other event is saved (P02.3).
+    // exactly once, whichever process saves them, and every other event is saved.
     // Method: save each ready minute of a lagging recording with a new Store and state, as
     // restarts do. Publication 14 has no later one to end its minute, so events 1 to 12 end up
     // accounted for across eight windows.
@@ -1688,35 +1688,35 @@ fn interrupted_lagging_seal_counts_its_losses_once(interruption: Interruption) {
 
 #[test]
 fn a_seal_past_lost_events_interrupted_before_its_event_index_counts_them_once() {
-    // Goal: events lost before a batch that was saved stay counted after a restart (P02.3).
+    // Goal: events lost before a batch that was saved stay counted after a restart.
     // Method: stop with the batch saved and no index, restart, and compare the counts.
     interrupted_lagging_seal_counts_its_losses_once(Interruption::EventIndexAbsent);
 }
 
 #[test]
 fn a_seal_past_lost_events_interrupted_with_a_table_missing_counts_them_once() {
-    // Goal: staging such a window again keeps its batch and its counts (P02.3).
+    // Goal: staging such a window again keeps its batch and its counts.
     // Method: stop with all but one table written, restart, and compare the counts.
     interrupted_lagging_seal_counts_its_losses_once(Interruption::TableMissing);
 }
 
 #[test]
 fn a_seal_past_lost_events_interrupted_after_its_tables_counts_them_once() {
-    // Goal: proving such a window from what it saved finds the same counts (P02.3).
+    // Goal: proving such a window from what it saved finds the same counts.
     // Method: stop with every table written, restart, and compare the counts.
     interrupted_lagging_seal_counts_its_losses_once(Interruption::TablesWritten);
 }
 
 #[test]
 fn a_seal_past_lost_events_abandoned_with_a_torn_batch_counts_them_once() {
-    // Goal: an attempt that saved no row is abandoned and the next scan counts the same (P02.3).
+    // Goal: an attempt that saved no row is abandoned and the next scan counts the same.
     // Method: tear the only batch, restart, and compare the counts.
     interrupted_lagging_seal_counts_its_losses_once(Interruption::EventBatchTorn);
 }
 
 #[test]
 fn a_seal_past_lost_events_interrupted_after_its_proof_counts_them_once() {
-    // Goal: durable metadata carries the counts through publication (P02.3).
+    // Goal: durable metadata carries the counts through publication.
     // Method: stop after the proof, restart, and compare the counts.
     interrupted_lagging_seal_counts_its_losses_once(Interruption::Proved);
 }
@@ -1724,7 +1724,7 @@ fn a_seal_past_lost_events_interrupted_after_its_proof_counts_them_once() {
 #[test]
 fn a_seal_with_no_rows_past_lost_events_counts_them_when_staged_again() {
     // Goal: events lost before a window that saved no row are counted, not taken for the window
-    // being overwritten, when the window is staged again (P02.3).
+    // being overwritten, when the window is staged again.
     // Method: push event 8 out of the ring too, so the next window, publication 8, saves no row
     // and loses publications 3 to 7 and events 4 to 8, then stop with a table missing and restart.
     let mut recording = lagging_recording();
@@ -1760,7 +1760,7 @@ fn a_seal_with_no_rows_past_lost_events_counts_them_when_staged_again() {
 #[test]
 fn a_finished_run_certifies_its_end_after_its_last_minute() {
     // Goal: a finished run ends in a canonical terminal publication, so whichever process comes
-    // next knows it is complete rather than rereading its source (P01.5, P02.3).
+    // next knows it is complete rather than rereading its source.
     // Method: finish the writer after three minutes, step the worker past them, read the frontier
     // through a new Store, then step a new worker, which must find nothing to do.
     let mut recording = Recording::new();
@@ -1792,7 +1792,7 @@ fn a_finished_run_certifies_its_end_after_its_last_minute() {
 
 #[test]
 fn a_run_finished_before_its_first_publication_certifies_its_end() {
-    // Goal: an empty run is complete too, with no invented window (P02.3).
+    // Goal: an empty run is complete too, with no invented window.
     // Method: finish the writer with nothing published, step the worker, read the frontier.
     let mut recording = Recording::new();
     recording.writer.finish();
@@ -1814,7 +1814,7 @@ fn a_run_finished_before_its_first_publication_certifies_its_end() {
 
 #[test]
 fn a_live_run_waits_at_its_newest_minute_until_it_finishes() {
-    // Goal: the last minute of a running collector stays open, and so does its end (P01.2).
+    // Goal: the last minute of a running collector stays open, and so does its end.
     // Method: with a live pid and clocks past this process's start, step over an empty ring,
     // then two minutes, then finish the writer and step to the end.
     let mut recording = Recording::new();
@@ -1844,7 +1844,7 @@ fn a_live_run_waits_at_its_newest_minute_until_it_finishes() {
 
 #[test]
 fn a_run_whose_writer_died_saves_its_last_minute_and_certifies_its_end() {
-    // Goal: a crashed collector costs nothing the ring holds, and its run still ends (P01.2).
+    // Goal: a crashed collector costs nothing the ring holds, and its run still ends.
     // Method: publish without finishing, step with a pid that is gone until the run completes,
     // and read that the terminal names a dead generation rather than a completion.
     let mut recording = Recording::new();
@@ -1873,7 +1873,7 @@ fn a_run_whose_writer_died_saves_its_last_minute_and_certifies_its_end() {
 
 #[test]
 fn a_crashed_runs_last_minute_finds_its_end_when_staged_again() {
-    // Goal: an interrupted last minute of a crashed collector still ends the run (P01.2).
+    // Goal: an interrupted last minute of a crashed collector still ends the run.
     // Method: save two minutes, stop the third with a table torn, and restart with the pid gone,
     // which takes reopening the ring, then read the run through to its certified end.
     let mut recording = Recording::new();
@@ -1931,7 +1931,7 @@ fn recording_with_withheld_events() -> Recording {
 
 #[test]
 fn a_captured_run_keeps_the_identities_of_events_its_writer_never_published() {
-    // Goal: the terminal of a captured run saves each event's identity with its row (P02.5).
+    // Goal: the terminal of a captured run saves each event's identity with its row.
     // Method: withhold the only publication of a captured ring, step once, read the terminal.
     let mut recording = Recording::captured();
     recording.publish_events_in_minute(0, 2);
@@ -2007,7 +2007,7 @@ fn a_terminal_with_no_rows_and_no_source_clears_the_slot(interruption: Interrupt
 
 #[test]
 fn a_terminal_registered_with_no_source_clears_the_slot() {
-    // Goal: an attempt that saved nothing holds nothing up (P02.3).
+    // Goal: an attempt that saved nothing holds nothing up.
     // Method: stop the seal once it has registered, remove the source, and take the step after
     // every run's turn.
     a_terminal_with_no_rows_and_no_source_clears_the_slot(Interruption::Registered);
@@ -2015,7 +2015,7 @@ fn a_terminal_registered_with_no_source_clears_the_slot() {
 
 #[test]
 fn a_terminal_with_only_a_torn_batch_and_no_source_clears_the_slot() {
-    // Goal: a batch no row can be read from counts as saving nothing (P02.3).
+    // Goal: a batch no row can be read from counts as saving nothing.
     // Method: stop the seal with its first batch torn, remove the source, and take the step after
     // every run's turn.
     a_terminal_with_no_rows_and_no_source_clears_the_slot(Interruption::EventBatchTorn);
@@ -2023,7 +2023,7 @@ fn a_terminal_with_only_a_torn_batch_and_no_source_clears_the_slot() {
 
 #[test]
 fn a_terminal_with_a_torn_batch_after_its_rows_keeps_the_rows() {
-    // Goal: a batch no row can be read from goes, and the whole one before it stays (P02.3).
+    // Goal: a batch no row can be read from goes, and the whole one before it stays.
     // Method: stop with the batch whole, add the file a process that ended while writing the next
     // one leaves, remove the source, and finish in a new store.
     let mut recording = recording_with_withheld_events();
@@ -2147,7 +2147,7 @@ fn saved_rows_stopped_after(changes: usize) -> bool {
 #[test]
 fn saved_rows_stopped_at_each_change_of_the_slot_reach_the_same_end() {
     // Goal: a process that ends at any point of publishing an ordinary attempt's kept rows that the
-    // next one can tell apart leaves work it finishes, with the same rows (P02.3).
+    // next one can tell apart leaves work it finishes, with the same rows.
     // Method: stop the publication after one more change of the slot each time, until it ends
     // first.
     let changes = (0..SLOT_CHANGES_MAX).find(|changes| saved_rows_stopped_after(*changes));
@@ -2196,7 +2196,7 @@ fn kept_terminal_stopped_after(changes: usize) -> bool {
 #[test]
 fn a_terminal_kept_and_stopped_at_each_change_of_the_slot_reaches_the_same_end() {
     // Goal: a process that ends at any point of publishing a terminal's kept rows that the next one
-    // can tell apart leaves work it finishes with the same rows (P02.3).
+    // can tell apart leaves work it finishes with the same rows.
     // Method: stop the publication after one more change of the slot each time, until it ends
     // first.
     let changes = (0..SLOT_CHANGES_MAX).find(|changes| kept_terminal_stopped_after(*changes));
@@ -2233,7 +2233,7 @@ fn interrupted_terminal_converges(interruption: Interruption) {
 
 #[test]
 fn events_a_dying_writer_never_published_are_saved_in_the_terminal() {
-    // Goal: the worker saves events past the last publication and certifies them (P02.3).
+    // Goal: the worker saves events past the last publication and certifies them.
     // Method: withhold the only publication, step once, and read the terminal's rows.
     let recording = recording_with_withheld_events();
     let store = Store::open(&recording.root).unwrap();
@@ -2252,35 +2252,35 @@ fn events_a_dying_writer_never_published_are_saved_in_the_terminal() {
 
 #[test]
 fn a_terminal_seal_interrupted_after_registering_converges() {
-    // Goal: a process ending before any terminal row costs nothing (P02.3).
+    // Goal: a process ending before any terminal row costs nothing.
     // Method: stop after registering, restart, and read the terminal.
     interrupted_terminal_converges(Interruption::Registered);
 }
 
 #[test]
 fn a_terminal_seal_interrupted_inside_its_rows_converges() {
-    // Goal: a torn terminal batch is written again from the finished source (P02.3).
+    // Goal: a torn terminal batch is written again from the finished source.
     // Method: tear the only batch, restart, and read the terminal.
     interrupted_terminal_converges(Interruption::EventBatchTorn);
 }
 
 #[test]
 fn a_terminal_seal_interrupted_with_its_rows_saved_converges() {
-    // Goal: rows with no proof are written again rather than trusted (P02.3).
+    // Goal: rows with no proof are written again rather than trusted.
     // Method: stop with the batch whole and no proof, restart, and read the terminal.
     interrupted_terminal_converges(Interruption::EventsStaged);
 }
 
 #[test]
 fn a_terminal_seal_interrupted_after_its_proof_converges() {
-    // Goal: durable terminal metadata finishes publishing at restart (P02.3).
+    // Goal: durable terminal metadata finishes publishing at restart.
     // Method: stop after the proof, restart, and read the terminal.
     interrupted_terminal_converges(Interruption::Proved);
 }
 
 #[test]
 fn a_terminal_seal_interrupted_at_each_publication_step_converges() {
-    // Goal: every durable step of a terminal publication goes on to the same end (P02.3).
+    // Goal: every durable step of a terminal publication goes on to the same end.
     // Method: stop after every third step, since the kill tests end a worker at each change a step
     // makes, restart, and read the terminal. The helper stops at Idle.
     for steps in (1..=PUBLICATION_STEPS).step_by(3) {
@@ -2310,7 +2310,7 @@ fn a_proved_terminal_publishes_when_its_source_is_gone() {
 
 #[test]
 fn a_proved_seal_publishes_when_its_source_is_gone() {
-    // Goal: durable proof metadata needs no source, so a reboot after it loses nothing (P02.3).
+    // Goal: durable proof metadata needs no source, so a reboot after it loses nothing.
     // Method: stop after the proof, remove the source, restart, and read the frontier.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
@@ -2362,7 +2362,7 @@ fn persist_until_quiet(recording: &Recording, store: &Store, state: &mut RunStat
 fn a_selection_overwritten_before_registering_is_counted_once_by_the_next_scan() {
     // Goal: a worker catching up on a full ring selects the oldest retained publication, which the
     // collector can overwrite before the attempt registers. That costs the minute, never the
-    // worker, and the loss is counted once (P02.3).
+    // worker, and the loss is counted once.
     // Method: seal a selection the ring has already overwritten, as that race leaves it, then run
     // the worker to the end and read each saved minute's losses.
     let mut recording = Recording::new();
@@ -2405,7 +2405,7 @@ fn a_selection_overwritten_before_registering_is_counted_once_by_the_next_scan()
 #[test]
 fn a_selection_overwritten_after_registering_is_counted_once_by_the_next_scan() {
     // Goal: the same race a moment later leaves an attempt that names a publication the ring no
-    // longer holds, with nothing saved, so it clears at once rather than holding the slot (P02.3).
+    // longer holds, with nothing saved, so it clears at once rather than holding the slot.
     // Method: register the first minute, overwrite it, stage through the worker, then run the
     // worker to the end and read the losses.
     let mut recording = Recording::new();
@@ -2459,7 +2459,7 @@ fn a_selection_overwritten_after_registering_is_counted_once_by_the_next_scan() 
 fn a_selection_whose_start_was_overwritten_is_selected_again_from_what_remains() {
     // Goal: when the ring overwrites only the start of the selected minute, the rest of it is
     // still saved, as a minute starting where the ring now starts, and every event is either
-    // saved or counted lost, once (P02.3).
+    // saved or counted lost, once.
     // Method: register a minute of eight ticks with events, publish four more into that minute
     // and one past it, stage through the worker, then run it to the end and account for events.
     let mut recording = Recording::new();
@@ -2751,8 +2751,7 @@ fn a_terminal_of_another_runs_source_is_refused() {
 #[test]
 fn publications_overwritten_inside_a_minute_are_counted_in_that_minute() {
     // Goal: when the ring overwrites the middle of a minute while it is read, the minute keeps
-    // what was read before and after, and counts the gap, since the attempt's start still holds
-    // (P02.3).
+    // what was read before and after, and counts the gap, since the attempt's start still holds.
     // Method: step the worker's staging by hand, publishing past the unread ticks between two
     // reads, then write and publish what it read and read the minute back.
     let mut recording = Recording::new();
@@ -2922,7 +2921,7 @@ fn a_proof_refuses_a_batch_whose_rows_are_invalid_past_their_event_numbers() {
 #[test]
 fn a_seal_charges_its_event_writer_to_the_one_budget_it_was_given() {
     // Goal: the worker's memory limit covers the event writer too, so a seal cannot reserve that
-    // limit twice (P02.4).
+    // limit twice.
     // Method: stage a registered attempt with a budget one byte short of the writer's working
     // memory, which must refuse, then with exactly that much, which must stage.
     let mut recording = Recording::new();
@@ -2961,7 +2960,7 @@ fn a_seal_charges_its_event_writer_to_the_one_budget_it_was_given() {
 #[test]
 fn the_whole_worker_saves_a_finished_run_retires_it_and_exits() {
     // Goal: the worker's own loop drives a registered recording to a certified end and lets go of
-    // the run, and a later worker finds nothing left to do (P01.5, P02.3).
+    // the run, and a later worker finds nothing left to do.
     // Method: run the whole worker over a finished ring, read what it saved through a new Store,
     // then run it again with the ring gone, which only the retirement can answer.
     let mut recording = Recording::new();
@@ -2992,7 +2991,7 @@ fn the_whole_worker_saves_a_finished_run_retires_it_and_exits() {
 #[test]
 fn the_whole_worker_retires_a_run_certified_before_it_could_retire_it() {
     // Goal: a process that ended between certifying a run and retiring it leaves work a later
-    // worker finishes from what is durable, so that worker still lets go and exits (P01.5).
+    // worker finishes from what is durable, so that worker still lets go and exits.
     // Method: certify the run by stepping the worker, without retiring it, lose the ring, then
     // run the whole worker and read the retirement.
     let mut recording = Recording::new();
@@ -3111,7 +3110,7 @@ fn a_removal_pass_comes_first_and_then_once_a_minute() {
 #[test]
 fn the_whole_worker_marks_what_a_lost_run_may_have_held_and_goes_on() {
     // Goal: a run whose ring is gone stops nothing, and the extent it may have held stays visible
-    // on the next saved minute rather than reading as no loss (P02.3).
+    // on the next saved minute rather than reading as no loss.
     // Method: register a run with no ring ahead of a finished run, run the whole worker, and read
     // the losses each saved minute records.
     let mut lost = Recording::new();
@@ -3145,7 +3144,7 @@ fn the_whole_worker_marks_what_a_lost_run_may_have_held_and_goes_on() {
 #[test]
 fn the_whole_worker_marks_what_an_evicted_ring_may_have_held() {
     // Goal: a restart beside evicted rings says that an extent is unknown even though nothing
-    // names the rings, so the run after that extent stands as its last observed boundary (P02.3).
+    // names the rings, so the run after that extent stands as its last observed boundary.
     // Method: run the whole worker over a finished run in a registry that counts one eviction.
     let mut recording = Recording::new();
     publish_three_minutes(&mut recording);
@@ -3177,7 +3176,7 @@ mod catalog_tests;
 #[test]
 fn a_window_stays_until_the_reading_after_it_has_outlived_the_period() {
     // Goal: the first reading after a gap keeps the window its rates come from, and then lets it
-    // go, while the run's newest window stays however old it is (P03.1).
+    // go, while the run's newest window stays however old it is.
     // Method: save a minute and, two hours on, another. Pass where only the first is past the
     // period, then where the second is too.
     let mut recording = Recording::new();

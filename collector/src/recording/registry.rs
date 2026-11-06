@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn a_registration_removes_the_receipt_of_each_run_no_longer_registered() {
-        // Goal: receipts plateau however many runs a recording sees (P03.3), and the oldest run's
+        // Goal: receipts plateau however many runs a recording sees, and the oldest run's
         // receipt still reads when its eviction asks whether it was saved.
         // Method: register and retire five runs in turn, beside a refused write of an old receipt.
         let root = std::env::temp_dir().join(format!(

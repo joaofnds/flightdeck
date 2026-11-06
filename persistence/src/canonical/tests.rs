@@ -1029,7 +1029,7 @@ fn terminal_and_fragment_tails_cannot_cross_ownership_frontiers() {
 #[test]
 fn nothing_follows_a_terminal_kept_without_its_source() {
     // Goal: a terminal kept when its source went ends its run as a certified one does, so a
-    // frontier refuses an object past it rather than reading the run as going on (P02.5).
+    // frontier refuses an object past it rather than reading the run as going on.
     // Method: publish a kept terminal and a fragment that starts where it ends, and read the
     // frontier.
     let fixture = Fixture::new();

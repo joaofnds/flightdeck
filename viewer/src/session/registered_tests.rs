@@ -55,7 +55,7 @@ fn a_session_finds_no_recording_in_a_root_still_being_set_up() {
 
 #[test]
 fn a_session_opens_a_registered_recording_at_its_two_ends() {
-    // Goal: a session reaches a registered recording through its catalog alone (P02.1).
+    // Goal: a session reaches a registered recording through its catalog alone.
     // Method: save two minutes through the worker and open a session over them.
     let fixture = registered_two_minutes();
 
@@ -71,7 +71,7 @@ fn a_session_opens_a_registered_recording_at_its_two_ends() {
 #[test]
 fn a_selection_reads_a_registered_window_with_its_rates() {
     // Goal: a selected second reads the same way from a registered window, and the first reading of
-    // a minute takes its rates from the minute before it (P02.5).
+    // a minute takes its rates from the minute before it.
     // Method: save two minutes and select the first second of the second minute.
     let fixture = registered_two_minutes();
     let mut session = Session::open(&fixture.root).unwrap();
@@ -86,7 +86,7 @@ fn a_selection_reads_a_registered_window_with_its_rates() {
 #[test]
 fn runs_sharing_a_second_both_stay_selectable() {
     // Goal: two runs on one wall second are two readings, neither hiding the other, as with a clock
-    // set back between runs (P02.1, P02.5).
+    // set back between runs.
     // Method: save a run of the recording and then a second run over the same seconds, open a
     // session, and select the second of each.
     let first = registered_two_minutes();
@@ -113,7 +113,7 @@ fn runs_sharing_a_second_both_stay_selectable() {
 #[test]
 fn a_reading_with_no_clock_is_counted_and_its_window_still_reads() {
     // Goal: a window with partly missing clocks is found through the readings that have one, and
-    // the rest are counted rather than lost (P02.5).
+    // the rest are counted rather than lost.
     // Method: save a minute of a reading with clocks and one without, and select the first.
     let mut fixture = Fixture::registered();
     fixture.publish_with_system_rows(SECOND_FIRST);
@@ -130,7 +130,7 @@ fn a_reading_with_no_clock_is_counted_and_its_window_still_reads() {
 #[test]
 fn readings_with_no_clock_at_all_are_counted_with_no_second_to_show() {
     // Goal: readings no clock can place still count, and a recording of nothing else has no ends to
-    // offer rather than wrong ones (P02.5).
+    // offer rather than wrong ones.
     // Method: save a minute of readings without clocks and open a session.
     let mut fixture = Fixture::registered();
     fixture.publish_without_clock();
@@ -189,7 +189,7 @@ fn registered_proof(session: &Session, window: u64) -> PathBuf {
 #[test]
 fn a_session_lists_only_the_windows_of_the_span_it_reads() {
     // Goal: what a session holds follows the span it reads and never what the recording saved, and
-    // the ends of the recording stay known (P02.1, P02.2).
+    // the ends of the recording stay known.
     // Method: save three minutes, the first far before the others, open a session, then select a
     // second of each end.
     let fixture = registered_far_apart();
@@ -213,7 +213,7 @@ fn a_session_lists_only_the_windows_of_the_span_it_reads() {
 #[test]
 fn a_read_past_the_listed_span_fails_rather_than_finding_nothing() {
     // Goal: a session lists one span, and a read outside it that found no readings would draw a gap
-    // in the recording where there is none (P02.5).
+    // in the recording where there is none.
     // Method: save minutes far apart, open a session at the newest, and read a range of the oldest.
     let fixture = registered_far_apart();
     let session = Session::open(&fixture.root).unwrap();
@@ -229,7 +229,7 @@ fn a_read_past_the_listed_span_fails_rather_than_finding_nothing() {
 
 #[test]
 fn a_read_of_kept_parts_past_the_listed_span_fails_rather_than_finding_nothing() {
-    // Goal: the tables a minute keeps for the App histories answer for the same span (P02.5).
+    // Goal: the tables a minute keeps for the App histories answer for the same span.
     // Method: save minutes far apart, open a session at the newest, and read parts of the oldest.
     let fixture = registered_far_apart();
     let session = Session::open(&fixture.root).unwrap();
@@ -246,7 +246,7 @@ fn a_read_of_kept_parts_past_the_listed_span_fails_rather_than_finding_nothing()
 #[test]
 fn an_unavailable_old_window_stops_no_reader_of_a_newer_one() {
     // Goal: damage outside what a reader asks for cannot stop it, and damage it asks for is
-    // explicit (P02.3).
+    // explicit.
     // Method: save three minutes far apart, damage the oldest one's proof, then open a session and
     // select a second of the newest and of the oldest.
     let fixture = registered_far_apart();
@@ -265,7 +265,7 @@ fn an_unavailable_old_window_stops_no_reader_of_a_newer_one() {
 #[test]
 fn a_second_name_for_an_old_minute_adds_no_minute_and_stops_no_reader() {
     // Goal: a retry reuses a seal's one name, so a second name is damage, which neither counts as
-    // another minute nor changes what a reader finds at either end (P02.3).
+    // another minute nor changes what a reader finds at either end.
     // Method: save three minutes far apart, link the oldest's seal under the free name of its
     // second publication, then open a session and select a second of the newest and of the oldest.
     let mut fixture = Fixture::registered();
@@ -306,7 +306,7 @@ fn registered_oldest_seal(root: &std::path::Path) -> PathBuf {
 #[test]
 fn damage_in_the_margin_of_a_span_stops_no_reader_of_what_it_needs() {
     // Goal: a span's margin is only there to save a load later, so damage in it costs a reader
-    // nothing it asked for, and it is explicit once a reader asks for it (P02.3).
+    // nothing it asked for, and it is explicit once a reader asks for it.
     // Method: save minutes further apart than a read needs and closer than its margin, damage the
     // older one's proof, select a second of the newer one, and then one of the older.
     const NEEDED_SECONDS: u64 = 3660;
@@ -354,7 +354,7 @@ fn a_reopen_keeps_what_an_earlier_read_verified() {
 
 #[test]
 fn a_session_sees_when_a_new_minute_lands_in_its_span() {
-    // Goal: a session can tell its list has gone stale without listing the recording (P02.2).
+    // Goal: a session can tell its list has gone stale without listing the recording.
     // Method: open a session, save one more minute in its span, and ask again.
     let mut fixture = Fixture::registered();
     fixture.publish_with_system_rows(SECOND_FIRST);
@@ -373,7 +373,7 @@ fn a_session_sees_when_a_new_minute_lands_in_its_span() {
 
 #[test]
 fn a_live_session_lists_a_minute_once_it_is_saved() {
-    // Goal: a live session follows what the persister saves through the catalog (P02.1).
+    // Goal: a live session follows what the persister saves through the catalog.
     // Method: open a live session over a registered recording with nothing saved, save a minute,
     // and poll until the session lists it.
     let mut fixture = Fixture::registered();
@@ -509,7 +509,7 @@ fn registered_wall_restore(walled: &[PathBuf]) {
 fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
     // Goal: a recording keeps opening and answering at its oldest and newest seconds at 65,535,
     // 65,536, 65,537 and 131,072 windows, a live reader goes on across the old cap, and neither
-    // lists or reads what lies between (P02.1, P02.2).
+    // lists or reads what lies between.
     // Method: save real minutes at both ends through the worker and link windows between them whose
     // proofs do not read, so that admitting any of them fails the read. Then cross the cap with
     // real saves while a live session polls.
@@ -564,7 +564,7 @@ fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
 #[test]
 fn two_runs_on_one_second_stay_selectable_past_the_old_cap() {
     // Goal: a second two runs share stays selectable in both, with a live reader open, in a
-    // recording past the old cap of windows (P02.1).
+    // recording past the old cap of windows.
     // Method: save minutes at both ends, link windows past the cap between them whose proofs do
     // not read, open a live session, save another run over the oldest second, poll, and select
     // each run there.
@@ -596,7 +596,7 @@ fn two_runs_on_one_second_stay_selectable_past_the_old_cap() {
 #[test]
 fn what_a_lookup_reads_stays_within_the_tree_however_long_the_recording() {
     // Goal: a lookup's work is bounded by the tree's shape and not by what the recording saved, at
-    // the sizes of 1, 7 and 30 days (P02.2).
+    // the sizes of 1, 7 and 30 days.
     // Method: link recordings of those sizes and count what the catalog's lookups read: the two
     // ends and a span of the clock.
     for windows in WINDOW_COUNTS_OF_DAYS {
@@ -629,7 +629,7 @@ fn what_a_lookup_reads_stays_within_the_tree_however_long_the_recording() {
 #[test]
 fn a_restart_on_a_long_run_reads_its_tail_and_not_what_it_saved_before() {
     // Goal: a restart costs what the run's tail holds and not what the run saved, at the sizes of
-    // 1, 7 and 30 days (P02.2, P02.4).
+    // 1, 7 and 30 days.
     // Method: publish a run past its ring, save what the ring holds, link the run's earlier windows
     // under it with proofs that do not read, and wall off the directories of the older ones, so
     // that reading or walking them fails. Restart the worker, save the next minute, and count what
@@ -708,7 +708,7 @@ const BASELINE_USAGE: Usage = Usage {
 #[test]
 fn a_saved_process_keeps_the_counters_the_format_baseline_recorded() {
     // Goal: counters no double holds exactly and counters near the top of a u64 read back the same
-    // once saved, as the baseline fixture of the older formats recorded them (P02.5).
+    // once saved, as the baseline fixture of the older formats recorded them.
     // Method: publish that fixture's usage, save it, open a session, and read each cell by column.
     let mut fixture = Fixture::registered();
     fixture.publish_with_usage(SECOND_FIRST, &BASELINE_USAGE);

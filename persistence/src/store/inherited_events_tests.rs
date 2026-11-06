@@ -1227,7 +1227,7 @@ mod finite_events_all_loss_after_registered_overwrite {
     #[test]
     fn lists_an_event_object_that_says_what_it_lost() {
         // Goal: an object that kept no row still names the events it covers and what they lost,
-        // so a list of event objects counts them (P02.1).
+        // so a list of event objects counts them.
         // Method: settle the refinement, then read the fragments after the empty terminals.
         let (mut fixture, _) = inherited_fixture(false);
         let budget = registration_budget();
