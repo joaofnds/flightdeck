@@ -1,5 +1,10 @@
 //! What a session returns once the retention period has passed some of its readings.
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use collector::recording::private::PrivateDirectory;
 use collector::ring::Identity;
@@ -359,7 +364,7 @@ fn expire_and_remove(root: &Path, continuous_ns: u64) -> u64 {
         .write(&PrivateDirectory::open(root).unwrap())
         .unwrap();
     let store = persistence::Store::open(root).unwrap();
-    let budget = std::sync::Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
 
     store.retire_expired(&now, &[], &budget).unwrap()
 }
@@ -452,4 +457,164 @@ fn the_first_retained_reading_comes_from_raw_readings_alone() {
     assert_eq!(retained_saved, saved);
     assert_eq!(retained_live, live);
     assert_eq!(retained_points, points[3..]);
+}
+
+/// Nine saved minutes of one reading each, at the start of its minute on the continuous clock.
+fn saved_across_nine_minutes() -> Fixture {
+    let mut fixture = Fixture::new();
+    let boot = fixture.writer.identity().unwrap().boot;
+    expire_boot_before(&fixture.root, boot, 0);
+    for minute in 0..NINE_MINUTES {
+        fixture.publish_with_system_rows(FIRST_SECOND + minute);
+        fixture.skip_run_ticks(59);
+        fixture.seal_minute(minute);
+    }
+
+    fixture
+}
+
+const NINE_MINUTES: u64 = 9;
+const FIRST_SECOND: u64 = 2_000;
+const READER_WAIT_MAX: Duration = Duration::from_secs(120);
+const NAMES_MAX: usize = 1 << 16;
+
+/// Moves the cutoff a minute at a time up to the newest reading, with a pass at each, and lets
+/// `read_count` go up twice after each. A read takes far less than the grace physical removal
+/// leaves a read under way, so no read sees the clock stand two passes behind what has gone.
+fn removal_beside_reads(root: &Path, read_count: &AtomicU64) -> u64 {
+    let mut removed = 0;
+    for minute in 1..NINE_MINUTES - 1 {
+        let reads = read_count.load(Ordering::Acquire);
+        removed += expire_and_remove(root, (minute + 1) * 60 * NS);
+        let waited = Instant::now();
+        while read_count.load(Ordering::Acquire) < reads + 2 {
+            assert!(
+                waited.elapsed() < READER_WAIT_MAX,
+                "the reader stopped reading"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    removed
+}
+
+/// Every name under `root`, which no recursion walks.
+fn names_under(root: &Path) -> BTreeSet<PathBuf> {
+    let mut names = BTreeSet::new();
+    let mut directories = vec![root.to_path_buf()];
+    for _name in 0..NAMES_MAX {
+        let Some(directory) = directories.pop() else {
+            return names;
+        };
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            names.insert(entry.path());
+            if entry.metadata().unwrap().is_dir() {
+                directories.push(entry.path());
+            }
+        }
+    }
+
+    panic!("a recording holds more directories than a test can walk");
+}
+
+#[test]
+fn a_reader_opening_beside_removal_meets_no_damage() {
+    // Goal: removal goes on beside readers, who meet neither damage nor a missing newest reading.
+    // Method: open a session and read the newest second over and over on this thread, while another
+    // removes the fixture's minutes oldest first.
+    let fixture = saved_across_nine_minutes();
+    let root = fixture.root.clone();
+    let newest = FIRST_SECOND + NINE_MINUTES - 1;
+    let read_count = Arc::new(AtomicU64::new(0));
+    let removal = {
+        let root = root.clone();
+        let read_count = Arc::clone(&read_count);
+        std::thread::spawn(move || removal_beside_reads(&root, &read_count))
+    };
+
+    let waited = Instant::now();
+    while !removal.is_finished() {
+        assert!(waited.elapsed() < READER_WAIT_MAX, "removal did not finish");
+        let selected = Session::open(&root).unwrap().select(newest, 0).unwrap();
+        assert_eq!(trend_seconds(&selected).last(), Some(&newest));
+        read_count.fetch_add(1, Ordering::Release);
+    }
+    let windows_removed = removal.join().unwrap();
+
+    let windows_left = Session::open(&root).unwrap().windows.len();
+    assert!(windows_removed > 0);
+    assert!(u64::try_from(windows_left).unwrap() < NINE_MINUTES);
+}
+
+#[test]
+fn a_reader_hung_on_an_open_file_stops_no_removal() {
+    // Goal: a read that hangs pins neither the recording nor the file's name, and what it holds
+    // open stays readable to it.
+    // Method: hold a saved table open, as a hung read does, remove its window, and read the table
+    // to its end.
+    let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
+    let oldest = Session::open(&fixture.root).unwrap().windows[0].clone();
+    let table = fixture
+        .root
+        .join(&oldest.data_directory)
+        .join("ticks.parquet");
+    let mut hung = std::fs::File::open(&table).unwrap();
+
+    let removed = expire_and_remove(&fixture.root, 200 * NS);
+
+    let mut bytes = Vec::new();
+    hung.read_to_end(&mut bytes).unwrap();
+    assert!(removed > 0);
+    assert!(!table.exists());
+    assert!(bytes.starts_with(b"PAR1"));
+}
+
+#[test]
+fn a_cancelled_read_leaves_nothing_in_the_way_of_removal_or_the_next_read() {
+    // Goal: a read given up holds nothing, so removal goes on and the session goes on reading
+    // whatever the period still covers.
+    // Method: cancel a session's reads, remove what expired, and read through a new epoch.
+    let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
+    let cancellation = Arc::new(crate::Cancellation::default());
+    let mut session = Session::open_with(&fixture.root, Arc::clone(&cancellation), 0).unwrap();
+    cancellation.cancel().unwrap();
+    let cancelled = session.select(1005, 0);
+
+    let removed = expire_and_remove(&fixture.root, 121 * NS);
+    let mut reopened = Session::open_with(
+        &fixture.root,
+        Arc::clone(&cancellation),
+        cancellation.epoch(),
+    )
+    .unwrap();
+    let selected = reopened.select(1005, 0).unwrap();
+
+    assert!(matches!(
+        cancelled,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted
+    ));
+    assert!(removed > 0);
+    assert_eq!(trend_seconds(&selected).last(), Some(&1005));
+}
+
+#[test]
+fn a_reader_leaves_nothing_on_disk_that_a_crash_could_strand() {
+    // Goal: a reader that dies needs no cleanup and pins nothing, since no reader takes a lease or
+    // writes a name.
+    // Method: read through both kinds of session and compare every name in the recording.
+    let fixture = saved_across_three_minutes(&crate::live::identity_fixture::Underived);
+    let before = names_under(&fixture.root);
+
+    Session::open(&fixture.root)
+        .unwrap()
+        .select(1005, 0)
+        .unwrap();
+    LiveSession::open(&fixture.root)
+        .unwrap()
+        .select(1005, 0)
+        .unwrap();
+
+    assert_eq!(names_under(&fixture.root), before);
 }
