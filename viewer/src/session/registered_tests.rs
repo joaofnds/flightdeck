@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use collector::recording::RegisteredRun;
 use persistence::Error;
 use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
@@ -532,6 +533,50 @@ fn what_a_lookup_reads_stays_within_the_tree_however_long_the_recording() {
     }
 }
 
+#[test]
+fn a_restart_on_a_long_run_reads_its_tail_and_not_what_it_saved_before() {
+    // Goal: a restart costs what the run's tail holds and not what the run saved, at the sizes of
+    // 1, 7 and 30 days (P02.2, P02.4).
+    // Method: publish a run past its ring, save what the ring holds, link the run's earlier windows
+    // under it with proofs that do not read, restart the worker, and save the next minute.
+    for windows in WINDOW_COUNTS_OF_DAYS {
+        let mut fixture = Fixture::registered();
+        for offset in 0..windows {
+            fixture.publish_with_system_rows(SECOND_FIRST + offset);
+        }
+        fixture.seal();
+        let run = fixture.writer.identity().unwrap();
+        registered_link_of_run(&fixture, run, SECOND_FIRST - 1, 1..windows - 8);
+        fixture.skip_run_ticks(60);
+        fixture.publish_with_system_rows(SECOND_FIRST + windows + 60);
+        let store = persistence::Store::open(&fixture.root).unwrap();
+        let registered = RegisteredRun {
+            identity: run,
+            ring_name: fixture.writer.name().to_owned(),
+            collector_pid: 0,
+        };
+        let mut held = persistence::worker::HeldWindows::default();
+
+        let started = std::time::Instant::now();
+        persistence::worker::seal_held_windows(
+            &store,
+            &registered,
+            None,
+            &mut held,
+            &persistence::sealed_apps::SealedApps::default(),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+        let mut work = ReadWork::default();
+        let frontier = store.source_frontier(&run, &budget, &mut work).unwrap();
+        println!("{windows} windows: saved the next minute in {elapsed:?}, {work:?}");
+        assert_eq!(frontier.unwrap().publication_end(), windows + 2);
+        assert!(work.entries <= 2 * ENTRIES_OF_A_BOUNDARY_MAX);
+    }
+}
+
 /// Links a window of one reading for each publication of `publications`, a second apart from
 /// `second`, under a run of their own.
 fn registered_link_between(fixture: &Fixture, second: u64, publications: std::ops::Range<u64>) {
@@ -539,6 +584,17 @@ fn registered_link_between(fixture: &Fixture, second: u64, publications: std::op
     // and these proofs do not read.
     let mut run = fixture.writer.identity().unwrap();
     run.run.0[1] ^= 1;
+    registered_link_of_run(fixture, run, second, publications);
+}
+
+/// Links a window of `run` of one reading for each publication of `publications`, a second apart
+/// from `second`.
+fn registered_link_of_run(
+    fixture: &Fixture,
+    run: collector::ring::RunIdentity,
+    second: u64,
+    publications: std::ops::Range<u64>,
+) {
     let readings: Vec<_> = publications
         .map(
             |publication| persistence::canonical::catalog::KnownReading {
