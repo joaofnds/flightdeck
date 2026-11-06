@@ -30,6 +30,8 @@ const _: () = assert!(PAGE_READINGS_MAX < LOOKUP_STEPS_MAX);
 const RANGE_WINDOWS_MAX: usize = 4096;
 /// The pages one clock range reads, more than a second's readings of every window it may touch.
 const RANGE_PAGES_MAX: usize = 1 << 12;
+/// How many names one search for a damaged window's readings walks.
+const READING_NAMES_MAX: usize = 1 << 16;
 
 const NAMESPACE_STATE_BYTES: usize = 256;
 const NS_PER_HOUR: u64 = 3_600_000_000_000;
@@ -635,6 +637,56 @@ pub(crate) fn window_at_or_after(
         CanonicalCursor::begin_owned(root, recording, Namespace::Ordinary, range, budget)?;
 
     window_holding_gate(&mut cursor, run)
+}
+
+/// The names a window's readings hold in the trees, found there, for a window whose ticks cannot
+/// say. Its wall clock bounds reach the readings with a clock and its publications those with none.
+/// A wall clock that stepped widens the first, so the search has a bound, past which what it did
+/// not reach stays. A window with no bounds keeps out of reach any reading of it that has a clock.
+pub(crate) fn window_reading_names(
+    root: &PrivateDirectory,
+    recording: Identity,
+    manifest: &Manifest,
+    budget: &Arc<ByteBudget>,
+) -> io::Result<Vec<(Namespace, CanonicalKey)>> {
+    let run = manifest.identity.run;
+    let publications = manifest.publication_first..manifest.publication_end;
+    let mut names = Vec::with_capacity(61);
+    let wall_range = manifest
+        .wall_ns
+        .map(|wall| known_page_range(wall.min, wall.max.saturating_add(1), None))
+        .transpose()?
+        .flatten();
+    if let Some(range) = wall_range {
+        let mut cursor =
+            CanonicalCursor::begin_owned(root, recording, Namespace::Known, range, budget)?;
+        for _reading in 0..READING_NAMES_MAX {
+            let Some(key) = catalog_found(&mut cursor)? else {
+                break;
+            };
+            let reading = KnownReading::from_key(recording, &key)?;
+            if reading.run == run && publications.contains(&reading.publication) {
+                names.push((Namespace::Known, key));
+            }
+        }
+    }
+
+    let unknown_at = |publication| UnknownReading { run, publication }.key();
+    let range = SeekRange {
+        first: unknown_at(manifest.publication_first)?,
+        last: unknown_at(manifest.publication_end.saturating_sub(1))?,
+        direction: Direction::Forward,
+    };
+    let mut cursor =
+        CanonicalCursor::begin_owned(root, recording, Namespace::Unknown, range, budget)?;
+    for _reading in 0..READING_NAMES_MAX {
+        let Some(key) = catalog_found(&mut cursor)? else {
+            break;
+        };
+        names.push((Namespace::Unknown, key));
+    }
+
+    Ok(names)
 }
 
 /// Keeps the window just counted if `readings`, its readings with no clock, are all it saved.

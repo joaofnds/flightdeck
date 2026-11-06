@@ -52,7 +52,7 @@ impl RetentionRoot {
     }
 
     fn period_seconds(&self) -> u64 {
-        Period::read(&self.directory()).seconds()
+        Period::read(&self.directory()).unwrap().seconds()
     }
 
     fn page(&self, cx: &mut TestAppContext) -> InputHarness {
@@ -143,8 +143,8 @@ fn a_minute_is_the_shortest_period_the_page_saves(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn ten_years_is_the_longest_period_the_page_saves(cx: &mut TestAppContext) {
-    // Goal: the page cannot leave a period no reader or persister accepts, which they would read
-    // as the default and so delete almost everything.
+    // Goal: the page cannot leave a period no reader or persister accepts, which would stop removal
+    // until someone chose another.
     // Method: raise the amount from the longest period.
     let root = RetentionRoot::holding(TEN_YEARS_SECONDS);
     let mut harness = root.page(cx);
@@ -199,6 +199,24 @@ fn a_refused_save_says_so_and_shows_the_period_the_recording_keeps(cx: &mut Test
 
     assert!(harness.driver.reading_is_visible("retention:1:Days"));
     assert!(harness.driver.reading_is_visible("retention-notice"));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_period_that_does_not_read_says_so_until_one_is_chosen(cx: &mut TestAppContext) {
+    // Goal: the page does not pass the default off as what the recording keeps, and choosing a
+    // period puts the file right.
+    // Method: damage the file, open the page, and raise the amount.
+    let root = RetentionRoot::holding(3_600);
+    std::fs::write(root.path.join("retention/period"), b"soon").unwrap();
+    let mut harness = root.page(cx);
+    let notice_when_opened = harness.driver.reading_is_visible("retention-notice");
+
+    harness.driver.click_control("retention-increase");
+
+    assert!(notice_when_opened);
+    assert!(!harness.driver.reading_is_visible("retention-notice"));
+    assert_eq!(root.period_seconds(), 2 * 86_400);
     harness.teardown();
 }
 

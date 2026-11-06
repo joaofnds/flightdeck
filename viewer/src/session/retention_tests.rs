@@ -7,8 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use collector::recording::private::PrivateDirectory;
-use collector::ring::Identity;
+use collector::ring::{Identity, ObservationTimes};
 use persistence::Error;
+use persistence::canonical::ReadWork;
+use persistence::canonical::catalog::Catalog;
 use persistence::retention::{Clock, ClockReading, Period, boot_offset_save};
 use serde_json::Value;
 
@@ -618,4 +620,146 @@ fn a_reader_leaves_nothing_on_disk_that_a_crash_could_strand() {
         .unwrap();
 
     assert_eq!(names_under(&fixture.root), before);
+}
+
+/// Damages the named file of the oldest minute of `fixture`, removes that minute, and gives what a
+/// new session then says of `newest_second`.
+fn session_after_removing_damaged(fixture: &Fixture, file: &str, newest_second: u64) -> Value {
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+    let run = fixture.writer.identity().unwrap();
+    let mut windows = Catalog::open(&fixture.root, &budget)
+        .unwrap()
+        .windows_of(&run, &mut ReadWork::default())
+        .unwrap();
+    windows.sort_by_key(|window| window.publication_first);
+    let second_first_ns = windows[1].continuous_ns.unwrap().min;
+    let raw = fixture.root.join(&windows[0].data_directory);
+    std::fs::write(raw.join(file), b"damaged").unwrap();
+
+    let removed = expire_and_remove(&fixture.root, second_first_ns + PERIOD_SECONDS * NS + 1);
+    assert_eq!(removed, 1);
+
+    Session::open(&fixture.root)
+        .unwrap()
+        .select(newest_second, 0)
+        .unwrap()
+}
+
+#[test]
+fn a_session_reads_on_once_a_minute_whose_ticks_did_not_read_has_gone() {
+    // Goal: damage in an expired minute costs a reader nothing once that minute is gone.
+    // Method: damage the oldest minute's ticks, remove it, and read the newest second, which lies
+    // beside it.
+    let fixture = saved_across_nine_minutes();
+    let newest_second = FIRST_SECOND + NINE_MINUTES - 1;
+
+    let selected = session_after_removing_damaged(&fixture, "ticks.parquet", newest_second);
+
+    assert_eq!(selected["second"], newest_second);
+}
+
+#[test]
+fn a_session_reads_on_far_from_a_removed_minute_whose_proof_did_not_read() {
+    // Goal: a proof that does not read cannot name its readings, so they stay and read as damage
+    // where a read reaches them, and a read of the rest of the recording never does.
+    // Method: damage the proof of a minute further back than a session lists, remove it, and read
+    // the newest second.
+    let mut fixture = Fixture::new();
+    let boot = fixture.writer.identity().unwrap().boot;
+    expire_boot_before(&fixture.root, boot, 0);
+    let newest_second = FIRST_SECOND + 4_000;
+    for (minute, second) in [FIRST_SECOND, newest_second - 1, newest_second]
+        .into_iter()
+        .enumerate()
+    {
+        fixture.publish_with_system_rows(second);
+        fixture.skip_run_ticks(59);
+        fixture.seal_minute(u64::try_from(minute).unwrap());
+    }
+
+    let selected = session_after_removing_damaged(&fixture, "metadata", newest_second);
+
+    assert_eq!(selected["second"], newest_second);
+}
+
+#[test]
+fn a_damaged_minute_goes_without_the_minute_a_stepped_wall_clock_put_inside_it() {
+    // Goal: readings of the same run that a wall clock stepped back put among a damaged minute's
+    // stay when that minute goes.
+    // Method: save a minute across walls 100 and 300 seconds and the next at 200, damage the first
+    // minute's ticks, remove it, and list the whole clock.
+    let mut fixture = Fixture::new();
+    let boot = fixture.writer.identity().unwrap().boot;
+    expire_boot_before(&fixture.root, boot, 0);
+    let clocked = |wall_seconds: u64, continuous_seconds: u64| ObservationTimes {
+        wall_ns: wall_seconds * NS,
+        continuous_ns: continuous_seconds * NS,
+        awake_ns: continuous_seconds * NS,
+    };
+    fixture.set_next_clocks(Some(clocked(100, 1)));
+    fixture.publish_with_system_rows(1);
+    fixture.set_next_clocks(Some(clocked(300, 2)));
+    fixture.publish_with_system_rows(2);
+    fixture.skip_run_ticks(58);
+    fixture.seal_minute(0);
+    fixture.set_next_clocks(Some(clocked(200, 61)));
+    fixture.publish_with_system_rows(3);
+    fixture.skip_run_ticks(59);
+    fixture.seal_minute(1);
+    fixture.set_next_clocks(Some(clocked(400, 121)));
+    fixture.publish_with_system_rows(4);
+    fixture.skip_run_ticks(59);
+    fixture.seal_minute(2);
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+    let catalog = Catalog::open(&fixture.root, &budget).unwrap();
+    let run = fixture.writer.identity().unwrap();
+    let mut windows = catalog.windows_of(&run, &mut ReadWork::default()).unwrap();
+    windows.sort_by_key(|window| window.publication_first);
+    let raw = fixture.root.join(&windows[0].data_directory);
+    std::fs::write(raw.join("ticks.parquet"), b"damaged").unwrap();
+
+    let removed = expire_and_remove(&fixture.root, 61 * NS + PERIOD_SECONDS * NS + 1);
+    let listed = catalog
+        .known_page(0, u64::MAX, None, &mut ReadWork::default())
+        .unwrap();
+
+    assert_eq!(removed, 1);
+    let walls: Vec<_> = listed
+        .readings
+        .iter()
+        .map(|reading| reading.wall_ns)
+        .collect();
+    assert_eq!(walls, [200 * NS, 400 * NS]);
+}
+
+#[test]
+fn a_minute_with_no_clock_whose_ticks_did_not_read_goes_whole() {
+    // Goal: a reading with no clock has its name found too when its window cannot name it.
+    // Method: save two minutes with no clocks, damage the first one's ticks, and remove what the
+    // retention clock has passed.
+    let mut fixture = Fixture::new();
+    let boot = fixture.writer.identity().unwrap().boot;
+    expire_boot_before(&fixture.root, boot, 0);
+    fixture.publish_without_clock();
+    fixture.publish_without_clock();
+    fixture.skip_run_ticks(58);
+    fixture.seal_minute(0);
+    fixture.publish_without_clock();
+    fixture.skip_run_ticks(59);
+    fixture.seal_minute(1);
+    let budget = Arc::new(persistence::resources::ByteBudget::new(256 * 1024 * 1024));
+    let catalog = Catalog::open(&fixture.root, &budget).unwrap();
+    let run = fixture.writer.identity().unwrap();
+    let windows = catalog.windows_of(&run, &mut ReadWork::default()).unwrap();
+    let oldest = windows.iter().min_by_key(|window| window.publication_first);
+    let raw = fixture.root.join(&oldest.unwrap().data_directory);
+    std::fs::write(raw.join("ticks.parquet"), b"damaged").unwrap();
+
+    let removed = expire_and_remove(&fixture.root, 200 * NS);
+    let listed = catalog
+        .unknown_page(None, &mut ReadWork::default())
+        .unwrap();
+
+    assert_eq!(removed, 2);
+    assert_eq!(listed.readings.len(), 0);
 }

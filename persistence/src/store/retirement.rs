@@ -4,11 +4,12 @@
 //! meeting a vanished name as damage. It then removes the raw data, and last the order entry, whose
 //! hard link keeps the proof a repeat after a crash starts from. Every step takes a missing target
 //! as done. A proof or table that does not read is reported and removal goes on with what it can
-//! name, so damage cannot stop expiry.
+//! name, so damage cannot stop expiry, and any other failure leaves that entry for the next pass,
+//! so it says nothing of what lies on disk and stops no other entry.
 
 use super::Store;
 use super::publication_control::{CountedControl, read_optional_normal, read_state, replace};
-use crate::canonical::catalog::window_at_or_after;
+use crate::canonical::catalog::{window_at_or_after, window_reading_names};
 use crate::canonical::metadata::{Body, CanonicalMetadata};
 use crate::canonical::removal;
 use crate::canonical::rows;
@@ -42,8 +43,10 @@ impl Store {
         budget: &Arc<ByteBudget>,
     ) -> io::Result<u64> {
         let clock = Clock::read_for_removal(&self.directory, now)?;
-        let period = Period::read(&self.directory);
-        self.retire_expired_room(&clock, period)?;
+        let period = Period::read(&self.directory)?;
+        if let Err(error) = self.retire_expired_room(&clock, period) {
+            collector::diagnostics::error(format_args!("retention room: {error}"));
+        }
         if let Err(error) = retention::boot_records_settle(&self.directory, &clock) {
             collector::diagnostics::error(format_args!("retention boot records: {error}"));
         }
@@ -97,14 +100,25 @@ impl Store {
             return Ok(0);
         }
 
-        let held = self.retire_expired_held(under_way.as_ref(), runs, budget)?;
+        let held = self.retire_expired_held(under_way.as_ref(), runs, budget);
         let mut retired = 0;
         for entry in &entries {
             if retired == RETIRED_PER_PASS {
                 break;
             }
-            if self.retire_one(entry, &held, cutoff, budget)? {
-                retired += 1;
+            match self.retire_one(entry, &held, cutoff, budget) {
+                Ok(true) => retired += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    self.retire_expired_settle()?;
+                    // No later entry finds the room this one did not.
+                    if error.kind() == io::ErrorKind::StorageFull {
+                        return Err(error);
+                    }
+                    collector::diagnostics::error(format_args!(
+                        "retention removal of one entry: {error}"
+                    ));
+                }
             }
         }
 
@@ -128,23 +142,34 @@ impl Store {
         Ok(())
     }
 
-    /// The transactions a pass must leave: the newest publication of each registered run and of
-    /// the run of a publication under way, which the next save reads as its predecessor.
+    /// What a pass must leave of each registered run and of the run of a publication under way.
     fn retire_expired_held(
         &self,
         under_way: Option<&NormalState>,
         runs: &[RunIdentity],
         budget: &Arc<ByteBudget>,
-    ) -> io::Result<Vec<Identity>> {
-        let mut held = Vec::with_capacity(runs.len() + 1);
-        if let Some(state) = under_way {
-            held.extend(self.retire_expired_newest(&state.input.run, budget)?);
-        }
-        for run in runs {
-            held.extend(self.retire_expired_newest(run, budget)?);
+    ) -> Held {
+        let mut held = Held {
+            newest: Vec::with_capacity(runs.len() + 1),
+            unread_runs: Vec::new(),
+        };
+        for run in under_way
+            .map(|state| &state.input.run)
+            .into_iter()
+            .chain(runs)
+        {
+            match self.retire_expired_newest(run, budget) {
+                Ok(newest) => held.newest.extend(newest),
+                Err(error) => {
+                    collector::diagnostics::error(format_args!(
+                        "retention newest publication of a run: {error}"
+                    ));
+                    held.unread_runs.push(*run);
+                }
+            }
         }
 
-        Ok(held)
+        held
     }
 
     fn retire_expired_newest(
@@ -167,7 +192,7 @@ impl Store {
     fn retire_one(
         &self,
         entry: &ListedEntry,
-        held: &[Identity],
+        held: &Held,
         cutoff: Cutoff,
         budget: &Arc<ByteBudget>,
     ) -> io::Result<bool> {
@@ -176,17 +201,16 @@ impl Store {
             .and_then(|mut proof| CanonicalMetadata::read(&mut proof));
         let metadata = match metadata {
             Ok(metadata) => metadata,
-            Err(error) => {
+            Err(error) if retire_one_damage(&error) => {
                 collector::diagnostics::error(format_args!(
                     "retention removal of an unreadable proof: {error}"
                 ));
                 self.retire_one_unreadable(entry)?;
                 return Ok(true);
             }
+            Err(error) => return Err(error),
         };
-        if held.contains(&metadata.transaction)
-            || self.retire_one_waits(&metadata, cutoff, budget)?
-        {
+        if held.keeps(&metadata) || self.retire_one_waits(&metadata, cutoff, budget)? {
             return Ok(false);
         }
 
@@ -247,35 +271,36 @@ impl Store {
         }
     }
 
-    /// Every name the proof holds in the trees. A window's readings are named from its ticks, and
-    /// after a crash past its name removal those are gone too, which leaves nothing to find.
+    /// Every name the proof holds in the trees. A window's ticks name its readings, and where they
+    /// do not read, or a crash past the name removal took them, the trees are asked instead, so a
+    /// reader meets no name of a window that is gone.
     fn retire_one_names(
         &self,
         metadata: &CanonicalMetadata,
         budget: &Arc<ByteBudget>,
     ) -> io::Result<Vec<(Namespace, CanonicalKey)>> {
-        let mut names = Vec::with_capacity(62);
-        if matches!(metadata.body, Body::Ordinary(_)) {
-            let readings = self
-                .directory
-                .open_directory(metadata.base.name())
-                .and_then(|base| {
-                    base.open_directory(
-                        &collector::recording::identity_text(metadata.transaction).to_string(),
-                    )
-                })
-                .and_then(|object| object.open_directory(metadata.child.name()))
-                .and_then(|raw| {
-                    rows::observation_keys(&raw, metadata, budget, &mut ReadWork::default(), None)
-                });
-            match readings {
-                Ok(readings) => names = readings,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => collector::diagnostics::error(format_args!(
-                    "retention removal of a window whose ticks do not read: {error}"
-                )),
+        let Body::Ordinary(manifest) = &metadata.body else {
+            return metadata.source_names();
+        };
+        let readings = self
+            .directory
+            .open_directory(metadata.base.name())
+            .and_then(|base| {
+                base.open_directory(
+                    &collector::recording::identity_text(metadata.transaction).to_string(),
+                )
+            })
+            .and_then(|object| object.open_directory(metadata.child.name()))
+            .and_then(|raw| {
+                rows::observation_keys(&raw, metadata, budget, &mut ReadWork::default(), None)
+            });
+        let mut names = match readings {
+            Ok(readings) => readings,
+            Err(error) if error.kind() == io::ErrorKind::NotFound || retire_one_damage(&error) => {
+                window_reading_names(&self.directory, self.recording, manifest, budget)?
             }
-        }
+            Err(error) => return Err(error),
+        };
         names.extend(metadata.source_names()?);
 
         Ok(names)
@@ -354,16 +379,40 @@ impl Store {
     }
 }
 
+/// What a pass must leave of the registered runs.
+struct Held {
+    /// The newest publication of each run, which its next save reads as its predecessor.
+    newest: Vec<Identity>,
+    /// The runs whose newest publication did not read, which keep what they hold for the pass.
+    unread_runs: Vec<RunIdentity>,
+}
+
+impl Held {
+    fn keeps(&self, metadata: &CanonicalMetadata) -> bool {
+        self.newest.contains(&metadata.transaction) || self.unread_runs.contains(&metadata.run)
+    }
+}
+
+/// Whether a failure to read says the thing read is damaged, rather than that the read could not be
+/// made, which says nothing of what lies on disk.
+fn retire_one_damage(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+    )
+}
+
 /// Whether a window must wait for a successor with these clock bounds, whose boot has this offset
 /// on the retention clock: its first reading still has a place inside the period. One with no place
-/// on the clock has to go first, by its own entry, for this window to go.
+/// on the clock holds nothing back, since no period can expire it and a row of them would hold
+/// every window before them for good. Such a reading shows without the rate this window gives it.
 pub(super) fn retire_one_waits_for(
     bounds: Option<TimeBounds>,
     offset_ns: Option<u64>,
     cutoff: Cutoff,
 ) -> bool {
     let (Some(bounds), Some(offset_ns)) = (bounds, offset_ns) else {
-        return true;
+        return false;
     };
 
     !cutoff.expired(bounds.min.saturating_add(offset_ns))

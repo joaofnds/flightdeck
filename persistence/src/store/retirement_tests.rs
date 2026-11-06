@@ -87,6 +87,33 @@ fn retirement_names_under(fixture: &Fixture, directory: &str) -> usize {
     fs::read_dir(fixture.root.join(directory)).unwrap().count()
 }
 
+fn retirement_pass(
+    fixture: &Fixture,
+    store: &Store,
+    runs: &[RunIdentity],
+    clock_ns: u64,
+) -> io::Result<u64> {
+    store.retire_expired(
+        &retirement_at(fixture, clock_ns),
+        runs,
+        &registration_budget(),
+    )
+}
+
+/// The raw directory of the window whose entry lies at `place`.
+fn retirement_raw_of(fixture: &Fixture, place: u64) -> PathBuf {
+    let name = order_entry_names(&fixture.root)
+        .into_iter()
+        .find(|name| name.starts_with(&format!("{place}-")))
+        .unwrap();
+
+    fixture
+        .root
+        .join("data")
+        .join(name.split('-').nth(1).unwrap())
+        .join("ready")
+}
+
 #[test]
 fn a_pass_removes_what_outlived_the_period_and_keeps_the_rest() {
     // Goal: saved readings go once they have outlived the period, and nothing younger goes.
@@ -413,9 +440,10 @@ fn a_pass_saves_the_clock_it_read() {
 }
 
 #[test]
-fn a_window_waits_for_a_successor_inside_the_period_or_off_the_clock() {
+fn a_window_waits_for_a_successor_inside_the_period() {
     // Goal: the reading after a window takes its rates from that window, so the window goes only
-    // once that reading has expired.
+    // once that reading has expired. A reading off the clock holds nothing back, since a row of
+    // them would hold every window behind it for good.
     // Method: compare each kind of successor with a cutoff at a known time.
     let cutoff = Clock::started_at(&ClockReading {
         boot: Identity([1, 2]),
@@ -435,8 +463,8 @@ fn a_window_waits_for_a_successor_inside_the_period_or_off_the_clock() {
             Some(1),
             true,
         ),
-        ("no clock", None, Some(0), true),
-        ("no boot record", bounds(0), None, true),
+        ("no clock", None, Some(0), false),
+        ("no boot record", bounds(0), None, false),
     ];
 
     for (name, successor, offset_ns, waits) in rows {
@@ -592,9 +620,8 @@ fn a_boot_record_stays_until_nothing_of_that_boot_can_need_it() {
 #[test]
 fn a_boot_record_that_does_not_read_goes_without_stopping_the_pass() {
     // Goal: a damaged record, which places no reading, neither stays forever nor stops removal.
-    // Method: damage a boot's record, and take two passes past every entry in another boot, since
-    // the older window waits for the first pass to take the newer one, whose boot it can no longer
-    // place.
+    // Method: damage a boot's record, and take one pass past every entry in another boot, which
+    // takes both windows, since neither waits for a successor no record can place.
     let mut fixture = Fixture::new(false);
     let store = retirement_store(&fixture);
     let root = PrivateDirectory::open(&fixture.root).unwrap();
@@ -607,16 +634,247 @@ fn a_boot_record_that_does_not_read_goes_without_stopping_the_pass() {
     fs::write(fixture.root.join(name), b"damaged").unwrap();
     let far = retirement_clock_keeping(newest) + 1;
 
-    for _pass in 0..2 {
-        store
-            .retire_expired(
-                &retirement_in_another_boot(far),
-                &[],
-                &registration_budget(),
-            )
-            .unwrap();
-    }
+    store
+        .retire_expired(
+            &retirement_in_another_boot(far),
+            &[],
+            &registration_budget(),
+        )
+        .unwrap();
 
     assert_eq!(boot_offset_ns(&root, fixture.run.boot).unwrap(), None);
     assert_eq!(retirement_places(&fixture), [0_u64; 0]);
+}
+
+#[test]
+fn a_period_that_does_not_read_removes_nothing() {
+    // Goal: a file that cannot say how long to keep readings deletes none of them.
+    // Method: damage the period where every window has outlived any period, pass, then put the
+    // file right and pass again.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let period = fixture.root.join("retention/period");
+    fs::write(&period, b"soon").unwrap();
+
+    let refused = retirement_pass(&fixture, &store, &[], FAR_NS);
+    let kept = retirement_places(&fixture).len();
+    fs::write(&period, b"60").unwrap();
+    let removed = retirement_pass(&fixture, &store, &[], FAR_NS).unwrap();
+
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert_eq!(kept, 3);
+    assert_eq!(removed, 3);
+}
+
+#[test]
+fn a_period_may_end_in_a_line_break() {
+    // Goal: a period written by hand keeps its meaning, since that is the route with no window.
+    // Method: write thirty days as a shell would, and pass two days after the last reading.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    fs::write(fixture.root.join("retention/period"), b"2592000\n").unwrap();
+    let two_days_later = retirement_places(&fixture)[2] + 2 * 86_400 * SECOND_NS;
+
+    let removed = retirement_pass(&fixture, &store, &[], two_days_later).unwrap();
+
+    assert_eq!(removed, 0);
+}
+
+#[test]
+fn a_damaged_record_of_the_running_boot_stops_nothing_and_comes_back() {
+    // Goal: the running boot's record, which only the next reboot would otherwise clear, can stop
+    // no removal, and the next publication puts it back.
+    // Method: damage the record of the boot the clock runs in, pass where the older windows have
+    // expired, and publish once more.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    retirement_windows(&mut fixture, &store, 3);
+    let name = format!(
+        "retention/boot-{}",
+        collector::recording::identity_text(fixture.run.boot)
+    );
+    fs::write(fixture.root.join(name), b"damaged").unwrap();
+    let memory = registration_budget();
+
+    let removed = retirement_pass(&fixture, &store, &[fixture.run], FAR_NS).unwrap();
+    let after_the_pass = boot_offset_ns(&root, fixture.run.boot).unwrap();
+    publish_counted_window(&mut fixture, &store, 3, &memory);
+
+    assert_eq!(removed, 2);
+    assert_eq!(after_the_pass, None);
+    assert!(boot_offset_ns(&root, fixture.run.boot).unwrap().is_some());
+}
+
+#[test]
+fn a_frontier_that_does_not_read_keeps_its_run_for_the_pass() {
+    // Goal: a registered run whose newest proof does not read loses nothing a later save may read,
+    // and the pass ends without an error, so the rest of the recording still shrinks.
+    // Method: damage the newest proof of the registered run and pass where the older windows, which
+    // do read, have expired.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let places = retirement_places(&fixture);
+    fs::write(
+        retirement_raw_of(&fixture, places[2]).join("metadata"),
+        b"damaged",
+    )
+    .unwrap();
+
+    let removed = retirement_pass(
+        &fixture,
+        &store,
+        &[fixture.run],
+        retirement_clock_keeping(places[2]),
+    )
+    .unwrap();
+
+    assert_eq!(removed, 0);
+    assert_eq!(retirement_places(&fixture), places);
+}
+
+#[test]
+fn a_raw_directory_that_does_not_empty_stops_no_other_removal() {
+    // Goal: what stops one entry stops that entry alone.
+    // Method: leave a stray directory in the oldest window's raw directory and pass where every
+    // window has expired.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let places = retirement_places(&fixture);
+    fs::create_dir(retirement_raw_of(&fixture, places[0]).join("stray")).unwrap();
+
+    let removed = retirement_pass(&fixture, &store, &[], FAR_NS).unwrap();
+
+    assert_eq!(removed, 2);
+    assert_eq!(retirement_places(&fixture), places[..1]);
+}
+
+#[test]
+fn a_clock_and_room_that_refuse_stop_no_removal() {
+    // Goal: the state a pass keeps for itself cannot stand between it and what it removes.
+    // Method: put directories where the clock and the room aside belong, so neither the save nor
+    // giving up the room can work, and pass where every window has expired.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let clock = fixture.root.join("retention/clock");
+    fs::remove_file(&clock).unwrap();
+    fs::create_dir(&clock).unwrap();
+    fs::create_dir(fixture.root.join("retention/reserve")).unwrap();
+
+    let removed = retirement_pass(&fixture, &store, &[], FAR_NS).unwrap();
+
+    assert_eq!(removed, 3);
+}
+
+#[test]
+fn an_hour_of_the_order_that_does_not_open_stops_no_removal() {
+    // Goal: a name nothing here made in the order stops that name alone.
+    // Method: leave a file named like an hour, past the hour the fixture's entries lie in, and pass
+    // where every window has expired.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    fs::write(fixture.root.join("retention/order/1"), b"stray").unwrap();
+
+    let removed = retirement_pass(&fixture, &store, &[], FAR_NS).unwrap();
+
+    assert_eq!(removed, 3);
+}
+
+#[test]
+fn a_proof_the_system_refuses_is_no_damage() {
+    // Goal: a failure that says nothing about the proof deletes nothing of its window.
+    // Method: take away permission on the oldest proof, and pass where every window has expired.
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let places = retirement_places(&fixture);
+    let raw = retirement_raw_of(&fixture, places[0]);
+    fs::set_permissions(raw.join("metadata"), fs::Permissions::from_mode(0o000)).unwrap();
+
+    let removed = retirement_pass(&fixture, &store, &[], FAR_NS).unwrap();
+
+    assert_eq!(removed, 2);
+    assert!(raw.join("ticks.parquet").exists());
+    assert_eq!(retirement_places(&fixture), places[..1]);
+}
+
+#[test]
+fn a_budget_that_refuses_the_ticks_is_no_damage() {
+    // Goal: running short of working memory deletes nothing.
+    // Method: pass where every window has expired with a budget too small for any table.
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let places = retirement_places(&fixture);
+    let raw = retirement_raw_of(&fixture, places[0]);
+    let refusing = Arc::new(crate::resources::ByteBudget::new(1));
+
+    let removed = store
+        .retire_expired(&retirement_at(&fixture, FAR_NS), &[], &refusing)
+        .unwrap();
+
+    assert_eq!(removed, 0);
+    assert!(raw.join("ticks.parquet").exists());
+    assert_eq!(retirement_places(&fixture), places);
+}
+
+/// What a catalog of the fixture lists once the oldest of three windows, whose ticks `damage`
+/// leaves unreadable, has been removed: the oldest reading's publication and how many windows the
+/// whole clock holds.
+fn retirement_after_removing_damaged_ticks(damage: impl FnOnce(&Path)) -> (u64, u64, usize) {
+    let mut fixture = Fixture::new(false);
+    let store = retirement_store(&fixture);
+    retirement_windows(&mut fixture, &store, 3);
+    let places = retirement_places(&fixture);
+    let catalog =
+        crate::canonical::catalog::Catalog::open(&fixture.root, &registration_budget()).unwrap();
+    let mut work = ReadWork::default();
+    let second_oldest = catalog.windows_of(&fixture.run, &mut work).unwrap()[1].publication_first;
+    damage(&retirement_raw_of(&fixture, places[0]).join("ticks.parquet"));
+
+    let removed = retirement_pass(
+        &fixture,
+        &store,
+        &[],
+        retirement_clock_keeping(places[1] + 1),
+    )
+    .unwrap();
+
+    assert_eq!(removed, 1);
+    let oldest = catalog.oldest_known(&mut work).unwrap().unwrap();
+    let windows = catalog.windows_in(0, u64::MAX, &mut work).unwrap();
+
+    (oldest.publication, second_oldest, windows.len())
+}
+
+#[test]
+fn a_window_whose_ticks_do_not_read_goes_whole() {
+    // Goal: a reader meets nothing of a removed window, so damage in it leaves no name behind that
+    // would read as damage in the recording around it.
+    // Method: damage the oldest window's ticks, remove it, and list the clock's whole range.
+    let (oldest, second_oldest, windows) = retirement_after_removing_damaged_ticks(|ticks| {
+        fs::write(ticks, b"damaged").unwrap();
+    });
+
+    assert_eq!(oldest, second_oldest);
+    assert_eq!(windows, 2);
+}
+
+#[test]
+fn a_window_whose_ticks_are_gone_goes_whole() {
+    // Goal: as above, for a table that is missing rather than damaged.
+    // Method: delete the oldest window's ticks, remove it, and list the clock's whole range.
+    let (oldest, second_oldest, windows) = retirement_after_removing_damaged_ticks(|ticks| {
+        fs::remove_file(ticks).unwrap();
+    });
+
+    assert_eq!(oldest, second_oldest);
+    assert_eq!(windows, 2);
 }

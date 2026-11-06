@@ -117,8 +117,10 @@ impl LiveDashboard {
                 choice.notice = None;
             }
             Err(error) => {
-                self.settings.retention.notice =
-                    Some(format!("The retention period did not read: {error}"));
+                self.settings.retention.notice = Some(format!(
+                    "The retention period did not read, so nothing is deleted until you choose \
+                    one here: {error}"
+                ));
             }
         }
     }
@@ -197,8 +199,8 @@ impl LiveDashboard {
                             .line_height(px(20.0))
                             .text_color(rgb(MUTED))
                             .child(
-                                "Readings older than this are deleted about a minute later and \
-                                cannot be brought back.",
+                                "Readings older than this stop showing, then are deleted \
+                                oldest first and cannot be brought back.",
                             ),
                     ),
             )
@@ -271,7 +273,7 @@ impl LiveDashboard {
 /// The period `root` holds. A recording that does not exist yet keeps the default.
 fn open_settings_retention_period(root: &Path) -> io::Result<Period> {
     match PrivateDirectory::open(root) {
-        Ok(directory) => Ok(Period::read(&directory)),
+        Ok(directory) => Period::read(&directory),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Period::DEFAULT),
         Err(error) => Err(error),
     }

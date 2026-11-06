@@ -16,6 +16,7 @@ use crate::metadata::TimeBounds;
 use collector::recording::private::{self, PrivateDirectory};
 use collector::ring::Identity;
 use std::io::{self, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const BOOT_MAGIC: &[u8; 8] = b"FDRETBT1";
 const BOOT_PREFIX: &str = "boot-";
@@ -75,31 +76,20 @@ impl Period {
         self.seconds
     }
 
-    /// The root's period. A root with none keeps the default, and so does one whose file does not
-    /// read, reported, since keeping readings too long can be put right and losing them cannot.
-    #[must_use]
-    pub fn read(root: &PrivateDirectory) -> Self {
-        match Self::read_saved(root) {
-            Ok(Some(period)) => period,
-            Ok(None) => Self::DEFAULT,
-            Err(error) => {
-                collector::diagnostics::error(format_args!("retention period: {error}"));
-                Self::DEFAULT
-            }
-        }
-    }
-
-    fn read_saved(root: &PrivateDirectory) -> io::Result<Option<Self>> {
-        let mut text = [0; PERIOD_DIGITS_MAX + 1];
+    /// The root's period, the default where it holds none. A file that does not read is
+    /// `InvalidData`, which says nothing of how long the user meant, so no caller may take a
+    /// default for it. A line break at its end is no damage, since the file may be written by hand.
+    pub fn read(root: &PrivateDirectory) -> io::Result<Self> {
+        let mut text = [0; PERIOD_DIGITS_MAX + 2];
         let Some(length) = read_bounded(root, PERIOD_NAME, &mut text)? else {
-            return Ok(None);
+            return Ok(Self::DEFAULT);
         };
-        let seconds = std::str::from_utf8(&text[..length])
+        let seconds = std::str::from_utf8(text[..length].trim_ascii_end())
             .ok()
             .and_then(|digits| digits.parse().ok())
             .and_then(Self::from_seconds);
 
-        seconds.map(Some).ok_or_else(invalid)
+        seconds.ok_or_else(invalid)
     }
 
     /// Saves the period where the persister and every reader read it on their next pass.
@@ -291,25 +281,26 @@ impl Cutoff {
 }
 
 /// Which readings a reader may return, as the recording's clock stood when this was read. It holds
-/// the offset of each boot asked about, so a read of many windows reads each record once.
+/// the offset of each boot asked about, none for a boot with no record that reads, so a read of
+/// many windows reads each record once.
 #[derive(Debug)]
 pub struct Retained {
     cutoff: Cutoff,
-    offsets: Vec<(Identity, u64)>,
+    offsets: Vec<(Identity, Option<u64>)>,
 }
 
 impl Retained {
     /// What `root` retains of readings of `boots`. A clock no persister has saved yet has not
     /// started, so nothing has expired. A record that does not read is reported, and the readings
-    /// it would place stay shown, since a reader must go on and keeping errs on the side of the
-    /// user's readings.
+    /// it would place stay shown, those of its boot where it is a boot's, since a reader must go on
+    /// and keeping errs on the side of the user's readings.
     #[must_use]
     pub fn read(root: &std::path::Path, boots: impl IntoIterator<Item = Identity>) -> Self {
         let mut offsets = Vec::new();
         let cutoff = match Self::read_saved(root, boots, &mut offsets) {
             Ok(cutoff) => cutoff,
             Err(error) => {
-                collector::diagnostics::error(format_args!("retention: {error}"));
+                retained_report(&error);
                 Cutoff {
                     expired_below_ns: 0,
                 }
@@ -322,7 +313,7 @@ impl Retained {
     fn read_saved(
         root: &std::path::Path,
         boots: impl IntoIterator<Item = Identity>,
-        offsets: &mut Vec<(Identity, u64)>,
+        offsets: &mut Vec<(Identity, Option<u64>)>,
     ) -> io::Result<Cutoff> {
         let directory = match PrivateDirectory::open(root) {
             Ok(directory) => directory,
@@ -339,12 +330,14 @@ impl Retained {
             });
         };
         let clock = saved.advanced_to(&ClockReading::now()?);
-        let cutoff = clock.cutoff(Period::read(&directory));
+        let cutoff = clock.cutoff(Period::read(&directory)?);
         for boot in boots {
             if offsets.iter().all(|(known, _)| *known != boot) {
-                if let Some(offset_ns) = boot_offset_ns(&directory, boot)? {
-                    offsets.push((boot, offset_ns));
-                }
+                let offset_ns = boot_offset_ns(&directory, boot).unwrap_or_else(|error| {
+                    retained_report(&error);
+                    None
+                });
+                offsets.push((boot, offset_ns));
             }
         }
 
@@ -355,7 +348,7 @@ impl Retained {
         self.offsets
             .iter()
             .find(|(known, _)| *known == boot)
-            .map(|(_, offset_ns)| *offset_ns)
+            .and_then(|(_, offset_ns)| *offset_ns)
     }
 
     /// Whether a reading of `boot` taken at `continuous_ns` may be returned. A reading with no
@@ -409,6 +402,14 @@ impl Retained {
         self.cutoff
             .expired_below_ns
             .saturating_sub(continuous_ns.saturating_add(offset_ns))
+    }
+}
+
+/// Says once a process what keeps a reader from the clock, since a reader asks many times a second.
+fn retained_report(error: &io::Error) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if !REPORTED.swap(true, Ordering::Relaxed) {
+        collector::diagnostics::error(format_args!("retention: {error}"));
     }
 }
 
@@ -511,7 +512,8 @@ impl BootRecord {
 
 /// Removes the record of each boot that has ended and that no publication can still need, since a
 /// reader shows a reading whose boot has no record. A record that does not read places no reading,
-/// so it goes as well.
+/// so it goes as well, and the running boot's next publication saves that boot's again at the same
+/// offset, which the running clock fixes.
 pub(crate) fn boot_records_settle(root: &PrivateDirectory, clock: &Clock) -> io::Result<()> {
     let directory = root.open_directory(DIRECTORY_NAME)?;
     let mut names = Vec::new();
@@ -522,8 +524,7 @@ pub(crate) fn boot_records_settle(root: &PrivateDirectory, clock: &Clock) -> io:
         Ok(())
     })?;
 
-    let running = boot_record_name(clock.at.boot);
-    for name in names.iter().filter(|name| **name != running) {
+    for name in &names {
         boot_records_settle_one(root, &directory, name, clock)?;
     }
 
@@ -547,6 +548,9 @@ fn boot_records_settle_one(
     let Some(record) = record else {
         return Ok(());
     };
+    if name == boot_record_name(clock.at.boot) {
+        return Ok(());
+    }
     if record.ended_ns == 0 {
         let ended = BootRecord {
             ended_ns: clock.progress_ns,
@@ -758,7 +762,13 @@ pub(crate) fn expired_entries(
         if hour_start_ns >= cutoff.expired_below_ns || entries.len() == entries_max {
             break;
         }
-        expired_entries_of_hour(&order, hour, cutoff, entries_max, &mut entries)?;
+        match expired_entries_of_hour(&order, hour, cutoff, entries_max, &mut entries) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                collector::diagnostics::error(format_args!("retention order: unknown hour {hour}"));
+            }
+            Err(error) => return Err(error),
+        }
     }
     entries.sort_unstable_by_key(|entry| entry.retained_from_ns);
 

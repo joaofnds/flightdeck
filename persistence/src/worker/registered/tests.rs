@@ -3043,6 +3043,105 @@ fn the_whole_worker_paces_itself_until_a_live_run_finishes() {
 }
 
 #[test]
+fn a_frontier_that_does_not_read_stops_no_other_run() {
+    // Goal: a registered run whose newest proof does not read keeps what a later save may read, and
+    // the run beside it still loses what it has outlived.
+    // Method: save minutes of each of two runs, damage the newest proof of one, and pass with both
+    // registered on a clock past all of them.
+    let mut recording = Recording::create(false, shape());
+    let mut other = recording.another_run();
+    let root = PrivateDirectory::open(&recording.root).unwrap();
+    Period::from_seconds(60).unwrap().write(&root).unwrap();
+    boot_offset_save(&root, recording.run.boot, 0).unwrap();
+    for minute in 0..4 {
+        recording.publish_in_minute(minute);
+        other.publish_in_minute(minute);
+    }
+    let store = Store::open(&recording.root).unwrap();
+    persist_until_quiet(&recording, &store, &mut RunState::default());
+    let mut other_state = RunState::default();
+    while matches!(other.persist(&store, &mut other_state), Progress::Sealed) {}
+    let manifests = recording.saved_manifests();
+    let directory_of = |run: Identity| -> Vec<PathBuf> {
+        manifests
+            .iter()
+            .filter(|manifest| manifest.identity.run.run == run)
+            .map(|manifest| recording.root.join(&manifest.data_directory))
+            .collect()
+    };
+    let damaged_run = directory_of(recording.run.run);
+    let beside = directory_of(other.run.run);
+    std::fs::write(damaged_run.last().unwrap().join("metadata"), b"damaged").unwrap();
+    let now = ClockReading {
+        boot: Identity([9, 9]),
+        continuous_ns: 0,
+        wall_ns: 1 << 62,
+    };
+
+    store
+        .retire_expired(
+            &now,
+            &[recording.run, other.run],
+            &super::persist_budget(0).unwrap(),
+        )
+        .unwrap();
+
+    for kept in &damaged_run[..damaged_run.len() - 1] {
+        assert!(kept.join("ticks.parquet").exists());
+    }
+    for gone in &beside[..beside.len() - 1] {
+        assert!(!gone.join("ticks.parquet").exists());
+    }
+}
+
+#[test]
+fn the_search_for_a_windows_readings_finds_its_own_and_none_of_a_run_beside_it() {
+    // Goal: a window that cannot name its readings loses them, and none of the readings of a run
+    // that shares its seconds.
+    // Method: save two runs whose readings take the same wall clocks, and compare what the trees
+    // give for one window with what its ticks give.
+    let mut recording = Recording::create(false, shape());
+    let mut other = recording.another_run();
+    for minute in [0, 0, 0, 1] {
+        recording.publish_in_minute(minute);
+        other.publish_in_minute(minute);
+    }
+    let store = Store::open(&recording.root).unwrap();
+    persist_until_quiet(&recording, &store, &mut RunState::default());
+    let mut other_state = RunState::default();
+    while matches!(other.persist(&store, &mut other_state), Progress::Sealed) {}
+    let manifests = recording.saved_manifests();
+    let window = manifests
+        .iter()
+        .find(|manifest| manifest.identity.run.run == recording.run.run)
+        .unwrap();
+    let raw_path = recording.root.join(&window.data_directory);
+    let budget = super::persist_budget(0).unwrap();
+    let mut proof = std::fs::File::open(raw_path.join("metadata")).unwrap();
+    let metadata = CanonicalMetadata::read(&mut proof).unwrap();
+    let root = PrivateDirectory::open(&recording.root).unwrap();
+    let named_by_ticks = crate::canonical::rows::observation_keys(
+        &PrivateDirectory::open(&raw_path).unwrap(),
+        &metadata,
+        &budget,
+        &mut ReadWork::default(),
+        None,
+    )
+    .unwrap();
+
+    let found = crate::canonical::catalog::window_reading_names(
+        &root,
+        recording.run.recording,
+        window,
+        &budget,
+    )
+    .unwrap();
+
+    assert_eq!(found.len(), 3);
+    assert_eq!(found, named_by_ticks);
+}
+
+#[test]
 fn the_whole_worker_removes_what_outlived_the_retention_period() {
     // Goal: a recording the real worker saves loses what its period no longer covers, while a
     // minute whose newest reading the period still covers stays whole.

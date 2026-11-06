@@ -218,7 +218,7 @@ fn a_root_with_no_period_keeps_one_day() {
     // Method: read the period of an empty root.
     let scratch = Scratch::new();
 
-    let period = Period::read(&scratch.root);
+    let period = Period::read(&scratch.root).unwrap();
 
     assert_eq!(period.seconds(), 86_400);
 }
@@ -234,7 +234,7 @@ fn a_saved_period_is_what_the_next_read_finds() {
         .write(&scratch.root)
         .unwrap();
 
-    assert_eq!(Period::read(&scratch.root).seconds(), 600);
+    assert_eq!(Period::read(&scratch.root).unwrap().seconds(), 600);
 }
 
 #[test]
@@ -251,15 +251,19 @@ fn a_period_stays_within_its_bounds() {
 }
 
 #[test]
-fn a_period_that_does_not_read_keeps_the_default() {
-    // Goal: a damaged file errs on keeping readings.
+fn a_period_that_does_not_read_is_refused() {
+    // Goal: a damaged file says nothing of how long the user meant, so it gives no period at all.
     // Method: write text, an out of bounds number and an overlong number, and read each.
     let scratch = Scratch::new();
 
     for text in ["soon", "1", "99999999999999999999999"] {
         private::atomic_write_in(&scratch.retention, PERIOD_NAME, text.as_bytes()).unwrap();
 
-        assert_eq!(Period::read(&scratch.root), Period::DEFAULT, "{text}");
+        assert_eq!(
+            Period::read(&scratch.root).unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "{text}"
+        );
     }
 }
 
@@ -551,7 +555,7 @@ fn retained_at_ten_seconds() -> Retained {
         cutoff: Cutoff {
             expired_below_ns: 10 * SECOND_NS,
         },
-        offsets: vec![(THIS_BOOT, 3 * SECOND_NS)],
+        offsets: vec![(THIS_BOOT, Some(3 * SECOND_NS))],
     }
 }
 
@@ -625,21 +629,6 @@ fn a_boot_record_that_does_not_read_hides_nothing() {
 }
 
 #[test]
-fn a_boot_is_asked_about_once_however_many_windows_name_it() {
-    // Goal: a read of many windows reads each boot's record once.
-    // Method: read what the root retains for one boot named three times.
-    let scratch = Scratch::new();
-    Clock::started_at(&reading(NEXT_BOOT, 0, 0))
-        .write(&scratch.root)
-        .unwrap();
-    boot_offset_save(&scratch.root, THIS_BOOT, SECOND_NS).unwrap();
-
-    let retained = Retained::read(&scratch.path, [THIS_BOOT, THIS_BOOT, THIS_BOOT]);
-
-    assert_eq!(retained.offsets, [(THIS_BOOT, SECOND_NS)]);
-}
-
-#[test]
 fn a_clock_no_persister_has_saved_hides_nothing() {
     // Goal: nothing expires before the retention clock has started, however long the Mac has been
     // up, since a boot's offset alone places an early reading far in the past.
@@ -650,4 +639,60 @@ fn a_clock_no_persister_has_saved_hides_nothing() {
     let retained = Retained::read(&scratch.path, [THIS_BOOT]);
 
     assert!(retained.holds(THIS_BOOT, Some(0)));
+}
+
+#[test]
+fn a_damaged_record_leaves_the_other_boots_on_the_clock() {
+    // Goal: damage in one boot's record shows that boot's readings and hides what has expired of
+    // every other boot.
+    // Method: damage one record beside a healthy one, on a clock past a day, and ask about a
+    // reading of each that the record would place at zero.
+    let scratch = Scratch::new();
+    Clock::started_at(&ClockReading {
+        boot: Identity([9, 9]),
+        continuous_ns: 0,
+        wall_ns: 1 << 62,
+    })
+    .write(&scratch.root)
+    .unwrap();
+    private::atomic_write_in(&scratch.retention, &boot_record_name(THIS_BOOT), b"short").unwrap();
+    boot_offset_save(&scratch.root, NEXT_BOOT, 0).unwrap();
+
+    let retained = Retained::read(&scratch.path, [THIS_BOOT, NEXT_BOOT]);
+
+    assert!(retained.holds(THIS_BOOT, Some(0)));
+    assert!(!retained.holds(NEXT_BOOT, Some(0)));
+}
+
+#[test]
+fn a_period_that_does_not_read_hides_nothing() {
+    // Goal: a reader asked to keep an unknown time shows what it has, rather than a day of it.
+    // Method: damage the period on a clock past a day, and ask about a reading at zero.
+    let scratch = Scratch::new();
+    Clock::started_at(&ClockReading {
+        boot: Identity([9, 9]),
+        continuous_ns: 0,
+        wall_ns: 1 << 62,
+    })
+    .write(&scratch.root)
+    .unwrap();
+    private::atomic_write_in(&scratch.retention, PERIOD_NAME, b"soon").unwrap();
+    boot_offset_save(&scratch.root, THIS_BOOT, 0).unwrap();
+
+    let retained = Retained::read(&scratch.path, [THIS_BOOT]);
+
+    assert!(retained.holds(THIS_BOOT, Some(0)));
+}
+
+#[test]
+fn a_running_boot_has_one_offset_however_late_it_is_asked() {
+    // Goal: a record lost in the running boot comes back at the value it held, so no reading moves.
+    // Method: ask for the offset as the clock starts and after the boot has run a while.
+    let start = Clock::started_at(&reading(THIS_BOOT, 100, 0));
+    let later = start.advanced_to(&reading(THIS_BOOT, 700, 600));
+
+    assert_eq!(
+        later.boot_offset_ns(THIS_BOOT, 650 * SECOND_NS),
+        start.boot_offset_ns(THIS_BOOT, 100 * SECOND_NS)
+    );
 }
