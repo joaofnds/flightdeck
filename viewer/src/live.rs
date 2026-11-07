@@ -724,12 +724,18 @@ mod tests {
         }
 
         fn new_with_shape(shape: &Shape) -> Self {
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir()
+                .join(format!("flightdeck-retry-{}-{serial}", std::process::id()));
+            Self::new_at(root, shape)
+        }
+
+        /// A run that records into `root`, which it finishes setting up where its setup stopped.
+        fn new_at(root: PathBuf, shape: &Shape) -> Self {
             assert!(shape.slot_count <= 120);
             assert!(shape.cpu_capacity <= 18);
 
             let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let root = std::env::temp_dir()
-                .join(format!("flightdeck-retry-{}-{serial}", std::process::id()));
             drop(persistence::Store::open(&root).unwrap());
             let place = Place {
                 lock_path: root.join("ring.lock"),
@@ -819,7 +825,14 @@ mod tests {
 
         fn new_following_fans(following_fans: u16) -> Self {
             assert!((2..=10).contains(&following_fans));
-            let mut fixture = Self::new_with_shape(&Shape {
+            let mut fixture = Self::new_with_shape(&Self::following_shape(following_fans));
+            fixture.following_fans = following_fans;
+            fixture
+        }
+
+        /// The ring of a run that publishes `publish_following`'s readings.
+        fn following_shape(following_fans: u16) -> Shape {
+            Shape {
                 slot_count: 120,
                 cpu_capacity: 18,
                 interface_capacity: 1,
@@ -829,9 +842,7 @@ mod tests {
                 process_capacity: 1,
                 coalition_capacity: 1,
                 event_capacity: 8,
-            });
-            fixture.following_fans = following_fans;
-            fixture
+            }
         }
 
         fn publish_following(&mut self, tick: u32) {
@@ -1181,6 +1192,24 @@ mod tests {
         assert!(session.history.is_none());
         assert_eq!(session.history_error, None);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_session_opened_while_its_recording_was_set_up_selects_what_it_saved_since() {
+        // Goal: a hold in a recording's first minutes reads what it saved after the page opened
+        // over the recording still being set up.
+        // Method: open a session over a root whose setup stopped after its identity, finish
+        // setting it up, save a minute, and select that minute's second.
+        let root = crate::root_fixture::unfinished_root();
+        let mut live = LiveSession::open(&root).unwrap();
+        assert!(live.history.is_none());
+        let mut fixture = RingFixture::new_at(root, &RingFixture::following_shape(2));
+        fixture.publish_following(1);
+        fixture.seal_held();
+
+        let selection = live.select(1001, 0).unwrap();
+
+        assert!(!selection["selected"].is_null());
     }
 
     #[test]

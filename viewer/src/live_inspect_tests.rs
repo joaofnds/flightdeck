@@ -98,6 +98,10 @@ fn selects_the_saved_observation_it_names() {
         &live.page("ticks", 0).unwrap()["observation"],
         &identity
     ));
+    assert_eq!(
+        live.apps_page(0).unwrap()["selected"]["stamp"]["publication"],
+        identity["publication"].to_string()
+    );
 }
 
 #[test]
@@ -159,8 +163,9 @@ fn selects_the_named_live_observation_of_a_repeated_second() {
 
 #[test]
 fn refuses_an_identity_the_second_does_not_hold() {
-    // Goal: a hover never reads a neighbour in place of the observation it names.
-    // Method: inspect second 1001 by the identity of second 1000's observation.
+    // Goal: a hover never reads a neighbour in place of the observation it names, nor leaves
+    // a page reading the observation selected before it.
+    // Method: select second 1001, then inspect it by the identity of second 1000's observation.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
@@ -176,6 +181,10 @@ fn refuses_an_identity_the_second_does_not_hold() {
     ));
     assert!(matches!(
         live.page("ticks", 0),
+        Err(Error::Bound("no selected observation"))
+    ));
+    assert!(matches!(
+        live.apps_page(0),
         Err(Error::Bound("no selected observation"))
     ));
 }

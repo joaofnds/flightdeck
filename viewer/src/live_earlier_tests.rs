@@ -52,6 +52,22 @@ fn a_session_refused_a_listing_keeps_the_minutes_it_knows_and_says_why() {
 }
 
 #[test]
+fn a_session_refuses_to_list_a_recording_whose_identity_no_longer_reads() {
+    // Goal: a recording whose identity no longer reads fails the list, rather than reading as a
+    // recording whose saved minutes went missing.
+    // Method: open a session over a saved minute, overwrite the recording's identity, and list.
+    let mut fixture = RingFixture::new_following();
+    fixture.publish_following(1);
+    fixture.seal_held();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    std::fs::write(fixture.root.join("identity"), b"damaged").unwrap();
+
+    let listed = session.list_saved();
+
+    assert!(matches!(listed, Err(Error::Io(_))), "{listed:?}");
+}
+
+#[test]
 fn a_session_lists_the_saved_minutes_once_its_context_has_moved_a_minute() {
     // Goal: a page read every second opens the recording's list about once a minute, as the
     // recording saves one. Method: list for a context, save another minute, list for a context a

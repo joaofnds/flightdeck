@@ -118,6 +118,55 @@ fn rejects_more_saved_points_than_the_response_observation_bound() {
 }
 
 #[test]
+fn rejects_more_merged_points_than_the_response_observation_bound() {
+    // Goal: saved points and context points that differ cannot together grow the merged
+    // projection past the bound each keeps alone.
+    // Method: supply as many saved points as the bound permits and one context point more, all
+    // in one wall second.
+    let history = History::new();
+    let cancellation = Arc::new(Cancellation::default());
+    let operation = cancellation.operation(0).unwrap();
+    let observed = observation(2);
+    let bound = u64::try_from(super::OBSERVATIONS_MAX).unwrap();
+    let saved: Vec<TracePoint> = (1..=bound)
+        .map(|publication| {
+            let mut point = trace(publication, 7);
+            point.observation.wall_ns = observed.wall_ns;
+            point
+        })
+        .collect();
+    let context = [crate::cpu_history_sample::Identity {
+        run: collector::recording::identity_text(collector::ring::Identity(observed.stamp.run))
+            .to_string(),
+        boot: collector::recording::identity_text(collector::ring::Identity(observed.stamp.boot))
+            .to_string(),
+        observation: crate::session::Observation {
+            window: 0,
+            publication: bound + 1,
+            run_tick: bound + 1,
+            wall: observed.wall_ns.unwrap(),
+            continuous: observed.stamp.continuous_ns,
+        },
+    }];
+
+    let result = history.response_merged(&Merge {
+        selected: &crate::live_app_response::Selected::ending_at(observed).unwrap(),
+        target: &Target {
+            kind: KeyKind::Executable,
+            bytes: b"app",
+        },
+        saved: &saved,
+        context: &context,
+        operation: &operation,
+    });
+
+    assert!(matches!(
+        result,
+        Err(Error::Bound("App history merged observations"))
+    ));
+}
+
+#[test]
 fn emits_a_null_gap_for_a_known_context_observation_without_app_facts() {
     // Goal: a known App observation cannot disappear when neither source retains its facts.
     // Method: provide scalar context for one publication that neither App source retains.
