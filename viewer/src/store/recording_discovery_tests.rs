@@ -627,6 +627,36 @@ fn payload_discovery_anchors_and_finishes_at_the_registered_run() {
     assert_eq!(budget.used(), 0);
 }
 
+#[test]
+fn runs_the_registry_let_go_load_in_the_order_they_ran() {
+    // Goal: a run's random identity cannot decide which of two retired runs a load takes first,
+    // since a load keeps the seconds it takes last. Method: save the higher identity's minute first
+    // and the lower identity's later, retire both, and read the clocks in the order loaded.
+    let mut first = Fixture::new();
+    let mut second = Fixture::new_mode(false, 2, Some(&first));
+    let (lower, higher) = register_lower_run(&mut first, &mut second);
+    higher.publish_with_events(10_000, &[]);
+    higher.seal_minute(0);
+    lower.publish_with_events(10_100, &[]);
+    lower.seal_minute(0);
+    collector::recording::Registry {
+        runs: Vec::new(),
+        evictions: 2,
+    }
+    .write(&lower.root)
+    .unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut walls = Vec::new();
+
+    super::load_payload(&lower.root, &budget, &operation, |_, second, _| {
+        walls.push(second.wall_ns);
+    })
+    .unwrap();
+
+    assert_eq!(walls, [10_000_000_000_000, 10_100_000_000_000]);
+}
+
 fn register_lower_run<'a>(
     first: &'a mut Fixture,
     second: &'a mut Fixture,

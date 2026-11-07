@@ -1,5 +1,6 @@
 //! Complete bounded catalog discovery for the opt-in process-payload adapter.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -34,13 +35,26 @@ pub(super) fn find(
 }
 
 /// Orders `found` newest first by run and keeps what a load continuing from `window.since` reads.
+/// The registry holds only the newest runs. The runs it let go of are older, and the clock of each
+/// one's first minute places them, since a run's identity is random and a load keeps the seconds
+/// it takes last.
 fn find_order(found: &mut Vec<Found>, runs: &[RunIdentity], window: &LoadWindow<'_>) {
+    let mut started = BTreeMap::new();
+    for minute in found.iter() {
+        if let Some(wall) = minute.wall_ns_max {
+            started
+                .entry(minute.run.run.0)
+                .and_modify(|first: &mut u64| *first = (*first).min(wall))
+                .or_insert(wall);
+        }
+    }
     found.sort_unstable_by_key(|minute| {
         let order = runs
             .iter()
             .position(|run| *run == minute.run)
             .map_or(0, |index| index + 1);
-        (order, minute.run.run.0, minute.publication_end)
+        let started = started.get(&minute.run.run.0).copied();
+        (order, started, minute.run.run.0, minute.publication_end)
     });
     found.reverse();
     if window.unread {
