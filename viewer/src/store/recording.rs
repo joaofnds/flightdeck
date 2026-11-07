@@ -455,6 +455,17 @@ pub(super) fn load_launch(
     }
 }
 
+impl Owed {
+    /// The Apps of every minute of `found`, oldest first, which a load that took the minutes' ticks
+    /// in without them owes the store's stretches.
+    fn all(found: Vec<Found>) -> Self {
+        Self {
+            found,
+            apps_from_ns: u64::MAX,
+        }
+    }
+}
+
 /// Hands `take` the run, the second and the Apps of each tick of the minutes `owed` holds, oldest
 /// first, as `load_launch` handed them over, with what a loader adds up over each stretch of the
 /// Apps of the minutes older than the live span. Returns why it handed over fewer than the
