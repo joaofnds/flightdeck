@@ -261,7 +261,9 @@ fn load_payload_window_using(
         },
     )?;
     operation.check()?;
-    if outcome.left_out.is_none() {
+    // The catalog still says what the recording holds beside a minute that read badly, and a query
+    // for one of that minute's seconds goes to the saved minutes, which say why it cannot be read.
+    if matches!(outcome.left_out, None | Some(Failure::Refused)) {
         if admitted {
             match catalog::revalidate(root, &checked) {
                 Ok(()) => {

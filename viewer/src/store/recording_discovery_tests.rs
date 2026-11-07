@@ -215,7 +215,7 @@ fn input_admission_failure_does_not_certify_a_discovered_catalog() {
     })
     .unwrap();
 
-    assert_eq!(outcome.left_out, Some(Failure::Refused));
+    assert_eq!(outcome.left_out, Some(Failure::Budget));
     assert_eq!(outcome.checked_catalog, None);
     assert_eq!(budget.used(), 0);
 }

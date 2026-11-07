@@ -352,7 +352,7 @@ fn build(
     if !current() {
         return None;
     }
-    if let Some(failure) = held.failure.or(held.left_out) {
+    if let Some(failure) = refusal(held) {
         return Some(QueryOutcome::Unavailable(QueryUnavailable::SourceFailure(
             failure,
         )));
@@ -476,7 +476,7 @@ fn build_available(
             return Err(QueryOutcome::NeedsLoad(QueryNeedsLoad::SourceChanged));
         }
     }
-    if let Some(failure) = held.failure.or(held.left_out) {
+    if let Some(failure) = refusal(held) {
         return Err(QueryOutcome::Unavailable(QueryUnavailable::SourceFailure(
             failure,
         )));
@@ -495,6 +495,13 @@ fn build_available(
     }
 
     Ok(())
+}
+
+/// Why the Store answers no query: what it reads failed, or it was left with nothing to show. A
+/// minute left out beside other readings costs only the seconds it holds.
+fn refusal(held: &Held) -> Option<Failure> {
+    held.failure
+        .or(held.left_out.filter(|_| held.newest.is_none()))
 }
 
 fn build_selected(

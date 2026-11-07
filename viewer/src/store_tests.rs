@@ -547,6 +547,79 @@ fn a_recording_the_store_cannot_read_says_why_until_the_cause_clears() {
     );
 }
 
+/// Two saved minutes and a run that goes on past them, with `minute` of them damaged, under a
+/// Store that follows the newest second.
+fn damaged_minute_store(minute: u64) -> (Fixture, Store, super::QueryHandle) {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(160);
+    fixture.seal_minute(1);
+    fixture.skip_run_ticks(59);
+    for second in 220..228 {
+        fixture.publish_with_system_rows(second);
+    }
+    empty_ticks_file(&fixture, minute);
+    let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
+    let store = Store::start_with_budget(&fixture.root, budget).unwrap();
+    let handle = store.query_handle().unwrap();
+
+    (fixture, store, handle)
+}
+
+#[test]
+fn a_damaged_saved_minute_costs_only_its_own_seconds() {
+    // Goal: a saved minute that reads badly leaves every other second and the live Mac to show.
+    // Method: damage the older of two saved minutes, start the Store and follow the newest.
+    let (_fixture, _store, handle) = damaged_minute_store(0);
+
+    let context = ready_context(&handle);
+
+    assert_eq!(context.selected_second(), 227);
+    assert!(context.retains_second(160));
+    assert!(!context.retains_second(100));
+}
+
+#[test]
+fn a_damaged_newest_saved_minute_leaves_the_live_mac_to_show() {
+    // Goal: with no saved reading to begin the ring from, the page still follows the live Mac,
+    // since the Store already says it left a minute out.
+    // Method: damage the newer of two saved minutes, start the Store and follow the newest.
+    let (_fixture, _store, handle) = damaged_minute_store(1);
+
+    let context = ready_context(&handle);
+
+    assert_eq!(context.selected_second(), 227);
+    assert!(context.retains_second(100));
+    assert!(!context.retains_second(160));
+}
+
+#[test]
+fn a_second_of_a_damaged_saved_minute_is_left_to_the_saved_minutes() {
+    // Goal: the Store answers no second it left out, so the saved minutes say why it is unreadable.
+    // Method: ask for a second of the damaged minute once the Store follows the newest.
+    let (_fixture, _store, handle) = damaged_minute_store(0);
+    ready_context(&handle);
+
+    handle
+        .submit(super::QueryRequest {
+            epoch: 0,
+            source: None,
+            selection: super::QuerySelection::Second {
+                second: 100,
+                alternative: 0,
+            },
+        })
+        .unwrap();
+    let reply = next_reply(&handle);
+
+    assert!(matches!(
+        reply,
+        super::QueryOutcome::Unavailable(super::QueryUnavailable::NoObservation)
+    ));
+}
+
 #[test]
 fn a_recording_not_yet_made_holds_a_query_with_no_failure() {
     // Goal: the first launch opens the window before the collector makes the recording, which is

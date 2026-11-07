@@ -14,6 +14,7 @@ use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::cancellation::Operation;
 use crate::recording::{Before, MachineMinute, ScopedSealedMinute, SealedSource, read_machine};
 use crate::store::apps::TickApps;
+use persistence::engine::AdmissionRefusal;
 
 #[cfg(test)]
 #[path = "recording_payload_tests.rs"]
@@ -226,11 +227,17 @@ impl Decoder {
             left_out: None,
         };
         let loaded = load_minute(root, found, self, budget, operation, capture);
-        let Ok((machine, mut apps)) = loaded else {
-            batch.left_out = Some(Failure::Refused);
-            self.predecessor = None;
-            self.previous_run = None;
-            return batch;
+        let (machine, mut apps) = match loaded {
+            Ok(loaded) => loaded,
+            Err(refused) => {
+                batch.left_out = Some(match refused {
+                    Refused::Input(AdmissionRefusal::Budget) => Failure::Budget,
+                    _ => Failure::Refused,
+                });
+                self.predecessor = None;
+                self.previous_run = None;
+                return batch;
+            }
         };
         let decoded = match self.project_machine(found, &machine, budget, |second| {
             project_machine_apps(found.run, second, &mut apps, &mut batch.seconds);

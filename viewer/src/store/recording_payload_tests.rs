@@ -931,7 +931,7 @@ fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
             persistence::engine::AdmissionRefusal::Budget
         ))
     ));
-    assert_eq!(batch.left_out, Some(crate::store::Failure::Refused));
+    assert_eq!(batch.left_out, Some(crate::store::Failure::Budget));
     assert!(batch.seconds.is_empty());
     assert!(decoder.predecessor.is_none());
     assert_eq!(budget.used(), charge.bytes());

@@ -39,7 +39,9 @@ pub(super) fn checked(held: &Held, ring: &mut Ring) -> Result<Option<CheckedCove
     if source_changed(held, ring) {
         return Ok(None);
     }
-    let requires_ring = catalog.newest_run.is_some();
+    // A load that left a minute out has no saved reading to prove the ring begins from, and it
+    // already says what it lacks.
+    let requires_ring = catalog.newest_run.is_some() && held.left_out.is_none();
     if requires_ring {
         if !ring.complete(&catalog.recording) {
             return Ok(None);

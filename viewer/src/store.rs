@@ -1139,9 +1139,23 @@ fn startup_staged(
                     thread::park_timeout(WAIT);
                     true
                 }
+                // A saved minute that reads badly costs its own seconds, and the load that serves
+                // every later catch-up leaves it out and goes on.
+                Err(StartupFailure::Read(refused)) => {
+                    operation.check()?;
+                    eprintln!("flightdeck store startup: {refused:?}");
+                    held.reset();
+                    held.startup = StartupState::Complete;
+                    shared.catch_up.store(true, Ordering::Release);
+                    return Ok(());
+                }
                 // What refuses now may clear while the window stays open.
-                Err(error) => {
-                    startup_staged_refused(held, ring, shared, &mut reported, &error);
+                Err(StartupFailure::Blocked) => {
+                    startup_staged_refused(held, ring, shared, &mut reported, Failure::Budget);
+                    true
+                }
+                Err(StartupFailure::Catalog(failure)) => {
+                    startup_staged_refused(held, ring, shared, &mut reported, failure);
                     true
                 }
             };
@@ -1163,16 +1177,10 @@ fn startup_staged_refused(
     ring: &mut Ring,
     shared: &Shared,
     reported: &mut Option<Failure>,
-    refusal: &recording::staged::Failure,
+    failure: Failure,
 ) {
-    use recording::staged::Failure as StartupFailure;
-    let (failure, reason) = match refusal {
-        StartupFailure::Blocked => (Failure::Budget, String::from("startup admission")),
-        StartupFailure::Read(refused) => (Failure::Refused, format!("{refused:?}")),
-        StartupFailure::Catalog(failure) => (*failure, format!("{failure:?}")),
-    };
     if *reported != Some(failure) {
-        eprintln!("flightdeck store startup: {reason}");
+        eprintln!("flightdeck store startup: {failure:?}");
     }
     *reported = Some(failure);
     held.failure = Some(failure);
