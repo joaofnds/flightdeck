@@ -125,7 +125,7 @@ pub fn show(cx: &mut App) {
     cx.activate(true);
 }
 
-/// A reader of the app's one Store, which went on while no window was open.
+/// A reader of the app's one Store.
 fn reopen_worker(root: std::path::PathBuf, cx: &App) -> Result<Worker, String> {
     let handle = crate::live_dashboard::store_query_handle(cx)
         .ok_or_else(|| "This Flightdeck runs no live Store".to_owned())?;

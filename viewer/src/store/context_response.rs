@@ -43,8 +43,7 @@ impl QueryContext {
         json!({"first_second":first,"last_second":last,
             "windows":catalog.map(|value| value.windows),
             "unknown_clock_ticks":catalog.and_then(|value| value.unknown_clock_ticks),
-            "tables":persistence::schema::TABLES.map(persistence::schema::Table::name),
-            "live":true,"history_error":null,"latest_observation":identity(latest, origin),
+            "live":true,"latest_observation":identity(latest, origin),
             "collector_completed":self.source_status().map(|status| status.completed),
             "source_generation":self.source.generation})
     }

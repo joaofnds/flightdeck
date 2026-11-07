@@ -179,10 +179,10 @@ fn showing_after_the_kept_reader_stopped_opens_the_window_over_a_new_reader(
 }
 
 #[gpui::test]
-fn showing_after_the_kept_reader_stopped_reads_the_store_that_went_on(cx: &mut TestAppContext) {
-    // Goal: the new reader takes up the Store that went on while no window was open, since a
-    // second Store over the ring would take in every publication again. Method: stop the kept
-    // reader, show the app, and ask whether the new reader runs a Store of its own.
+fn showing_after_the_kept_reader_stopped_reads_the_app_s_one_store(cx: &mut TestAppContext) {
+    // Goal: the new reader takes up the app's one Store, since a second Store over the ring would
+    // take in every publication again. Method: stop the kept reader, show the app, and ask whether
+    // the new reader runs a Store of its own.
     let mut harness = BackgroundHarness::setup(cx);
     harness.show();
     harness.close_windows();

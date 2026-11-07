@@ -253,8 +253,7 @@ struct Shared {
 }
 
 impl Store {
-    /// Starts the store thread over the recording at `root`, with every buffer it holds
-    /// seconds and Views in allocated before the thread starts.
+    /// Starts the store thread over the recording at `root`.
     pub fn start(root: &Path) -> io::Result<Self> {
         Self::start_inner(root, None)
     }
