@@ -90,6 +90,23 @@ fn closing_the_last_window_keeps_the_owned_collector_running(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn closing_the_last_window_parks_the_store_until_the_window_shows_again(cx: &mut TestAppContext) {
+    // Goal: with no window open the Store takes in nothing, and the window shown again wakes it
+    // to reconcile once. Method: show, close and show the live window, asking each time whether
+    // the Store runs.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.show();
+    harness.close_windows();
+    let closed = harness.cx.read(crate::live_dashboard::store_active);
+
+    harness.show();
+
+    assert!(!closed);
+    assert!(harness.cx.read(crate::live_dashboard::store_active));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn showing_after_the_window_closed_opens_a_live_window(cx: &mut TestAppContext) {
     // Goal: the menu bar brings back the window over the readings collected while it was shut.
     // Method: close the live window, show the app again, and read the window it opened.

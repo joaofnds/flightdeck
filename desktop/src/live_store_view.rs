@@ -59,6 +59,11 @@ pub(crate) fn set_store_active(active: bool, cx: &App) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn store_active(cx: &App) -> bool {
+    cx.global::<LiveStore>().0.is_active()
+}
+
 pub(super) fn store_pending(cx: &App) -> bool {
     cx.try_global::<LiveStore>()
         .is_some_and(|store| store.0.pending())
