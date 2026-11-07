@@ -1103,10 +1103,30 @@ fn reader_computer(
         }
     }
 
-    let selection = reader_latest(session)?;
+    let selection = match command.request.second {
+        Some(second) if reader.store.is_some() => {
+            reader_computer_held(session, &command.request, second)?
+        }
+        _ => reader_latest(session)?,
+    };
     let snapshot = reader_snapshot_new(command.generation, catalog, selection);
     reader_snapshot_record(reader, command, &snapshot, Histories::Read);
     Ok(Some(snapshot))
+}
+
+/// What the Computer page shows of a hold the Store leaves to the saved minutes: the held second,
+/// as on every page of the live route, or the newest reading where that second holds none.
+fn reader_computer_held(
+    session: &mut LiveSession,
+    request: &Request,
+    second: u64,
+) -> Result<Value, String> {
+    let held = reader_selection_second(session, request, second)?;
+    if held["selected"].is_null() {
+        return reader_latest(session);
+    }
+
+    Ok(held)
 }
 
 fn reader_selection(
@@ -1120,22 +1140,31 @@ fn reader_selection(
     if context == Context::Keep {
         return reader_selection_kept(session, request);
     }
-    let selection = match request.second {
-        Some(second) => session.select(second, 0).map_err(|error| error.to_string()),
+    match request.second {
+        Some(second) => reader_selection_second(session, request, second),
         None => reader_latest(session),
-    }?;
-    if let Some(identity) = &request.identity {
-        if let Some(second) = request.second {
-            let index = selection_alternative(&selection, identity)?;
-            let exact = session
-                .select(second, index)
-                .map_err(|error| error.to_string())?;
-            identity_validate(&exact["selected"], identity)?;
-            return Ok(exact);
-        }
     }
+}
 
-    Ok(selection)
+/// Selects `second`, at the observation the request names where it names one.
+fn reader_selection_second(
+    session: &mut LiveSession,
+    request: &Request,
+    second: u64,
+) -> Result<Value, String> {
+    let selection = session
+        .select(second, 0)
+        .map_err(|error| error.to_string())?;
+    let Some(identity) = &request.identity else {
+        return Ok(selection);
+    };
+    let index = selection_alternative(&selection, identity)?;
+    let exact = session
+        .select(second, index)
+        .map_err(|error| error.to_string())?;
+    identity_validate(&exact["selected"], identity)?;
+
+    Ok(exact)
 }
 
 /// Selects the observation a hover names at its second, without the context around it.

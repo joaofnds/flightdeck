@@ -177,6 +177,40 @@ fn the_self_page_waits_for_no_second_a_hold_names() {
     assert!(live.is_ok(), "{:?}", live.err());
 }
 
+#[test]
+fn the_computer_page_copies_a_held_second_older_than_the_store_holds() {
+    // Goal: a hold reads on the Computer page as on every other once the Store's span has left it
+    // behind. Method: hold the older of two minutes further apart than the Store's span, read the
+    // Computer page through a Store's worker, and read what it copies.
+    let mut pages = OlderPages::new();
+    let held = OlderPages::held("computer");
+
+    let live = finished_page(&mut pages.live, held.clone());
+
+    assert_eq!(copied_second(&live, &held), OlderPages::SECOND);
+}
+
+#[test]
+fn every_page_of_a_second_older_than_the_store_holds_shows_what_the_saved_route_shows() {
+    // Goal: a second the Store leaves to the saved minutes reads as the saved route reads it.
+    // Method: hold the older of two minutes further apart than the Store's span, read every page
+    // through a Store's worker and through a saved recording's reader, and compare.
+    let mut pages = OlderPages::new();
+
+    for route in routes_of_a_held_second() {
+        let held = OlderPages::held(route);
+
+        let live = finished_page(&mut pages.live, held.clone());
+        let saved = finished_page(&mut pages.saved, held.clone());
+
+        assert_eq!(
+            shown(route, &held, live),
+            shown(route, &held, saved),
+            "{route}"
+        );
+    }
+}
+
 /// Refuses any reading of the ring by the worker, whatever it was made for: one made for a page's
 /// older tail still takes in what the Store took in.
 fn assert_worker_took_in_nothing(events: &[Event]) {
@@ -276,6 +310,70 @@ impl Pages {
         }
         panic!("the saved reader never finished its page");
     }
+}
+
+/// Two saved minutes further apart than the Store's span, read through a Store's worker and through
+/// a saved recording's reader.
+struct OlderPages {
+    live: Worker,
+    saved: Worker,
+    store: Option<viewer::store::Store>,
+    /// Kept until the readers have stopped, since dropping it deletes the recording.
+    _recording: crate::live_source::tests::SealedRecording,
+}
+
+impl OlderPages {
+    const SECOND: u64 = 1000;
+
+    fn new() -> Self {
+        let recording =
+            crate::live_source::tests::SealedRecording::with_a_minute_past_the_store_hour();
+        let budget = std::sync::Arc::new(viewer::store::ByteBudget::new(256 * 1024 * 1024));
+        let store = viewer::store::Store::start_with_budget(&recording.root, budget).unwrap();
+        let live = Worker::start_from_store(recording.root.clone(), store.query_handle().unwrap())
+            .unwrap();
+        let saved = Worker::start_recorded(recording.root.clone()).unwrap();
+
+        Self {
+            live,
+            saved,
+            store: Some(store),
+            _recording: recording,
+        }
+    }
+
+    fn held(route: &str) -> Request {
+        let mut held = request(route);
+        held.second = Some(Self::SECOND);
+
+        held
+    }
+}
+
+impl Drop for OlderPages {
+    fn drop(&mut self) {
+        self.live.stop();
+        self.saved.stop();
+        drop(self.store.take());
+    }
+}
+
+fn finished_page(worker: &mut Worker, request: Request) -> Box<Snapshot> {
+    let generation = worker.request(request).unwrap();
+    for _step in 0..4_000 {
+        match worker.take().unwrap() {
+            Some(Update::Ready(snapshot)) => {
+                assert_eq!(snapshot.generation, generation);
+                if worker.last_output_complete() {
+                    return snapshot;
+                }
+            }
+            Some(Update::Failed { message, .. }) => panic!("{message}"),
+            None => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("the reader never finished its page");
 }
 
 /// What the window shows of `snapshot`: the panels of its page, its tables, histories and rankings

@@ -1107,8 +1107,8 @@ fn a_sealed_recording_leaves_a_missing_second_empty() {
     assert!(snapshot.selection["summary"].is_null());
 }
 
-struct SealedRecording {
-    root: std::path::PathBuf,
+pub(crate) struct SealedRecording {
+    pub(crate) root: std::path::PathBuf,
 }
 
 impl SealedRecording {
@@ -1178,18 +1178,24 @@ impl SealedRecording {
 
     /// Readings at second 1000 and two at second 2200, which are more than 900 seconds apart.
     fn with_an_older_minute() -> Self {
-        Self::older_minute(&Underived)
+        Self::older_minute(&Underived, 2200)
     }
 
     /// The recording of `with_an_older_minute`, sealed with the App parts and ranks of each of
     /// its observations.
     fn with_an_older_kept_minute() -> Self {
-        Self::older_minute(&persistence::sealed_apps::SealedApps::default())
+        Self::older_minute(&persistence::sealed_apps::SealedApps::default(), 2200)
     }
 
-    /// Readings at second 1000 and two at second 2200 in one window sealed with the tables
+    /// Readings at second 1000 and two at a second two hours on, further apart than the Store
+    /// reads, sealed with the App parts and ranks of each of its observations.
+    pub(crate) fn with_a_minute_past_the_store_hour() -> Self {
+        Self::older_minute(&persistence::sealed_apps::SealedApps::default(), 8200)
+    }
+
+    /// Readings at second 1000 and two at `newer_second` in one window sealed with the tables
     /// `derive` derives.
-    fn older_minute(derive: &dyn persistence::worker::Derive) -> Self {
+    fn older_minute(derive: &dyn persistence::worker::Derive, newer_second: u64) -> Self {
         let recording = Self::empty();
         let store = persistence::Store::open(&recording.root).unwrap();
         let identity = persistence::WindowIdentity {
@@ -1202,8 +1208,8 @@ impl SealedRecording {
         };
         let mut window = Self::window(identity);
         Self::append(&mut window, 1, 1000);
-        Self::append(&mut window, 2, 2200);
-        Self::append(&mut window, 3, 2200);
+        Self::append(&mut window, 2, newer_second);
+        Self::append(&mut window, 3, newer_second);
         Self::commit_derived(&recording.root, &window, derive);
         drop(store);
 
