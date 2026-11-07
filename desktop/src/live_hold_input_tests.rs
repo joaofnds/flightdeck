@@ -15,7 +15,7 @@ use crate::live_source::{Snapshot, Update};
 use crate::live_store_app_fixtures::{
     HOUR_NEWEST, apps_at, hour, hour_led_from_its_older_part, hour_until,
 };
-use crate::live_store_fixtures::{reading_at, trend_point};
+use crate::live_store_fixtures::{reading_at, trend_point, view};
 use crate::live_store_page_fixtures::{readings, summary_selection, texts};
 use crate::live_views::summary;
 use crate::time_range::Range;
@@ -1655,6 +1655,125 @@ fn hour_peaking_at(peak: u64) -> viewer::store::View {
     view
 }
 
+/// The first second a store holds whole, 1,080 seconds before the hour's newest. Before it a store
+/// keeps what each ten seconds reduced to.
+const STORE_WHOLE_FIRST: u64 = HOUR_NEWEST - 1_080;
+
+/// The View of a store that holds whole every second from `whole_first`, a multiple of ten, and the
+/// two stretches before it, with `read` writing 95 into the reading of the second `peak` and 10
+/// into each other's.
+fn store_reading_at(
+    whole_first: u64,
+    peak: u64,
+    read: fn(&mut viewer::store::MachineSecond, f32),
+) -> viewer::store::View {
+    let second_at = |second: u64| {
+        let mut reading = reading_at(second, 0);
+        read(&mut reading, if second == peak { 95.0 } else { 10.0 });
+        reading
+    };
+    let older: Vec<_> = (whole_first - 20..whole_first).map(second_at).collect();
+    let whole: Vec<_> = (whole_first..=HOUR_NEWEST).map(second_at).collect();
+    let mut view = view(1, &[older[0].clone(), older[10].clone()], &whole);
+    view.stretches = older
+        .chunks(10)
+        .chain(whole[..whole.len() - 1].chunks(10))
+        .zip(whole_first / 10 - 2..)
+        .map(|(seconds, stretch)| store_reading_at_stretch(stretch, seconds))
+        .collect();
+
+    view
+}
+
+/// What a store keeps of the ten `seconds` of `stretch`.
+fn store_reading_at_stretch(
+    stretch: u64,
+    seconds: &[viewer::store::MachineSecond],
+) -> Arc<viewer::store::AppsStretch> {
+    let run = collector::ring::RunIdentity {
+        recording: collector::ring::Identity([1, 1]),
+        run: collector::ring::Identity([1, 2]),
+        boot: collector::ring::Identity([3, 4]),
+    };
+    let apps = [Arc::new(viewer::store::AppsSecond::default())];
+    let mut held = viewer::store::AppsStretch::of_seconds(stretch, &apps);
+    let mut machine = viewer::store::MachineStretch::default();
+    for second in seconds {
+        machine.add(&run, second);
+    }
+    *held.machine = machine;
+
+    Arc::new(held)
+}
+
+/// Writes `value` into the CPU reading of `second`.
+fn read_cpu(second: &mut viewer::store::MachineSecond, value: f32) {
+    second.cpu_percent = Some(f64::from(value));
+}
+
+/// Holds the CPU's highest reading over the last hour of a store whose CPU peaks at `peak`, and
+/// answers that the hold names that second.
+fn a_cpu_peak_holds_through_its_table(cx: &mut TestAppContext, peak: u64) {
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(store_reading_at(STORE_WHOLE_FIRST, peak, read_cpu));
+    harness.driver.show_range(Range::Last(3_600));
+
+    harness.driver.hold_cpu_maximum();
+
+    assert_eq!(harness.driver.requested_second(), Some(peak));
+    harness.teardown();
+}
+
+/// Holds the highest reading `maximum` from the table of the chart `chart`, over the last hour of a
+/// store whose `read` peaks at `peak`, in a window tall enough for all of Overview's charts, and
+/// answers that the hold names that second.
+fn a_metrics_peak_holds_at(
+    cx: &mut TestAppContext,
+    peak: u64,
+    read: fn(&mut viewer::store::MachineSecond, f32),
+    chart: &'static str,
+    maximum: &'static str,
+) {
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(store_reading_at(STORE_WHOLE_FIRST, peak, read));
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.resize_window(1_320.0, 3_000.0);
+    harness.driver.click_control(chart);
+
+    harness.driver.click_control(maximum);
+
+    assert_eq!(harness.driver.requested_second(), Some(peak));
+    harness.teardown();
+}
+
+/// Holds the highest reading `maximum` from the table of the Energy page's chart `chart`, over the
+/// last hour of a saved recording whose stretch reached `high` at `path` at `OLDER_PEAK`, in a
+/// window tall enough for its charts, and answers that the hold names that second.
+fn a_saved_peak_holds_through_its_table(
+    cx: &mut TestAppContext,
+    path: &str,
+    high: f64,
+    chart: &'static str,
+    maximum: &'static str,
+) {
+    let mut reply = recording_peaking_in_its_older_tail();
+    let selection = reply.selection.legacy_mut().unwrap();
+    selection["earlier_trends"][150]["reach"]["leaves"][path] = serde_json::json!([10.0, high, 1]);
+    let mut harness = InputHarness::open_recorded_route(cx, "energy");
+    harness.driver.show_reply_at_the_hour(reply);
+    harness.driver.resize_window(1_320.0, 3_000.0);
+    harness.driver.click_control(chart);
+
+    harness.driver.click_control(maximum);
+
+    assert_eq!(harness.driver.requested_second(), Some(OLDER_PEAK));
+    harness.teardown();
+}
+
 /// `hour_peaking_at(peak)`, where the CPU also reads 60% at the second `spike`.
 fn hour_with_a_lower_spike_at(peak: u64, spike: u64) -> viewer::store::View {
     let mut view = hour_peaking_at(peak);
@@ -1935,6 +2054,37 @@ fn the_keyboard_holds_a_maximum_from_the_data_table(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_move_after_holding_a_maximum_lets_a_plot_scrolled_under_the_pointer_hover(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the pointer's next move ends what a held maximum set aside, so a plot that scrolls
+    // under it afterwards reads as it ordinarily does.
+    // Method: the hold, a move to the GPU plot's bottom edge, a scroll that takes the plot off the
+    // pointer and one that brings it back, then the second a chart reads out and the second under
+    // the pointer.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_peaking_at(HELD));
+    harness.driver.place_cpu_maximum_above_the_gpu_plot();
+    harness.driver.hold_cpu_maximum();
+    let plot = harness.driver.plot_bounds("live-gpu-activity-plot");
+    let pointer = gpui::point(plot.center().x, plot.bottom() - gpui::px(1.0));
+    harness.driver.hover_position(pointer);
+    harness.driver.scroll_at(pointer, -2.0);
+
+    harness.driver.scroll_at(pointer, 2.0);
+
+    let (shown, _) = harness.driver.chart_accessibility_reading("live-cpu");
+    let under_the_pointer = harness
+        .driver
+        .second_at_plot_x("live-gpu-activity-plot", pointer.x);
+    assert_ne!(under_the_pointer, Some(HELD));
+    assert_eq!(shown, under_the_pointer);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_narrowed_range_gives_the_highest_reading_inside_it(cx: &mut TestAppContext) {
     // Goal: narrowing the range is how a second spike is found, so the table keeps to the window
     // the charts show and a higher reading past that window is no maximum of it.
@@ -1953,6 +2103,187 @@ fn a_narrowed_range_gives_the_highest_reading_inside_it(cx: &mut TestAppContext)
     harness.driver.hold_cpu_maximum();
 
     assert_eq!(harness.driver.requested_second(), Some(spike));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_peak_a_second_inside_the_charted_seconds_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a peak on the newer side of where a chart starts keeping one reading
+    // of each ten. Method: `a_cpu_peak_holds_through_its_table`.
+    a_cpu_peak_holds_through_its_table(cx, HOUR_NEWEST - 959);
+}
+
+#[gpui::test]
+fn a_peak_at_the_edge_of_the_charted_seconds_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a peak on the second where a chart starts keeping one reading of each
+    // ten. Method: `a_cpu_peak_holds_through_its_table`.
+    a_cpu_peak_holds_through_its_table(cx, HOUR_NEWEST - 960);
+}
+
+#[gpui::test]
+fn a_peak_a_second_past_the_charted_seconds_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a peak on the older side of where a chart starts keeping one reading
+    // of each ten. Method: `a_cpu_peak_holds_through_its_table`.
+    a_cpu_peak_holds_through_its_table(cx, HOUR_NEWEST - 961);
+}
+
+#[gpui::test]
+fn a_peak_a_second_inside_what_a_store_holds_whole_holds_through_its_table(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the table finds a peak on the newer side of where a store stops holding every second.
+    // Method: `a_cpu_peak_holds_through_its_table`.
+    a_cpu_peak_holds_through_its_table(cx, HOUR_NEWEST - 1_079);
+}
+
+#[gpui::test]
+fn a_peak_at_the_edge_of_what_a_store_holds_whole_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a peak on the oldest second a store holds whole.
+    // Method: `a_cpu_peak_holds_through_its_table`.
+    a_cpu_peak_holds_through_its_table(cx, HOUR_NEWEST - 1_080);
+}
+
+#[gpui::test]
+fn a_peak_a_second_past_what_a_store_holds_whole_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a peak a store kept only as what its ten seconds reduced to.
+    // Method: `a_cpu_peak_holds_through_its_table`.
+    a_cpu_peak_holds_through_its_table(cx, HOUR_NEWEST - 1_081);
+}
+
+#[gpui::test]
+fn a_gpu_peak_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a GPU peak a store kept only as what its ten seconds reduced to.
+    // Method: `a_metrics_peak_holds_at`.
+    let read = |second: &mut viewer::store::MachineSecond, value: f32| {
+        second.gpu_active_percent = Some(f64::from(value));
+    };
+    let peak = HOUR_NEWEST - 1_081;
+    a_metrics_peak_holds_at(
+        cx,
+        peak,
+        read,
+        "chart-data:live-gpu-activity",
+        "chart-maximum:live-gpu-activity:Busy",
+    );
+}
+
+#[gpui::test]
+fn a_power_peak_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a power peak a store kept only as what its ten seconds reduced to.
+    // Method: `a_metrics_peak_holds_at`.
+    let read = |second: &mut viewer::store::MachineSecond, value: f32| {
+        second.power_watts = Some(value);
+    };
+    let peak = HOUR_NEWEST - 1_081;
+    a_metrics_peak_holds_at(
+        cx,
+        peak,
+        read,
+        "chart-data:live-power",
+        "chart-maximum:live-power:Whole machine",
+    );
+}
+
+#[gpui::test]
+fn a_temperature_peak_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a temperature peak a saved recording keeps in its older tail.
+    // Method: `a_saved_peak_holds_through_its_table`.
+    a_saved_peak_holds_through_its_table(
+        cx,
+        "soc_celsius",
+        95.0,
+        "chart-data:live-soc-temperature",
+        "chart-maximum:live-soc-temperature:SoC sensor",
+    );
+}
+
+#[gpui::test]
+fn a_fan_peak_holds_through_its_table(cx: &mut TestAppContext) {
+    // Goal: the table finds a fan peak a saved recording keeps in its older tail, past what the
+    // fan reads at the newest seconds.
+    // Method: `a_saved_peak_holds_through_its_table`.
+    a_saved_peak_holds_through_its_table(
+        cx,
+        "fan_rpm/0",
+        5_000.0,
+        "chart-data:live-fans",
+        "chart-maximum:live-fans:Fan 0",
+    );
+}
+
+#[gpui::test]
+fn a_memory_peak_holds_through_its_tables_total(cx: &mut TestAppContext) {
+    // Goal: the table finds what a whole stack reached where a store kept only what its ten seconds
+    // reduced to. Method: `a_metrics_peak_holds_at`, with App memory past what wired memory climbs.
+    let read = |second: &mut viewer::store::MachineSecond, value: f32| {
+        let bytes = if value > 50.0 { 1 << 34 } else { 1 << 30 };
+        second.memory.as_mut().unwrap().app_bytes = Some(bytes);
+    };
+    let peak = HOUR_NEWEST - 1_081;
+    a_metrics_peak_holds_at(
+        cx,
+        peak,
+        read,
+        "chart-data:live-memory",
+        "chart-maximum:live-memory:Total",
+    );
+}
+
+#[gpui::test]
+fn a_wider_window_keeps_a_lines_maximum(cx: &mut TestAppContext) {
+    // Goal: a chart's width sets its buckets, which change nothing a table holds.
+    // Method: a peak a store reduced, a window wider than the default, and the maximum held.
+    let peak = HOUR_NEWEST - 1_081;
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(store_reading_at(STORE_WHOLE_FIRST, peak, read_cpu));
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.resize_window(2_400.0, 1_000.0);
+
+    harness.driver.hold_cpu_maximum();
+
+    assert_eq!(harness.driver.requested_second(), Some(peak));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_narrower_window_keeps_a_lines_maximum(cx: &mut TestAppContext) {
+    // Goal: a chart's width sets its buckets, which change nothing a table holds.
+    // Method: a peak a store reduced, a window narrower than the default, and the maximum held.
+    let peak = HOUR_NEWEST - 1_081;
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(store_reading_at(STORE_WHOLE_FIRST, peak, read_cpu));
+    harness.driver.show_range(Range::Last(3_600));
+    harness.driver.resize_window(900.0, 1_000.0);
+
+    harness.driver.hold_cpu_maximum();
+
+    assert_eq!(harness.driver.requested_second(), Some(peak));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_peak_that_leaves_what_a_store_holds_whole_keeps_its_second(cx: &mut TestAppContext) {
+    // Goal: a reading that ages out of the seconds a store holds whole stays its line's maximum,
+    // the same reading as before.
+    // Method: a store holding the peak whole, the next View of it having reduced that second, and
+    // the maximum held.
+    let peak = STORE_WHOLE_FIRST + 4;
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(store_reading_at(STORE_WHOLE_FIRST, peak, read_cpu));
+    harness.driver.show_range(Range::Last(3_600));
+    let mut aged = store_reading_at(STORE_WHOLE_FIRST + 10, peak, read_cpu);
+    aged.version = 2;
+    harness.driver.show_next_view(aged);
+
+    harness.driver.hold_cpu_maximum();
+
+    assert_eq!(harness.driver.requested_second(), Some(peak));
     harness.teardown();
 }
 
@@ -2080,6 +2411,72 @@ fn a_stack_with_a_line_hidden_has_no_total(cx: &mut TestAppContext) {
         .context
         .debug_bounds("chart-maximum:live-memory:Total");
     assert_eq!(total, None);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_hidden_guide_line_keeps_its_stacks_total(cx: &mut TestAppContext) {
+    // Goal: Installed only marks a height on the Memory chart, so hiding it leaves the stack whole
+    // and its total standing.
+    // Method: the Memory chart with that line hidden, then its table.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_memory_peak_at(HELD));
+    harness.driver.hide_line("live-memory\tInstalled");
+
+    harness.driver.click_control("chart-data:live-memory");
+
+    let total = harness
+        .driver
+        .context
+        .debug_bounds("chart-maximum:live-memory:Total");
+    assert!(total.is_some());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_new_view_under_an_open_table_moves_a_lines_maximum(cx: &mut TestAppContext) {
+    // Goal: the table stays true as the readings under it change, so a pick holds what its row says
+    // now rather than what it said when the dialog opened.
+    // Method: the CPU table open, a next View whose peak is elsewhere, and the maximum held.
+    let later = HELD + 100;
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_peaking_at(HELD));
+    harness.driver.click_control("chart-data:live-cpu");
+    let mut next = hour_peaking_at(later);
+    next.version = 2;
+    harness.driver.show_next_view(next);
+
+    harness
+        .driver
+        .click_control("chart-maximum:live-cpu:All cores");
+
+    assert_eq!(harness.driver.requested_second(), Some(later));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_new_view_under_an_open_table_moves_its_stacks_total(cx: &mut TestAppContext) {
+    // Goal: the table's Total stays true as the readings under it change.
+    // Method: the Memory table open, a next View whose peak is elsewhere, and the Total held.
+    let later = HELD + 100;
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_memory_peak_at(HELD));
+    harness.driver.click_control("chart-data:live-memory");
+    let mut next = hour_with_a_memory_peak_at(later);
+    next.version = 2;
+    harness.driver.show_next_view(next);
+
+    harness
+        .driver
+        .click_control("chart-maximum:live-memory:Total");
+
+    assert_eq!(harness.driver.requested_second(), Some(later));
     harness.teardown();
 }
 
@@ -2246,6 +2643,37 @@ fn a_shift_tab_brings_a_maximum_past_the_dialogs_side_into_view(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn a_wheel_scrolls_a_table_wider_than_the_window_sideways(cx: &mut TestAppContext) {
+    // Goal: a pointer reaches the columns past the window's side with the wheel, as the keyboard
+    // does with Tab.
+    // Method: the Memory table in a narrow window, the wheel turned sideways over it, then where
+    // a control lies before and after.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_memory_peak_at(HELD));
+    harness.driver.click_control("chart-data:live-memory");
+    harness.driver.resize_window(400.0, 1300.0);
+    let name = "chart-maximum:live-memory:Total";
+    let before = harness.driver.context.debug_bounds(name).unwrap();
+
+    harness
+        .driver
+        .context
+        .simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(px(200.0), before.center().y),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.0), px(0.0))),
+            modifiers: Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+    harness.driver.draw_next_frame();
+
+    let after = harness.driver.context.debug_bounds(name).unwrap();
+    assert_eq!(after.left(), before.left() - px(100.0));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn a_tab_back_to_the_close_control_brings_it_into_view(cx: &mut TestAppContext) {
     // Goal: the way out of the dialog stays on screen after the table scrolled.
     // Method: the Memory table in a short window, a shift tab to its last control, a tab past it
@@ -2369,6 +2797,15 @@ impl InputDriver {
         let newest = HOUR_NEWEST - 5;
         let reply = readings(&[reading_at(newest - 1, 0), reading_at(newest, 0)]);
         self.show_reply_at_fifteen_minutes(reply);
+        self.view.update(&mut self.context, |dashboard, cx| {
+            assert!(dashboard.take_view(Arc::new(view)));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Gives the page `view`, the store's next.
+    fn show_next_view(&mut self, view: viewer::store::View) {
         self.view.update(&mut self.context, |dashboard, cx| {
             assert!(dashboard.take_view(Arc::new(view)));
             cx.notify();

@@ -74,6 +74,42 @@ fn clicking_a_history_interval_pins_the_observation_under_the_pointer(cx: &mut T
 }
 
 #[gpui::test]
+fn a_maximum_held_above_the_history_stays_shown_while_the_pointer_rests(cx: &mut TestAppContext) {
+    // Goal: holding a maximum closes the dialog above the CPU history, which puts its cells under
+    // a pointer that has not moved. The first frame reports that as a hover, and it must not take
+    // the page from the second the user just picked.
+    // Method: a window whose dialog sets the maximum's control above the cells, the maximum held
+    // with the pointer left on it, then whether the history inspects anything.
+    let mut harness = CPUHistoryHarness::setup(cx);
+    harness.driver.seed_history_with_cpu_readings();
+    let name = "chart-maximum:live-cpu:All cores";
+    harness
+        .driver
+        .context
+        .simulate_resize(gpui::size(gpui::px(1_000.0), gpui::px(2_200.0)));
+    harness.driver.context.run_until_parked();
+    let data = harness.driver.context.debug_bounds("chart-data:live-cpu");
+    harness
+        .driver
+        .context
+        .simulate_click(data.unwrap().center(), Modifiers::none());
+    harness.driver.context.run_until_parked();
+    let control = harness.driver.context.debug_bounds(name).unwrap().center();
+    let cells = harness.driver.context.debug_bounds("cpu-history-cells");
+    assert!(cells.unwrap().contains(&control));
+
+    harness
+        .driver
+        .context
+        .simulate_click(control, Modifiers::none());
+    harness.driver.context.run_until_parked();
+
+    assert!(harness.driver.pinned_second().is_some());
+    assert!(!harness.driver.history_is_inspected());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn hovering_the_history_while_a_second_is_pinned_inspects_the_hovered_interval(
     cx: &mut TestAppContext,
 ) {
@@ -189,6 +225,20 @@ struct CPUHistoryFixture {
 
 impl CPUHistoryDriver {
     fn seed_history(&mut self) {
+        let fixture = Self::seed_history_fixture();
+        self.install_history(fixture);
+    }
+
+    /// `seed_history`, with the CPU reading at each second of the chart above the history.
+    fn seed_history_with_cpu_readings(&mut self) {
+        let mut fixture = Self::seed_history_fixture();
+        for trend in fixture.selection["trends"].as_array_mut().unwrap() {
+            trend["cpu_percent"] = json!(50.0);
+        }
+        self.install_history(fixture);
+    }
+
+    fn seed_history_fixture() -> CPUHistoryFixture {
         let (mut payload, mut selection) = super::tests::fixture();
         payload["observation"]["publication"] = json!(3);
         payload["observation"]["run_tick"] = json!(3);
@@ -204,7 +254,8 @@ impl CPUHistoryDriver {
             .push(json!(50.0));
         selection["selected"] = selected.clone();
         selection["trends"].as_array_mut().unwrap().push(selected);
-        self.install_history(CPUHistoryFixture { payload, selection });
+
+        CPUHistoryFixture { payload, selection }
     }
 
     fn install_history(&mut self, fixture: CPUHistoryFixture) {
@@ -360,6 +411,12 @@ impl CPUHistoryDriver {
             let history = dashboard.snapshot.as_ref()?.cpu_history.as_ref()?;
             let inspection = dashboard.cpu_inspection.or_else(|| history.selected())?;
             history.target(inspection)?.1["publication"].as_u64()
+        })
+    }
+
+    fn history_is_inspected(&self) -> bool {
+        self.view.read_with(&self.context, |dashboard, _| {
+            dashboard.cpu_inspection.is_some()
         })
     }
 

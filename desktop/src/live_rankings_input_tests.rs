@@ -1620,6 +1620,27 @@ fn same_basename_resident_history() -> serde_json::Value {
 }
 
 #[gpui::test]
+fn a_resident_charts_maximum_holds_the_reading_that_read_it(cx: &mut TestAppContext) {
+    // Goal: a chart of resident memory names the reading of each point, so its table holds that
+    // reading.
+    // Method: the Memory page's chart, an App's highest reading held, then what the page asks for.
+    let mut harness = InputHarness::setup_route(cx, "memory");
+    harness
+        .driver
+        .seed_resident_leaders(same_basename_resident_history());
+    harness
+        .driver
+        .click_resident_legend("chart-data:live-memory-app-resident");
+
+    harness
+        .driver
+        .click_resident_legend("chart-maximum:live-memory-app-resident:/A/Foo");
+
+    assert_eq!(harness.driver.requested_second(), Some(999));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn resident_history_reserved_other_label_has_an_independent_app_toggle(cx: &mut TestAppContext) {
     // Keep the captured executable Other distinct from the sum of noncohort Apps.
     let mut harness = InputHarness::setup_route(cx, "memory");

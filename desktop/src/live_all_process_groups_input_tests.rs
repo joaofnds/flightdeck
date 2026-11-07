@@ -77,6 +77,55 @@ fn all_groups_gap_never_borrows_the_current_reading(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_process_groups_maximum_holds_the_reading_that_read_it(cx: &mut TestAppContext) {
+    // Goal: a chart of process groups names the reading of each point, so its table holds that
+    // reading.
+    // Method: the Disk chart's table, the group's highest read held, then what the page asks for.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.resize_process_history();
+    harness.driver.deliver_all_group_history();
+    harness
+        .driver
+        .process_history_control("chart-data:live-process-groups-disk");
+
+    harness
+        .driver
+        .process_history_control("chart-maximum:live-process-groups-disk:b read");
+
+    let second = harness
+        .driver
+        .view
+        .read_with(&harness.driver.context, |dashboard, _| {
+            dashboard.request.second
+        });
+    assert_eq!(second, Some(999));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_process_groups_chart_says_where_its_highest_reading_is(cx: &mut TestAppContext) {
+    // Goal: a line of means hides a brief peak, so its chart says where to find one.
+    // Method: the Disk chart's help.
+    let mut harness = AppHoverHarness::setup(cx);
+    harness.driver.resize_process_history();
+
+    harness.driver.deliver_all_group_history();
+
+    let help = harness
+        .driver
+        .view
+        .read_with(&harness.driver.context, |dashboard, _| {
+            let panels = dashboard.panels.iter();
+            let disk = panels
+                .into_iter()
+                .find(|panel| panel.id == "live-process-groups-disk");
+            disk.unwrap().help.clone().unwrap()
+        });
+    assert!(help.contains(crate::live_projection::LINE_DATA_HELP));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn all_groups_installed_data_and_legend_controls_preserve_exact_selected_values(
     cx: &mut TestAppContext,
 ) {

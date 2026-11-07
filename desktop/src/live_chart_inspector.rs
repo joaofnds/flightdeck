@@ -900,6 +900,43 @@ mod tests {
     }
 
     #[test]
+    fn a_sample_that_ties_its_reach_holds_the_reading_the_reach_names() {
+        // Goal: a reach names the very reading that reached it, so where a sample reads the same a
+        // hold goes to the reading the reach names.
+        // Method: a sample reading what its reach reached, each naming its own second.
+        let mut panel = reaching_panel(false);
+        panel.lines[0].values[1] = Some(95.0);
+        panel.places = Some(vec![place_at(8_950), place_at(8_960)].into());
+
+        let summaries = chart_summaries(&panel, REACHING_VIEW);
+
+        assert_eq!(read_at(summaries[0].maximum), Some(9_000));
+    }
+
+    #[test]
+    fn a_line_that_reads_its_highest_twice_holds_the_earlier_reading() {
+        // Goal: of two readings that tie, the table gives the first it came to, so a table drawn
+        // again over the same readings keeps naming the same second.
+        // Method: a line reading the same highest at two seconds.
+        let panel = clocked_panel(1000, &[Some(9.0), Some(9.0), Some(1.0)]);
+
+        let summaries = chart_summaries(&panel, panel.window);
+
+        assert_eq!(read_at(summaries[0].maximum), Some(1000));
+    }
+
+    #[test]
+    fn a_chart_with_no_window_names_no_reading_to_hold() {
+        // Goal: a hold keeps to the window the charts show, so with none there is nothing a maximum
+        // could hold and no reach names one.
+        // Method: a line whose reach would pass its samples, and no window.
+        let summaries = chart_summaries(&reaching_panel(false), None);
+
+        assert_eq!(highest(&summaries[0]), Some(20.0));
+        assert_eq!(read_at(summaries[0].maximum), None);
+    }
+
+    #[test]
     fn a_reach_under_a_samples_own_reading_leaves_that_reading_the_maximum() {
         // Goal: a stretch's reach leaves out the reading a chart draws, so the higher of the two
         // is what the line reached, and picking it holds that reading rather than the reach's.
