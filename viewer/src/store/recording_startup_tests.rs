@@ -8,9 +8,9 @@ mod boundaries;
 mod pending;
 
 #[test]
-fn staged_machine_work_counts_the_refused_projection_and_its_compatibility_reduction() {
-    // Goal: staged source-work accounting includes the existing compatibility fallback.
-    // Method: decode a real saved NaN/null load triple and count both reductions per tick.
+fn staged_machine_work_classes_a_refused_projection_apart_from_its_reduction() {
+    // Goal: each second counts one reduction, and a complete state refused beside it counts apart.
+    // Method: decode a real saved NaN/null load triple and count each class per tick.
     let fixture = crate::recording::sealed_system_minute();
     refuse_saved_load(&fixture);
     let (found, machine) = machine_source(&fixture);
@@ -30,7 +30,8 @@ fn staged_machine_work_counts_the_refused_projection_and_its_compatibility_reduc
         crate::store::CompleteMachineState::Refused(_)
     )));
     assert_eq!(seconds.last().unwrap().cpu_percent, Some(75.0));
-    assert_eq!(machine_work(&trace), 6);
+    assert_eq!(machine_work(&trace), 3);
+    assert_eq!(refused_projections(&trace), 3);
     drop(scope);
 }
 
@@ -59,6 +60,15 @@ fn machine_work(trace: &persistence::work::ingestion::Trace) -> usize {
     events
         .iter()
         .filter(|event| event.kind == persistence::work::ingestion::Kind::MachineReduction)
+        .count()
+}
+
+fn refused_projections(trace: &persistence::work::ingestion::Trace) -> usize {
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    events
+        .iter()
+        .filter(|event| event.kind == persistence::work::ingestion::Kind::MachineProjectionRefused)
         .count()
 }
 

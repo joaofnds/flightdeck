@@ -483,7 +483,7 @@ pub(super) fn project_machine<'reading>(
                 persistence::work::ingestion::record_publication(
                     found.run,
                     reading.tick.publication,
-                    persistence::work::ingestion::Kind::MachineReduction,
+                    persistence::work::ingestion::Kind::MachineProjectionRefused,
                 );
             }
             take(second);

@@ -506,6 +506,14 @@ fn a_nonfinite_power_reading_leaves_the_second_readable_beside_its_missing_power
     assert_eq!(count(&events, Producer::Worker, Kind::FrameCapture, 2), 0);
     assert_eq!(count(&events, Producer::Worker, Kind::RawCapture, 2), 0);
     assert_eq!(count(&events, Producer::Store, Kind::FrameCapture, 2), 1);
+    assert_eq!(
+        count(&events, Producer::Store, Kind::MachineReduction, 2),
+        1
+    );
+    assert_eq!(
+        count(&events, Producer::Store, Kind::MachineProjectionRefused, 2),
+        1
+    );
 }
 
 #[test]

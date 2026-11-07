@@ -37,6 +37,7 @@ pub enum Kind {
     RawCaptureAttempt,
     RawCapture,
     MachineReduction,
+    MachineProjectionRefused,
     Accepted,
     AttemptFailed,
     NativeScan,

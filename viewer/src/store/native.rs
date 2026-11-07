@@ -343,7 +343,7 @@ impl Prepared {
         }) {
             input
                 .source
-                .record_work(persistence::work::ingestion::Kind::MachineReduction);
+                .record_work(persistence::work::ingestion::Kind::MachineProjectionRefused);
         }
         self.stage = Stage::Payload;
         Ok(())
