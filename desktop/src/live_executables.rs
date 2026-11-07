@@ -137,7 +137,7 @@ impl Subtotal {
     }
 
     fn json(&self) -> Value {
-        json!({"known":self.known.to_string(), "measured_members":self.measured,
+        json!({"known":self.known, "measured_members":self.measured,
             "unavailable_members":self.unavailable, "overflowed":self.overflowed})
     }
 }
@@ -421,14 +421,14 @@ fn amount(value: &Value) -> Result<Option<u64>, String> {
 }
 
 fn counter_optional(value: &Value) -> Result<Option<u64>, String> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(text) => text
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|error| error.to_string()),
-        _ => Err("Executable counter is not an exact decimal string".to_owned()),
+    if value.is_null() {
+        return Ok(None);
     }
+
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| "Executable counter is not an exact integer".to_owned())
 }
 
 /// A reading marked with `*` when some of the group's processes lack it.
@@ -524,16 +524,16 @@ mod tests {
 
     fn process(bytes: &str) -> Value {
         json!({"executable_name":{"bytes_hex":bytes,"display":"Program"}, "state":"live",
-            "app_attribution":null, "cpu_ns":{"known":"4","unavailable":null},
-            "energy_nj":{"known":"8","unavailable":null},
-            "resident_bytes":{"known":"16","unavailable":null},
-            "footprint_bytes":{"known":"32","unavailable":null},
+            "app_attribution":null, "cpu_ns":{"known":4,"unavailable":null},
+            "energy_nj":{"known":8,"unavailable":null},
+            "resident_bytes":{"known":16,"unavailable":null},
+            "footprint_bytes":{"known":32,"unavailable":null},
             "disk_read_bytes":{"known":null,"unavailable":"interval"},
             "disk_written_bytes":{"known":null,"unavailable":"interval"},
             "disk_io_bytes":{"known":null,"unavailable":"interval"},
-            "idle_wakeups":{"known":"6","unavailable":null},
-            "pageins":{"known":"4","unavailable":null},
-            "threads":{"known":"8","unavailable":null},
+            "idle_wakeups":{"known":6,"unavailable":null},
+            "pageins":{"known":4,"unavailable":null},
+            "threads":{"known":8,"unavailable":null},
             "gpu_ns":{"known":null,"unavailable":"unknown"}})
     }
 
@@ -553,8 +553,8 @@ mod tests {
         // driver lists no GPU client for leaves the group's GPU time partial. Method: group a
         // process that used a quarter second of GPU time in one second beside one without.
         let mut client = process("61");
-        client["gpu_ns"] = json!({"known":"250000000","unavailable":null});
-        let detail = json!({"processes":[client,process("61")],"elapsed_ns":"1000000000"});
+        client["gpu_ns"] = json!({"known":250_000_000,"unavailable":null});
+        let detail = json!({"processes":[client,process("61")],"elapsed_ns":1_000_000_000});
 
         let groups = groups(Some(&detail)).unwrap();
 
@@ -565,7 +565,7 @@ mod tests {
     fn shows_no_gpu_time_for_a_group_without_a_gpu_client() {
         // Goal: a group none of whose processes has a GPU time reads as missing, never as 0%.
         // Method: group two processes the driver lists no GPU client for.
-        let detail = json!({"processes":[process("61"),process("61")],"elapsed_ns":"1000000000"});
+        let detail = json!({"processes":[process("61"),process("61")],"elapsed_ns":1_000_000_000});
 
         let groups = groups(Some(&detail)).unwrap();
 
@@ -577,10 +577,10 @@ mod tests {
         // Goal: an exec boundary cannot give the whole interval's GPU time to its final
         // executable. Method: group one GPU client and one exec-crossing GPU client.
         let mut ordinary = process("61");
-        ordinary["gpu_ns"] = json!({"known":"250000000","unavailable":null});
+        ordinary["gpu_ns"] = json!({"known":250_000_000,"unavailable":null});
         let mut crossing = ordinary.clone();
         crossing["app_attribution"] = json!("exec");
-        let detail = json!({"processes":[ordinary,crossing],"elapsed_ns":"1000000000"});
+        let detail = json!({"processes":[ordinary,crossing],"elapsed_ns":1_000_000_000});
 
         let groups = groups(Some(&detail)).unwrap();
 
@@ -629,10 +629,10 @@ mod tests {
         // Goal: partial totals preserve exact integers and report the missing member.
         // Method: group one known interval above f64 precision with one refused interval.
         let mut known = process("61");
-        known["cpu_ns"]["known"] = json!("9007199254740993");
+        known["cpu_ns"]["known"] = json!(9_007_199_254_740_993_u64);
         let mut refused = process("61");
         refused["cpu_ns"] = json!({"known":null,"unavailable":"refused"});
-        let detail = json!({"processes":[known,refused],"elapsed_ns":"1000000000"});
+        let detail = json!({"processes":[known,refused],"elapsed_ns":1_000_000_000});
 
         let groups = groups(Some(&detail)).unwrap();
 
@@ -666,9 +666,9 @@ mod tests {
         // Goal: overflow retains the valid known subtotal but suppresses derived readings.
         // Method: add one to a maximum u64 CPU interval in the same executable group.
         let mut maximum = process("61");
-        maximum["cpu_ns"]["known"] = json!(u64::MAX.to_string());
+        maximum["cpu_ns"]["known"] = json!(u64::MAX);
         let mut extra = process("61");
-        extra["cpu_ns"]["known"] = json!("1");
+        extra["cpu_ns"]["known"] = json!(1);
         let detail = json!({"processes":[maximum,extra]});
 
         let groups = groups(Some(&detail)).unwrap();
@@ -729,10 +729,10 @@ mod tests {
     fn keeps_disk_directions_separate_from_the_jointly_measured_population() {
         // Group disjoint read/write populations and retain an unavailable combined interval.
         let mut read = process("61");
-        read["disk_read_bytes"] = json!({"known":"5","unavailable":null});
+        read["disk_read_bytes"] = json!({"known":5,"unavailable":null});
         let mut written = process("61");
-        written["disk_written_bytes"] = json!({"known":"7","unavailable":null});
-        let detail = json!({"processes":[read,written],"elapsed_ns":"1000000000"});
+        written["disk_written_bytes"] = json!({"known":7,"unavailable":null});
+        let detail = json!({"processes":[read,written],"elapsed_ns":1_000_000_000});
 
         let groups = groups(Some(&detail)).unwrap();
 
@@ -747,14 +747,14 @@ mod tests {
     fn suppresses_an_overflowed_disk_total_without_losing_valid_directions() {
         // Overflow only the combined subtotal while preserving exact independent directions.
         let mut maximum = process("61");
-        maximum["disk_read_bytes"] = json!({"known":u64::MAX.to_string(),"unavailable":null});
-        maximum["disk_written_bytes"] = json!({"known":"0","unavailable":null});
+        maximum["disk_read_bytes"] = json!({"known":u64::MAX,"unavailable":null});
+        maximum["disk_written_bytes"] = json!({"known":0,"unavailable":null});
         maximum["disk_io_bytes"] = maximum["disk_read_bytes"].clone();
         let mut extra = process("61");
-        extra["disk_read_bytes"] = json!({"known":"0","unavailable":null});
-        extra["disk_written_bytes"] = json!({"known":"1","unavailable":null});
+        extra["disk_read_bytes"] = json!({"known":0,"unavailable":null});
+        extra["disk_written_bytes"] = json!({"known":1,"unavailable":null});
         extra["disk_io_bytes"] = extra["disk_written_bytes"].clone();
-        let detail = json!({"processes":[maximum,extra],"elapsed_ns":"1000000000"});
+        let detail = json!({"processes":[maximum,extra],"elapsed_ns":1_000_000_000});
 
         let groups = groups(Some(&detail)).unwrap();
 
@@ -770,10 +770,10 @@ mod tests {
         // A final verified interval remains attributable after its memory gauge expires.
         let mut exited = process("61");
         exited["state"] = json!("exited_verified");
-        exited["disk_read_bytes"] = json!({"known":"3000","unavailable":null});
-        exited["disk_written_bytes"] = json!({"known":"1000","unavailable":null});
-        exited["disk_io_bytes"] = json!({"known":"4000","unavailable":null});
-        let detail = json!({"processes":[exited],"elapsed_ns":"2000000000"});
+        exited["disk_read_bytes"] = json!({"known":3000,"unavailable":null});
+        exited["disk_written_bytes"] = json!({"known":1000,"unavailable":null});
+        exited["disk_io_bytes"] = json!({"known":4000,"unavailable":null});
+        let detail = json!({"processes":[exited],"elapsed_ns":2_000_000_000});
 
         let groups = groups(Some(&detail)).unwrap();
 

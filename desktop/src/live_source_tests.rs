@@ -986,10 +986,6 @@ fn a_sealed_recording_opens_at_its_latest_saved_observation_without_a_live_ring(
     assert_eq!(snapshot.selection["second"], 1002);
     assert_eq!(snapshot.selection["selected"]["publication"], 3);
     assert_eq!(snapshot.selection["summary"]["memory_total_bytes"], 12_288);
-    assert_eq!(
-        snapshot.pages["fans"]["observation"],
-        snapshot.selection["selected"]
-    );
 }
 
 #[test]
@@ -1550,8 +1546,8 @@ fn live_network_ingestion_runs_the_worker_without_staging_queries_or_string_tabl
 }
 
 #[test]
-fn live_overview_formats_only_its_requested_fan_page() {
-    // Goal: Overview's explicitly requested raw page stays distinct from metric ingestion.
+fn live_overview_formats_no_cell() {
+    // Goal: Overview reads its fan speed from the reading, without formatting a raw page.
     // Method: run the production worker on a private native source with one measured fan row.
     let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     fixture.publish_resources();
@@ -1562,15 +1558,14 @@ fn live_overview_formats_only_its_requested_fan_page() {
 
     let snapshot = worker.read_at(&fixture.root).unwrap().unwrap();
 
-    assert_eq!(snapshot.pages.len(), 1);
-    assert_eq!(snapshot.pages["fans"]["total"], 1);
-    assert_eq!(snapshot.pages["fans"]["rows"][0][2], "1234");
+    assert!(snapshot.pages.is_empty());
+    assert_eq!(snapshot.selection["summary"]["fan_rpm"][0], 1234.0);
     let work = measured.counts();
     assert_eq!(work.staged_ticks, 0);
     assert_eq!(work.frames, 0);
     assert_eq!(work.sql_plans, 0);
     assert_eq!(work.collections, 0);
-    assert_eq!(work.string_cells, 3);
+    assert_eq!(work.string_cells, 0);
 }
 
 #[path = "live_native_measurement_tests.rs"]

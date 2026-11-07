@@ -161,10 +161,10 @@ fn real_named_process_history_includes_members_outside_the_loaded_page() {
     assert_eq!(payload["selected"]["stamp"]["publication"], "2");
     assert_eq!(payload["executable_name"]["bytes_hex"], "61");
     let point = &payload["points"][1];
-    assert_eq!(point["cpu_ns"]["known"], "1200000000");
+    assert_eq!(point["cpu_ns"]["known"], 1_200_000_000);
     assert_eq!(point["cpu_percent_one_core"], 120.0);
-    assert_eq!(point["resident_bytes"]["known"], "2048");
-    assert_eq!(point["footprint_bytes"]["known"], "4096");
+    assert_eq!(point["resident_bytes"]["known"], 2048);
+    assert_eq!(point["footprint_bytes"]["known"], 4096);
     assert_eq!(point["energy_watts"], 1.25);
     assert_eq!(point["disk_read_bps"], 80.0);
     assert_eq!(point["disk_written_bps"], 40.0);

@@ -444,7 +444,7 @@ mod tests {
 
     fn disk_app() -> serde_json::Value {
         let measure = |known: u64| {
-            json!({"known":known.to_string(), "measured_members":2,
+            json!({"known":known, "measured_members":2,
                 "unavailable_members":0, "overflowed":false})
         };
         json!({"members":2, "membership_complete":true, "cpu_ns":measure(100),
@@ -490,7 +490,7 @@ mod tests {
         let app = disk_app();
         let mut point = app.clone();
         point["observation"] = observation(903, 4);
-        point["cpu_ns"]["known"] = json!("101");
+        point["cpu_ns"]["known"] = json!(101);
         let history = json!({"selected": observation(903, 4), "points": [point]});
 
         assert_eq!(
@@ -505,7 +505,7 @@ mod tests {
         let app = disk_app();
         let mut point = app.clone();
         point["observation"] = observation(903, 4);
-        point["energy_nj"] = json!({"known":"201","measured_members":2,
+        point["energy_nj"] = json!({"known":201,"measured_members":2,
             "unavailable_members":0,"overflowed":false});
         let history = json!({"selected": observation(903, 4), "points": [point]});
 
@@ -521,7 +521,7 @@ mod tests {
         let app = disk_app();
         let mut point = app.clone();
         point["observation"] = observation(903, 4);
-        point["resident_bytes"] = json!({"known":"2048","measured_members":2,
+        point["resident_bytes"] = json!({"known":2048,"measured_members":2,
             "unavailable_members":0,"overflowed":false});
         let history = json!({"selected": observation(903, 4), "points": [point]});
 
@@ -537,7 +537,7 @@ mod tests {
         let app = disk_app();
         let mut point = app.clone();
         point["observation"] = observation(903, 4);
-        point["footprint_bytes"] = json!({"known":"8192","measured_members":2,
+        point["footprint_bytes"] = json!({"known":8192,"measured_members":2,
             "unavailable_members":0,"overflowed":false});
         let history = json!({"selected": observation(903, 4), "points": [point]});
 

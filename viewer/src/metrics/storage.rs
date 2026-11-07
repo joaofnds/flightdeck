@@ -146,7 +146,8 @@ pub(super) fn capture(
 
 fn point_source(table: &View<'_>, time: Option<u64>, snapshot: &mut DiskSnapshot) -> Result<bool> {
     *snapshot = DiskSnapshot::default();
-    if !table.disks(only(table)?, snapshot)? {
+    only(table)?;
+    if !table.disks(snapshot) {
         return Ok(false);
     }
 

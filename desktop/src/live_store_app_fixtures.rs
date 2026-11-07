@@ -86,7 +86,7 @@ pub fn ranked(name: &str) -> Arc<RankedApp> {
 }
 
 pub fn worker_measure(known: u64) -> Value {
-    json!({"known": known.to_string(), "measured_members": 1, "unavailable_members": 0,
+    json!({"known": known, "measured_members": 1, "unavailable_members": 0,
         "overflowed": false})
 }
 

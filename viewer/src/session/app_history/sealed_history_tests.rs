@@ -27,7 +27,7 @@ fn restores_the_history_a_replay_gives_from_the_parts_a_window_keeps() {
         .with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points)
         .unwrap();
 
-    assert_eq!(kept[1]["cpu_ns"]["known"], "1");
+    assert_eq!(kept[1]["cpu_ns"]["known"], 1);
     assert_eq!(kept, replayed_history(session, &selected, &CURRENT, points));
 }
 
@@ -229,7 +229,7 @@ fn restores_a_replayed_minute_after_a_minute_that_keeps_parts() {
         .with_app_history(&Selected::ending_at(selected).unwrap(), &CURRENT, points)
         .unwrap();
 
-    assert_eq!(restored[1]["cpu_ns"]["known"], "1");
+    assert_eq!(restored[1]["cpu_ns"]["known"], 1);
     assert_eq!(
         restored,
         replayed_history(session, &selected, &CURRENT, points)

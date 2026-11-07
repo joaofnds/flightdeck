@@ -29,13 +29,7 @@ fn projects_per_device_rates_and_weighted_completed_request_time() {
         ),
     );
 
-    let point = point(
-        &fixture.tables,
-        &fixture.current,
-        Some(&fixture.previous),
-        1,
-    )
-    .unwrap();
+    let point = fixture.point();
     let storage = &point["storage"];
 
     assert_eq!(storage["state"], "complete");
@@ -77,14 +71,7 @@ fn device(identity: u64, bytes: u64, operations: u64, duration: u64) -> DiskRead
 }
 
 fn capture(fixture: &mut Fixture, publication: u64, snapshot: &DiskSnapshot) {
-    let table = fixture
-        .tables
-        .get_mut(&(0, "ticks"))
-        .unwrap()
-        .get_mut(&publication)
-        .unwrap();
-    table.columns.push("physical_disks".into());
-    table.rows[0].push(Some(persistence::disks::encode(snapshot).unwrap()));
+    fixture.minute(publication).ticks[0].disks = Some(*snapshot);
 }
 
 fn fixture() -> Fixture {

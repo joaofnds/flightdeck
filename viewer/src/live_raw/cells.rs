@@ -389,19 +389,7 @@ impl Cell<'_> {
         match self {
             Self::Null => Ok(None),
             Self::Float64(number) => Ok(Some(*number)),
-            Self::Float32(number) => {
-                if !number.is_finite() {
-                    return Ok(None);
-                }
-
-                // Legacy Float32 cells used their shortest decimal before f64 parsing.
-                // Preserve that public scalar presentation without building a string table.
-                number
-                    .to_string()
-                    .parse()
-                    .map(Some)
-                    .map_err(|_| Error::Bound("f32 presentation"))
-            }
+            Self::Float32(number) => Ok(number.is_finite().then(|| f64::from(*number))),
             _ => Err(Error::Bound("number metric cell")),
         }
     }

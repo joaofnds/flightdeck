@@ -215,7 +215,7 @@ fn unavailable_interval(point: &mut Value) {
         "disk_written_bytes",
         "disk_io_bytes",
     ] {
-        point[field] = json!({"known":"0","measured_members":0,
+        point[field] = json!({"known":0,"measured_members":0,
             "unavailable_members":1,"overflowed":false});
     }
     for field in [
@@ -439,7 +439,7 @@ fn fixture() -> Value {
             "run_tick":2,"continuous_ns":3_000_000_000_u64,
             "wall_ns":1_000_000_000_000_u64,"segment":0}]});
     let measure = |known: u64| {
-        json!({"known":known.to_string(),"measured_members":1,
+        json!({"known":known,"measured_members":1,
             "unavailable_members":0,"overflowed":false})
     };
     let unavailable = json!({"observation":{"wall_ns":"998000000000",
@@ -453,7 +453,7 @@ fn fixture() -> Value {
         "disk_read_bytes":null,"disk_written_bytes":null,"disk_io_bytes":null,
         "disk_read_bps":null,"disk_written_bps":null,"disk_io_bps":null});
     let measured = json!({"observation":selected,"segment":"1","source_available":true,
-        "elapsed_ns":"2000000000","members":1,"membership_complete":true,
+        "elapsed_ns":2_000_000_000,"members":1,"membership_complete":true,
         "cpu_ns":measure(0),"energy_nj":measure(0),"resident_bytes":measure(1024),
         "footprint_bytes":measure(2048),"cpu_percent_one_core":0.0,
         "energy_joules":0.0,"energy_watts":0.0,

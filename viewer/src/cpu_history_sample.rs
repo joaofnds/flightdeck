@@ -1,7 +1,6 @@
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use crate::data::Table;
 use crate::session::Observation;
 
 pub(crate) const CPUS_MAX: usize = 1024;
@@ -148,10 +147,6 @@ impl Identity {
     }
 }
 
-pub(crate) fn counters(table: &Table, publication: u64, output: &mut Counters) -> Result<()> {
-    counters_view(&crate::metric_view::View::Saved(table), publication, output)
-}
-
 pub(crate) fn counters_rows(
     rows: &[crate::recording::CpuRow],
     output: &mut Counters,
@@ -160,6 +155,7 @@ pub(crate) fn counters_rows(
     if rows.len() > CPUS_MAX {
         return Err(Error::Bound("logical CPU count"));
     }
+
     output.reserve_exact(rows.len());
     for (index, row) in rows.iter().enumerate() {
         if collector::u64_from_usize(index) != u64::from(row.cpu) {
@@ -167,6 +163,7 @@ pub(crate) fn counters_rows(
         }
         output.push(counters_values(&row.ticks));
     }
+
     Ok(())
 }
 
@@ -186,9 +183,7 @@ pub(crate) fn counters_view(
 
     let mut ordered = vec![None; table.len()];
     for row in table.rows() {
-        if table.integer(row, "publication")? != Some(publication) {
-            return Err(Error::Bound("CPU detail publication"));
-        }
+        assert_eq!(table.integer(row, "publication")?, Some(publication));
 
         let cpu = table
             .integer(row, "cpu")?

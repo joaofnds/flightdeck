@@ -1318,11 +1318,6 @@ fn reader_payload_read(
     if snapshot.selection["selected"].is_null() {
         return Ok(());
     }
-    let tables: &[&str] = match request.route.as_str() {
-        "overview" => &["fans"],
-        _ => &[],
-    };
-    reader_payload_read_pages(session, tables, snapshot)?;
     if request.route == "apps" {
         reader_apps(session, request, context, histories, snapshot)?;
     }
@@ -1369,22 +1364,6 @@ fn reader_payload_read(
             }
             snapshot.app_ranks = Some(Arc::new(RanksWindow::Legacy(session.app_ranks())));
         }
-    }
-
-    Ok(())
-}
-
-fn reader_payload_read_pages(
-    session: &mut LiveSession,
-    tables: &[&str],
-    snapshot: &mut Snapshot,
-) -> Result<(), String> {
-    for table in tables {
-        let page = reader_page(session, table, 0)?;
-        identity_validate(&page["observation"], &snapshot.selection["selected"])?;
-        snapshot
-            .pages
-            .insert((*table).to_owned(), Presentation::Legacy(page));
     }
 
     Ok(())
@@ -1645,17 +1624,6 @@ fn reader_apps_remember(request: &mut Request, apps: &Value) -> Result<(), Strin
         request.app = app_first_key(apps)?;
     }
     Ok(())
-}
-
-fn reader_page(session: &LiveSession, table: &str, offset: u64) -> Result<Value, String> {
-    let first = session.page(table, 0).map_err(|error| error.to_string())?;
-    let offset = page_offset(offset, &first["total"])?;
-    if offset == 0 {
-        return Ok(first);
-    }
-    session
-        .page(table, offset)
-        .map_err(|error| error.to_string())
 }
 
 fn reader_apps_page(session: &LiveSession, offset: u32) -> Result<Value, String> {

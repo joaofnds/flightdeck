@@ -68,7 +68,7 @@ fn retains_charge_and_cycles_when_battery_electrical_fields_are_missing() {
     // Goal: unavailable battery power cannot erase independently measured charge or zero cycles.
     // Method: remove only voltage from the raw source before the common projection.
     let mut fixture = battery_fixture();
-    set(fixture.row("ticks", 2), 0, "battery_voltage_mv", None);
+    battery_of(&mut fixture).voltage_mv = None;
 
     let point = fixture.point();
 
@@ -82,13 +82,8 @@ fn preserves_empty_charge_and_zero_battery_flow() {
     // Goal: measured empty charge and no current remain zero rather than unavailable.
     // Method: set both source values to literal zero without changing their denominators.
     let mut fixture = battery_fixture();
-    set(
-        fixture.row("ticks", 2),
-        0,
-        "battery_charge_current",
-        Some("0"),
-    );
-    set(fixture.row("ticks", 2), 0, "battery_current_ma", Some("0"));
+    battery_of(&mut fixture).charge_current = Some(0);
+    battery_of(&mut fixture).current_ma = Some(0);
 
     let point = fixture.point();
 
@@ -101,7 +96,7 @@ fn derives_health_only_from_full_and_design_capacity() {
     // Goal: normalized charge units cannot replace the independent health denominator.
     // Method: keep a current/max ratio of55% but remove design capacity.
     let mut fixture = battery_fixture();
-    set(fixture.row("ticks", 2), 0, "battery_design_capacity", None);
+    battery_of(&mut fixture).design_capacity = None;
 
     let point = fixture.point();
 
@@ -109,38 +104,25 @@ fn derives_health_only_from_full_and_design_capacity() {
     assert!(point["battery"]["health_percent"].is_null());
 }
 
-#[test]
-fn rejects_a_partial_battery_extension_in_the_scalar_source() {
-    // Goal: incomplete capture metadata cannot silently become an older source.
-    // Method: remove one named field from an otherwise complete raw table.
-    let mut fixture = battery_fixture();
-    fixture.row("ticks", 2).columns.pop().unwrap();
-    fixture.row("ticks", 2).rows[0].pop().unwrap();
-
-    assert!(point(&fixture.tables, &fixture.current, None, 1).is_err());
-}
-
 fn battery_fixture() -> Fixture {
     let mut fixture = Fixture::new();
-    let tick = fixture.row("ticks", 2);
-
-    for (name, value) in [
-        ("battery_version", "1"),
-        ("battery_source_continuous_ns", "1000000000"),
-        ("battery_charge_current", "55"),
-        ("battery_charge_maximum", "100"),
-        ("battery_full_charge_capacity", "101"),
-        ("battery_design_capacity", "100"),
-        ("battery_cycle_count", "0"),
-        ("battery_charging", "false"),
-        ("battery_external_power", "false"),
-        ("battery_voltage_mv", "12000"),
-        ("battery_current_ma", "-2000"),
-        ("battery_adapter_watts", "94"),
-    ] {
-        tick.columns.push(name.to_owned());
-        tick.rows[0].push(Some(value.to_owned()));
-    }
+    fixture.minute(2).ticks[0].battery = Some(collector::battery::BatteryReading {
+        source_continuous_ns: 1_000_000_000,
+        charge_current: Some(55),
+        charge_maximum: Some(100),
+        full_charge_capacity: Some(101),
+        design_capacity: Some(100),
+        cycle_count: Some(0),
+        charging: Some(false),
+        external_power: Some(false),
+        voltage_mv: Some(12_000),
+        current_ma: Some(-2_000),
+        adapter_watts: Some(94),
+    });
 
     fixture
+}
+
+fn battery_of(fixture: &mut Fixture) -> &mut collector::battery::BatteryReading {
+    fixture.minute(2).ticks[0].battery.as_mut().unwrap()
 }

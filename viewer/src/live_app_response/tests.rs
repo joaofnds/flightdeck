@@ -13,12 +13,12 @@ fn preserves_known_subtotals_and_uncertain_membership() {
         })
         .unwrap();
 
-    assert_eq!(page["apps"][0]["cpu_ns"]["known"], "500000000");
+    assert_eq!(page["apps"][0]["cpu_ns"]["known"], 500_000_000);
     assert_eq!(page["apps"][0]["cpu_percent_one_core"], 50.0);
-    assert_eq!(page["apps"][0]["energy_nj"]["known"], "3000000000");
+    assert_eq!(page["apps"][0]["energy_nj"]["known"], 3_000_000_000_u64);
     assert_eq!(page["apps"][0]["energy_joules"], 3.0);
     assert_eq!(page["apps"][0]["energy_watts"], 3.0);
-    assert_eq!(page["apps"][0]["resident_bytes"]["known"], "157286400");
+    assert_eq!(page["apps"][0]["resident_bytes"]["known"], 157_286_400);
     assert_eq!(page["apps"][0]["membership_complete"], false);
     assert_eq!(page["selected"]["stamp"]["publication"], "9007199254740993");
 }
@@ -47,7 +47,7 @@ fn reads_gpu_time_as_a_share_of_the_interval_and_a_missing_one_as_unknown() {
     assert_eq!(
         detail["app"]["gpu_ns"],
         serde_json::json!({
-            "known":"250000000", "measured_members":1,
+            "known":250_000_000, "measured_members":1,
             "unavailable_members":1, "overflowed":false
         })
     );
@@ -80,7 +80,7 @@ fn keeps_partial_disk_rates_and_joint_coverage_on_the_wire() {
     assert_eq!(
         detail["app"]["disk_io_bytes"],
         serde_json::json!({
-            "known":"1200000000", "measured_members":1,
+            "known":1_200_000_000, "measured_members":1,
             "unavailable_members":1, "overflowed":false
         })
     );
@@ -128,7 +128,7 @@ fn preserves_process_identity_and_exact_byte_keys_in_detail() {
     assert_eq!(
         detail["processes"][0]["cpu_ns"],
         serde_json::json!({
-            "known": "200000000", "unavailable": null
+            "known": 200_000_000, "unavailable": null
         })
     );
     assert_eq!(detail["processes"][0]["state"], "live");
@@ -154,7 +154,7 @@ fn distinguishes_unavailable_members_from_measured_zero() {
 
     assert_eq!(
         detail["app"]["cpu_ns"],
-        serde_json::json!({ "known": "200000000",
+        serde_json::json!({ "known": 200_000_000,
         "measured_members": 1, "unavailable_members": 1, "overflowed": false })
     );
     assert_eq!(
@@ -187,7 +187,7 @@ macro_rules! missing_rates {
                 "known": null, "unavailable": $reason
             }));
             assert_eq!(detail["app"]["cpu_percent_one_core"], Value::Null);
-            assert_eq!(detail["app"]["resident_bytes"]["known"], "157286400");
+            assert_eq!(detail["app"]["resident_bytes"]["known"], 157286400);
             assert_eq!(detail["app"]["membership_complete"], false);
             assert_eq!(detail["processes"][0]["disk_read_bytes"], serde_json::json!({
                 "known":null, "unavailable":$reason
@@ -225,13 +225,13 @@ fn retains_process_usage_but_withholds_app_attribution_across_exec() {
         })
         .unwrap();
 
-    assert_eq!(detail["processes"][0]["cpu_ns"]["known"], "200000000");
+    assert_eq!(detail["processes"][0]["cpu_ns"]["known"], 200_000_000);
     assert_eq!(detail["processes"][0]["app_attribution"], "exec");
     assert_eq!(detail["app"]["cpu_ns"]["measured_members"], 0);
     assert_eq!(detail["app"]["cpu_percent_one_core"], Value::Null);
     assert_eq!(
         detail["processes"][0]["disk_io_bytes"]["known"],
-        "1200000000"
+        1_200_000_000
     );
     assert_eq!(detail["processes"][0]["disk_io_bps"], 1_200_000_000.0);
     assert_eq!(detail["app"]["disk_io_bytes"]["measured_members"], 0);
@@ -254,7 +254,7 @@ fn retains_legacy_gauges_with_unsupported_identity() {
     assert_eq!(page["app_count"], 0);
     assert_eq!(page["ungrouped_members"], 2);
     assert_eq!(page["processes"][0]["program_unavailable"], "unsupported");
-    assert_eq!(page["processes"][0]["resident_bytes"]["known"], "104857600");
+    assert_eq!(page["processes"][0]["resident_bytes"]["known"], 104_857_600);
     assert_eq!(page["processes"][0]["creation"], Value::Null);
 }
 
@@ -299,7 +299,7 @@ fn retains_exact_overflow_subtotals_without_derived_rates() {
     assert_eq!(
         page["apps"][0]["cpu_ns"],
         serde_json::json!({
-            "known": "18446744073709551615", "measured_members": 1,
+            "known": 18_446_744_073_709_551_615_u64, "measured_members": 1,
             "unavailable_members": 1, "overflowed": true
         })
     );

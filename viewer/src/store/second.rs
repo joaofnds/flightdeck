@@ -117,6 +117,21 @@ pub struct Reading<'a> {
     pub fans: &'a [FanRow],
 }
 
+impl Reading<'_> {
+    /// A minute of this reading's rows alone.
+    pub(crate) fn copied_minute(&self) -> MachineMinute {
+        MachineMinute {
+            ticks: vec![self.tick.clone()],
+            cpus: self.cpus.to_vec(),
+            memory: self.memory.copied().into_iter().collect(),
+            interfaces: self.interfaces.to_vec(),
+            gpu_states: self.gpu_states.to_vec(),
+            core_states: self.core_states.to_vec(),
+            fans: self.fans.to_vec(),
+        }
+    }
+}
+
 impl MachineSecond {
     /// Whether the second's rates are over the interval since the run's previous reading.
     #[must_use]
@@ -672,6 +687,33 @@ pub fn readings(minute: &MachineMinute) -> impl Iterator<Item = Reading<'_>> {
             fans: own_fans,
         }
     })
+}
+
+/// The reading of `publication` in `minute`, none where the minute holds no such tick. The
+/// decoder refuses a minute whose rows are out of publication order.
+pub(crate) fn reading_at(minute: &MachineMinute, publication: u64) -> Option<Reading<'_>> {
+    let index = minute
+        .ticks
+        .binary_search_by_key(&publication, |tick| tick.publication)
+        .ok()?;
+
+    Some(Reading {
+        tick: &minute.ticks[index],
+        cpus: reading_at_rows(&minute.cpus, publication, |row| row.publication),
+        memory: reading_at_rows(&minute.memory, publication, |row| row.publication).first(),
+        interfaces: reading_at_rows(&minute.interfaces, publication, |row| row.publication),
+        gpu_states: reading_at_rows(&minute.gpu_states, publication, |row| row.publication),
+        core_states: reading_at_rows(&minute.core_states, publication, |row| row.publication),
+        fans: reading_at_rows(&minute.fans, publication, |row| row.publication),
+    })
+}
+
+fn reading_at_rows<T>(rows: &[T], publication: u64, publication_of: impl Fn(&T) -> u64) -> &[T] {
+    let first = rows.partition_point(|row| publication_of(row) < publication);
+    let rows = &rows[first..];
+    let count = rows.partition_point(|row| publication_of(row) == publication);
+
+    &rows[..count]
 }
 
 /// The leading rows of `rows` that belong to `publication`, and the rest. Rows of an earlier

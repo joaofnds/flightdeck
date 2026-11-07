@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::{probe_request, workflows};
-use crate::live_source::{Snapshot, Update, Worker, identity_signature, identity_validate};
+use crate::live_source::{Snapshot, Update, Worker, identity_signature};
 
 #[derive(Default)]
 struct Observations {
@@ -123,11 +123,6 @@ fn run_updates(worker: &mut Worker, started: Instant, seconds: u32) -> Result<()
 }
 
 fn run_snapshot(snapshot: &Snapshot) -> Result<Value, String> {
-    let fans = snapshot
-        .pages
-        .get("fans")
-        .ok_or("Missing live soak fan page")?;
-    identity_validate(&fans["observation"], &snapshot.selection["selected"])?;
     if !snapshot.read_ms.is_finite() {
         return Err("Live soak received a non-finite read duration".into());
     }
@@ -386,10 +381,7 @@ mod tests {
                 json!({"selected": selected, "context_last_second": second,
                 "trends": [selected]}),
             ),
-            pages: (BTreeMap::from([("fans".to_owned(), json!({"observation": selected}))]))
-                .into_iter()
-                .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
-                .collect(),
+            pages: BTreeMap::new(),
             apps: None,
             detail: None,
             history: None,

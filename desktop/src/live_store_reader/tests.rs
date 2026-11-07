@@ -248,9 +248,9 @@ fn a_kept_refresh_waits_for_a_store_behind_the_newest_reading() {
 }
 
 #[test]
-fn an_inspected_overview_reading_waits_for_a_store_behind_the_newest_reading() {
-    // Goal: a picked reading of the Overview that reaches a Store just behind is not a failure.
-    // Method: pick the older of two readings while the Store stays behind, then let it catch up.
+fn an_inspected_overview_reading_needs_no_store_caught_up() {
+    // Goal: a picked reading of the Overview shows at once from what the Store already answered.
+    // Method: pick the older of two readings while the Store stays behind the newest one.
     let mut harness = Harness::new();
     harness.worker.request(request("overview")).unwrap();
     let shown = harness.ready();
@@ -268,8 +268,6 @@ fn an_inspected_overview_reading_waits_for_a_store_behind_the_newest_reading() {
 
     harness.worker.inspect(inspection).unwrap();
 
-    harness.assert_no_update_over_several_polls();
-    harness.store_active();
     let inspected = harness.ready_strict();
     assert_eq!(inspected.selection["selected"]["publication"], 1);
 }
@@ -512,6 +510,7 @@ fn core_reading(publication: u64, states: u32, cores: u32) -> viewer::recording:
 
 fn core_tick(publication: u64) -> viewer::recording::TickRow {
     viewer::recording::TickRow {
+        gpu_state_count: 0,
         publication,
         run_tick: publication,
         wall_ns: Some(publication * 1_000_000_000),

@@ -25,7 +25,8 @@ use crate::live_apps::committed::{ENDPOINTS_MAX, Endpoint, committed_endpoints};
 mod saved_load_tests;
 
 /// The ticks table's columns every minute holds, of those the store reads.
-const TICK_COLUMNS: [&str; 10] = [
+const TICK_COLUMNS: [&str; 11] = [
+    "gpu_state_count",
     "publication",
     "run_tick",
     "wall_ns",
@@ -117,6 +118,12 @@ pub struct MachineMinute {
     pub fans: Vec<FanRow>,
 }
 
+/// The most rows a table may hold of one tick. A Mac writes far fewer: its logical CPUs, and each
+/// core's active states.
+pub(crate) const TABLE_ROWS_PER_TICK_MAX: usize = 4096;
+/// The most bytes of a saved fact about the Mac, which a raw page refuses past this too.
+pub(crate) const MACHINE_TEXT_BYTES_MAX: usize = 4096;
+
 /// When a tick was taken and which sources it read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TickRow {
@@ -128,6 +135,8 @@ pub struct TickRow {
     pub awake_ns: Option<u64>,
     pub ioreport_read: bool,
     pub smc_read: bool,
+    /// The GPU state rows the tick declares.
+    pub gpu_state_count: u64,
     /// `None` where the tick did not read `IOReport`.
     pub gpu_energy_nj: Option<u64>,
     /// Each `None` where the tick did not read the SMC.
@@ -232,6 +241,7 @@ impl MachineMinute {
             awake_ns: tick.times.map(|times| times.awake_ns),
             ioreport_read: tick.ioreport_read,
             smc_read: tick.smc_read,
+            gpu_state_count: collector::u64_from_usize(tick.gpu_active_ns.len()),
             gpu_energy_nj: tick.ioreport_read.then_some(tick.gpu_energy_nj),
             power_watts: tick.smc_read.then_some(tick.power_watts),
             soc_celsius: tick.smc_read.then_some(tick.soc_celsius),
@@ -305,6 +315,65 @@ impl MachineMinute {
                     frequency_khz: push_tick_frequency_khz(tick, *khz),
                 });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+impl TickRow {
+    /// A tick that read `IOReport` and the SMC, with no clock and no optional reading.
+    pub(crate) fn fixture(publication: u64) -> Self {
+        Self {
+            publication,
+            run_tick: publication,
+            wall_ns: None,
+            continuous_ns: None,
+            awake_ns: None,
+            ioreport_read: true,
+            smc_read: true,
+            gpu_state_count: 0,
+            gpu_energy_nj: None,
+            power_watts: None,
+            soc_celsius: None,
+            cpu_celsius: None,
+            gpu_celsius: None,
+            thermal_pressure: None,
+            performance_levels: None,
+            system: None,
+            saved_computer: None,
+            saved_load_average: None,
+            battery: None,
+            disks: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl InterfaceRow {
+    /// An interface's row, its `counters` from `received_bytes` through `receive_drops`.
+    pub(crate) fn fixture(publication: u64, index: u16, name: &str, counters: [u64; 7]) -> Self {
+        let [
+            received_bytes,
+            sent_bytes,
+            received_packets,
+            sent_packets,
+            receive_errors,
+            send_errors,
+            receive_drops,
+        ] = counters;
+        Self {
+            publication,
+            interface: Interface {
+                index,
+                name: interface_name(name).unwrap(),
+                received_bytes,
+                sent_bytes,
+                received_packets,
+                sent_packets,
+                receive_errors,
+                send_errors,
+                receive_drops,
+            },
         }
     }
 }
@@ -394,16 +463,52 @@ fn read_machine_tables(minute: &SealedMinute, into: &mut MachineMinute) -> Resul
     read_memory(minute, &ticks, &mut into.memory)?;
     read_interfaces(minute, &ticks, &mut into.interfaces)?;
     read_gpu_states(minute, &ticks, &mut into.gpu_states)?;
+    read_gpu_states_declared(&into.ticks, &into.gpu_states)?;
     read_core_states(minute, &ticks, &mut into.core_states)?;
 
     read_fans(minute, &ticks, &mut into.fans)
 }
 
-fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refused> {
-    assert!(into.is_empty());
-    let source = read_ticks_frame(minute.ticks()?, &[], None)?;
+/// Reads only the ticks and CPUs of `minute` into `into`, replacing what it held.
+pub(crate) fn read_machine_cpus(
+    minute: &SealedMinute,
+    into: &mut MachineMinute,
+) -> Result<(), Refused> {
+    into.clear();
+    read_ticks(minute, &mut into.ticks)?;
+    let ticks: Vec<u64> = into.ticks.iter().map(|tick| tick.publication).collect();
 
-    read_ticks_readings(&source, into)
+    read_cpus(minute, &ticks, &mut into.cpus)
+}
+
+pub(crate) fn read_ticks(minute: &SealedMinute, into: &mut Vec<TickRow>) -> Result<(), Refused> {
+    assert!(into.is_empty());
+    let limit =
+        u32::try_from(ENDPOINTS_MAX + 1).map_err(|_| persistence::Error::Bound("process ticks"))?;
+    let source = read_ticks_frame(minute.ticks()?, &[], Some(limit))?;
+    read_ticks_readings(&source, into)?;
+
+    read_ticks_within(minute, into)
+}
+
+/// Refuses a tick of a publication the minute's manifest does not hold.
+fn read_ticks_within(minute: &SealedMinute, ticks: &[TickRow]) -> Result<(), Refused> {
+    let publications = minute.publications();
+    if ticks
+        .iter()
+        .all(|tick| publications.contains(&tick.publication))
+    {
+        return Ok(());
+    }
+
+    Err(persistence::Error::Bound("tick publication").into())
+}
+
+/// The rows a table may hold of a minute with `ticks`, so that what a minute's readers decode
+/// is bounded by the readings it holds, whatever its file says. A tick writes far fewer rows to
+/// any table than `TABLE_ROWS_PER_TICK_MAX`: its CPUs, and each core's active states.
+fn table_rows_max(ticks: &[u64]) -> usize {
+    ticks.len() * TABLE_ROWS_PER_TICK_MAX
 }
 
 fn read_ticks_frame(
@@ -445,6 +550,9 @@ fn read_ticks_frame(
 }
 
 fn read_ticks_readings(frame: &DataFrame, into: &mut Vec<TickRow>) -> Result<(), Refused> {
+    if frame.height() > ENDPOINTS_MAX {
+        return Err(persistence::Error::Bound("ticks of a minute").into());
+    }
     read_ticks_rows(frame, into)?;
     ordered(into, "tick order", |tick| tick.publication)?;
     if read_ticks_readings_holds(frame, TEMPERATURE_FIELDS[0].0) {
@@ -480,6 +588,7 @@ fn read_ticks_rows(frame: &DataFrame, into: &mut Vec<TickRow>) -> Result<(), Ref
     let awake_ns = Cells::<UInt64Type>::named(frame, "awake_ns")?;
     let ioreport_read = Cells::<BooleanType>::named(frame, "ioreport_read")?;
     let smc_read = Cells::<BooleanType>::named(frame, "smc_read")?;
+    let gpu_state_count = Cells::<UInt32Type>::named(frame, "gpu_state_count")?;
     let gpu_energy_nj = Cells::<UInt64Type>::named(frame, "gpu_energy_nj")?;
     let power_watts = Cells::<Float32Type>::named(frame, "power_watts")?;
     let soc_celsius = Cells::<Float32Type>::named(frame, "soc_celsius")?;
@@ -493,6 +602,7 @@ fn read_ticks_rows(frame: &DataFrame, into: &mut Vec<TickRow>) -> Result<(), Ref
             awake_ns: awake_ns.optional(row)?,
             ioreport_read: ioreport_read.get(row)?,
             smc_read: smc_read.get(row)?,
+            gpu_state_count: u64::from(gpu_state_count.get(row)?),
             gpu_energy_nj: gpu_energy_nj.optional(row)?,
             power_watts: power_watts.optional(row)?,
             soc_celsius: soc_celsius.optional(row)?,
@@ -606,6 +716,13 @@ fn read_ticks_machine_facts(
         .map(|name| Cells::<StringType>::named(frame, name)?.optional(row));
     let [model, chip, architecture] = texts;
     let texts = [model?, chip?, architecture?];
+    if texts
+        .iter()
+        .flatten()
+        .any(|text| text.len() > MACHINE_TEXT_BYTES_MAX)
+    {
+        return Err(persistence::Error::Bound("machine text").into());
+    }
     let native = texts.map(|text| text.and_then(|text| FactText::new(text.as_bytes())));
     tick.saved_computer = texts
         .iter()
@@ -748,7 +865,9 @@ fn read_cpus(minute: &SealedMinute, ticks: &[u64], into: &mut Vec<CpuRow>) -> Re
         "nice_ticks",
         "idle_ticks",
     ];
-    let frame = minute.table(Table::Cpus)?.collect(&columns)?;
+    let frame = minute
+        .table(Table::Cpus)?
+        .collect_rows(&columns, table_rows_max(ticks))?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let cpu = Cells::<UInt32Type>::named(&frame, "cpu")?;
     let user = Cells::<UInt32Type>::named(&frame, "user_ticks")?;
@@ -781,7 +900,9 @@ fn read_memory(
     columns.push("publication");
     columns.extend(MEMORY_COUNTERS);
     columns.push("pressure");
-    let frame = minute.table(Table::Memory)?.collect(&columns)?;
+    let frame = minute
+        .table(Table::Memory)?
+        .collect_rows(&columns, table_rows_max(ticks))?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let counters = MEMORY_COUNTERS
         .iter()
@@ -866,7 +987,9 @@ fn read_interfaces(
     let mut columns = Vec::with_capacity(INTERFACE_COUNTERS.len() + 3);
     columns.extend(["publication", "interface", "name"]);
     columns.extend(INTERFACE_COUNTERS);
-    let frame = minute.table(Table::Interfaces)?.collect(&columns)?;
+    let frame = minute
+        .table(Table::Interfaces)?
+        .collect_rows(&columns, table_rows_max(ticks))?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let index = Cells::<UInt16Type>::named(&frame, "interface")?;
     let names = Cells::<StringType>::named(&frame, "name")?;
@@ -927,7 +1050,9 @@ fn read_gpu_states(
     into: &mut Vec<GpuStateRow>,
 ) -> Result<(), Refused> {
     let columns = ["publication", "state", "active_ns"];
-    let frame = minute.table(Table::GpuStates)?.collect(&columns)?;
+    let frame = minute
+        .table(Table::GpuStates)?
+        .collect_rows(&columns, table_rows_max(ticks))?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let state = Cells::<UInt32Type>::named(&frame, "state")?;
     let active_ns = Cells::<UInt64Type>::named(&frame, "active_ns")?;
@@ -943,6 +1068,20 @@ fn read_gpu_states(
     ordered(into, UNORDERED, |row| (row.publication, row.state))
 }
 
+/// Refuses a minute in which a tick holds other GPU states than the count it declares, since a
+/// lost state at both of two readings would otherwise read as a different rate.
+fn read_gpu_states_declared(ticks: &[TickRow], states: &[GpuStateRow]) -> Result<(), Refused> {
+    for tick in ticks {
+        let first = states.partition_point(|state| state.publication < tick.publication);
+        let held = states[first..].partition_point(|state| state.publication == tick.publication);
+        if collector::u64_from_usize(held) != tick.gpu_state_count {
+            return Err(persistence::Error::Bound("GPU state rows").into());
+        }
+    }
+
+    Ok(())
+}
+
 fn read_core_states(
     minute: &SealedMinute,
     ticks: &[u64],
@@ -956,7 +1095,7 @@ fn read_core_states(
     if clocked {
         columns.push(clock);
     }
-    let frame = table.collect(&columns)?;
+    let frame = table.collect_rows(&columns, table_rows_max(ticks))?;
 
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let core = Cells::<UInt32Type>::named(&frame, "core")?;
@@ -983,7 +1122,9 @@ fn read_core_states(
 
 fn read_fans(minute: &SealedMinute, ticks: &[u64], into: &mut Vec<FanRow>) -> Result<(), Refused> {
     let columns = ["publication", "fan", "rpm"];
-    let frame = minute.table(Table::Fans)?.collect(&columns)?;
+    let frame = minute
+        .table(Table::Fans)?
+        .collect_rows(&columns, table_rows_max(ticks))?;
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
     let fan = Cells::<UInt32Type>::named(&frame, "fan")?;
     let rpm = Cells::<Float32Type>::named(&frame, "rpm")?;

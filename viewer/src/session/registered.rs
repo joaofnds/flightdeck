@@ -342,10 +342,9 @@ impl Session {
 
     /// The wall-clock bounds of the ticks of a window whose manifest holds none.
     fn span_bounds_ticks(&self, window: usize) -> Result<Option<TimeBounds>> {
-        let ticks = self.table(window, "ticks")?;
         let mut bounds: Option<TimeBounds> = None;
-        for row in &ticks.rows {
-            if let Some(wall) = ticks.integer(row, "wall_ns")? {
+        for tick in &self.reader().minute_ticks(window)? {
+            if let Some(wall) = tick.wall_ns {
                 bounds = Some(match bounds {
                     Some(bounds) => TimeBounds {
                         min: bounds.min.min(wall),

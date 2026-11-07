@@ -27,7 +27,7 @@ fn an_evicted_raw_reading_keeps_its_owned_facts_and_reservation() {
 
     let operation = operation();
     let page = reading.raw().page("ticks", 0, &operation).unwrap();
-    assert_eq!(page.integer(&page.rows[0], "publication").unwrap(), Some(1));
+    assert_eq!(page.shown(0, "publication"), Some("1"));
     assert_eq!(budget.used(), reading.raw().bytes() + ARC_BYTES);
     drop(reading);
     assert_eq!(budget.used(), 0);

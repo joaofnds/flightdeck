@@ -732,7 +732,7 @@ impl AppEpoch {
                 "page":{"offset":0,"total":1,"next_offset":null}}),
             )),
             detail: Some(crate::live_source::Presentation::Legacy(
-                json!({"selected":selected,"app":app,"elapsed_ns":"1000000000",
+                json!({"selected":selected,"app":app,"elapsed_ns":1_000_000_000,
                 "processes":self.processes(),
                 "page":{"offset":0,"total":app["members"],"next_offset":null}}),
             )),
@@ -756,22 +756,22 @@ impl AppEpoch {
 
     fn app(self) -> Value {
         let (members, cpu, memory, energy) = match self {
-            Self::Accepted => (3, 87, "7516192768", 9),
-            Self::Historical => (2, 13, "3221225472", 4),
-            Self::LargerHistorical => (5, 13, "3221225472", 4),
+            Self::Accepted => (3, 87, 7_516_192_768_u64, 9),
+            Self::Historical => (2, 13, 3_221_225_472_u64, 4),
+            Self::LargerHistorical => (5, 13, 3_221_225_472_u64, 4),
         };
         json!({"display_name":"Example App","key":{"kind":"bundle","bytes_hex":"41",
             "display":"Example App"},"members":members,"live_members":members,
             "membership_complete":true,"cpu_percent_one_core":cpu,
             "energy_watts":energy,"energy_joules":energy,
-            "cpu_ns":measure("130000000"),"energy_nj":measure("4000000000"),
-            "gpu_ns":measure("250000000"),"gpu_percent":25.0,
+            "cpu_ns":measure(130_000_000),"energy_nj":measure(4_000_000_000),
+            "gpu_ns":measure(250_000_000),"gpu_percent":25.0,
             "resident_bytes":measure(memory),"footprint_bytes":measure(memory),
-            "disk_read_bytes":{"known":"0","measured_members":0,
+            "disk_read_bytes":{"known":0,"measured_members":0,
                 "unavailable_members":members,"overflowed":false},
-            "disk_written_bytes":{"known":"0","measured_members":0,
+            "disk_written_bytes":{"known":0,"measured_members":0,
                 "unavailable_members":members,"overflowed":false},
-            "disk_io_bytes":{"known":"0","measured_members":0,
+            "disk_io_bytes":{"known":0,"measured_members":0,
                 "unavailable_members":members,"overflowed":false},
             "disk_read_bps":null,"disk_written_bps":null,"disk_io_bps":null})
     }
@@ -833,7 +833,7 @@ fn system_point(second: u64, publication: u64) -> Value {
     point
 }
 
-fn measure(known: &str) -> Value {
+fn measure(known: u64) -> Value {
     json!({"known":known,"measured_members":1,"unavailable_members":0,"overflowed":false})
 }
 
@@ -841,15 +841,15 @@ fn process(name: &str, bytes: &str, pid: u32) -> Value {
     json!({"pid":pid,"creation":{"unique_id":pid},"state":"live",
         "executable_name":{"display":name,"bytes_hex":bytes},"app_attribution":null,
         "cpu_percent_one_core":60.0,"energy_watts":2.0,"energy_joules":2.0,
-        "cpu_ns":{"known":"600000000","unavailable":null},
-        "energy_nj":{"known":"2000000000","unavailable":null},
-        "resident_bytes":{"known":"67108864","unavailable":null},
-        "footprint_bytes":{"known":"134217728","unavailable":null},
+        "cpu_ns":{"known":600_000_000,"unavailable":null},
+        "energy_nj":{"known":2_000_000_000,"unavailable":null},
+        "resident_bytes":{"known":67_108_864,"unavailable":null},
+        "footprint_bytes":{"known":134_217_728,"unavailable":null},
         "disk_read_bytes":{"known":null,"unavailable":"interval"},
         "disk_written_bytes":{"known":null,"unavailable":"interval"},
         "disk_io_bytes":{"known":null,"unavailable":"interval"},
-        "idle_wakeups":{"known":"6","unavailable":null},
-        "pageins":{"known":"4","unavailable":null},"threads":{"known":"8","unavailable":null},
+        "idle_wakeups":{"known":6,"unavailable":null},
+        "pageins":{"known":4,"unavailable":null},"threads":{"known":8,"unavailable":null},
         "gpu_ns":{"known":null,"unavailable":"unknown"},
         "idle_wakeups_per_second":6.0,"pageins_per_second":4.0,
         "disk_read_bps":null,"disk_written_bps":null,"disk_io_bps":null})

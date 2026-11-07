@@ -255,16 +255,16 @@ fn point(publication: u64) -> Value {
     let pageins = 4 * publication - 1;
     let threads = 5 * publication + 3;
     json!({"observation":observation(publication),"segment":0,"cpu_percent_one_core":120.0*factor,
-        "resident_bytes":(publication*1_073_741_824).to_string(),
-        "footprint_bytes":((publication+1)*1_073_741_824).to_string(),"energy_watts":1.25*factor,
+        "resident_bytes":publication*1_073_741_824,
+        "footprint_bytes":(publication+1)*1_073_741_824,"energy_watts":1.25*factor,
         "disk_read_bps":1_000_000.0*factor,"disk_written_bps":500_000.0*factor,
         "idle_wakeups_per_second":f64::from(u32::try_from(wakeups).unwrap()),
         "pageins_per_second":f64::from(u32::try_from(pageins).unwrap()),
-        "idle_wakeups":{"known":wakeups.to_string(),"measured_members":1,
+        "idle_wakeups":{"known":wakeups,"measured_members":1,
             "unavailable_members":0,"overflowed":false},
-        "pageins":{"known":pageins.to_string(),"measured_members":1,
+        "pageins":{"known":pageins,"measured_members":1,
             "unavailable_members":0,"overflowed":false},
-        "threads":{"known":threads.to_string(),"measured_members":1,
+        "threads":{"known":threads,"measured_members":1,
             "unavailable_members":0,"overflowed":false}})
 }
 
@@ -288,7 +288,7 @@ fn captured_event_rates_use_human_units_and_preserve_small_nonzero_values() {
 #[test]
 fn named_thread_reading_shows_one_exact_quantity() {
     // Read a named captured gauge directly so its exact quantity appears only once.
-    let payload = json!({"points":[{"threads":{"known":"8","measured_members":1,
+    let payload = json!({"points":[{"threads":{"known":8,"measured_members":1,
         "unavailable_members":0,"overflowed":false}}]});
 
     let reading = crate::live_process_history::captured_reading(
@@ -303,7 +303,7 @@ fn named_thread_reading_shows_one_exact_quantity() {
 #[test]
 fn named_thread_reading_preserves_partial_coverage() {
     // Read a partial named gauge without repeating its known subtotal.
-    let payload = json!({"points":[{"threads":{"known":"8","measured_members":1,
+    let payload = json!({"points":[{"threads":{"known":8,"measured_members":1,
         "unavailable_members":2,"overflowed":false}}]});
 
     let reading = crate::live_process_history::captured_reading(

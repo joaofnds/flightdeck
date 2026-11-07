@@ -7,7 +7,6 @@ use collector::ring::{
 };
 use persistence::{Limits, Store, Window, WindowIdentity};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -16,6 +15,7 @@ struct Recording {
     root: PathBuf,
     writer: Writer,
     window: Window,
+    minute: MachineMinute,
 }
 
 impl Recording {
@@ -51,6 +51,7 @@ impl Recording {
             WindowIdentity { run, window: 0 },
             Limits::from_shape(&shape).unwrap(),
         );
+        let mut minute = MachineMinute::default();
         for publication in 1..=count {
             let tick = reading(publication);
             let times = ObservationTimes {
@@ -63,6 +64,7 @@ impl Recording {
                 reader.read_into(&mut read).unwrap(),
                 Found::Publication { .. }
             ));
+            minute.push_tick(publication, &read);
             window
                 .push_tick(
                     &persistence::Observation {
@@ -80,32 +82,26 @@ impl Recording {
             root,
             writer,
             window,
+            minute,
         }
     }
 
-    fn project(&self) -> Tables {
-        let connection = crate::data::connection();
-        let control = Arc::new(crate::Cancellation::default());
-        let operation = control.operation(0).unwrap();
-        let mut tables = Tables::new();
-        for kind in persistence::schema::TABLES {
-            let order = kind.order();
-            let name = kind.name();
-            if TABLE_NAMES.contains(&name) {
-                connection
-                    .register(name, persistence::frame(kind, &self.window).unwrap())
-                    .unwrap();
-                let table = crate::data::query(
-                    &connection,
-                    &format!("SELECT * FROM {name} ORDER BY {order}"),
-                    crate::data::ROWS_MAX,
-                    &operation,
-                )
-                .unwrap();
-                tables.insert((0, name), partition(&table).unwrap());
-            }
-        }
-        tables
+    /// The point of `current` from the readings the ring gave, before any seal.
+    fn point(&self, current: &Observation, previous: Option<&Observation>) -> Value {
+        let reading = reading_at(&self.minute, current.publication).unwrap();
+        let before =
+            previous.map(|previous| reading_at(&self.minute, previous.publication).unwrap());
+
+        point_sources(
+            &Sources::Machine {
+                current: &reading,
+                previous: before.as_ref(),
+            },
+            current,
+            previous,
+            1,
+        )
+        .unwrap()
     }
 
     fn seal(&self) {
@@ -245,7 +241,6 @@ fn preserves_optional_source_failure_and_recovery_in_live_and_saved_projection()
     // Goal: sealing preserves absence, fresh recovery, and the missing counter predecessor.
     // Method: encode true/false/true/true availability with distinct gauges and absolute counters.
     let recording = Recording::with_ticks(4, recovery_tick);
-    let tables = recording.project();
     let observations: [Observation; 4] = std::array::from_fn(|index| {
         let publication = u64::try_from(index).unwrap() + 1;
         Observation {
@@ -261,7 +256,7 @@ fn preserves_optional_source_failure_and_recovery_in_live_and_saved_projection()
 
     for (index, observation) in observations.iter().enumerate() {
         let previous = index.checked_sub(1).map(|index| &observations[index]);
-        let mut live = point(&tables, observation, previous, 1).unwrap();
+        let mut live = recording.point(observation, previous);
         live["run"] = json!(
             collector::recording::identity_text(recording.window.identity.run.run).to_string()
         );
@@ -290,27 +285,20 @@ fn preserves_optional_source_failure_and_recovery_in_live_and_saved_projection()
         );
         assert_eq!(live["memory_free_bytes"], 2);
     }
-    assert_failed_encoding(&tables);
+    let saved = session.reader().machine_minute(0).unwrap();
+    assert_failed_encoding(&saved);
 }
 
-fn assert_failed_encoding(tables: &Tables) {
-    let failed = &tables[&(0, "ticks")][&2];
-    for field in [
-        "gpu_energy_nj",
-        "power_watts",
-        "soc_celsius",
-        "cpu_celsius",
-        "gpu_celsius",
-    ] {
-        let column = failed
-            .columns
-            .iter()
-            .position(|name| name == field)
-            .unwrap();
-        assert_eq!(failed.rows[0][column], None);
-    }
-    assert!(!tables[&(0, "gpu_states")].contains_key(&2));
-    assert!(!tables[&(0, "fans")].contains_key(&2));
+fn assert_failed_encoding(saved: &MachineMinute) {
+    let failed = &saved.ticks[1];
+    assert_eq!(failed.publication, 2);
+    assert_eq!(failed.gpu_energy_nj, None);
+    assert_eq!(failed.power_watts, None);
+    assert_eq!(failed.soc_celsius, None);
+    assert_eq!(failed.cpu_celsius, None);
+    assert_eq!(failed.gpu_celsius, None);
+    assert!(saved.gpu_states.iter().all(|row| row.publication != 2));
+    assert!(saved.fans.iter().all(|row| row.publication != 2));
 }
 
 fn recovery_tick(publication: u64) -> Tick {
@@ -330,11 +318,65 @@ fn recovery_tick(publication: u64) -> Tick {
 }
 
 #[test]
+fn a_saved_counter_past_double_precision_reads_its_exact_integer() {
+    // Goal: a counter no 64-bit float can hold reads as the integer that was saved.
+    // Method: save a memory total of 2^53 + 1 and read it as an integer from a selection.
+    let recording = Recording::new();
+    recording.seal();
+    let mut session = Session::open(&recording.root).unwrap();
+
+    let response = session.select(1001, 0).unwrap();
+
+    assert_eq!(
+        response["summary"]["memory_total_bytes"].as_u64(),
+        Some(9_007_199_254_740_993)
+    );
+}
+
+#[test]
+fn a_rate_of_counters_past_double_precision_subtracts_exact_integers() {
+    // Goal: counter arithmetic stays in integers until the rate needs a float.
+    // Method: save page-ins of 2^53 + 1 and 2^53 + 3 two seconds apart. Their exact rate is 1 per
+    // second, and rounding either to a float first reads 2.
+    let recording = Recording::with_ticks(2, |publication| {
+        let mut tick = tick(publication == 2);
+        tick.memory.pageins = 9_007_199_254_740_991 + 2 * publication;
+        tick
+    });
+    recording.seal();
+    let mut session = Session::open(&recording.root).unwrap();
+
+    let response = session.select(1001, 0).unwrap();
+
+    assert_eq!(response["summary"]["memory_pageins_per_second"], 1.0);
+}
+
+#[test]
+fn a_minute_with_other_gpu_states_than_its_ticks_declare_refuses() {
+    // Goal: a lost state's row never reads as a different GPU rate, where the same recording whole
+    // reads 40% in the test below.
+    // Method: drop the last saved state row, which belongs to the later reading, and select it.
+    let recording = Recording::new();
+    recording.seal_with(|directory| {
+        crate::recording::damage_table_file(&directory.join("gpu_states.parquet"), |frame| {
+            frame.head(Some(frame.height() - 1))
+        });
+    });
+    let mut session = Session::open(&recording.root).unwrap();
+
+    let result = session.select(1001, 0);
+
+    assert!(
+        matches!(result, Err(Error::Bound("GPU state rows"))),
+        "{result:?}"
+    );
+}
+
+#[test]
 fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
     // Goal: sealing cannot change any public scalar field or source identity.
     // Method: project one source window through the live encoder, then seal and query it.
     let recording = Recording::new();
-    let tables = recording.project();
     let previous = Observation {
         window: 0,
         publication: 1,
@@ -349,7 +391,7 @@ fn keeps_the_unsealed_encoder_projection_equal_to_saved_resource_scalars() {
         wall: 1_001_000_000_000,
         continuous: Some(3_000_000_000),
     };
-    let mut unsealed = point(&tables, &current, Some(&previous), 1).unwrap();
+    let mut unsealed = recording.point(&current, Some(&previous));
     unsealed["run"] =
         json!(collector::recording::identity_text(recording.window.identity.run.run).to_string());
     unsealed["boot"] =
@@ -437,19 +479,6 @@ fn refuses_an_admitted_empty_fan_source_without_its_rpm_column() {
             .unwrap();
     });
     let mut session = Session::open(&recording.root).unwrap();
-    let fans = session.table(0, "fans").unwrap();
-    assert_eq!(fans.columns, ["publication", "fan"]);
-    assert!(fans.rows.is_empty());
-    let ticks = session.table(0, "ticks").unwrap();
-    assert_eq!(ticks.rows.len(), 2);
-    assert_eq!(
-        ticks.field(&ticks.rows[0], "smc_read").unwrap(),
-        Some("true")
-    );
-    assert_eq!(
-        ticks.field(&ticks.rows[1], "smc_read").unwrap(),
-        Some("true")
-    );
 
     let result = session.select(1001, 0);
 

@@ -73,7 +73,7 @@ fn retains_a_start_only_app_at_its_next_publication_exit() {
     assert_eq!(restored, detail);
     assert_eq!(restored["app"]["members"], 1);
     assert_eq!(restored["app"]["live_members"], 0);
-    assert_eq!(restored["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(restored["app"]["resident_bytes"]["known"], 0);
     assert_eq!(
         restored["app"]["cpu_percent_one_core"],
         serde_json::Value::Null
@@ -109,7 +109,7 @@ fn retains_an_event_only_app_from_the_adjacent_publication_after_reopen() {
     let detail = live.app_detail(kind, key, 0).unwrap();
     assert_eq!(detail["app"]["members"], 1);
     assert_eq!(detail["app"]["live_members"], 0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 0);
     assert_eq!(
         detail["app"]["cpu_percent_one_core"],
         serde_json::Value::Null
@@ -117,7 +117,7 @@ fn retains_an_event_only_app_from_the_adjacent_publication_after_reopen() {
     assert_eq!(detail["app"]["energy_joules"], serde_json::Value::Null);
     assert_eq!(
         detail["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
     fixture.seal();
     collector::recording::Registry {
@@ -198,7 +198,7 @@ fn retains_an_app_observed_at_exec_before_its_verified_exit() {
         .unwrap();
     assert_eq!(detail["app"]["members"], 1);
     assert_eq!(detail["app"]["live_members"], 0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 0);
     assert_eq!(
         detail["app"]["cpu_percent_one_core"],
         serde_json::Value::Null
@@ -211,7 +211,7 @@ fn retains_an_app_observed_at_exec_before_its_verified_exit() {
     );
     assert_eq!(
         detail["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
 }
 
@@ -335,10 +335,10 @@ fn associates_exec_bytes_beside_both_scheduled_and_start_programs() {
         started["processes"][0]["executable_name"]["display"],
         "start"
     );
-    assert_eq!(started["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(started["app"]["resident_bytes"]["known"], 0);
     assert_eq!(
         started["processes"][0]["resident_bytes"]["known"],
-        "52428800"
+        52_428_800
     );
 }
 

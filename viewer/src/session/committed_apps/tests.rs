@@ -26,7 +26,7 @@ fn normalizes_processes_and_events_once_for_a_same_window_pair() {
     let restored = session.with_app_sample(&selected, page).unwrap();
 
     assert_eq!(session.source_reads.get() - before, 4);
-    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], 1);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn normalizes_each_distinct_window_for_a_cross_window_pair() {
     let restored = session.with_app_sample(&selected, page).unwrap();
 
     assert_eq!(session.source_reads.get() - before, 6);
-    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], 1);
 }
 
 #[test]
@@ -69,8 +69,8 @@ fn restores_exact_selection_lazily_and_reuses_one_owned_sample() {
     assert_eq!(restored, repeated);
     assert_eq!(session.source_reads.get(), reads);
     assert_eq!(restored["selected"]["stamp"]["publication"], "2");
-    assert_eq!(restored["elapsed_ns"], "1000000000");
-    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored["elapsed_ns"], 1_000_000_000);
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], 1);
     assert_eq!(restored["apps"][1]["resident_bytes"]["measured_members"], 0);
     assert!(!restored["membership_complete"].as_bool().unwrap());
     assert!(
@@ -202,7 +202,7 @@ fn retains_legacy_numeric_gauges_with_unsupported_app_identity() {
 
     assert_eq!(restored["app_count"], 0);
     assert_eq!(restored["ungrouped_members"], 1);
-    assert_eq!(restored["processes"][0]["resident_bytes"]["known"], "11");
+    assert_eq!(restored["processes"][0]["resident_bytes"]["known"], 11);
     assert_eq!(restored["processes"][0]["creation"], Value::Null);
     assert_eq!(
         restored["processes"][0]["program_unavailable"],
@@ -251,8 +251,8 @@ fn restores_the_exact_predecessor_from_the_adjacent_committed_minute() {
     assert_eq!(restored["selected"]["run_tick"], "60");
     assert_eq!(restored["selected"]["stamp"]["publication"], "2");
     assert_eq!(restored["previous"]["publication"], "1");
-    assert_eq!(restored["elapsed_ns"], "1000000000");
-    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored["elapsed_ns"], 1_000_000_000);
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], 1);
 }
 
 #[test]
@@ -377,8 +377,8 @@ fn retains_a_measured_interval_when_the_saved_awake_clocks_are_equal() {
     let restored = session.with_app_sample(&selected, page).unwrap();
 
     assert_eq!(restored["previous"]["publication"], "1");
-    assert_eq!(restored["elapsed_ns"], "1000000000");
-    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored["elapsed_ns"], 1_000_000_000);
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], 1);
     assert_eq!(restored["apps"][0]["cpu_ns"]["measured_members"], 1);
 }
 
@@ -397,8 +397,8 @@ fn assert_saved_wall_rates(previous_wall: u64, alternative: usize) {
     let restored = session.with_app_sample(&selected, page).unwrap();
     assert_eq!(restored["selected"]["stamp"]["publication"], "2");
     assert_eq!(restored["previous"]["publication"], "1");
-    assert_eq!(restored["elapsed_ns"], "1000000000");
-    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored["elapsed_ns"], 1_000_000_000);
+    assert_eq!(restored["apps"][0]["cpu_ns"]["known"], 1);
     assert_eq!(restored["apps"][0]["cpu_ns"]["measured_members"], 1);
 }
 
@@ -425,7 +425,7 @@ fn assert_rates_unavailable(restored: &Value, awake_ns: Option<&str>) {
     assert_eq!(restored["previous"], previous);
     assert_eq!(restored["elapsed_ns"], Value::Null);
     assert_eq!(restored["apps"][0]["key"]["display"], "/Apps/Current.app");
-    assert_eq!(restored["apps"][0]["resident_bytes"]["known"], "11");
+    assert_eq!(restored["apps"][0]["resident_bytes"]["known"], 11);
     assert_eq!(restored["apps"][0]["cpu_ns"]["measured_members"], 0);
     assert_eq!(restored["apps"][0]["energy_nj"]["measured_members"], 0);
     assert_eq!(restored["apps"][0]["cpu_percent_one_core"], Value::Null);

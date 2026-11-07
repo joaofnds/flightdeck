@@ -1,5 +1,7 @@
 use super::*;
-use crate::data::Table;
+use crate::cpu_history_sample::counters_rows;
+use crate::recording::CpuRow;
+use collector::machine::CPUTicks;
 
 #[test]
 fn derives_each_logical_cpu_activity_from_its_own_counter_interval() {
@@ -30,37 +32,27 @@ fn sample(publication: u64, counters: Vec<[u64; 4]>) -> Sample {
             wall: publication * 1_000_000_000,
             continuous: Some(publication * 1_000_000_000),
         },
-        cpus: Source::Saved(Table {
-            columns: [
-                "publication",
-                "cpu",
-                "user_ticks",
-                "system_ticks",
-                "nice_ticks",
-                "idle_ticks",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-            rows: counters
-                .into_iter()
-                .enumerate()
-                .map(|(cpu, values)| {
-                    std::iter::once(publication.to_string())
-                        .chain(std::iter::once(cpu.to_string()))
-                        .chain(values.map(|value| value.to_string()))
-                        .map(Some)
-                        .collect()
-                })
-                .collect(),
-        }),
+        cpus: counters
+            .into_iter()
+            .map(|values| values.map(Some))
+            .collect(),
     }
 }
 
-fn table(sample: &mut Sample) -> &mut Table {
-    match &mut sample.cpus {
-        Source::Saved(table) => table,
-        Source::Native(_) => unreachable!(),
-    }
+/// `count` CPU rows of one publication, each its index as its user ticks.
+fn cpu_rows(publication: u64, count: u32) -> Vec<CpuRow> {
+    (0..count)
+        .map(|cpu| CpuRow {
+            publication,
+            cpu,
+            ticks: CPUTicks {
+                user: cpu,
+                system: 0,
+                nice: 0,
+                idle: 0,
+            },
+        })
+        .collect()
 }
 
 macro_rules! unavailable_case {
@@ -92,7 +84,6 @@ unavailable_case!(
     gaps_when_a_publication_is_missing,
     |current: &mut Sample| {
         current.observation.publication += 1;
-        table(current).rows[0][0] = Some("3".to_owned());
     }
 );
 unavailable_case!(gaps_when_a_run_tick_is_missing, |current: &mut Sample| {
@@ -122,7 +113,7 @@ fn retains_independent_unavailable_and_available_cpus() {
             [10, 0, 10, 30],
         ],
     );
-    table(&mut current).rows[1][2] = None;
+    current.cpus[1][0] = None;
 
     let result = project(&current, Some(&previous)).unwrap();
 
@@ -134,24 +125,6 @@ fn retains_independent_unavailable_and_available_cpus() {
         ])
     );
     assert_eq!(result["interval_available"], true);
-}
-
-#[test]
-fn matches_reordered_rows_by_logical_index() {
-    // Goal: table order does not change CPU identity or activity.
-    // Method: reverse one of two complete counter domains.
-    let previous = sample(1, vec![[0, 0, 0, 0]; 2]);
-    let mut current = sample(2, vec![[25, 0, 0, 75], [75, 0, 0, 25]]);
-    table(&mut current).rows.reverse();
-
-    let result = project(&current, Some(&previous)).unwrap();
-
-    assert_eq!(
-        result["cpus"],
-        json!([
-            {"cpu":0,"busy_percent":25.0}, {"cpu":1,"busy_percent":75.0}
-        ])
-    );
 }
 
 #[test]
@@ -174,15 +147,16 @@ fn gaps_every_cpu_when_the_complete_domain_changes() {
 }
 
 macro_rules! invalid_domain_case {
-    ($name:ident, $change:expr, $reason:literal) => {
+    ($name:ident, $cpu:literal, $reason:literal) => {
         #[test]
         fn $name() {
-            // Goal: malformed CPU identity domains are rejected at the bounded projection.
+            // Goal: malformed CPU identity domains are refused where their rows are read.
             // Method: corrupt one complete domain and compare the typed boundary error.
-            let mut current = sample(2, vec![[25, 0, 0, 75]; 2]);
-            $change(&mut current);
+            let mut rows = cpu_rows(2, 2);
+            rows[1].cpu = $cpu;
+            let mut counters = Vec::new();
 
-            let result = project(&current, None);
+            let result = counters_rows(&rows, &mut counters);
 
             assert!(matches!(result, Err(Error::Bound($reason))), "{result:?}");
         }
@@ -190,31 +164,13 @@ macro_rules! invalid_domain_case {
 }
 invalid_domain_case!(
     rejects_duplicate_cpu_indices,
-    |current: &mut Sample| {
-        table(current).rows[1][1] = Some("0".to_owned());
-    },
-    "duplicate logical CPU index"
-);
-invalid_domain_case!(
-    rejects_incomplete_cpu_domains,
-    |current: &mut Sample| {
-        table(current).rows[1][1] = Some("2".to_owned());
-    },
+    0,
     "incomplete logical CPU domain"
 );
 invalid_domain_case!(
-    rejects_oversized_cpu_indices,
-    |current: &mut Sample| {
-        table(current).rows[1][1] = Some("4294967296".to_owned());
-    },
-    "logical CPU index"
-);
-invalid_domain_case!(
-    rejects_foreign_publication_rows,
-    |current: &mut Sample| {
-        table(current).rows[1][0] = Some("1".to_owned());
-    },
-    "CPU detail publication"
+    rejects_incomplete_cpu_domains,
+    2,
+    "incomplete logical CPU domain"
 );
 
 #[test]
@@ -234,9 +190,10 @@ fn keeps_the_maximum_cpu_domain_inside_the_projection_byte_bound() {
 fn rejects_cpu_counts_above_the_projection_bound() {
     // Goal: a source cannot bypass the fixed logical CPU admission limit.
     // Method: supply one more independently indexed row than the bound.
-    let current = sample(1, vec![[0, 0, 0, 0]; 1025]);
+    let rows = cpu_rows(1, 1025);
+    let mut counters = Vec::new();
 
-    let result = project(&current, None);
+    let result = counters_rows(&rows, &mut counters);
 
     assert!(matches!(result, Err(Error::Bound("logical CPU count"))));
 }

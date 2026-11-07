@@ -441,27 +441,18 @@ fn reports_retention_limits_without_fabricating_dropped_cpu_values() {
             publication,
             wall: 1001 * NS + publication * 100_000,
         });
-        let table = Table {
-            columns: [
-                "publication",
-                "cpu",
-                "user_ticks",
-                "system_ticks",
-                "nice_ticks",
-                "idle_ticks",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-            rows: vec![vec![
-                Some(publication.to_string()),
-                Some("0".to_owned()),
-                Some(publication.to_string()),
-                Some("0".to_owned()),
-                Some("0".to_owned()),
-                Some(publication.to_string()),
-            ]],
+        let ticks = u32::try_from(publication).unwrap();
+        let row = crate::recording::CpuRow {
+            publication,
+            cpu: 0,
+            ticks: collector::machine::CPUTicks {
+                user: ticks,
+                system: 0,
+                nice: 0,
+                idle: ticks,
+            },
         };
-        history.capture(&identity, &table).unwrap();
+        history.capture_rows(&identity, &[row]).unwrap();
         if publication <= 4096 {
             context.push(identity);
         }

@@ -26,12 +26,12 @@ fn rehydrates_adjacent_event_only_app_identity() {
     assert_eq!(detail, expected);
     assert_eq!(detail["app"]["members"], 1);
     assert_eq!(detail["app"]["live_members"], 0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 0);
     assert_eq!(detail["app"]["cpu_percent_one_core"], Value::Null);
     assert_eq!(detail["app"]["energy_joules"], Value::Null);
     assert_eq!(
         detail["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
     assert_eq!(session.sources[0].reader.next_publication(), cursor);
     assert_eq!(session.sources[0].reader.next_event(), event_cursor);
@@ -161,7 +161,7 @@ fn keeps_verified_exit_facts_without_rates_across_a_run_tick_gap() {
     gap_exit_outputs(&Ok(last), &mut observed);
 
     assert_eq!(observed[0]["detail"]["elapsed_ns"], Value::Null);
-    gap_exit_assert(&observed[0], "exited_verified", &["125829120", "131072000"]);
+    gap_exit_assert(&observed[0], "exited_verified", &[125_829_120, 131_072_000]);
     assert_eq!(observed[0], observed[1]);
     assert_eq!(observed[0], observed[2]);
     gap_exit_assert_loading(&observed[3]);
@@ -181,7 +181,7 @@ fn restores_unverified_exit_last_gauges_across_a_saved_run_tick_gap() {
     gap_exit_assert(
         &observed[1],
         "exited_unverified",
-        &["104857600", "110000000"],
+        &[104_857_600, 110_000_000],
     );
     assert_eq!(observed[1], observed[0]);
     assert_eq!(observed[1], observed[2]);
@@ -369,7 +369,7 @@ fn gap_exit_sealed(fixture: &identity_fixture::Fixture, saved: &Session, output:
         .unwrap();
 }
 
-fn gap_exit_assert(observed: &Value, state: &str, gauges: &[&str; 2]) {
+fn gap_exit_assert(observed: &Value, state: &str, gauges: &[u64; 2]) {
     let apps = &observed["apps"];
     let detail = &observed["detail"];
     assert_eq!(apps["app_count"], 1);
@@ -403,9 +403,9 @@ fn gap_exit_assert(observed: &Value, state: &str, gauges: &[&str; 2]) {
 }
 
 fn gap_exit_app() -> Value {
-    let interval = json!({"known": "0", "measured_members": 0,
+    let interval = json!({"known": 0, "measured_members": 0,
         "unavailable_members": 1, "overflowed": false});
-    let empty = json!({"known": "0", "measured_members": 0,
+    let empty = json!({"known": 0, "measured_members": 0,
         "unavailable_members": 0, "overflowed": false});
     json!({"app_index": 0, "display_name": "Current.app",
         "key": {"kind": "bundle", "bytes_hex": "2f417070732f43757272656e742e617070",
@@ -419,7 +419,7 @@ fn gap_exit_app() -> Value {
         "gpu_percent": null})
 }
 
-fn gap_exit_process(state: &str, gauges: &[&str; 2]) -> Value {
+fn gap_exit_process(state: &str, gauges: &[u64; 2]) -> Value {
     let interval = json!({"known": null, "unavailable": "interval"});
     json!({"pid": 7, "creation": {"unique_id": "7", "pid_version": -7},
         "app_index": 0, "executable_name": {"bytes_hex": "63757272656e74", "display": "current"},
@@ -466,8 +466,8 @@ fn restores_rates_from_the_first_consecutive_successor_after_a_gap() {
     assert_eq!(gap["apps"][0]["cpu_ns"]["measured_members"], 0);
     assert_eq!(successor["previous"]["publication"], "2");
     assert_eq!(successor["previous"]["continuous_ns"], "2000000000");
-    assert_eq!(successor["elapsed_ns"], "1000000000");
-    assert_eq!(successor["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(successor["elapsed_ns"], 1_000_000_000);
+    assert_eq!(successor["apps"][0]["cpu_ns"]["known"], 1);
     let rate = successor["apps"][0]["cpu_percent_one_core"]
         .as_f64()
         .unwrap();

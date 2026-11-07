@@ -786,18 +786,18 @@ fn measure_value(value: &Value) -> Result<Option<u64>, String> {
     if measured == 0 {
         return Ok(None);
     }
-    decimal(&value["known"])
+    counter(&value["known"])
 }
 
-fn decimal(value: &Value) -> Result<Option<u64>, String> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(text) => text
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|error| error.to_string()),
-        _ => Err("Invalid exact counter".into()),
+fn counter(value: &Value) -> Result<Option<u64>, String> {
+    if value.is_null() {
+        return Ok(None);
     }
+
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| "Invalid exact counter".into())
 }
 
 fn unavailable(message: &str) -> AnyElement {

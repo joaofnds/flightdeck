@@ -449,7 +449,7 @@ fn withholds_app_rates_but_keeps_exit_evidence_after_a_missed_run_tick() {
 
 fn assert_gap_intervals(detail: &serde_json::Value) {
     assert_eq!(detail["elapsed_ns"], serde_json::Value::Null);
-    let interval = json!({"known": "0", "measured_members": 0,
+    let interval = json!({"known": 0, "measured_members": 0,
         "unavailable_members": detail["app"]["members"], "overflowed": false});
     for field in [
         "cpu_ns",

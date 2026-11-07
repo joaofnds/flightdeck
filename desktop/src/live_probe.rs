@@ -167,25 +167,10 @@ fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
             return Err(format!("Live route {route} has no selected observation"));
         }
     }
-    let tables: &[&str] = match route {
-        "overview" => &["fans"],
-        _ => &[],
-    };
-    if snapshot.pages.len() != tables.len() {
-        return Err(format!("Live route {route} returned the wrong table count"));
-    }
-    for table in tables {
-        let page = snapshot
-            .pages
-            .get(*table)
-            .ok_or_else(|| format!("Missing {table} page"))?;
-        probe_flat_identity(&page["observation"], &snapshot.selection["selected"])?;
-        let rows = page["rows"]
-            .as_array()
-            .ok_or_else(|| "Missing page rows".to_owned())?;
-        if rows.len() > 512 {
-            return Err("Live page exceeds 512 rows".to_owned());
-        }
+    if !snapshot.pages.is_empty() {
+        return Err(format!(
+            "Live route {route} returned a raw page it has no use for"
+        ));
     }
     if route == "apps" {
         probe_apps(snapshot)?;

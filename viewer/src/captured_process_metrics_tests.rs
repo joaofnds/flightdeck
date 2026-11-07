@@ -62,11 +62,11 @@ fn captured_two_second_rates_and_current_threads_survive_saved_reopen() {
     let point = &live["points"][1];
     assert_eq!(point["idle_wakeups_per_second"], 5.0);
     assert_eq!(point["pageins_per_second"], 3.0);
-    assert_eq!(point["idle_wakeups"]["known"], "10");
-    assert_eq!(point["pageins"]["known"], "6");
-    assert_eq!(point["threads"]["known"], "8");
-    assert_eq!(detail["processes"][0]["threads"]["known"], "3");
-    assert_eq!(detail["processes"][1]["threads"]["known"], "5");
+    assert_eq!(point["idle_wakeups"]["known"], 10);
+    assert_eq!(point["pageins"]["known"], 6);
+    assert_eq!(point["threads"]["known"], 8);
+    assert_eq!(detail["processes"][0]["threads"]["known"], 3);
+    assert_eq!(detail["processes"][1]["threads"]["known"], 5);
     assert_eq!(detail["processes"][0]["idle_wakeups_per_second"], 3.0);
     assert_eq!(detail["processes"][1]["pageins_per_second"], 1.0);
     assert_eq!(live["points"], saved["points"]);
@@ -106,10 +106,10 @@ fn reset_wakeups_keep_the_measured_peer_and_independent_pageins() {
     assert_eq!(
         actual["points"][1]["idle_wakeups"],
         json!({
-            "known":"6", "measured_members":1, "unavailable_members":1, "overflowed":false
+            "known":6, "measured_members":1, "unavailable_members":1, "overflowed":false
         })
     );
-    assert_eq!(actual["points"][1]["pageins"]["known"], "6");
+    assert_eq!(actual["points"][1]["pageins"]["known"], 6);
     assert_eq!(
         detail["processes"][0]["idle_wakeups"]["unavailable"],
         "counter_reset"
@@ -156,14 +156,9 @@ macro_rules! current_threads {
     };
 }
 
-current_threads!(negative_captured_threads_are_unavailable, -1, "0", 0);
-current_threads!(zero_captured_threads_are_measured, 0, "0", 1);
-current_threads!(
-    positive_captured_threads_need_no_elapsed_interval,
-    8,
-    "8",
-    1
-);
+current_threads!(negative_captured_threads_are_unavailable, -1, 0, 0);
+current_threads!(zero_captured_threads_are_measured, 0, 0, 1);
+current_threads!(positive_captured_threads_need_no_elapsed_interval, 8, 8, 1);
 
 #[test]
 fn verified_exits_keep_final_counter_deltas_without_a_present_thread_gauge() {
@@ -184,7 +179,7 @@ fn verified_exits_keep_final_counter_deltas_without_a_present_thread_gauge() {
     let actual = selected(&mut session);
     let detail = session.app_detail(KeyKind::Bundle, b"/A.app", 0).unwrap();
 
-    assert_eq!(actual["points"][1]["idle_wakeups"]["known"], "6");
+    assert_eq!(actual["points"][1]["idle_wakeups"]["known"], 6);
     assert_eq!(actual["points"][1]["threads"]["measured_members"], 0);
     assert_eq!(detail["processes"][0]["threads"]["known"], Value::Null);
 }
@@ -242,7 +237,7 @@ macro_rules! captured_lifetime {
                 $reason
             );
             assert_eq!(actual["points"][1]["idle_wakeups"]["measured_members"], 0);
-            assert_eq!(actual["points"][1]["threads"]["known"], "8");
+            assert_eq!(actual["points"][1]["threads"]["known"], 8);
         }
     };
 }
@@ -256,7 +251,7 @@ captured_lifetime!(
 captured_lifetime!(
     exec_keeps_process_counters_without_attributing_the_app_interval,
     |row: &mut named::Named<'_>| row.version += 1,
-    "6",
+    6,
     Value::Null
 );
 
@@ -284,7 +279,7 @@ fn zero_elapsed_keeps_current_threads_and_refuses_counter_rates() {
 
     assert_eq!(actual["points"][1]["idle_wakeups_per_second"], Value::Null);
     assert_eq!(actual["points"][1]["pageins_per_second"], Value::Null);
-    assert_eq!(actual["points"][1]["threads"]["known"], "1");
+    assert_eq!(actual["points"][1]["threads"]["known"], 1);
 }
 
 #[test]
@@ -395,8 +390,8 @@ fn ordinary_app_shape_stays_compact_while_process_groups_keep_ten_measures() {
             "pageins",
             "threads",
         ]
-        .map(|field| group_point[field]["known"].as_str().unwrap()),
-        ["0", "0", "0", "0", "0", "1024", "2048", "6", "4", "8"]
+        .map(|field| group_point[field]["known"].as_u64().unwrap()),
+        [0, 0, 0, 0, 0, 1024, 2048, 6, 4, 8]
     );
     assert_eq!(all.points[1].readings[0].measures.len(), 10);
     fixture.seal();

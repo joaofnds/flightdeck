@@ -1,20 +1,13 @@
-use super::{ContextRange, NS, OBSERVATIONS_MAX, Observation, Session, partition};
+use super::{ContextRange, NS, OBSERVATIONS_MAX, Observation, Session};
 use crate::cpu_history::{self, Cache, Entry};
 use crate::cpu_history_sample::{self, CounterSample, Identity, Interval};
-use crate::data::{self, Table};
+use crate::recording::CpuRow;
 use persistence::{Error, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 const BATCH_OBSERVATIONS_MAX: usize = 64;
 const BATCH_PUBLICATIONS_MAX: usize = BATCH_OBSERVATIONS_MAX * 2;
-
-struct CpuQuery<'a> {
-    window: usize,
-    table: &'a str,
-    predicate: &'a str,
-    rows_max: usize,
-}
 
 impl Session {
     pub fn cpu_history(&mut self, offset: u32) -> Result<Value> {
@@ -59,7 +52,6 @@ impl Session {
             return Ok(());
         }
 
-        self.operation.attach(&self.connection)?;
         let operation = self.operation.begin(self.operation.epoch())?;
         operation.run(|| {
             let observations = self.observations(range)?;
@@ -184,47 +176,14 @@ impl Session {
     ) -> Result<()> {
         assert!(publications.len() <= BATCH_PUBLICATIONS_MAX);
 
-        let predicate = publications
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut ticks = None;
-        self.cpu_history_query(
-            &CpuQuery {
-                window,
-                table: "ticks",
-                predicate: &predicate,
-                rows_max: publications.len(),
-            },
-            &mut ticks,
-        )?;
-        let rows_max = publications.len() * cpu_history_sample::CPUS_MAX;
-        let mut cpus = None;
-        self.cpu_history_query(
-            &CpuQuery {
-                window,
-                table: "cpus",
-                predicate: &predicate,
-                rows_max,
-            },
-            &mut cpus,
-        )?;
-        let ticks = ticks
-            .as_ref()
-            .ok_or(Error::Bound("CPU history tick output"))?;
-        let mut cpus = partition(
-            cpus.as_ref()
-                .ok_or(Error::Bound("CPU history table output"))?,
-        )?;
-        for row in &ticks.rows {
+        let minute = self.reader().minute_cpus(window)?;
+        for reading in crate::store::readings(&minute) {
             self.operation.check()?;
-            if ticks.integer(row, "wall_ns")?.is_none() {
-                continue;
+            if publications.contains(&reading.tick.publication) {
+                if let Some(observation) = Observation::of_tick(reading.tick, window) {
+                    self.cpu_history_sample(&observation, reading.cpus, output)?;
+                }
             }
-
-            let observation = Observation::from_row(ticks, row, window)?;
-            self.cpu_history_sample(&observation, &mut cpus, output)?;
         }
 
         Ok(())
@@ -233,15 +192,13 @@ impl Session {
     fn cpu_history_sample(
         &self,
         observation: &Observation,
-        cpus: &mut BTreeMap<u64, Table>,
+        cpus: &[CpuRow],
         output: &mut BTreeMap<(usize, u64), CounterSample>,
     ) -> Result<()> {
         let mut identity = None;
         Identity::read(&observation.json(&self.windows), observation, &mut identity)?;
         let mut counters = Vec::new();
-        if let Some(table) = cpus.remove(&observation.publication) {
-            cpu_history_sample::counters(&table, observation.publication, &mut counters)?;
-        }
+        cpu_history_sample::counters_rows(cpus, &mut counters)?;
 
         let sample = CounterSample {
             identity: identity.ok_or(Error::Bound("CPU history sample identity"))?,
@@ -253,24 +210,6 @@ impl Session {
         {
             return Err(Error::Bound("duplicate CPU history tick"));
         }
-
-        Ok(())
-    }
-
-    fn cpu_history_query(&self, query: &CpuQuery<'_>, output: &mut Option<Table>) -> Result<()> {
-        assert!(output.is_none());
-        assert!(query.rows_max <= BATCH_PUBLICATIONS_MAX * cpu_history_sample::CPUS_MAX);
-
-        let _observation = self.source_scope(query.window, Some(query.table));
-        let source = self.source(query.window, query.table)?;
-        let limit = query.rows_max + 1;
-        let predicate = query.predicate;
-        *output = Some(data::query(
-            &self.connection,
-            &format!("SELECT * FROM {source} WHERE publication IN ({predicate}) LIMIT {limit}"),
-            query.rows_max,
-            &self.operation,
-        )?);
 
         Ok(())
     }

@@ -31,8 +31,8 @@ fn retained_app_trace_matches_the_saved_live_session() {
 
     assert_eq!(trace_fields(&shown), trace_fields(&expected));
     assert_eq!(shown["points"][0]["segment"], "0");
-    assert_eq!(shown["points"][1]["cpu_ns"]["known"], "1");
-    assert_eq!(shown["points"][1]["resident_bytes"]["known"], "11");
+    assert_eq!(shown["points"][1]["cpu_ns"]["known"], 1);
+    assert_eq!(shown["points"][1]["resident_bytes"]["known"], 11);
 }
 
 #[test]

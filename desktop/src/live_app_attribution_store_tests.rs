@@ -171,7 +171,7 @@ fn worker_history(seconds: &[MachineSecond; 4]) -> Value {
 /// A point of `charted`'s readings at `observation`, in segment `segment`.
 fn worker_point(observation: &Value, segment: u64) -> Value {
     json!({"observation": observation, "segment": segment.to_string(),
-        "elapsed_ns": "1000000000", "source_available": true, "membership_complete": true,
+        "elapsed_ns": 1_000_000_000, "source_available": true, "membership_complete": true,
         "ungrouped_members": 0, "usage_refused": 0, "usage_gone": 0,
         "apps": [worker_reading(500_000_000, 50.0), worker_reading(250_000_000, 25.0)],
         "other": {"app_count": 1, "membership_complete": true,

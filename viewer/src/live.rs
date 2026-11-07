@@ -903,7 +903,7 @@ impl LiveSession {
         *output = Some(crate::cpu_detail::Sample {
             identity: observation.json(),
             observation: observation.observation.clone(),
-            cpus: crate::cpu_detail::Source::Native(counters),
+            cpus: counters,
         });
 
         Ok(())
@@ -3888,7 +3888,7 @@ mod tests {
         assert_eq!(history["points"][1]["resident_bytes"], Value::Null);
         assert_eq!(history["coverage"]["retention_limited"], true);
         assert!(history["restoration_error"].is_string());
-        assert_eq!(detail["app"]["resident_bytes"]["known"], "11");
+        assert_eq!(detail["app"]["resident_bytes"]["known"], 11);
         std::fs::rename(&withheld, &data).unwrap();
     }
 

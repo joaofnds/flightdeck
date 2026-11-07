@@ -597,28 +597,21 @@ fn number(value: &Value) -> Result<Option<f32>, String> {
 }
 
 fn scalar(value: &Value) -> Result<Option<f32>, String> {
-    if value.is_null() {
-        return Ok(None);
+    match value {
+        Value::Null => Ok(None),
+        Value::Number(_) => finite_number(value)
+            .map(Some)
+            .ok_or_else(|| "Nonfinite live chart quantity".to_owned()),
+        _ => Err("Invalid live chart quantity".to_owned()),
     }
-    let text = match value {
-        Value::String(text) => return scalar_text(text),
-        Value::Number(value) => value.to_string(),
-        _ => return Err("Invalid live chart quantity".to_owned()),
-    };
-    scalar_text(&text)
 }
 
-fn scalar_text(text: &str) -> Result<Option<f32>, String> {
-    if text.len() > 64 {
-        return Err("Live chart quantity exceeds its bound".to_owned());
-    }
-
-    let value = text.parse::<f32>().map_err(|error| error.to_string())?;
-    if !value.is_finite() {
-        return Err("Nonfinite live chart quantity".to_owned());
-    }
-
-    Ok(Some(value))
+/// The number `value` holds, none where it holds no number or one past what an `f32` can hold.
+pub(crate) fn finite_number(value: &Value) -> Option<f32> {
+    value
+        .as_f64()
+        .and_then(|number| number.to_f32())
+        .filter(|number| number.is_finite())
 }
 
 /// A reading as the prototype's `axisValue` writes it: a unit below 1 takes its smaller

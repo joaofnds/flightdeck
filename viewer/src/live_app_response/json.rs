@@ -234,7 +234,7 @@ fn header_json(header: &Header) -> Value {
     json!({
         "selected": observation(&header.selected),
         "previous": header.previous.as_ref().map(stamp),
-        "elapsed_ns": header.elapsed_ns.map(|value| value.to_string()),
+        "elapsed_ns": header.elapsed_ns,
         "membership_complete": header.membership_complete,
         "ungrouped_members": header.ungrouped_members,
         "usage_refused": header.usage_refused,
@@ -371,13 +371,13 @@ fn disk_rate(bytes: Option<u64>, elapsed_ns: Option<u64>) -> Option<f64> {
 }
 
 pub(super) fn measure(value: &Measure) -> Value {
-    json!({ "known": value.known.to_string(), "measured_members": value.measured_members,
+    json!({ "known": value.known, "measured_members": value.measured_members,
         "unavailable_members": value.unavailable_members, "overflowed": value.overflowed })
 }
 
 fn amount(value: Amount) -> Value {
     match value {
-        Amount::Known(value) => json!({ "known": value.to_string(), "unavailable": null }),
+        Amount::Known(value) => json!({ "known": value, "unavailable": null }),
         Amount::Unavailable(value) => json!({ "known": null, "unavailable": reason(value) }),
     }
 }

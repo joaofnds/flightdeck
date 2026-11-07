@@ -14,12 +14,7 @@ const _: () = {
 pub(crate) struct Sample {
     pub identity: Value,
     pub observation: Observation,
-    pub cpus: Source,
-}
-
-pub(crate) enum Source {
-    Saved(crate::data::Table),
-    Native(cpu_history_sample::Counters),
+    pub cpus: cpu_history_sample::Counters,
 }
 
 pub(crate) struct Presentation<'a> {
@@ -81,17 +76,9 @@ fn project_sample(sample: &Sample, output: &mut Option<CounterSample>) -> Result
 
     let mut identity = None;
     Identity::read(&sample.identity, &sample.observation, &mut identity)?;
-    let counters = match &sample.cpus {
-        Source::Native(counters) => counters.clone(),
-        Source::Saved(table) => {
-            let mut counters = Vec::new();
-            cpu_history_sample::counters(table, sample.observation.publication, &mut counters)?;
-            counters
-        }
-    };
     *output = Some(CounterSample {
         identity: identity.ok_or(Error::Bound("CPU identity"))?,
-        counters,
+        counters: sample.cpus.clone(),
     });
 
     Ok(())

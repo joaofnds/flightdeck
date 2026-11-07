@@ -346,7 +346,7 @@ mod tests {
             "run_tick":"2","stamp":{"run":["1","2"],"boot":["3","4"],
                 "publication":"2","continuous_ns":"3000000000","awake_ns":"700000000"}});
         let measure = |known: u64| {
-            json!({"known":known.to_string(),"measured_members":1,
+            json!({"known":known,"measured_members":1,
                 "unavailable_members":0,"overflowed":false})
         };
         let gap = json!({"observation":{"recording":["5","6"],"wall_ns":"998000000000",

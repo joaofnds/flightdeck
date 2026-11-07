@@ -81,13 +81,10 @@ fn resident_history_keeps_interval_leaders_when_the_current_leader_changes() {
     );
     assert_eq!(response["cohort"][0]["sum_bytes"], "200");
     assert_eq!(response["cohort"][0]["samples"], 2);
-    assert_eq!(
-        response["points"][0]["other"]["resident_bytes"]["known"],
-        "0"
-    );
+    assert_eq!(response["points"][0]["other"]["resident_bytes"]["known"], 0);
     assert_eq!(
         response["points"][1]["other"]["resident_bytes"]["known"],
-        "100"
+        100
     );
 }
 
@@ -112,11 +109,11 @@ fn resident_history_compares_exact_means_and_skips_unavailable_denominators() {
     assert_eq!(response["points"][0]["apps"][0]["unavailable_members"], 1);
     assert_eq!(
         response["points"][1]["apps"][0]["known"],
-        "9007199254740993"
+        9_007_199_254_740_993_u64
     );
     assert_eq!(
         response["points"][1]["other"]["resident_bytes"]["known"],
-        "9007199254740992"
+        9_007_199_254_740_992_u64
     );
 }
 
@@ -141,8 +138,8 @@ fn resident_history_preserves_distinct_observations_in_the_same_wall_second() {
         response["points"][1]["observation"]["stamp"]["publication"],
         "2"
     );
-    assert_eq!(response["points"][0]["apps"][0]["known"], "10");
-    assert_eq!(response["points"][1]["apps"][0]["known"], "90");
+    assert_eq!(response["points"][0]["apps"][0]["known"], 10);
+    assert_eq!(response["points"][1]["apps"][0]["known"], 90);
     assert_eq!(response["points"][1]["segment"], "1");
     assert_eq!(
         response["points"][0]["other"]["resident_bytes"],
@@ -192,12 +189,12 @@ fn resident_history_keeps_partial_residents_eligible_and_refused_readings_unavai
     assert_eq!(response["cohort"][0]["samples"], 1);
     assert_eq!(
         response["points"][0]["apps"][0],
-        json!({"known":"10",
+        json!({"known":10,
         "measured_members":1,"unavailable_members":1,"overflowed":false})
     );
     assert_eq!(
         response["points"][1]["apps"][0],
-        json!({"known":"0",
+        json!({"known":0,
         "measured_members":0,"unavailable_members":2,"overflowed":false})
     );
 }
@@ -318,7 +315,7 @@ fn resident_history_preserves_context_gaps_after_compact_facts_are_evicted() {
     );
     assert_eq!(response["points"][0]["other"], Value::Null);
     assert_eq!(response["points"][399]["source_available"], true);
-    assert_eq!(response["points"][399]["apps"][0]["known"], "1");
+    assert_eq!(response["points"][399]["apps"][0]["known"], 1);
     assert_eq!(response["coverage"]["retention_limited"], true);
     drop(session);
     drop(fixture);

@@ -602,7 +602,7 @@ impl InputDriver {
             let mut snapshot = accepted_snapshot(dashboard.generation);
             let mut history = disk_fixture();
             for point in history["points"].as_array_mut().unwrap() {
-                point["apps"][0]["disk_io_bytes"]["known"] = json!("20");
+                point["apps"][0]["disk_io_bytes"]["known"] = json!(20);
                 point["apps"][0]["disk_io_bps"] = json!(10.0);
             }
             snapshot.app_attribution_history =
@@ -659,9 +659,9 @@ fn two_disk_apps_history() -> serde_json::Value {
         {"key":{"kind":"bundle","bytes_hex":"42","display":"Higher"}}]);
     for point in history["points"].as_array_mut().unwrap() {
         let mut higher = point["apps"][0].clone();
-        point["apps"][0]["disk_io_bytes"]["known"] = json!("2000000");
+        point["apps"][0]["disk_io_bytes"]["known"] = json!(2_000_000);
         point["apps"][0]["disk_io_bps"] = json!(1_000_000.0);
-        higher["disk_io_bytes"]["known"] = json!("4000000");
+        higher["disk_io_bytes"]["known"] = json!(4_000_000);
         higher["disk_io_bps"] = json!(2_000_000.0);
         point["apps"].as_array_mut().unwrap().push(higher);
     }

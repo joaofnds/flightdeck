@@ -227,9 +227,8 @@ pub fn captured_reading(payload: &Value, panel: &str, index: Option<usize>) -> O
         return Some(format!("Unavailable · {unavailable} unavailable"));
     }
 
-    let known = match measure["known"].as_str()?.parse::<u64>() {
-        Ok(value) => value,
-        Err(error) => return Some(format!("Unavailable · invalid exact count: {error}")),
+    let Some(known) = measure["known"].as_u64() else {
+        return Some("Unavailable · invalid exact count".to_owned());
     };
 
     let reading = if field == "threads" {

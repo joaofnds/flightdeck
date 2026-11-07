@@ -52,8 +52,8 @@ fn restores_both_committed_points_without_a_selected_sample_projection() {
     assert_eq!(restored[0]["observation"]["stamp"]["publication"], "1");
     assert_eq!(restored[0]["cpu_ns"]["measured_members"], 0);
     assert_eq!(restored[1]["observation"], selected.json());
-    assert_eq!(restored[1]["cpu_ns"]["known"], "1");
-    assert_eq!(restored[1]["resident_bytes"]["known"], "11");
+    assert_eq!(restored[1]["cpu_ns"]["known"], 1);
+    assert_eq!(restored[1]["resident_bytes"]["known"], 11);
     assert!(session.app_sample_cache.borrow().is_none());
 }
 
@@ -153,8 +153,8 @@ fn restores_a_compatible_predecessor_across_committed_minutes() {
         .unwrap();
 
     assert_eq!(restored.as_array().unwrap().len(), 2);
-    assert_eq!(restored[1]["elapsed_ns"], "1000000000");
-    assert_eq!(restored[1]["cpu_ns"]["known"], "1");
+    assert_eq!(restored[1]["elapsed_ns"], 1_000_000_000);
+    assert_eq!(restored[1]["cpu_ns"]["known"], 1);
     assert_eq!(session.source_reads.get(), 6);
 }
 
@@ -179,8 +179,8 @@ fn reads_the_exact_predecessor_outside_the_plotted_wall_range() {
 
     assert_eq!(restored.as_array().unwrap().len(), 1);
     assert_eq!(restored[0]["observation"], selected.json());
-    assert_eq!(restored[0]["elapsed_ns"], "1000000000");
-    assert_eq!(restored[0]["cpu_ns"]["known"], "1");
+    assert_eq!(restored[0]["elapsed_ns"], 1_000_000_000);
+    assert_eq!(restored[0]["cpu_ns"]["known"], 1);
     assert_eq!(session.source_reads.get(), 3);
 }
 
@@ -209,7 +209,7 @@ fn leaves_rates_unavailable_across_a_missing_scheduled_tick() {
 
     assert_eq!(restored[1]["elapsed_ns"], Value::Null);
     assert_eq!(restored[1]["cpu_ns"]["measured_members"], 0);
-    assert_eq!(restored[1]["resident_bytes"]["known"], "11");
+    assert_eq!(restored[1]["resident_bytes"]["known"], 11);
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn retains_repeated_wall_second_observations_as_distinct_points() {
     assert_eq!(restored.as_array().unwrap().len(), 2);
     assert_eq!(restored[0]["observation"]["stamp"]["publication"], "1");
     assert_eq!(restored[1]["observation"]["stamp"]["publication"], "2");
-    assert_eq!(restored[1]["cpu_ns"]["known"], "1");
+    assert_eq!(restored[1]["cpu_ns"]["known"], 1);
 }
 
 #[test]
@@ -377,7 +377,7 @@ fn leaves_a_clockless_predecessor_out_of_the_trace_and_its_rate_baseline() {
     assert_eq!(restored[0]["observation"], selected.json());
     assert_eq!(restored[0]["elapsed_ns"], Value::Null);
     assert_eq!(restored[0]["cpu_ns"]["measured_members"], 0);
-    assert_eq!(restored[0]["resident_bytes"]["known"], "11");
+    assert_eq!(restored[0]["resident_bytes"]["known"], 11);
 }
 
 #[test]
@@ -406,7 +406,7 @@ fn leaves_rates_unavailable_when_saved_awake_time_decreases() {
 
     assert_eq!(restored[1]["elapsed_ns"], Value::Null);
     assert_eq!(restored[1]["cpu_ns"]["measured_members"], 0);
-    assert_eq!(restored[1]["resident_bytes"]["known"], "11");
+    assert_eq!(restored[1]["resident_bytes"]["known"], 11);
 }
 
 #[test]

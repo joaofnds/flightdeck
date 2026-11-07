@@ -36,9 +36,9 @@ macro_rules! disk_history_interval {
 
             assert_eq!(live, saved);
             assert_eq!(saved, warm);
-            assert_eq!(live["app"]["disk_read_bytes"]["known"], "4096");
-            assert_eq!(live["app"]["disk_written_bytes"]["known"], "1024");
-            assert_eq!(live["app"]["disk_io_bytes"]["known"], "5120");
+            assert_eq!(live["app"]["disk_read_bytes"]["known"], 4096);
+            assert_eq!(live["app"]["disk_written_bytes"]["known"], 1024);
+            assert_eq!(live["app"]["disk_io_bytes"]["known"], 5120);
             assert_eq!(live["app"]["disk_read_bps"], $read);
             assert_eq!(live["app"]["disk_written_bps"], $written);
             assert_eq!(live["app"]["disk_io_bps"], $combined);

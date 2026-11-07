@@ -393,8 +393,8 @@ fn measures_bounded_fan_projection_and_retained_json_cost() {
         let mut fans = None;
         source.raw.view("fans", &mut fans).unwrap();
         point["fan_rpm"] = crate::live_fan_history::capture_view(
-            &crate::metric_view::View::Native(ticks.unwrap()),
-            Some(&crate::metric_view::View::Native(fans.unwrap())),
+            &crate::metric_view::View(ticks.unwrap()),
+            Some(&crate::metric_view::View(fans.unwrap())),
             source.observation.publication,
         )
         .unwrap();

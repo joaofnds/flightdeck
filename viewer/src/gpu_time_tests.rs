@@ -21,7 +21,7 @@ fn an_apps_gpu_time_reads_the_same_live_and_from_the_replay_of_its_saved_minute(
     let saved = gpu_saved(&fixture);
 
     assert_eq!(live.detail["app"]["gpu_percent"], 25.0);
-    assert_eq!(gpu_of(&live.detail, 7)["known"], "250000000");
+    assert_eq!(gpu_of(&live.detail, 7)["known"], 250_000_000);
     assert_eq!(gpu_of(&live.detail, 8)["unavailable"], "unknown");
     assert_eq!(live.apps["metric"], "gpu");
     assert_eq!(live.apps["points"][1]["apps"][0]["gpu_percent"], 25.0);

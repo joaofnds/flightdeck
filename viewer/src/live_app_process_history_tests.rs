@@ -42,7 +42,7 @@ fn retains_selected_group_rates_and_exact_bytes_across_sealing() {
     let point = live["points"].as_array().unwrap().last().unwrap();
     assert_eq!(point["cpu_percent_one_core"], 25.0);
     assert_eq!(point["energy_watts"], 2.0);
-    assert_eq!(point["disk_read_bytes"]["known"], "4096");
+    assert_eq!(point["disk_read_bytes"]["known"], 4096);
     assert_eq!(point["disk_read_bps"], 2048.0);
     assert_eq!(point["disk_written_bps"], 512.0);
     assert_eq!(point["disk_io_bps"], 2560.0);
@@ -139,7 +139,7 @@ fn sums_same_byte_names_across_pids_without_merging_other_apps() {
         .unwrap();
 
     assert_eq!(grouped["points"][1]["members"], 2);
-    assert_eq!(grouped["points"][1]["resident_bytes"]["known"], "2048");
+    assert_eq!(grouped["points"][1]["resident_bytes"]["known"], 2048);
     assert_eq!(grouped["executable_name"]["bytes_hex"], "776f726b6572ff");
     assert_eq!(different["points"][1]["members"], Value::Null);
     assert_eq!(different["points"][1]["source_available"], true);
@@ -174,7 +174,7 @@ fn gaps_an_exec_crossing_inside_the_same_app() {
     assert_eq!(group["points"][0]["members"], Value::Null);
     assert_eq!(group["points"][1]["cpu_percent_one_core"], Value::Null);
     assert_eq!(group["points"][1]["cpu_ns"]["unavailable_members"], 1);
-    assert_eq!(group["points"][1]["resident_bytes"]["known"], "1024");
+    assert_eq!(group["points"][1]["resident_bytes"]["known"], 1024);
 }
 
 #[test]
@@ -216,13 +216,13 @@ fn retains_verified_exit_counters_without_carrying_memory_forward() {
         .unwrap();
 
     assert_eq!(reopened.catalog()["tail_ticks"], 0);
-    assert_eq!(saved["points"][1]["cpu_ns"], amount("100000000", 1));
-    assert_eq!(saved["points"][1]["energy_nj"], amount("200000000", 1));
-    assert_eq!(saved["points"][1]["disk_read_bytes"], amount("4096", 1));
-    assert_eq!(saved["points"][1]["disk_written_bytes"], amount("1024", 1));
-    assert_eq!(saved["points"][1]["disk_io_bytes"], amount("5120", 1));
-    assert_eq!(saved["points"][1]["resident_bytes"], amount("0", 0));
-    assert_eq!(saved["points"][1]["footprint_bytes"], amount("0", 0));
+    assert_eq!(saved["points"][1]["cpu_ns"], amount(100_000_000, 1));
+    assert_eq!(saved["points"][1]["energy_nj"], amount(200_000_000, 1));
+    assert_eq!(saved["points"][1]["disk_read_bytes"], amount(4_096, 1));
+    assert_eq!(saved["points"][1]["disk_written_bytes"], amount(1_024, 1));
+    assert_eq!(saved["points"][1]["disk_io_bytes"], amount(5_120, 1));
+    assert_eq!(saved["points"][1]["resident_bytes"], amount(0, 0));
+    assert_eq!(saved["points"][1]["footprint_bytes"], amount(0, 0));
     assert_eq!(saved["points"], group["points"]);
 }
 
@@ -252,7 +252,7 @@ fn retains_partial_group_coverage_instead_of_fabricating_missing_members() {
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
 
-    assert_eq!(group["points"][1]["resident_bytes"]["known"], "1024");
+    assert_eq!(group["points"][1]["resident_bytes"]["known"], 1024);
     assert_eq!(group["points"][1]["resident_bytes"]["measured_members"], 1);
     assert_eq!(
         group["points"][1]["resident_bytes"]["unavailable_members"],
@@ -337,7 +337,7 @@ fn trims_optional_groups_before_app_facts_under_a_full_live_context() {
     assert_eq!(group["coverage"]["retention_limited"], true);
     assert_eq!(group["points"][0]["source_available"], false);
     assert_eq!(group["points"][899]["source_available"], true);
-    assert_eq!(group["points"][899]["cpu_ns"]["known"], "1000");
+    assert_eq!(group["points"][899]["cpu_ns"]["known"], 1000);
     assert_eq!(cpu["points"], repeated["points"]);
     assert_eq!(power["points"].as_array().unwrap().len(), 900);
     assert!(group["coverage"]["cache_bytes"].as_u64().unwrap() <= 75_497_472);
@@ -477,7 +477,10 @@ fn preserves_large_group_amounts_and_suppresses_an_overflowed_gauge() {
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
 
-    assert_eq!(group["points"][1]["cpu_ns"]["known"], "9007199254740993");
+    assert_eq!(
+        group["points"][1]["cpu_ns"]["known"],
+        9_007_199_254_740_993_u64
+    );
     assert_eq!(group["points"][1]["resident_bytes"]["overflowed"], true);
     assert_eq!(group["points"][1]["resident_bytes"]["measured_members"], 1);
     assert_eq!(
@@ -518,8 +521,8 @@ fn retains_a_live_group_publication_omitted_inside_a_committed_range() {
         session.history.as_ref().unwrap().windows[0].publication_end,
         4
     );
-    assert_eq!(before["points"][1]["cpu_ns"]["known"], "100000000");
-    assert_eq!(before["points"][1]["disk_read_bytes"]["known"], "4096");
+    assert_eq!(before["points"][1]["cpu_ns"]["known"], 100_000_000);
+    assert_eq!(before["points"][1]["disk_read_bytes"]["known"], 4096);
     assert_eq!(after["points"], before["points"]);
     assert_eq!(after["coverage"]["retention_limited"], false);
 }
@@ -544,8 +547,8 @@ fn retains_a_live_group_interval_when_only_its_endpoint_is_committed() {
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
 
-    assert_eq!(before["points"][1]["energy_nj"]["known"], "200000000");
-    assert_eq!(before["points"][1]["disk_io_bytes"]["known"], "5120");
+    assert_eq!(before["points"][1]["energy_nj"]["known"], 200_000_000);
+    assert_eq!(before["points"][1]["disk_io_bytes"]["known"], 5120);
     assert_eq!(after["points"], before["points"]);
 }
 
@@ -569,7 +572,7 @@ fn retains_a_live_terminal_interval_when_its_baseline_is_not_committed() {
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
 
-    assert_eq!(before["points"][1]["disk_read_bytes"]["known"], "4096");
+    assert_eq!(before["points"][1]["disk_read_bytes"]["known"], 4096);
     assert_eq!(before["points"][1]["resident_bytes"]["measured_members"], 0);
     assert_eq!(after["points"], before["points"]);
 }
@@ -662,19 +665,19 @@ fn sums_independent_nonzero_member_amounts_and_rates_in_live_and_saved_history()
     assert_eq!(
         metric_values(&live["points"][1]),
         serde_json::json!({
-        "cpu_ns":amount("360000000",2),"energy_nj":amount("1000000000",2),
-        "resident_bytes":amount("3000",2),"footprint_bytes":amount("8000",2),
-        "disk_read_bytes":amount("3072",2),"disk_written_bytes":amount("768",2),
-        "disk_io_bytes":amount("3840",2),"cpu_percent_one_core":36.0,
+        "cpu_ns":amount(360_000_000,2),"energy_nj":amount(1_000_000_000,2),
+        "resident_bytes":amount(3_000,2),"footprint_bytes":amount(8_000,2),
+        "disk_read_bytes":amount(3_072,2),"disk_written_bytes":amount(768,2),
+        "disk_io_bytes":amount(3_840,2),"cpu_percent_one_core":36.0,
         "energy_joules":1.0,"energy_watts":1.0,"disk_read_bps":3072.0,
-        "disk_written_bps":768.0,"elapsed_ns":"1000000000",
+        "disk_written_bps":768.0,"elapsed_ns":1_000_000_000,
         "members":2})
     );
     assert!((live["points"][1]["disk_io_bps"].as_f64().unwrap() - 3840.0).abs() < 1e-9);
     assert_eq!(saved["points"], live["points"]);
 }
 
-fn amount(known: &str, measured_members: u32) -> Value {
+fn amount(known: u64, measured_members: u32) -> Value {
     serde_json::json!({"known":known,"measured_members":measured_members,
         "unavailable_members":0,"overflowed":false})
 }

@@ -3,18 +3,6 @@ use persistence::{Error, Result};
 #[cfg(test)]
 use serde_json::Value;
 
-use crate::data::Table;
-
-#[cfg(test)]
-pub(crate) fn capture(ticks: &Table, fans: Option<&Table>, publication: u64) -> Result<Value> {
-    let fans = fans.map(crate::metric_view::View::Saved);
-    capture_view(
-        &crate::metric_view::View::Saved(ticks),
-        fans.as_ref(),
-        publication,
-    )
-}
-
 #[cfg(test)]
 pub(crate) fn capture_view(
     ticks: &crate::metric_view::View<'_>,
@@ -29,16 +17,12 @@ pub(crate) fn capture_typed(
     fans: Option<&crate::metric_view::View<'_>>,
     publication: u64,
 ) -> Result<Option<Vec<Option<f64>>>> {
-    if ticks.len() != 1 {
-        return Err(Error::Bound("fan tick rows"));
-    }
-
+    assert_eq!(ticks.len(), 1);
     if ticks.integer(0, "publication")? != Some(publication) {
         return Err(Error::Bound("fan tick publication"));
     }
 
     if let Some(fans) = fans {
-        source_view(fans)?;
         if fans.len() > usize::from(FANS_MAX) {
             return Err(Error::Bound("fan channels"));
         }
@@ -65,19 +49,6 @@ pub(crate) fn capture_typed(
     }
 }
 
-pub(crate) fn source(fans: &Table) -> Result<()> {
-    source_view(&crate::metric_view::View::Saved(fans))
-}
-
-fn source_view(fans: &crate::metric_view::View<'_>) -> Result<()> {
-    for column in ["publication", "fan", "rpm"] {
-        if !fans.holds(column) {
-            return Err(Error::Bound("missing schema column"));
-        }
-    }
-    Ok(())
-}
-
 fn capture_channels(
     fans: &crate::metric_view::View<'_>,
     publication: u64,
@@ -87,9 +58,7 @@ fn capture_channels(
     assert!(values.is_empty());
 
     for (index, row) in fans.rows().enumerate() {
-        if fans.integer(row, "publication")? != Some(publication) {
-            return Err(Error::Bound("fan row publication"));
-        }
+        assert_eq!(fans.integer(row, "publication")?, Some(publication));
 
         if fans.integer(row, "fan")?
             != Some(u64::try_from(index).unwrap_or_else(|_| unreachable!()))
@@ -107,7 +76,7 @@ fn capture_channels(
 
 fn capture_rpm(fans: &crate::metric_view::View<'_>, row: usize) -> Result<Option<f64>> {
     Ok(fans
-        .fan_rpm(row)?
+        .number(row, "rpm")?
         .filter(|value| value.is_finite())
         .filter(|value| *value >= 0.0))
 }

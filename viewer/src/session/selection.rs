@@ -3,8 +3,6 @@ use collector::recording::identity_text;
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use crate::data;
-
 impl Session {
     pub(crate) fn restore_selection(&mut self, selected: &Value) -> Result<()> {
         assert!(self.selected.is_none());
@@ -20,22 +18,12 @@ impl Session {
             return Ok(());
         };
 
-        let _observation = self.source_scope(window, Some("ticks"));
-        let source = self.source(window, "ticks")?;
-        let table = data::query(
-            &self.connection,
-            &format!(
-                "SELECT publication,run_tick,wall_ns,continuous_ns FROM {source} \
-                 WHERE publication={publication} LIMIT 2"
-            ),
-            1,
-            &self.operation,
-        )?;
-        let row = table
-            .rows
-            .first()
-            .ok_or(Error::Bound("missing selected tick"))?;
-        let observation = Observation::from_row(&table, row, window)?;
+        let ticks = self.reader().minute_ticks(window)?;
+        let index = ticks
+            .binary_search_by_key(&publication, |tick| tick.publication)
+            .map_err(|_| Error::Bound("missing selected tick"))?;
+        let observation = Observation::of_tick(&ticks[index], window)
+            .ok_or(Error::Bound("missing tick field"))?;
         self.selected_retained(&observation)?;
         for (name, value) in [
             ("publication", observation.publication),

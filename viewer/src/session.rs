@@ -5,22 +5,31 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use collector::recording::{bootstrap, identity_text, private};
-use persistence::engine::{Engine, Row};
+use persistence::engine::{AdmissionRefusal, AdmittedTable, Engine, Row};
+use persistence::resources::ByteBudget;
 use persistence::retention::Retained;
 use persistence::{Error, Manifest, Result, TimeBounds, read_committed, reread_committed};
 use serde_json::{Value, json};
 
 use crate::Cancellation;
 use crate::cancellation::Operation;
-use crate::data::{self, Table};
+use crate::data;
 use crate::metrics;
+use crate::recording::{
+    CpuRow, MachineMinute, Refused, ScopedSealedMinute, SealedSource, TickRow, read_machine,
+    read_machine_cpus, read_ticks,
+};
 
 pub(crate) const OBSERVATIONS_MAX: usize = 4096;
 pub(crate) const PAGE_ROWS: u64 = 512;
 const WINDOWS_MAX: usize = 65_536;
 const NS: u64 = 1_000_000_000;
-/// All context readers share this allowance for event-part inputs and retained query buffers.
+/// Event-part inputs and retained query buffers share this allowance.
 const EVENT_QUERY_BYTES_MAX: usize = 256 * 1024 * 1024;
+/// What one decode of a minute may reserve, as the Store gives the same decoder. Each decode has
+/// its own, since a capture reserves a footer's worst case for a moment, so six decodes sharing one
+/// allowance would refuse a healthy minute depending on how they overlap.
+const MACHINE_READ_BYTES_MAX: usize = 256 * 1024 * 1024;
 
 pub struct Session {
     root: PathBuf,
@@ -37,9 +46,7 @@ pub struct Session {
     /// Whether each window's files were verified, which its first read does.
     verified: Vec<AtomicBool>,
     connection: Engine,
-    /// The connections a context's readers read through, one each, so their queries run at once.
-    context_connections: Vec<Engine>,
-    event_query_budget: Arc<persistence::resources::ByteBudget>,
+    event_query_budget: Arc<ByteBudget>,
     first: Option<u64>,
     last: Option<u64>,
     /// The readings with no known clock, none where the recording's catalog has not counted them.
@@ -66,7 +73,7 @@ pub struct Session {
     #[cfg(test)]
     pub(crate) tick_queries: std::cell::Cell<u64>,
     #[cfg(test)]
-    pub(crate) table_queries: Count,
+    pub(crate) machine_minute_reads: Count,
     #[cfg(test)]
     pub(crate) kept_header_queries: std::cell::Cell<u64>,
     #[cfg(test)]
@@ -83,7 +90,7 @@ pub struct Session {
 struct Listed<'root> {
     root: &'root Path,
     connection: Engine,
-    event_query_budget: Arc<persistence::resources::ByteBudget>,
+    event_query_budget: Arc<ByteBudget>,
     registered: registered::Registered,
     operation: Operation,
 }
@@ -185,18 +192,14 @@ pub(crate) struct Observation {
 }
 
 impl Observation {
-    pub(crate) fn from_row(table: &Table, row: &[Option<String>], window: usize) -> Result<Self> {
-        let required = |name| {
-            table
-                .integer(row, name)?
-                .ok_or(Error::Bound("missing tick field"))
-        };
-        Ok(Self {
+    /// The observation of `tick`, none where the tick read no wall clock, which no second holds.
+    pub(crate) fn of_tick(tick: &TickRow, window: usize) -> Option<Self> {
+        Some(Self {
             window,
-            publication: required("publication")?,
-            run_tick: required("run_tick")?,
-            wall: required("wall_ns")?,
-            continuous: table.integer(row, "continuous_ns")?,
+            publication: tick.publication,
+            run_tick: tick.run_tick,
+            wall: tick.wall_ns?,
+            continuous: tick.continuous_ns,
         })
     }
 
@@ -239,9 +242,7 @@ impl Session {
         let operation = cancellation.operation(epoch)?;
         persistence::query::validate_root(root)?;
         private::verify_directory(root)?;
-        let event_query_budget = Arc::new(persistence::resources::ByteBudget::new(
-            EVENT_QUERY_BYTES_MAX,
-        ));
+        let event_query_budget = Arc::new(ByteBudget::new(EVENT_QUERY_BYTES_MAX));
         let registered = registered::Registered::open(root, &event_query_budget, &operation)?;
         let connection = data::connection();
         operation.attach(&connection)?;
@@ -271,7 +272,6 @@ impl Session {
             windows: Vec::new(),
             verified: Vec::new(),
             connection,
-            context_connections: (0..CONTEXT_READERS).map(|_| data::connection()).collect(),
             event_query_budget,
             first: None,
             last: None,
@@ -299,7 +299,7 @@ impl Session {
             #[cfg(test)]
             tick_queries: std::cell::Cell::new(0),
             #[cfg(test)]
-            table_queries: Count::default(),
+            machine_minute_reads: Count::default(),
             #[cfg(test)]
             kept_header_queries: std::cell::Cell::new(0),
             #[cfg(test)]
@@ -543,9 +543,9 @@ impl Session {
         };
 
         let selected = chosen.json(&self.windows);
-        let mut tables = metrics::Tables::new();
+        let mut minutes = metrics::Minutes::new();
         let mut points =
-            metrics::trends(&self.reader(), std::slice::from_ref(&chosen), &mut tables)?;
+            metrics::trends(&self.reader(), std::slice::from_ref(&chosen), &mut minutes)?;
         assert_eq!(points.len(), 1);
         let mut summary = points.swap_remove(0);
         summary
@@ -562,15 +562,13 @@ impl Session {
         assert!(range.first_ns < range.end_ns);
         assert!(output.is_empty());
 
-        self.operation.attach(&self.connection)?;
         self.operation
             .run(|| self.context_read(range, output).map(|_observations| ()))
     }
 
     /// The observations of `range`, in no order, with their points in `output`, in time order.
     /// Up to `CONTEXT_READERS` threads read them, each a contiguous run of the windows that may
-    /// hold them through a connection of its own, so the reads wait on each other no more than
-    /// the file system makes them.
+    /// hold them, so the reads wait on each other no more than the file system makes them.
     fn context_read(
         &self,
         range: ContextRange,
@@ -578,13 +576,12 @@ impl Session {
     ) -> Result<Vec<Observation>> {
         assert!(range.first_ns < range.end_ns);
         assert!(output.is_empty());
-        assert_eq!(self.context_connections.len(), CONTEXT_READERS);
         self.span_check(range)?;
 
         let retained = self.reader().retained();
         let windows = self.context_windows(range, &retained);
         let chunk = context_chunk(windows.len());
-        assert!(context_reader_count(windows.len()) <= self.context_connections.len());
+        assert!(context_reader_count(windows.len()) <= CONTEXT_READERS);
         let parts: Vec<&[usize]> = windows.chunks(chunk).collect();
         assert_eq!(parts.len(), context_reader_count(windows.len()));
         let mut observations = Vec::new();
@@ -604,41 +601,45 @@ impl Session {
         Ok(observations)
     }
 
-    /// Reads each of `parts` with `read` on a thread named `name` and a context connection of its
-    /// own, so the reads wait on each other no more than the file system makes them, and gives
-    /// each part's result in the order of `parts`.
+    /// Reads each of `parts` with `read` on a thread named `name`, so the reads wait on each other
+    /// no more than the file system makes them, and gives each part's result in the order of
+    /// `parts`.
     pub(crate) fn context_readers<P: Send, T: Send>(
         &self,
         name: &str,
         parts: Vec<P>,
         read: impl Fn(&Reader<'_>, P) -> Result<T> + Sync,
     ) -> Result<Vec<Result<T>>> {
-        assert!(parts.len() <= self.context_connections.len());
+        assert!(parts.len() <= CONTEXT_READERS);
 
         let count = parts.len();
         let read = &read;
         let results = std::thread::scope(|scope| -> Result<Vec<Result<T>>> {
             let mut readers = Vec::with_capacity(CONTEXT_READERS);
-            for (part, connection) in parts.into_iter().zip(&self.context_connections) {
-                let reader = self.reader_through(connection);
+            for part in parts {
+                let reader = self.reader();
                 let observation = persistence::work::ingestion::inherit_current();
                 let thread = std::thread::Builder::new()
                     .name(name.to_owned())
                     .stack_size(CONTEXT_READER_STACK_BYTES)
                     .spawn_scoped(scope, move || {
                         let observation = observation.enter();
+                        let measured = persistence::work::observe();
                         let result = read(&reader, part);
+                        let counts = measured.counts();
+                        drop(measured);
                         drop(observation);
-                        result
+                        (result, counts)
                     })?;
                 readers.push(thread);
             }
 
             let mut results = Vec::with_capacity(readers.len());
             for thread in readers {
-                let result = thread
+                let (result, counts) = thread
                     .join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                persistence::work::merge(counts);
                 results.push(result);
             }
             Ok(results)
@@ -711,21 +712,11 @@ impl Session {
                 continue;
             }
 
-            let _observation = self.source_scope(window, Some("ticks"));
-            let source = self.source(window, "ticks")?;
-            let table = data::query(
-                &self.connection,
-                &format!("SELECT * FROM {source} WHERE publication={publication} LIMIT 2"),
-                1,
-                &self.operation,
-            )?;
-            if let Some(row) = table.rows.first() {
-                if table.integer(row, "wall_ns")?.is_none() {
-                    return Ok(());
+            let minute = self.reader().minute_cpus(window)?;
+            if let Some(reading) = crate::store::reading_at(&minute, publication) {
+                if let Some(observation) = Observation::of_tick(reading.tick, window) {
+                    self.cpu_detail_sample_rows(&observation, reading.cpus, output)?;
                 }
-
-                let observation = Observation::from_row(&table, row, window)?;
-                self.cpu_detail_sample(&observation, output)?;
 
                 return Ok(());
             }
@@ -739,23 +730,27 @@ impl Session {
         observation: &Observation,
         output: &mut Option<crate::cpu_detail::Sample>,
     ) -> Result<()> {
+        let minute = self.reader().minute_cpus(observation.window)?;
+        let reading = crate::store::reading_at(&minute, observation.publication);
+        let cpus = reading.map_or(&[][..], |reading| reading.cpus);
+
+        self.cpu_detail_sample_rows(observation, cpus, output)
+    }
+
+    fn cpu_detail_sample_rows(
+        &self,
+        observation: &Observation,
+        rows: &[CpuRow],
+        output: &mut Option<crate::cpu_detail::Sample>,
+    ) -> Result<()> {
         assert!(output.is_none());
 
-        let _observation = self.source_scope(observation.window, Some("cpus"));
-        let source = self.source(observation.window, "cpus")?;
-        let publication = observation.publication;
-        let limit = crate::cpu_detail::CPUS_MAX + 1;
-        let cpus = data::query(
-            &self.connection,
-            &format!("SELECT * FROM {source} WHERE publication={publication} LIMIT {limit}"),
-            crate::cpu_detail::CPUS_MAX,
-            &self.operation,
-        )?;
-
+        let mut cpus = Vec::new();
+        crate::cpu_history_sample::counters_rows(rows, &mut cpus)?;
         *output = Some(crate::cpu_detail::Sample {
             identity: observation.json(&self.windows),
             observation: observation.clone(),
-            cpus: crate::cpu_detail::Source::Saved(cpus),
+            cpus,
         });
 
         Ok(())
@@ -845,10 +840,6 @@ impl Session {
         )
     }
 
-    pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
-        self.reader().table(window, name)
-    }
-
     pub(crate) fn predecessor_windows_holding(
         &self,
         window: usize,
@@ -860,21 +851,17 @@ impl Session {
 
     /// A reader of this session's windows through the session's connection.
     pub(crate) fn reader(&self) -> Reader<'_> {
-        self.reader_through(&self.connection)
-    }
-
-    fn reader_through<'session>(&'session self, connection: &'session Engine) -> Reader<'session> {
         Reader {
             root: &self.root,
             windows: &self.windows,
             verified: &self.verified,
-            connection,
+            connection: &self.connection,
             event_query_budget: &self.event_query_budget,
             operation: &self.operation,
             #[cfg(test)]
             source_reads: &self.source_reads,
             #[cfg(test)]
-            table_queries: &self.table_queries,
+            machine_minute_reads: &self.machine_minute_reads,
         }
     }
 
@@ -930,20 +917,20 @@ pub(crate) const fn context_reader_count(window_count: usize) -> usize {
     window_count.div_ceil(context_chunk(window_count))
 }
 
-/// The sealed windows of a session and a connection to read them through. Each thread that
-/// reads a context holds a reader of a connection of its own, so the threads share the windows,
-/// their verification and the operation, and wait on no one's queries.
+/// The sealed windows of a session and its connection, which only a raw page and the App
+/// histories query. Each thread that reads a context holds a reader, so the threads share the
+/// windows, their verification and the operation.
 pub(crate) struct Reader<'session> {
     root: &'session Path,
     pub(crate) windows: &'session [Manifest],
     verified: &'session [AtomicBool],
     connection: &'session Engine,
-    event_query_budget: &'session Arc<persistence::resources::ByteBudget>,
+    event_query_budget: &'session Arc<ByteBudget>,
     operation: &'session Operation,
     #[cfg(test)]
     source_reads: &'session Count,
     #[cfg(test)]
-    table_queries: &'session Count,
+    machine_minute_reads: &'session Count,
 }
 
 impl Reader<'_> {
@@ -1019,35 +1006,77 @@ impl Reader<'_> {
         Ok(())
     }
 
-    pub(crate) fn table(&self, window: usize, name: &str) -> Result<Table> {
-        let _observation = self.source_scope(window, Some(name));
+    /// The minute at `window` through admission, once its commitment still stands.
+    fn sealed_minute<'minute>(
+        &'minute self,
+        window: usize,
+        budget: &'minute Arc<ByteBudget>,
+    ) -> Result<ScopedSealedMinute<'minute>> {
         #[cfg(test)]
-        self.table_queries.increment();
-        if name == metrics::core_frequency::CORE_LEVEL_STATES {
-            let sources = metrics::core_frequency::CoreLevelSources {
-                core_states: &self.source(window, "core_states")?,
-                ticks: &self.source(window, "ticks")?,
-            };
-            return metrics::core_frequency::core_level_states(
-                self.connection,
-                &sources,
-                self.operation,
-            );
-        }
-        let order = if name == "fans" {
-            "publication, fan"
-        } else {
-            "publication"
-        };
-        data::query(
-            self.connection,
-            &format!(
-                "SELECT * FROM {} ORDER BY {order}",
-                self.source(window, name)?
-            ),
-            data::ROWS_MAX,
+        self.source_reads.increment();
+        self.validate_commitment(window)?;
+        let manifest = &self.windows[window];
+        let marker = persistence::commitment_path(self.root, manifest);
+
+        ScopedSealedMinute::committed_using(
+            &SealedSource {
+                root: self.root,
+                marker: &marker,
+            },
+            manifest,
+            budget,
             self.operation,
+            &AdmittedTable::from_file_budgeted,
         )
+        .map_err(minute_refusal)
+    }
+
+    /// What `read` takes from the minute at `window`, through an allowance of its own.
+    fn minute_read(
+        &self,
+        window: usize,
+        read: impl FnOnce(&ScopedSealedMinute<'_>) -> std::result::Result<(), Refused>,
+    ) -> Result<()> {
+        let budget = Arc::new(ByteBudget::new(MACHINE_READ_BYTES_MAX));
+        let sealed = self.sealed_minute(window, &budget)?;
+
+        read(&sealed).map_err(minute_refusal)
+    }
+
+    /// Every machine reading of the minute at `window`. A number a tick cannot hold anywhere in
+    /// the minute refuses the whole minute.
+    pub(crate) fn machine_minute(&self, window: usize) -> Result<MachineMinute> {
+        let _observation = self.source_scope(window, None);
+        #[cfg(test)]
+        self.machine_minute_reads.increment();
+        let mut minute = MachineMinute::default();
+        self.minute_read(window, |sealed| read_machine(sealed, &mut minute))?;
+        minute_bytes_record(minute.heap_bytes());
+        for tick in &minute.ticks {
+            crate::live_raw::validate_machine_tick(tick)?;
+        }
+
+        Ok(minute)
+    }
+
+    /// The ticks of the minute at `window`, which say what its readings are and when.
+    pub(crate) fn minute_ticks(&self, window: usize) -> Result<Vec<TickRow>> {
+        let _observation = self.source_scope(window, Some("ticks"));
+        let mut ticks = Vec::new();
+        self.minute_read(window, |sealed| read_ticks(sealed, &mut ticks))?;
+        minute_bytes_record(ticks.capacity() * size_of::<TickRow>());
+
+        Ok(ticks)
+    }
+
+    /// The ticks and CPUs of the minute at `window`, its other tables left empty.
+    pub(crate) fn minute_cpus(&self, window: usize) -> Result<MachineMinute> {
+        let _observation = self.source_scope(window, Some("cpus"));
+        let mut minute = MachineMinute::default();
+        self.minute_read(window, |sealed| read_machine_cpus(sealed, &mut minute))?;
+        minute_bytes_record(minute.heap_bytes());
+
+        Ok(minute)
     }
 
     /// What the retention period still covers of the readings of these windows.
@@ -1061,8 +1090,8 @@ impl Reader<'_> {
     }
 
     /// Appends to `observations` the readings of `window` that fall in `range` and that `retained`
-    /// holds. An expired reading stays readable through the tables, where the reading after it
-    /// takes its rates from it, and only this list says which readings a read returns.
+    /// holds. An expired reading stays readable in its minute, where the reading after it takes its
+    /// rates from it, and only this list says which readings a read returns.
     fn window_observations(
         &self,
         window: usize,
@@ -1070,24 +1099,20 @@ impl Reader<'_> {
         retained: &Retained,
         observations: &mut Vec<Observation>,
     ) -> Result<()> {
-        let _observation = self.source_scope(window, Some("ticks"));
-        let source = self.source(window, "ticks")?;
         let ContextRange { first_ns, end_ns } = range;
-        let ticks = data::query(
-            self.connection,
-            &format!("SELECT * FROM {source} WHERE wall_ns>={first_ns} AND wall_ns<{end_ns}"),
-            OBSERVATIONS_MAX,
-            self.operation,
-        )?;
-        if observations.len() + ticks.rows.len() > OBSERVATIONS_MAX {
-            return Err(Error::Bound("context observations"));
-        }
-
         let boot = self.windows[window].identity.run.boot;
-        for row in &ticks.rows {
-            let observation = Observation::from_row(&ticks, row, window)?;
-            if retained.holds(boot, observation.continuous) {
-                observations.push(observation);
+        for tick in &self.minute_ticks(window)? {
+            let Some(observation) = Observation::of_tick(tick, window) else {
+                continue;
+            };
+            if (first_ns..end_ns).contains(&observation.wall) {
+                if observations.len() == OBSERVATIONS_MAX {
+                    return Err(Error::Bound("context observations"));
+                }
+
+                if retained.holds(boot, observation.continuous) {
+                    observations.push(observation);
+                }
             }
         }
         Ok(())
@@ -1131,7 +1156,7 @@ fn context_read_part(
     range: ContextRange,
     retained: &Retained,
 ) -> Result<(Vec<Observation>, Vec<Value>)> {
-    let mut tables = metrics::Tables::new();
+    let mut minutes = metrics::Minutes::new();
     let mut observations = Vec::new();
     let mut points = Vec::new();
     let mut batch = Vec::new();
@@ -1142,7 +1167,7 @@ fn context_read_part(
             if observations.len() + batch.len() > OBSERVATIONS_MAX {
                 return Err(Error::Bound("context observations"));
             }
-            points.append(&mut metrics::trends(reader, &batch, &mut tables)?);
+            points.append(&mut metrics::trends(reader, &batch, &mut minutes)?);
             observations.append(&mut batch);
         }
     }
@@ -1185,22 +1210,21 @@ fn context_points_order(points: &mut [Value]) {
     });
 }
 
-pub(crate) fn partition(table: &Table) -> Result<BTreeMap<u64, Table>> {
-    let mut result = BTreeMap::new();
-    for row in &table.rows {
-        let publication = table
-            .integer(row, "publication")?
-            .ok_or(Error::Bound("publication"))?;
-        result
-            .entry(publication)
-            .or_insert_with(|| Table {
-                columns: table.columns.clone(),
-                rows: Vec::new(),
-            })
-            .rows
-            .push(row.clone());
+/// The error of a minute the decoder refused.
+fn minute_bytes_record(bytes: usize) {
+    persistence::work::record(|counts| counts.minute_bytes += collector::u64_from_usize(bytes));
+}
+
+fn minute_refusal(refused: Refused) -> Error {
+    match refused {
+        Refused::Commitment(error) => Error::Io(error),
+        Refused::Decode(error) => error,
+        Refused::Input(AdmissionRefusal::Budget) => Error::Bound("machine read budget"),
+        Refused::Input(AdmissionRefusal::Bound(reason)) => Error::Bound(reason),
+        Refused::Input(AdmissionRefusal::Io { kind, raw_os_error }) => Error::Io(
+            raw_os_error.map_or_else(|| io::Error::from(kind), io::Error::from_raw_os_error),
+        ),
     }
-    Ok(result)
 }
 
 #[path = "cpu_history_saved.rs"]
@@ -1225,6 +1249,8 @@ pub(crate) mod reopen_tests;
 #[cfg(test)]
 pub(crate) mod retention_tests;
 mod selection;
+#[cfg(test)]
+mod typed_tests;
 pub use earlier::{
     CHARTED_SECONDS, CONTEXT_AFTER_SECONDS, EARLIER_STRIDE_SECONDS, LEAD_IN_SECONDS, LOADED_SECONDS,
 };

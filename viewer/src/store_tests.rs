@@ -1975,7 +1975,7 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         let count = |name: &str| u32::try_from(value[name].as_u64().unwrap()).unwrap();
 
         Measure {
-            known: value["known"].as_str().unwrap().parse().unwrap(),
+            known: value["known"].as_u64().unwrap(),
             measured_members: count("measured_members"),
             unavailable_members: count("unavailable_members"),
             overflowed: value["overflowed"].as_bool().unwrap(),

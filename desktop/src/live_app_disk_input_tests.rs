@@ -28,9 +28,9 @@ fn selected_app_disk_summary_and_columns_keep_joint_coverage(cx: &mut gpui::Test
     );
     let executable = harness.driver.selected_disk_executable();
     assert_eq!(executable["scope"], "loaded process page only");
-    assert_eq!(executable["disk_io_bytes"], disk_measure("3000000"));
-    assert_eq!(executable["disk_read_bytes"], disk_measure("2000000"));
-    assert_eq!(executable["disk_written_bytes"], disk_measure("1000000"));
+    assert_eq!(executable["disk_io_bytes"], disk_measure(3_000_000));
+    assert_eq!(executable["disk_read_bytes"], disk_measure(2_000_000));
+    assert_eq!(executable["disk_written_bytes"], disk_measure(1_000_000));
     harness.teardown();
 }
 
@@ -517,7 +517,7 @@ impl AppHoverDriver {
         assert!(self.text_is_visible("executable-disk:hex:63:3.0 MB/s"));
         assert_eq!(
             self.selected_disk_executable()["disk_io_bytes"],
-            complete_measure("6000000")
+            complete_measure(6_000_000)
         );
     }
 
@@ -608,7 +608,7 @@ fn disk_readout_snapshot(generation: u64, epoch: AppEpoch, current: DiskReadout)
     snapshot.apps.as_mut().unwrap().legacy_mut().unwrap()["apps"][0] = app.clone();
     let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
     detail["app"] = app;
-    detail["elapsed_ns"] = json!("2000000000");
+    detail["elapsed_ns"] = json!(2_000_000_000);
     detail["page"]["total"] = json!(3);
     detail["processes"] = disk_readout_processes(readout);
     snapshot.history.as_mut().unwrap().legacy_mut().unwrap()["points"] = json!([
@@ -654,7 +654,7 @@ fn disk_readout_app(readout: DiskReadout, epoch: AppEpoch) -> Value {
 fn disk_readout_metric(app: &mut Value, metric: &str, known: u64, measured: u64) {
     assert!(measured <= 3);
     app[format!("{metric}_bytes")] = json!({
-        "known":known.to_string(),"measured_members":measured,
+        "known":known,"measured_members":measured,
         "unavailable_members":3 - measured,"overflowed":false
     });
     app[format!("{metric}_bps")] = if measured == 0 {
@@ -673,7 +673,7 @@ fn disk_readout_point(readout: DiskReadout, epoch: AppEpoch) -> Value {
     };
     point["segment"] = json!(0);
     point["source_available"] = json!(true);
-    point["elapsed_ns"] = json!("2000000000");
+    point["elapsed_ns"] = json!(2_000_000_000);
 
     point
 }
@@ -802,7 +802,7 @@ fn disk_snapshot(generation: u64) -> Box<Snapshot> {
     crossing["app_attribution"] = json!("exec");
     let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
     detail["app"] = app.clone();
-    detail["elapsed_ns"] = json!("2000000000");
+    detail["elapsed_ns"] = json!(2_000_000_000);
     detail["processes"] = json!([
         disk_process(
             10,
@@ -831,7 +831,7 @@ fn historical_disk_snapshot(generation: u64) -> Box<Snapshot> {
     snapshot.apps.as_mut().unwrap().legacy_mut().unwrap()["apps"][0] = app.clone();
     let detail = snapshot.detail.as_mut().unwrap().legacy_mut().unwrap();
     detail["app"] = app;
-    detail["elapsed_ns"] = json!("2000000000");
+    detail["elapsed_ns"] = json!(2_000_000_000);
     detail["processes"] = json!([
         disk_process(
             20,
@@ -863,9 +863,9 @@ fn historical_disk_snapshot(generation: u64) -> Box<Snapshot> {
 
 fn current_disk_app() -> Value {
     let mut app = AppEpoch::Accepted.app();
-    app["disk_read_bytes"] = disk_measure("2000000");
-    app["disk_written_bytes"] = disk_measure("1000000");
-    app["disk_io_bytes"] = disk_measure("3000000");
+    app["disk_read_bytes"] = disk_measure(2_000_000);
+    app["disk_written_bytes"] = disk_measure(1_000_000);
+    app["disk_io_bytes"] = disk_measure(3_000_000);
     app["disk_read_bps"] = json!(1_000_000.0);
     app["disk_written_bps"] = json!(500_000.0);
     app["disk_io_bps"] = json!(1_500_000.0);
@@ -875,9 +875,9 @@ fn current_disk_app() -> Value {
 
 fn historical_disk_app() -> Value {
     let mut app = AppEpoch::Historical.app();
-    app["disk_read_bytes"] = complete_measure("4000000");
-    app["disk_written_bytes"] = complete_measure("2000000");
-    app["disk_io_bytes"] = complete_measure("6000000");
+    app["disk_read_bytes"] = complete_measure(4_000_000);
+    app["disk_written_bytes"] = complete_measure(2_000_000);
+    app["disk_io_bytes"] = complete_measure(6_000_000);
     app["disk_read_bps"] = json!(2_000_000.0);
     app["disk_written_bps"] = json!(1_000_000.0);
     app["disk_io_bps"] = json!(3_000_000.0);
@@ -890,12 +890,12 @@ fn disk_history_points() -> Value {
     current["observation"] = wire_observation(1000, 2);
     current["segment"] = json!(0);
     current["source_available"] = json!(true);
-    current["elapsed_ns"] = json!("2000000000");
+    current["elapsed_ns"] = json!(2_000_000_000);
     let mut historical = historical_disk_app();
     historical["observation"] = wire_observation(999, 1);
     historical["segment"] = json!(0);
     historical["source_available"] = json!(true);
-    historical["elapsed_ns"] = json!("2000000000");
+    historical["elapsed_ns"] = json!(2_000_000_000);
 
     json!([historical, current])
 }
@@ -903,9 +903,9 @@ fn disk_history_points() -> Value {
 fn disk_process(pid: u32, amounts: DiskAmounts) -> Value {
     let mut process = super::process("Accepted worker", "61", pid);
     let combined = amounts.read.checked_add(amounts.written).unwrap();
-    process["disk_read_bytes"] = json!({"known":amounts.read.to_string(),"unavailable":null});
-    process["disk_written_bytes"] = json!({"known":amounts.written.to_string(),"unavailable":null});
-    process["disk_io_bytes"] = json!({"known":combined.to_string(),"unavailable":null});
+    process["disk_read_bytes"] = json!({"known":amounts.read,"unavailable":null});
+    process["disk_written_bytes"] = json!({"known":amounts.written,"unavailable":null});
+    process["disk_io_bytes"] = json!({"known":combined,"unavailable":null});
     process["disk_read_bps"] = json!(amounts.read.to_f64().unwrap() / 2.0);
     process["disk_written_bps"] = json!(amounts.written.to_f64().unwrap() / 2.0);
     process["disk_io_bps"] = json!(combined.to_f64().unwrap() / 2.0);
@@ -913,10 +913,10 @@ fn disk_process(pid: u32, amounts: DiskAmounts) -> Value {
     process
 }
 
-fn disk_measure(known: &str) -> Value {
+fn disk_measure(known: u64) -> Value {
     json!({"known":known,"measured_members":2,"unavailable_members":1,"overflowed":false})
 }
 
-fn complete_measure(known: &str) -> Value {
+fn complete_measure(known: u64) -> Value {
     json!({"known":known,"measured_members":2,"unavailable_members":0,"overflowed":false})
 }

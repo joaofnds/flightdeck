@@ -383,8 +383,8 @@ fn empty_or_unavailable_observations_never_fabricate_cpu_activity() {
 #[test]
 fn quantities_follow_binary_memory_and_adaptive_power_units() {
     // Goal: scalar readouts use the recorded source units and preserve missing data.
-    // Method: format numeric, string, zero and unavailable values.
-    let values = json!({"memory": "536870912", "power": 0.25, "zero": 0, "missing": null});
+    // Method: format numeric, zero and unavailable values.
+    let values = json!({"memory": 536_870_912, "power": 0.25, "zero": 0, "missing": null});
     assert_eq!(quantity(&values, "memory", "GiB", GIBIBYTE), "512 MiB");
     assert_eq!(quantity(&values, "power", "W", 1.0), "250 mW");
     assert_eq!(quantity(&values, "zero", "W", 1.0), "0 W");
@@ -401,10 +401,10 @@ fn history_projection_reads_decimal_stamps_and_partial_measurements() {
         "run": ["1", "2"], "boot": ["3", "4"], "publication": "3"}});
     let history = json!({"points": [
         {"observation": observation, "segment": "1", "cpu_percent_one_core": null,
-         "resident_bytes": {"known": "536870912", "measured_members": 1,
+         "resident_bytes": {"known": 536_870_912, "measured_members": 1,
             "unavailable_members": 2, "overflowed": false},
-         "footprint_bytes": {"known": "0", "measured_members": 0,
-            "unavailable_members": 3, "overflowed": false}, "energy_watts": "0.25"}
+         "footprint_bytes": {"known": 0, "measured_members": 0,
+            "unavailable_members": 3, "overflowed": false}, "energy_watts": 0.25}
     ]});
     let apps = panels("apps", &selection(), Some(&history)).unwrap();
     let titles: Vec<&str> = apps.iter().map(|panel| panel.title.as_str()).collect();
@@ -530,7 +530,7 @@ fn mixed_identity_encodings_keep_the_selected_point_and_segment() {
     let history = json!({"selected": {"run": "FFFFFFFFFFFFFFFFABCDEF0123456789",
         "boot": "00000000000000030000000000000004", "publication": 1},
         "points": [{"observation": observation, "segment": "1",
-            "cpu_percent_one_core": "-0.0"}]});
+            "cpu_percent_one_core": -0.0}]});
 
     let apps = panels("apps", &selection(), Some(&history)).unwrap();
 

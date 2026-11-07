@@ -1,4 +1,7 @@
 use super::*;
+use crate::recording::{CpuRow, FanRow, GpuStateRow, InterfaceRow, MemoryRow, TickRow};
+use collector::interfaces::Interface;
+use collector::machine::{CPUTicks, Memory};
 
 mod app_machine_tests;
 mod battery_tests;
@@ -36,58 +39,15 @@ unsigned_number_case!(
 );
 
 struct Fixture {
-    tables: Tables,
+    minutes: BTreeMap<u64, MachineMinute>,
     previous: Observation,
     current: Observation,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let mut tables = Tables::new();
-        let fans = table(&["publication", "fan", "rpm"], &[]);
-        tables.insert((0, "fans"), partition(&fans).unwrap());
-        for publication in 1..=2 {
-            let current = publication == 2;
-            tables
-                .entry((0, "ticks"))
-                .or_default()
-                .insert(publication, ticks(current));
-            tables
-                .entry((0, "memory"))
-                .or_default()
-                .insert(publication, memory(current));
-            tables.entry((0, "cpus")).or_default().insert(
-                publication,
-                table(
-                    &[
-                        "publication",
-                        "cpu",
-                        "user_ticks",
-                        "system_ticks",
-                        "nice_ticks",
-                        "idle_ticks",
-                    ],
-                    &[&[if current { "2" } else { "1" }, "0", "10", "20", "0", "70"]],
-                ),
-            );
-            tables
-                .entry((0, "interfaces"))
-                .or_default()
-                .insert(publication, interfaces(current));
-            tables.entry((0, "gpu_states")).or_default().insert(
-                publication,
-                table(
-                    &["state", "active_ns"],
-                    if current {
-                        &[&["0", "1500000000"], &["1", "2300000000"]]
-                    } else {
-                        &[&["0", "1000000000"], &["1", "2000000000"]]
-                    },
-                ),
-            );
-        }
         Self {
-            tables,
+            minutes: BTreeMap::from([(1, minute(1, false)), (2, minute(2, true))]),
             previous: Observation {
                 window: 0,
                 publication: 1,
@@ -106,180 +66,144 @@ impl Fixture {
     }
 
     fn point(&self) -> Value {
-        point(&self.tables, &self.current, Some(&self.previous), 1).unwrap()
+        self.point_after(Some(&self.previous)).unwrap()
     }
 
-    fn row(&mut self, name: &'static str, publication: u64) -> &mut Table {
-        self.tables
-            .get_mut(&(0, name))
-            .unwrap()
-            .get_mut(&publication)
-            .unwrap()
+    /// The current observation's point, its rates over the interval since `previous`, if any.
+    fn point_after(&self, previous: Option<&Observation>) -> Result<Value> {
+        self.point_of(&self.current, previous)
+    }
+
+    fn point_of(&self, current: &Observation, previous: Option<&Observation>) -> Result<Value> {
+        let reading = self.reading(current.publication);
+        let before = previous.map(|_| self.reading(current.publication - 1));
+
+        point_sources(
+            &Sources::Machine {
+                current: &reading,
+                previous: before.as_ref(),
+            },
+            current,
+            previous,
+            1,
+        )
+    }
+
+    fn reading(&self, publication: u64) -> Reading<'_> {
+        reading_at(&self.minutes[&publication], publication).unwrap()
+    }
+
+    fn minute(&mut self, publication: u64) -> &mut MachineMinute {
+        self.minutes.get_mut(&publication).unwrap()
     }
 }
 
-fn table(columns: &[&str], rows: &[&[&str]]) -> Table {
-    Table {
-        columns: columns.iter().map(|value| (*value).to_owned()).collect(),
-        rows: rows
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|value| {
-                        if *value == "NULL" {
-                            None
-                        } else {
-                            Some((*value).to_owned())
-                        }
-                    })
-                    .collect()
-            })
-            .collect(),
+/// One publication's readings. Only the counters of the current tick moved since the earlier.
+fn minute(publication: u64, current: bool) -> MachineMinute {
+    MachineMinute {
+        ticks: vec![tick(publication, current)],
+        cpus: vec![cpu_row(publication, 0, 30, 70)],
+        memory: vec![MemoryRow {
+            publication,
+            memory: memory(current),
+        }],
+        interfaces: vec![interface(publication, current)],
+        gpu_states: gpu_states(
+            publication,
+            if current {
+                &[1_500_000_000, 2_300_000_000]
+            } else {
+                &[1_000_000_000, 2_000_000_000]
+            },
+        ),
+        core_states: Vec::new(),
+        fans: Vec::new(),
     }
 }
 
-fn ticks(current: bool) -> Table {
-    table(
-        &[
-            "gpu_energy_nj",
-            "power_watts",
-            "soc_celsius",
-            "cpu_celsius",
-            "gpu_celsius",
-            "ioreport_read",
-            "gpu_state_count",
-            "publication",
-            "smc_read",
-        ],
-        &[if current {
-            &[
-                "5000000000",
-                "0",
-                "45",
-                "61.5",
-                "52.25",
-                "true",
-                "2",
-                "2",
-                "true",
-            ]
+fn tick(publication: u64, current: bool) -> TickRow {
+    TickRow {
+        gpu_energy_nj: Some(if current {
+            5_000_000_000
         } else {
-            &[
-                "1000000000",
-                "0",
-                "45",
-                "60.5",
-                "NULL",
-                "true",
-                "2",
-                "1",
-                "true",
-            ]
-        }],
-    )
+            1_000_000_000
+        }),
+        power_watts: Some(0.0),
+        soc_celsius: Some(45.0),
+        cpu_celsius: Some(if current { 61.5 } else { 60.5 }),
+        gpu_celsius: current.then_some(52.25),
+        ..TickRow::fixture(publication)
+    }
 }
 
-const MEMORY_COLUMNS: [&str; 19] = [
-    "total_bytes",
-    "free_bytes",
-    "active_bytes",
-    "inactive_bytes",
-    "speculative_bytes",
-    "wired_bytes",
-    "compressed_bytes",
-    "anonymous_bytes",
-    "file_backed_bytes",
-    "purgeable_bytes",
-    "swap_total_bytes",
-    "swap_used_bytes",
-    "swapped_in_bytes",
-    "swapped_out_bytes",
-    "pageins",
-    "pageouts",
-    "compressions",
-    "decompressions",
-    "pressure",
-];
-
-fn memory(current: bool) -> Table {
-    table(
-        &MEMORY_COLUMNS,
-        &[if current {
-            &[
-                "9007199254740993",
-                "2",
-                "3",
-                "4",
-                "5",
-                "6",
-                "7",
-                "8",
-                "9",
-                "10",
-                "11",
-                "12",
-                "1124",
-                "2248",
-                "7",
-                "2",
-                "11",
-                "6",
-                "0",
-            ]
-        } else {
-            &[
-                "9007199254740993",
-                "2",
-                "3",
-                "4",
-                "5",
-                "6",
-                "7",
-                "8",
-                "9",
-                "10",
-                "11",
-                "12",
-                "100",
-                "200",
-                "1",
-                "2",
-                "3",
-                "4",
-                "0",
-            ]
-        }],
-    )
+fn cpu_row(publication: u64, cpu: u32, user: u32, idle: u32) -> CpuRow {
+    CpuRow {
+        publication,
+        cpu,
+        ticks: CPUTicks {
+            user,
+            system: 0,
+            nice: 0,
+            idle,
+        },
+    }
 }
 
-fn interfaces(current: bool) -> Table {
-    table(
-        &[
-            "interface",
-            "name",
-            "received_bytes",
-            "sent_bytes",
-            "received_packets",
-            "sent_packets",
-            "receive_errors",
-            "send_errors",
-            "receive_drops",
-        ],
-        &[if current {
-            &["7", "en0", "3048", "3024", "18", "20", "3", "6", "9"]
-        } else {
-            &["7", "en0", "1000", "2000", "10", "20", "1", "2", "3"]
-        }],
-    )
+fn memory(current: bool) -> Memory {
+    Memory {
+        total_bytes: 9_007_199_254_740_993,
+        free_bytes: 2,
+        active_bytes: 3,
+        inactive_bytes: 4,
+        speculative_bytes: 5,
+        wired_bytes: 6,
+        compressed_bytes: 7,
+        anonymous_bytes: 8,
+        file_backed_bytes: 9,
+        purgeable_bytes: 10,
+        swap_total_bytes: 11,
+        swap_used_bytes: 12,
+        swapped_in_bytes: if current { 1124 } else { 100 },
+        swapped_out_bytes: if current { 2248 } else { 200 },
+        pageins: if current { 7 } else { 1 },
+        pageouts: 2,
+        compressions: if current { 11 } else { 3 },
+        decompressions: if current { 6 } else { 4 },
+        ..Memory::default()
+    }
 }
 
-fn set(table: &mut Table, row: usize, name: &str, value: Option<&str>) {
-    let index = table
-        .columns
-        .iter()
-        .position(|column| column == name)
-        .unwrap();
-    table.rows[row][index] = value.map(str::to_owned);
+/// The current interface's counters, from `received_bytes` through `receive_drops`.
+const INTERFACE_CURRENT: [u64; 7] = [3048, 3024, 18, 20, 3, 6, 9];
+const INTERFACE_EARLIER: [u64; 7] = [1000, 2000, 10, 20, 1, 2, 3];
+
+fn interface(publication: u64, current: bool) -> InterfaceRow {
+    let counters = if current {
+        INTERFACE_CURRENT
+    } else {
+        INTERFACE_EARLIER
+    };
+
+    InterfaceRow::fixture(publication, 7, "en0", counters)
+}
+
+fn gpu_states(publication: u64, active_ns: &[u64]) -> Vec<GpuStateRow> {
+    (0_u32..)
+        .zip(active_ns)
+        .map(|(state, active_ns)| GpuStateRow {
+            publication,
+            state,
+            active_ns: *active_ns,
+        })
+        .collect()
+}
+
+fn fan_row(fan: u32, rpm: f32) -> FanRow {
+    FanRow {
+        publication: 2,
+        fan,
+        rpm,
+    }
 }
 
 #[test]
@@ -304,13 +228,13 @@ fn network_rates(value: &Value) -> Value {
 }
 
 macro_rules! unavailable_network_counter {
-    ($name:ident, $column:literal, $counter:expr, $expected:tt) => {
+    ($name:ident, $reset:expr, $expected:tt) => {
         #[test]
         fn $name() {
             // Goal: one unavailable counter does not erase another measured rate.
-            // Method: remove or reset one current counter and compare all four outputs.
+            // Method: reset one current counter and compare all four outputs.
             let mut fixture = Fixture::new();
-            set(fixture.row("interfaces", 2), 0, $column, $counter);
+            $reset(&mut fixture.minute(2).interfaces[0].interface);
 
             let value = fixture.point();
 
@@ -323,61 +247,34 @@ macro_rules! unavailable_network_counter {
 
 unavailable_network_counter!(
     preserves_other_network_rates_when_received_packets_reset,
-    "received_packets",
-    Some("0"),
+    |interface: &mut Interface| interface.received_packets = 0,
     [null, 0.0, 1.0, 2.0]
 );
 unavailable_network_counter!(
     preserves_other_network_rates_when_sent_packets_reset,
-    "sent_packets",
-    Some("0"),
+    |interface: &mut Interface| interface.sent_packets = 0,
     [4.0, null, 1.0, 2.0]
 );
 unavailable_network_counter!(
     preserves_other_network_rates_when_receive_errors_reset,
-    "receive_errors",
-    Some("0"),
+    |interface: &mut Interface| interface.receive_errors = 0,
     [4.0, 0.0, null, 2.0]
 );
 unavailable_network_counter!(
     preserves_other_network_rates_when_send_errors_reset,
-    "send_errors",
-    Some("0"),
-    [4.0, 0.0, 1.0, null]
-);
-unavailable_network_counter!(
-    preserves_other_network_rates_when_received_packets_are_missing,
-    "received_packets",
-    None,
-    [null, 0.0, 1.0, 2.0]
-);
-unavailable_network_counter!(
-    preserves_other_network_rates_when_sent_packets_are_missing,
-    "sent_packets",
-    None,
-    [4.0, null, 1.0, 2.0]
-);
-unavailable_network_counter!(
-    preserves_other_network_rates_when_receive_errors_are_missing,
-    "receive_errors",
-    None,
-    [4.0, 0.0, null, 2.0]
-);
-unavailable_network_counter!(
-    preserves_other_network_rates_when_send_errors_are_missing,
-    "send_errors",
-    None,
+    |interface: &mut Interface| interface.send_errors = 0,
     [4.0, 0.0, 1.0, null]
 );
 
 macro_rules! changed_network_identity {
-    ($name:ident, $column:literal, $changed:literal) => {
+    ($name:ident, $index:literal, $interface_name:literal) => {
         #[test]
         fn $name() {
             // Goal: reused interface indices or renamed interfaces cannot authorize rates.
             // Method: change one part of the current interface key, keeping the counters.
             let mut fixture = Fixture::new();
-            set(fixture.row("interfaces", 2), 0, $column, Some($changed));
+            fixture.minute(2).interfaces[0] =
+                InterfaceRow::fixture(2, $index, $interface_name, INTERFACE_CURRENT);
 
             assert_eq!(
                 network_rates(&fixture.point()),
@@ -389,21 +286,17 @@ macro_rules! changed_network_identity {
 
 changed_network_identity!(
     leaves_network_rates_unavailable_after_interface_renaming,
-    "name",
+    7,
     "utun0"
 );
-changed_network_identity!(
-    leaves_network_rates_unavailable_after_index_reuse,
-    "interface",
-    "8"
-);
+changed_network_identity!(leaves_network_rates_unavailable_after_index_reuse, 8, "en0");
 
 #[test]
 fn leaves_network_rates_unavailable_after_interface_membership_changes() {
     // Goal: changing the interface set cannot make a partial aggregate look complete.
     // Method: remove the current interface while retaining the earlier measurement.
     let mut fixture = Fixture::new();
-    fixture.row("interfaces", 2).rows.clear();
+    fixture.minute(2).interfaces.clear();
 
     assert_eq!(
         network_rates(&fixture.point()),
@@ -416,16 +309,13 @@ fn sums_network_counters_by_interface_identity_instead_of_row_order() {
     // Goal: multiple external interfaces contribute once despite a changed row order.
     // Method: add a second interface with different counters before the current first row.
     let mut fixture = Fixture::new();
-    fixture.row("interfaces", 1).rows.push(
-        ["8", "utun0", "0", "0", "2", "3", "4", "5", "0"]
-            .map(|value| Some(value.to_owned()))
-            .to_vec(),
-    );
-    fixture.row("interfaces", 2).rows.insert(
+    fixture
+        .minute(1)
+        .interfaces
+        .push(InterfaceRow::fixture(1, 8, "utun0", [0, 0, 2, 3, 4, 5, 0]));
+    fixture.minute(2).interfaces.insert(
         0,
-        ["8", "utun0", "0", "0", "8", "13", "12", "17", "0"]
-            .map(|value| Some(value.to_owned()))
-            .to_vec(),
+        InterfaceRow::fixture(2, 8, "utun0", [0, 0, 8, 13, 12, 17, 0]),
     );
 
     assert_eq!(network_rates(&fixture.point()), json!([7.0, 5.0, 5.0, 8.0]));
@@ -512,13 +402,12 @@ fn resumes_gpu_rates_only_after_two_successful_readings_follow_a_source_failure(
     });
 
     let points: [Value; 4] = std::array::from_fn(|index| {
-        point(
-            &fixture.tables,
-            &observations[index],
-            index.checked_sub(1).map(|index| &observations[index]),
-            1,
-        )
-        .unwrap()
+        fixture
+            .point_of(
+                &observations[index],
+                index.checked_sub(1).map(|index| &observations[index]),
+            )
+            .unwrap()
     });
 
     assert_eq!(
@@ -538,40 +427,19 @@ fn resumes_gpu_rates_only_after_two_successful_readings_follow_a_source_failure(
 
 fn optional_failure_fixture() -> Fixture {
     let mut fixture = Fixture::new();
-    for rows in fixture.tables.values_mut() {
-        for publication in 3..=4 {
-            if let Some(mut current) = rows.get(&2).cloned() {
-                if let Some(column) = current
-                    .columns
-                    .iter()
-                    .position(|name| name == "publication")
-                {
-                    for row in &mut current.rows {
-                        row[column] = Some(publication.to_string());
-                    }
-                }
-                rows.insert(publication, current);
-            }
-        }
-    }
-    set(fixture.row("ticks", 2), 0, "ioreport_read", Some("false"));
-    set(fixture.row("ticks", 2), 0, "smc_read", Some("false"));
-    for field in [
-        "gpu_energy_nj",
-        "power_watts",
-        "soc_celsius",
-        "cpu_celsius",
-        "gpu_celsius",
-    ] {
-        set(fixture.row("ticks", 2), 0, field, None);
-    }
-    fixture.row("gpu_states", 2).rows.clear();
-    set(
-        fixture.row("ticks", 4),
-        0,
-        "gpu_energy_nj",
-        Some("7000000000"),
-    );
+    fixture.minutes.insert(3, minute(3, true));
+    fixture.minutes.insert(4, minute(4, true));
+    let failed = fixture.minute(2);
+    failed.gpu_states.clear();
+    let tick = &mut failed.ticks[0];
+    tick.ioreport_read = false;
+    tick.smc_read = false;
+    tick.gpu_energy_nj = None;
+    tick.power_watts = None;
+    tick.soc_celsius = None;
+    tick.cpu_celsius = None;
+    tick.gpu_celsius = None;
+    fixture.minute(4).ticks[0].gpu_energy_nj = Some(7_000_000_000);
     fixture
 }
 
@@ -580,7 +448,7 @@ fn rejects_gpu_residency_with_a_refused_previous_sample() {
     // Goal: refusal cannot become measured GPU work or power.
     // Method: keep numeric counters but mark the earlier IOReport read unsuccessful.
     let mut fixture = Fixture::new();
-    set(fixture.row("ticks", 1), 0, "ioreport_read", Some("false"));
+    fixture.minute(1).ticks[0].ioreport_read = false;
 
     let value = fixture.point();
 
@@ -589,24 +457,22 @@ fn rejects_gpu_residency_with_a_refused_previous_sample() {
 }
 
 #[test]
-fn rejects_gpu_residency_with_a_changed_declared_state_count() {
+fn rejects_gpu_residency_with_a_changed_state_count() {
     // Goal: a changing state domain cannot produce an aggregate residency rate.
-    // Method: change only the earlier declared count while keeping both state tables.
+    // Method: give only the earlier reading a third state.
     let mut fixture = Fixture::new();
-    set(fixture.row("ticks", 1), 0, "gpu_state_count", Some("3"));
+    fixture.minute(1).gpu_states = gpu_states(1, &[1_000_000_000, 2_000_000_000, 0]);
 
     assert!(fixture.point()["gpu_active_percent"].is_null());
 }
 
 #[test]
-fn rejects_gpu_residency_with_zero_declared_states() {
+fn rejects_gpu_residency_with_no_states() {
     // Goal: no active-state domain means unavailable rather than measured idle.
-    // Method: declare zero states and provide no state rows at either endpoint.
+    // Method: give neither endpoint a state row.
     let mut fixture = Fixture::new();
-    set(fixture.row("ticks", 1), 0, "gpu_state_count", Some("0"));
-    set(fixture.row("ticks", 2), 0, "gpu_state_count", Some("0"));
-    fixture.row("gpu_states", 1).rows.clear();
-    fixture.row("gpu_states", 2).rows.clear();
+    fixture.minute(1).gpu_states.clear();
+    fixture.minute(2).gpu_states.clear();
 
     assert!(fixture.point()["gpu_active_percent"].is_null());
 }
@@ -614,19 +480,19 @@ fn rejects_gpu_residency_with_zero_declared_states() {
 #[test]
 fn rejects_gpu_residency_with_a_missing_state_row() {
     // Goal: partial residency is never reported as a complete GPU percentage.
-    // Method: remove one of two declared rows from the current endpoint.
+    // Method: remove one of two rows from the current endpoint.
     let mut fixture = Fixture::new();
-    fixture.row("gpu_states", 2).rows.pop().unwrap();
+    fixture.minute(2).gpu_states.pop().unwrap();
 
     assert!(fixture.point()["gpu_active_percent"].is_null());
 }
 
 #[test]
 fn rejects_gpu_residency_with_duplicate_state_rows() {
-    // Goal: duplicated rows cannot disguise a missing state at the declared row count.
+    // Goal: duplicated rows cannot disguise a missing state at the same row count.
     // Method: give the two current rows the same state index.
     let mut fixture = Fixture::new();
-    set(fixture.row("gpu_states", 2), 1, "state", Some("0"));
+    fixture.minute(2).gpu_states[1].state = 0;
 
     assert!(fixture.point()["gpu_active_percent"].is_null());
 }
@@ -636,7 +502,7 @@ fn rejects_gpu_residency_with_an_out_of_range_state() {
     // Goal: a matching row count cannot substitute a different state domain.
     // Method: replace state 1 with state 2 in a two-state sample.
     let mut fixture = Fixture::new();
-    set(fixture.row("gpu_states", 2), 1, "state", Some("2"));
+    fixture.minute(2).gpu_states[1].state = 2;
 
     assert!(fixture.point()["gpu_active_percent"].is_null());
 }
@@ -646,17 +512,7 @@ fn rejects_gpu_residency_after_a_counter_reset() {
     // Goal: a reset is unavailable, never a negative or wrapped activity reading.
     // Method: move one current state counter below its previous value.
     let mut fixture = Fixture::new();
-    set(fixture.row("gpu_states", 2), 0, "active_ns", Some("0"));
-
-    assert!(fixture.point()["gpu_active_percent"].is_null());
-}
-
-#[test]
-fn rejects_gpu_residency_with_unavailable_state_data() {
-    // Goal: SQL NULL residency remains unavailable.
-    // Method: keep the state identity but remove its counter.
-    let mut fixture = Fixture::new();
-    set(fixture.row("gpu_states", 2), 1, "active_ns", None);
+    fixture.minute(2).gpu_states[0].active_ns = 0;
 
     assert!(fixture.point()["gpu_active_percent"].is_null());
 }
@@ -666,25 +522,20 @@ fn preserves_measured_idle_and_never_clamps_gpu_activity() {
     // Goal: measured zero differs from missing data, and source counters are not clamped.
     // Method: reuse the earlier counters, then increase one state beyond a full interval.
     let mut fixture = Fixture::new();
-    fixture.row("gpu_states", 2).rows = fixture.row("gpu_states", 1).rows.clone();
+    fixture.minute(2).gpu_states = gpu_states(2, &[1_000_000_000, 2_000_000_000]);
     assert_eq!(fixture.point()["gpu_active_percent"], 0.0);
 
-    set(
-        fixture.row("gpu_states", 2),
-        0,
-        "active_ns",
-        Some("4000000000"),
-    );
+    fixture.minute(2).gpu_states[0].active_ns = 4_000_000_000;
     assert_eq!(fixture.point()["gpu_active_percent"], 150.0);
 }
 
 #[test]
 fn preserves_independent_memory_and_network_counter_availability() {
     // Goal: one reset cannot create a false rate or erase other measured rates.
-    // Method: reset one VM counter and remove one network counter independently.
+    // Method: reset one VM counter and one network counter independently.
     let mut fixture = Fixture::new();
-    set(fixture.row("memory", 2), 0, "compressions", Some("0"));
-    set(fixture.row("interfaces", 2), 0, "received_bytes", None);
+    fixture.minute(2).memory[0].memory.compressions = 0;
+    fixture.minute(2).interfaces[0].interface.received_bytes = 0;
 
     let value = fixture.point();
 
@@ -700,13 +551,7 @@ fn reports_the_recorded_cpu_and_gpu_temperatures() {
     // Method: project a tick that recorded both, then one whose GPU sensor gave no reading.
     let mut fixture = Fixture::new();
     let both = fixture.point();
-    let ticks = fixture.row("ticks", 2);
-    let gpu = ticks
-        .columns
-        .iter()
-        .position(|name| name == "gpu_celsius")
-        .unwrap();
-    ticks.rows[0][gpu] = None;
+    fixture.minute(2).ticks[0].gpu_celsius = None;
     let cpu_only = fixture.point();
 
     assert_eq!(both["cpu_celsius"], 61.5);
@@ -908,24 +753,17 @@ fn measures_scalar_selection_response_sizes_at_both_context_limits() {
 }
 
 #[test]
-fn preserves_measured_empty_interface_domains_after_saved_partitioning() {
-    // Goal: partitioning an empty measured interface table cannot turn zero into unavailable.
-    // Method: compare live empty row sets with the saved partition's absent publication rows.
+fn preserves_measured_empty_interface_domains() {
+    // Goal: an empty measured interface table cannot turn zero into unavailable.
+    // Method: project two readings that hold no interface row.
     let mut fixture = Fixture::new();
-    fixture.row("interfaces", 1).rows.clear();
-    fixture.row("interfaces", 2).rows.clear();
-    let live = fixture.point();
-    fixture.tables.get_mut(&(0, "interfaces")).unwrap().clear();
+    fixture.minute(1).interfaces.clear();
+    fixture.minute(2).interfaces.clear();
 
-    assert_eq!(fixture.point(), live);
-    assert_eq!(live["network_rx_bps"], 0.0);
-    assert_eq!(network_rates(&live), json!([0.0, 0.0, 0.0, 0.0]));
-    fixture.tables.remove(&(0, "interfaces")).unwrap();
-    assert!(fixture.point()["network_rx_bps"].is_null());
-    assert_eq!(
-        network_rates(&fixture.point()),
-        json!([null, null, null, null])
-    );
+    let point = fixture.point();
+
+    assert_eq!(point["network_rx_bps"], 0.0);
+    assert_eq!(network_rates(&point), json!([0.0, 0.0, 0.0, 0.0]));
 }
 
 #[test]
@@ -933,15 +771,10 @@ fn preserves_zero_gpu_energy_and_refuses_energy_resets() {
     // Goal: measured zero power remains distinct from a reset energy counter.
     // Method: set equal energy endpoints, then make the later energy smaller.
     let mut fixture = Fixture::new();
-    set(
-        fixture.row("ticks", 2),
-        0,
-        "gpu_energy_nj",
-        Some("1000000000"),
-    );
+    fixture.minute(2).ticks[0].gpu_energy_nj = Some(1_000_000_000);
     assert_eq!(fixture.point()["gpu_watts"], 0.0);
 
-    set(fixture.row("ticks", 2), 0, "gpu_energy_nj", Some("0"));
+    fixture.minute(2).ticks[0].gpu_energy_nj = Some(0);
     assert!(fixture.point()["gpu_watts"].is_null());
     assert_eq!(fixture.point()["gpu_active_percent"], 40.0);
 }
@@ -949,9 +782,9 @@ fn preserves_zero_gpu_energy_and_refuses_energy_resets() {
 #[test]
 fn leaves_rates_unavailable_without_a_compatible_predecessor() {
     // Goal: no source counter interval is fabricated at startup or a run-tick gap.
-    // Method: omit the predecessor, then skip a run tick with numeric tables unchanged.
+    // Method: omit the predecessor, then skip a run tick with numeric rows unchanged.
     let mut fixture = Fixture::new();
-    let first = point(&fixture.tables, &fixture.current, None, 1).unwrap();
+    let first = fixture.point_after(None).unwrap();
     assert!(first["gpu_active_percent"].is_null());
     assert!(first["memory_pageins_per_second"].is_null());
     assert_eq!(network_rates(&first), json!([null, null, null, null]));
@@ -970,24 +803,9 @@ fn preserves_measured_network_zeroes_without_traffic() {
     // Goal: unchanged measured counters are zero, rather than absent observations.
     // Method: keep the same interface and counters at both endpoints of a valid interval.
     let mut fixture = Fixture::new();
-    fixture.row("interfaces", 2).rows = fixture.row("interfaces", 1).rows.clone();
+    fixture.minute(2).interfaces = vec![interface(2, false)];
 
     assert_eq!(network_rates(&fixture.point()), json!([0.0, 0.0, 0.0, 0.0]));
-}
-
-#[test]
-fn refuses_a_missing_fan_source_in_common_projection() {
-    // Goal: a missing source cannot turn into a measured empty array or an unread gap.
-    // Method: remove the loaded source map from an otherwise complete scalar observation.
-    let mut fixture = Fixture::new();
-    assert!(fixture.tables.remove(&(0, "fans")).is_some());
-
-    let result = point(&fixture.tables, &fixture.current, None, 1);
-
-    assert!(matches!(
-        result,
-        Err(Error::Bound("missing required recorded fan source"))
-    ));
 }
 
 macro_rules! malformed_common_fan {
@@ -997,56 +815,32 @@ macro_rules! malformed_common_fan {
             // Goal: common scalar projection refuses malformed fan associations.
             // Method: corrupt one fact of a measured, complete two-channel source.
             let mut fixture = Fixture::new();
-            set(fixture.row("ticks", 2), 0, "smc_read", Some("true"));
-            fixture.tables.get_mut(&(0, "fans")).unwrap().insert(
-                2,
-                table(
-                    &["publication", "fan", "rpm"],
-                    &[&["2", "0", "12"], &["2", "1", "0"]],
-                ),
-            );
-            $change(&mut fixture);
+            fixture.minute(2).fans = vec![fan_row(0, 12.0), fan_row(1, 0.0)];
+            $change(&mut fixture.minute(2).fans);
 
-            let result = point(&fixture.tables, &fixture.current, None, 1);
+            let result = fixture.point_after(None);
 
             assert!(matches!(result, Err(Error::Bound($reason))), "{result:?}");
         }
     };
 }
 malformed_common_fan!(
-    refuses_a_changed_fan_publication_in_common_projection,
-    |fixture: &mut Fixture| set(fixture.row("fans", 2), 0, "publication", Some("3")),
-    "fan row publication"
-);
-malformed_common_fan!(
     refuses_duplicate_fan_channels_in_common_projection,
-    |fixture: &mut Fixture| set(fixture.row("fans", 2), 1, "fan", Some("0")),
+    |fans: &mut Vec<FanRow>| fans[1].fan = 0,
     "fan channel order"
 );
 malformed_common_fan!(
-    refuses_missing_fan_columns_in_common_projection,
-    |fixture: &mut Fixture| fixture.row("fans", 2).columns.clear(),
-    "missing schema column"
-);
-malformed_common_fan!(
     refuses_too_many_fan_channels_in_common_projection,
-    |fixture: &mut Fixture| fixture.row("fans", 2).rows.resize(11, vec![None; 3]),
+    |fans: &mut Vec<FanRow>| fans.resize(11, fan_row(0, 0.0)),
     "fan channels"
 );
 
 #[test]
-fn retains_nullable_fan_channels_in_common_projection() {
-    // Goal: SQL NULL remains a channel gap beside stopped zero in common scalar projection.
-    // Method: project a real-shaped nullable fan table through the same point builder.
+fn retains_an_unread_fan_channel_in_common_projection() {
+    // Goal: a channel with no reading remains a gap beside stopped zero in common projection.
+    // Method: project a channel the collector read as NaN through the same point builder.
     let mut fixture = Fixture::new();
-    set(fixture.row("ticks", 2), 0, "smc_read", Some("true"));
-    fixture.tables.get_mut(&(0, "fans")).unwrap().insert(
-        2,
-        table(
-            &["publication", "fan", "rpm"],
-            &[&["2", "0", "NULL"], &["2", "1", "0"]],
-        ),
-    );
+    fixture.minute(2).fans = vec![fan_row(0, f32::NAN), fan_row(1, 0.0)];
 
     assert_eq!(fixture.point()["fan_rpm"], json!([null, 0.0]));
 }
@@ -1063,24 +857,39 @@ fn preserves_machine_rate_multiplication_before_division() {
     );
 }
 
+/// A publication's interfaces, each its index and its received bytes.
+fn received_minute(publication: u64, interfaces: &[(u16, u64)]) -> MachineMinute {
+    MachineMinute {
+        ticks: vec![TickRow::fixture(publication)],
+        interfaces: interfaces
+            .iter()
+            .map(|(index, received_bytes)| {
+                InterfaceRow::fixture(
+                    publication,
+                    *index,
+                    "en0",
+                    [*received_bytes, 0, 0, 0, 0, 0, 0],
+                )
+            })
+            .collect(),
+        ..MachineMinute::default()
+    }
+}
+
 #[test]
 fn retains_decimal_component_order_before_a_later_reset() {
     // Goal: typed pairing retains the saved reduction's overflow before a later reset.
     // Method: keys 1, 10, 2 overflow in decimal order but reset first in numeric order.
-    let current = table(
-        &["cpu", "user_ticks"],
-        &[&["1", "18446744073709551615"], &["2", "0"], &["10", "1"]],
-    );
-    let previous = table(
-        &["cpu", "user_ticks"],
-        &[&["1", "0"], &["2", "1"], &["10", "0"]],
-    );
+    let current = received_minute(2, &[(1, u64::MAX), (2, 0), (10, 1)]);
+    let previous = received_minute(1, &[(1, 0), (2, 1), (10, 0)]);
+    let current = reading_at(&current, 2).unwrap();
+    let previous = reading_at(&previous, 1).unwrap();
 
     let result = counter_delta(
-        &View::Saved(&current),
-        &View::Saved(&previous),
-        &["cpu"],
-        "user_ticks",
+        &View(crate::live_raw::View::machine(&current, "interfaces").unwrap()),
+        &View(crate::live_raw::View::machine(&previous, "interfaces").unwrap()),
+        &["interface"],
+        "received_bytes",
     );
 
     assert!(matches!(result, Err(Error::Bound("counter sum"))));

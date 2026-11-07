@@ -4,8 +4,6 @@ use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::cpu_history_sample::{self, CounterSample, Identity, Interval};
-#[cfg(test)]
-use crate::data::Table;
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation};
 
 pub(crate) const PAGE_CPUS: usize = 32;
@@ -115,13 +113,6 @@ impl History {
             previous: Vec::with_capacity(SOURCES_MAX),
             heap_bytes: 0,
         });
-    }
-
-    #[cfg(test)]
-    pub fn capture(&mut self, identity: &Identity, table: &Table) -> Result<()> {
-        let mut counters = Vec::new();
-        cpu_history_sample::counters(table, identity.observation.publication, &mut counters)?;
-        self.capture_counters(identity, counters)
     }
 
     pub fn capture_rows(

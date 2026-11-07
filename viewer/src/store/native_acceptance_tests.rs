@@ -624,7 +624,7 @@ fn the_complete_store_retains_native_facets_from_one_ingestion() {
     let observation = apps.observation.unwrap();
     let raw = held.raw.as_ref().unwrap().find(&observation).unwrap();
     let page = raw.raw().page("ticks", 0, &operation).unwrap();
-    assert_eq!(page.integer(&page.rows[0], "publication").unwrap(), Some(2));
+    assert_eq!(page.shown(0, "publication"), Some("2"));
     let mut events = Vec::new();
     trace.snapshot(&mut events).unwrap();
     for kind in [

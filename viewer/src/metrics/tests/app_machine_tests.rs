@@ -2,28 +2,8 @@ use super::*;
 
 fn two_cpus() -> Fixture {
     let mut fixture = Fixture::new();
-    let columns = [
-        "publication",
-        "cpu",
-        "user_ticks",
-        "system_ticks",
-        "nice_ticks",
-        "idle_ticks",
-    ];
-    *fixture.row("cpus", 1) = table(
-        &columns,
-        &[
-            &["1", "0", "0", "0", "0", "0"],
-            &["1", "1", "0", "0", "0", "0"],
-        ],
-    );
-    *fixture.row("cpus", 2) = table(
-        &columns,
-        &[
-            &["2", "1", "100", "0", "0", "100"],
-            &["2", "0", "100", "0", "0", "0"],
-        ],
-    );
+    fixture.minute(1).cpus = vec![cpu_row(1, 0, 0, 0), cpu_row(1, 1, 0, 0)];
+    fixture.minute(2).cpus = vec![cpu_row(2, 1, 100, 100), cpu_row(2, 0, 100, 0)];
 
     fixture
 }
@@ -47,7 +27,7 @@ fn machine_cpu_sums_recorded_core_rates_with_unequal_tick_denominators() {
 fn machine_cpu_withholds_the_total_when_one_recorded_core_resets() {
     // A reset on either core makes the independent whole-machine reference unavailable.
     let mut fixture = two_cpus();
-    set(fixture.row("cpus", 1), 0, "user_ticks", Some("101"));
+    fixture.minute(1).cpus[0].ticks.user = 101;
 
     let value = fixture.point();
 
@@ -58,8 +38,8 @@ fn machine_cpu_withholds_the_total_when_one_recorded_core_resets() {
 fn machine_cpu_withholds_the_total_when_one_recorded_core_is_missing() {
     // A changed CPU domain cannot become a subtotal disguised as the full machine.
     let mut fixture = two_cpus();
-    fixture.row("cpus", 2).rows.pop().unwrap();
-    set(fixture.row("cpus", 2), 0, "cpu", Some("0"));
+    fixture.minute(2).cpus.pop().unwrap();
+    fixture.minute(2).cpus[0].cpu = 0;
 
     let value = fixture.point();
 

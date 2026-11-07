@@ -1018,6 +1018,7 @@ impl Machine {
         Self {
             tick: TickRow {
                 publication,
+                gpu_state_count: 0,
                 run_tick: publication - 1,
                 wall_ns: Some((1_000 + publication) * SECOND_NS),
                 continuous_ns: Some(publication * SECOND_NS),

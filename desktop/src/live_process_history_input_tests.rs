@@ -479,16 +479,16 @@ fn captured_process_table_cells_keep_metric_order_and_exact_thread_counts(cx: &m
             let mut snapshot = AppEpoch::Accepted.snapshot(dashboard.generation);
             let second =
                 &mut snapshot.detail.as_mut().unwrap().legacy_mut().unwrap()["processes"][1];
-            second["idle_wakeups"] = json!({"known":"2","unavailable":null});
-            second["pageins"] = json!({"known":"1","unavailable":null});
-            second["threads"] = json!({"known":"3","unavailable":null});
+            second["idle_wakeups"] = json!({"known":2,"unavailable":null});
+            second["pageins"] = json!({"known":1,"unavailable":null});
+            second["threads"] = json!({"known":3,"unavailable":null});
             second["idle_wakeups_per_second"] = json!(2.0);
             second["pageins_per_second"] = json!(1.0);
             let helper =
                 &mut snapshot.detail.as_mut().unwrap().legacy_mut().unwrap()["processes"][2];
-            helper["idle_wakeups"] = json!({"known":"42","unavailable":null});
-            helper["pageins"] = json!({"known":"43","unavailable":null});
-            helper["threads"] = json!({"known":"44","unavailable":null});
+            helper["idle_wakeups"] = json!({"known":42,"unavailable":null});
+            helper["pageins"] = json!({"known":43,"unavailable":null});
+            helper["threads"] = json!({"known":44,"unavailable":null});
             helper["idle_wakeups_per_second"] = json!(42.0);
             helper["pageins_per_second"] = json!(43.0);
             assert!(dashboard.take_update(Update::Ready(snapshot)));

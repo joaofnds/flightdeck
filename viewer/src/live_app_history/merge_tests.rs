@@ -19,12 +19,12 @@ fn prefers_the_entire_live_point_without_summing_the_saved_overlap() {
     let response = response(&history, &saved, &observation(2)).unwrap();
 
     assert_eq!(response["points"].as_array().unwrap().len(), 1);
-    assert_eq!(response["points"][0]["cpu_ns"]["known"], "42");
-    assert_eq!(response["points"][0]["elapsed_ns"], "1000000000");
+    assert_eq!(response["points"][0]["cpu_ns"]["known"], 42);
+    assert_eq!(response["points"][0]["elapsed_ns"], 1_000_000_000);
     assert_eq!(response["points"][0]["cpu_percent_one_core"], 0.000_004_2);
-    assert_eq!(response["points"][0]["disk_read_bytes"]["known"], "42");
-    assert_eq!(response["points"][0]["disk_written_bytes"]["known"], "42");
-    assert_eq!(response["points"][0]["disk_io_bytes"]["known"], "42");
+    assert_eq!(response["points"][0]["disk_read_bytes"]["known"], 42);
+    assert_eq!(response["points"][0]["disk_written_bytes"]["known"], 42);
+    assert_eq!(response["points"][0]["disk_io_bytes"]["known"], 42);
     assert_eq!(response["points"][0]["disk_read_bps"], 42.0);
     assert_eq!(response["points"][0]["disk_written_bps"], 42.0);
     assert_eq!(response["points"][0]["disk_io_bps"], 42.0);
@@ -122,7 +122,7 @@ fn retains_a_null_point_when_the_target_has_no_attributed_members() {
     assert_eq!(response["points"][1]["members"], Value::Null);
     assert_eq!(response["points"][1]["resident_bytes"], Value::Null);
     assert_eq!(response["points"][1]["cpu_percent_one_core"], Value::Null);
-    assert_eq!(response["points"][2]["resident_bytes"]["known"], "9");
+    assert_eq!(response["points"][2]["resident_bytes"]["known"], 9);
 }
 
 macro_rules! broken_interval {
@@ -237,7 +237,7 @@ fn retains_the_entire_first_second_of_merged_history() {
         response["points"][0]["observation"]["wall_ns"],
         "941900000000"
     );
-    assert_eq!(response["points"][0]["resident_bytes"]["known"], "7");
+    assert_eq!(response["points"][0]["resident_bytes"]["known"], 7);
     assert_eq!(response["points"][0]["source_available"], true);
 }
 

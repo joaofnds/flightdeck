@@ -44,10 +44,10 @@ fn disk_attribution_keeps_exact_combined_deltas_and_continuous_rates_after_reope
     assert_eq!(after["points"], before["points"]);
     assert_eq!(after["cohort"], before["cohort"]);
     assert_eq!(warm, after);
-    assert_eq!(after["points"][1]["elapsed_ns"], "2000000000");
+    assert_eq!(after["points"][1]["elapsed_ns"], 2_000_000_000);
     assert_eq!(
         after["points"][1]["apps"][0]["disk_io_bytes"]["known"],
-        "5120"
+        5120
     );
     assert_eq!(after["points"][1]["apps"][0]["disk_io_bps"], 2560.0);
     assert_eq!(
@@ -104,7 +104,7 @@ fn disk_attribution_restores_verified_exit_work_and_reuses_cpu_warmed_saved_fact
     assert_eq!(after["cohort"], before["cohort"]);
     assert_eq!(
         after["points"][2]["apps"][0]["disk_io_bytes"]["known"],
-        "7000"
+        7000
     );
     assert_eq!(after["points"][2]["apps"][0]["disk_io_bps"], 7000.0);
     assert_eq!(resident["points"][2]["apps"][0], serde_json::Value::Null);
@@ -160,9 +160,12 @@ fn attribution_preserves_cpu_above_one_core_and_actual_interval_power() {
         .unwrap();
 
     assert_eq!(cpu["metric"], "cpu");
-    assert_eq!(cpu["points"][1]["elapsed_ns"], "1000000000");
+    assert_eq!(cpu["points"][1]["elapsed_ns"], 1_000_000_000);
     assert_eq!(cpu["points"][1]["apps"][0]["cpu_percent_one_core"], 120.0);
-    assert_eq!(cpu["points"][1]["apps"][0]["cpu_ns"]["known"], "1200000000");
+    assert_eq!(
+        cpu["points"][1]["apps"][0]["cpu_ns"]["known"],
+        1_200_000_000
+    );
     assert_eq!(power["metric"], "power");
     assert_eq!(power["points"][1]["apps"][0]["energy_watts"], 2.4);
     assert_eq!(
@@ -335,7 +338,7 @@ fn attribution_restores_a_predecessor_outside_the_visible_context_across_minutes
 
     assert_eq!(cpu["points"].as_array().unwrap().len(), 1);
     assert_eq!(cpu["points"][0]["apps"][0]["cpu_percent_one_core"], 120.0);
-    assert_eq!(cpu["points"][0]["elapsed_ns"], "1000000000");
+    assert_eq!(cpu["points"][0]["elapsed_ns"], 1_000_000_000);
 }
 
 #[test]
@@ -355,7 +358,7 @@ fn attribution_uses_continuous_elapsed_time_and_withholds_refused_members() {
         .app_attribution_history(AppAttributionMetric::Power)
         .unwrap();
 
-    assert_eq!(cpu["points"][1]["elapsed_ns"], "2000000000");
+    assert_eq!(cpu["points"][1]["elapsed_ns"], 2_000_000_000);
     assert_eq!(cpu["points"][1]["apps"][0]["cpu_percent_one_core"], 60.0);
     assert_eq!(power["points"][1]["apps"][0]["energy_watts"], 1.2);
     assert_eq!(

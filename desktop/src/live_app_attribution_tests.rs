@@ -90,7 +90,7 @@ fn measured_zero_and_partial_rates_retain_their_coverage() {
     // A measured zero is drawable while an incomplete measure carries an explicit subtotal label.
     let mut value = fixture(Metric::Cpu);
     value["points"][0]["apps"][0]["cpu_percent_one_core"] = json!(0.0);
-    value["points"][0]["apps"][0]["cpu_ns"]["known"] = json!("0");
+    value["points"][0]["apps"][0]["cpu_ns"]["known"] = json!(0);
     value["points"][1]["apps"][0]["cpu_ns"]["unavailable_members"] = json!(2);
     let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
 
@@ -139,7 +139,7 @@ fn empty_other_is_a_measured_zero_only_with_complete_capture() {
     // The backend may establish an empty set only from a complete source and a valid interval.
     let mut value = fixture(Metric::Cpu);
     value["points"][1]["other"] = json!({"app_count":0,"cpu_ns":{
-        "known":"0","measured_members":0,"unavailable_members":0,"overflowed":false},
+        "known":0,"measured_members":0,"unavailable_members":0,"overflowed":false},
         "cpu_percent_one_core":0.0,"membership_complete":true});
     let history = AppAttributionHistory::prepare(Metric::Cpu, &value, &selection());
 
@@ -278,7 +278,7 @@ fn observation(publication: u64) -> Value {
 
 fn point(publication: u64) -> Value {
     let cpu = if publication == 1 { 120.0 } else { 240.0 };
-    json!({"observation":observation(publication),"segment":"0","elapsed_ns":"1000000000",
+    json!({"observation":observation(publication),"segment":"0","elapsed_ns":1_000_000_000,
         "source_available":true,"membership_complete":true,"ungrouped_members":0,
         "usage_refused":0,"usage_gone":0,"apps":[{"members":1,"membership_complete":true,
         "cpu_ns":measure(if publication == 1 { "1200000000" }
@@ -321,7 +321,7 @@ fn disk_attribution_scales_rates_without_changing_the_captured_interval_bytes() 
 fn disk_attribution_preserves_bytes_above_float_integer_precision() {
     // Keep the interval's exact counter even when floating-point rate conversion rounds it.
     let mut value = disk_fixture();
-    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("9007199254740993");
+    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(9_007_199_254_740_993_u64);
     value["points"][1]["apps"][0]["disk_io_bps"] = json!(4_503_599_627_370_496.0);
     let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
 
@@ -336,7 +336,7 @@ fn disk_attribution_preserves_bytes_above_float_integer_precision() {
 fn disk_attribution_keeps_a_measured_zero_drawable() {
     // A jointly measured zero belongs in the history rather than becoming an availability gap.
     let mut value = disk_fixture();
-    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("0");
+    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(0);
     value["points"][1]["apps"][0]["disk_io_bps"] = json!(0.0);
     let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
 
@@ -417,12 +417,12 @@ pub(crate) fn disk_fixture() -> Value {
         .iter_mut()
         .enumerate()
     {
-        point["elapsed_ns"] = json!("2000000000");
+        point["elapsed_ns"] = json!(2_000_000_000);
         point["apps"][0] = json!({"members":1,"membership_complete":true,
             "disk_io_bytes":measure(["1000000", "3000000"][index]),
             "disk_io_bps":([500_000.0, 1_500_000.0][index])});
         point["other"] = json!({"app_count":0,"membership_complete":true,
-            "disk_io_bytes":{"known":"0","measured_members":0,
+            "disk_io_bytes":{"known":0,"measured_members":0,
             "unavailable_members":0,"overflowed":false},"disk_io_bps":0.0});
     }
 
@@ -433,7 +433,7 @@ pub(crate) fn disk_fixture() -> Value {
 fn disk_attribution_small_nonzero_rates_keep_human_units() {
     // A captured ten bytes per second must stay distinct from measured zero and unavailable data.
     let mut value = disk_fixture();
-    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("20");
+    value["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(20);
     value["points"][1]["apps"][0]["disk_io_bps"] = json!(10.0);
     let history = AppAttributionHistory::prepare(Metric::Disk, &value, &selection());
 

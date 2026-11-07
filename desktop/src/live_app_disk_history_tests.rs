@@ -12,7 +12,7 @@ fn selected_app_disk_history_combines_interval_rates_and_keeps_gaps() {
         "publication":"2","continuous_ns":"3000000000","awake_ns":"700000000"}});
     let selection = json!({"second":1000,"context_last_second":1000,"selected":selected});
     let measure = |known: u64| {
-        json!({"known":known.to_string(),"measured_members":1,
+        json!({"known":known,"measured_members":1,
             "unavailable_members":0,"overflowed":false})
     };
     let unavailable = json!({"observation":{"wall_ns":"998000000000",
@@ -25,7 +25,7 @@ fn selected_app_disk_history_combines_interval_rates_and_keeps_gaps() {
         "disk_read_bytes":null,"disk_written_bytes":null,"disk_io_bytes":null,
         "disk_read_bps":null,"disk_written_bps":null,"disk_io_bps":null});
     let measured = json!({"observation":selected,"segment":"0","source_available":true,
-        "elapsed_ns":"2000000000","members":1,"membership_complete":true,
+        "elapsed_ns":2_000_000_000,"members":1,"membership_complete":true,
         "cpu_ns":measure(0),"energy_nj":measure(0),"resident_bytes":measure(1024),
         "footprint_bytes":measure(1024),"cpu_percent_one_core":0.0,
         "energy_joules":0.0,"energy_watts":0.0,

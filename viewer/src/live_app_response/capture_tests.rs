@@ -35,9 +35,9 @@ fn owns_ring_facts_after_source_and_frames_are_retired() {
 
     assert_eq!(result["selected"]["stamp"]["publication"], "2");
     assert_eq!(result["previous"]["publication"], "1");
-    assert_eq!(result["apps"][0]["cpu_ns"]["known"], "200000000");
-    assert_eq!(result["apps"][0]["energy_nj"]["known"], "1000000000");
-    assert_eq!(result["apps"][0]["resident_bytes"]["known"], "104857600");
+    assert_eq!(result["apps"][0]["cpu_ns"]["known"], 200_000_000);
+    assert_eq!(result["apps"][0]["energy_nj"]["known"], 1_000_000_000);
+    assert_eq!(result["apps"][0]["resident_bytes"]["known"], 104_857_600);
     assert_eq!(result["apps"][0]["membership_complete"], false);
     assert_eq!(result["apps"][0]["key"]["bytes_hex"], "2f412e617070");
 }
@@ -76,26 +76,23 @@ fn owns_exact_disk_deltas_and_rates_after_the_ring_is_retired() {
     assert_eq!(
         page["apps"][0]["disk_read_bytes"],
         serde_json::json!({
-            "known":"4096", "measured_members":1, "unavailable_members":0, "overflowed":false
+            "known":4096, "measured_members":1, "unavailable_members":0, "overflowed":false
         })
     );
     assert_eq!(detail["app"], page["apps"][0]);
-    assert_eq!(detail["app"]["disk_written_bytes"]["known"], "1024");
-    assert_eq!(detail["app"]["disk_io_bytes"]["known"], "5120");
+    assert_eq!(detail["app"]["disk_written_bytes"]["known"], 1024);
+    assert_eq!(detail["app"]["disk_io_bytes"]["known"], 5120);
     assert_eq!(detail["app"]["disk_read_bps"], 4096.0);
     assert_eq!(detail["app"]["disk_written_bps"], 1024.0);
     assert_eq!(detail["app"]["disk_io_bps"], 5120.0);
     assert_eq!(
         detail["processes"][0]["disk_read_bytes"],
         serde_json::json!({
-            "known":"4096", "unavailable":null
+            "known":4096, "unavailable":null
         })
     );
-    assert_eq!(
-        detail["processes"][0]["disk_written_bytes"]["known"],
-        "1024"
-    );
-    assert_eq!(detail["processes"][0]["disk_io_bytes"]["known"], "5120");
+    assert_eq!(detail["processes"][0]["disk_written_bytes"]["known"], 1024);
+    assert_eq!(detail["processes"][0]["disk_io_bytes"]["known"], 5120);
     assert_eq!(detail["processes"][0]["disk_read_bps"], 4096.0);
     assert_eq!(detail["processes"][0]["disk_written_bps"], 1024.0);
     assert_eq!(detail["processes"][0]["disk_io_bps"], 5120.0);
@@ -139,7 +136,7 @@ fn retains_a_full_rolling_disk_history_from_real_ring_publications() {
     assert_eq!(points.len(), 900);
     assert_eq!(points[0]["observation"]["stamp"]["publication"], "2");
     assert_eq!(points[899]["observation"]["stamp"]["publication"], "901");
-    assert_eq!(points[0]["disk_io_bytes"]["known"], "5120");
+    assert_eq!(points[0]["disk_io_bytes"]["known"], 5120);
     assert_eq!(points[899]["disk_read_bps"], 4096.0);
     assert_eq!(points[899]["disk_written_bps"], 1024.0);
     assert_eq!(points[899]["disk_io_bps"], 5120.0);

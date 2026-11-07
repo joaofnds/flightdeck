@@ -22,11 +22,13 @@ use persistence::schema::Table;
 use polars::prelude::{DataFrame, Expr, LazyFrame, SchemaRef, UInt64Type, col};
 
 pub use apps::{AppMinute, AppParts, AppRow, Previous, SampleRow, read_apps};
-pub(crate) use machine::read_machine_and_endpoints;
 pub use machine::{
     CoreStateRow, CpuRow, FanRow, GpuStateRow, InterfaceRow, MachineMinute, MemoryRow, TickRow,
     read_machine,
 };
+#[cfg(test)]
+pub(crate) use machine::{MACHINE_TEXT_BYTES_MAX, TABLE_ROWS_PER_TICK_MAX};
+pub(crate) use machine::{read_machine_and_endpoints, read_machine_cpus, read_ticks};
 pub use minute_ticks::{MinuteTick, MinuteTicks};
 pub use processes::{Before, derive_apps};
 
@@ -207,6 +209,15 @@ enum SealedColumns {
     Admitted(persistence::engine::AdmittedColumns),
 }
 
+impl SealedColumns {
+    fn contains(&self, name: &str) -> bool {
+        match self {
+            Self::Legacy(schema) => schema.contains(name),
+            Self::Admitted(columns) => columns.contains(name),
+        }
+    }
+}
+
 impl SealedTable<'_> {
     /// Whether the table holds the optional columns `group`, which a minute holds whole or
     /// not at all.
@@ -215,18 +226,30 @@ impl SealedTable<'_> {
             operation.check()?;
         }
 
-        match &self.columns {
-            SealedColumns::Legacy(schema) => holds_columns(group, |name| schema.contains(name)),
-            SealedColumns::Admitted(columns) => holds_columns(group, |name| columns.contains(name)),
-        }
+        holds_columns(group, |name| self.columns.contains(name))
     }
 
     /// The `columns`, rows in the order the file holds them.
     fn collect(mut self, columns: &[&str]) -> Result<DataFrame, Refused> {
+        require_columns(columns, |name| self.columns.contains(name))?;
         let columns: Vec<Expr> = columns.iter().map(|name| col(*name)).collect();
         self.plan = self.plan.select(columns);
 
         self.collect_plan()
+    }
+
+    /// The `columns`, rows in the order the file holds them, refusing a table of more than
+    /// `rows_max` rows rather than decoding the rest of it.
+    fn collect_rows(mut self, columns: &[&str], rows_max: usize) -> Result<DataFrame, Refused> {
+        let limit =
+            u32::try_from(rows_max + 1).map_err(|_| persistence::Error::Bound("table rows"))?;
+        self.plan = self.plan.limit(limit);
+        let frame = self.collect(columns)?;
+        if frame.height() > rows_max {
+            return Err(persistence::Error::Bound("table rows").into());
+        }
+
+        Ok(frame)
     }
 
     fn collect_plan(self) -> Result<DataFrame, Refused> {
@@ -248,12 +271,24 @@ fn collect_plan(
         persistence::work::ingestion::Kind::NativeCollect,
         0,
     );
+    persistence::work::record(|counts| counts.saved_tables += 1);
     let result = plan.collect().map_err(persistence::Error::from);
     if let Some(operation) = operation {
         operation.check()?;
     }
 
     result
+}
+
+/// Refuses a table that lacks one of the `columns` a read needs.
+fn require_columns(columns: &[&str], contains: impl Fn(&str) -> bool) -> Result<(), Refused> {
+    if columns.iter().all(|name| contains(name)) {
+        return Ok(());
+    }
+
+    Err(Refused::from(persistence::Error::Bound(
+        "missing schema column",
+    )))
 }
 
 fn holds_columns(group: &[&str], mut contains: impl FnMut(&str) -> bool) -> Result<bool, Refused> {

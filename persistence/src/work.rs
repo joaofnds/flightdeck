@@ -1,5 +1,6 @@
 //! Opt-in calling-thread work counts. A scope measures real subsystem entry points; outside
-//! a scope the recorder leaves state untouched. A scope cannot move to another thread.
+//! a scope the recorder leaves state untouched. A scope cannot move to another thread, so a
+//! helper thread measures in a scope of its own and its starter merges what that scope counted.
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -14,6 +15,12 @@ pub struct Counts {
     pub collections: u64,
     pub string_cells: u64,
     pub source_metadata_checks: u64,
+    /// The saved tables decoded, a decode of one table counting once.
+    pub saved_tables: u64,
+    /// The bytes of the rows a read of a saved minute owns once decoded.
+    pub minute_bytes: u64,
+    /// The bytes of the rows copied out of a decoded minute to outlive it.
+    pub minute_copy_bytes: u64,
 }
 
 thread_local! {
@@ -54,6 +61,32 @@ pub fn record(update: impl FnOnce(&mut Counts)) {
         update(&mut value);
         COUNTS.set(Some(value));
     }
+}
+
+/// Adds what a helper thread's scope counted to the scope on this thread.
+pub fn merge(helper: Counts) {
+    let Counts {
+        staged_ticks,
+        frames,
+        sql_plans,
+        collections,
+        string_cells,
+        source_metadata_checks,
+        saved_tables,
+        minute_bytes,
+        minute_copy_bytes,
+    } = helper;
+    record(|counts| {
+        counts.staged_ticks += staged_ticks;
+        counts.frames += frames;
+        counts.sql_plans += sql_plans;
+        counts.collections += collections;
+        counts.string_cells += string_cells;
+        counts.source_metadata_checks += source_metadata_checks;
+        counts.saved_tables += saved_tables;
+        counts.minute_bytes += minute_bytes;
+        counts.minute_copy_bytes += minute_copy_bytes;
+    });
 }
 
 #[cfg(test)]

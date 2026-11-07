@@ -182,7 +182,7 @@ impl TracePoint {
     pub(crate) fn json(&self, segment: u64, named_process_group: bool) -> Value {
         let mut point = json!({"observation": self.observation.json(),
             "segment": segment.to_string(), "source_available": self.captured,
-            "elapsed_ns": self.elapsed_ns.map(|value| value.to_string()),
+            "elapsed_ns": self.elapsed_ns,
             "members": null, "membership_complete": false,
             "cpu_ns": null, "energy_nj": null, "resident_bytes": null, "footprint_bytes": null,
             "cpu_percent_one_core": null, "energy_joules": null, "energy_watts": null,

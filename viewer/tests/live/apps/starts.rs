@@ -303,7 +303,7 @@ fn associates_each_short_lived_app_beside_scheduled_members() {
     assert_eq!(page["process_count"], 4);
     assert_eq!(first["app"]["key"]["display"], "/Applications/B.app");
     assert_eq!(first["app"]["live_members"], 0);
-    assert_eq!(first["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(first["app"]["resident_bytes"]["known"], 0);
     assert_eq!(first["processes"][0]["pid"], 9);
     assert_eq!(first["processes"][0]["creation"]["unique_id"], "900");
     assert_eq!(
@@ -313,7 +313,7 @@ fn associates_each_short_lived_app_beside_scheduled_members() {
     assert_eq!(first["processes"][0]["state"], "exited_verified");
     assert_eq!(
         first["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
     assert_eq!(
         first["processes"][0]["cpu_percent_one_core"],
@@ -321,7 +321,7 @@ fn associates_each_short_lived_app_beside_scheduled_members() {
     );
     assert_eq!(second["app"]["key"]["display"], "/Applications/C.app");
     assert_eq!(second["app"]["live_members"], 0);
-    assert_eq!(second["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(second["app"]["resident_bytes"]["known"], 0);
     assert_eq!(second["processes"][0]["pid"], 10);
     assert_eq!(second["processes"][0]["creation"]["unique_id"], "901");
     assert_eq!(
@@ -331,7 +331,7 @@ fn associates_each_short_lived_app_beside_scheduled_members() {
     assert_eq!(second["processes"][0]["state"], "exited_verified");
     assert_eq!(
         second["processes"][0]["resident_bytes"]["known"],
-        "52428800"
+        52_428_800
     );
     assert_eq!(
         second["processes"][0]["cpu_percent_one_core"],

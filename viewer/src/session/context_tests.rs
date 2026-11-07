@@ -31,21 +31,20 @@ const MINUTE_SECONDS: [(u64, u64); MINUTE_COUNT] = [
 const _: () = assert!(context_reader_count(MINUTE_COUNT) == READER_COUNT);
 
 #[test]
-fn context_reads_a_minute_s_tables_once_and_again_before_each_later_reader() {
-    // Goal: a context's readers read each sealed minute's tables once, and each reader after the
-    // first reads the minute before its first minute too, since that minute holds the reading
-    // its first rates come from.
+fn context_reads_a_minute_once_and_again_before_each_later_reader() {
+    // Goal: a context's readers read each sealed minute's readings once, and each reader after
+    // the first reads the minute before its first minute too, since that minute holds the
+    // reading its first rates come from.
     // Method: read the context of seven sealed minutes, which four readers read, and count the
-    // table queries it made: seven minutes, and three more for the three later readers.
+    // minutes it read: seven, and three more for the three later readers.
     let fixture = sealed_minutes();
     let session = Session::open(&fixture.root).unwrap();
-    let queries = session.table_queries.get();
+    let reads = session.machine_minute_reads.get();
 
     let points = context(&session, SECOND_FIRST, seconds_end());
 
     assert_eq!(points.len(), RUN_TICKS.len());
-    let table_count = u64::try_from(metrics::TABLE_NAMES.len()).unwrap();
-    assert_eq!(session.table_queries.get() - queries, 10 * table_count);
+    assert_eq!(session.machine_minute_reads.get() - reads, 10);
 }
 
 #[test]
@@ -53,17 +52,17 @@ fn context_over_several_readers_gives_the_points_one_reader_gives() {
     // Goal: a context's points, rates included, do not depend on how its minutes were split
     // between readers.
     // Method: read the context of seven sealed minutes, which four readers read, then take the
-    // points of the same minutes in turn on one reader with one set of tables.
+    // points of the same minutes in turn on one reader with one set of minutes.
     let fixture = sealed_minutes();
     let session = Session::open(&fixture.root).unwrap();
 
     let whole = context(&session, SECOND_FIRST, seconds_end());
     let reader = session.reader();
-    let mut tables = metrics::Tables::new();
+    let mut minutes = metrics::Minutes::new();
     let mut alone = Vec::new();
     for (first, end) in MINUTE_SECONDS {
         let observations = session.observations(range(first, end)).unwrap();
-        alone.extend(metrics::trends(&reader, &observations, &mut tables).unwrap());
+        alone.extend(metrics::trends(&reader, &observations, &mut minutes).unwrap());
     }
 
     let rated = whole
@@ -92,25 +91,22 @@ fn context_numbers_segments_across_its_readers() {
 }
 
 #[test]
-fn context_keeps_the_tables_of_a_minute_and_of_the_minute_before_only() {
-    // Goal: a reader of many sealed minutes holds the tables of two minutes at most, since only
-    // the minute before a minute holds the reading its first rates come from.
-    // Method: take the points of the sealed minutes in turn with one set of tables, and list the
-    // minutes whose tables it keeps after each.
+fn context_keeps_a_minute_and_the_minute_before_only() {
+    // Goal: a reader of many sealed minutes holds two minutes at most, since only the minute
+    // before a minute holds the reading its first rates come from.
+    // Method: take the points of the sealed minutes in turn with one set of minutes, and list
+    // the minutes it keeps after each.
     let fixture = sealed_minutes();
     let session = Session::open(&fixture.root).unwrap();
     let reader = session.reader();
-    let mut tables = metrics::Tables::new();
+    let mut minutes = metrics::Minutes::new();
 
     let kept = MINUTE_SECONDS
         .iter()
         .map(|(first, end)| {
             let observations = session.observations(range(*first, *end)).unwrap();
-            metrics::trends(&reader, &observations, &mut tables).unwrap();
-            tables
-                .keys()
-                .map(|(window, _)| *window)
-                .collect::<BTreeSet<_>>()
+            metrics::trends(&reader, &observations, &mut minutes).unwrap();
+            minutes.keys().copied().collect::<BTreeSet<_>>()
         })
         .collect::<Vec<_>>();
 

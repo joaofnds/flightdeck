@@ -1,23 +1,16 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use crate::cpu_history_sample::{CapturedInterval, ObservedCounters, ObservedInterval};
-use crate::data::Table;
 use crate::metric_view::{Sources, View};
-use crate::session::{OBSERVATIONS_MAX, Observation, Reader, partition};
+use crate::recording::MachineMinute;
+use crate::session::{OBSERVATIONS_MAX, Observation, Reader};
+use crate::store::{Reading, reading_at};
 
 type ObservationKey = ([u64; 2], [u64; 2], u64);
-pub(crate) const TABLE_NAMES: [&str; 7] = [
-    "ticks",
-    "memory",
-    "cpus",
-    "interfaces",
-    "gpu_states",
-    "fans",
-    core_frequency::CORE_LEVEL_STATES,
-];
 const MEMORY_RATES: [(&str, &str); 6] = [
     ("memory_pageins_per_second", "pageins"),
     ("memory_pageouts_per_second", "pageouts"),
@@ -35,25 +28,22 @@ const TRAFFIC_RATES: [(&str, &str); 6] = [
     ("network_tx_errors_per_second", "send_errors"),
 ];
 
-pub(crate) type Tables = BTreeMap<(usize, &'static str), BTreeMap<u64, Table>>;
+/// The decoded minutes one reader holds while it makes its points, by window.
+pub(crate) type Minutes = BTreeMap<usize, MachineMinute>;
 
-/// The cells of the tables one context may hold while it makes its points, over all its readers.
-pub(crate) const CONTEXT_CELLS_MAX: usize = 2_000_000;
+/// The bytes of decoded minutes one reader may hold, which bounds a context's memory by its
+/// readers. A reader holds two minutes at most.
+pub(crate) const READER_MINUTES_BYTES_MAX: usize = 64 * 1024 * 1024;
 
-/// The cells of the tables one reader may hold, so the readers of a context together stay under
-/// `CONTEXT_CELLS_MAX`. A reader holds the tables of two minutes at most, which came to 68,640
-/// cells over a recording of an M5 Pro.
-pub(crate) const READER_CELLS_MAX: usize = CONTEXT_CELLS_MAX / crate::session::CONTEXT_READERS;
-
-/// The points of `observations`, the readings of one window. `tables` keeps the tables of their
-/// window and of the windows that may hold their predecessors, and drops the rest, since the
-/// first reading of the next window takes its rates from the last reading of this one.
+/// The points of `observations`, the readings of one window. `minutes` keeps their minute and
+/// those that may hold their predecessors, and drops the rest, since the first reading of the next
+/// window takes its rates from the last reading of this one.
 pub(crate) fn trends(
     reader: &Reader<'_>,
     observations: &[Observation],
-    tables: &mut Tables,
+    minutes: &mut Minutes,
 ) -> Result<Vec<Value>> {
-    let all = trends_read(reader, observations, tables)?;
+    let all = trends_read(reader, observations, minutes)?;
     let mut points = Vec::with_capacity(observations.len());
     let mut segment = 0_u64;
     let mut prior: Option<&Observation> = None;
@@ -69,9 +59,16 @@ pub(crate) fn trends(
         }) {
             segment += 1;
         }
+        let current = trends_reading(minutes, observation)?;
+        let before = previous
+            .map(|previous| trends_reading(minutes, previous))
+            .transpose()?;
         points.push(trends_point(
             reader,
-            tables,
+            &Sources::Machine {
+                current: &current,
+                previous: before.as_ref(),
+            },
             observation,
             previous,
             segment,
@@ -81,10 +78,21 @@ pub(crate) fn trends(
     Ok(points)
 }
 
+/// The reading of `observation` in the minute `minutes` keeps of its window.
+fn trends_reading<'minutes>(
+    minutes: &'minutes Minutes,
+    observation: &Observation,
+) -> Result<Reading<'minutes>> {
+    minutes
+        .get(&observation.window)
+        .and_then(|minute| reading_at(minute, observation.publication))
+        .ok_or(Error::Bound("missing required recorded table rows"))
+}
+
 /// The point of `observation` with the identity of its run and boot.
 pub(crate) fn trends_point(
     reader: &Reader<'_>,
-    tables: &Tables,
+    sources: &Sources<'_>,
     observation: &Observation,
     previous: Option<&Observation>,
     segment: u64,
@@ -94,7 +102,7 @@ pub(crate) fn trends_point(
         observation.publication,
         persistence::work::ingestion::Kind::MachineReduction,
     );
-    let mut value = point(tables, observation, previous, segment)?;
+    let mut value = point_sources(sources, observation, previous, segment)?;
     let identity = observation.json(reader.windows);
     value["run"] = identity["run"].clone();
     value["boot"] = identity["boot"].clone();
@@ -102,12 +110,12 @@ pub(crate) fn trends_point(
     Ok(value)
 }
 
-/// Reads into `tables` the tables of `observations` and of their predecessors, after dropping
+/// Decodes into `minutes` the minutes of `observations` and of their predecessors, after dropping
 /// those of every other window, and returns the observations with their predecessors.
 fn trends_read(
     reader: &Reader<'_>,
     observations: &[Observation],
-    tables: &mut Tables,
+    minutes: &mut Minutes,
 ) -> Result<BTreeMap<ObservationKey, Observation>> {
     let mut all: BTreeMap<_, _> = observations
         .iter()
@@ -121,14 +129,11 @@ fn trends_read(
             windows.extend(reader.predecessor_windows(observation));
         }
     }
-    tables.retain(|(window, _), _| windows.contains(window));
+    minutes.retain(|window, _| windows.contains(window));
 
-    let mut cell_count = trends_cell_count(tables);
     for observation in observations {
         if !all.contains_key(&key_previous(reader, observation)) {
-            if let Some(previous) =
-                trends_predecessor(reader, observation, tables, &mut cell_count)?
-            {
+            if let Some(previous) = trends_predecessor(reader, observation, minutes)? {
                 all.insert(key(reader, &previous, previous.publication), previous);
             }
         }
@@ -144,22 +149,18 @@ fn trends_read(
         return Err(Error::Bound("context batch windows"));
     }
     for window in read {
-        for name in TABLE_NAMES {
-            trends_table(reader, tables, window, name, &mut cell_count)?;
-        }
+        trends_minute(reader, minutes, window)?;
     }
-    assert_eq!(cell_count, trends_cell_count(tables));
 
     Ok(all)
 }
 
-/// The reading before `observation` in its run, from the ticks of the first window that holds
-/// it with a wall clock.
+/// The reading before `observation` in its run, from the first window that holds it with a wall
+/// clock.
 fn trends_predecessor(
     reader: &Reader<'_>,
     observation: &Observation,
-    tables: &mut Tables,
-    cell_count: &mut usize,
+    minutes: &mut Minutes,
 ) -> Result<Option<Observation>> {
     let _purpose =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
@@ -168,12 +169,10 @@ fn trends_predecessor(
     };
 
     for window in reader.predecessor_windows(observation) {
-        let ticks = trends_table(reader, tables, window, "ticks", cell_count)?;
-        if let Some(table) = ticks.get(&publication) {
-            for row in &table.rows {
-                if table.integer(row, "wall_ns")?.is_some() {
-                    return Ok(Some(Observation::from_row(table, row, window)?));
-                }
+        let minute = trends_minute(reader, minutes, window)?;
+        if let Some(reading) = reading_at(minute, publication) {
+            if let Some(previous) = Observation::of_tick(reading.tick, window) {
+                return Ok(Some(previous));
             }
         }
     }
@@ -181,60 +180,32 @@ fn trends_predecessor(
     Ok(None)
 }
 
-/// The rows of table `name` of `window` by publication, read from the window unless `tables`
-/// keeps them. `cell_count` counts the cells `tables` keeps, which stay under a bound.
-fn trends_table<'tables>(
+/// The minute at `window`, decoded unless `minutes` keeps it.
+pub(crate) fn trends_minute<'minutes>(
     reader: &Reader<'_>,
-    tables: &'tables mut Tables,
+    minutes: &'minutes mut Minutes,
     window: usize,
-    name: &'static str,
-    cell_count: &mut usize,
-) -> Result<&'tables BTreeMap<u64, Table>> {
-    match tables.entry((window, name)) {
-        std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            Ok(entry.insert(table_read(reader, window, name, cell_count)?))
+) -> Result<&'minutes MachineMinute> {
+    let held_bytes: usize = minutes.values().map(MachineMinute::heap_bytes).sum();
+    match minutes.entry(window) {
+        Entry::Occupied(held) => Ok(held.into_mut()),
+        Entry::Vacant(place) => {
+            let minute = reader.machine_minute(window)?;
+            minutes_bytes_check(held_bytes + minute.heap_bytes())?;
+
+            Ok(place.insert(minute))
         }
     }
 }
 
-/// The rows of table `name` of `window` by publication, read from the window. `cell_count`
-/// counts the cells one reader holds, which stay under `READER_CELLS_MAX`.
-pub(crate) fn table_read(
-    reader: &Reader<'_>,
-    window: usize,
-    name: &'static str,
-    cell_count: &mut usize,
-) -> Result<BTreeMap<u64, Table>> {
-    let table = reader.table(window, name)?;
-    if name == "fans" {
-        crate::live_fan_history::source(&table)?;
-    }
-    *cell_count += table.rows.len() * table.columns.len();
-    cells_check(*cell_count)?;
-
-    partition(&table)
-}
-
-/// Refuses a reader that would hold `cell_count` cells, more than `READER_CELLS_MAX`.
-pub(crate) fn cells_check(cell_count: usize) -> Result<()> {
-    if cell_count > READER_CELLS_MAX {
-        return Err(Error::Bound("context cells"));
+/// Refuses a reader that would hold `bytes` of decoded minutes, more than
+/// `READER_MINUTES_BYTES_MAX`.
+pub(crate) fn minutes_bytes_check(bytes: usize) -> Result<()> {
+    if bytes > READER_MINUTES_BYTES_MAX {
+        return Err(Error::Bound("context minute bytes"));
     }
 
     Ok(())
-}
-
-/// The count of the cells of the tables `tables` keeps.
-pub(crate) fn trends_cell_count(tables: &Tables) -> usize {
-    let mut cell_count = 0;
-    for publications in tables.values() {
-        for table in publications.values() {
-            cell_count += table.rows.len() * table.columns.len();
-        }
-    }
-
-    cell_count
 }
 
 fn key(reader: &Reader<'_>, observation: &Observation, publication: u64) -> ObservationKey {
@@ -249,15 +220,6 @@ fn key_previous(reader: &Reader<'_>, observation: &Observation) -> ObservationKe
         observation,
         observation.publication.saturating_sub(1),
     )
-}
-
-pub(crate) fn point(
-    tables: &Tables,
-    current: &Observation,
-    previous: Option<&Observation>,
-    segment: u64,
-) -> Result<Value> {
-    point_sources(&Sources::Saved(tables), current, previous, segment)
 }
 
 pub(crate) fn point_native(
@@ -313,9 +275,6 @@ fn capture_sources(
 ) -> Result<point::Point> {
     let ticks = get(tables, current, "ticks")?;
     let tick = only(&ticks)?;
-    if !tables.holds(current, "fans") {
-        return Err(Error::Bound("missing required recorded fan source"));
-    }
     let fans = tables.optional(current, "fans")?;
     let fan_rpm =
         crate::live_fan_history::capture_typed(&ticks, fans.as_ref(), current.publication)?;
@@ -572,12 +531,8 @@ fn point_traffic(
     let old_interfaces = optional(tables, previous, "interfaces")?;
     if interfaces.is_none() {
         if old_interfaces.is_none() {
-            if tables.holds(current, "interfaces") {
-                if tables.holds(previous, "interfaces") {
-                    for index in 6..12 {
-                        value.rates[index] = Some(0.0);
-                    }
-                }
+            for index in 6..12 {
+                value.rates[index] = Some(0.0);
             }
         }
     }

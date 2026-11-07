@@ -341,6 +341,16 @@ macro_rules! refuses_a_damaged_table {
 }
 
 refuses_a_damaged_table! {
+    refuses_a_null_cpu_counter, Table::Cpus, "query null cell",
+        |frame| with_column(frame, null("user_ticks", DataType::UInt32));
+    refuses_a_null_interface_counter, Table::Interfaces, "query null cell",
+        |frame| with_column(frame, null("received_bytes", DataType::UInt64));
+    refuses_a_null_gpu_state_counter, Table::GpuStates, "query null cell",
+        |frame| with_column(frame, null("active_ns", DataType::UInt64));
+    refuses_a_null_core_state_counter, Table::CoreStates, "query null cell",
+        |frame| with_column(frame, null("active_ns", DataType::UInt64));
+    refuses_a_null_fan_speed, Table::Fans, "query null cell",
+        |frame| with_column(frame, null("rpm", DataType::Float32));
     refuses_a_column_group_missing_a_column, Table::Ticks, "incomplete column group",
         |frame| frame.drop("battery_adapter_watts").unwrap();
     refuses_another_battery_version, Table::Ticks, "battery version",

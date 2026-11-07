@@ -31,11 +31,11 @@ fn reads_captured_app_totals_without_a_registered_live_source() {
     assert_eq!(page["app_count"], 2);
     assert_eq!(page["process_count"], 2);
     assert_eq!(detail["app"]["key"]["display"], "/Apps/Current.app");
-    assert_eq!(detail["app"]["cpu_ns"]["known"], "1");
+    assert_eq!(detail["app"]["cpu_ns"]["known"], 1);
     assert_eq!(detail["app"]["cpu_ns"]["measured_members"], 1);
-    assert_eq!(detail["app"]["energy_nj"]["known"], "0");
+    assert_eq!(detail["app"]["energy_nj"]["known"], 0);
     assert_eq!(detail["app"]["energy_nj"]["measured_members"], 1);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "11");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 11);
     assert_eq!(detail["processes"][0]["pid"], 7);
     assert_eq!(detail["processes"][0]["creation"]["unique_id"], "7");
     assert_eq!(detail["processes"][0]["creation"]["pid_version"], -7);
@@ -68,8 +68,8 @@ fn restores_app_history_without_a_registered_live_source() {
     assert_eq!(points[0]["observation"]["stamp"]["publication"], "1");
     assert_eq!(points[0]["cpu_percent_one_core"], serde_json::Value::Null);
     assert_eq!(points[1]["observation"], history["selected"]);
-    assert_eq!(points[1]["cpu_ns"]["known"], "1");
-    assert_eq!(points[1]["resident_bytes"]["known"], "11");
+    assert_eq!(points[1]["cpu_ns"]["known"], 1);
+    assert_eq!(points[1]["resident_bytes"]["known"], 11);
     assert_eq!(points[1]["cpu_ns"], detail["app"]["cpu_ns"]);
     assert_eq!(points[1]["energy_nj"], detail["app"]["energy_nj"]);
 }
@@ -96,8 +96,8 @@ fn keeps_live_app_readings_when_committed_history_becomes_unreadable() {
 
     assert_eq!(history["points"], before["points"]);
     assert_eq!(history["selected"], before["selected"]);
-    assert_eq!(history["points"][1]["cpu_ns"]["known"], "1");
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "11");
+    assert_eq!(history["points"][1]["cpu_ns"]["known"], 1);
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 11);
     assert!(history["restoration_error"].as_str().unwrap().len() <= 2048);
     assert!(!history["restoration_error"].as_str().unwrap().is_empty());
     std::fs::rename(&withheld, &data).unwrap();
@@ -191,16 +191,17 @@ fn follows_an_exact_predecessor_across_sealed_minutes() {
         serde_json::Value::Null
     );
     assert_eq!(second["selected"]["run_tick"], "60");
-    assert_eq!(second["elapsed_ns"], "1000000000");
-    assert_eq!(second["apps"][0]["cpu_ns"]["known"], "1");
+    assert_eq!(second["elapsed_ns"], 1_000_000_000);
+    assert_eq!(second["apps"][0]["cpu_ns"]["known"], 1);
     assert_eq!(second["apps"][0]["cpu_ns"]["measured_members"], 1);
-    assert_eq!(second["apps"][0]["resident_bytes"]["known"], "11");
+    assert_eq!(second["apps"][0]["resident_bytes"]["known"], 11);
 }
 
 #[test]
 fn sums_positive_committed_user_system_and_energy_intervals() {
     // Goal: cold App and process totals include both CPU counters and positive energy.
     // Method: seal independent 200 ms user, 300 ms system and 3 J increments, then retire live.
+    const ENERGY_NJ: u64 = 3_000_000_000;
     let mut fixture = Fixture::new();
     let previous = Usage {
         awake_ns_at_start: 0,
@@ -251,19 +252,19 @@ fn sums_positive_committed_user_system_and_energy_intervals() {
         )
         .unwrap();
     assert_eq!(history["points"][1]["cpu_percent_one_core"], 50.0);
-    assert_eq!(history["points"][1]["energy_nj"]["known"], "3000000000");
+    assert_eq!(history["points"][1]["energy_nj"]["known"], ENERGY_NJ);
     assert_eq!(history["points"][1]["energy_joules"], 3.0);
     assert_eq!(history["points"][1]["energy_watts"], 3.0);
 
-    assert_eq!(detail["elapsed_ns"], "1000000000");
-    assert_eq!(detail["app"]["cpu_ns"]["known"], "500000000");
+    assert_eq!(detail["elapsed_ns"], 1_000_000_000);
+    assert_eq!(detail["app"]["cpu_ns"]["known"], 500_000_000);
     assert_eq!(detail["app"]["cpu_percent_one_core"], 50.0);
-    assert_eq!(detail["app"]["energy_nj"]["known"], "3000000000");
+    assert_eq!(detail["app"]["energy_nj"]["known"], ENERGY_NJ);
     assert_eq!(detail["app"]["energy_joules"], 3.0);
     assert_eq!(detail["app"]["energy_watts"], 3.0);
-    assert_eq!(detail["processes"][0]["cpu_ns"]["known"], "500000000");
+    assert_eq!(detail["processes"][0]["cpu_ns"]["known"], 500_000_000);
     assert_eq!(detail["processes"][0]["cpu_percent_one_core"], 50.0);
-    assert_eq!(detail["processes"][0]["energy_nj"]["known"], "3000000000");
+    assert_eq!(detail["processes"][0]["energy_nj"]["known"], ENERGY_NJ);
     assert_eq!(detail["processes"][0]["energy_joules"], 3.0);
     assert_eq!(detail["processes"][0]["energy_watts"], 3.0);
 }

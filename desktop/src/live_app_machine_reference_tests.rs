@@ -69,7 +69,7 @@ fn gpu_reference_is_the_gpus_own_busy_share_over_each_apps_gpu_time() {
 fn disk_reference_keeps_whole_device_scope_and_exact_app_bytes() {
     // Keep the reference outside App byte accounting even above f32 integer precision.
     let mut apps = tests::disk_fixture();
-    apps["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("9007199254740993");
+    apps["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(9_007_199_254_740_993_u64);
     apps["points"][1]["apps"][0]["disk_io_bps"] = json!(4_503_599_627_370_496.0);
     let history = AppAttributionHistory::prepare(Metric::Disk, &apps, &scalar_selection());
 

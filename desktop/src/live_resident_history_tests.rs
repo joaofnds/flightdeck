@@ -396,6 +396,6 @@ fn point(publication: u64, known: u64) -> Value {
 }
 
 fn measure(known: u64, measured: u32, unavailable: u32, overflowed: bool) -> Value {
-    json!({"known":known.to_string(),"measured_members":measured,
+    json!({"known":known,"measured_members":measured,
         "unavailable_members":unavailable,"overflowed":overflowed})
 }

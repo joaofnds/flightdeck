@@ -145,8 +145,8 @@ fn interrupts_a_page_after_formatting_starts_and_retries_in_a_new_epoch() {
 }
 
 #[test]
-fn keeps_machine_decimal_presentation_and_multiplication_first_rates() {
-    // Goal: native reduction preserves the legacy public decimal and rate operation order.
+fn keeps_machine_gauges_as_read_and_multiplication_first_rates() {
+    // Goal: native reduction keeps the number a gauge read and the rate operation order.
     // Method: submit a real decoded ring tick with non-binary f32 gauges and a 1 ns offset.
     let mut fixture = RingFixture::new_following();
     fixture.publish_following(1);
@@ -166,9 +166,9 @@ fn keeps_machine_decimal_presentation_and_multiplication_first_rates() {
     session.poll_publication(0, 2).unwrap();
     let response = session.follow_latest().unwrap();
 
-    assert_eq!(response["summary"]["power_watts"], 0.1);
-    assert_eq!(response["summary"]["soc_celsius"], 40.2);
-    assert_eq!(response["summary"]["fan_rpm"][0], 1234.1);
+    assert_eq!(response["summary"]["power_watts"], f64::from(0.1_f32));
+    assert_eq!(response["summary"]["soc_celsius"], f64::from(40.2_f32));
+    assert_eq!(response["summary"]["fan_rpm"][0], f64::from(1234.1_f32));
     let expected: f64 = 0.999_999_999;
     assert_eq!(
         response["summary"]["memory_pageins_per_second"]

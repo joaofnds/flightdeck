@@ -98,11 +98,8 @@ fn assert_finite_saved_load(reader: SavedReader) {
         .unwrap()
         .unwrap();
 
-    assert_eq!(
-        old.number(&old.rows[1], "load_average_1").unwrap(),
-        Some(0.5)
-    );
-    assert_eq!(old.number(&old.rows[1], "load_average_5").unwrap(), None);
+    assert_eq!(old.shown(1, "load_average_1"), Some("0.5"));
+    assert_eq!(old.shown(1, "load_average_5"), None);
     assert!(second.complete().unwrap().summary(&second)["load_average"].is_null());
     assert_eq!(second.cpu_percent, Some(75.0));
     drop(second);

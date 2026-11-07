@@ -135,8 +135,8 @@ fn apps_by_column() -> [Value; 4] {
         AppReadings {
             name: "a",
             members: 1,
-            resident: Some("300"),
-            footprint: Some("100"),
+            resident: Some(300),
+            footprint: Some(100),
             joules: Some(4.0),
             disk_measured: true,
             disk_bps: Some(5.0),
@@ -145,7 +145,7 @@ fn apps_by_column() -> [Value; 4] {
         AppReadings {
             name: "b",
             members: 4,
-            footprint: Some("400"),
+            footprint: Some(400),
             watts: Some(1.0),
             disk_bps: Some(9.0),
             ..AppReadings::default()
@@ -153,7 +153,7 @@ fn apps_by_column() -> [Value; 4] {
         AppReadings {
             name: "c",
             members: 2,
-            resident: Some("900"),
+            resident: Some(900),
             resident_overflowed: true,
             watts: Some(3.0),
             joules: Some(1.0),
@@ -164,8 +164,8 @@ fn apps_by_column() -> [Value; 4] {
         AppReadings {
             name: "d",
             members: 3,
-            resident: Some("100"),
-            footprint: Some("200"),
+            resident: Some(100),
+            footprint: Some(200),
             watts: Some(2.0),
             joules: Some(2.0),
             disk_measured: true,
@@ -182,9 +182,9 @@ fn apps_by_column() -> [Value; 4] {
 struct AppReadings {
     name: &'static str,
     members: u64,
-    resident: Option<&'static str>,
+    resident: Option<u64>,
     resident_overflowed: bool,
-    footprint: Option<&'static str>,
+    footprint: Option<u64>,
     footprint_overflowed: bool,
     watts: Option<f64>,
     joules: Option<f64>,
@@ -194,7 +194,7 @@ struct AppReadings {
 
 impl AppReadings {
     fn app(&self) -> Value {
-        let measure = |known: Option<&str>, overflowed: bool| {
+        let measure = |known: Option<u64>, overflowed: bool| {
             json!({"known": known, "measured_members": u64::from(known.is_some()),
                 "unavailable_members": 0, "overflowed": overflowed})
         };
@@ -203,7 +203,7 @@ impl AppReadings {
             "resident_bytes": measure(self.resident, self.resident_overflowed),
             "footprint_bytes": measure(self.footprint, self.footprint_overflowed),
             "energy_watts": self.watts, "energy_joules": self.joules,
-            "disk_io_bytes": {"known": "1000", "measured_members": u64::from(self.disk_measured),
+            "disk_io_bytes": {"known": 1000, "measured_members": u64::from(self.disk_measured),
                 "unavailable_members": 0, "overflowed": false},
             "disk_io_bps": self.disk_bps})
     }

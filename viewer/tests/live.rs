@@ -1720,8 +1720,8 @@ mod tests {
         );
         assert_eq!(detail["selected"], page["selected"]);
         assert_eq!(history["selected"], page["selected"]);
-        assert_eq!(detail["app"]["resident_bytes"]["known"], "11");
-        assert_eq!(detail["app"]["footprint_bytes"]["known"], "12");
+        assert_eq!(detail["app"]["resident_bytes"]["known"], 11);
+        assert_eq!(detail["app"]["footprint_bytes"]["known"], 12);
         assert_eq!(detail["processes"][0]["pid"], 7);
         assert_eq!(detail["processes"][0]["creation"]["unique_id"], "7");
         assert_eq!(
@@ -1733,7 +1733,7 @@ mod tests {
             serde_json::Value::Null
         );
         let selected = &history["points"][usize::try_from(publication - 1).unwrap()];
-        assert_eq!(selected["resident_bytes"]["known"], "11");
+        assert_eq!(selected["resident_bytes"]["known"], 11);
         assert_eq!(
             detail["app"]["cpu_percent_one_core"],
             selected["cpu_percent_one_core"]

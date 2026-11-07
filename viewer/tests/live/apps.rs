@@ -25,7 +25,7 @@ fn aggregates_live_apps_from_the_exact_selected_publication() {
     assert_eq!(page["selected"]["stamp"]["publication"], "2");
     assert_eq!(page["app_count"], 1);
     assert_eq!(page["process_count"], 2);
-    assert_eq!(page["elapsed_ns"], "1000000000");
+    assert_eq!(page["elapsed_ns"], 1_000_000_000);
     let app = &page["apps"][0];
     assert_eq!(app["display_name"], "A.app");
     assert_eq!(app["key"]["display"], "/Applications/A.app");
@@ -33,7 +33,7 @@ fn aggregates_live_apps_from_the_exact_selected_publication() {
     assert_eq!(app["cpu_percent_one_core"], 50.0);
     assert_eq!(app["energy_joules"], 3.0);
     assert_eq!(app["energy_watts"], 3.0);
-    assert_eq!(app["resident_bytes"]["known"], "157286400");
+    assert_eq!(app["resident_bytes"]["known"], 157_286_400);
     assert_eq!(app["membership_complete"], false);
     assert_eq!(app["cpu_ns"]["measured_members"], 2);
     assert_eq!(app["cpu_ns"]["unavailable_members"], 0);
@@ -99,16 +99,16 @@ fn includes_verified_final_usage_beside_the_exited_live_app_member() {
     assert_eq!(detail["app"]["energy_watts"], 3.0);
     assert_eq!(detail["app"]["members"], 2);
     assert_eq!(detail["app"]["live_members"], 1);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "52428800");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 52_428_800);
     assert_eq!(detail["processes"][0]["pid"], 7);
     assert_eq!(detail["processes"][0]["state"], "exited_verified");
     assert_eq!(
         detail["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
     assert_eq!(detail["processes"][0]["cpu_percent_one_core"], 20.0);
     assert_eq!(history["points"][1]["cpu_percent_one_core"], 50.0);
-    assert_eq!(history["points"][1]["resident_bytes"]["known"], "52428800");
+    assert_eq!(history["points"][1]["resident_bytes"]["known"], 52_428_800);
 }
 
 fn publish_exit(fixture: &mut Fixture) {
@@ -138,7 +138,7 @@ fn retains_an_app_that_starts_and_exits_between_scheduled_samples() {
         .unwrap();
     assert_eq!(detail["app"]["members"], 1);
     assert_eq!(detail["app"]["live_members"], 0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "0");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 0);
     assert_eq!(
         detail["app"]["cpu_percent_one_core"],
         serde_json::Value::Null
@@ -147,7 +147,7 @@ fn retains_an_app_that_starts_and_exits_between_scheduled_samples() {
     assert_eq!(detail["processes"][0]["state"], "exited_verified");
     assert_eq!(
         detail["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
     assert_eq!(
         detail["processes"][0]["cpu_percent_one_core"],
@@ -387,7 +387,7 @@ fn refuses_final_counters_that_regress_after_the_scheduled_sample() {
         .unwrap();
 
     assert_eq!(detail["app"]["cpu_percent_one_core"], 30.0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "52428800");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 52_428_800);
     assert_eq!(detail["processes"][0]["state"], "exited_unverified");
     assert_eq!(
         detail["processes"][0]["cpu_ns"]["unavailable"],
@@ -399,11 +399,11 @@ fn refuses_final_counters_that_regress_after_the_scheduled_sample() {
     );
     assert_eq!(
         detail["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
     assert_eq!(
         detail["processes"][0]["footprint_bytes"]["known"],
-        "110000000"
+        110_000_000
     );
 }
 
@@ -471,7 +471,7 @@ fn keeps_refused_final_usage_unavailable_beside_the_last_resident_gauge() {
 
     assert_eq!(detail["app"]["cpu_percent_one_core"], 30.0);
     assert_eq!(detail["app"]["cpu_ns"]["unavailable_members"], 1);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "52428800");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 52_428_800);
     assert_eq!(detail["processes"][0]["state"], "exited_unverified");
     assert_eq!(
         detail["processes"][0]["cpu_percent_one_core"],
@@ -479,7 +479,7 @@ fn keeps_refused_final_usage_unavailable_beside_the_last_resident_gauge() {
     );
     assert_eq!(
         detail["processes"][0]["resident_bytes"]["known"],
-        "104857600"
+        104_857_600
     );
 }
 
@@ -528,7 +528,7 @@ fn reconstructs_verified_exit_totals_after_real_raw_cache_eviction() {
     assert!(retained < 20);
     assert_eq!(selected["selected"]["publication"], 2);
     assert_eq!(detail["app"]["cpu_percent_one_core"], 50.0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], "52428800");
+    assert_eq!(detail["app"]["resident_bytes"]["known"], 52_428_800);
     assert_eq!(detail["processes"][0]["state"], "exited_verified");
 }
 
@@ -784,7 +784,7 @@ fn retains_exact_app_history_while_following_the_fifteen_minute_window() {
     assert_eq!(points[1]["members"], 2);
     assert_eq!(points[0]["cpu_percent_one_core"], serde_json::Value::Null);
     assert_eq!(points[1]["cpu_percent_one_core"], 50.0);
-    assert_eq!(points[1]["resident_bytes"]["known"], "157286400");
+    assert_eq!(points[1]["resident_bytes"]["known"], 157_286_400);
     assert_eq!(points[1]["energy_watts"], 3.0);
     assert_eq!(history["coverage"]["retention_limited"], false);
 }
@@ -814,10 +814,10 @@ fn retains_the_charted_seconds_for_an_ordinary_live_app_population() {
     assert_eq!(history["selected"]["stamp"]["publication"], "961");
     assert_eq!(points[0]["observation"]["stamp"]["publication"], "2");
     assert_eq!(points[959]["observation"]["stamp"]["publication"], "961");
-    assert_eq!(points[0]["resident_bytes"]["known"], "200");
-    assert_eq!(points[959]["resident_bytes"]["known"], "96100");
-    assert_eq!(points[0]["cpu_ns"]["known"], "1000000");
-    assert_eq!(points[959]["cpu_ns"]["known"], "1000000");
+    assert_eq!(points[0]["resident_bytes"]["known"], 200);
+    assert_eq!(points[959]["resident_bytes"]["known"], 96100);
+    assert_eq!(points[0]["cpu_ns"]["known"], 1_000_000);
+    assert_eq!(points[959]["cpu_ns"]["known"], 1_000_000);
     assert!(history["coverage"]["cache_bytes"].as_u64().unwrap() < 72 * 1024 * 1024);
     eprintln!("ordinary App history coverage: {}", history["coverage"]);
 }
@@ -1036,8 +1036,8 @@ fn keeps_compact_app_trends_after_actual_raw_cache_pressure() {
         history["points"][31]["observation"]["stamp"]["publication"],
         "32"
     );
-    assert_eq!(history["points"][31]["cpu_ns"]["known"], "1");
-    assert_eq!(history["points"][31]["resident_bytes"]["known"], "11");
+    assert_eq!(history["points"][31]["cpu_ns"]["known"], 1);
+    assert_eq!(history["points"][31]["resident_bytes"]["known"], 11);
     assert_eq!(history["coverage"]["retention_limited"], false);
     assert!(
         history["coverage"]["cache_bytes"].as_u64().unwrap()

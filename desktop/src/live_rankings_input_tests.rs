@@ -1324,7 +1324,7 @@ fn resident_history_observation(publication: u64) -> serde_json::Value {
 }
 
 fn resident_history_measure(known: u64) -> serde_json::Value {
-    json!({"known":known.to_string(),"measured_members":1,
+    json!({"known":known,"measured_members":1,
         "unavailable_members":0,"overflowed":false})
 }
 

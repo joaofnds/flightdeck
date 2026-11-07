@@ -42,7 +42,7 @@ fn attribution_cohort_keeps_interval_leaders_and_other_when_the_current_leader_c
 
     assert_eq!(response["cohort"].as_array().unwrap().len(), 8);
     assert_eq!(response["cohort"][7]["key"]["display"], "/H.app");
-    assert_eq!(response["points"][1]["other"]["cpu_ns"]["known"], "100");
+    assert_eq!(response["points"][1]["other"]["cpu_ns"]["known"], 100);
     assert_eq!(response["points"][1]["other"]["app_count"], 1);
 }
 

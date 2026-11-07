@@ -7,6 +7,7 @@ use polars::prelude::DataFrame;
 
 use super::{
     Refused, ScopedSealedMinute as SealedMinute, SealedSource, SealedTable, holds_columns,
+    require_columns,
 };
 use crate::cancellation::Operation;
 
@@ -60,6 +61,33 @@ impl<'input> SealedMinute<'input> {
         Ok(minute)
     }
 
+    /// A minute of the commitment `witness` whose files its caller verified, which keeps one
+    /// verifier of a session's windows, read through admission.
+    pub(crate) fn committed_using(
+        source: &SealedSource<'_>,
+        witness: &persistence::Manifest,
+        budget: &'input Arc<ByteBudget>,
+        operation: &'input Operation,
+        capture: &'input super::InputCapture<'input>,
+    ) -> Result<Self, Refused> {
+        operation.check()?;
+        let mut minute = Self {
+            root: source.root.to_owned(),
+            marker: source.marker.to_owned(),
+            manifest: witness.clone(),
+            ticks: None,
+            inputs: None,
+        }
+        .with_ticks(budget, operation, capture)?;
+        minute.inputs = Some(super::TableInputs {
+            budget,
+            operation,
+            capture,
+        });
+
+        Ok(minute)
+    }
+
     #[cfg(test)]
     pub(super) fn open_with_ticks(
         source: &SealedSource<'_>,
@@ -76,12 +104,21 @@ impl<'input> SealedMinute<'input> {
         capture: impl FnOnce(File, &Arc<ByteBudget>) -> Result<AdmittedTable, AdmissionRefusal>,
     ) -> Result<Self, Refused> {
         operation.check()?;
-        let mut minute = Self::open(source.root, source.marker)?;
+
+        Self::open(source.root, source.marker)?.with_ticks(budget, operation, capture)
+    }
+
+    fn with_ticks(
+        mut self,
+        budget: &Arc<ByteBudget>,
+        operation: &Operation,
+        capture: impl FnOnce(File, &Arc<ByteBudget>) -> Result<AdmittedTable, AdmissionRefusal>,
+    ) -> Result<Self, Refused> {
         let _observation =
-            persistence::work::ingestion::minute_source(&minute.manifest, Some("ticks"));
-        let path = source
+            persistence::work::ingestion::minute_source(&self.manifest, Some("ticks"));
+        let path = self
             .root
-            .join(&minute.manifest.data_directory)
+            .join(&self.manifest.data_directory)
             .join("ticks.parquet");
 
         let file = collector::recording::private::open_private_file(&path, false)
@@ -90,12 +127,12 @@ impl<'input> SealedMinute<'input> {
         operation.check()?;
         let table = capture(file, budget).map_err(Refused::Input)?;
         operation.check()?;
-        minute.ticks = Some(TicksInput {
+        self.ticks = Some(TicksInput {
             table,
             operation: operation.begin(operation.epoch())?,
         });
 
-        Ok(minute)
+        Ok(self)
     }
 
     pub(super) fn ticks(&self) -> Result<TicksTable<'_>, Refused> {
@@ -154,8 +191,10 @@ impl TicksTable<'_> {
             }
             (None, Some(input)) => {
                 input.operation.check()?;
+                require_columns(columns, |name| input.table.contains_column(name))?;
                 let _observation =
                     persistence::work::ingestion::minute_source(self.manifest, Some("ticks"));
+                persistence::work::record(|counts| counts.saved_tables += 1);
                 let result = input.table.read_metadata_budgeted(columns, row_limit);
                 input.operation.check()?;
                 result.map_err(|refusal| match refusal {

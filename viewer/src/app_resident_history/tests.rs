@@ -29,7 +29,7 @@ fn resident_history_keeps_exact_gauge_bytes_without_a_counter_baseline() {
     assert_eq!(response["cohort"][0]["key"]["display"], "/Apps/Current.app");
     assert_eq!(
         response["points"][0]["apps"][0]["known"],
-        "9007199254740993"
+        9_007_199_254_740_993_u64
     );
     assert_eq!(response["points"][0]["apps"][0]["measured_members"], 1);
     assert_eq!(response["points"][0]["other"]["app_count"], 1);

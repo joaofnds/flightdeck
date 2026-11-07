@@ -490,9 +490,9 @@ fn preserves_adjacent_totals_across_an_actual_normal_query_group_boundary() {
 
     let restored = restored.unwrap();
     assert_eq!(restored["members"], 12_000);
-    assert_eq!(restored["elapsed_ns"], "1000000000");
-    assert_eq!(restored["cpu_ns"]["known"], "12000");
-    assert_eq!(restored["resident_bytes"]["known"], "132000");
+    assert_eq!(restored["elapsed_ns"], 1_000_000_000);
+    assert_eq!(restored["cpu_ns"]["known"], 12000);
+    assert_eq!(restored["resident_bytes"]["known"], 132_000);
 }
 
 #[test]
@@ -722,10 +722,10 @@ saved_thread_cell!(
 saved_thread_cell!(
     saved_zero_threads_are_measured,
     AnyValue::Int32(0),
-    serde_json::json!({"known":"0","unavailable":null})
+    serde_json::json!({"known":0,"unavailable":null})
 );
 saved_thread_cell!(
     saved_positive_threads_are_measured,
     AnyValue::Int32(8),
-    serde_json::json!({"known":"8","unavailable":null})
+    serde_json::json!({"known":8,"unavailable":null})
 );

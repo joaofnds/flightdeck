@@ -73,6 +73,7 @@ pub use query::{
 };
 pub use response::{ContextPart, ContextParts, ContextRanks, Response};
 pub use sampled::{SampledRank, SampledRanking, SampledRanks, SampledSecond};
+pub(crate) use second::reading_at;
 pub use second::{
     BatterySecond, CompleteMachine, CompleteMachineState, CpuCounter, CpuInterval, CpuPrevious,
     MachineAdmission, MachineCaptureError, MachineSecond, MemorySecond, Reading, Traffic, readings,

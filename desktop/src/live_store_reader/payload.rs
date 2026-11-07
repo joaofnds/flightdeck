@@ -15,16 +15,6 @@ pub(super) fn snapshot(
     shared: &Shared,
     inspected: Option<&Observation>,
 ) -> Result<Box<Snapshot>, String> {
-    snapshot_with_raw(context, context, command, shared, inspected)
-}
-
-pub(super) fn snapshot_with_raw(
-    context: &Arc<QueryContext>,
-    raw: &Arc<QueryContext>,
-    command: &mut Command,
-    shared: &Shared,
-    inspected: Option<&Observation>,
-) -> Result<Box<Snapshot>, String> {
     let observation = inspected.copied().unwrap_or(context.selected().observation);
     let selection = context
         .selection_for(
@@ -40,14 +30,6 @@ pub(super) fn snapshot_with_raw(
         Presentation::Store(selection),
     );
     snapshot.histories_pending = context.readiness() == QueryReadiness::Primary;
-    if command.request.route == "overview" {
-        let page = raw
-            .raw_page_for(&observation, "fans", 0, &shared.cancellation, command.epoch)
-            .map_err(|error| error.to_string())?;
-        snapshot
-            .pages
-            .insert("fans".into(), Presentation::Store(page));
-    }
     if crate::live_source::route_ranks_apps(&command.request.route) {
         let ranks = context
             .selected_rank_status_for(&observation)

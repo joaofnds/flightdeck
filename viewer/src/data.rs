@@ -12,34 +12,13 @@ pub(crate) struct Table {
     pub rows: Vec<Vec<Option<String>>>,
 }
 
+#[cfg(test)]
 impl Table {
-    pub fn field<'a>(&self, row: &'a [Option<String>], name: &str) -> Result<Option<&'a str>> {
-        let index = self
-            .columns
-            .iter()
-            .position(|column| column == name)
-            .ok_or(Error::Bound("missing schema column"))?;
-        Ok(row.get(index).ok_or(Error::Bound("short row"))?.as_deref())
-    }
+    /// The text a page shows in column `name` of row `row`.
+    pub fn shown(&self, row: usize, name: &str) -> Option<&str> {
+        let column = self.columns.iter().position(|column| column == name);
 
-    pub fn integer(&self, row: &[Option<String>], name: &str) -> Result<Option<u64>> {
-        self.field(row, name)?
-            .map(|value| value.parse().map_err(|_| Error::Bound("integer")))
-            .transpose()
-    }
-
-    pub fn number(&self, row: &[Option<String>], name: &str) -> Result<Option<f64>> {
-        let value = self
-            .field(row, name)?
-            .map(str::parse::<f64>)
-            .transpose()
-            .map_err(|_| Error::Bound("number"))?;
-        if let Some(value) = value {
-            if !value.is_finite() {
-                return Err(Error::Bound("nonfinite reading"));
-            }
-        }
-        Ok(value)
+        self.rows[row][column.unwrap()].as_deref()
     }
 }
 

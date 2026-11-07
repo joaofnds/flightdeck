@@ -217,7 +217,7 @@ fn machine_reference_preserves_app_bytes_above_float_integer_precision(cx: &mut 
 fn large_disk_snapshot(generation: u64) -> Box<Snapshot> {
     let mut snapshot = comparison_snapshot(generation);
     let mut apps = crate::live_app_attribution_history::tests::disk_fixture();
-    apps["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!("9007199254740993");
+    apps["points"][1]["apps"][0]["disk_io_bytes"]["known"] = json!(9_007_199_254_740_993_u64);
     apps["points"][1]["apps"][0]["disk_io_bps"] = json!(4_503_599_627_370_496.0);
     Arc::get_mut(snapshot.overview_app_histories.as_mut().unwrap())
         .unwrap()

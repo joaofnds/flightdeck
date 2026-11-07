@@ -150,12 +150,6 @@ impl StoreReader {
             .observation_for_identity(second, identity)
             .map_err(|error| error.to_string())?;
 
-        if command.request.route == "overview" {
-            if observation != context.selected().observation {
-                return self.snapshot_kept_raw(command, shared, observation);
-            }
-        }
-
         payload::snapshot(context, command, shared, Some(&observation)).map(Some)
     }
 
@@ -206,55 +200,6 @@ impl StoreReader {
             QueryOutcome::NeedsLoad(reason) => Err(format!("Store kept coverage: {reason:?}")),
             QueryOutcome::Unavailable(reason) => Err(format!("Store kept unavailable: {reason:?}")),
         }
-    }
-
-    fn snapshot_kept_raw(
-        &mut self,
-        command: &mut Command,
-        shared: &Shared,
-        observation: viewer::live_app_response::Observation,
-    ) -> Result<Option<Box<Snapshot>>, String> {
-        let context = self
-            .context
-            .as_ref()
-            .unwrap_or_else(|| unreachable!("kept Store context"));
-        if self.pending.is_none() {
-            let context_last_second = command.request.second.ok_or("Missing inspected second")?;
-            let token = self
-                .handle
-                .submit(QueryRequest {
-                    epoch: command.epoch,
-                    source: Some(context.source),
-                    selection: QuerySelection::Exact {
-                        observation,
-                        context_last_second,
-                    },
-                })
-                .map_err(|error| format!("Store inspection query: {error:?}"))?;
-            self.pending = Some((command.generation, token));
-            return Ok(None);
-        }
-        let Some(reply) = self.handle.take() else {
-            return Ok(None);
-        };
-        if self.pending != Some((command.generation, reply.token)) {
-            return Ok(None);
-        }
-        self.pending = None;
-        let raw = match reply.outcome {
-            QueryOutcome::Ready(raw) => raw,
-            QueryOutcome::NeedsLoad(viewer::store::QueryNeedsLoad::UncheckedCoverage) => {
-                return Ok(None);
-            }
-            QueryOutcome::NeedsLoad(reason) => {
-                return Err(format!("Store inspection coverage: {reason:?}"));
-            }
-            QueryOutcome::Unavailable(reason) => {
-                return Err(format!("Store inspection unavailable: {reason:?}"));
-            }
-        };
-
-        payload::snapshot_with_raw(context, &raw, command, shared, Some(&observation)).map(Some)
     }
 
     fn snapshot_query(

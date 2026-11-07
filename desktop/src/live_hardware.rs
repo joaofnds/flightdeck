@@ -7,7 +7,6 @@ use serde_json::Value;
 use crate::charts::{GREEN, LINE, MUTED, ORANGE, PANEL, RED, TEXT, YELLOW};
 use crate::hardware::{Readings, hardware_stage};
 use crate::live_dashboard::LiveDashboard;
-use crate::live_source::Snapshot;
 
 impl LiveDashboard {
     pub fn live_hardware(&self) -> impl IntoElement {
@@ -81,31 +80,30 @@ impl LiveDashboard {
     }
 
     fn reading_fan_speeds(&self) -> Result<[Option<f32>; 2], String> {
-        if self.shown_preview().is_none() {
-            return fan_speeds(self.snapshot.as_deref());
-        }
-
         let Some(snapshot) = self.reading_snapshot() else {
             return Ok([None, None]);
         };
 
-        let value = &snapshot.selection["summary"]["fan_rpm"];
-        if value.is_null() {
-            return Ok([None, None]);
-        }
-
-        let channels = value.as_array().ok_or("Invalid hovered fan channels")?;
-        if channels.len() > 10 {
-            return Err("Hovered fan channels exceed ten".into());
-        }
-
-        let mut speeds = [None, None];
-        for (speed, channel) in speeds.iter_mut().zip(channels) {
-            *speed = fan_speed(channel)?;
-        }
-
-        Ok(speeds)
+        fan_speeds(&snapshot.selection["summary"]["fan_rpm"])
     }
+}
+
+fn fan_speeds(channels: &Value) -> Result<[Option<f32>; 2], String> {
+    if channels.is_null() {
+        return Ok([None, None]);
+    }
+
+    let channels = channels.as_array().ok_or("Invalid fan channels")?;
+    if channels.len() > 10 {
+        return Err("Fan channels exceed ten".into());
+    }
+
+    let mut speeds = [None, None];
+    for (speed, channel) in speeds.iter_mut().zip(channels) {
+        *speed = fan_speed(channel)?;
+    }
+
+    Ok(speeds)
 }
 
 fn live_readings(summary: &Value, speeds: [Option<f32>; 2]) -> Result<Readings, String> {
@@ -160,208 +158,86 @@ fn live_number_signed(value: &Value) -> Result<Option<f32>, String> {
     if value.is_null() {
         return Ok(None);
     }
-
-    let text = crate::live_views::text(value);
-    if text.len() > 64 {
-        return Err("Schematic value exceeds its byte bound".into());
-    }
-
-    let value = text.parse::<f32>().map_err(|error| error.to_string())?;
-    if !value.is_finite() {
-        return Err("Schematic value is not finite".into());
-    }
-
-    Ok(Some(value))
-}
-
-fn fan_speeds(snapshot: Option<&Snapshot>) -> Result<[Option<f32>; 2], String> {
-    let Some(snapshot) = snapshot else {
-        return Ok([None, None]);
-    };
-    let Some(page) = snapshot.pages.get("fans") else {
-        return Ok([None, None]);
-    };
-    let selected = &snapshot.selection["selected"];
-    if selected.is_null() {
-        return Err("Fan data has no selected observation".into());
-    }
-    for key in ["run", "boot", "publication"] {
-        if page["observation"][key].is_null() {
-            return Err(format!("Fan data has no observation {key}"));
-        }
-        if page["observation"][key] != selected[key] {
-            return Err("Fan data does not match the selected observation".into());
-        }
-    }
-    let columns = page["columns"]
-        .as_array()
-        .ok_or("Fan columns are unavailable")?;
-    if columns.len() != 3 {
-        return Err("Invalid fan column count".into());
-    }
-    for (column, expected) in columns.iter().zip(["publication", "fan", "rpm"]) {
-        if column.as_str() != Some(expected) {
-            return Err("Invalid fan table schema".into());
-        }
-    }
-    let rows = page["rows"].as_array().ok_or("Fan rows are unavailable")?;
-    if rows.len() > 10 {
-        return Err("Fan rows exceed the ten-channel bound".into());
-    }
-    let publication = integer(&selected["publication"])?;
-    fan_speeds_rows(rows, publication)
-}
-
-fn fan_speeds_rows(rows: &[Value], publication: u64) -> Result<[Option<f32>; 2], String> {
-    assert!(rows.len() <= 10);
-    let mut speeds = [None, None];
-    let mut seen = [false; 10];
-    for row in rows {
-        let fields = row.as_array().ok_or("Invalid fan row")?;
-        if fields.len() != 3 {
-            return Err("Invalid fan row field count".into());
-        }
-        if integer(&fields[0])? != publication {
-            return Err("Fan row does not match the selected publication".into());
-        }
-        let channel = usize::try_from(integer(&fields[1])?).map_err(|error| error.to_string())?;
-        if channel >= seen.len() {
-            return Err("Fan channel exceeds its bound".into());
-        }
-        if seen[channel] {
-            return Err("Fan channel is repeated".into());
-        }
-        seen[channel] = true;
-        let speed = fan_speed(&fields[2])?;
-        if channel < speeds.len() {
-            speeds[channel] = speed;
-        }
-    }
-    Ok(speeds)
+    crate::live_projection::finite_number(value)
+        .map(Some)
+        .ok_or_else(|| "Schematic value is not a finite number".into())
 }
 
 fn fan_speed(value: &Value) -> Result<Option<f32>, String> {
     if value.is_null() {
         return Ok(None);
     }
-    let text = crate::live_views::text(value);
-    if text.len() > 64 {
-        return Err("Fan speed exceeds its byte bound".into());
-    }
-    let speed = text.parse::<f32>().map_err(|error| error.to_string())?;
-    if !speed.is_finite() {
-        return Err("Fan speed is not finite".into());
-    }
+    let speed =
+        crate::live_projection::finite_number(value).ok_or("Fan speed is not a finite number")?;
     if speed < 0.0 {
         return Err("Fan speed is negative".into());
     }
     Ok(Some(speed))
 }
 
-fn integer(value: &Value) -> Result<u64, String> {
-    match value {
-        Value::String(text) => {
-            if text.len() > 20 {
-                return Err("Fan integer exceeds its byte bound".into());
-            }
-            text.parse::<u64>().map_err(|error| error.to_string())
-        }
-        value => value.as_u64().ok_or_else(|| "Invalid fan integer".into()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::BTreeMap;
 
-    fn snapshot() -> Snapshot {
-        let identity = json!({"run":"00000000000000000000000000000001",
-            "boot":"00000000000000000000000000000002", "publication":42});
-        Snapshot {
-            generation: 1,
-            catalog: Value::Null,
-            selection: crate::live_source::Presentation::Legacy(json!({"selected":identity})),
-            pages: (BTreeMap::from([(
-                "fans".into(),
-                json!({"observation":identity,
-                "columns":["publication","fan","rpm"],
-                "rows":[["42","0","1530"],["42","1",null]]}),
-            )]))
-            .into_iter()
-            .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
-            .collect(),
-            apps: None,
-            detail: None,
-            history: None,
-            cpu_detail: None,
-            cpu_history: None,
-            resident_history: None,
-            app_attribution_history: None,
-            overview_app_histories: None,
-            histories_pending: false,
-            process_history: None,
-            rankings: None,
-            app_ranks: None,
-            app_parts: None,
-            read_ms: 0.0,
-        }
+    #[test]
+    fn a_reading_keeps_a_fan_it_could_not_read_missing() {
+        // Goal: an unread channel is no fan speed, rather than a stopped fan.
+        // Method: read two channels, the second of them unread.
+
+        let speeds = fan_speeds(&json!([1530.0, null]));
+
+        assert_eq!(speeds.unwrap(), [Some(1530.0), None]);
     }
 
     #[test]
-    fn fans_preserve_missing_speed() {
-        // Decode the real raw-page string representation without replacing null with zero.
-        assert_eq!(fan_speeds(Some(&snapshot())).unwrap(), [Some(1530.0), None]);
-        assert_eq!(fan_speeds(None).unwrap(), [None, None]);
+    fn a_reading_without_fans_has_no_fan_speeds() {
+        // Goal: a reading that measured no fans draws none.
+        // Method: read the field a second with no fan readings leaves empty.
+
+        let speeds = fan_speeds(&Value::Null);
+
+        assert_eq!(speeds.unwrap(), [None, None]);
     }
 
     #[test]
-    fn fans_refuse_other_observation() {
-        // A fan payload for another exact publication must not decorate this reading.
-        let mut snapshot = snapshot();
-        snapshot
-            .pages
-            .get_mut("fans")
-            .unwrap()
-            .legacy_mut()
-            .unwrap()["observation"]["publication"] = json!(43);
-        assert!(fan_speeds(Some(&snapshot)).is_err());
+    fn fan_speeds_refuse_more_channels_than_a_mac_has() {
+        // Goal: a reading past the bound fails visibly rather than dropping channels silently.
+        // Method: read eleven channels, one past the bound.
+
+        let speeds = fan_speeds(&json!(vec![1.0; 11]));
+
+        assert!(speeds.is_err());
     }
 
     #[test]
-    fn fans_refuse_invalid_schema() {
-        // A changed raw-table layout must fail visibly rather than reorder meanings silently.
-        let mut snapshot = snapshot();
-        snapshot
-            .pages
-            .get_mut("fans")
-            .unwrap()
-            .legacy_mut()
-            .unwrap()["columns"][1] = json!("rpm");
-        assert!(fan_speeds(Some(&snapshot)).is_err());
+    fn fan_speeds_refuse_a_negative_speed() {
+        // Goal: a speed no fan can turn at never drives the animation.
+        // Method: read a channel below zero.
+
+        let speeds = fan_speeds(&json!([-1.0]));
+
+        assert!(speeds.is_err());
     }
 
     #[test]
-    fn fans_refuse_duplicate_channels_and_wrong_publication() {
-        // Reject ambiguity within a page even when its outer observation is correct.
-        assert!(
-            fan_speeds_rows(
-                &[json!(["42", "0", "1000"]), json!(["42", "0", "2000"])],
-                42
-            )
-            .is_err()
-        );
-        assert!(fan_speeds_rows(&[json!(["43", "0", "1000"])], 42).is_err());
+    fn fan_speeds_refuse_a_speed_past_what_a_chart_can_hold() {
+        // Goal: a speed that overflows the drawn number never reads as infinite.
+        // Method: read a channel far past the largest `f32`.
+
+        let speeds = fan_speeds(&json!([1e300]));
+
+        assert!(speeds.is_err());
     }
 
     #[test]
-    fn fans_refuse_invalid_values_and_channel() {
-        // Kernel-facing values remain unavailable when invalid instead of driving animation.
-        for speed in [json!("NaN"), json!("inf"), json!("-1")] {
-            assert!(fan_speeds_rows(&[json!(["42", "0", speed])], 42).is_err());
-        }
-        assert!(fan_speeds_rows(&[json!(["42", "10", "1000"])], 42).is_err());
+    fn fan_speeds_refuse_text() {
+        // Goal: only a number reads as a fan speed.
+        // Method: read a channel holding digits as text.
+
+        let speeds = fan_speeds(&json!(["1530"]));
+
+        assert!(speeds.is_err());
     }
 }
 
@@ -384,7 +260,7 @@ mod battery_hud_tests {
     #[test]
     fn battery_hud_preserves_signed_discharge() {
         // Goal: retain discharge direction by projecting a negative recorded power flow.
-        let summary = json!({"battery":{"charge_percent":"65.5","power_watts":"-8.25",
+        let summary = json!({"battery":{"charge_percent":65.5,"power_watts":-8.25,
             "charging":false}});
 
         let battery = live_battery(&summary).unwrap();
@@ -443,26 +319,6 @@ mod battery_hud_tests {
     }
 
     #[test]
-    fn battery_hud_rejects_nonfinite_charge() {
-        // Goal: prevent an unpaintable charge value by supplying the string form of NaN.
-        let summary = json!({"battery":{"charge_percent":"NaN","power_watts":4}});
-
-        let battery = live_battery(&summary);
-
-        assert!(battery.is_err());
-    }
-
-    #[test]
-    fn battery_hud_rejects_nonfinite_power() {
-        // Goal: prevent an unpaintable power value while retaining a valid charge input.
-        let summary = json!({"battery":{"charge_percent":50,"power_watts":"-inf"}});
-
-        let battery = live_battery(&summary);
-
-        assert!(battery.is_err());
-    }
-
-    #[test]
     fn battery_hud_rejects_negative_charge() {
         // Goal: reject an impossible charge without rejecting valid signed discharge power.
         let summary = json!({"battery":{"charge_percent":-1,"power_watts":-3.5}});
@@ -479,19 +335,21 @@ mod projection_boundary_tests {
     use serde_json::json;
 
     #[test]
-    fn battery_hud_accepts_numeric_power_at_the_byte_limit() {
-        // Goal: the inclusive 64-byte bound accepts a valid finite numeric power string.
-        let summary = json!({"battery":{"charge_percent":50,"power_watts":"0".repeat(64)}});
+    fn battery_hud_refuses_power_held_as_text() {
+        // Goal: only a number reads as a battery's power.
+        // Method: project a summary whose power holds digits as text.
+        let summary = json!({"battery":{"charge_percent":50,"power_watts":"8.25"}});
 
-        let battery = live_battery(&summary).unwrap();
+        let battery = live_battery(&summary);
 
-        assert_eq!(battery, [Some(50.0), Some(0.0)]);
+        assert!(battery.is_err());
     }
 
     #[test]
-    fn battery_hud_rejects_numeric_power_past_the_byte_limit() {
-        // Goal: a 65-byte numeric string cannot bypass the bounded parser by being finite.
-        let summary = json!({"battery":{"charge_percent":50,"power_watts":"0".repeat(65)}});
+    fn battery_hud_refuses_power_past_what_a_chart_can_hold() {
+        // Goal: a power that overflows the drawn number never reads as infinite.
+        // Method: project a summary whose power lies far past the largest `f32`.
+        let summary = json!({"battery":{"charge_percent":50,"power_watts":1e300}});
 
         let battery = live_battery(&summary);
 

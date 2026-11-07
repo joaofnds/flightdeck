@@ -256,7 +256,7 @@ fn batch_keeps_a_saved_predecessor_outside_the_context_across_minutes() {
     );
     assert_eq!(
         batch.cpu.as_ref().unwrap()["points"][0]["elapsed_ns"],
-        "1000000000"
+        1_000_000_000
     );
 }
 

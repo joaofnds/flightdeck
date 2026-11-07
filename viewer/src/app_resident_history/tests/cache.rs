@@ -49,7 +49,7 @@ fn resident_history_keeps_exit_only_population_identical_after_cold_reopen() {
     assert_eq!(after["cohort"], before["cohort"]);
     assert_eq!(after["points"][1]["other"], before["points"][1]["other"]);
     assert_eq!(after["points"], before["points"]);
-    assert_eq!(after["points"][0]["apps"][0]["known"], "11");
+    assert_eq!(after["points"][0]["apps"][0]["known"], 11);
     assert_eq!(after["points"][1]["apps"][0], serde_json::Value::Null);
     assert_eq!(after["points"][1]["other"]["app_count"], 0);
 }

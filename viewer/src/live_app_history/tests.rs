@@ -39,7 +39,7 @@ fn shortens_dense_history_at_its_byte_limit_and_reports_the_loss() {
         points.last().unwrap()["observation"]["stamp"]["publication"],
         "18"
     );
-    assert_eq!(points.last().unwrap()["resident_bytes"]["known"], "42");
+    assert_eq!(points.last().unwrap()["resident_bytes"]["known"], 42);
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn emits_a_gap_when_an_app_is_absent_in_an_observed_publication() {
         )
         .unwrap();
 
-    assert_eq!(response["points"][0]["resident_bytes"]["known"], "42");
+    assert_eq!(response["points"][0]["resident_bytes"]["known"], 42);
     assert_eq!(response["points"][1]["members"], serde_json::Value::Null);
     assert_eq!(
         response["points"][1]["resident_bytes"],
@@ -108,7 +108,7 @@ fn emits_a_gap_when_an_app_is_absent_in_an_observed_publication() {
         response["points"][1]["cpu_percent_one_core"],
         serde_json::Value::Null
     );
-    assert_eq!(response["points"][2]["resident_bytes"]["known"], "42");
+    assert_eq!(response["points"][2]["resident_bytes"]["known"], 42);
     assert_eq!(response["points"][1]["source_available"], true);
     assert_eq!(
         response["points"][1]["disk_read_bytes"],

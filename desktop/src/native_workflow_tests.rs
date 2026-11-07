@@ -741,7 +741,7 @@ fn copying_an_expanded_process_keeps_its_creation_identity_and_exact_counters() 
     snapshot.detail = Some(crate::live_source::Presentation::Legacy(
         json!({"app":{"key":{"kind":"bundle","bytes_hex":"41"}},
         "processes":[{"pid":123,"creation":{"unique_id":"987","pid_version":4},
-            "cpu_ns":{"known":"9007199254740993"}}]}),
+            "cpu_ns":{"known":9_007_199_254_740_993_u64}}]}),
     ));
     let mut request = fresh_request("apps");
     request.app = Some(AppKey {
@@ -757,7 +757,10 @@ fn copying_an_expanded_process_keeps_its_creation_identity_and_exact_counters() 
     let value: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(value["detail"]["pid"], 123);
     assert_eq!(value["detail"]["creation"]["unique_id"], "987");
-    assert_eq!(value["detail"]["cpu_ns"]["known"], "9007199254740993");
+    assert_eq!(
+        value["detail"]["cpu_ns"]["known"],
+        9_007_199_254_740_993_u64
+    );
 }
 
 #[test]

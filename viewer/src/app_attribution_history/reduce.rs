@@ -372,7 +372,7 @@ impl Point {
             }
         }
         let mut point = json!({"observation":null,"segment":segment.to_string(),
-            "elapsed_ns":self.capture.elapsed_ns.map(|value| value.to_string()),
+            "elapsed_ns":self.capture.elapsed_ns,
             "source_available":true,"membership_complete":capture.membership_complete,
             "ungrouped_members":capture.ungrouped_members,"usage_refused":capture.usage_refused,
             "usage_gone":capture.usage_gone,"apps":null,"other":null});

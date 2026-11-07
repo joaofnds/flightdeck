@@ -23,7 +23,7 @@ fn reads_each_minute_of_the_older_tail_once() {
         session.earlier_context(second).unwrap();
     }
 
-    assert_eq!(filled - opened, 13 * earlier_tables());
+    assert_eq!(filled - opened, 13);
     assert_eq!(earlier_reads(&session), filled);
 }
 
@@ -31,7 +31,7 @@ fn reads_each_minute_of_the_older_tail_once() {
 fn reads_each_minute_once_where_its_manifest_holds_no_wall_bounds() {
     // Goal: a minute the persister sealed without wall bounds, since one of its ticks had no
     // wall time, is read once like any other. Method: publish one reading without clocks in every
-    // minute, save them, read the tail, and count the saved sources read for it.
+    // minute, save them, read the tail, and count the saved minutes read for it.
     let mut fixture = RingFixture::new_following();
     for minute in 0..15 {
         for offset in 1..=60 {
@@ -51,7 +51,7 @@ fn reads_each_minute_once_where_its_manifest_holds_no_wall_bounds() {
         .earlier_context(earlier_context_last(EARLIER_LIMIT))
         .unwrap();
 
-    assert_eq!(earlier_reads(&session) - opened, 13 * earlier_tables());
+    assert_eq!(earlier_reads(&session) - opened, 13);
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn the_older_tail_reads_on_past_a_minute_removal_took_from_under_its_list() {
 fn reads_only_the_sources_of_a_newly_needed_minute() {
     // Goal: a stride whose tail reaches one more sealed minute reads that minute alone. Method:
     // read the tail, move its limit until the join reaches the first reading of minute 13, at
-    // EARLIER_BASE + 3120, and count the saved sources read for the move.
+    // EARLIER_BASE + 3120, and count the saved minutes read for the move.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
@@ -163,28 +163,28 @@ fn reads_only_the_sources_of_a_newly_needed_minute() {
         .earlier_context(earlier_context_last(EARLIER_BASE + 3110))
         .unwrap();
 
-    assert_eq!(earlier_reads(&session) - filled, earlier_tables());
+    assert_eq!(earlier_reads(&session) - filled, 1);
 }
 
 #[test]
 fn reads_each_minute_once_while_minutes_seal() {
     // Goal: a newly sealed minute, and the refreshed list that lists it, make the tail read
     // only the minutes it newly needs. Method: follow the limits `earlier_follow` steps through,
-    // which reach minutes 0 to 14 in all, and count the saved sources every session read.
+    // which reach minutes 0 to 14 in all, and count the saved minutes every session read.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..12, earlier_wall);
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
     let (_, reads) = earlier_follow(&mut fixture, &mut session);
 
-    assert_eq!(reads, 15 * earlier_tables());
+    assert_eq!(reads, 15);
 }
 
 #[test]
 fn rereads_only_the_minute_after_a_removed_one() {
     // Goal: removing a minute changes the reading before the next minute's first, so that
     // minute alone is read again. Method: read the tail, remove minute 5's proof, refresh the
-    // list, and count the saved sources the next read takes.
+    // list, and count the saved minutes the next read takes.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
@@ -196,7 +196,7 @@ fn rereads_only_the_minute_after_a_removed_one() {
 
     session.earlier_context(last).unwrap();
 
-    assert_eq!(earlier_reads(&session) - refreshed, earlier_tables());
+    assert_eq!(earlier_reads(&session) - refreshed, 1);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn reads_a_recovered_minute_and_no_other() {
     // Goal: a minute saved late is read and no other, since the minute after it belongs to a later
     // run, whose first reading takes the reading before it from its own run. Method: stop a run
     // with minute 5 unsaved, record the rest in the next run, read the tail, save minute 5, refresh
-    // the list, and count the saved sources the next read takes.
+    // the list, and count the saved minutes the next read takes.
     let (older, _newer) = earlier_recording_missing_minute_five();
     let mut session = LiveSession::open(&older.root).unwrap();
     let last = earlier_context_last(EARLIER_LIMIT);
@@ -215,14 +215,14 @@ fn reads_a_recovered_minute_and_no_other() {
 
     session.earlier_context(last).unwrap();
 
-    assert_eq!(earlier_reads(&session) - refreshed, earlier_tables());
+    assert_eq!(earlier_reads(&session) - refreshed, 1);
 }
 
 #[test]
 fn reads_each_of_two_recovered_minutes_once() {
     // Goal: a fill that reads two minutes saved late reads each once, though it reads them
     // together. Method: stop one run with its last minute, 5, unsaved and leave the next run with
-    // its last, 12, unsaved, read the tail, save both, refresh the list, count the saved sources
+    // its last, 12, unsaved, read the tail, save both, refresh the list, count the saved minutes
     // the next read takes, and compare its tail with a reopened session's.
     let mut first = RingFixture::new_following();
     earlier_publish_minutes(&mut first, 0..5, earlier_wall);
@@ -240,7 +240,7 @@ fn reads_each_of_two_recovered_minutes_once() {
 
     let tail = session.earlier_context(last).unwrap();
 
-    assert_eq!(earlier_reads(&session) - refreshed, 2 * earlier_tables());
+    assert_eq!(earlier_reads(&session) - refreshed, 2);
     assert_eq!(tail, earlier_reopened(&first.root, last));
 }
 
@@ -248,7 +248,7 @@ fn reads_each_of_two_recovered_minutes_once() {
 fn drops_the_minutes_a_tail_leaves() {
     // Goal: the tail keeps only the minutes its range needs, so going back and returning reads
     // the newest minutes again. Method: read the tail, read it 500 seconds earlier, which leaves
-    // minutes 13 and 14, return, and count the saved sources the return takes.
+    // minutes 13 and 14, return, and count the saved minutes the return takes.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
@@ -261,7 +261,7 @@ fn drops_the_minutes_a_tail_leaves() {
 
     session.earlier_context(newest).unwrap();
 
-    assert_eq!(earlier_reads(&session) - back, 2 * earlier_tables());
+    assert_eq!(earlier_reads(&session) - back, 2);
 }
 
 #[test]
@@ -702,8 +702,10 @@ fn stops_reading_minutes_once_the_kept_readings_pass_the_bound() {
     // Goal: a range holding more readings than a context may hold fails without reading every
     // minute in it. Method: seal five runs of fifteen minutes whose readings all fall at the
     // same 900 seconds, as runs recorded at once would, read the tail twice, and count the
-    // saved sources read. The 69th minute brings the kept readings past OBSERVATIONS_MAX, and
+    // saved minutes read. The 69th minute brings the kept readings past OBSERVATIONS_MAX, and
     // the fill stops once it has kept it, having read the rest of its batch of six, the 72nd.
+    // CPU history over the same range refuses as well, rather than reaching the assertion past
+    // that refusal, which would abort the app.
     let mut fixture = RingFixture::new_following();
     let wall = |tick: u64| EARLIER_BASE + 300 + tick;
     earlier_publish_minutes(&mut fixture, 0..15, wall);
@@ -719,10 +721,14 @@ fn stops_reading_minutes_once_the_kept_readings_pass_the_bound() {
 
     let first = session.earlier_context(last);
     let second = session.earlier_context(last);
+    let history = Session::open(&fixture.root)
+        .unwrap()
+        .cpu_history_restore(ContextRange::ending_at(wall(899)).unwrap());
 
     assert!(matches!(first, Err(Error::Bound("context observations"))));
     assert!(matches!(second, Err(Error::Bound("context observations"))));
-    assert_eq!(earlier_reads(&session) - opened, 72 * earlier_tables());
+    assert!(matches!(history, Err(Error::Bound("context observations"))));
+    assert_eq!(earlier_reads(&session) - opened, 72);
 }
 
 #[test]
@@ -747,7 +753,7 @@ fn answers_a_kept_tail_after_its_read_is_canceled() {
 fn keeps_the_minutes_a_canceled_fill_finished() {
     // Goal: a canceled read of the tail loses only the minutes of the batch it was reading.
     // Method: cancel once the first minute is kept, read the tail again in the next epoch, and
-    // count the saved sources both reads took. The first batch read six minutes, 0 to 5, so
+    // count the saved minutes both reads took. The first batch read six minutes, 0 to 5, so
     // the second read reads minutes 1 to 5 again.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
@@ -764,12 +770,12 @@ fn keeps_the_minutes_a_canceled_fill_finished() {
 
     assert!(matches!(canceled, Err(Error::Io(error))
         if error.kind() == std::io::ErrorKind::Interrupted));
-    assert_eq!(earlier_reads(&session) - opened, (13 + 5) * earlier_tables());
+    assert_eq!(earlier_reads(&session) - opened, 13 + 5);
 }
 
 /// Follows ten limits a minute apart from `EARLIER_BASE + 2860`, publishing and saving minutes 12,
 /// 13 and 14 in turn before the first, the fourth and the tenth and refreshing the list, and gives
-/// each limit's context last second and tail with the saved sources every session read. Minute 13
+/// each limit's context last second and tail with the saved minutes every session read. Minute 13
 /// seals two limits before a tail reaches it, and minute 14 at the first limit whose tail reaches
 /// it.
 fn earlier_follow(
@@ -904,15 +910,9 @@ fn earlier_context_last(limit_second: u64) -> u64 {
     limit_second + CHARTED_SECONDS - 1
 }
 
-/// The saved sources the session's history has read.
+/// The saved minutes the session's history has read.
 fn earlier_reads(session: &LiveSession) -> u64 {
     session.history.as_ref().unwrap().source_reads.get()
-}
-
-/// The sources a minute's context reads, its tables and the ticks again, which place each core
-/// state in a performance level.
-fn earlier_tables() -> u64 {
-    u64::try_from(metrics::TABLE_NAMES.len() + 1).unwrap()
 }
 
 /// The Mac's readings of the stretch at `at` of a store started on `fixture`, once it holds the

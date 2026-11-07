@@ -1,14 +1,10 @@
-//! Borrowed, typed access to machine facts. Saved tables decode at this boundary; live
-//! facts never become text cells. Both inputs run the same metric reducers and presentation.
+//! Borrowed, typed access to machine facts. Saved minutes decode before this boundary and live
+//! facts never become text cells, so both run the same metric reducers and presentation.
 use persistence::{Error, Result};
 
-use crate::data::Table;
 use crate::live_raw::{Cell, Raw};
 
-pub(crate) enum View<'a> {
-    Saved(&'a Table),
-    Native(crate::live_raw::View<'a>),
-}
+pub(crate) struct View<'a>(pub(crate) crate::live_raw::View<'a>);
 
 pub(crate) enum Key<'a> {
     Integer(u64),
@@ -32,7 +28,7 @@ impl PartialOrd for Key<'_> {
 impl Ord for Key<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Saved component keys were ordered as decimal text. Keep that reduction order
-        // without allocating numeric strings in the native adapter.
+        // without allocating numeric strings.
         let mut left = [0; 20];
         let mut right = [0; 20];
         self.bytes(&mut left).cmp(other.bytes(&mut right))
@@ -63,7 +59,6 @@ impl Key<'_> {
 }
 
 pub(crate) enum Sources<'a> {
-    Saved(&'a crate::metrics::Tables),
     Machine {
         current: &'a crate::store::Reading<'a>,
         previous: Option<&'a crate::store::Reading<'a>>,
@@ -94,45 +89,28 @@ impl<'a> Sources<'a> {
                 let reading = if current.tick.publication == observation.publication {
                     *current
                 } else {
-                    previous.ok_or(Error::Bound("native metric predecessor"))?
+                    previous.ok_or(Error::Bound("metric predecessor"))?
                 };
-                Ok(Some(View::Native(crate::live_raw::View::machine(
-                    reading, name,
-                )?)))
+                let view = crate::live_raw::View::machine(reading, name)?;
+                Ok((view.len() > 0).then_some(View(view)))
             }
-            Self::Saved(tables) => Ok(tables
-                .get(&(observation.window, name))
-                .and_then(|table| table.get(&observation.publication))
-                .map(View::Saved)),
             Self::Native { current, previous } => {
                 let raw = if current.machine.ticks[0].publication == observation.publication {
                     *current
                 } else {
-                    previous.ok_or(Error::Bound("native metric predecessor"))?
+                    previous.ok_or(Error::Bound("metric predecessor"))?
                 };
                 let mut view = None;
                 raw.view(name, &mut view)?;
-                Ok(Some(View::Native(
-                    view.ok_or(Error::Bound("native metric view"))?,
-                )))
+                Ok(Some(View(view.ok_or(Error::Bound("metric view"))?)))
             }
-        }
-    }
-
-    pub fn holds(&self, observation: &crate::session::Observation, name: &str) -> bool {
-        match self {
-            Self::Saved(tables) => tables.contains_key(&(observation.window, name)),
-            Self::Native { .. } | Self::Machine { .. } => true,
         }
     }
 }
 
 impl View<'_> {
     pub fn len(&self) -> usize {
-        match self {
-            Self::Saved(table) => table.rows.len(),
-            Self::Native(view) => view.len(),
-        }
+        self.0.len()
     }
 
     pub fn rows(&self) -> std::ops::Range<usize> {
@@ -140,97 +118,48 @@ impl View<'_> {
     }
 
     pub fn holds(&self, name: &str) -> bool {
-        match self {
-            Self::Saved(table) => table.columns.iter().any(|column| column == name),
-            Self::Native(view) => view.holds(name),
-        }
+        self.0.holds(name)
     }
 
     pub fn field(&self, row: usize, name: &str) -> Result<Option<&str>> {
-        match self {
-            Self::Saved(table) => table.field(&table.rows[row], name),
-            Self::Native(view) => match view.cell(row, name)? {
-                Cell::Null => Ok(None),
-                Cell::Text(text) => Ok(Some(text)),
-                Cell::Bool(true) => Ok(Some("true")),
-                Cell::Bool(false) => Ok(Some("false")),
-                _ => Err(Error::Bound("text metric cell")),
-            },
+        match self.0.cell(row, name)? {
+            Cell::Null => Ok(None),
+            Cell::Text(text) => Ok(Some(text)),
+            Cell::Bool(true) => Ok(Some("true")),
+            Cell::Bool(false) => Ok(Some("false")),
+            _ => Err(Error::Bound("text metric cell")),
         }
     }
 
     pub fn integer(&self, row: usize, name: &str) -> Result<Option<u64>> {
-        match self {
-            Self::Saved(table) => table.integer(&table.rows[row], name),
-            Self::Native(view) => match view.cell(row, name)? {
-                Cell::Null => Ok(None),
-                Cell::Unsigned(value) => Ok(Some(value)),
-                _ => Err(Error::Bound("integer metric cell")),
-            },
+        match self.0.cell(row, name)? {
+            Cell::Null => Ok(None),
+            Cell::Unsigned(value) => Ok(Some(value)),
+            _ => Err(Error::Bound("integer metric cell")),
         }
     }
 
     pub fn key(&self, row: usize, name: &str) -> Result<Option<Key<'_>>> {
-        match self {
-            Self::Saved(table) => Ok(table.field(&table.rows[row], name)?.map(Key::Text)),
-            Self::Native(_) => {
-                if name == "name" {
-                    return Ok(self.field(row, name)?.map(Key::Text));
-                }
-
-                Ok(self.integer(row, name)?.map(Key::Integer))
-            }
+        if name == "name" {
+            return Ok(self.field(row, name)?.map(Key::Text));
         }
+
+        Ok(self.integer(row, name)?.map(Key::Integer))
     }
 
     pub fn signed(&self, row: usize, name: &str) -> Result<Option<i64>> {
-        match self {
-            Self::Saved(table) => table
-                .field(&table.rows[row], name)?
-                .map(str::parse)
-                .transpose()
-                .map_err(|_| Error::Bound("signed metric cell")),
-            Self::Native(view) => match view.cell(row, name)? {
-                Cell::Null => Ok(None),
-                Cell::Signed(value) => Ok(Some(value)),
-                _ => Err(Error::Bound("signed metric cell")),
-            },
+        match self.0.cell(row, name)? {
+            Cell::Null => Ok(None),
+            Cell::Signed(value) => Ok(Some(value)),
+            _ => Err(Error::Bound("signed metric cell")),
         }
     }
 
     pub fn number(&self, row: usize, name: &str) -> Result<Option<f64>> {
-        match self {
-            Self::Saved(table) => table.number(&table.rows[row], name),
-            Self::Native(view) => view.cell(row, name)?.number(),
-        }
+        self.0.cell(row, name)?.number()
     }
 
-    pub fn fan_rpm(&self, row: usize) -> Result<Option<f64>> {
-        match self {
-            Self::Saved(table) => table
-                .field(&table.rows[row], "rpm")?
-                .map(str::parse::<f64>)
-                .transpose()
-                .map_err(|_| Error::Bound("number")),
-            Self::Native(view) => view.cell(row, "rpm")?.number(),
-        }
-    }
-
-    pub fn disks(&self, row: usize, snapshot: &mut collector::disks::DiskSnapshot) -> Result<bool> {
-        match self {
-            Self::Saved(table) => {
-                if !self.holds(persistence::disks::FIELD) {
-                    return Ok(false);
-                }
-
-                let Some(text) = table.field(&table.rows[row], persistence::disks::FIELD)? else {
-                    return Ok(false);
-                };
-
-                persistence::disks::decode(text, snapshot)?;
-                Ok(true)
-            }
-            Self::Native(view) => Ok(view.disks(snapshot)),
-        }
+    pub fn disks(&self, snapshot: &mut collector::disks::DiskSnapshot) -> bool {
+        self.0.disks(snapshot)
     }
 }
