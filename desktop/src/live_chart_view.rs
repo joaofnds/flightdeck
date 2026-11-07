@@ -431,7 +431,7 @@ impl LiveDashboard {
                 }
 
                 if *hovered {
-                    if this.pointer != crate::live_hover::controller::PointerPlace::InsideWindow {
+                    if !this.pointer_inside_window() {
                         return;
                     }
                 } else {
@@ -1374,7 +1374,6 @@ fn chart_time_row(
         .child(charts::time_labels(time))
 }
 
-/// Inspects the hovered reading, else the selected second, else the newest reading.
 /// The target of the cell of a chart of states the pointer at `position` is on, which is the
 /// reading that reached the state the cell shows rather than the second under the pointer.
 fn chart_hover_state(
@@ -1390,6 +1389,7 @@ fn chart_hover_state(
     Some(crate::live_hover::Target::of_place(&reach.peak))
 }
 
+/// Inspects the hovered reading, else the selected second, else the newest reading.
 fn chart_inspection(panel: &Panel, index: Option<usize>) -> Inspection {
     let newest = panel
         .lines

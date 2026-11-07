@@ -208,7 +208,15 @@ fn panels_panel(
     let mut positions = Vec::with_capacity(payload.points.len());
     let mut segments = Vec::with_capacity(payload.points.len());
 
-    panels_panel_positions(payload, first, span, &mut positions, &mut segments)?;
+    let mut places = Vec::with_capacity(payload.points.len());
+    panels_panel_positions(
+        payload,
+        first,
+        span,
+        &mut positions,
+        &mut segments,
+        &mut places,
+    )?;
     let lines = panels_panel_lines(payload, definition);
 
     // The prototype mirrors written bytes below the axis, so that chart has no zero floor.
@@ -235,8 +243,9 @@ fn panels_panel(
         help: Some(format!(
             "Seven groups with highest known mean CPU over captured context; Other includes \
             every remaining captured named group. Unknown names are excluded and reported. \
-            Missing readings remain gaps. Groups use executable bytes across PID lifetimes. {}",
-            crate::live_projection::LINE_STATISTICS_HELP
+            Missing readings remain gaps. Groups use executable bytes across PID lifetimes. {} {}",
+            crate::live_projection::LINE_MEAN_HELP,
+            crate::live_projection::LINE_DATA_HELP
         )),
         source: Some("Captured process intervals".into()),
         quantities: None,
@@ -250,7 +259,7 @@ fn panels_panel(
             .iter()
             .position(|point| point.observation == payload.selected),
         window: Some(window),
-        places: None,
+        places: Some(places.into()),
         detail_first: None,
         reading_seconds: crate::charts::TICK_SECONDS,
         sliding: false,
@@ -264,6 +273,7 @@ fn panels_panel_positions(
     span: u16,
     positions: &mut Vec<f32>,
     segments: &mut Vec<u64>,
+    places: &mut Vec<crate::data::MachinePlace>,
 ) -> Result<(), String> {
     let mut segment = 0_u64;
 
@@ -282,6 +292,12 @@ fn panels_panel_positions(
             .ok_or("Fraction exceeds f32")?;
 
         positions.push((f32::from(seconds) + fraction / 1_000_000_000.0) / f32::from(span));
+        places.push(crate::data::MachinePlace {
+            boot: point.observation.stamp.boot,
+            run: point.observation.stamp.run,
+            publication: point.observation.stamp.publication,
+            wall_ns: wall,
+        });
 
         if let Some(previous) = index
             .checked_sub(1)

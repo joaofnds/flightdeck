@@ -366,7 +366,7 @@ fn overview_panels_coordinates(
     })
 }
 
-/// How low and how high `reading` reached over `stretch`, as `second_value` reads one second. A
+/// How high `reading` reached over `stretch`, as `second_value` reads one second. A
 /// category has no height between its levels, so it reaches its highest level alone.
 fn stretch_reach(reading: &Reading, stretch: &MachineStretch) -> Result<Option<LineReach>, String> {
     let key = reading.reach.unwrap_or(reading.key);
@@ -405,7 +405,6 @@ fn stretch_reach_measured(reduction: &Reduction<MachinePlace>) -> Option<LineRea
     let measured = reduction.measured.as_ref()?;
 
     Some(LineReach {
-        low: measured.minimum.value.to_f32()?,
         high: measured.maximum.value.to_f32()?,
         peak: measured.maximum.place,
     })
@@ -416,7 +415,6 @@ fn stretch_reach_category(highest: Option<&Mark<u8, MachinePlace>>) -> Option<Li
     let level = f32::from(highest.category);
 
     Some(LineReach {
-        low: level,
         high: level,
         peak: highest.place,
     })

@@ -7,9 +7,10 @@ continues across collector restarts.
 minutes, hours or days. A reading older than the retention period is deleted.
 
 **Hold**: the user's pause on one second of the recording, made by picking a second or a range
-on a chart or by pausing, so that every page shows that second's readings rather than the live
-Mac's until the user lets go. The charts keep the window they showed when the hold began, and
-the recording goes on collecting. The held second is the second a hold names.
+on a chart, by picking a line's highest reading in its Data table or by pausing, so that every
+page shows that second's readings rather than the live Mac's until the user lets go. The charts
+keep the window they showed when the hold began, and the recording goes on collecting. The held
+second is the second a hold names.
 
 **Tick**: one scheduled collection of the Mac's readings. A missed tick has no readings.
 
@@ -110,12 +111,11 @@ line at any bucket with no readings of its own, and each point beside the break 
 of its buckets. A chart of readings a second apart takes the shortest length, of at least one
 second, that leaves each bucket a pixel of the chart, so a wider chart or a shorter span draws
 shorter buckets, and each point covers at least four seconds and a second more than its bucket.
-Each point also keeps what its bucket's readings reached, the lowest and the highest and the reading
-that read the highest, so a peak the mean hides stays findable as it ages. A chart of states draws
-the highest state its readings reached.
+A chart of states draws the highest state its readings reached.
 Buckets start at multiples of their length, so a point keeps its place as the chart scrolls.
 Readings further apart, such as the collector's ten-second reports or the older readings of a
 chart that reaches back more than sixteen minutes, which stand ten seconds apart, make buckets
 at least that long and points that cover at least four times that, so forty seconds for readings
 ten seconds apart. Each older reading of a chart by App is the App's mean over the seconds of its
-ten that the recording holds, while a chart of the whole Mac keeps the first of those seconds.
+ten that the recording holds, while a chart of the whole Mac keeps the first of those seconds and the
+highest reading of the ten, so a peak the mean hides stays findable as it ages.

@@ -5,6 +5,7 @@ use gpui::{
 };
 use num_traits::ToPrimitive;
 
+use crate::chart_axes::TimeWindow;
 use crate::charts::{GRID, MUTED, PANEL};
 use crate::dashboard::control;
 use crate::data::{LineExtremes, MachinePlace, Panel};
@@ -15,7 +16,7 @@ pub(crate) struct ChartInspector {
     panel_id: String,
     summaries: Vec<SampleSummary>,
     /// What the whole of the chart's stack reached, where one of its lines names that.
-    stack_total: Option<SampleSummary>,
+    stack_total: Option<SampleMaximum>,
     focus: FocusHandle,
     /// The focus of the control that holds each row's maximum, the stack's total last.
     maximum_focus: Vec<FocusHandle>,
@@ -23,34 +24,22 @@ pub(crate) struct ChartInspector {
 
 struct SampleSummary {
     mean: Option<f32>,
-    maximum: Option<f32>,
-    /// The reading that read the maximum, where the chart names it.
-    maximum_pick: Option<MaximumPick>,
+    maximum: Option<SampleMaximum>,
     available: u32,
     total: usize,
 }
 
-/// The reading a row's maximum names, which its control holds.
+/// The highest a row reached, and the reading that read it where the chart names its readings.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum MaximumPick {
-    /// The reading itself, where the panel names its readings. Two runs can read the same wall
-    /// second.
-    Reading(MachinePlace),
-    /// The second it was read in, where the panel names none.
-    Second(u64),
+struct SampleMaximum {
+    value: f32,
+    place: Option<MachinePlace>,
 }
 
-impl MaximumPick {
-    fn second(self) -> u64 {
-        match self {
-            Self::Reading(place) => place.second(),
-            Self::Second(second) => second,
-        }
-    }
-}
-
-/// The most rows the table can give: a line's for each of its sixteen, then the stack's total.
-const CHART_DATA_ROWS_MAX: usize = 17;
+/// The most lines a chart's table gives a row.
+const CHART_LINES_MAX: usize = 16;
+/// The most rows the table can give: a line's for each of its lines, then the stack's total.
+const CHART_DATA_ROWS_MAX: usize = CHART_LINES_MAX + 1;
 /// The column of a row that says when its maximum was read, and holds that reading.
 const CHART_DATA_READ_AT_COLUMN: usize = 4;
 
@@ -63,10 +52,11 @@ impl LiveDashboard {
     ) {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let view = self.view_window();
         self.chart_inspector = Some(ChartInspector {
             panel_id: panel.id.clone(),
-            summaries: chart_summaries(panel),
-            stack_total: chart_stack_total(panel),
+            summaries: chart_summaries(panel, view),
+            stack_total: chart_stack_total(panel, view),
             focus,
             maximum_focus: (0..CHART_DATA_ROWS_MAX)
                 .map(|_| cx.focus_handle())
@@ -76,18 +66,14 @@ impl LiveDashboard {
     }
 
     pub(crate) fn refresh_chart_inspector(&mut self) {
+        let view = self.view_window();
         let Some(inspector) = &mut self.chart_inspector else {
             return;
         };
 
-        if let Some(panel) = self
-            .panels
-            .iter()
-            .take(16)
-            .find(|panel| panel.id == inspector.panel_id)
-        {
-            inspector.summaries = chart_summaries(panel);
-            inspector.stack_total = chart_stack_total(panel);
+        if let Some(panel) = chart_inspector_panel(&self.panels, &inspector.panel_id) {
+            inspector.summaries = chart_summaries(panel, view);
+            inspector.stack_total = chart_stack_total(panel, view);
         } else {
             self.chart_inspector = None;
         }
@@ -98,11 +84,7 @@ impl LiveDashboard {
         cx: &mut Context<Self>,
     ) -> Option<gpui::Stateful<gpui::Div>> {
         let inspector = self.chart_inspector.as_ref()?;
-        let panel = self
-            .panels
-            .iter()
-            .take(16)
-            .find(|panel| panel.id == inspector.panel_id)?;
+        let panel = chart_inspector_panel(&self.panels, &inspector.panel_id)?;
         let dialog = self.chart_inspector_dialog(panel, inspector, cx);
 
         Some(
@@ -169,7 +151,8 @@ impl LiveDashboard {
             .child(div().text_color(rgb(MUTED)).child(
                 "Recorded samples in the visible chart. A sample that covers several seconds \
                 counts toward the mean once, and toward the maximum by the highest reading of \
-                those seconds. They do not recover peaks between readings. Picking when a maximum \
+                those seconds where the chart keeps it. A layer of a stack and an App keep only \
+                their samples. They do not recover peaks between readings. Picking when a maximum \
                 was read holds that reading on every page.",
             ))
     }
@@ -221,17 +204,17 @@ impl LiveDashboard {
             return;
         }
         let count = stops.len();
-        let at = stops
+        let focused_index = stops
             .iter()
             .position(|stop| stop.is_focused(window))
             .unwrap_or(0);
-        let next = if backward {
-            (at + count - 1) % count
+        let next_index = if backward {
+            (focused_index + count - 1) % count
         } else {
-            (at + 1) % count
+            (focused_index + 1) % count
         };
 
-        window.focus(&stops[next], cx);
+        window.focus(&stops[next_index], cx);
     }
 
     /// The controls of the dialog in the order the keyboard reaches them.
@@ -239,53 +222,75 @@ impl LiveDashboard {
         let Some(inspector) = &self.chart_inspector else {
             return Vec::new();
         };
-        let Some(panel) = self
-            .panels
-            .iter()
-            .take(16)
-            .find(|panel| panel.id == inspector.panel_id)
-        else {
+        let Some(panel) = chart_inspector_panel(&self.panels, &inspector.panel_id) else {
             return Vec::new();
         };
 
         let mut stops = vec![inspector.focus.clone()];
         for (line_index, summary) in inspector.summaries.iter().enumerate() {
-            if summary.maximum_pick.is_some() && self.chart_series_visible(panel, line_index) {
+            let held = summary
+                .maximum
+                .is_some_and(|maximum| maximum.place.is_some());
+            if held && self.chart_series_visible(panel, line_index) {
                 stops.push(inspector.maximum_focus[line_index].clone());
             }
         }
-        if chart_stack_total_row(inspector).is_some() {
+        let total = self.chart_inspector_total(panel, inspector);
+        if total.is_some_and(|total| total.place.is_some()) {
             stops.push(inspector.maximum_focus[inspector.summaries.len()].clone());
         }
+
         stops
     }
 
-    /// Lets go of the dialog and holds the reading `pick` names on every page.
-    fn chart_inspector_hold(
+    /// What the whole of `panel`'s stack reached, while every line of the stack is shown, since
+    /// with one hidden the chart no longer stacks what the total adds up.
+    fn chart_inspector_total(
+        &self,
+        panel: &Panel,
+        inspector: &ChartInspector,
+    ) -> Option<SampleMaximum> {
+        let every_line_shown = panel
+            .lines
+            .iter()
+            .take(CHART_LINES_MAX)
+            .enumerate()
+            .filter(|(_, line)| crate::charts::stacked(panel, line))
+            .all(|(line_index, _)| self.chart_series_visible(panel, line_index));
+
+        inspector.stack_total.filter(|_| every_line_shown)
+    }
+
+    /// Lets go of the dialog and holds the reading at `place` on every page. A hold stays in the
+    /// window the charts show, and the table was drawn before this event, so a reading that window
+    /// has since left holds nothing.
+    pub(crate) fn chart_inspector_hold(
         &mut self,
-        pick: MaximumPick,
+        place: MachinePlace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_chart_inspector(window, cx);
-        self.pointer = crate::live_hover::controller::PointerPlace::AtHeldPick;
-        match pick {
-            MaximumPick::Reading(place) => {
-                self.pin_target(crate::live_hover::Target::of_place(&place), cx);
-            }
-            MaximumPick::Second(second) => self.pin_second(second, cx),
+        let in_view = self
+            .view_window()
+            .is_some_and(|view| view.contains(place.second()));
+        if !in_view {
+            return;
         }
+
+        self.pointer = crate::live_hover::controller::PointerPlace::AtHeldPick;
+        self.pin_target(crate::live_hover::Target::of_place(&place), cx);
     }
 
     /// The control of the row `name` that says when its maximum was read and holds that reading.
     fn chart_inspector_maximum(
         panel: &Panel,
         name: &str,
-        pick: MaximumPick,
+        place: MachinePlace,
         focus: &FocusHandle,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let read_at = crate::chart_axes::clock(pick.second(), true);
+        let read_at = crate::chart_axes::clock(place.second(), true);
         let selector = format!("chart-maximum:{}:{name}", panel.id);
 
         div()
@@ -311,14 +316,14 @@ impl LiveDashboard {
             .on_key_down(
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
-                        this.chart_inspector_hold(pick, window, cx);
+                        this.chart_inspector_hold(place, window, cx);
                         window.prevent_default();
                         cx.stop_propagation();
                     }
                 }),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.chart_inspector_hold(pick, window, cx);
+                this.chart_inspector_hold(place, window, cx);
             }))
             .child(read_at)
     }
@@ -345,16 +350,18 @@ impl LiveDashboard {
         );
         let index = self.chart_inspection_index(panel);
         let mut visible_count = 0;
-        for (line_index, line) in panel.lines.iter().take(16).enumerate() {
+        let lines = panel.lines.iter().take(CHART_LINES_MAX);
+        for (line_index, line) in lines.enumerate() {
             if !self.chart_series_visible(panel, line_index) {
                 continue;
             }
 
             visible_count += 1;
             let summary = &inspector.summaries[line_index];
-            let maximum = summary.maximum_pick.map(|pick| {
+            let place = summary.maximum.and_then(|maximum| maximum.place);
+            let maximum = place.map(|place| {
                 let focus = &inspector.maximum_focus[line_index];
-                Self::chart_inspector_maximum(panel, &line.name, pick, focus, cx)
+                Self::chart_inspector_maximum(panel, &line.name, place, focus, cx)
             });
             table = table.child(chart_data_row(
                 chart_data_cells(
@@ -369,12 +376,14 @@ impl LiveDashboard {
         if visible_count == 0 {
             table = table.child("No visible series. Enable one in the chart legend.");
         }
-        if let Some((total, pick)) = chart_stack_total_row(inspector) {
-            let focus = &inspector.maximum_focus[inspector.summaries.len()];
-            let maximum = Self::chart_inspector_maximum(panel, CHART_DATA_TOTAL, pick, focus, cx);
+        if let Some(total) = self.chart_inspector_total(panel, inspector) {
+            let maximum = total.place.map(|place| {
+                let focus = &inspector.maximum_focus[inspector.summaries.len()];
+                Self::chart_inspector_maximum(panel, CHART_DATA_TOTAL, place, focus, cx)
+            });
             table = table.child(chart_data_row(
                 chart_data_total_cells(panel, total),
-                Some(maximum),
+                maximum,
             ));
         }
 
@@ -532,92 +541,103 @@ fn chart_data_cells(
         line.name.clone(),
         selected,
         super::line_reading(panel, summary.mean, unit),
-        super::line_reading(panel, summary.maximum, unit),
-        chart_data_read_at(summary),
+        super::line_reading(panel, summary.maximum.map(|maximum| maximum.value), unit),
+        chart_data_read_at(summary.maximum),
         format!("{} / {}", summary.available, summary.total),
     ]
 }
 
 /// What the Data table's row of a stack's whole says: how far it reached and when, since the rows
 /// of its lines say what each read and a mean of the whole is nothing the chart draws.
-fn chart_data_total_cells(panel: &Panel, total: &SampleSummary) -> [String; 6] {
+fn chart_data_total_cells(panel: &Panel, total: SampleMaximum) -> [String; 6] {
     [
         CHART_DATA_TOTAL.into(),
         String::new(),
         String::new(),
-        super::line_reading(panel, total.maximum, &panel.unit),
-        chart_data_read_at(total),
+        super::line_reading(panel, Some(total.value), &panel.unit),
+        chart_data_read_at(Some(total)),
         String::new(),
     ]
 }
 
-fn chart_data_read_at(summary: &SampleSummary) -> String {
-    summary.maximum_pick.map_or_else(String::new, |pick| {
-        crate::chart_axes::clock(pick.second(), true)
-    })
+fn chart_data_read_at(maximum: Option<SampleMaximum>) -> String {
+    maximum
+        .and_then(|maximum| maximum.place)
+        .map_or_else(String::new, |place| {
+            crate::chart_axes::clock(place.second(), true)
+        })
 }
 
 /// A row of the table, whose column of when its maximum was read is `maximum` where it has one.
-fn chart_data_row(values: [String; 6], maximum: Option<gpui::Stateful<gpui::Div>>) -> gpui::Div {
+fn chart_data_row(
+    values: [String; 6],
+    mut maximum: Option<gpui::Stateful<gpui::Div>>,
+) -> gpui::Div {
     let mut row = div()
         .flex()
         .items_center()
         .border_b_1()
         .border_color(rgb(GRID))
         .py(px(9.0));
-    let mut maximum = maximum;
     for (column, value) in values.into_iter().enumerate() {
         let cell = div()
             .flex_1()
             .min_w_0()
             .px(px(8.0))
             .debug_selector(|| value.clone());
-        row = row.child(
-            match maximum.take_if(|_| column == CHART_DATA_READ_AT_COLUMN) {
-                Some(maximum) => cell.child(maximum),
-                None => cell.child(value),
-            },
-        );
+        let control = if column == CHART_DATA_READ_AT_COLUMN {
+            maximum.take()
+        } else {
+            None
+        };
+        row = row.child(match control {
+            Some(control) => cell.child(control),
+            None => cell.child(value),
+        });
     }
+
     row
 }
 
 /// What the table's row of a stack's whole names.
 const CHART_DATA_TOTAL: &str = "Total";
 
-/// The summary of the stack's whole and the reading its maximum names, where the table has a row
-/// for it.
-fn chart_stack_total_row(inspector: &ChartInspector) -> Option<(&SampleSummary, MaximumPick)> {
-    let total = inspector.stack_total.as_ref()?;
-
-    Some((total, total.maximum_pick?))
+/// The chart of `panels` a table with `panel_id` reads.
+fn chart_inspector_panel<'panels>(
+    panels: &'panels [Rc<Panel>],
+    panel_id: &str,
+) -> Option<&'panels Rc<Panel>> {
+    panels.iter().take(16).find(|panel| panel.id == panel_id)
 }
 
-fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
-    let lower = super::chart_inspection(panel, None).lower;
-
+/// What each line of `panel` read on the chart. A chart keeps readings on either side of its
+/// window, for its first point's mean and so that a narrowed range keeps each reading's index. Its
+/// mean and its count keep to the readings the plot paints, and its maximum to the readings in
+/// `view`, the window the charts show, since that is what a hold can name.
+fn chart_summaries(panel: &Panel, view: Option<TimeWindow>) -> Vec<SampleSummary> {
     panel
         .lines
         .iter()
-        .take(16)
+        .take(CHART_LINES_MAX)
         .map(|line| {
             assert!(line.values.len() <= crate::data::LIVE_SAMPLE_LIMIT);
             let mut sum = 0.0_f64;
-            let mut maximum: Option<(f32, Option<MaximumPick>)> = None;
+            let mut maximum = None;
             let mut available = 0_u32;
+            let mut total = 0_usize;
             let values = line.values.iter().take(crate::data::LIVE_SAMPLE_LIMIT);
-            for (index, value) in values.enumerate().skip(lower) {
-                let value = value.filter(|value| value.is_finite());
+            for (index, value) in values.enumerate() {
+                let on_plot = chart_summaries_on_plot(panel, index);
+                let value = value.filter(|value| on_plot && value.is_finite());
+                if on_plot {
+                    total += 1;
+                }
                 if let Some(value) = value {
                     sum += f64::from(value);
                     available += 1;
                 }
-                let Some(reading) = chart_summaries_reading(panel, line, index, value) else {
-                    continue;
-                };
-                if maximum.is_none_or(|(highest, _)| reading.0 > highest) {
-                    maximum = Some(reading);
-                }
+                let reading = chart_summaries_reading(panel, line, index, value, view);
+                maximum = chart_data_higher(maximum, reading);
             }
             let mean = if available == 0 {
                 None
@@ -626,47 +646,47 @@ fn chart_summaries(panel: &Panel) -> Vec<SampleSummary> {
             };
             SampleSummary {
                 mean,
-                maximum: maximum.map(|(value, _)| value),
-                maximum_pick: maximum.and_then(|(_, pick)| pick),
+                maximum,
                 available,
-                total: line.values.len().saturating_sub(lower),
+                total,
             }
         })
         .collect()
 }
 
-/// How far the whole of `panel`'s stack reached in view, where a line of it names that: the highest
-/// of what that line names and of what its lines add up to at each reading. No row of a line can
-/// say it, since each keeps to its own readings.
-fn chart_stack_total(panel: &Panel) -> Option<SampleSummary> {
+/// Whether the plot of `panel` paints its reading at `index`. A chart with no clock paints them
+/// all.
+fn chart_summaries_on_plot(panel: &Panel, index: usize) -> bool {
+    match &panel.positions {
+        Some(positions) if panel.window.is_some() => positions
+            .get(index)
+            .is_some_and(|position| crate::time_range::on_plot(*position)),
+        _ => true,
+    }
+}
+
+/// How far the whole of `panel`'s stack reached in `view`, where a line of it names that: the
+/// highest of what that line names and of what its lines add up to at each reading. No row of a
+/// line can say it, since each keeps to its own readings.
+fn chart_stack_total(panel: &Panel, view: Option<TimeWindow>) -> Option<SampleMaximum> {
     let lines: Vec<&crate::data::Line> = panel
         .lines
         .iter()
-        .take(16)
+        .take(CHART_LINES_MAX)
         .filter(|line| crate::charts::stacked(panel, line))
         .collect();
     let extremes = lines.iter().find_map(|line| line.extremes.as_ref())?;
-    let lower = super::chart_inspection(panel, None).lower;
     let count = lines.iter().map(|line| line.values.len()).max()?;
 
-    let mut maximum: Option<(f32, Option<MaximumPick>)> = None;
-    for index in lower..count {
-        let added = chart_stack_total_reading(&lines, index);
-        let Some(reading) = chart_summaries_highest(panel, Some(extremes), index, added) else {
-            continue;
-        };
-        if maximum.is_none_or(|(highest, _)| reading.0 > highest) {
-            maximum = Some(reading);
-        }
+    let mut maximum = None;
+    for index in 0..count {
+        let added = chart_stack_total_reading(&lines, index)
+            .filter(|_| chart_summaries_on_plot(panel, index));
+        let reading = chart_data_highest(panel, Some(extremes), index, added, view);
+        maximum = chart_data_higher(maximum, reading);
     }
 
-    Some(SampleSummary {
-        mean: None,
-        maximum: maximum.map(|(value, _)| value),
-        maximum_pick: maximum.and_then(|(_, pick)| pick),
-        available: 0,
-        total: 0,
-    })
+    maximum
 }
 
 /// What `lines` add up to at `index`, or `None` where any of them read nothing there, since a sum
@@ -681,57 +701,77 @@ fn chart_stack_total_reading(lines: &[&crate::data::Line], index: usize) -> Opti
             .flatten()
             .filter(|value| value.is_finite())?;
     }
+
     Some(added)
 }
 
-/// The highest reading the sample `value` at `index` of `line` stands for, and the reading the
-/// chart names for it. A stacked line's reach is the stack's total and not its own.
+/// The highest reading the sample `value` at `index` of `line` stands for. A stacked line's reach
+/// is the stack's total and not its own.
 fn chart_summaries_reading(
     panel: &Panel,
     line: &crate::data::Line,
     index: usize,
     value: Option<f32>,
-) -> Option<(f32, Option<MaximumPick>)> {
-    let extremes = line.extremes.as_ref().filter(|_| panel.stack != Some(true));
+    view: Option<TimeWindow>,
+) -> Option<SampleMaximum> {
+    let extremes = line
+        .extremes
+        .as_ref()
+        .filter(|_| !crate::charts::stacked(panel, line));
 
-    chart_summaries_highest(panel, extremes, index, value)
+    chart_data_highest(panel, extremes, index, value, view)
 }
 
-/// The higher of `value` and what `extremes` name at `index`, and the reading that read it.
-fn chart_summaries_highest(
+/// The higher of `value` and what `extremes` name at `index`, and the reading that read it, among
+/// the readings in `view`. A reach can name a reading past the point that stands for it, so each
+/// answers for its own place. A chart that names no readings has only its sample to go by.
+fn chart_data_highest(
     panel: &Panel,
     extremes: Option<&LineExtremes>,
     index: usize,
     value: Option<f32>,
-) -> Option<(f32, Option<MaximumPick>)> {
+    view: Option<TimeWindow>,
+) -> Option<SampleMaximum> {
+    let in_view = |place: &MachinePlace| view.is_some_and(|view| view.contains(place.second()));
+    let place = panel
+        .places
+        .as_ref()
+        .and_then(|places| places.get(index).copied());
+    let own = value
+        .filter(|_| place.is_none_or(|place| in_view(&place)))
+        .map(|value| SampleMaximum { value, place });
     let reach = extremes
-        .and_then(|extremes| extremes[index])
-        .filter(|reach| value.is_none_or(|value| reach.high >= value));
-    if let Some(reach) = reach {
-        return Some((reach.high, Some(MaximumPick::Reading(reach.peak))));
-    }
+        .and_then(|extremes| extremes.get(index).copied().flatten())
+        .filter(|reach| in_view(&reach.peak))
+        .map(|reach| SampleMaximum {
+            value: reach.high,
+            place: Some(reach.peak),
+        });
 
-    value.map(|value| (value, chart_summaries_pick(panel, index)))
+    chart_data_higher(reach, own)
 }
 
-/// The reading at `index` of `panel`: the one it names, or else the second its clock puts it in.
-fn chart_summaries_pick(panel: &Panel, index: usize) -> Option<MaximumPick> {
-    if let Some(places) = &panel.places {
-        return Some(MaximumPick::Reading(places[index]));
+/// The higher of `highest` and `reading`, the earlier of two that tie.
+fn chart_data_higher(
+    highest: Option<SampleMaximum>,
+    reading: Option<SampleMaximum>,
+) -> Option<SampleMaximum> {
+    match (highest, reading) {
+        (Some(highest), Some(reading)) if reading.value > highest.value => Some(reading),
+        (highest, reading) => highest.or(reading),
     }
-    let buckets = crate::charts::panel_buckets(panel)?;
-    let positions = panel.positions.as_deref()?;
-
-    buckets.second_of(positions[index]).map(MaximumPick::Second)
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::{Context, Render, TestAppContext, Window, div, prelude::*, px};
 
+    use crate::chart_axes::TimeWindow;
+    use crate::data::{LineReach, MachinePlace};
+
     use super::{
-        MaximumPick, chart_data_cells, chart_stack_total, chart_summaries, split_reading,
-        tooltip_row,
+        SampleMaximum, SampleSummary, chart_data_cells, chart_stack_total, chart_summaries,
+        split_reading, tooltip_row,
     };
 
     struct Probe;
@@ -766,6 +806,30 @@ mod tests {
         assert!(detail.top() >= name.bottom());
     }
 
+    /// A reading of no run, read at `second`.
+    fn place_at(second: u64) -> MachinePlace {
+        MachinePlace {
+            wall_ns: second * 1_000_000_000,
+            ..MachinePlace::default()
+        }
+    }
+
+    /// A window that holds the wall seconds `reaching_panel` names.
+    const REACHING_VIEW: Option<TimeWindow> = Some(TimeWindow {
+        first: 8_900,
+        span: 200,
+    });
+
+    fn highest(summary: &SampleSummary) -> Option<f32> {
+        summary.maximum.map(|maximum| maximum.value)
+    }
+
+    fn read_at(maximum: Option<SampleMaximum>) -> Option<u64> {
+        maximum
+            .and_then(|maximum| maximum.place)
+            .map(|place| place.second())
+    }
+
     /// A panel of one line, its second sample said to reach 95 at wall second 9,000.
     fn reaching_panel(stack: bool) -> crate::data::Panel {
         let mut panel: crate::data::Panel = serde_json::from_value(serde_json::json!({
@@ -774,13 +838,9 @@ mod tests {
         .unwrap();
         panel.lines[0].extremes = Some(vec![
             None,
-            Some(crate::data::LineReach {
-                low: 1.0,
+            Some(LineReach {
                 high: 95.0,
-                peak: crate::data::MachinePlace {
-                    wall_ns: 9_000_000_000_000,
-                    ..crate::data::MachinePlace::default()
-                },
+                peak: place_at(9_000),
             }),
         ]);
 
@@ -793,7 +853,7 @@ mod tests {
         // that read it.
         // Method: a line whose sample reaches past what it draws, and read its row.
         let panel = reaching_panel(false);
-        let summaries = chart_summaries(&panel);
+        let summaries = chart_summaries(&panel, REACHING_VIEW);
 
         let cells = chart_data_cells(&panel, &panel.lines[0], String::new(), &summaries[0]);
 
@@ -809,27 +869,26 @@ mod tests {
         // Goal: a chart's table of statistics gives the peak its mean hides and when it was read,
         // and leaves the mean a mean.
         // Method: a sample that reaches past its own mean, and read the summary.
-        let summaries = chart_summaries(&reaching_panel(false));
+        let summaries = chart_summaries(&reaching_panel(false), REACHING_VIEW);
 
-        assert_eq!(summaries[0].maximum, Some(95.0));
-        assert_eq!(
-            summaries[0].maximum_pick.map(MaximumPick::second),
-            Some(9_000)
-        );
+        assert_eq!(highest(&summaries[0]), Some(95.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(9_000));
         assert_eq!(summaries[0].mean, Some(15.0));
     }
 
     #[test]
     fn a_reach_under_a_samples_own_reading_leaves_that_reading_the_maximum() {
         // Goal: a stretch's reach leaves out the reading a chart draws, so the higher of the two
-        // is what the line reached.
+        // is what the line reached, and picking it holds that reading rather than the reach's.
         // Method: a sample that reads past what its reach names, and read the summary.
         let mut panel = reaching_panel(false);
         panel.lines[0].values[1] = Some(99.0);
+        panel.places = Some(vec![place_at(8_950), place_at(8_960)].into());
 
-        let summaries = chart_summaries(&panel);
+        let summaries = chart_summaries(&panel, REACHING_VIEW);
 
-        assert_eq!(summaries[0].maximum, Some(99.0));
+        assert_eq!(highest(&summaries[0]), Some(99.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(8_960));
     }
 
     #[test]
@@ -840,13 +899,10 @@ mod tests {
         let mut panel = reaching_panel(false);
         panel.lines[0].values[1] = None;
 
-        let summaries = chart_summaries(&panel);
+        let summaries = chart_summaries(&panel, REACHING_VIEW);
 
-        assert_eq!(summaries[0].maximum, Some(95.0));
-        assert_eq!(
-            summaries[0].maximum_pick.map(MaximumPick::second),
-            Some(9_000)
-        );
+        assert_eq!(highest(&summaries[0]), Some(95.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(9_000));
         assert_eq!(summaries[0].mean, Some(10.0));
     }
 
@@ -855,60 +911,82 @@ mod tests {
         // Goal: a stack's top line names how far the stack reaches, which is no reading of that
         // line, so its row keeps to its own samples.
         // Method: the same line in a stack, and read the summary.
-        let summaries = chart_summaries(&reaching_panel(true));
+        let summaries = chart_summaries(&reaching_panel(true), REACHING_VIEW);
 
-        assert_eq!(summaries[0].maximum, Some(20.0));
-        assert_eq!(summaries[0].maximum_pick, None);
+        assert_eq!(highest(&summaries[0]), Some(20.0));
+        assert_eq!(read_at(summaries[0].maximum), None);
     }
 
-    /// A chart of `values` a second apart from 1,000, across the 900 seconds from `first`.
+    #[test]
+    fn a_guide_line_of_a_stacked_chart_keeps_its_own_reach() {
+        // Goal: a line drawn over a stack rather than in it, as installed memory is, reads for
+        // itself.
+        // Method: the same line taken out of the stack, and read the summary.
+        let mut panel = reaching_panel(true);
+        panel.lines[0].stack = Some(false);
+
+        let summaries = chart_summaries(&panel, REACHING_VIEW);
+
+        assert_eq!(highest(&summaries[0]), Some(95.0));
+    }
+
+    /// A chart of `values` a second apart from 1,000, across the 900 seconds from `first`, each
+    /// naming its reading.
     fn clocked_panel(first: u64, values: &[Option<f32>]) -> crate::data::Panel {
         let mut panel: crate::data::Panel = serde_json::from_value(serde_json::json!({
             "id": "cpu", "title": "CPU", "unit": "%", "kind": "line",
             "lines": [{"name": "All cores", "color": "#5794f2", "values": values}]}))
         .unwrap();
-        let window = crate::chart_axes::TimeWindow { first, span: 900 };
+        let window = TimeWindow { first, span: 900 };
+        let seconds = (0..values.len()).map(|index| 1000 + u64::try_from(index).unwrap());
         panel.window = Some(window);
         panel.positions = Some(
-            (0..values.len())
-                .map(|index| {
-                    let second = 1000 + u64::try_from(index).unwrap();
+            seconds
+                .clone()
+                .map(|second| {
                     let offset = f64::from(u32::try_from(second).unwrap())
                         - f64::from(u32::try_from(first).unwrap());
                     num_traits::ToPrimitive::to_f32(&((offset + 0.5) / 900.0)).unwrap()
                 })
                 .collect(),
         );
+        panel.places = Some(seconds.map(place_at).collect());
         panel
     }
 
     #[test]
     fn a_peak_of_one_second_is_its_lines_maximum_at_every_offset() {
-        // Goal: a spike one second long stays in the table wherever a bucket boundary falls, so no
-        // offset or width of the chart loses it.
+        // Goal: a spike one second long stays in the table wherever a bucket boundary falls, and
+        // the table reads readings rather than buckets, so no offset loses it.
         // Method: a steady line with one peak at each second of a minute, and read each summary.
         for peak in 0..60_usize {
             let mut values = vec![Some(10.0); 900];
             values[peak] = Some(95.0);
+            let panel = clocked_panel(1000, &values);
 
-            let summaries = chart_summaries(&clocked_panel(1000, &values));
+            let summaries = chart_summaries(&panel, panel.window);
 
-            assert_eq!(summaries[0].maximum, Some(95.0));
+            assert_eq!(highest(&summaries[0]), Some(95.0), "peak {peak}");
             assert_eq!(
-                summaries[0].maximum_pick.map(MaximumPick::second),
-                Some(1000 + u64::try_from(peak).unwrap())
+                read_at(summaries[0].maximum),
+                Some(1000 + u64::try_from(peak).unwrap()),
+                "peak {peak}"
             );
         }
     }
 
     #[test]
-    fn a_panel_that_names_no_readings_holds_a_maximum_by_its_second() {
-        // Goal: a chart by App names no reading of its own, so its maximum is held by the second it
-        // was read in.
-        // Method: a chart with a clock and no places, and read the pick.
-        let summaries = chart_summaries(&clocked_panel(1000, &[Some(1.0), Some(9.0), Some(2.0)]));
+    fn a_panel_that_names_no_readings_gives_a_maximum_and_nothing_to_hold() {
+        // Goal: a hold names a reading, so a chart that names none says what it reached and offers
+        // no control.
+        // Method: a chart with a clock and no places, and read the summary.
+        let mut panel = clocked_panel(1000, &[Some(1.0), Some(9.0), Some(2.0)]);
+        panel.places = None;
 
-        assert_eq!(summaries[0].maximum_pick, Some(MaximumPick::Second(1001)));
+        let summaries = chart_summaries(&panel, panel.window);
+
+        assert_eq!(highest(&summaries[0]), Some(9.0));
+        assert_eq!(read_at(summaries[0].maximum), None);
     }
 
     #[test]
@@ -917,13 +995,88 @@ mod tests {
         // readings before its window for its first point's mean, so a peak there is no maximum
         // to hold.
         // Method: a window that starts two seconds after a higher reading, and read the summary.
-        let summaries = chart_summaries(&clocked_panel(1002, &[Some(95.0), Some(5.0), Some(7.0)]));
+        let panel = clocked_panel(1002, &[Some(95.0), Some(5.0), Some(7.0)]);
 
-        assert_eq!(summaries[0].maximum, Some(7.0));
-        assert_eq!(summaries[0].maximum_pick, Some(MaximumPick::Second(1002)));
+        let summaries = chart_summaries(&panel, panel.window);
+
+        assert_eq!(highest(&summaries[0]), Some(7.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(1002));
         assert_eq!(summaries[0].mean, Some(6.0));
         assert_eq!(summaries[0].available, 2);
         assert_eq!(summaries[0].total, 2);
+    }
+
+    #[test]
+    fn a_reading_after_the_window_counts_in_no_summary() {
+        // Goal: a narrowed range keeps the readings past it, and narrowing is how a second spike
+        // is found, so a higher reading past the window must not hide the one inside it.
+        // Method: a window whose last second is 1,000, a reading the plot paints a hair beyond it
+        // and one further on, and read the summary.
+        let panel = clocked_panel(101, &[Some(7.0), Some(95.0), Some(96.0)]);
+
+        let summaries = chart_summaries(&panel, panel.window);
+
+        assert_eq!(highest(&summaries[0]), Some(7.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(1000));
+        assert_eq!(summaries[0].mean, Some(51.0));
+        assert_eq!(summaries[0].available, 2);
+        assert_eq!(summaries[0].total, 2);
+    }
+
+    #[test]
+    fn a_reading_a_hair_before_the_window_is_no_maximum_to_hold() {
+        // Goal: the plot paints a reading a hair before its window, and a hold on it would move
+        // the charts, which keep the window they showed when the hold began.
+        // Method: a higher reading in the second before the window, and read the summary.
+        let panel = clocked_panel(1001, &[Some(9.0), Some(5.0)]);
+
+        let summaries = chart_summaries(&panel, panel.window);
+
+        assert_eq!(highest(&summaries[0]), Some(5.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(1001));
+        assert_eq!(summaries[0].mean, Some(7.0));
+    }
+
+    #[test]
+    fn a_reach_that_names_a_reading_past_the_window_is_no_maximum() {
+        // Goal: a stretch can start inside the window and peak after it, and a hold there would
+        // leave the window the charts show.
+        // Method: a point inside the window whose reach names a reading past its last second.
+        let mut panel = clocked_panel(1000, &[Some(10.0), Some(20.0)]);
+        panel.lines[0].extremes = Some(vec![
+            Some(LineReach {
+                high: 95.0,
+                peak: place_at(2_000),
+            }),
+            None,
+        ]);
+
+        let summaries = chart_summaries(&panel, panel.window);
+
+        assert_eq!(highest(&summaries[0]), Some(20.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(1001));
+    }
+
+    #[test]
+    fn a_reach_that_began_before_the_window_gives_its_peak_inside_it() {
+        // Goal: a stretch stands where its first second is, so a window that starts inside it
+        // leaves its point off the plot and still holds its peak.
+        // Method: a point before the window whose reach names a reading inside it.
+        let mut panel = clocked_panel(1003, &[Some(10.0), Some(10.0), Some(10.0), Some(12.0)]);
+        panel.lines[0].extremes = Some(vec![
+            Some(LineReach {
+                high: 95.0,
+                peak: place_at(1_005),
+            }),
+            None,
+            None,
+            None,
+        ]);
+
+        let summaries = chart_summaries(&panel, panel.window);
+
+        assert_eq!(highest(&summaries[0]), Some(95.0));
+        assert_eq!(read_at(summaries[0].maximum), Some(1_005));
     }
 
     /// A stack of two lines a second apart, the second naming the stack's reach at its second
@@ -942,13 +1095,13 @@ mod tests {
     #[test]
     fn a_stacks_total_is_the_highest_it_reached_at_one_reading() {
         // Goal: a memory or power spike is a spike of the whole stack, which no line's row can
-        // give, and it adds up one reading, never separate maxima.
+        // give.
         // Method: a stack whose top line names a reach past what its lines add up to, and read the
         // total.
-        let total = chart_stack_total(&stacked_panel()).unwrap();
+        let total = chart_stack_total(&stacked_panel(), REACHING_VIEW);
 
-        assert_eq!(total.maximum, Some(95.0));
-        assert_eq!(total.maximum_pick.map(MaximumPick::second), Some(9_000));
+        assert_eq!(total.map(|total| total.value), Some(95.0));
+        assert_eq!(read_at(total), Some(9_000));
     }
 
     #[test]
@@ -959,22 +1112,74 @@ mod tests {
         let mut panel = stacked_panel();
         panel.lines[0].values = vec![Some(100.0), Some(20.0)];
 
-        let total = chart_stack_total(&panel).unwrap();
+        let total = chart_stack_total(&panel, REACHING_VIEW);
 
-        assert_eq!(total.maximum, Some(105.0));
+        assert_eq!(total.map(|total| total.value), Some(105.0));
+    }
+
+    #[test]
+    fn a_stacks_total_adds_up_one_reading_and_never_separate_maxima() {
+        // Goal: lines that peak at different moments never stacked that high, so the total is the
+        // highest any one reading added up to.
+        // Method: two lines that peak at different readings, and read the total.
+        let mut panel = stacked_panel();
+        panel.lines[0].values = vec![Some(10.0), Some(20.0)];
+        panel.lines[1].values = vec![Some(15.0), Some(1.0)];
+        panel.lines[1].extremes = Some(vec![None, None]);
+
+        let total = chart_stack_total(&panel, REACHING_VIEW);
+
+        assert_eq!(total.map(|total| total.value), Some(25.0));
     }
 
     #[test]
     fn a_stacks_total_adds_up_no_reading_a_line_of_it_missed() {
         // Goal: a sum that left a line out would read a total the stack never read.
-        // Method: a stack whose higher reading lacks one of its lines, and read the total.
+        // Method: a stack whose larger sum lacks one of its lines, and read the total.
         let mut panel = stacked_panel();
         panel.lines[0].values = vec![None, Some(20.0)];
+        panel.lines[1].values = vec![Some(50.0), Some(1.0)];
         panel.lines[1].extremes = Some(vec![None, None]);
 
-        let total = chart_stack_total(&panel).unwrap();
+        let total = chart_stack_total(&panel, REACHING_VIEW);
 
-        assert_eq!(total.maximum, Some(21.0));
+        assert_eq!(total.map(|total| total.value), Some(21.0));
+    }
+
+    #[test]
+    fn a_guide_line_adds_nothing_to_its_stacks_total() {
+        // Goal: installed memory is drawn over the stack and is no layer of it, so it is no part of
+        // what the stack reached.
+        // Method: a stack with a far higher line taken out of it, and read the total.
+        let mut panel = stacked_panel();
+        let mut guide = panel.lines[0].clone();
+        guide.name = "Guide".into();
+        guide.stack = Some(false);
+        guide.values = vec![Some(1000.0), Some(1000.0)];
+        panel.lines.push(guide);
+
+        let total = chart_stack_total(&panel, REACHING_VIEW);
+
+        assert_eq!(total.map(|total| total.value), Some(95.0));
+    }
+
+    #[test]
+    fn a_stacks_total_keeps_to_the_window() {
+        // Goal: the total says what the chart in view reached, as each line's row does.
+        // Method: readings off the plot, a hair before the window and in it, the first two adding
+        // up to more, and read the total.
+        let mut panel = clocked_panel(1002, &[Some(90.0), Some(2.0), Some(3.0)]);
+        let mut top = panel.lines[0].clone();
+        top.name = "Top".into();
+        top.values = vec![Some(90.0), Some(50.0), Some(1.0)];
+        top.extremes = Some(vec![None, None, None]);
+        panel.lines.push(top);
+        panel.stack = Some(true);
+
+        let total = chart_stack_total(&panel, panel.window);
+
+        assert_eq!(total.map(|total| total.value), Some(4.0));
+        assert_eq!(read_at(total), Some(1002));
     }
 
     #[test]
@@ -984,8 +1189,11 @@ mod tests {
         let mut stack = stacked_panel();
         stack.lines[1].extremes = None;
 
-        assert!(chart_stack_total(&reaching_panel(false)).is_none());
-        assert!(chart_stack_total(&stack).is_none());
+        assert_eq!(
+            chart_stack_total(&reaching_panel(false), REACHING_VIEW),
+            None
+        );
+        assert_eq!(chart_stack_total(&stack, REACHING_VIEW), None);
     }
 
     #[test]

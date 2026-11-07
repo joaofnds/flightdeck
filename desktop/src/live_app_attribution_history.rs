@@ -420,7 +420,12 @@ impl History {
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
             window: Some(self.window),
-            places: None,
+            places: Some(
+                self.points
+                    .iter()
+                    .map(|point| point.observation.place())
+                    .collect(),
+            ),
             detail_first: self.detail_first,
             reading_seconds: crate::charts::TICK_SECONDS,
             sliding: false,

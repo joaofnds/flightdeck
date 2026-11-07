@@ -62,13 +62,12 @@ pub struct Panel {
     pub chart_width: std::cell::Cell<Option<f32>>,
 }
 
-/// The lowest and highest reading each value of a line stands for, where it names them.
+/// The highest reading each value of a line stands for, where it names it.
 pub type LineExtremes = Vec<Option<LineReach>>;
 
 /// What the readings one point of a line stands for reached.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LineReach {
-    pub low: f32,
     pub high: f32,
     /// The reading that read `high`.
     pub peak: MachinePlace,

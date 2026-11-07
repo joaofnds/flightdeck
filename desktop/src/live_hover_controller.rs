@@ -124,6 +124,11 @@ impl LiveDashboard {
         }
     }
 
+    /// Whether a hover listener may trust its hit test.
+    pub(crate) fn pointer_inside_window(&self) -> bool {
+        self.pointer == PointerPlace::InsideWindow
+    }
+
     /// Ends a pointer hover when the pointer leaves the window. GPUI keeps the last pointer
     /// position, so until the pointer moves again the next frame would hover the plot under
     /// that stale position.

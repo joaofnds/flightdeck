@@ -747,8 +747,8 @@ trait Observations {
     /// What `reading` reads at observation `index`, before its divisor.
     fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String>;
 
-    /// How low and how high `reading` reached over what observation `index` stands for, before its
-    /// divisor, or `None` where it stands only for itself.
+    /// How high `reading` reached over what observation `index` stands for, before its divisor, or
+    /// `None` where it stands only for itself.
     fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String>;
 }
 
@@ -773,7 +773,6 @@ impl Observations for [Value] {
 
         Ok(reach.and_then(|reach| {
             Some(LineReach {
-                low: reach.low.to_f32()?,
                 high: reach.high.to_f32()?,
                 peak: reach.peak,
             })
@@ -798,7 +797,6 @@ fn panel_extremes<O: Observations + ?Sized>(
     for index in 0..points.count() {
         let reach = points.reach(reading, index)?;
         extremes.push(reach.map(|reach| LineReach {
-            low: reach.low / reading.divisor,
             high: reach.high / reading.divisor,
             ..reach
         }));
@@ -811,9 +809,13 @@ fn panel_extremes<O: Observations + ?Sized>(
 }
 
 /// What a line chart's points stand for, which its help says beside what it measures.
-pub(crate) const LINE_STATISTICS_HELP: &str = "Each point is the mean of the readings of its \
-    seconds, so a single high reading can lie well past its line. The Data table gives each \
-    line's highest reading and holds it.";
+pub(crate) const LINE_MEAN_HELP: &str = "Each point is the mean of the readings of its seconds, \
+    so a single high reading can lie well past its line.";
+
+/// Where a chart with a Data table finds a line's peak, which its help says after what its points
+/// stand for.
+pub(crate) const LINE_DATA_HELP: &str =
+    "The Data table gives the highest reading it keeps of each line and holds it.";
 
 /// What a point of a chart of states stands for, which its help says beside what it measures.
 pub(crate) const STATE_STATISTICS_HELP: &str = "A cell that covers several seconds shows the \
@@ -838,7 +840,10 @@ fn panel<O: Observations + ?Sized>(
         stack: Some(specification.stack),
         fill: Some(specification.fill),
         caption: specification.caption.map(str::to_owned),
-        help: Some(format!("{} {LINE_STATISTICS_HELP}", specification.help)),
+        help: Some(format!(
+            "{} {LINE_MEAN_HELP} {LINE_DATA_HELP}",
+            specification.help
+        )),
         source: Some("Live recording".into()),
         quantities: None,
         states: None,
@@ -1465,6 +1470,7 @@ fn timeline_cells<O: Observations + ?Sized>(
     let span = usize::from(domain.span);
     let mut cells = vec![None; span];
     let mut reaches = vec![None; span];
+    let mut places = vec![MachinePlace::default(); span];
     let mut selected = None;
 
     for index in 0..points.count() {
@@ -1488,9 +1494,11 @@ fn timeline_cells<O: Observations + ?Sized>(
                 let stretch = usize::try_from(stretch).map_err(|error| error.to_string())?;
                 cells[cell..cell + stretch].fill(value);
                 reaches[cell..cell + stretch].fill(named);
+                places[cell..cell + stretch].fill(coordinates.places[index]);
             } else {
                 cells[cell] = value;
                 reaches[cell] = named;
+                places[cell] = coordinates.places[index];
             }
         }
         if Some(index) == coordinates.selected_index {
@@ -1501,7 +1509,7 @@ fn timeline_cells<O: Observations + ?Sized>(
     "timeline".clone_into(&mut panel.kind);
     panel.lines[0].values = cells;
     panel.lines[0].extremes = Some(reaches);
-    panel.places = None;
+    panel.places = Some(places.into());
     panel.positions = Some(
         (0..domain.span)
             .map(|cell| (f32::from(cell) + 0.5) / f32::from(domain.span))

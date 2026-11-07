@@ -192,6 +192,12 @@ pub fn zoom(panel: &mut Panel, view: TimeWindow) {
     panel.window = Some(view);
 }
 
+/// Whether a reading at `position` is one the plot paints, a hair beyond an edge included.
+#[must_use]
+pub fn on_plot(position: f32) -> bool {
+    (-EDGE..=1.0 + EDGE).contains(&position)
+}
+
 /// The first and last index of `positions` that fall inside the plot, which are the readings a
 /// zoomed chart paints. A reading a hair beyond an edge counts, since rounding puts the reading
 /// at an edge a hair either side of it. When none are inside, one reading stays so the plot

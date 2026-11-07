@@ -322,7 +322,12 @@ impl History {
             segments: Some(self.points.iter().map(|point| point.segment).collect()),
             selected_index: Some(self.selected_index),
             window: Some(self.window),
-            places: None,
+            places: Some(
+                self.points
+                    .iter()
+                    .map(|point| point.observation.place())
+                    .collect(),
+            ),
             detail_first: self.detail_first,
             reading_seconds: crate::charts::TICK_SECONDS,
             sliding: false,
@@ -482,6 +487,17 @@ impl Observation {
             wall_ns: observation.wall_ns,
             continuous_ns: stamp.continuous_ns,
             awake_ns: stamp.awake_ns,
+        }
+    }
+
+    /// The reading this names. One with no clock reads wall second zero, which no window holds,
+    /// so nothing offers to hold it.
+    pub(crate) fn place(&self) -> crate::data::MachinePlace {
+        crate::data::MachinePlace {
+            boot: self.boot,
+            run: self.run,
+            publication: self.publication,
+            wall_ns: self.wall_ns.unwrap_or(0),
         }
     }
 

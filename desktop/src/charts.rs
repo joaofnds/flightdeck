@@ -352,7 +352,7 @@ fn curve_lower(panel: &Panel, inspection: Inspection) -> usize {
 
 /// The buckets of a panel with a clock, sized for its card, or for an overview card until its
 /// card has been laid out.
-pub(crate) fn panel_buckets(panel: &Panel) -> Option<Buckets> {
+fn panel_buckets(panel: &Panel) -> Option<Buckets> {
     let chart_width = panel.chart_width.get().unwrap_or(CHART_WIDTH_DEFAULT);
     panel.window.map(|window| {
         Buckets::of(
@@ -963,7 +963,7 @@ impl Buckets {
 
     /// The second a reading at `position` across the window was taken in, or `None` for a reading
     /// before the clock's zero.
-    pub(crate) fn second_of(&self, position: f32) -> Option<u64> {
+    fn second_of(&self, position: f32) -> Option<u64> {
         assert!(position.is_finite());
         let span = match u32::try_from(self.window.span) {
             Ok(span) => f64::from(span),

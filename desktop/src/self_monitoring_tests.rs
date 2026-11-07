@@ -458,9 +458,10 @@ fn the_run_status_says_the_reports_come_from_the_collector_this_app_started() {
 }
 
 #[test]
-fn a_self_chart_says_what_its_points_and_marks_stand_for() {
-    // Goal: a chart of reports draws means and marks peaks as every line chart does, so its help
-    // says so. Method: the charts of one report.
+fn a_self_chart_says_what_its_points_stand_for_and_names_no_table_it_lacks() {
+    // Goal: a chart of reports draws means as every line chart does and has no Data table, so its
+    // help says the one and not the other.
+    // Method: the charts of one report.
     let mut reports = started();
     reports.ticks.push_back(tick(1_010));
 
@@ -471,4 +472,5 @@ fn a_self_chart_says_what_its_points_and_marks_stand_for() {
         help.contains("the mean of the readings of its seconds"),
         "{help}"
     );
+    assert!(!help.contains("Data table"), "{help}");
 }

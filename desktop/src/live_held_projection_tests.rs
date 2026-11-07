@@ -290,7 +290,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
 
             let line = &panel_named(&panels, "live-cpu").lines[0];
             let reach = line.extremes.as_ref().unwrap()[0].unwrap();
-            assert_eq!((reach.low, reach.high), (10.0, 95.0), "offset {offset}");
+            assert_eq!(Some(reach.high), Some(95.0), "offset {offset}");
             assert_eq!(reach.peak.second(), peak, "offset {offset}");
         }
     }
@@ -336,7 +336,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         assert_eq!(lines[0].extremes, None);
         assert_eq!(lines[1].extremes, None);
         let reach = lines[2].extremes.as_ref().unwrap()[0].unwrap();
-        assert_eq!((reach.low, reach.high), (3.0, 5.0));
+        assert_eq!(Some(reach.high), Some(5.0));
     }
 
     #[test]
@@ -366,12 +366,11 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
             .flat_map(|specification| specification.lines)
             .filter(|reading| reading.reach.is_none());
         for reading in readings {
-            let expected = points.value(&reading, 0).unwrap().map(|read| (read, read));
+            let expected = points.value(&reading, 0).unwrap();
 
             let reach = points.reach(&reading, 0).unwrap();
 
-            let reach = reach.map(|reach| (reach.low, reach.high));
-            assert_eq!(reach, expected, "{}", reading.key);
+            assert_eq!(reach.map(|reach| reach.high), expected, "{}", reading.key);
         }
     }
     #[test]
@@ -385,7 +384,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
 
         let help = |id| panel_named(&panels, id).help.clone().unwrap();
         assert!(help("live-cpu").contains("the mean of the readings of its seconds"));
-        assert!(help("live-cpu").contains("The Data table gives each line's highest reading"));
+        assert!(help("live-cpu").contains("The Data table gives the highest reading it keeps"));
         assert!(help("live-memory-pressure").contains("shows the highest state among them"));
     }
 
@@ -403,7 +402,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
             let chart = panel_named(&panels, panel);
             let drawn = chart.lines.iter().find(|drawn| drawn.name == line).unwrap();
             let reach = drawn.extremes.as_ref().unwrap()[0].unwrap();
-            assert_eq!((reach.low, reach.high), (10.0, 95.0), "offset {offset}");
+            assert_eq!(Some(reach.high), Some(95.0), "offset {offset}");
             assert_eq!(reach.peak.second(), peak, "offset {offset}");
         }
     }
@@ -581,7 +580,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let cell = usize::try_from(9_023 - panel.window.unwrap().first).unwrap();
         let reach = panel.lines[0].extremes.as_ref().unwrap()[cell].unwrap();
         assert_eq!(reach.peak.second(), 9_026);
-        assert!(panel.places.is_none());
+        assert_eq!(panel.places.as_ref().unwrap()[cell].second(), 9_020);
     }
 
     #[test]
@@ -711,7 +710,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
 
         let line = &panel_named(&drawn, "live-cpu").lines[0];
         let reach = line.extremes.as_ref().unwrap()[1].unwrap();
-        assert_eq!((reach.low, reach.high), (10.0, 95.0));
+        assert_eq!(Some(reach.high), Some(95.0));
         let peak = reach.peak;
         assert_eq!((peak.run, peak.boot, peak.publication), ([1, 2], [3, 4], 7));
         assert_eq!(peak.second(), 9_031);

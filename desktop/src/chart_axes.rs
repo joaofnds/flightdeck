@@ -22,6 +22,14 @@ impl TimeWindow {
         }
     }
 
+    /// Whether `second` is one of the window's.
+    #[must_use]
+    pub fn contains(self, second: u64) -> bool {
+        second
+            .checked_sub(self.first)
+            .is_some_and(|offset| offset < self.span)
+    }
+
     /// The second under `fraction` of the window's width, where the right edge belongs to the
     /// last second.
     #[must_use]

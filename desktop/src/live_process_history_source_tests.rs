@@ -438,9 +438,9 @@ fn default_all_process_groups_loads_twelve_histories_before_app_totals() {
 }
 
 #[test]
-fn a_chart_of_process_groups_says_what_its_points_and_marks_stand_for() {
-    // Goal: a chart of groups draws means and marks peaks as every line chart does, so its help
-    // says so. Method: project the two-name recording and read the first chart's help.
+fn a_chart_of_process_groups_says_what_its_points_stand_for() {
+    // Goal: a chart of groups draws means as every line chart does, so its help says so.
+    // Method: project the two-name recording and read the first chart's help.
     let recording = named_recording();
     let mut request = named_request();
     request.executable = None;
