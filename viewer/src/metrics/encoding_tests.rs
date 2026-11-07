@@ -318,6 +318,86 @@ fn recovery_tick(publication: u64) -> Tick {
 }
 
 #[test]
+fn a_reading_copied_alone_gives_the_next_point_the_rates_its_minute_gives() {
+    // Goal: what the older tail keeps of a minute's last reading gives the next minute's first
+    // point the rates the minute itself would. Method: read a point whose predecessor is the
+    // copy, over a minute holding every table a rate reads, and compare it with the point whose
+    // predecessor is in the minute.
+    let mut recording = Recording::new();
+    recording.minute.interfaces = vec![interface_row(1, 1_000), interface_row(2, 3_000)];
+    recording.minute.core_states = vec![core_state_row(1, 500), core_state_row(2, 900)];
+    let (previous, current) = consecutive_observations();
+    let kept = reading_at(&recording.minute, 1).unwrap().copied_minute();
+    let reading = reading_at(&recording.minute, 2).unwrap();
+    let before = reading_at(&kept, 1).unwrap();
+
+    let point = point_sources(
+        &Sources::Machine {
+            current: &reading,
+            previous: Some(&before),
+        },
+        &current,
+        Some(&previous),
+        1,
+    )
+    .unwrap();
+
+    assert_eq!(point, recording.point(&current, Some(&previous)));
+    assert!(point["network_rx_bps"].is_number());
+    assert!(point["gpu_active_percent"].is_number());
+    assert_eq!(before.core_states, [core_state_row(1, 500)]);
+}
+
+/// The two readings `Recording::new` publishes, as the observations of one run.
+fn consecutive_observations() -> (Observation, Observation) {
+    let previous = Observation {
+        window: 0,
+        publication: 1,
+        run_tick: 1,
+        wall: 1_000_000_000_000,
+        continuous: Some(1_000_000_000),
+    };
+    let current = Observation {
+        window: 0,
+        publication: 2,
+        run_tick: 2,
+        wall: 1_001_000_000_000,
+        continuous: Some(3_000_000_000),
+    };
+
+    (previous, current)
+}
+
+fn interface_row(publication: u64, received_bytes: u64) -> crate::recording::InterfaceRow {
+    let mut name = [0; 16];
+    name[..3].copy_from_slice(b"en0");
+    crate::recording::InterfaceRow {
+        publication,
+        interface: collector::interfaces::Interface {
+            index: 1,
+            name: collector::interfaces::Name::from_bytes(name, 3).unwrap(),
+            received_bytes,
+            sent_bytes: 0,
+            received_packets: 0,
+            sent_packets: 0,
+            receive_errors: 0,
+            send_errors: 0,
+            receive_drops: 0,
+        },
+    }
+}
+
+fn core_state_row(publication: u64, active_ns: u64) -> crate::recording::CoreStateRow {
+    crate::recording::CoreStateRow {
+        publication,
+        core: 0,
+        state: 0,
+        active_ns,
+        frequency_khz: Some(2_000_000),
+    }
+}
+
+#[test]
 fn a_saved_counter_past_double_precision_reads_its_exact_integer() {
     // Goal: a counter no 64-bit float can hold reads as the integer that was saved.
     // Method: save a memory total of 2^53 + 1 and read it as an integer from a selection.

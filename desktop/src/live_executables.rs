@@ -522,6 +522,13 @@ fn groups_bytes(process: &Value) -> Option<&str> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn refuses_a_counter_written_as_text() {
+        // Goal: an executable's counter is the integer the reader sent or a refusal, never a
+        // number parsed from text. Method: read a counter holding its digits in a string.
+        assert!(counter_optional(&json!("5")).is_err());
+    }
+
     fn process(bytes: &str) -> Value {
         json!({"executable_name":{"bytes_hex":bytes,"display":"Program"}, "state":"live",
             "app_attribution":null, "cpu_ns":{"known":4,"unavailable":null},

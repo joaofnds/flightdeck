@@ -816,6 +816,13 @@ mod selection_tests {
     crate::live_source::app_key_tests::captured_app_key_tests!(app_key);
 
     #[test]
+    fn refuses_a_counter_written_as_text() {
+        // Goal: an App's counter is the integer the reader sent or a refusal, never a number
+        // parsed from text. Method: read a counter holding its digits in a string.
+        assert!(counter(&json!("5")).is_err());
+    }
+
+    #[test]
     fn changing_apps_hides_previous_details_until_the_requested_app_arrives() {
         // A pending or failed B read must never expose retained A processes and histories as B.
         let previous = json!({"app":{"key":{"kind":"bundle","bytes_hex":"41"}},

@@ -118,7 +118,8 @@ pub struct Reading<'a> {
 }
 
 impl Reading<'_> {
-    /// A minute of this reading's rows alone.
+    /// A minute of what the rates of the next reading read of this one, which is every row but
+    /// the fans, whose speeds are no counter.
     pub(crate) fn copied_minute(&self) -> MachineMinute {
         MachineMinute {
             ticks: vec![self.tick.clone()],
@@ -127,7 +128,7 @@ impl Reading<'_> {
             interfaces: self.interfaces.to_vec(),
             gpu_states: self.gpu_states.to_vec(),
             core_states: self.core_states.to_vec(),
-            fans: self.fans.to_vec(),
+            fans: Vec::new(),
         }
     }
 }
