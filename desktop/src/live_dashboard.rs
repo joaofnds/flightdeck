@@ -40,7 +40,7 @@ pub(crate) fn observe_visibility(
     cx: &mut gpui::App,
 ) {
     dashboard.update(cx, |dashboard, cx| {
-        store_view::set_store_active(window.is_visible() && dashboard.follows_live_mac(), cx);
+        store_view::set_store_active(window.is_visible() && dashboard.reads_live_mac(), cx);
         // macOS reports only changes, so a window it hides from the start would read its page
         // until it first showed and hid again.
         if !window.is_visible() {
@@ -66,7 +66,7 @@ impl LiveDashboard {
         if visible {
             self.resume_begin_reading();
         }
-        store_view::set_store_active(visible && self.follows_live_mac(), cx);
+        store_view::set_store_active(visible && self.reads_live_mac(), cx);
         if !visible {
             self.store_view_hide();
         }
@@ -520,11 +520,17 @@ impl LiveDashboard {
     /// Whether the window follows the live Mac's newest second, on whichever page it shows. The
     /// store ingests while it does, so Overview opened again has no minutes to catch up from.
     fn follows_live_mac(&self) -> bool {
-        if self.worker.mode() != crate::live_source_mode::SourceMode::Live {
+        if !self.reads_live_mac() {
             return false;
         }
 
         self.request.second.is_none()
+    }
+
+    /// Whether the page reads the live Mac, whose Store goes on while a second is held, since the
+    /// pages of a held second read it.
+    fn reads_live_mac(&self) -> bool {
+        self.worker.mode() == crate::live_source_mode::SourceMode::Live
     }
 
     fn can_resume_from_store(&self, cx: &Context<Self>) -> bool {
@@ -610,8 +616,7 @@ impl LiveDashboard {
     }
 
     /// Takes the store's newest View, but none while a second is held, which keeps the View its
-    /// charts were drawn from. Parking the store does not stop a step of it already past its
-    /// check of whether the window asks for the live Mac, which can still hand over a View.
+    /// charts were drawn from.
     fn tick_store_view(&mut self, cx: &mut Context<Self>) {
         if self.hold.is_some() {
             return;
@@ -681,7 +686,7 @@ impl LiveDashboard {
         if !self.follows_live_mac() && self.hold.is_none() {
             self.store_view_drop();
         }
-        store_view::set_store_active(visible && self.follows_live_mac(), cx);
+        store_view::set_store_active(visible && self.reads_live_mac(), cx);
         if self.presence == Presence::Opening {
             if !self.reply_pending {
                 self.presence = Presence::Hiding;
@@ -1051,9 +1056,12 @@ impl LiveDashboard {
         if self.request.second.is_some() || self.preview.is_some() {
             return;
         }
-        let Some(snapshot) = self.snapshot.take() else {
+        let Some(mut snapshot) = self.snapshot.take() else {
             return;
         };
+        // An App's parts keep the whole context they borrow from, and the Store holds two at most.
+        // The page's next reading brings them again.
+        snapshot.app_parts = None;
         let presentation = Box::new(crate::live_acceptance::Presentation {
             request: self.request.clone(),
             snapshot,
@@ -1560,6 +1568,7 @@ pub use store_view::install_store;
 pub(crate) use store_view::set_store_active;
 #[cfg(feature = "automation")]
 pub(crate) use store_view::store_activity;
+pub(crate) use store_view::store_query_handle;
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]

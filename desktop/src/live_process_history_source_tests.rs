@@ -653,7 +653,7 @@ pub(crate) fn all_history() -> Box<viewer::app_process_groups_history::AppProces
     let recording = named_recording();
     let mut request = named_request();
     request.executable = None;
-    let snapshot = recording.read(request).unwrap();
+    let snapshot = recording.read_saved(request).unwrap();
     match std::sync::Arc::try_unwrap(snapshot.process_history.unwrap()) {
         Ok(crate::live_source::Presentation::Legacy(
             crate::live_process_history::ProcessHistory::All { payload, .. },

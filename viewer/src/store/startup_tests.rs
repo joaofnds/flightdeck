@@ -1110,7 +1110,7 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
         &operation,
         &capture,
         |_, second, apps| {
-            assert!(span.push(|buffer| buffer.take(apps, None, Some(&budget))));
+            span.push(|buffer| buffer.take(apps, None, Some(&budget)));
             let newest = span.newest_held().unwrap();
             assert_eq!(newest.processes.as_ref().unwrap().len(), 2);
             publications.push(second.publication);

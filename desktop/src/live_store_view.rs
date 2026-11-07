@@ -64,6 +64,11 @@ pub(super) fn store_pending(cx: &App) -> bool {
         .is_some_and(|store| store.0.pending())
 }
 
+/// The handle a new reader of the app's Store queries it through, where the app runs one.
+pub(crate) fn store_query_handle(cx: &App) -> Option<viewer::store::QueryHandle> {
+    cx.try_global::<LiveStore>()?.0.query_handle()
+}
+
 pub(super) fn store_installed(cx: &App) -> bool {
     cx.has_global::<LiveStore>()
 }
@@ -310,8 +315,8 @@ impl LiveDashboard {
         self.store_panels.remnant = None;
     }
 
-    /// Lets go of the store's View as the window hides, but of none a hold keeps, since the store
-    /// stays parked while a second is held and the window shown again shows the held page.
+    /// Lets go of the store's View as the window hides, but of none a hold keeps, since the
+    /// window shown again shows the held page.
     pub(super) fn store_view_hide(&mut self) {
         if self.hold.is_some() {
             return;

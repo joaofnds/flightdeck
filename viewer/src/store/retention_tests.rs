@@ -111,10 +111,10 @@ fn an_eviction_records_the_departed_time_without_moving_an_older_view() {
 }
 
 #[test]
-fn backpressure_does_not_advance_the_eviction_boundary() {
-    // Goal: a refused publication cannot invalidate more full detail than ingestion
-    // actually evicts.
-    // Method: pin a full View, consume every spare buffer, then offer one further publication.
+fn a_retained_view_keeps_the_eviction_boundary_it_was_published_with() {
+    // Goal: the eviction boundary names what ingestion actually evicted, and a View keeps the
+    // boundary of its own span however far the store goes on past it.
+    // Method: retain a full View, consume every spare buffer, then take one further publication.
     let mut held = full_span();
     let original = publish(&mut held);
     let count = u64::try_from(super::SECONDS_HELD_MAX).unwrap();
@@ -122,21 +122,19 @@ fn backpressure_does_not_advance_the_eviction_boundary() {
     for offset in 1..=count {
         take(&mut held, &second(full + offset));
     }
-    let accepted = publish(&mut held);
+    let spare_used = publish(&mut held);
 
-    let pushed = held.take(&RUN, &second(full + count + 1), unread());
-    let refused = publish(&mut held);
+    take(&mut held, &second(full + count + 1));
+    let past_spare = publish(&mut held);
 
-    assert!(!pushed);
     assert_eq!(
-        accepted.full_detail_evicted_through_ns,
+        spare_used.full_detail_evicted_through_ns,
         Some(count * 1_000_000_000)
     );
     assert_eq!(
-        refused.full_detail_evicted_through_ns,
-        accepted.full_detail_evicted_through_ns
+        past_spare.full_detail_evicted_through_ns,
+        Some((count + 1) * 1_000_000_000)
     );
-    assert_eq!(refused.seconds, accepted.seconds);
     assert_eq!(original.full_detail_evicted_through_ns, None);
 }
 

@@ -126,9 +126,20 @@ pub fn show(cx: &mut App) {
     cx.activate(true);
 }
 
+/// A reader of the app's one Store, which went on while no window was open.
+fn reopen_worker(root: std::path::PathBuf, cx: &App) -> Result<Worker, String> {
+    let worker = match crate::live_dashboard::store_query_handle(cx) {
+        Some(handle) => Worker::start_from_store(root, handle),
+        None => Worker::start(root),
+    };
+
+    worker.map_err(|error| error.to_string())
+}
+
 fn reopen(cx: &mut App) -> Result<(), String> {
     let background = cx.global_mut::<Background>();
     let kept = background.kept.take();
+    let root = background.reopening.root.clone();
     let reopening = &background.reopening;
     let start = super::Start {
         named_page: None,
@@ -143,14 +154,11 @@ fn reopen(cx: &mut App) -> Result<(), String> {
                 worker
             } else {
                 state.reader_stopped();
-                Worker::start_idle(reopening.root.clone()).map_err(|error| error.to_string())?
+                reopen_worker(root, cx)?
             };
             (worker, Some(state))
         }
-        None => (
-            Worker::start(reopening.root.clone()).map_err(|error| error.to_string())?,
-            None,
-        ),
+        None => (reopen_worker(root, cx)?, None),
     };
     super::open_window(
         super::Opening {

@@ -454,8 +454,6 @@ impl PendingStage {
             Arc::strong_count(self.stage.held.apps.held().next().unwrap()),
             2
         );
-        assert!(self.stage.held.apps.has_room());
-        assert!(self.stage.held.span.has_room());
         self.assert_pairing();
     }
 
@@ -464,8 +462,6 @@ impl PendingStage {
         assert_eq!(sampled.free(), 0);
         assert_eq!(sampled.len(), 1);
         assert_eq!(Arc::strong_count(sampled.held().next().unwrap()), 2);
-        assert!(sampled.has_room());
-        assert!(self.stage.held.earlier.has_room());
         self.assert_pairing();
     }
 

@@ -11,6 +11,15 @@ struct Sequence {
     harness: Harness,
 }
 
+/// `snapshot` without the App parts that keep its context, of which the Store holds two at most,
+/// so a test can keep the snapshot past later reads.
+fn parts_released(
+    mut snapshot: Box<crate::live_source::Snapshot>,
+) -> Box<crate::live_source::Snapshot> {
+    snapshot.app_parts = None;
+    snapshot
+}
+
 impl Sequence {
     fn setup(output: &mut Option<Self>) {
         assert!(output.is_none());
@@ -246,14 +255,14 @@ impl Drop for Sequence {
 }
 
 #[test]
-fn characterizes_a_refused_publication_blocking_its_retained_successor() {
-    // Goal: identify the accepted context after valid A, refused B and valid retained C.
+fn a_nonfinite_publication_holds_back_no_successor() {
+    // Goal: the page reads B beside its missing power, and C after it, on the one policy the
+    // Store keeps, where a second reader used to refuse B and every later reading.
     // Method: publish through a real writer only after each Backend response and Store View.
-    // TODO(GUI item 2, doc-102): replace this baseline when canonical refusal policy is settled.
     let mut sequence = None;
     Sequence::setup(&mut sequence);
     let mut sequence = sequence.unwrap();
-    let accepted = sequence.harness.read("apps");
+    let accepted = parts_released(sequence.harness.read("apps"));
     let first = sequence.harness.view_at(1);
     assert_eq!(accepted.selection["selected"]["publication"], 1);
     let first_identity = first.apps.last().unwrap().observation.unwrap();
@@ -262,23 +271,20 @@ fn characterizes_a_refused_publication_blocking_its_retained_successor() {
     sequence.publish(1, |readings| {
         super::customize(super::Input::NonfinitePower, readings);
     });
-    let refused = sequence.harness.read_result("apps");
+    sequence.harness.read_publication("apps", 2);
     let second = sequence.harness.view_at(2);
-    assert!(refused.is_err());
     assert_eq!(second.apps.last().unwrap().elapsed_ns, Some(1_000_000_000));
     assert_store_app_amounts(second.apps.last().unwrap(), 2);
 
     sequence.publish(2, |_| {});
-    let successor = sequence.harness.read_result("apps");
-    let repeated = sequence.harness.read_result("apps");
+    let successor = parts_released(sequence.harness.read_publication("apps", 3));
     let third = sequence.harness.view_at(3);
     let mut input = serde_json::Value::Null;
     sequence.observe(3, &mut input);
     let inspected = sequence.inspect(&accepted);
     sequence.teardown();
 
-    assert!(successor.is_err());
-    assert!(repeated.is_err());
+    assert_eq!(successor.selection["selected"]["publication"], 3);
     assert_eq!(input[1]["publication"], 2);
     assert_eq!(input[1]["power_nonfinite"], true);
     assert_eq!(input[2]["publication"], 3);
@@ -295,19 +301,26 @@ fn characterizes_a_refused_publication_blocking_its_retained_successor() {
     let events = sequence.harness.events();
     assert_eq!(
         super::count(&events, super::Producer::Worker, super::Kind::Accepted, 1),
+        0
+    );
+    assert_eq!(
+        super::count(&events, super::Producer::Store, super::Kind::Accepted, 1),
         1
     );
     assert_eq!(
         super::count(&events, super::Producer::Worker, super::Kind::RingRead, 3),
         0
     );
+    assert_eq!(
+        super::count(&events, super::Producer::Store, super::Kind::RingRead, 3),
+        1
+    );
     output::record_sequence(
         &sequence.harness,
         &json!({"accepted": accepted.apps, "accepted_detail": accepted.detail,
             "inspected": inspected.apps, "inspected_detail": inspected.detail, "input": input,
             "selection": accepted.selection, "store_machine": format!("{:?}", third.seconds),
-            "store_apps": format!("{:?}", third.apps),
-            "errors": [refused.err().unwrap(), successor.err().unwrap(), repeated.err().unwrap()]}),
+            "store_apps": format!("{:?}", third.apps)}),
     );
     sequence.cleanup();
 }
@@ -361,7 +374,7 @@ fn assert_ordinary_c_once(events: &[super::Event]) {
     ] {
         let work: Vec<_> = events
             .iter()
-            .filter(|event| event.producer == super::Producer::Worker)
+            .filter(|event| event.producer == super::Producer::Store)
             .filter(|event| event.kind == kind)
             .filter(|event| matches!(event.key, super::Key::Publication { publication: 3, .. }))
             .collect();
@@ -381,7 +394,7 @@ fn assert_selected_c(
     assert_eq!(selected.selection["selected"]["run_tick"], 2);
     assert_eq!(
         selected.selection["selected"]["reader_losses"]["publications"],
-        1
+        0
     );
     assert_eq!(selected.selection["selected"]["reader_losses"]["events"], 0);
     assert_eq!(
@@ -402,42 +415,39 @@ fn assert_selected_c(
     assert_eq!(selected.apps, inspected.apps);
     assert_eq!(selected.detail, inspected.detail);
     let detail = selected.detail.as_ref().unwrap();
-    assert_eq!(detail["previous"]["publication"], "1");
-    assert!(detail["elapsed_ns"].is_null());
-    assert_eq!(detail["app"]["cpu_ns"]["measured_members"], 0);
-    assert_eq!(detail["app"]["cpu_ns"]["unavailable_members"], 3);
-    assert!(detail["app"]["cpu_percent_one_core"].is_null());
+    assert_eq!(detail["previous"]["publication"], "2");
+    assert_eq!(detail["elapsed_ns"], 1_000_000_000);
+    assert_eq!(detail["app"]["cpu_ns"]["measured_members"], 1);
+    assert_eq!(detail["app"]["cpu_ns"]["unavailable_members"], 2);
+    assert_eq!(detail["app"]["cpu_percent_one_core"], 30.0);
 }
 
 #[test]
-fn characterizes_exact_successor_after_a_refused_publication_is_overwritten() {
-    // Goal: compare exact C after Worker skips refused B, independently of the newest result.
+fn an_exact_successor_of_a_nonfinite_publication_reads_after_it_is_overwritten() {
+    // Goal: exact C reads the same after the ring lets go of B, independently of the newest result.
     // Method: acknowledge A/B/C, overwrite only the publication prefix, then select and inspect C.
-    // TODO(GUI item 2, doc-102): replace this baseline with the settled canonical refusal policy.
     let mut sequence = None;
     Sequence::setup(&mut sequence);
     let mut sequence = sequence.unwrap();
-    let accepted = sequence.harness.read("apps");
+    let accepted = parts_released(sequence.harness.read("apps"));
     let first = sequence.harness.view_at(1);
     assert_eq!(accepted.selection["selected"]["publication"], 1);
     assert_eq!(first.seconds.last().unwrap().publication, 1);
     sequence.publish(1, |readings| {
         super::customize(super::Input::NonfinitePower, readings);
     });
-    let refused = sequence.harness.read_result("apps");
+    sequence.harness.read_publication("apps", 2);
     let second = sequence.harness.view_at(2);
-    assert!(refused.is_err());
     assert_store_app_amounts(second.apps.last().unwrap(), 2);
     sequence.publish(2, |_| {});
-    let blocked = sequence.harness.read_result("apps");
+    sequence.harness.read_publication("apps", 3);
     let third = sequence.harness.view_at(3);
-    assert!(blocked.is_err());
     assert_store_app_amounts(third.apps.last().unwrap(), 1);
 
     sequence.overrun_refusal();
     let mut input = serde_json::Value::Null;
     sequence.observe_overrun(&mut input);
-    let latest = sequence.harness.read("apps");
+    let latest = parts_released(sequence.harness.read_publication("apps", 6));
     let sixth = sequence.harness.view_at(6);
     assert_eq!(latest.selection["selected"]["publication"], 6);
     assert!(!latest.histories_pending);
@@ -463,7 +473,6 @@ fn characterizes_exact_successor_after_a_refused_publication_is_overwritten() {
         &json!({"input": input, "accepted": accepted.selection,
             "ordinary_recovery_events": recovered_events.iter().map(output::event)
                 .collect::<Vec<_>>(),
-            "blocked_errors": [refused.err().unwrap(), blocked.err().unwrap()],
             "latest": {"selection": latest.selection, "apps": latest.apps, "detail": latest.detail},
             "selected": {"selection": selected.selection, "apps": selected.apps,
                 "detail": selected.detail},
@@ -482,13 +491,13 @@ fn withholds_app_rates_across_a_physically_spaced_run_tick_gap() {
     let mut sequence = None;
     Sequence::setup(&mut sequence);
     let mut sequence = sequence.unwrap();
-    let accepted = sequence.harness.read("apps");
+    let accepted = parts_released(sequence.harness.read("apps"));
     let first = sequence.harness.view_at(1);
     assert_eq!(accepted.selection["selected"]["publication"], 1);
     assert_eq!(first.seconds.last().unwrap().publication, 1);
 
     sequence.publish(2, |_| {});
-    let successor = sequence.harness.read("apps");
+    let successor = parts_released(sequence.harness.read_publication("apps", 2));
     let second = sequence.harness.view_at(2);
     let mut input = serde_json::Value::Null;
     sequence.observe(2, &mut input);

@@ -129,7 +129,12 @@ impl Adapter {
     }
 
     fn read(&mut self) -> Option<Update> {
-        super::super::read(&mut self.reader, &mut self.command, &self.shared)
+        super::super::read(
+            &mut self.reader,
+            std::path::Path::new(""),
+            &mut self.command,
+            &self.shared,
+        )
     }
 
     fn submit(&mut self, request: Request, context: crate::live_source::Context) {

@@ -16,19 +16,22 @@ pub(super) fn snapshot(
     inspected: Option<&Observation>,
 ) -> Result<Box<Snapshot>, String> {
     let observation = inspected.copied().unwrap_or(context.selected().observation);
-    let selection = context
-        .selection_for(
-            &observation,
-            inspected.is_some(),
-            &shared.cancellation,
-            command.epoch,
+    let selection = if super::route_reads_the_newest(&command.request.route) {
+        Presentation::Legacy(Value::Null)
+    } else {
+        Presentation::Store(
+            context
+                .selection_for(
+                    &observation,
+                    inspected.is_some(),
+                    &shared.cancellation,
+                    command.epoch,
+                )
+                .map_err(|error| error.to_string())?,
         )
-        .map_err(|error| error.to_string())?;
-    let mut snapshot = crate::live_source::reader_snapshot_owned(
-        command.generation,
-        context.catalog(),
-        Presentation::Store(selection),
-    );
+    };
+    let mut snapshot =
+        crate::live_source::reader_snapshot_owned(command.generation, context.catalog(), selection);
     snapshot.histories_pending = context.readiness() == QueryReadiness::Primary;
     if crate::live_source::route_ranks_apps(&command.request.route) {
         let ranks = context

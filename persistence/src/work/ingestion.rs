@@ -21,6 +21,8 @@ pub enum Purpose {
     Selection,
     Raw,
     Predecessor,
+    /// A read of saved minutes for what the live Store does not hold.
+    History,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

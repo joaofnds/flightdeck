@@ -1217,9 +1217,7 @@ fn hidden_window_pauses_the_store_and_showing_it_resumes_ingestion(cx: &mut gpui
 }
 
 #[gpui::test]
-fn showing_a_pinned_window_keeps_the_store_paused_until_live_is_selected(
-    cx: &mut gpui::TestAppContext,
-) {
+fn showing_a_pinned_window_wakes_the_store_and_keeps_the_second(cx: &mut gpui::TestAppContext) {
     // Goal: restoring a pinned selection never starts live ingestion in the store.
     // Method: show a pinned window over a paused real store, then explicitly return to live.
     use gpui::{AppContext, WindowOptions, WindowVisibility};
@@ -1248,15 +1246,11 @@ fn showing_a_pinned_window_keeps_the_store_paused_until_live_is_selected(
         .update(cx, |dashboard, _, cx| dashboard.tick(cx))
         .unwrap();
 
-    assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_paused()));
-    assert!(!cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
-    window
-        .update(cx, |dashboard, _, cx| {
-            dashboard.reset_range(cx);
-            dashboard.tick(cx);
-        })
+    assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
+    let held = window
+        .update(cx, |dashboard, _, _| dashboard.request.second)
         .unwrap();
-    wait_for_store_activity(cx, false);
+    assert_eq!(held, Some(1000));
     cx.update_window(window.into(), |_, window, _| window.remove_window())
         .unwrap();
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
@@ -1300,12 +1294,12 @@ fn a_live_page_other_than_overview_keeps_the_store_ingesting(cx: &mut gpui::Test
 }
 
 #[gpui::test]
-fn a_second_held_on_overview_keeps_the_view_and_parks_the_store(cx: &mut gpui::TestAppContext) {
+fn a_second_held_on_overview_keeps_the_view_while_the_store_goes_on(cx: &mut gpui::TestAppContext) {
     // Goal: while a second is held on Overview the page keeps the View its charts were drawn
-    // from and the store stops ingesting, though the live Mac runs on, so nothing but letting go
-    // moves the charts. Method: Overview drawn from a real store and read by a real reader, a
-    // pin of the newest second the page draws, a second published, ticks of the page, then the
-    // View the page holds and the store's activity.
+    // from, so nothing but letting go moves the charts, and the store goes on, since the pages of
+    // the held second read it. Method: Overview drawn from a real store and read by a real
+    // reader, a pin of the newest second the page draws, a second published, ticks of the page,
+    // then the View the page holds and the store's activity.
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
@@ -1325,7 +1319,7 @@ fn a_second_held_on_overview_keeps_the_view_and_parks_the_store(cx: &mut gpui::T
 
     let kept = cx.update(|cx| page.read(cx).store_view.clone().unwrap());
     assert!(Arc::ptr_eq(&kept, &drawn));
-    wait_for_store_activity(cx, true);
+    assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
 

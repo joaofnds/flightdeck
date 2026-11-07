@@ -46,23 +46,13 @@ pub(super) struct Stretches {
 }
 
 impl Stretches {
-    /// Room for `count` closed stretches, over `count + held` buffers, since a View the main
-    /// thread holds keeps stretches the store let go of.
+    /// Room for `count` closed stretches, over `count + held` buffers, so a View the main thread
+    /// holds for a moment costs the store no new buffer.
     pub(super) fn new(count: usize, held: usize) -> Self {
         Self {
             closed: Span::new(count, Buffers::new(count + held, AppsStretch::with_room)),
             open: AppsStretch::with_room(),
             spare: Vec::with_capacity(STRETCH_APPS_MAX),
-        }
-    }
-
-    /// Whether taking in a second of stretch `stretch` finds room: it adds to the open stretch,
-    /// or closes it into a buffer no View holds.
-    pub(super) fn has_room(&self, stretch: u64) -> bool {
-        if self.closes(stretch) {
-            self.closed.has_room()
-        } else {
-            true
         }
     }
 
@@ -79,8 +69,7 @@ impl Stretches {
         if self.closes(stretch) {
             self.open.close();
             let open = &mut self.open;
-            let pushed = self.closed.push(|buffer| mem::swap(buffer, open));
-            assert!(pushed);
+            self.closed.push(|buffer| mem::swap(buffer, open));
             // The buffer the closed stretch took the place of may hold a stretch let go of.
             self.open.clear();
         }

@@ -32,22 +32,6 @@ pub(super) fn take_payloads() -> std::collections::BTreeMap<&'static str, serde_
     PAYLOADS.with(|payloads| std::mem::take(&mut *payloads.borrow_mut()))
 }
 
-pub(super) fn raw_if_requested(
-    session: &viewer::LiveSession,
-    shared: &Shared,
-    selection: &serde_json::Value,
-) {
-    if shared
-        .measurement_raw
-        .load(std::sync::atomic::Ordering::Acquire)
-    {
-        if !selection["selected"].is_null() {
-            let pages = crate::live_source::tests::native_measurements::raw::pages(session);
-            payload("raw_pages", &pages);
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage {
     Reading,
@@ -67,13 +51,6 @@ pub(crate) struct Hold {
 }
 
 impl Worker {
-    pub(crate) fn freeze_raw_pages(&self) {
-        assert!(persistence::work::ingestion::is_active());
-        self.shared
-            .measurement_raw
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-
     pub(crate) fn frozen_payloads(
         &self,
         output: &mut std::collections::BTreeMap<&'static str, serde_json::Value>,
@@ -189,6 +166,17 @@ pub(super) fn checkpoint(shared: &Shared, generation: u64, stage: Stage) {
 pub(super) fn finished(shared: &Shared, generation: u64) {
     if let Some(gate) = shared.measurement_gate.lock().unwrap().as_mut() {
         if gate.entered == Some(generation) {
+            gate.finished = true;
+            shared.measurement_wake.notify_all();
+        }
+    }
+}
+
+/// Records that a read of the Store gave up its generation once a newer request cancelled it.
+pub(super) fn abandoned(shared: &Shared, generation: u64) {
+    if let Some(gate) = shared.measurement_gate.lock().unwrap().as_mut() {
+        if gate.entered == Some(generation) {
+            gate.interrupted = true;
             gate.finished = true;
             shared.measurement_wake.notify_all();
         }

@@ -17,11 +17,19 @@ mod store_reader;
 pub use store_reader::ownership::{Part, PartsWindow, RanksWindow};
 pub use store_reader::presentation::Presentation;
 
+/// What the Store may hold of readings and of the responses the window shows. The hour of a Mac
+/// with 918 processes reached 283 MB as it loaded, a held View keeps a span apart from the one the
+/// Store goes on filling, and the window's two contexts come on top, so this leaves room for more
+/// than three times those processes.
+pub const STORE_BYTES_MAX: usize = 1024 * 1024 * 1024;
+
 pub struct Worker {
     root: PathBuf,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
     mode: SourceMode,
+    /// The Store of a worker no window shares one with, so the reader goes on while it lives.
+    store: Option<viewer::store::Store>,
 }
 
 /// Whether a selection carries the readings older than its full-detail context.
@@ -147,8 +155,6 @@ struct Shared {
     measurement_staged: AtomicBool,
     #[cfg(test)]
     measurement_taken: AtomicBool,
-    #[cfg(test)]
-    measurement_raw: AtomicBool,
     #[cfg(test)]
     measurement_gate: Mutex<Option<measurement::Gate>>,
     #[cfg(test)]
@@ -288,12 +294,19 @@ impl Worker {
         self.mailbox().unwrap().sent.clone()
     }
 
+    /// Starts a live reader over a Store of its own, for a caller with no window to share one.
     pub fn start(root: PathBuf) -> std::io::Result<Self> {
-        Self::start_mode(root, SourceMode::Live, Rest::Following)
-    }
+        let store = viewer::store::Store::start_with_budget(
+            &root,
+            Arc::new(viewer::store::ByteBudget::new(STORE_BYTES_MAX)),
+        )?;
+        let handle = store
+            .query_handle()
+            .unwrap_or_else(|| unreachable!("a budgeted Store serves queries"));
+        let mut worker = Self::start_from_store(root, handle)?;
+        worker.store = Some(store);
 
-    pub(crate) fn start_idle(root: PathBuf) -> std::io::Result<Self> {
-        Self::start_mode(root, SourceMode::Live, Rest::Idle)
+        Ok(worker)
     }
 
     pub fn start_recorded(root: PathBuf) -> std::io::Result<Self> {
@@ -301,7 +314,6 @@ impl Worker {
     }
 
     /// Starts the source-free live client over the canonical Store's independent query handle.
-    #[cfg(test)]
     pub fn start_from_store(
         root: PathBuf,
         handle: viewer::store::QueryHandle,
@@ -366,6 +378,7 @@ impl Worker {
             shared,
             thread: Some(thread),
             mode,
+            store: None,
         })
     }
 
@@ -509,6 +522,7 @@ impl Worker {
             shared: std::mem::replace(&mut self.shared, Arc::new(refusing)),
             thread: self.thread.take(),
             mode: self.mode,
+            store: self.store.take(),
         }))
     }
 
@@ -544,8 +558,6 @@ impl Shared {
             measurement_staged: AtomicBool::new(false),
             #[cfg(test)]
             measurement_taken: AtomicBool::new(false),
-            #[cfg(test)]
-            measurement_raw: AtomicBool::new(false),
             #[cfg(test)]
             measurement_gate: Mutex::new(None),
             #[cfg(test)]
@@ -842,7 +854,7 @@ fn reader_read(
     shared: &Shared,
 ) -> Option<Update> {
     if reader.store.is_some() {
-        return store_reader::read(reader, command, shared);
+        return store_reader::read(reader, root, command, shared);
     }
     if Instant::now() < reader.retry_after {
         return None;
@@ -904,8 +916,6 @@ fn reader_snapshot(
         histories,
         &mut snapshot,
     )?;
-    #[cfg(test)]
-    measurement::raw_if_requested(session, shared, &snapshot.selection);
     if histories == Histories::Defer {
         snapshot.histories_pending = true;
     }
@@ -1159,8 +1169,6 @@ fn reader_computer(
 
     let selection = reader_latest(session)?;
     let snapshot = reader_snapshot_new(command.generation, catalog, selection);
-    #[cfg(test)]
-    measurement::raw_if_requested(session, shared, &snapshot.selection);
     reader_snapshot_record(reader, command, &snapshot, Histories::Read);
     Ok(Some(snapshot))
 }

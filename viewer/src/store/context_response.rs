@@ -52,6 +52,14 @@ impl QueryContext {
             "source_generation":self.source.generation})
     }
 
+    /// Whether the context holds a reading of `second`, which a chart's older readings lie past.
+    #[must_use]
+    pub fn retains_second(&self, second: u64) -> bool {
+        self.seconds()
+            .iter()
+            .any(|entry| super::selection::at_second(&entry.observation, second))
+    }
+
     pub fn observation_for_identity(&self, second: u64, value: &Value) -> Result<Observation> {
         let run = parse_identity(value["run"].as_str().ok_or(Error::Bound("selected run"))?)?;
         let boot = parse_identity(

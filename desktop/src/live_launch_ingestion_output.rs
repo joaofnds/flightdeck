@@ -8,8 +8,7 @@ pub(super) fn record_route(route: &str) {
     let mut harness = None;
     Harness::baseline(&mut harness);
     let mut harness = harness.unwrap();
-    harness.backend.as_ref().unwrap().worker.freeze_raw_pages();
-    let mut snapshot = harness.read(route);
+    let snapshot = harness.read(route);
     let view = harness.view();
     let mut payloads = std::collections::BTreeMap::new();
     harness
@@ -18,8 +17,8 @@ pub(super) fn record_route(route: &str) {
         .unwrap()
         .worker
         .frozen_payloads(&mut payloads);
-    validate_raw(route, &payloads);
-    let expanded_copy = expanded_copy(&mut snapshot, route, &payloads);
+    assert!(!payloads.contains_key("raw_pages"));
+    let expanded_copy = expanded_copy(&snapshot, route);
     let source_availability = payloads::report(&snapshot).unwrap();
     let window = window_values(&snapshot);
     let process = process_history(&snapshot);
@@ -105,69 +104,8 @@ fn record_route_panels(route: &str, presentation: &crate::live_acceptance::Prese
     );
 }
 
-fn validate_raw(route: &str, payloads: &std::collections::BTreeMap<&str, Value>) {
-    if route == "self" {
-        assert!(!payloads.contains_key("raw_pages"));
-        return;
-    }
-    let tables = &payloads["raw_pages"];
-    assert_eq!(tables.as_object().unwrap().len(), 11);
-    let processes = &tables["processes"][0];
-    assert_eq!(raw_cell(processes, "user_ns"), "9007199454740993");
-    assert_eq!(raw_cell(processes, "cycles"), "18446744073709551606");
-    assert_eq!(
-        raw_cell(processes, "process_unique_id"),
-        "18446744073709551615"
-    );
-    assert_eq!(
-        raw_cell(processes, "executable_name"),
-        "worker\\xff\\x0a\\\\"
-    );
-}
-
-fn raw_cell<'page>(page: &'page Value, name: &str) -> &'page Value {
-    let column = page["columns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .position(|column| column == name)
-        .unwrap();
-    &page["rows"][0][column]
-}
-
-fn expanded_copy(
-    snapshot: &mut Snapshot,
-    route: &str,
-    payloads: &std::collections::BTreeMap<&str, Value>,
-) -> Value {
+fn expanded_copy(snapshot: &Snapshot, route: &str) -> Value {
     let mut copies = serde_json::Map::new();
-    let saved = std::mem::take(&mut snapshot.pages);
-    if let Some(tables) = payloads.get("raw_pages") {
-        let tables = tables.as_object().unwrap();
-        assert!(tables.len() <= 11);
-        for (table, pages) in tables {
-            let pages = pages.as_array().unwrap();
-            assert!(pages.len() <= 128);
-            let mut rows = Vec::new();
-            for page in pages {
-                snapshot.pages.insert(
-                    table.clone(),
-                    crate::live_source::Presentation::Legacy(page.clone()),
-                );
-                let count = page["rows"].as_array().unwrap().len();
-                assert!(count <= 512);
-                for row in 0..count {
-                    rows.push(crate::native_workflows::selected_copy(
-                        Some(snapshot),
-                        &request("network"),
-                        Some(&(table.clone(), row)),
-                    ));
-                }
-            }
-            copies.insert(table.clone(), json!(rows));
-        }
-    }
-    snapshot.pages = saved;
     if route == "apps" {
         for kind in ["app_processes", "executables"] {
             copies.insert(
@@ -237,35 +175,6 @@ pub(super) fn event(event: &Event) -> Value {
         "boot": run.map(|run| collector::recording::identity_text(run.boot).to_string()),
         "publication": publication, "publication_first": first, "publication_end": end,
         "table": event.table, "bytes": event.bytes.to_string()})
-}
-
-pub(super) fn record_refusal(
-    case: &str,
-    harness: &Harness,
-    view: &viewer::store::View,
-    errors: &[&str],
-) {
-    assert!(!errors.is_empty());
-    assert!(errors.len() <= 2);
-    let events = harness.events();
-    let failures = events
-        .iter()
-        .filter(|event| {
-            event.producer == persistence::work::ingestion::Producer::Worker
-                && event.kind == persistence::work::ingestion::Kind::AttemptFailed
-        })
-        .count();
-
-    emit(
-        case,
-        &json!({"schemaVersion": 1, "case": case, "worker_error": errors[0],
-        "worker_errors": errors, "explicit_refusal_results": errors.len(),
-        "total_worker_attempt_failures": failures,
-        "store_machine": format!("{:?}", view.seconds),
-        "store_apps": format!("{:?}", view.apps),
-        "trace_complete": harness.backend.is_none(), "trace_overflowed": false,
-        "events": events.iter().map(event).collect::<Vec<_>>()}),
-    );
 }
 
 pub(super) fn record_semantics(

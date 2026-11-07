@@ -75,6 +75,24 @@ fn hovering_with_the_app_picker_open_reads_a_second_whose_app_part_is_kept(
 }
 
 #[gpui::test]
+fn a_page_left_behind_lets_go_of_the_app_parts_it_kept(cx: &mut TestAppContext) {
+    // Goal: the parts of an App keep the whole context they borrow from and the Store holds two
+    // contexts, so a page the window left must not keep one.
+    // Method: keep an App's parts on an Apps page that follows the live Mac, which is the page the
+    // window keeps, open another page and watch the parts.
+    let mut harness = AppHoverHarness::setup(cx);
+    let parts = kept_window_parts("App00600");
+    let kept = std::sync::Arc::downgrade(&parts);
+    harness.driver.keep_app_parts("App00600", parts);
+    harness.driver.follow_live_mac();
+
+    harness.driver.navigate("memory");
+
+    assert_eq!(kept.strong_count(), 0);
+    harness.teardown();
+}
+
+#[gpui::test]
 fn sub_watt_app_power_reads_in_milliwatts(cx: &mut TestAppContext) {
     // Goal: the card keeps the prototype's milliwatt precision instead of rounding to 0.1 W.
     // Method: accept an App drawing 0.142 W and read its Process power card.
@@ -604,6 +622,20 @@ impl AppHoverDriver {
             });
             dashboard.snapshot.as_mut().unwrap().app_parts = Some(parts);
             cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    fn follow_live_mac(&mut self) {
+        self.view.update(&mut self.context, |dashboard, _| {
+            dashboard.request.second = None;
+            dashboard.preview = None;
+        });
+    }
+
+    fn navigate(&mut self, route: &str) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.navigate(route, cx);
         });
         self.context.run_until_parked();
     }

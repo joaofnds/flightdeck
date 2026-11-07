@@ -248,6 +248,38 @@ fn a_kept_refresh_waits_for_a_store_behind_the_newest_reading() {
 }
 
 #[test]
+fn a_context_limit_met_for_a_moment_holds_the_page_without_a_failure() {
+    // Goal: the window holds the context it shows while the next one arrives, which fills the
+    // Store's two for a moment and is no failure of the page.
+    // Method: keep both contexts while the Worker asks, then let one go.
+    let mut harness = Harness::new();
+    let (first, second) = harness.both_contexts_held();
+
+    let generation = harness.worker.request(request("memory")).unwrap();
+
+    harness.assert_no_update_over_several_polls();
+    drop(first);
+    assert_eq!(harness.ready_strict().generation, generation);
+    drop(second);
+}
+
+#[test]
+fn a_context_limit_that_lasts_says_so() {
+    // Goal: a page never waits for ever on contexts something else keeps.
+    // Method: keep both contexts while the Worker asks, past its bounded wait.
+    let mut harness = Harness::new();
+    let (first, second) = harness.both_contexts_held();
+
+    harness.worker.request(request("memory")).unwrap();
+
+    assert_eq!(
+        harness.failure(),
+        "Store readings unavailable: ContextLimit"
+    );
+    drop((first, second));
+}
+
+#[test]
 fn an_inspected_overview_reading_needs_no_store_caught_up() {
     // Goal: a picked reading of the Overview shows at once from what the Store already answered.
     // Method: pick the older of two readings while the Store stays behind the newest one.
@@ -298,7 +330,15 @@ fn a_store_continuation_with_no_reply_uses_the_nonzero_polling_cadence() {
         context: Context::Select,
     };
 
-    assert!(super::read(&mut reader, &mut command, &Shared::new()).is_none());
+    assert!(
+        super::read(
+            &mut reader,
+            std::path::Path::new(""),
+            &mut command,
+            &Shared::new()
+        )
+        .is_none()
+    );
 
     assert!(handle.pending());
     assert_eq!(
@@ -636,6 +676,55 @@ impl Harness {
                 Some(Update::Ready(_)) => panic!("Store Worker answered from a Store behind"),
             }
         }
+    }
+
+    fn both_contexts_held(
+        &self,
+    ) -> (
+        Arc<viewer::store::QueryContext>,
+        Arc<viewer::store::QueryContext>,
+    ) {
+        let handle = self.store.as_ref().unwrap().query_handle().unwrap();
+        let first = Self::ready_context(&handle);
+        let second = Self::ready_context(&handle);
+        assert_eq!(handle.contexts_held(), 2);
+
+        (first, second)
+    }
+
+    fn ready_context(handle: &viewer::store::QueryHandle) -> Arc<viewer::store::QueryContext> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for _attempt in 0..1_000 {
+            handle
+                .submit(viewer::store::QueryRequest {
+                    epoch: 0,
+                    source: None,
+                    selection: viewer::store::QuerySelection::FollowLatest,
+                })
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            if let Some(reply) = handle.take() {
+                if let viewer::store::QueryOutcome::Ready(context) = reply.outcome {
+                    return context;
+                }
+            }
+            assert!(Instant::now() < deadline, "the Store gave no context");
+        }
+        panic!("the Store gave no context within its attempts");
+    }
+
+    fn failure(&mut self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        for _attempt in 0..2_000 {
+            match self.worker.take().unwrap() {
+                None => {}
+                Some(Update::Failed { message, .. }) => return message,
+                Some(Update::Ready(_)) => panic!("the Worker read past the limit"),
+            }
+            assert!(Instant::now() < deadline, "the Worker did not fail");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the Worker did not fail within its attempts");
     }
 
     fn ready_strict(&mut self) -> Box<Snapshot> {

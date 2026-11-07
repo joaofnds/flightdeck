@@ -102,8 +102,9 @@ pub(crate) mod tests;
 /// the two minutes the collector has not sealed yet.
 const SECONDS_MAX: usize = 1_080;
 
-/// The seconds past the span a View the main thread holds may keep, after which the store
-/// takes no more seconds until the main thread lets go of it.
+/// The seconds the store takes on buffers it already has while a View the main thread holds keeps
+/// the span's. Past them each second makes a new buffer, so a View held longer, as a hold does,
+/// stops nothing, and the store holds at most this many buffers and the span that View keeps.
 const SECONDS_HELD_MAX: usize = 64;
 
 /// The older seconds of the loaded hour the store holds, one in every stretch of
@@ -111,9 +112,9 @@ const SECONDS_HELD_MAX: usize = 64;
 /// live span's 1,080, is 258 stretches, and the stretch the live span cuts into is one more.
 const EARLIER_MAX: usize = 259;
 
-/// The older seconds past their span a View the main thread holds may keep. While it holds one,
-/// the live span lets go of at most `SECONDS_HELD_MAX` seconds, which start at most eight
-/// stretches.
+/// The older seconds the store takes on buffers it already has while a View the main thread holds
+/// keeps theirs. The live span lets go of `SECONDS_HELD_MAX` seconds in that time, which start at
+/// most eight stretches.
 const EARLIER_HELD_MAX: usize = 8;
 
 /// The closed stretches of `EARLIER_STRIDE_SECONDS` the store holds Apps of: the stretches of
@@ -121,9 +122,9 @@ const EARLIER_HELD_MAX: usize = 8;
 /// they hold at least the hour and its lead-in, 3,660 seconds.
 const STRETCHES_MAX: usize = EARLIER_MAX + SECONDS_MAX / 10;
 
-/// The closed stretches past their span a View the main thread holds may keep. While it holds
-/// one, the store takes in at most `SECONDS_HELD_MAX` seconds, which close at most eight
-/// stretches where they follow one another.
+/// The closed stretches the store takes on buffers it already has while a View the main thread
+/// holds keeps theirs. The store takes `SECONDS_HELD_MAX` seconds in that time, which close at most
+/// eight stretches where they follow one another.
 const STRETCHES_HELD_MAX: usize = EARLIER_HELD_MAX;
 
 const _: () = {
@@ -139,6 +140,9 @@ const VIEWS_MAX: usize = 4;
 /// The longest sleep between steps. Native startup decoding can take longer to finish after
 /// cancellation, so this is not a shutdown deadline.
 const WAIT: Duration = Duration::from_millis(100);
+
+/// The rest between attempts to start on a recording that refused, each of which reads it again.
+const STARTUP_RETRY_WAIT: Duration = Duration::from_secs(1);
 
 // The store looks for a collector started again at least once a second.
 const _: () = assert!(WAIT.saturating_mul(ring::FOLLOW_STEPS).as_millis() <= 1_000);
@@ -257,8 +261,7 @@ impl Store {
         Self::start_inner(root, None)
     }
 
-    /// Starts the expanded payload experiment with an explicit retained-byte budget.
-    /// Production pages keep using `start` until the full footprint preflight passes.
+    /// Starts a store of full process and App payloads with an explicit retained-byte budget.
     pub fn start_with_payload(root: &Path, bytes_max: usize) -> io::Result<Self> {
         Self::start_with_budget(root, Arc::new(ByteBudget::new(bytes_max)))
     }
@@ -532,7 +535,7 @@ impl Held {
         Self::with_payload(PathBuf::new(), budget)
     }
 
-    fn with_apps(root: PathBuf, make_apps: impl FnMut() -> AppsSecond) -> Self {
+    fn with_apps(root: PathBuf, make_apps: fn() -> AppsSecond) -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
         let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, make_apps);
         let earlier = Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, MachineSecond::default);
@@ -632,9 +635,6 @@ impl Held {
         let kept = leaving
             .clone()
             .filter(|leaving| starts_stretch(self.earlier.newest(), leaving));
-        if !self.take_room(kept.is_some(), stretch(second)) {
-            return false;
-        }
         let Ok(prepared_sample) = self.take_sample(kept.as_ref()) else {
             return false;
         };
@@ -642,11 +642,9 @@ impl Held {
         if let Some(kept) = kept {
             if let Some(sampled) = &mut self.sampled {
                 let sample = prepared_sample.unwrap_or_else(|| unreachable!("admitted sample"));
-                let pushed = sampled.push(|buffer| *buffer = sample);
-                assert!(pushed);
+                sampled.push(|buffer| *buffer = sample);
             }
-            let pushed = self.earlier.push(|buffer| *buffer = kept);
-            assert!(pushed);
+            self.earlier.push(|buffer| *buffer = kept);
         }
         self.take_current(run, second, apps, newest.segment);
         persistence::work::ingestion::record_publication(
@@ -670,35 +668,6 @@ impl Held {
         self.newest
             .as_ref()
             .is_some_and(|newest| newest.holds(run, second))
-    }
-
-    fn take_room(&self, kept: bool, stretch: u64) -> bool {
-        if !self.span.has_room() {
-            return false;
-        }
-
-        if !self.apps.has_room() {
-            return false;
-        }
-
-        if !self.stretches.has_room(stretch) {
-            return false;
-        }
-
-        if kept {
-            if !self.earlier.has_room() {
-                return false;
-            }
-
-            if self
-                .sampled
-                .as_ref()
-                .is_some_and(|sampled| !sampled.has_room())
-            {
-                return false;
-            }
-        }
-        true
     }
 
     fn take_sample(&self, kept: Option<&MachineSecond>) -> Result<Option<SampledSecond>, Missing> {
@@ -731,13 +700,12 @@ impl Held {
         apps: TickApps<'_>,
         segment: u64,
     ) {
-        let pushed = self.span.push(|buffer| {
+        self.span.push(|buffer| {
             *buffer = second.clone();
             buffer.boot = run.boot.0;
             buffer.run = run.run.0;
             buffer.segment = segment;
         });
-        assert!(pushed);
         let folded = match &apps {
             TickApps::Folded(folded) => Some(&folded.apps),
             _ => None,
@@ -745,14 +713,13 @@ impl Held {
         let previous = self.apps.newest_held().map(Arc::clone);
         let tick = take_observation(run, second);
         let budget = self.payload_budget.as_ref();
-        let pushed = self.apps.push(|buffer| {
+        self.apps.push(|buffer| {
             buffer.take(apps, previous.as_deref(), budget);
             if buffer.observation.is_none() {
                 buffer.observation = Some(tick);
             }
             buffer.consecutive = take_consecutive(previous.as_deref(), buffer);
         });
-        assert!(pushed);
         let Some(newest) = self.apps.newest() else {
             unreachable!("the span just took the second in");
         };
@@ -1163,23 +1130,62 @@ fn startup_staged(
     };
     let mut startup = Startup::new();
     let mut blocked = None;
+    let mut reported = None;
     held.startup = StartupState::Loading;
     for _ in 0..STEPS_MAX {
         operation.check()?;
-        match startup_staged_turn(&input, held, ring, shared, &mut startup, &mut blocked) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
-            Err(StartupFailure::Catalog(Failure::ChangedIdentity | Failure::ForeignRecording)) => {
-                held.reset();
-                held.startup = StartupState::Loading;
-                *ring = make_ring(root, Some(&budget));
-                startup = Startup::new();
-                blocked = None;
-            }
-            Err(error) => return Err(startup_error(error)),
+        let restart =
+            match startup_staged_turn(&input, held, ring, shared, &mut startup, &mut blocked) {
+                Ok(true) => return Ok(()),
+                Ok(false) => false,
+                Err(StartupFailure::Catalog(
+                    Failure::ChangedIdentity | Failure::ForeignRecording,
+                )) => true,
+                // The collector makes the recording after the window opens.
+                Err(StartupFailure::Catalog(Failure::Recording(io::ErrorKind::NotFound))) => {
+                    thread::park_timeout(WAIT);
+                    true
+                }
+                // What refuses now may clear while the window stays open.
+                Err(error) => {
+                    startup_staged_refused(held, ring, shared, &mut reported, &error);
+                    true
+                }
+            };
+        if restart {
+            held.reset();
+            held.startup = StartupState::Loading;
+            *ring = make_ring(root, Some(&budget));
+            startup = Startup::new();
+            blocked = None;
         }
     }
     unreachable!("startup finishes or the Store is cancelled");
+}
+
+/// Answers the page's query with why the Store cannot start, and rests before the next attempt,
+/// which reads the recording again.
+fn startup_staged_refused(
+    held: &mut Held,
+    ring: &mut Ring,
+    shared: &Shared,
+    reported: &mut Option<Failure>,
+    refusal: &recording::staged::Failure,
+) {
+    use recording::staged::Failure as StartupFailure;
+    let (failure, reason) = match refusal {
+        StartupFailure::Blocked => (Failure::Budget, String::from("startup admission")),
+        StartupFailure::Read(refused) => (Failure::Refused, format!("{refused:?}")),
+        StartupFailure::Catalog(failure) => (*failure, format!("{failure:?}")),
+    };
+    if *reported != Some(failure) {
+        eprintln!("flightdeck store startup: {reason}");
+    }
+    *reported = Some(failure);
+    held.failure = Some(failure);
+    let queries = shared.queries.as_ref().unwrap_or_else(|| unreachable!());
+    run_queries(held, ring, queries);
+    thread::park_timeout(STARTUP_RETRY_WAIT);
 }
 
 fn startup_staged_turn(
@@ -1313,19 +1319,6 @@ fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
         apps: held.apps.free(),
         sampled: held.sampled.as_ref().map_or(0, Span::free),
         newest: held.newest.map(|newest| (newest.run, newest.publication)),
-    }
-}
-
-fn startup_error(error: recording::staged::Failure) -> persistence::Error {
-    match error {
-        recording::staged::Failure::Blocked => persistence::Error::Bound("startup admission"),
-        recording::staged::Failure::Read(crate::recording::Refused::Decode(error)) => error,
-        recording::staged::Failure::Read(error) => {
-            persistence::Error::Io(io::Error::other(format!("{error:?}")))
-        }
-        recording::staged::Failure::Catalog(error) => {
-            persistence::Error::Io(io::Error::other(format!("{error:?}")))
-        }
     }
 }
 

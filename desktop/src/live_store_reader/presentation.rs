@@ -23,6 +23,31 @@ impl<T> Presentation<T> {
         }
     }
 
+    /// Edits the value and keeps its admission owner.
+    pub fn edited(self, edit: impl FnOnce(&mut T)) -> Self
+    where
+        T: Clone,
+    {
+        match self {
+            Self::Legacy(mut value) => {
+                edit(&mut value);
+                Self::Legacy(value)
+            }
+            Self::Shared(mut value) => {
+                edit(Arc::make_mut(&mut value));
+                Self::Shared(value)
+            }
+            Self::Store(value) => Self::Store(value.map(|mut value| {
+                edit(&mut value);
+                value
+            })),
+            Self::Canonical(value) => Self::Canonical(value.map(|mut value| {
+                edit(&mut value);
+                value
+            })),
+        }
+    }
+
     /// Fixture mutations are allowed only for values created without a Store owner.
     #[cfg(test)]
     pub fn legacy_mut(&mut self) -> Option<&mut T> {

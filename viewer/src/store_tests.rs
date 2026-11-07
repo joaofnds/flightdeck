@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,7 +20,7 @@ pub(super) fn saved_manifest_start(bytes: &[u8]) -> usize {
 /// The proof binds a manifest's identity, range and losses to its own, but not its clocks.
 pub(super) fn change_saved_manifest(root: &std::path::Path, marker: &std::path::Path) {
     let original = persistence::read_committed(root, marker).unwrap();
-    let mut bytes = std::fs::read(marker).unwrap();
+    let mut bytes = fs::read(marker).unwrap();
     assert_eq!(&bytes[..8], b"FDCAN002");
     // The manifest's identities follow its magic and two words. Eight words of window, range and
     // losses come next, and then a word saying it has a wall clock, and its first bound.
@@ -29,7 +31,7 @@ pub(super) fn change_saved_manifest(root: &std::path::Path, marker: &std::path::
         + 10 * size_of::<u64>();
     let wall_ns = u64::from_le_bytes(bytes[wall_ns_max..wall_ns_max + 8].try_into().unwrap());
     bytes[wall_ns_max..wall_ns_max + 8].copy_from_slice(&(wall_ns + 1).to_le_bytes());
-    std::fs::write(marker, bytes).unwrap();
+    fs::write(marker, bytes).unwrap();
     assert_ne!(persistence::read_committed(root, marker).unwrap(), original);
 }
 
@@ -516,6 +518,93 @@ fn an_exhausted_ingestion_budget_accepts_no_partial_observation() {
 }
 
 #[test]
+fn a_recording_the_store_cannot_read_says_why_until_the_cause_clears() {
+    // Goal: a Store that cannot start tells the page why and reads again once it can, rather than
+    // closing every page for as long as the window stays open.
+    // Method: wall off the recording's identity, ask for the newest reading, then restore it.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let identity = fixture.root.join("identity");
+    let mode = fs::metadata(&identity).unwrap().permissions();
+    fs::set_permissions(&identity, fs::Permissions::from_mode(0o000)).unwrap();
+    let budget = Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX));
+    let store = Store::start_with_budget(&fixture.root, budget).unwrap();
+    let handle = store.query_handle().unwrap();
+
+    let refused = latest_reply(&handle);
+    fs::set_permissions(&identity, mode).unwrap();
+    let restored = ready_context(&handle);
+
+    assert!(matches!(
+        refused,
+        super::QueryOutcome::Unavailable(super::QueryUnavailable::SourceFailure(
+            Failure::Recording(ErrorKind::PermissionDenied)
+        ))
+    ));
+    assert_eq!(
+        restored.source.recording,
+        fixture.writer.identity().unwrap().recording
+    );
+}
+
+#[test]
+fn a_recording_not_yet_made_holds_a_query_with_no_failure() {
+    // Goal: the first launch opens the window before the collector makes the recording, which is
+    // no failure of the recording, so the page waits for its readings.
+    // Method: ask while the recording's directory is away, then bring it back and take the reply.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let away = fixture.root.with_extension("away");
+    fs::rename(&fixture.root, &away).unwrap();
+    let budget = Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX));
+    let store = Store::start_with_budget(&fixture.root, budget).unwrap();
+    let handle = store.query_handle().unwrap();
+    handle.submit(latest_request()).unwrap();
+
+    fs::rename(&away, &fixture.root).unwrap();
+    let reply = next_reply(&handle);
+
+    assert!(!matches!(reply, super::QueryOutcome::Unavailable(_)));
+}
+
+fn latest_request() -> super::QueryRequest {
+    super::QueryRequest {
+        epoch: 0,
+        source: None,
+        selection: super::QuerySelection::FollowLatest,
+    }
+}
+
+fn latest_reply(handle: &super::QueryHandle) -> super::QueryOutcome {
+    handle.submit(latest_request()).unwrap();
+    next_reply(handle)
+}
+
+fn next_reply(handle: &super::QueryHandle) -> super::QueryOutcome {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..1000 {
+        if let Some(reply) = handle.take() {
+            return reply.outcome;
+        }
+        assert!(Instant::now() < deadline, "the Store did not reply");
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the Store did not reply within its attempts");
+}
+
+fn ready_context(handle: &super::QueryHandle) -> Arc<super::QueryContext> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..1000 {
+        if let super::QueryOutcome::Ready(context) = latest_reply(handle) {
+            return context;
+        }
+        assert!(Instant::now() < deadline, "the Store did not read again");
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the Store did not read again within its attempts");
+}
+
+#[test]
 fn a_view_retains_its_payload_and_byte_reservations_after_the_store_stops() {
     // Goal: releasing the producer cannot recycle or uncharge a retained reader's payload.
     // Method: stop the store with a View held, inspect its processes, then release the View.
@@ -779,7 +868,7 @@ pub(super) fn empty_ticks_file(fixture: &Fixture, minute: u64) {
         .root
         .join(&manifest.data_directory)
         .join("ticks.parquet");
-    std::fs::write(ticks, []).unwrap();
+    fs::write(ticks, []).unwrap();
 }
 
 /// The first View the store hands over that `holds` accepts, failing after ten seconds.
@@ -1991,9 +2080,9 @@ fn held_through(view: &View, wall_second: u64) -> bool {
 }
 
 #[test]
-fn releasing_a_retained_view_allows_ingestion_after_the_spare_slots_fill() {
-    // Goal: backpressure ends when the reader releases its View, without another publication.
-    // Method: pin a full span, exhaust every spare slot, release the reader and retry the tick.
+fn a_retained_view_stops_no_ingestion_past_the_spare_slots() {
+    // Goal: a View held as long as the user likes, as a hold does, leaves the store taking seconds
+    // and the View as it was. Method: pin a full span, exhaust every spare slot, take one more.
     let mut held = super::Held::without_recording();
     let full = u64::try_from(super::SECONDS_MAX).unwrap();
     for second in 1..=full {
@@ -2004,12 +2093,31 @@ fn releasing_a_retained_view_allows_ingestion_after_the_spare_slots_fill() {
     for second in full + 1..=last {
         assert!(held.take(&RUN, &second_at(second), UNREAD));
     }
-    let next = second_at(last + 1);
-    assert!(!held.take(&RUN, &next, UNREAD));
 
-    drop(reader);
-    let accepted = held.take(&RUN, &next, UNREAD);
+    let accepted = held.take(&RUN, &second_at(last + 1), UNREAD);
 
     assert!(accepted);
     assert_eq!(held.span.newest().unwrap().publication, last + 1);
+    assert_eq!(reader.seconds.last().unwrap().publication, full);
+}
+
+#[test]
+fn a_reload_finishes_while_a_view_holds_every_buffer() {
+    // Goal: a new run reloads the hour while the window holds the View of the old one, since the
+    // window takes no other until the reload publishes one. Method: pin a full span, reset as a
+    // reload does, and take a whole span again.
+    let mut held = super::Held::without_recording();
+    let full = u64::try_from(super::SECONDS_MAX).unwrap();
+    for second in 1..=full {
+        assert!(held.take(&RUN, &second_at(second), UNREAD));
+    }
+    let reader = published(&mut held);
+
+    held.reset();
+    for second in full + 1..=2 * full {
+        assert!(held.take(&RUN, &second_at(second), UNREAD));
+    }
+
+    assert_eq!(held.span.len(), super::SECONDS_MAX);
+    assert_eq!(reader.seconds.last().unwrap().publication, full);
 }

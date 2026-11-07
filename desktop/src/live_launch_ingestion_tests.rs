@@ -153,6 +153,19 @@ impl Harness {
         self.wait(generation)
     }
 
+    /// Reads `route` until the Store's context reaches `publication`, which a read may not yet,
+    /// since the Store takes in the ring on its own thread.
+    fn read_publication(&mut self, route: &str, publication: u64) -> Box<Snapshot> {
+        for _step in 0..2_000 {
+            let snapshot = self.read(route);
+            if snapshot.selection["selected"]["publication"] == publication {
+                return snapshot;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the Store's context never reached publication {publication}");
+    }
+
     fn inspect_request(&mut self, request: Request) -> Result<Box<Snapshot>, String> {
         let generation = self.backend.as_mut().unwrap().worker.inspect(request)?;
         self.wait(generation)
@@ -225,27 +238,6 @@ impl Harness {
         events
     }
 
-    fn wait_for_failure(&self, publication: u64) -> usize {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut events = Vec::new();
-        for _step in 0..2_000 {
-            events.clear();
-            self.trace.snapshot(&mut events).unwrap();
-            let failures = count(&events, Producer::Worker, Kind::AttemptFailed, publication);
-            if failures > 0 {
-                return failures;
-            }
-
-            assert!(
-                Instant::now() < deadline,
-                "initial following failure timed out"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
-
-        panic!("initial following failure exceeded its step bound");
-    }
-
     fn teardown(&mut self) {
         let backend = self.backend.take().unwrap();
         let mut thread = backend.worker.retire();
@@ -290,9 +282,12 @@ fn request(route: &str) -> Request {
     }
 }
 
+/// How many times `producer` did `kind` of work on `publication`, leaving out reads of saved
+/// minutes for what the Store does not hold, which take in no publication.
 fn count(events: &[Event], producer: Producer, kind: Kind, publication: u64) -> usize {
     events
         .iter()
+        .filter(|event| event.purpose != persistence::work::ingestion::Purpose::History)
         .filter(|event| event.producer == producer)
         .filter(|event| event.kind == kind)
         .filter(|event| match event.key {
@@ -304,27 +299,10 @@ fn count(events: &[Event], producer: Producer, kind: Kind, publication: u64) -> 
         .count()
 }
 
-fn assert_worker_sealed_work(events: &[Event], run: &collector::ring::RunIdentity) {
-    let collected: Vec<_> = events
-        .iter()
-        .filter(|event| event.producer == Producer::Worker && event.kind == Kind::NativeCollect)
-        .collect();
-    assert!(!collected.is_empty());
-    for event in collected {
-        assert_eq!(
-            event.key,
-            Key::Minute {
-                run: *run,
-                first: 1,
-                end: 3
-            }
-        );
-    }
-}
-
 #[test]
-fn characterizes_duplicate_capture_through_the_live_launch_constructor() {
-    // Goal: stage 1 records actual duplicate work before the one-owner implementation.
+fn takes_in_each_publication_once_through_the_live_launch_constructor() {
+    // Goal: each publication has one accepted machine reduction and one App aggregation, the
+    // Store's, and the reader of the page does none.
     // Method: use the real constructor, populated registered ring, seal and completed consumers.
     let mut harness = None;
     Harness::setup(Input::Sealed(SourceLayout::Identity), &mut harness);
@@ -343,16 +321,19 @@ fn characterizes_duplicate_capture_through_the_live_launch_constructor() {
     let events = harness.events();
     let input = harness.input.as_ref().unwrap();
 
-    assert_worker_sealed_work(&events, &input.identity);
+    assert_eq!(count(&events, Producer::Worker, Kind::NativeCollect, 2), 0);
     assert_eq!(snapshot.selection["selected"]["publication"], 2);
     assert_eq!(view.seconds.last().unwrap().publication, 2);
     assert_eq!(
         snapshot.selection["summary"]["memory_total_bytes"],
         8_589_934_592_u64
     );
-    assert_eq!(count(&events, Producer::Worker, Kind::FrameCapture, 2), 1);
-    assert_eq!(count(&events, Producer::Store, Kind::FrameCapture, 2), 1);
-    assert_eq!(count(&events, Producer::Worker, Kind::RawCapture, 2), 1);
+    assert_eq!(count(&events, Producer::Worker, Kind::FrameCapture, 2), 0);
+    assert_eq!(
+        count(&events, Producer::Store, Kind::CommittedFrameCapture, 2),
+        1
+    );
+    assert_eq!(count(&events, Producer::Worker, Kind::RawCapture, 2), 0);
     println!(
         "{}",
         json!({"selected": snapshot.selection["selected"], "payloads": payloads,
@@ -362,11 +343,10 @@ fn characterizes_duplicate_capture_through_the_live_launch_constructor() {
             "layout": format!("{:?}", input.layout), "lock": input.lock,
             "second_first": input.second_first, "mapped_bytes": input.mapped_bytes}})
     );
-    assert_eq!(
-        count(&events, Producer::Worker, Kind::AppDerivation, 2)
-            + count(&events, Producer::Store, Kind::AppDerivation, 2),
-        2 // Tighten this baseline to one in the ownership switch; the first red is retained.
-    );
+    for kind in [Kind::MachineReduction, Kind::AppDerivation, Kind::Accepted] {
+        assert_eq!(count(&events, Producer::Worker, kind, 2), 0, "{kind:?}");
+        assert_eq!(count(&events, Producer::Store, kind, 2), 1, "{kind:?}");
+    }
 }
 
 fn customize(input: Input, readings: &mut collector::ring::Readings<'_>) {
@@ -505,50 +485,44 @@ fn assert_gap_intervals(detail: &serde_json::Value) {
 }
 
 #[test]
-fn characterizes_raw_validation_refusal_beside_available_store_machine_readings() {
-    // Goal: canonicalization must account for today's differing nonfinite-power policies.
-    // Method: send identical malformed raw facts through the two launch-created readers.
+fn a_nonfinite_power_reading_leaves_the_second_readable_beside_its_missing_power() {
+    // Goal: one policy for a nonfinite reading, the Store's, which shows the second and says its
+    // power is missing, where the second reader used to refuse the whole page.
+    // Method: send a malformed raw fact through the launch-created reader.
     let mut harness = None;
     Harness::setup(Input::NonfinitePower, &mut harness);
     let mut harness = harness.unwrap();
-    let initial_failures = harness.wait_for_failure(2);
 
-    let result = harness.read_result("overview");
-    let repeated = harness.read_result("overview");
+    let snapshot = harness.read_publication("overview", 2);
     let view = harness.view();
 
-    assert!(result.is_err());
-    assert!(repeated.is_err());
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
     assert_eq!(view.seconds.last().unwrap().power_watts, None);
     assert_eq!(view.apps.last().unwrap().missing, None);
     harness.teardown();
     let events = harness.events();
-    assert!(count(&events, Producer::Worker, Kind::AttemptFailed, 2) >= initial_failures + 2);
-    assert!(count(&events, Producer::Worker, Kind::FrameCapture, 2) >= initial_failures + 2);
+    assert_eq!(count(&events, Producer::Worker, Kind::AttemptFailed, 2), 0);
+    assert_eq!(count(&events, Producer::Worker, Kind::FrameCapture, 2), 0);
     assert_eq!(count(&events, Producer::Worker, Kind::RawCapture, 2), 0);
-    output::record_refusal(
-        "nonfinite-power",
-        &harness,
-        &view,
-        &[
-            result.as_ref().err().unwrap(),
-            repeated.as_ref().err().unwrap(),
-        ],
-    );
+    assert_eq!(count(&events, Producer::Store, Kind::FrameCapture, 2), 1);
 }
 
 #[test]
-fn characterizes_app_refusal_beside_available_store_machine_readings() {
-    // Goal: canonicalization must retain the current independently unavailable App result.
+fn an_app_refusal_leaves_the_machine_readings_beside_it() {
+    // Goal: a second whose Apps are refused still shows its machine readings, and says its Apps
+    // are unavailable.
     // Method: supply duplicate numeric PIDs without changing the valid machine reading.
     let mut harness = None;
     Harness::setup(Input::DuplicatePid, &mut harness);
     let mut harness = harness.unwrap();
 
-    let result = harness.read_result("overview");
+    let snapshot = harness.read_publication("overview", 2);
     let view = harness.view();
 
-    assert!(result.is_err());
+    assert!(matches!(
+        snapshot.rankings.as_deref().map(std::ops::Deref::deref),
+        Some(crate::live_rankings::Rankings::Unavailable(_))
+    ));
     assert!(matches!(
         view.apps.last().unwrap().missing,
         Some(viewer::store::Missing::Refused(_))
@@ -557,16 +531,13 @@ fn characterizes_app_refusal_beside_available_store_machine_readings() {
     let events = harness.events();
     assert_eq!(count(&events, Producer::Worker, Kind::FrameCapture, 2), 0);
     assert_eq!(count(&events, Producer::Store, Kind::FrameCapture, 2), 0);
-    assert!(count(&events, Producer::Worker, Kind::FrameCaptureAttempt, 2) >= 1);
+    assert_eq!(
+        count(&events, Producer::Worker, Kind::FrameCaptureAttempt, 2),
+        0
+    );
     assert_eq!(
         count(&events, Producer::Store, Kind::FrameCaptureAttempt, 2),
         1
-    );
-    output::record_refusal(
-        "duplicate-pid",
-        &harness,
-        &view,
-        &[result.as_ref().err().unwrap()],
     );
 }
 

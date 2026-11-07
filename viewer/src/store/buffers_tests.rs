@@ -8,8 +8,8 @@ fn span(capacity: usize, buffers: usize) -> Span<u64> {
     Span::new(capacity, Buffers::new(buffers, || 0))
 }
 
-fn push(span: &mut Span<u64>, reading: u64) -> bool {
-    span.push(|buffer| *buffer = reading)
+fn push(span: &mut Span<u64>, reading: u64) {
+    span.push(|buffer| *buffer = reading);
 }
 
 fn held(span: &Span<u64>) -> Vec<u64> {
@@ -28,7 +28,7 @@ fn a_span_holds_its_newest_readings_oldest_first() {
     let mut span = span(3, 5);
 
     for reading in 1..=5 {
-        assert!(push(&mut span, reading));
+        push(&mut span, reading);
     }
 
     assert_eq!(held(&span), [3, 4, 5]);
@@ -40,13 +40,13 @@ fn a_reading_a_view_holds_never_changes() {
     // full span, push readings until the span has let go of every reading the View holds, and
     // read the View again.
     let mut span = span(2, 5);
-    assert!(push(&mut span, 1));
-    assert!(push(&mut span, 2));
+    push(&mut span, 1);
+    push(&mut span, 2);
     let view = view(&span);
 
-    assert!(push(&mut span, 3));
-    assert!(push(&mut span, 4));
-    assert!(push(&mut span, 5));
+    push(&mut span, 3);
+    push(&mut span, 4);
+    push(&mut span, 5);
 
     assert_eq!(
         view.iter().map(|reading| **reading).collect::<Vec<_>>(),
@@ -62,7 +62,7 @@ fn a_released_buffer_is_written_again() {
     let mut span = span(4, 5);
 
     for reading in 1..=1000 {
-        assert!(push(&mut span, reading));
+        push(&mut span, reading);
     }
 
     assert_eq!(held(&span), [997, 998, 999, 1000]);
@@ -71,18 +71,17 @@ fn a_released_buffer_is_written_again() {
 #[test]
 fn a_view_released_frees_its_buffers() {
     // Goal: a View the main thread drops lets the store write its buffers again. Method: hold
-    // a View until every buffer is held, drop it, and push again.
+    // a View until the span has let go of its readings, drop it, and count the free buffers.
     let mut span = span(2, 3);
-    assert!(push(&mut span, 1));
-    assert!(push(&mut span, 2));
+    push(&mut span, 1);
+    push(&mut span, 2);
     let view = view(&span);
-    assert!(push(&mut span, 3));
-    assert!(!push(&mut span, 4));
+    push(&mut span, 3);
+    assert_eq!(span.free(), 0);
 
     drop(view);
 
-    assert!(push(&mut span, 4));
-    assert_eq!(held(&span), [3, 4]);
+    assert_eq!(span.free(), 1);
 }
 
 #[test]
@@ -101,43 +100,85 @@ fn a_released_buffer_keeps_nothing_it_held() {
 }
 
 mod when_every_buffer_is_held {
-    use super::{held, push, span, view};
+    use std::sync::Arc;
+
+    use super::{Buffers, Span, held, push, span, view};
 
     #[test]
-    fn a_push_changes_nothing() {
-        // Goal: a reading the span cannot hold yet is taken again at the next step, with the
-        // span as it was. Method: hold Views until no buffer is free, then push.
+    fn a_push_takes_the_reading_and_leaves_the_views_as_they_were() {
+        // Goal: a View held for as long as the user likes stops no reading. Method: hold Views
+        // until no buffer is free, then push.
         let mut span = span(2, 3);
-        assert!(push(&mut span, 1));
-        assert!(push(&mut span, 2));
+        push(&mut span, 1);
+        push(&mut span, 2);
         let first = view(&span);
-        assert!(push(&mut span, 3));
+        push(&mut span, 3);
         let second = view(&span);
+        assert_eq!(span.free(), 0);
 
-        let pushed = push(&mut span, 4);
+        push(&mut span, 4);
 
-        assert!(!pushed);
-        assert_eq!(held(&span), [2, 3]);
-        drop((first, second));
+        assert_eq!(held(&span), [3, 4]);
+        assert_eq!(
+            first.iter().map(|reading| **reading).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            second.iter().map(|reading| **reading).collect::<Vec<_>>(),
+            [2, 3]
+        );
     }
 
     #[test]
-    fn repeated_pushes_keep_every_reading() {
-        // Goal: a span that cannot take a reading does not shrink while it waits. Method: push
-        // into a span with every buffer held, several times.
-        let mut span = span(2, 3);
-        assert!(push(&mut span, 1));
-        assert!(push(&mut span, 2));
-        let first = view(&span);
-        assert!(push(&mut span, 3));
-        let second = view(&span);
+    fn readings_in_memory_are_the_buffers_and_what_the_view_holds() {
+        // Goal: a View held through many readings bounds memory by the buffers and that View, not
+        // by how long it is held. Method: hold a View of a full span, push a thousand readings
+        // that each share one handle, and count the readings alive through each handle.
+        let held_reading = Arc::new(0);
+        let later_reading = Arc::new(0);
+        let mut span = shared_span(4, 5);
+        for _ in 1..=4 {
+            span.push(|buffer| *buffer = vec![Arc::clone(&held_reading)]);
+        }
+        let view = view_of_shared(&span);
 
-        for _ in 0..5 {
-            assert!(!push(&mut span, 4));
+        for _ in 1..=1000 {
+            span.push(|buffer| *buffer = vec![Arc::clone(&later_reading)]);
         }
 
-        assert_eq!(held(&span), [2, 3]);
-        drop((first, second));
+        let alive = Arc::strong_count(&held_reading) + Arc::strong_count(&later_reading) - 2;
+        assert!(alive <= 5 + view.len(), "{alive}");
+        assert_eq!(Arc::strong_count(&held_reading) - 1, view.len());
+    }
+
+    #[test]
+    fn a_view_let_go_of_frees_the_readings_it_kept() {
+        // Goal: the readings a long hold kept leave memory as it ends. Method: hold a View past
+        // every buffer, drop it, release the buffers as the store does before each write, and
+        // count the readings alive through their shared handle.
+        let held_reading = Arc::new(0);
+        let later_reading = Arc::new(0);
+        let mut span = shared_span(2, 3);
+        for _ in 1..=2 {
+            span.push(|buffer| *buffer = vec![Arc::clone(&held_reading)]);
+        }
+        let view = view_of_shared(&span);
+        for _ in 3..=8 {
+            span.push(|buffer| *buffer = vec![Arc::clone(&later_reading)]);
+        }
+
+        drop(view);
+        span.release(Vec::clear);
+
+        assert_eq!(Arc::strong_count(&held_reading), 1);
+    }
+
+    fn shared_span(capacity: usize, buffers: usize) -> Span<Vec<Arc<u64>>> {
+        Span::new(capacity, Buffers::new(buffers, Vec::new))
+    }
+
+    fn view_of_shared(span: &Span<Vec<Arc<u64>>>) -> Vec<Arc<Vec<Arc<u64>>>> {
+        span.held().map(Arc::clone).collect()
     }
 }
 
@@ -180,12 +221,9 @@ fn views_taken_while_the_store_writes_never_change() {
         let mut span = span(16, 64);
         let mut reading = 1;
         while reading <= 100_000 {
-            if push(&mut span, reading) {
-                writer_mailbox.put(Arc::new(view(&span)));
-                reading += 1;
-            } else {
-                thread::yield_now();
-            }
+            push(&mut span, reading);
+            writer_mailbox.put(Arc::new(view(&span)));
+            reading += 1;
         }
     });
 

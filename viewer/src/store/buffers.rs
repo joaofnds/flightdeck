@@ -1,7 +1,7 @@
-//! The buffers the store writes its readings into, all allocated when the store starts, and
-//! the mailbox it leaves its Views in. Neither thread waits on the other: a buffer is written
-//! again only once no View holds it, and the main thread takes a new View only when no store
-//! step is handing one over.
+//! The buffers the store writes its readings into, allocated when the store starts, and the
+//! mailbox it leaves its Views in. Neither thread waits on the other: a buffer is written again
+//! only once no View holds it, a store that finds every buffer held makes a new one, and the main
+//! thread takes a new View only when no store step is handing one over.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, TryLockError};
@@ -13,10 +13,11 @@ use persistence::retention::Retained;
 #[path = "buffers_tests.rs"]
 mod tests;
 
-/// Buffers of one kind, all allocated when the store starts. A buffer is written again only
-/// once nothing but these buffers holds it, so a reading a View holds never changes.
+/// Buffers of one kind, allocated when the store starts. A buffer is written again only once
+/// nothing but these buffers holds it, so a reading a View holds never changes.
 pub struct Buffers<T> {
     all: Vec<Arc<T>>,
+    make: fn() -> T,
     /// Where the search for a buffer to write starts, past the one written last, so a buffer
     /// just released is written again last.
     next: usize,
@@ -24,7 +25,7 @@ pub struct Buffers<T> {
 
 impl<T> Buffers<T> {
     /// `count` buffers, each made by `make`.
-    pub fn new(count: usize, mut make: impl FnMut() -> T) -> Self {
+    pub fn new(count: usize, make: fn() -> T) -> Self {
         assert!(count > 0);
 
         let mut all = Vec::with_capacity(count);
@@ -32,24 +33,51 @@ impl<T> Buffers<T> {
             all.push(Arc::new(make()));
         }
 
-        Self { all, next: 0 }
+        Self { all, make, next: 0 }
     }
 
     /// A buffer that nothing else holds, written by `fill`, or `None` when every buffer is
     /// held.
     pub fn write(&mut self, fill: impl FnOnce(&mut T)) -> Option<Arc<T>> {
+        let index = self.write_index()?;
+
+        Some(self.write_at(index, fill))
+    }
+
+    /// A buffer written by `fill`, made new where every buffer is held. The next buffer is the
+    /// one written longest ago, which a span has let go of once it is full, so its new one takes
+    /// its place and only the View holding it keeps it alive. The readings in memory are so
+    /// these buffers and what the Views hold.
+    fn write_replacing(&mut self, fill: impl FnOnce(&mut T)) -> Arc<T> {
+        let index = self.write_index().unwrap_or_else(|| {
+            self.all[self.next] = Arc::new((self.make)());
+            self.next
+        });
+
+        self.write_at(index, fill)
+    }
+
+    /// Where the next buffer nothing else holds lies, if one does.
+    fn write_index(&mut self) -> Option<usize> {
         let count = self.all.len();
         for offset in 0..count {
             let index = (self.next + offset) % count;
-            if let Some(buffer) = Arc::get_mut(&mut self.all[index]) {
-                fill(buffer);
-                self.next = (index + 1) % count;
-
-                return Some(Arc::clone(&self.all[index]));
+            if Arc::get_mut(&mut self.all[index]).is_some() {
+                return Some(index);
             }
         }
 
         None
+    }
+
+    fn write_at(&mut self, index: usize, fill: impl FnOnce(&mut T)) -> Arc<T> {
+        let Some(buffer) = Arc::get_mut(&mut self.all[index]) else {
+            unreachable!("the store writes only a buffer nothing else holds");
+        };
+        fill(buffer);
+        self.next = (index + 1) % self.all.len();
+
+        Arc::clone(&self.all[index])
     }
 
     /// Clears with `clear` each buffer that nothing else holds, so a buffer waiting to be
@@ -104,8 +132,8 @@ impl<T> Span<T> {
         self.buffers.release(clear);
     }
 
-    /// A span of at most `capacity` readings over `buffers`, which needs more buffers than
-    /// readings, since a View the main thread holds keeps readings the span let go of.
+    /// A span of at most `capacity` readings over `buffers`, which holds more buffers than
+    /// readings, so a View the main thread holds for a moment costs the store no new buffer.
     #[must_use]
     pub fn new(capacity: usize, buffers: Buffers<T>) -> Self {
         assert!(capacity > 0);
@@ -119,24 +147,15 @@ impl<T> Span<T> {
     }
 
     /// Adds the reading `fill` writes after the newest, letting go of the oldest when the span
-    /// is full. Returns false and changes nothing when every buffer is held, so the caller
-    /// takes the reading again at its next step.
-    pub fn push(&mut self, fill: impl FnOnce(&mut T)) -> bool {
-        if !self.has_room() {
-            return false;
-        }
-
+    /// is full. A View holding the readings keeps them, and stops nothing.
+    pub fn push(&mut self, fill: impl FnOnce(&mut T)) {
         if self.held.len() == self.capacity {
             drop(self.held.pop_front());
         }
         assert!(self.held.len() < self.capacity);
 
-        let Some(reading) = self.buffers.write(fill) else {
-            unreachable!("a span writes a reading only once a buffer is free");
-        };
-
+        let reading = self.buffers.write_replacing(fill);
         self.held.push_back(reading);
-        true
     }
 
     /// Lets go of the oldest reading, which a View may go on holding.
@@ -166,21 +185,6 @@ impl<T> Span<T> {
         count
     }
 
-    /// Whether `push` finds a buffer to write: a free one, or the oldest reading's where the
-    /// span is full and no View holds it.
-    #[must_use]
-    pub fn has_room(&self) -> bool {
-        if self.buffers.free() > 0 {
-            return true;
-        }
-
-        if self.held.len() == self.capacity {
-            self.oldest_held_only_here()
-        } else {
-            false
-        }
-    }
-
     /// The reading the next `push` lets go of, the oldest where the span is full.
     #[must_use]
     pub fn leaving(&self) -> Option<&T> {
@@ -188,15 +192,6 @@ impl<T> Span<T> {
             self.held.front().map(AsRef::as_ref)
         } else {
             None
-        }
-    }
-
-    /// Whether the oldest reading's buffer is free once the span lets go of it, since no View
-    /// holds it.
-    fn oldest_held_only_here(&self) -> bool {
-        match self.held.front() {
-            Some(oldest) => Arc::strong_count(oldest) == 2,
-            None => false,
         }
     }
 

@@ -27,6 +27,18 @@ fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {
 }
 
 #[test]
+fn a_store_reading_and_a_saved_reading_name_one_recording() {
+    // Goal: a hover the saved minutes answer belongs to the page the Store answered.
+    // Method: read one page through each route and compare the recording each names.
+    let recording = SealedRecording::new();
+
+    let store_reading = recording.read(SealedRecording::request()).unwrap();
+    let saved_reading = recording.read_saved(SealedRecording::request()).unwrap();
+
+    assert_eq!(store_reading.catalog["path"], saved_reading.catalog["path"]);
+}
+
+#[test]
 fn a_chart_request_carries_the_older_tail_and_a_hover_request_does_not() {
     // Goal: charts get the saved readings older than the full-detail context so a range of 30 or
     // 60 minutes has something to show, while a hover's preview stays cheap. Method: read a
@@ -512,7 +524,7 @@ fn a_fresh_replacement_reader_waits_for_a_request_without_opening_live_data() {
     // Goal: a restored pin's fresh worker stays idle even before its first command arrives.
     // Method: step the actual initial worker policy over a readable recording without a command.
     let recording = SealedRecording::new();
-    let worker = super::Worker::start_idle(recording.root.clone()).unwrap();
+    let worker = super::Worker::start(recording.root.clone()).unwrap();
     let mut reader = SnapshotReader::new();
 
     super::worker_step(
@@ -843,7 +855,6 @@ impl SnapshotReader {
             shared: Arc::new(Shared {
                 measurement_staged: AtomicBool::new(false),
                 measurement_taken: AtomicBool::new(false),
-                measurement_raw: AtomicBool::new(false),
                 measurement_gate: Mutex::new(None),
                 measurement_wake: Condvar::new(),
                 #[cfg(feature = "automation")]
@@ -892,6 +903,7 @@ impl SnapshotReader {
     /// the test steps the reader itself.
     fn hand_over(&self) -> Worker {
         let mut closing = Worker {
+            store: None,
             root: std::path::PathBuf::new(),
             shared: Arc::clone(&self.shared),
             thread: None,
@@ -1227,6 +1239,12 @@ impl SealedRecording {
         self.read_with(request, Worker::request)
     }
 
+    /// Reads `request` as the window reads a recording the user opened.
+    fn read_saved(&self, request: Request) -> Result<Box<super::Snapshot>, String> {
+        let mut worker = Worker::start_recorded(self.root.clone()).unwrap();
+        Self::read_through(&mut worker, request, Worker::request)
+    }
+
     /// Reads `request` as a hover's read of its second alone.
     fn inspect(&self, request: Request) -> Result<Box<super::Snapshot>, String> {
         self.read_with(request, Worker::inspect)
@@ -1451,6 +1469,7 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
     // Goal: an old worker result cannot replace the latest requested generation.
     // Method: publish both generations through the real mailbox without a background thread.
     let mut worker = Worker {
+        store: None,
         root: std::path::PathBuf::new(),
         shared: Arc::new(Shared::new()),
         thread: None,
@@ -1505,6 +1524,7 @@ fn a_new_request_ends_the_pause_between_polls() {
     // the real mailbox, send a request, and wait up to ten seconds for the pause to end, which
     // keeps the verdict independent of how busy the machine is.
     let mut worker = Worker {
+        store: None,
         root: std::path::PathBuf::new(),
         shared: Arc::new(Shared::new()),
         thread: None,

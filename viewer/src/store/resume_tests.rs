@@ -472,7 +472,7 @@ fn seconds_of(view: &super::View) -> Vec<u64> {
 }
 
 #[test]
-fn ordinary_ingestion_delivers_a_replacement_before_its_retained_view_exhausts_buffers() {
+fn ordinary_ingestion_delivers_every_reading_while_a_retained_view_holds_the_buffers() {
     // Goal: live ingestion hands over a replacement even when its current View holds old buffers.
     // Method: retain a full span, queue 65 real ring ticks, take the next View, then finish.
     let mut fixture = pressure_recording();
@@ -512,26 +512,10 @@ fn ordinary_ingestion_delivers_a_replacement_before_its_retained_view_exhausts_b
         Publication::Progress,
     )
     .unwrap();
-    let replacement = mailbox
-        .take()
-        .expect("a replacement must break buffer backpressure");
+    let replacement = mailbox.take().expect("a View of the new readings");
 
-    assert_eq!(replacement.seconds.last().unwrap().publication, 1144);
-    drop(retained);
-    drop(replacement);
-    super::step(
-        &mut held,
-        &mut ring,
-        Ok(()),
-        &mailbox,
-        None,
-        Publication::Progress,
-    )
-    .unwrap();
-    assert_eq!(
-        mailbox.take().unwrap().seconds.last().unwrap().publication,
-        1145
-    );
+    assert_eq!(replacement.seconds.last().unwrap().publication, 1145);
+    assert_eq!(retained.seconds.last().unwrap().publication, 1080);
 }
 
 fn pressure_recording() -> Fixture {
