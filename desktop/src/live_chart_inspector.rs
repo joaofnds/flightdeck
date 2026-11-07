@@ -704,8 +704,7 @@ fn chart_stack_total(panel: &Panel, view: Option<TimeWindow>) -> Option<SampleMa
 
     let mut maximum = None;
     for index in 0..count {
-        let added = chart_stack_total_reading(&lines, index)
-            .filter(|_| chart_summaries_on_plot(panel, index));
+        let added = chart_stack_total_reading(&lines, index);
         let reading = chart_data_highest(panel, Some(extremes), index, added, view);
         maximum = chart_data_higher(maximum, reading);
     }
