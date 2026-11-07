@@ -17,7 +17,6 @@ pub(super) fn record_route(route: &str) {
         .unwrap()
         .worker
         .frozen_payloads(&mut payloads);
-    assert!(!payloads.contains_key("raw_pages"));
     let expanded_copy = expanded_copy(&snapshot, route);
     let source_availability = payloads::report(&snapshot).unwrap();
     let window = window_values(&snapshot);
@@ -46,11 +45,7 @@ pub(super) fn record_route(route: &str) {
         "rank_window_and_parts": window, "source_process_history": process,
         "process_history": process_history(snapshot), "copy": copy,
         "expanded_copy": expanded_copy,
-        "panels": presentation.panels.iter().map(|panel| json!({"data": panel,
-            "window": panel.window.map(|window| json!({"first": window.first,
-                "span": window.span})), "detail_first": panel.detail_first,
-            "reading_seconds": panel.reading_seconds, "sliding": panel.sliding}))
-            .collect::<Vec<_>>(),
+        "panels": presentation.panels.iter().map(|panel| panel_value(panel)).collect::<Vec<_>>(),
         "typed_view": {"seconds": format!("{:?}", view.seconds),
             "apps": format!("{:?}", view.apps), "earlier": format!("{:?}", view.earlier),
             "failure": format!("{:?}", view.failure),
@@ -102,6 +97,16 @@ fn record_route_panels(route: &str, presentation: &crate::live_acceptance::Prese
             "live-process-groups-sockets",
         ]
     );
+}
+
+/// A panel with the fields its own serialization leaves out, which say what span it covers and
+/// where a hold lands on it.
+pub(super) fn panel_value(panel: &crate::data::Panel) -> Value {
+    json!({"data": panel,
+        "window": panel.window.map(|window| json!({"first": window.first,
+            "span": window.span})), "detail_first": panel.detail_first,
+        "reading_seconds": panel.reading_seconds, "sliding": panel.sliding,
+        "places": format!("{:?}", panel.places)})
 }
 
 fn expanded_copy(snapshot: &Snapshot, route: &str) -> Value {

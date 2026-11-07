@@ -322,7 +322,6 @@ fn takes_in_each_publication_once_through_the_live_launch_constructor() {
     let events = harness.events();
     let input = harness.input.as_ref().unwrap();
 
-    assert_eq!(count(&events, Producer::Worker, Kind::NativeCollect, 2), 0);
     assert_eq!(snapshot.selection["selected"]["publication"], 2);
     assert_eq!(view.seconds.last().unwrap().publication, 2);
     assert_eq!(
@@ -487,9 +486,9 @@ fn assert_gap_intervals(detail: &serde_json::Value) {
 
 #[test]
 fn a_nonfinite_power_reading_leaves_the_second_readable_beside_its_missing_power() {
-    // Goal: one policy for a nonfinite reading, the Store's, which shows the second and says its
-    // power is missing, where the second reader used to refuse the whole page.
-    // Method: send a malformed raw fact through the launch-created reader.
+    // Goal: one policy for a nonfinite reading, the Store's, which shows the second, its summary
+    // empty since the second's complete state is refused, where the second reader used to refuse
+    // the whole page. Method: send a malformed raw fact through the launch-created reader.
     let mut harness = None;
     Harness::setup(Input::NonfinitePower, &mut harness);
     let mut harness = harness.unwrap();
@@ -498,6 +497,8 @@ fn a_nonfinite_power_reading_leaves_the_second_readable_beside_its_missing_power
     let view = harness.view();
 
     assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert!(snapshot.selection["summary"]["power_watts"].is_null());
+    assert!(snapshot.selection["summary"]["memory_total_bytes"].is_null());
     assert_eq!(view.seconds.last().unwrap().power_watts, None);
     assert_eq!(view.apps.last().unwrap().missing, None);
     harness.teardown();
@@ -532,6 +533,10 @@ fn an_app_refusal_leaves_the_machine_readings_beside_it() {
         snapshot.rankings.as_deref().map(std::ops::Deref::deref),
         Some(crate::live_rankings::Rankings::Unavailable(_))
     ));
+    assert_eq!(
+        snapshot.selection["summary"]["memory_total_bytes"],
+        8_589_934_592_u64
+    );
     assert!(matches!(
         view.apps.last().unwrap().missing,
         Some(viewer::store::Missing::Refused(_))

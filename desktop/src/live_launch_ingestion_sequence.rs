@@ -64,6 +64,16 @@ impl Sequence {
         backend.store.as_ref().unwrap()
     }
 
+    fn store_parked(&self) {
+        for _attempt in 0..2_000 {
+            if self.store().is_paused() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the Store did not park");
+    }
+
     fn setup_writer(&mut self, recording: collector::ring::Identity) {
         let identity = collector::recording::new_run_identity(recording).unwrap();
         let root = &self.harness.root;
@@ -271,14 +281,21 @@ fn a_store_woken_after_a_hide_takes_in_what_it_missed_once() {
     sequence.publish(1, |_| {});
     sequence.harness.read_publication("cpu", 2);
     sequence.store().set_active(false);
+    sequence.store_parked();
     sequence.publish(2, |_| {});
     sequence.publish(3, |_| {});
+    let while_parked = sequence.store().take();
 
     sequence.store().set_active(true);
     sequence.harness.read_publication("cpu", 4);
     sequence.teardown();
 
+    assert_eq!(
+        while_parked.map_or(2, |view| view.seconds.last().unwrap().publication),
+        2
+    );
     let events = sequence.harness.events();
+    super::routes::assert_worker_took_in_nothing(&events);
     for publication in [3, 4] {
         for kind in [
             super::Kind::MachineReduction,
@@ -288,11 +305,6 @@ fn a_store_woken_after_a_hide_takes_in_what_it_missed_once() {
             assert_eq!(
                 super::count(&events, super::Producer::Store, kind, publication),
                 1,
-                "{kind:?} {publication}"
-            );
-            assert_eq!(
-                super::count(&events, super::Producer::Worker, kind, publication),
-                0,
                 "{kind:?} {publication}"
             );
         }

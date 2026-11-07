@@ -556,15 +556,10 @@ fn a_fresh_replacement_reader_waits_for_a_request_without_opening_live_data() {
     // Goal: a restored pin's fresh worker stays idle even before its first command arrives.
     // Method: step the actual initial worker policy over a readable recording without a command.
     let recording = SealedRecording::new();
-    let worker = super::Worker::start(recording.root.clone()).unwrap();
+    let shared = Arc::new(super::Shared::new());
     let mut reader = SnapshotReader::new();
 
-    super::worker_step(
-        &recording.root,
-        &worker.shared,
-        &mut reader.reader,
-        &mut None,
-    );
+    super::worker_step(&recording.root, &shared, &mut reader.reader, &mut None);
 
     assert!(reader.reader.session.is_none());
 }

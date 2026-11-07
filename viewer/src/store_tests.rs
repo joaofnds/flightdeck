@@ -633,10 +633,13 @@ fn a_recording_not_yet_made_holds_a_query_with_no_failure() {
     let store = Store::start_with_budget(&fixture.root, budget).unwrap();
     let handle = store.query_handle().unwrap();
     handle.submit(latest_request()).unwrap();
+    thread::sleep(3 * super::WAIT);
+    let while_away = handle.take();
 
     fs::rename(&away, &fixture.root).unwrap();
     let reply = next_reply(&handle);
 
+    assert!(while_away.is_none());
     assert!(!matches!(reply, super::QueryOutcome::Unavailable(_)));
 }
 

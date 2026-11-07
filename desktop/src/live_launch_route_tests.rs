@@ -1,5 +1,7 @@
 //! Every page the app registers, read through the live launch.
 
+use std::collections::BTreeMap;
+
 use persistence::work::ingestion::{Event, Kind, Producer};
 use serde_json::{Value, json};
 
@@ -53,40 +55,44 @@ fn every_page_of_the_newest_second_shows_what_the_saved_route_shows() {
     // every page the app registers through the live launch and through a saved recording's
     // reader over the same recording, and compare what each page draws and copies.
     let mut pages = Pages::new();
+    let mut live = BTreeMap::new();
+    let mut saved = BTreeMap::new();
 
     for (route, _) in ROUTES {
-        let live = pages.live_newest(route);
-        let saved = pages.saved(request(route), Worker::request);
-
-        assert_eq!(
-            shown(route, &request(route), live),
-            shown(route, &request(route), saved),
-            "{route}"
-        );
+        let live_page = pages.live_newest(route);
+        let saved_page = pages.saved(request(route), Worker::request);
+        live.insert(route, shown(route, &request(route), live_page));
+        saved.insert(route, shown(route, &request(route), saved_page));
     }
+
+    assert_eq!(live, saved);
 }
 
 #[test]
 fn every_page_past_its_first_rows_shows_what_the_saved_route_shows() {
     // Goal: paging reads the same rows, whichever route answers. Method: read every page the app
-    // registers past the first row of each of its tables through both readers, and compare what
-    // each page draws and copies.
+    // registers past the first App and past the first member of the selected App through both
+    // readers, and compare what each page draws and copies. The fixture has one CPU, so a page of
+    // CPUs past the first is not compared here.
     let mut pages = Pages::new();
+    let mut live = BTreeMap::new();
+    let mut saved = BTreeMap::new();
 
     for (route, _) in ROUTES {
         let mut past_first = request(route);
         past_first.apps_offset = 1;
         past_first.members_offset = 1;
-        past_first.cpu_offset = 32;
-        let live = pages.live_newest_of(past_first.clone());
-        let saved = pages.saved(past_first.clone(), Worker::request);
-
-        assert_eq!(
-            shown(route, &past_first, live),
-            shown(route, &past_first, saved),
-            "{route}"
-        );
+        past_first.app = Some(crate::live_source::AppKey {
+            kind: "bundle".into(),
+            bytes_hex: crate::live_source::app_key_bytes_hex(source::APP),
+        });
+        let live_page = pages.live_newest_of(past_first.clone());
+        let saved_page = pages.saved(past_first.clone(), Worker::request);
+        live.insert(route, shown(route, &past_first, live_page));
+        saved.insert(route, shown(route, &past_first, saved_page));
     }
+
+    assert_eq!(live, saved);
 }
 
 #[test]
@@ -95,18 +101,39 @@ fn every_page_of_a_held_second_shows_what_the_saved_route_shows() {
     // the first second, by its identity, on every page through both readers, and compare what
     // each page draws and copies.
     let mut pages = Pages::new();
+    let mut live = BTreeMap::new();
+    let mut saved = BTreeMap::new();
 
     for route in routes_of_a_held_second() {
         let held = pages.held_request(route);
-        let live = pages.harness.read_request(held.clone()).unwrap();
-        let saved = pages.saved(held.clone(), Worker::request);
-
-        assert_eq!(
-            shown(route, &held, live),
-            shown(route, &held, saved),
-            "{route}"
-        );
+        let live_page = pages.harness.read_request(held.clone()).unwrap();
+        let saved_page = pages.saved(held.clone(), Worker::request);
+        live.insert(route, shown(route, &held, live_page));
+        saved.insert(route, shown(route, &held, saved_page));
     }
+
+    assert_eq!(live, saved);
+}
+
+#[test]
+fn every_page_of_a_second_held_on_a_chart_shows_what_the_saved_route_shows() {
+    // Goal: a second picked on a chart, which names no exact reading, reads the same on every
+    // page, whichever route answers it. Method: read the first second with no identity on every
+    // page through both readers, and compare what each page draws and copies.
+    let mut pages = Pages::new();
+    let mut live = BTreeMap::new();
+    let mut saved = BTreeMap::new();
+
+    for route in routes_of_a_held_second() {
+        let mut held = pages.held_request(route);
+        held.identity = None;
+        let live_page = pages.harness.read_request(held.clone()).unwrap();
+        let saved_page = pages.saved(held.clone(), Worker::request);
+        live.insert(route, shown(route, &held, live_page));
+        saved.insert(route, shown(route, &held, saved_page));
+    }
+
+    assert_eq!(live, saved);
 }
 
 #[test]
@@ -165,16 +192,48 @@ fn the_computer_page_copies_a_held_second_no_identity_names() {
 #[test]
 fn the_self_page_waits_for_no_second_a_hold_names() {
     // Goal: a hold on a second with no readings refuses no page that shows none of its own, and
-    // Self-monitoring shows only the app's figures. Method: hold a second before any reading,
-    // and read the Self-monitoring page through the live launch.
-    let mut pages = Pages::new();
-    let mut held = pages.held_request("self");
+    // Self-monitoring shows only the app's figures, so it reads no saved minute for it. Method:
+    // hold a second before any reading, read the Self-monitoring page through the live launch,
+    // and look for work the reader did.
+    let mut harness = None;
+    Harness::setup(Input::Sealed(SourceLayout::Identity), &mut harness);
+    let mut harness = harness.unwrap();
+    harness.read_publication("overview", 2);
+    let mut held = request("self");
     held.second = Some(source::SECOND_FIRST - 3_600);
-    held.identity = None;
 
-    let live = pages.harness.read_request(held);
+    let live = harness.read_request(held);
+    harness.teardown();
 
     assert!(live.is_ok(), "{:?}", live.err());
+    let events = harness.events();
+    assert_eq!(saved_reads(&events), 0);
+}
+
+#[test]
+fn a_second_past_the_store_is_read_only_as_history() {
+    // Goal: a second past the Store's hour costs saved reads the count of a publication's work
+    // leaves out, and those reads are all the reader does. Method: hold a second two hours older
+    // than the newest through a reader of the Store, and class the reader's work.
+    let recording = crate::live_source::tests::SealedRecording::with_a_minute_past_the_store_hour();
+    let trace = persistence::work::ingestion::Trace::new(
+        collector::recording::read_identity(&recording.root).unwrap(),
+    );
+    let scope = trace.enter();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let mut live = Worker::start_from_store(recording.root.clone(), handle).unwrap();
+
+    let held = finished_page(&mut live, OlderPages::held("cpu"));
+    live.stop();
+    drop(store);
+    drop(scope);
+
+    assert_eq!(held.selection["second"], OlderPages::SECOND);
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    let reader = || events.iter().filter(|e| e.producer == Producer::Worker);
+    assert!(reader().count() > 0);
+    assert_eq!(saved_reads(&events), reader().count());
 }
 
 #[test]
@@ -213,7 +272,16 @@ fn every_page_of_a_second_older_than_the_store_holds_shows_what_the_saved_route_
 
 /// Refuses any reading of the ring by the worker, whatever it was made for: one made for a page's
 /// older tail still takes in what the Store took in.
-fn assert_worker_took_in_nothing(events: &[Event]) {
+/// What the reader did under the purpose of reading saved minutes.
+fn saved_reads(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|event| event.producer == Producer::Worker)
+        .filter(|event| event.purpose == persistence::work::ingestion::Purpose::History)
+        .count()
+}
+
+pub(super) fn assert_worker_took_in_nothing(events: &[Event]) {
     for kind in [
         Kind::MachineReduction,
         Kind::AppDerivation,
@@ -406,7 +474,8 @@ fn shown(route: &str, request: &Request, snapshot: Box<Snapshot>) -> Value {
 
     let mut shown = json!({"route": route, "tables": tables, "ranks": ranks, "rankings": rankings,
         "process_history": process_history, "cpu_history": cpu_history,
-        "panels": presentation.panels.iter().map(|panel| json!(panel)).collect::<Vec<_>>(),
+        "panels": presentation.panels.iter().map(|panel| super::output::panel_value(panel))
+            .collect::<Vec<_>>(),
         "copy": copied});
     shown_comparable(&mut shown);
 

@@ -1318,8 +1318,10 @@ fn a_second_held_on_overview_keeps_the_view_while_the_store_goes_on(cx: &mut gpu
     }
 
     let kept = cx.update(|cx| page.read(cx).store_view.clone().unwrap());
+    let newer = newer_store_view(cx, drawn.version);
+
     assert!(Arc::ptr_eq(&kept, &drawn));
-    assert!(cx.update(|cx| cx.global::<super::LiveStore>().0.is_active()));
+    assert!(newer.version > drawn.version);
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
 
@@ -1506,4 +1508,16 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     assert_eq!(delivered, Some(2));
     assert!(!cx.update(|cx| page.read(cx).awaiting_reply()));
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
+}
+
+/// The Store's next View newer than `version`, which it hands over whatever View a page keeps.
+fn newer_store_view(cx: &mut gpui::TestAppContext, version: u64) -> Arc<View> {
+    for _attempt in 0..2_000 {
+        let taken = cx.update(|cx| super::take_store_view(cx));
+        if let Some(view) = taken.filter(|view| view.version > version) {
+            return view;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the Store handed over no newer View");
 }
