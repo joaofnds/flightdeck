@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 
@@ -46,7 +47,11 @@ impl Envelope {
 }
 
 fn capture(options: &command::Capture<'_>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session = viewer::LiveSession::open(options.recording)?;
+    let mut session = viewer::LiveSession::open_history_with(
+        options.recording,
+        Arc::new(viewer::Cancellation::default()),
+        0,
+    )?;
     let selection = session.select(options.second, options.alternative)?;
     let history = session.app_history(options.kind, &options.bytes)?;
     let value = json!({"schema_version":1,"route":"apps","app":options.key,

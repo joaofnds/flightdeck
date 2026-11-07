@@ -7,7 +7,7 @@ mod payload;
 pub mod presentation;
 #[cfg(test)]
 #[path = "live_store_reader/tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 use std::sync::Arc;
 use std::time::Instant;

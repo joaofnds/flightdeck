@@ -10,8 +10,6 @@ mod diagnostics;
 mod ownership;
 #[path = "live_native_measurement_payloads.rs"]
 pub(crate) mod payloads;
-#[path = "live_native_measurement_raw.rs"]
-pub(crate) mod raw;
 #[path = "live_native_measurement_selection.rs"]
 mod selection;
 
@@ -143,8 +141,7 @@ fn measures_complete_worker_routes_on_one_frozen_native_recording() {
     let phase = std::env::var("FLIGHTDECK_ITEM1_PHASE").unwrap();
     match phase.as_str() {
         "cold" | "correctness" => measure_route(root, &route, &expected),
-        "raw" => raw::run(root, &route, &expected),
-        _ => panic!("phase must be cold, correctness or raw"),
+        _ => panic!("phase must be cold or correctness"),
     }
 }
 
@@ -357,8 +354,8 @@ fn copies_native_readings_exactly_and_refuses_json_past_one_mibibyte() {
     let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     fixture.publish_resources();
     fixture.publish_resources();
+    super::super::store_reader::tests::seal_recording(&fixture, 0);
     let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
     let mut snapshot = reader.read_at(&fixture.root).unwrap().unwrap();
     let copy = |snapshot: &crate::live_source::Snapshot| {
         crate::native_workflows::selected_copy(Some(snapshot), &reader.command.request, None)

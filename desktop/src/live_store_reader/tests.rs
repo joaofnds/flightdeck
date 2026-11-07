@@ -876,7 +876,7 @@ impl persistence::worker::Derive for SealUnderived {
 }
 
 /// Saves what the ring holds of the run through `minute`, with the persister's own worker.
-fn seal_recording(recording: &LiveRecording, minute: u64) {
+pub(in crate::live_source) fn seal_recording(recording: &LiveRecording, minute: u64) {
     let registry = collector::recording::Registry::read(&recording.root).unwrap();
     let store = persistence::Store::open(&recording.root).unwrap();
     persistence::worker::seal_held_windows(

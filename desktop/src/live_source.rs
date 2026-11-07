@@ -879,8 +879,7 @@ fn reader_snapshot(
         early,
         kept_tail_only,
     } = reader_snapshot_plan(reader, &command.request.route);
-    let first_snapshot = reader.last_generation != command.generation;
-    let arrivals = reader_snapshot_arrivals(reader, command, first_snapshot);
+    let arrivals = reader_snapshot_arrivals(command);
     let session = reader_snapshot_session(&mut reader.session, root, command, shared, arrivals)?;
     let catalog = session.catalog();
     if published {
@@ -991,38 +990,21 @@ fn reader_snapshot_histories(session: &LiveSession, snapshot: &Snapshot) -> Hist
 /// What a reader's session does before a read to learn what arrived since the last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Arrivals {
-    /// It reads the ring and the saved minutes, as the only reader of a saved recording.
-    Read,
     /// It lists the saved minutes, since the Store alone takes in the live Mac's readings.
     List,
     /// It reads from what it already knows, as a step that keeps its endpoint does.
     Leave,
 }
 
-fn reader_snapshot_arrivals(reader: &Reader, command: &Command, first_snapshot: bool) -> Arrivals {
-    let due = if route_shows_no_reading(&command.request.route) {
-        true
+fn reader_snapshot_arrivals(command: &Command) -> Arrivals {
+    if command.request.second.is_none() {
+        Arrivals::List
     } else {
-        match command.mode {
-            SourceMode::Live => match command.request.second {
-                None => true,
-                Some(_) => first_snapshot && command.context == Context::Select,
-            },
-            SourceMode::Recorded => command.request.second.is_none(),
-        }
-    };
-    if !due {
-        return Arrivals::Leave;
+        Arrivals::Leave
     }
-    if reader.store.is_some() {
-        return Arrivals::List;
-    }
-
-    Arrivals::Read
 }
 
-/// The reader's session, opened on the first read and begun for the command's epoch. A session
-/// that reads a ring catches it up first, then keeps that endpoint while deferred work finishes.
+/// The reader's session, opened on the first read and begun for the command's epoch.
 fn reader_snapshot_session<'session>(
     slot: &'session mut Option<LiveSession>,
     root: &std::path::Path,
@@ -1033,13 +1015,8 @@ fn reader_snapshot_session<'session>(
     let session = if let Some(session) = slot {
         session
     } else {
-        let open = if command.context == Context::Restore {
-            LiveSession::open_history_with
-        } else {
-            LiveSession::open_with
-        };
         slot.insert(
-            open(root, Arc::clone(&shared.cancellation), command.epoch)
+            LiveSession::open_history_with(root, Arc::clone(&shared.cancellation), command.epoch)
                 .map_err(|error| error.to_string())?,
         )
     };
@@ -1049,14 +1026,13 @@ fn reader_snapshot_session<'session>(
     #[cfg(test)]
     measurement::checkpoint(shared, command.generation, measurement::Stage::Reading);
     match arrivals {
-        Arrivals::Read => {
-            session.poll().map_err(|error| {
+        Arrivals::List => {
+            session.list_saved().map_err(|error| {
                 #[cfg(test)]
                 measurement::interrupted(shared, command.generation, &error);
                 error.to_string()
             })?;
         }
-        Arrivals::List => session.list_saved().map_err(|error| error.to_string())?,
         Arrivals::Leave => {}
     }
 
@@ -1168,8 +1144,7 @@ fn reader_computer(
     shared: &Shared,
     published: bool,
 ) -> Result<Option<Box<Snapshot>>, String> {
-    let first_snapshot = reader.last_generation != command.generation;
-    let arrivals = reader_snapshot_arrivals(reader, command, first_snapshot);
+    let arrivals = reader_snapshot_arrivals(command);
     let session = reader_snapshot_session(&mut reader.session, root, command, shared, arrivals)?;
     let catalog = session.catalog();
     if published {
@@ -1299,10 +1274,6 @@ fn reader_earlier(
 
 fn reader_latest(session: &mut LiveSession) -> Result<Value, String> {
     let catalog = session.catalog();
-    if !catalog["latest_observation"].is_null() {
-        return session.follow_latest().map_err(|error| error.to_string());
-    }
-
     if let Some(second) = catalog["last_second"].as_u64() {
         let first = session
             .select(second, 0)

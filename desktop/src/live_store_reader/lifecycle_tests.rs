@@ -482,6 +482,107 @@ fn an_answer_no_page_waits_for_leaves_the_pause_to_run() {
 }
 
 #[test]
+fn a_page_opened_before_any_minute_is_saved_shows_its_app_histories_at_once() {
+    // Goal: a launch over a recording that has saved no minute yet fills its App charts with its
+    // first readings, since reading them replays no saved minute.
+    // Method: open Overview on the Store of a ring with no saved history.
+    let (recording, _store, handle) = store_answering();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("overview");
+    adapter.command.request.load_app_attribution_history = true;
+
+    let Update::Ready(opened) = adapter.update_within(Duration::from_secs(10)) else {
+        panic!("the page did not open");
+    };
+
+    assert!(!opened.histories_pending);
+    assert!(crate::live_source::tests::overview_ready(&opened));
+}
+
+#[test]
+fn a_resting_reader_selects_a_second_published_since_its_last_read() {
+    // Goal: Pause can select a reading already shown by the Store while the page reader rests.
+    // Method: rest the reader, publish another second, then ask for it.
+    let (mut recording, _store, handle) = store_answering();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("network");
+    adapter.update_within(Duration::from_secs(10));
+    adapter.reader.store.as_mut().unwrap().rest();
+    recording.publish_resources();
+    let mut held = request("network");
+    held.second = Some(recording.last_second());
+    adapter.submit(held, crate::live_source::Context::Select);
+
+    let selected = adapter.finished_within(Duration::from_secs(10));
+
+    assert_eq!(selected.selection["second"], recording.last_second());
+    assert_eq!(selected.selection["selected"]["publication"], 3);
+    assert!(!selected.selection["summary"].is_null());
+}
+
+#[test]
+fn restoring_a_pin_finishes_its_histories_on_its_own_second() {
+    // Goal: a restored pin stays on its second with its histories read, whatever arrived since.
+    // Method: read a page, publish another reading, then restore the first page's second.
+    let (mut recording, _store, handle) = store_answering();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("memory");
+    let initial = adapter.finished_within(Duration::from_secs(10));
+    let second = initial.selection["second"].as_u64().unwrap();
+    recording.publish_resources();
+    let mut pinned = request("memory");
+    pinned.second = Some(second);
+    adapter.submit(pinned, crate::live_source::Context::Restore);
+
+    let restored = adapter.finished_within(Duration::from_secs(10));
+
+    assert_eq!(restored.selection["second"], second);
+    assert_ne!(second, recording.last_second());
+}
+
+#[test]
+fn live_network_ingestion_runs_the_worker_without_staging_queries_or_string_tables() {
+    // Goal: the worker's ordinary read of a followed page has no eager table work.
+    // Method: step the reader on this thread over a Store that follows a ring, reading Network.
+    let (recording, _store, handle) = store_answering();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("network");
+    let measured = persistence::work::observe();
+
+    let snapshot = adapter.finished_within(Duration::from_secs(10));
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert_eq!(snapshot.selection["summary"]["cpu_percent"], 50.0);
+    assert_eq!(snapshot.selection["summary"]["network_rx_bps"], 1.0);
+    assert_eq!(measured.counts(), persistence::work::Counts::default());
+}
+
+#[test]
+fn live_overview_formats_no_cell() {
+    // Goal: Overview reads its fan speed from the reading, without formatting a raw page.
+    // Method: step the reader on this thread over a Store that follows one measured fan row.
+    let (recording, _store, handle) = store_answering();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("overview");
+    let measured = persistence::work::observe();
+
+    let snapshot = adapter.finished_within(Duration::from_secs(10));
+
+    assert_eq!(snapshot.selection["summary"]["fan_rpm"][0], 1234.0);
+    let work = measured.counts();
+    assert_eq!(work.staged_ticks, 0);
+    assert_eq!(work.frames, 0);
+    assert_eq!(work.sql_plans, 0);
+    assert_eq!(work.collections, 0);
+    assert_eq!(work.string_cells, 0);
+}
+
+#[test]
 fn a_page_the_saved_minutes_answer_reads_the_rest_at_once() {
     // Goal: a page reads the rest of what the saved minutes answer straight after showing its first
     // part, since it asks the Store nothing it has to wait for.

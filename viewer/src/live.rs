@@ -265,14 +265,18 @@ impl LiveSession {
         Ok(())
     }
 
-    /// Lists what the recording saved since the session last looked, and reads no ring, for a
-    /// session whose live readings a Store takes in. A refused list leaves the session with the
-    /// minutes it knows and says why beside them, as a poll does.
+    /// Lists what the recording saved since the session last looked, and reads no ring, since a
+    /// Store takes in the live Mac's readings. A recording whose identity no longer reads refuses
+    /// the list. A refused list of its minutes leaves the session with the minutes it knows and
+    /// says why beside them.
     pub fn list_saved(&mut self) -> Result<()> {
         let operation = self.operation.begin(self.operation.epoch())?;
-        operation.run(|| match self.refresh_history() {
-            Ok(()) => Ok(()),
-            Err(error) => self.history_failure(error),
+        operation.run(|| {
+            collector::recording::read_identity(&self.root)?;
+            match self.refresh_history() {
+                Ok(()) => Ok(()),
+                Err(error) => self.history_failure(error),
+            }
         })
     }
 

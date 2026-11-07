@@ -36,8 +36,9 @@ target/release/flightdeck --recording /path/to/session.recording --live-check --
 target/release/flightdeck --recording /path/to/session.recording --live-soak --seconds 900
 ```
 
-The Live control in a Recorded window follows new readings from that recording
-through the existing reader. It does not start a collector or acquire shutdown ownership.
+A recording opened while it records shows through its newest saved minute. The Live control
+in a Recorded window and Refresh pick up the minutes saved since. They do not start a
+collector or acquire shutdown ownership.
 
 A build with the `automation` feature can be driven without the screen. With
 `--control SOCKET` the window opens hidden and answers one command

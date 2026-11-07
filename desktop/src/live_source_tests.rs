@@ -151,23 +151,6 @@ fn a_page_opened_over_minutes_that_keep_their_app_parts_publishes_its_app_histor
 }
 
 #[test]
-fn a_page_opened_before_any_minute_is_saved_publishes_its_app_histories_at_once() {
-    // Goal: a launch over a recording that has saved no minute yet fills its App charts with
-    // its first readings, since reading them replays no saved minute.
-    // Method: publish two ticks to a live ring with no saved history and open Overview.
-    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish();
-    recording.publish();
-    let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
-
-    let opened = reader.read_at(&recording.root).unwrap().unwrap();
-
-    assert!(!opened.histories_pending);
-    assert!(overview_ready(&opened));
-}
-
-#[test]
 fn a_memory_page_opened_over_minutes_that_keep_their_app_parts_publishes_its_history_at_once() {
     // Goal: the Memory page fills its resident chart with its first readings where its saved
     // minutes keep their Apps' parts, as Overview does.
@@ -265,6 +248,75 @@ fn a_session_told_to_list_takes_in_a_minute_saved_after_it_opened() {
 
     assert_eq!(left, opened);
     assert_eq!(listed, opened + 1);
+}
+
+#[test]
+fn a_recording_opened_while_it_records_shows_through_its_newest_saved_minute() {
+    // Goal: a saved window reads what the recording saved and none of what it only published, since
+    // the Store alone reads the ring. Method: save two readings of a recording, publish a third,
+    // and read the recording as saved.
+    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    crate::live_source::store_reader::tests::seal_recording(&recording, 0);
+    let saved = recording.last_second();
+    recording.publish_resources();
+
+    let snapshot = SnapshotReader::new()
+        .read_at(&recording.root)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(snapshot.catalog["last_second"], saved);
+    assert_ne!(saved, recording.last_second());
+}
+
+#[test]
+fn a_chosen_second_leaves_the_list_to_a_read_of_the_newest() {
+    // Goal: choosing a second costs no list, since a list reopens the recording. Method: read the
+    // recording, save a minute past its readings, and choose a second it holds.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let listed = reader.read_complete(&recording).catalog["last_second"].clone();
+    recording.seal_older_minute(9000);
+    reader.command.generation += 1;
+    reader.command.request.second = Some(2200);
+
+    let chosen = reader.read_complete(&recording);
+
+    assert_eq!(chosen.catalog["last_second"], listed);
+}
+
+#[test]
+fn a_second_saved_before_the_last_list_opens_once_saved() {
+    // Goal: a chosen second finds a minute saved since the reader last listed, inside the span it
+    // holds. Method: read the recording, save a minute between its readings and choose its second.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    recording.seal_older_minute(1100);
+    reader.command.generation += 1;
+    reader.command.request.second = Some(1100);
+
+    let chosen = reader.read_complete(&recording);
+
+    assert_eq!(chosen.selection["second"], 1100);
+}
+
+#[test]
+fn a_second_saved_after_the_last_list_opens_once_saved() {
+    // Goal: a chosen second finds a minute saved since the reader last listed, past all it holds.
+    // Method: read the recording, save a minute after its newest reading and choose its second.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    recording.seal_older_minute(3000);
+    reader.command.generation += 1;
+    reader.command.request.second = Some(3000);
+
+    let chosen = reader.read_complete(&recording);
+
+    assert_eq!(chosen.selection["second"], 3000);
 }
 
 #[test]
@@ -497,61 +549,6 @@ fn a_handed_over_reader_leaves_its_session_where_it_is() {
 }
 
 #[test]
-fn a_resting_reader_selects_a_second_published_since_its_last_read() {
-    // Goal: Pause can select a reading already shown by the store while the page reader rests.
-    // Method: rest a real ring reader, publish another second, then request it through its handle.
-    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish();
-    let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
-    reader.read_at(&recording.root).unwrap().unwrap();
-    let mut kept = reader.hand_over();
-    assert_eq!(reader.receive(), (super::Received::Continued, false));
-    recording.publish();
-    let mut request = SealedRecording::request();
-    request.second = Some(recording.last_second());
-
-    kept.request(request).unwrap();
-    assert!(reader.receive().1);
-    let selected = reader.read_at(&recording.root).unwrap().unwrap();
-
-    assert_eq!(selected.selection["second"], recording.last_second());
-    assert_eq!(selected.selection["selected"]["publication"], 2);
-    assert_eq!(
-        selected.selection["selected"]["wall_ns"],
-        1_001_000_000_000_u64
-    );
-    assert!(!selected.selection["summary"].is_null());
-}
-
-#[test]
-fn restoring_a_pin_finishes_its_histories_without_ingesting_new_live_arrivals() {
-    // Goal: even a pin awaiting histories never follows the recording on restoration.
-    // Method: restore a known second after another publication and inspect the session catalog.
-    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish();
-    let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
-    let initial = reader.read_at(&recording.root).unwrap().unwrap();
-    let second = initial.selection["second"].as_u64().unwrap();
-    let mut kept = reader.hand_over();
-    assert_eq!(reader.receive(), (super::Received::Continued, false));
-    recording.publish();
-    let mut request = SealedRecording::request();
-    request.second = Some(second);
-
-    kept.restore(request).unwrap();
-    assert!(reader.receive().1);
-    let restored = reader.read_at(&recording.root).unwrap().unwrap();
-    let histories = reader.read_at(&recording.root).unwrap().unwrap();
-
-    assert_eq!(restored.selection["second"], second);
-    assert!(!histories.histories_pending);
-    assert_eq!(reader.session().catalog()["last_second"], second);
-    assert_ne!(second, recording.last_second());
-}
-
-#[test]
 fn a_fresh_replacement_reader_waits_for_a_request_without_opening_live_data() {
     // Goal: a restored pin's fresh worker stays idle even before its first command arrives.
     // Method: step the actual initial worker policy over a readable recording without a command.
@@ -631,47 +628,21 @@ fn a_window_that_takes_the_resting_reader_renews_its_step_limit() {
 }
 
 #[test]
-fn a_window_keeps_reading_new_observations_across_its_step_limit() {
-    // Goal: a window left open keeps its live readings when a bounded run of steps ends.
-    // Method: exhaust one-step leases over a real live ring, publishing another observation
-    // between them, and take the snapshots the same reader delivers.
-    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish();
-    let mut reader = SnapshotReader::new();
-    let mut command = SnapshotReader::command();
-    command.mode = crate::live_source_mode::SourceMode::Live;
-    let mut command = Some(command);
-
-    let first = reader.lease(&recording.root, &mut command, 1);
-
-    let output = reader.shared.mailbox.lock().unwrap().output.take();
-    let Some(Update::Ready(snapshot)) = output else {
-        panic!("The worker did not publish live readings at its step limit");
-    };
-    assert_eq!(snapshot.selection["selected"]["publication"], 1);
-    assert_eq!(first, super::Lease::Renewed);
-
-    recording.publish();
-    let second = reader.lease(&recording.root, &mut command, 1);
-
-    let output = reader.shared.mailbox.lock().unwrap().output.take();
-    let Some(Update::Ready(snapshot)) = output else {
-        panic!("The worker did not publish the next live observation");
-    };
-    assert_eq!(snapshot.selection["selected"]["publication"], 2);
-    assert_eq!(second, super::Lease::Renewed);
-}
-
-#[test]
 fn a_window_automatically_reads_the_next_batch_when_its_step_run_ends() {
     // Goal: the worker renews exhausted step runs without the window restarting it.
-    // Method: start the real worker with one-step runs and request two live observations.
+    // Method: start the real worker over a Store with one-step runs, and read a reading published
+    // after the first read.
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish();
+    recording.publish_resources();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
     let mut worker = Worker::start_reader(
         recording.root.clone(),
         crate::live_source_mode::SourceMode::Live,
-        None,
+        Some(store.query_handle().unwrap()),
         1,
     )
     .unwrap();
@@ -679,13 +650,17 @@ fn a_window_automatically_reads_the_next_batch_when_its_step_run_ends() {
         SealedRecording::read_through(&mut worker, SealedRecording::request(), Worker::request)
             .unwrap();
 
-    recording.publish();
-    let next =
-        SealedRecording::read_through(&mut worker, SealedRecording::request(), Worker::request)
-            .unwrap();
+    recording.publish_resources();
+    let next = (0..1000).find_map(|_attempt| {
+        let page =
+            SealedRecording::read_through(&mut worker, SealedRecording::request(), Worker::request)
+                .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        (page.selection["selected"]["publication"] == 2).then_some(page)
+    });
 
     assert_eq!(first.selection["selected"]["publication"], 1);
-    assert_eq!(next.selection["selected"]["publication"], 2);
+    assert!(next.is_some());
 }
 
 #[test]
@@ -819,7 +794,7 @@ fn a_failed_read_of_a_pages_app_histories_pauses_before_its_retry() {
 }
 
 /// Whether the snapshot carries the Overview's App histories, each read rather than failed.
-fn overview_ready(snapshot: &super::Snapshot) -> bool {
+pub(crate) fn overview_ready(snapshot: &super::Snapshot) -> bool {
     use crate::live_app_attribution_history::AppAttributionHistory;
     let Some(histories) = &snapshot.overview_app_histories else {
         return false;
@@ -1599,49 +1574,6 @@ fn a_new_request_ends_the_pause_between_polls() {
 
     ending.recv_timeout(Duration::from_secs(10)).unwrap();
     pausing.join().unwrap();
-}
-
-#[test]
-fn live_network_ingestion_runs_the_worker_without_staging_queries_or_string_tables() {
-    // Goal: the production worker's ordinary populated live path has no eager table work.
-    // Method: step the existing worker harness over a registered native ring and read Network.
-    let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    fixture.publish_resources();
-    fixture.publish_resources();
-    let mut worker = SnapshotReader::new();
-    worker.command.mode = crate::live_source_mode::SourceMode::Live;
-    worker.command.request.route = "network".into();
-    let measured = persistence::work::observe();
-
-    let snapshot = worker.read_at(&fixture.root).unwrap().unwrap();
-
-    assert_eq!(snapshot.selection["selected"]["publication"], 2);
-    assert_eq!(snapshot.selection["summary"]["cpu_percent"], 50.0);
-    assert_eq!(snapshot.selection["summary"]["network_rx_bps"], 1.0);
-    assert!(!snapshot.histories_pending);
-    assert_eq!(measured.counts(), persistence::work::Counts::default());
-}
-
-#[test]
-fn live_overview_formats_no_cell() {
-    // Goal: Overview reads its fan speed from the reading, without formatting a raw page.
-    // Method: run the production worker on a private native source with one measured fan row.
-    let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    fixture.publish_resources();
-    fixture.publish_resources();
-    let mut worker = SnapshotReader::new();
-    worker.command.mode = crate::live_source_mode::SourceMode::Live;
-    let measured = persistence::work::observe();
-
-    let snapshot = worker.read_at(&fixture.root).unwrap().unwrap();
-
-    assert_eq!(snapshot.selection["summary"]["fan_rpm"][0], 1234.0);
-    let work = measured.counts();
-    assert_eq!(work.staged_ticks, 0);
-    assert_eq!(work.frames, 0);
-    assert_eq!(work.sql_plans, 0);
-    assert_eq!(work.collections, 0);
-    assert_eq!(work.string_cells, 0);
 }
 
 #[path = "live_native_measurement_tests.rs"]

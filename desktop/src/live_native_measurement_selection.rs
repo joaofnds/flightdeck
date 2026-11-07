@@ -37,8 +37,8 @@ fn keeps_the_followed_context_while_reading_an_exact_older_hover_identity() {
     let mut fixture = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     fixture.publish_resources();
     fixture.publish_resources();
+    super::super::super::store_reader::tests::seal_recording(&fixture, 0);
     let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.command.request.route = "network".into();
     let (latest, _) = read_complete(&mut reader, &fixture.root);
     let expected = serde_json::json!({"selected": latest.selection["trends"][0],
@@ -46,7 +46,6 @@ fn keeps_the_followed_context_while_reading_an_exact_older_hover_identity() {
         "kept_observations": latest.selection["trends"]});
     drop(reader);
     let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.command.request.route = "network".into();
     configure(&mut reader, &fixture.root, &expected, "hover");
 
