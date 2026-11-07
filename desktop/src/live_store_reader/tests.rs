@@ -651,6 +651,11 @@ impl Harness {
     fn store_behind_the_newest_reading(&mut self) {
         let store = self.store.as_ref().unwrap();
         store.set_active(false);
+        Self::wait_until_paused(store);
+        self.recording.as_mut().unwrap().publish_resources();
+    }
+
+    fn wait_until_paused(store: &viewer::store::Store) {
         let deadline = Instant::now() + Duration::from_secs(10);
         for _ in 0..1000 {
             if store.is_paused() {
@@ -660,7 +665,6 @@ impl Harness {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(store.is_paused());
-        self.recording.as_mut().unwrap().publish_resources();
     }
 
     fn store_active(&self) {

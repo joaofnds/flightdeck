@@ -21,8 +21,10 @@ use viewer::store::{
 
 use super::{Command, Context, Earlier, Histories, Presentation, Reader, Shared, Snapshot, Update};
 
-/// Steps of the worker a query may meet the Store's limit on contexts before the page says so.
-const CONTEXT_WAITS_MAX: u32 = 20;
+/// Steps of the worker, ten seconds of them at its pace, a page waits for the Store to answer it.
+/// Past them the saved minutes answer, or the limit on contexts says so, since a Store that cannot
+/// prove what it holds or has no recording to read would otherwise hold the page for ever.
+const STORE_WAITS_MAX: u32 = 40;
 
 /// What one step of the reader found.
 enum Reading {
@@ -41,7 +43,7 @@ pub(super) struct StoreReader {
     published: u64,
     /// The page's older readings come with a later step's reading.
     tail_pending: bool,
-    context_waits: u32,
+    store_waits: u32,
 }
 
 impl StoreReader {
@@ -53,7 +55,7 @@ impl StoreReader {
             generation: 0,
             published: 0,
             tail_pending: false,
-            context_waits: 0,
+            store_waits: 0,
         }
     }
 
@@ -65,7 +67,7 @@ impl StoreReader {
         self.pending = None;
         self.published = 0;
         self.tail_pending = false;
-        self.context_waits = 0;
+        self.store_waits = 0;
     }
 
     fn snapshot(&mut self, command: &mut Command, shared: &Shared) -> Result<Reading, String> {
@@ -86,7 +88,7 @@ impl StoreReader {
             self.generation = command.generation;
             self.published = 0;
             self.tail_pending = false;
-            self.context_waits = 0;
+            self.store_waits = 0;
         }
         if self.published == command.generation {
             if self.snapshot_published_stands(command, shared)? {
@@ -212,11 +214,11 @@ impl StoreReader {
                 })
                 .map_err(|error| format!("Store kept query: {error:?}"))?;
             self.pending = Some((command.generation, token));
-            return Ok(Reading::Waiting);
+            return Ok(self.submitted());
         }
 
         let Some(reply) = self.handle.take() else {
-            return Ok(Reading::Waiting);
+            return Ok(self.waited());
         };
 
         if self.pending != Some((command.generation, reply.token)) {
@@ -226,7 +228,7 @@ impl StoreReader {
         self.pending = None;
         match reply.outcome {
             QueryOutcome::Ready(context) => {
-                self.context_waits = 0;
+                self.store_waits = 0;
                 if context.readiness() == QueryReadiness::Primary {
                     return Ok(Reading::Waiting);
                 }
@@ -250,10 +252,10 @@ impl StoreReader {
                 self.context = None;
             }
             self.snapshot_query_submit(command, selection)?;
-            return Ok(Reading::Waiting);
+            return Ok(self.submitted());
         }
         let Some(reply) = self.handle.take() else {
-            return Ok(Reading::Waiting);
+            return Ok(self.waited());
         };
         if self.pending != Some((command.generation, reply.token)) {
             return Ok(Reading::Waiting);
@@ -264,7 +266,7 @@ impl StoreReader {
             QueryOutcome::NeedsLoad(reason) => return Ok(self.needs_load(reason)),
             QueryOutcome::Unavailable(reason) => return self.unavailable(reason),
         };
-        self.context_waits = 0;
+        self.store_waits = 0;
         if self.published == command.generation {
             if self.repeats_selection(&context) {
                 return Ok(Reading::Waiting);
@@ -303,15 +305,32 @@ impl StoreReader {
         Ok(Reading::Ready(snapshot))
     }
 
+    /// What a step that asked the Store does: it waits for the answer, whatever the wait so far,
+    /// since that answer may be the one that says why the page cannot be read.
+    fn submitted(&mut self) -> Reading {
+        self.store_waits = self.store_waits.saturating_add(1);
+        Reading::Waiting
+    }
+
+    /// What a step that has no answer from the Store does: it waits, up to the bound.
+    fn waited(&mut self) -> Reading {
+        if self.store_waits < STORE_WAITS_MAX {
+            self.store_waits += 1;
+            return Reading::Waiting;
+        }
+
+        Reading::Saved
+    }
+
     /// What a step does with a query the Store could not yet or cannot answer from what it holds.
     fn needs_load(&mut self, reason: QueryNeedsLoad) -> Reading {
         match reason {
             QueryNeedsLoad::AppsPending
             | QueryNeedsLoad::UncheckedCoverage
-            | QueryNeedsLoad::IncompleteRing => Reading::Waiting,
+            | QueryNeedsLoad::IncompleteRing => self.waited(),
             QueryNeedsLoad::SourceChanged => {
                 self.context = None;
-                Reading::Waiting
+                self.waited()
             }
             QueryNeedsLoad::OutsideCoverage
             | QueryNeedsLoad::FullDetailEvicted
@@ -324,8 +343,8 @@ impl StoreReader {
     fn unavailable(&mut self, reason: QueryUnavailable) -> Result<Reading, String> {
         match reason {
             QueryUnavailable::NoReadings | QueryUnavailable::NoObservation => Ok(Reading::Saved),
-            QueryUnavailable::ContextLimit if self.context_waits < CONTEXT_WAITS_MAX => {
-                self.context_waits += 1;
+            QueryUnavailable::ContextLimit if self.store_waits < STORE_WAITS_MAX => {
+                self.store_waits += 1;
                 Ok(Reading::Waiting)
             }
             reason => Err(format!("Store readings unavailable: {reason:?}")),
@@ -446,7 +465,14 @@ pub(super) fn read(
         }
         Ok(Reading::Waiting) => None,
         Ok(Reading::Saved) => match read_saved(reader, root, command, shared) {
-            Ok(snapshot) => snapshot.map(Update::Ready),
+            Ok(snapshot) => {
+                // What the recording saves comes a minute apart, so a page it answered asks again
+                // a second later rather than at the worker's pace, unless part of the page is due.
+                if !super::reader_pending(reader, command.generation) {
+                    reader.retry_after = Instant::now() + super::RETRY_INTERVAL;
+                }
+                snapshot.map(Update::Ready)
+            }
             Err(message) => Some(read_failed(reader, command, message)),
         },
         Err(message) => Some(read_failed(reader, command, message)),

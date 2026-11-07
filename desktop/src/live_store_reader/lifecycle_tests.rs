@@ -99,7 +99,127 @@ fn a_cancelled_kept_primary_refresh_cannot_replace_a_new_selection() {
     assert_eq!(budget.used(), 0);
 }
 
+#[test]
+fn a_store_missing_its_ring_leaves_the_page_to_the_saved_minutes() {
+    // Goal: a page never waits for ever on a Store that cannot prove what it holds.
+    // Method: register a ring that does not exist beside a saved minute, and step the reader.
+    let mut recording = LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    seal_recording(&recording, 0);
+    let mut registry = collector::recording::Registry::read(&recording.root).unwrap();
+    registry.runs[0].ring_name = String::from("/fdnoring");
+    registry.write(&recording.root).unwrap();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let mut adapter = Adapter::on_root(store.query_handle().unwrap(), &recording.root);
+
+    let update = adapter.first_update();
+
+    let Update::Ready(snapshot) = update else {
+        panic!("the saved minutes did not answer");
+    };
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+}
+
+#[test]
+fn a_recording_that_never_appears_says_so() {
+    // Goal: a page never waits for ever on a Store that has no recording to read.
+    // Method: start the Store on a root nothing makes, and step the reader.
+    let directory =
+        std::env::temp_dir().join(format!("flightdeck-no-recording-{}", std::process::id()));
+    let store = viewer::store::Store::start_with_budget(
+        &directory,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let mut adapter = Adapter::on_root(store.query_handle().unwrap(), &directory);
+
+    let update = adapter.first_update();
+
+    assert!(matches!(update, Update::Failed { .. }));
+}
+
+#[test]
+fn a_page_the_saved_minutes_answered_reads_them_again_a_second_later() {
+    // Goal: a Store that stays behind costs the page one listing of the recording a second, and the
+    // minute saved meanwhile still reaches it.
+    // Method: read past the wait with the Store parked behind the ring, save a minute, and time the
+    // next update from before the first.
+    let mut recording = LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    seal_recording(&recording, 0);
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    Harness::ready_context(&handle);
+    store.set_active(false);
+    Harness::wait_until_paused(&store);
+    recording.publish_resources();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.submit(request("network"), crate::live_source::Context::Select);
+    let started = Instant::now();
+    let Update::Ready(first) = adapter.first_update() else {
+        panic!("the saved minutes did not answer");
+    };
+    assert_eq!(first.selection["selected"]["publication"], 2);
+    for _ in 0..62 {
+        recording.publish_resources();
+    }
+    seal_recording(&recording, 1);
+
+    let next = adapter.update_within(Duration::from_secs(10));
+
+    let Update::Ready(next) = next else {
+        panic!("the saved minutes did not answer again");
+    };
+    assert!(started.elapsed() >= crate::live_source::RETRY_INTERVAL);
+    assert_ne!(next.selection["selected"]["publication"], 2);
+}
+
+#[test]
+fn a_store_that_catches_up_takes_the_page_back_from_the_saved_minutes() {
+    // Goal: the saved minutes stand in for a Store that stays behind only until it catches up.
+    // Method: read past the wait with the Store parked behind the ring, then let it go on.
+    let mut recording = LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    seal_recording(&recording, 0);
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    Harness::ready_context(&handle);
+    store.set_active(false);
+    Harness::wait_until_paused(&store);
+    recording.publish_resources();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.submit(request("network"), crate::live_source::Context::Select);
+    let Update::Ready(saved) = adapter.first_update() else {
+        panic!("the saved minutes did not answer");
+    };
+    assert_eq!(saved.selection["selected"]["publication"], 2);
+
+    store.set_active(true);
+    let next = adapter.update_within(Duration::from_secs(10));
+
+    let Update::Ready(live) = next else {
+        panic!("the Store did not answer");
+    };
+    assert_eq!(live.selection["selected"]["publication"], 3);
+}
+
 struct Adapter {
+    root: std::path::PathBuf,
     reader: crate::live_source::Reader,
     command: crate::live_source::Command,
     shared: crate::live_source::Shared,
@@ -107,7 +227,12 @@ struct Adapter {
 
 impl Adapter {
     fn new(handle: viewer::store::QueryHandle) -> Self {
+        Self::on_root(handle, std::path::Path::new(""))
+    }
+
+    fn on_root(handle: viewer::store::QueryHandle, root: &std::path::Path) -> Self {
         Self {
+            root: root.to_owned(),
             reader: crate::live_source::Reader {
                 session: None,
                 store: Some(super::super::StoreReader::new(handle)),
@@ -131,10 +256,33 @@ impl Adapter {
     fn read(&mut self) -> Option<Update> {
         super::super::read(
             &mut self.reader,
-            std::path::Path::new(""),
+            &self.root,
             &mut self.command,
             &self.shared,
         )
+    }
+
+    /// The first thing the reader publishes, stepping with no pause, so a test of its bounded wait
+    /// takes none of the time that wait lasts at the worker's pace.
+    fn first_update(&mut self) -> Update {
+        for _ in 0..1_000 {
+            if let Some(update) = self.read() {
+                return update;
+            }
+        }
+        panic!("the reader kept waiting");
+    }
+
+    fn update_within(&mut self, limit: Duration) -> Update {
+        let deadline = Instant::now() + limit;
+        for _ in 0..1_000 {
+            if let Some(update) = self.read() {
+                return update;
+            }
+            assert!(Instant::now() < deadline, "the reader kept waiting");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the reader kept waiting within its attempts");
     }
 
     fn submit(&mut self, request: Request, context: crate::live_source::Context) {
