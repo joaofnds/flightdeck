@@ -10,11 +10,16 @@ use super::*;
 const VOLUME_SIZE: &str = "256m";
 const CHUNK_BYTES: usize = 1 << 20;
 const FILES_MAX: usize = 1 << 10;
+/// How many times a test asks for its volume to go, a second apart, since another process can hold
+/// the disk open after the volume unmounted. A holder that outlasts this fails the test, named.
+const DETACH_ATTEMPTS: usize = 30;
 
 /// A small APFS volume mounted for one test.
 struct Volume {
     directory: PathBuf,
     mount: PathBuf,
+    /// The image's whole disk, which still names it once the volume has unmounted.
+    device: String,
 }
 
 impl Volume {
@@ -39,14 +44,21 @@ impl Volume {
             &image,
         );
         let attached = Command::new("hdiutil")
-            .args(["attach", "-quiet", "-nobrowse", "-noverify", "-mountpoint"])
+            .args(["attach", "-nobrowse", "-noverify", "-mountpoint"])
             .arg(&mount)
             .arg(&image)
-            .status()
+            .output()
             .unwrap();
-        assert!(attached.success());
+        assert!(attached.status.success());
+        let listed = String::from_utf8(attached.stdout).unwrap();
+        let device = listed.split_whitespace().next().unwrap().to_owned();
+        assert!(device.starts_with("/dev/disk"), "{listed}");
 
-        Self { directory, mount }
+        Self {
+            directory,
+            mount,
+            device,
+        }
     }
 
     /// Writes files of smaller and smaller sizes until the volume refuses the smallest, and gives
@@ -85,18 +97,53 @@ fn volume_file_written(path: &Path, bytes: &[u8]) -> bool {
 
 impl Drop for Volume {
     fn drop(&mut self) {
-        let detached = Command::new("hdiutil")
-            .args(["detach", "-force"])
-            .arg(&self.mount)
-            .output()
-            .unwrap();
-        assert!(
-            detached.status.success(),
-            "{}",
-            String::from_utf8_lossy(&detached.stderr)
-        );
-        std::fs::remove_dir_all(&self.directory).unwrap();
+        let mut refusal = String::new();
+        for attempt in 0..DETACH_ATTEMPTS {
+            let detached = Command::new("hdiutil")
+                .args(["detach", "-force", &self.device])
+                .output()
+                .unwrap();
+            if detached.status.success() {
+                std::fs::remove_dir_all(&self.directory).unwrap();
+                return;
+            }
+            refusal = String::from_utf8_lossy(&detached.stderr).into_owned();
+            if attempt == 0 {
+                eprintln!("{refusal}{}", volume_holders());
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        panic!("{refusal}{}", volume_holders());
     }
+}
+
+/// What this user can see holding a disk open, and the system's processes that open disks, whose
+/// files only root can see.
+fn volume_holders() -> String {
+    let files = Command::new("lsof").args(["-n", "-P"]).output().unwrap();
+    let processes = Command::new("ps")
+        .args(["-axo", "pid,etime,command"])
+        .output()
+        .unwrap();
+    let files = String::from_utf8_lossy(&files.stdout).into_owned();
+    let processes = String::from_utf8_lossy(&processes.stdout).into_owned();
+    let disks = files
+        .lines()
+        .filter(|line| line.contains("/dev/disk") || line.contains("/dev/rdisk"));
+    let tools = processes.lines().filter(|line| {
+        [
+            "fsck",
+            "/mds",
+            "mdworker",
+            "diskimages",
+            "hdiutil",
+            "diskutil",
+        ]
+        .iter()
+        .any(|tool| line.contains(tool))
+    });
+
+    disks.chain(tools).collect::<Vec<_>>().join("\n")
 }
 
 fn volume_command(arguments: &[&str], path: &Path) {
