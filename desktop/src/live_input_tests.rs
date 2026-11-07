@@ -1383,6 +1383,21 @@ impl InputDriver {
             .simulate_mouse_up(bounds.center(), MouseButton::Right, Modifiers::none());
     }
 
+    fn resize_window(&mut self, width: f32, height: f32) {
+        self.context
+            .simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
+        self.context.run_until_parked();
+    }
+
+    /// Delivers the next frame, which a test window has no loop to reach, and what it scrolled.
+    fn draw_next_frame(&mut self) {
+        self.context.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.refresh();
+        });
+        self.context.run_until_parked();
+    }
+
     fn press(&mut self, keys: &str) {
         self.context.simulate_keystrokes(keys);
     }

@@ -1,7 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    Context, FocusHandle, SharedString, Window, anchored, deferred, div, prelude::*, px, rgb,
+    Context, FocusHandle, ScrollAnchor, ScrollHandle, SharedString, Window, anchored, deferred,
+    div, prelude::*, px, rgb,
 };
 use num_traits::ToPrimitive;
 
@@ -17,9 +18,18 @@ pub(crate) struct ChartInspector {
     summaries: Vec<SampleSummary>,
     /// What the whole of the chart's stack reached, where one of its lines names that.
     stack_total: Option<SampleMaximum>,
+    /// What the keyboard scrolls, since GPUI brings no focused element into view itself.
+    scroll: ScrollHandle,
+    close_stop: ChartDataStop,
+    /// The control that holds each row's maximum, the stack's total last.
+    maximum_stops: Vec<ChartDataStop>,
+}
+
+/// One control of the dialog the keyboard reaches.
+#[derive(Clone)]
+struct ChartDataStop {
     focus: FocusHandle,
-    /// The focus of the control that holds each row's maximum, the stack's total last.
-    maximum_focus: Vec<FocusHandle>,
+    anchor: ScrollAnchor,
 }
 
 struct SampleSummary {
@@ -50,17 +60,25 @@ impl LiveDashboard {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        let scroll = ScrollHandle::new();
+        let close_stop = ChartDataStop {
+            focus: cx.focus_handle(),
+            anchor: ScrollAnchor::for_handle(scroll.clone()),
+        };
+        window.focus(&close_stop.focus, cx);
         let view = self.view_window();
         self.chart_inspector = Some(ChartInspector {
             panel_id: panel.id.clone(),
             summaries: chart_summaries(panel, view),
             stack_total: chart_stack_total(panel, view),
-            focus,
-            maximum_focus: (0..CHART_DATA_ROWS_MAX)
-                .map(|_| cx.focus_handle())
+            maximum_stops: (0..CHART_DATA_ROWS_MAX)
+                .map(|_| ChartDataStop {
+                    focus: cx.focus_handle(),
+                    anchor: ScrollAnchor::for_handle(scroll.clone()),
+                })
                 .collect(),
+            scroll,
+            close_stop,
         });
         cx.notify();
     }
@@ -133,13 +151,18 @@ impl LiveDashboard {
             .w_full()
             .max_w(px(880.0))
             .max_h(px((f32::from(self.viewport_size.height) - 48.0).max(120.0)))
-            .overflow_y_scroll()
+            .overflow_scroll()
+            .track_scroll(&inspector.scroll)
             .p(px(20.0))
             .rounded(px(5.0))
             .border_1()
             .border_color(rgb(GRID))
             .bg(rgb(PANEL))
-            .child(Self::chart_inspector_heading(panel, &inspector.focus, cx))
+            .child(Self::chart_inspector_heading(
+                panel,
+                &inspector.close_stop,
+                cx,
+            ))
             .child(div().mt(px(12.0)).child(format!("Selected {selected}")))
             .children(panel.help.as_ref().map(|help| {
                 div()
@@ -159,7 +182,7 @@ impl LiveDashboard {
 
     fn chart_inspector_heading(
         panel: &Panel,
-        focus: &FocusHandle,
+        close_stop: &ChartDataStop,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         div()
@@ -176,7 +199,8 @@ impl LiveDashboard {
                 control("Close")
                     .debug_selector(|| "chart-data-close".into())
                     .aria_label("Close chart data")
-                    .track_focus(focus)
+                    .track_focus(&close_stop.focus)
+                    .anchor_scroll(Some(close_stop.anchor.clone()))
                     .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                         if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
                             this.close_chart_inspector(window, cx);
@@ -197,7 +221,9 @@ impl LiveDashboard {
     }
 
     /// Moves the focus to the dialog's next control, or its previous one when `backward`, staying
-    /// within the dialog.
+    /// within the dialog, and scrolls it to the dialog's top left corner, as far as there is table
+    /// to scroll. Only a scroll container's direct children give their place, so a control already
+    /// in view moves too.
     fn chart_inspector_tab(&self, backward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let stops = self.chart_inspector_stops();
         if stops.is_empty() {
@@ -206,7 +232,7 @@ impl LiveDashboard {
         let count = stops.len();
         let focused_index = stops
             .iter()
-            .position(|stop| stop.is_focused(window))
+            .position(|stop| stop.focus.is_focused(window))
             .unwrap_or(0);
         let next_index = if backward {
             (focused_index + count - 1) % count
@@ -214,11 +240,12 @@ impl LiveDashboard {
             (focused_index + 1) % count
         };
 
-        window.focus(&stops[next_index], cx);
+        window.focus(&stops[next_index].focus, cx);
+        stops[next_index].anchor.scroll_to(window, cx);
     }
 
     /// The controls of the dialog in the order the keyboard reaches them.
-    fn chart_inspector_stops(&self) -> Vec<FocusHandle> {
+    fn chart_inspector_stops(&self) -> Vec<ChartDataStop> {
         let Some(inspector) = &self.chart_inspector else {
             return Vec::new();
         };
@@ -226,18 +253,18 @@ impl LiveDashboard {
             return Vec::new();
         };
 
-        let mut stops = vec![inspector.focus.clone()];
+        let mut stops = vec![inspector.close_stop.clone()];
         for (line_index, summary) in inspector.summaries.iter().enumerate() {
             let held = summary
                 .maximum
                 .is_some_and(|maximum| maximum.place.is_some());
             if held && self.chart_series_visible(panel, line_index) {
-                stops.push(inspector.maximum_focus[line_index].clone());
+                stops.push(inspector.maximum_stops[line_index].clone());
             }
         }
         let total = self.chart_inspector_total(panel, inspector);
         if total.is_some_and(|total| total.place.is_some()) {
-            stops.push(inspector.maximum_focus[inspector.summaries.len()].clone());
+            stops.push(inspector.maximum_stops[inspector.summaries.len()].clone());
         }
 
         stops
@@ -287,7 +314,7 @@ impl LiveDashboard {
         panel: &Panel,
         name: &str,
         place: MachinePlace,
-        focus: &FocusHandle,
+        stop: &ChartDataStop,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let read_at = crate::chart_axes::clock(place.second(), true);
@@ -312,7 +339,8 @@ impl LiveDashboard {
             .tab_stop(true)
             .focus(crate::charts::focus_ring)
             .hover(|style| style.bg(rgb(0x2c_2f_35)))
-            .track_focus(focus)
+            .track_focus(&stop.focus)
+            .anchor_scroll(Some(stop.anchor.clone()))
             .on_key_down(
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                     if ["enter", "space"].contains(&event.keystroke.key.as_str()) {
@@ -360,8 +388,8 @@ impl LiveDashboard {
             let summary = &inspector.summaries[line_index];
             let place = summary.maximum.and_then(|maximum| maximum.place);
             let maximum = place.map(|place| {
-                let focus = &inspector.maximum_focus[line_index];
-                Self::chart_inspector_maximum(panel, &line.name, place, focus, cx)
+                let stop = &inspector.maximum_stops[line_index];
+                Self::chart_inspector_maximum(panel, &line.name, place, stop, cx)
             });
             table = table.child(chart_data_row(
                 chart_data_cells(
@@ -378,8 +406,8 @@ impl LiveDashboard {
         }
         if let Some(total) = self.chart_inspector_total(panel, inspector) {
             let maximum = total.place.map(|place| {
-                let focus = &inspector.maximum_focus[inspector.summaries.len()];
-                Self::chart_inspector_maximum(panel, CHART_DATA_TOTAL, place, focus, cx)
+                let stop = &inspector.maximum_stops[inspector.summaries.len()];
+                Self::chart_inspector_maximum(panel, CHART_DATA_TOTAL, place, stop, cx)
             });
             table = table.child(chart_data_row(
                 chart_data_total_cells(panel, total),
@@ -387,11 +415,7 @@ impl LiveDashboard {
             ));
         }
 
-        div()
-            .id("chart-data-table")
-            .my(px(16.0))
-            .overflow_x_scroll()
-            .child(table)
+        table.my(px(16.0))
     }
 
     fn chart_series_visible(&self, panel: &Panel, line_index: usize) -> bool {

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use collector::recording::identity_text;
-use gpui::{Modifiers, MouseButton, TestAppContext};
+use gpui::{Modifiers, MouseButton, TestAppContext, px};
 
 use super::range::cpu_by_app_lines_drawing;
 use super::store_view_hover::held_seconds;
@@ -2192,6 +2192,105 @@ fn a_tab_past_the_last_maximum_returns_to_the_close_control(cx: &mut TestAppCont
         None
     );
     assert_eq!(harness.driver.requested_second(), None);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_shift_tab_brings_a_maximum_below_the_dialogs_fold_into_view(cx: &mut TestAppContext) {
+    // Goal: the focus stays on screen where the table is taller than the window.
+    // Method: the Memory table in a short window, a shift tab to its last control, then where
+    // that control lies against the window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_memory_peak_at(HELD));
+    harness.driver.click_control("chart-data:live-memory");
+    harness.driver.resize_window(1000.0, 300.0);
+
+    harness.driver.press("shift-tab");
+    harness.driver.draw_next_frame();
+
+    let control = harness
+        .driver
+        .context
+        .debug_bounds("chart-maximum:live-memory:Total")
+        .unwrap();
+    assert!(control.top() >= px(0.0));
+    assert!(control.bottom() <= px(300.0));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_shift_tab_brings_a_maximum_past_the_dialogs_side_into_view(cx: &mut TestAppContext) {
+    // Goal: the focus stays on screen where the table is wider than the window.
+    // Method: the Memory table in a narrow window, a shift tab to its last control, then where
+    // that control lies against the window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_memory_peak_at(HELD));
+    harness.driver.click_control("chart-data:live-memory");
+    harness.driver.resize_window(400.0, 1300.0);
+
+    harness.driver.press("shift-tab");
+    harness.driver.draw_next_frame();
+
+    let control = harness
+        .driver
+        .context
+        .debug_bounds("chart-maximum:live-memory:Total")
+        .unwrap();
+    assert!(control.left() >= px(0.0));
+    assert!(control.right() <= px(400.0));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_tab_back_to_the_close_control_brings_it_into_view(cx: &mut TestAppContext) {
+    // Goal: the way out of the dialog stays on screen after the table scrolled.
+    // Method: the Memory table in a short window, a shift tab to its last control, a tab past it
+    // to Close, then where Close lies against the window.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_memory_peak_at(HELD));
+    harness.driver.click_control("chart-data:live-memory");
+    harness.driver.resize_window(1000.0, 300.0);
+    harness.driver.press("shift-tab");
+    harness.driver.draw_next_frame();
+
+    harness.driver.press("tab");
+    harness.driver.draw_next_frame();
+
+    let close = harness
+        .driver
+        .context
+        .debug_bounds("chart-data-close")
+        .unwrap();
+    assert!(close.top() >= px(0.0));
+    assert!(close.bottom() <= px(300.0));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_tab_moves_nothing_in_a_dialog_that_fits(cx: &mut TestAppContext) {
+    // Goal: a table the window holds whole stays where the reader found it.
+    // Method: the Memory table in a tall window, then where Close lies before and after a shift
+    // tab to the table's last control.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_with_a_memory_peak_at(HELD));
+    harness.driver.click_control("chart-data:live-memory");
+    let before = harness.driver.context.debug_bounds("chart-data-close");
+
+    harness.driver.press("shift-tab");
+    harness.driver.draw_next_frame();
+
+    assert_eq!(
+        harness.driver.context.debug_bounds("chart-data-close"),
+        before
+    );
     harness.teardown();
 }
 
