@@ -278,7 +278,7 @@ impl LiveDashboard {
     /// Lets go of the held second and of the store's View the hold kept parked, keeping a record
     /// of that View's newest second for the page to draw from until the store's next View. Every
     /// way out of a hold that stays on the live Mac lets go here, since a View the page keeps
-    /// pins the buffers the Store needs to catch up.
+    /// holds its buffers in memory beside the ones the Store goes on filling.
     pub(super) fn hold_let_go(&mut self) {
         if self.hold.take().is_none() {
             return;

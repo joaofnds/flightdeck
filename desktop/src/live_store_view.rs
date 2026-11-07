@@ -297,11 +297,10 @@ impl LiveDashboard {
         self.refresh_chart_inspector();
     }
 
-    /// Lets go of the View a hold kept, before the store wakes to catch up, since the catch-up
-    /// writes the buffers a View the page holds keeps. The page keeps the charts it drew from
-    /// the View and the readings of its newest second, and shows them until the store's next
-    /// View, since the worker's readings may be older and draw the charts by App over fifteen
-    /// minutes at most.
+    /// Lets go of the View a hold kept, whose buffers the store then makes no new ones beside.
+    /// The page keeps the charts it drew from the View and the readings of its newest second,
+    /// and shows them until the store's next View, since the worker's readings may be older and
+    /// draw the charts by App over fifteen minutes at most.
     pub(super) fn store_view_let_go(&mut self) {
         let Some(view) = self.store_view.take() else {
             return;
