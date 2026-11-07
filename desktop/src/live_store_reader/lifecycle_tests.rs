@@ -149,20 +149,7 @@ fn a_page_the_saved_minutes_answered_reads_them_again_a_second_later() {
     // minute saved meanwhile still reaches it.
     // Method: read past the wait with the Store parked behind the ring, save a minute, and time the
     // next update from before the first.
-    let mut recording = LiveRecording::new();
-    recording.publish_resources();
-    recording.publish_resources();
-    seal_recording(&recording, 0);
-    let store = viewer::store::Store::start_with_budget(
-        &recording.root,
-        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
-    )
-    .unwrap();
-    let handle = store.query_handle().unwrap();
-    Harness::ready_context(&handle);
-    store.set_active(false);
-    Harness::wait_until_paused(&store);
-    recording.publish_resources();
+    let (mut recording, _store, handle) = store_parked_behind_the_ring();
     let mut adapter = Adapter::on_root(handle, &recording.root);
     adapter.submit(request("network"), crate::live_source::Context::Select);
     let started = Instant::now();
@@ -188,20 +175,7 @@ fn a_page_the_saved_minutes_answered_reads_them_again_a_second_later() {
 fn a_store_that_catches_up_takes_the_page_back_from_the_saved_minutes() {
     // Goal: the saved minutes stand in for a Store that stays behind only until it catches up.
     // Method: read past the wait with the Store parked behind the ring, then let it go on.
-    let mut recording = LiveRecording::new();
-    recording.publish_resources();
-    recording.publish_resources();
-    seal_recording(&recording, 0);
-    let store = viewer::store::Store::start_with_budget(
-        &recording.root,
-        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
-    )
-    .unwrap();
-    let handle = store.query_handle().unwrap();
-    Harness::ready_context(&handle);
-    store.set_active(false);
-    Harness::wait_until_paused(&store);
-    recording.publish_resources();
+    let (recording, store, handle) = store_parked_behind_the_ring();
     let mut adapter = Adapter::on_root(handle, &recording.root);
     adapter.submit(request("network"), crate::live_source::Context::Select);
     let Update::Ready(saved) = adapter.first_update() else {
@@ -216,6 +190,110 @@ fn a_store_that_catches_up_takes_the_page_back_from_the_saved_minutes() {
         panic!("the Store did not answer");
     };
     assert_eq!(live.selection["selected"]["publication"], 3);
+}
+
+#[test]
+fn a_page_the_saved_minutes_answered_in_part_asks_again_at_the_workers_pace() {
+    // Goal: the wait of a second between saved answers never delays the rest of a page's own read.
+    // Method: read a page whose histories come a step later past the wait, with the Store parked
+    // behind the ring, and look at when the reader may step again.
+    let (recording, _store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    let mut request = request("memory");
+    request.load_resident_history = true;
+    adapter.submit(request, crate::live_source::Context::Select);
+
+    let Update::Ready(first) = adapter.first_update() else {
+        panic!("the saved minutes did not answer");
+    };
+
+    assert!(first.histories_pending);
+    assert!(adapter.reader.retry_after <= Instant::now());
+}
+
+#[test]
+fn a_second_whose_apps_are_unread_holds_the_page_until_the_store_reads_them() {
+    // Goal: a reading the Store is about to complete shows from the Store, not the saved minutes.
+    // Method: ask for an older second of a Primary while history admission is denied, stepping
+    // short of the bounded wait on a root with no recording, where a saved read fails, then let
+    // the Store read on.
+    let (harness, _budget, lease) = Harness::denied_history();
+    let mut adapter = Adapter::new(harness.store.as_ref().unwrap().query_handle().unwrap());
+    let primary = adapter.ready_for(viewer::store::QueryReadiness::Primary);
+    let mut older = request("memory");
+    older.second = Some(1000);
+    adapter.submit(older, crate::live_source::Context::Select);
+
+    let steps_short_of_the_wait = super::super::STORE_WAITS_MAX - 10;
+    for _ in 0..steps_short_of_the_wait {
+        assert!(adapter.read().is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop((primary, lease));
+    let complete = adapter.ready_for(viewer::store::QueryReadiness::Complete);
+
+    assert_eq!(complete.selection["selected"]["publication"], 1);
+}
+
+#[test]
+fn an_incomplete_ring_holds_the_page_for_the_wait() {
+    // Goal: a ring the Store is about to note as whole costs a wait, not a saved read.
+    // Method: answer the reader directly, since a real Store answers this only in the moment
+    // between reading the ring and noting that it did.
+    let (_recording, _store, handle) = store_parked_behind_the_ring();
+    let mut reader = super::super::StoreReader::new(handle);
+
+    let answer = reader.needs_load(viewer::store::QueryNeedsLoad::IncompleteRing);
+
+    assert!(matches!(answer, super::super::Answer::Waiting));
+}
+
+#[test]
+fn a_second_whose_detail_the_store_let_go_reads_the_saved_minutes_at_once() {
+    // Goal: waiting cannot bring back what the Store let go, so the page does not wait for it.
+    // Method: answer the reader directly, which leaves it no reason to step again.
+    let (_recording, _store, handle) = store_parked_behind_the_ring();
+    let mut reader = super::super::StoreReader::new(handle);
+
+    let answer = reader.needs_load(viewer::store::QueryNeedsLoad::FullDetailEvicted);
+
+    assert!(matches!(answer, super::super::Answer::Saved));
+}
+
+#[test]
+fn a_second_the_store_holds_no_reading_of_reads_the_saved_minutes_at_once() {
+    // Goal: waiting cannot bring a reading the Store does not hold, so the page does not wait.
+    // Method: answer the reader directly, which leaves it no reason to step again.
+    let (_recording, _store, handle) = store_parked_behind_the_ring();
+    let mut reader = super::super::StoreReader::new(handle);
+
+    let answer = reader.needs_load(viewer::store::QueryNeedsLoad::MissingObservation);
+
+    assert!(matches!(answer, super::super::Answer::Saved));
+}
+
+/// A Store parked a reading behind its ring, over a saved minute, and a handle to ask it.
+fn store_parked_behind_the_ring() -> (
+    LiveRecording,
+    viewer::store::Store,
+    viewer::store::QueryHandle,
+) {
+    let mut recording = LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    seal_recording(&recording, 0);
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    Harness::ready_context(&handle);
+    store.set_active(false);
+    Harness::wait_until_paused(&store);
+    recording.publish_resources();
+
+    (recording, store, handle)
 }
 
 struct Adapter {

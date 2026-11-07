@@ -179,6 +179,27 @@ fn a_followed_primary_context_reacquires_the_source_after_a_restart() {
     harness.assert_source_free();
 }
 
+#[test]
+fn a_held_second_is_asked_for_again_when_its_source_changes() {
+    // Goal: a reader whose context names a source that ended asks anew, rather than name that
+    // source until its wait ends and the saved minutes answer.
+    // Method: restart the real source while the Primary of a held second waits at the Worker's
+    // Pending checkpoint, let the Store take in the restart, and trace what the Worker read.
+    let (mut harness, primary, hold) = primary_sealed(Some(1063));
+    let source = primary.catalog["source_generation"].as_u64().unwrap();
+    let selected = primary.selection["selected"].clone();
+    drop(primary);
+    harness.restart_source();
+    harness.wait_until_the_store_reads_past(source);
+
+    hold.release();
+    let current = harness.ready_strict();
+
+    assert_eq!(current.selection["selected"], selected);
+    assert!(current.catalog["source_generation"].as_u64().unwrap() > source);
+    harness.assert_source_free();
+}
+
 fn inspect_primary(
     harness: &mut Harness,
     primary: &Snapshot,
@@ -646,6 +667,18 @@ impl Harness {
             lease,
             handle,
         )
+    }
+
+    fn wait_until_the_store_reads_past(&self, source: u64) {
+        let handle = self.store.as_ref().unwrap().query_handle().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for _ in 0..1000 {
+            if Self::ready_context(&handle).source.generation > source {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the Store kept its source");
+        }
+        panic!("the Store kept its source within its attempts");
     }
 
     fn store_behind_the_newest_reading(&mut self) {
