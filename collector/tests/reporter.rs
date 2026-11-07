@@ -383,7 +383,11 @@ mod tests {
     fn wait_for_growth(output: &Path, previous: u64) {
         let start = Instant::now();
 
-        for _attempt in 0..1_001 {
+        // Yielding rather than sleeping: a 1 ms sleep can last far longer on a loaded runner,
+        // and a thousand of them outlast the child's deadline. The one-second assertion bounds
+        // the wait, and the attempt count only ends the loop, since a status read and a yield
+        // take over a microsecond.
+        for _attempt in 0..10_000_000 {
             if fs::metadata(output).unwrap().len() > previous {
                 return;
             }
@@ -391,7 +395,7 @@ mod tests {
                 start.elapsed() < Duration::from_secs(1),
                 "writer delivery stalled"
             );
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::yield_now();
         }
         panic!("writer delivery exhausted its controller bound");
     }
