@@ -128,12 +128,10 @@ pub fn show(cx: &mut App) {
 
 /// A reader of the app's one Store, which went on while no window was open.
 fn reopen_worker(root: std::path::PathBuf, cx: &App) -> Result<Worker, String> {
-    let worker = match crate::live_dashboard::store_query_handle(cx) {
-        Some(handle) => Worker::start_from_store(root, handle),
-        None => Worker::start(root),
-    };
+    let handle = crate::live_dashboard::store_query_handle(cx)
+        .ok_or_else(|| "This Flightdeck runs no live Store".to_owned())?;
 
-    worker.map_err(|error| error.to_string())
+    Worker::start_from_store(root, handle).map_err(|error| error.to_string())
 }
 
 fn reopen(cx: &mut App) -> Result<(), String> {

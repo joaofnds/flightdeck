@@ -1192,8 +1192,8 @@ fn hidden_window_pauses_the_store_and_showing_it_resumes_ingestion(cx: &mut gpui
     use gpui::{AppContext, WindowOptions, WindowVisibility};
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
-    let worker = Worker::start(recording.root.clone()).unwrap();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
     cx.update(|cx| super::install_store(store, cx));
     let window = cx.update(|cx| {
         cx.open_window(WindowOptions::default(), |window, cx| {
@@ -1223,8 +1223,8 @@ fn showing_a_pinned_window_wakes_the_store_and_keeps_the_second(cx: &mut gpui::T
     use gpui::{AppContext, WindowOptions, WindowVisibility};
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
-    let worker = Worker::start(recording.root.clone()).unwrap();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
     cx.update(|cx| super::install_store(store, cx));
     let window = cx.update(|cx| {
         cx.open_window(WindowOptions::default(), |window, cx| {
@@ -1303,8 +1303,8 @@ fn a_second_held_on_overview_keeps_the_view_while_the_store_goes_on(cx: &mut gpu
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
-    let worker = Worker::start(recording.root.clone()).unwrap();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
     cx.update(|cx| super::install_store(store, cx));
     let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "overview".into(), None)));
     tick_until_settled(cx, &page, 1);
@@ -1335,8 +1335,8 @@ fn overview_opened_again_draws_the_newest_second_the_store_read_on_another_page(
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
-    let worker = Worker::start(recording.root.clone()).unwrap();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
     cx.update(|cx| super::install_store(store, cx));
     let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "overview".into(), None)));
     tick_until_settled(cx, &page, 1);
@@ -1398,8 +1398,8 @@ fn overview_opened_with_no_saved_page_draws_the_view_the_store_kept_current(
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
-    let worker = Worker::start(recording.root.clone()).unwrap();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
     cx.update(|cx| super::install_store(store, cx));
     let page = cx.update(|cx| cx.new(|_| LiveDashboard::new(worker, "cpu".into(), None)));
     tick_until_settled(cx, &page, 1);

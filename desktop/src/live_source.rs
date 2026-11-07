@@ -24,6 +24,21 @@ pub use store_reader::presentation::Presentation;
 /// than three times those processes.
 pub const STORE_BYTES_MAX: usize = 1024 * 1024 * 1024;
 
+/// Starts a live window's Store over `root`, and the handle a `Worker` reads it through.
+pub fn store_start(
+    root: &Path,
+) -> std::io::Result<(viewer::store::Store, viewer::store::QueryHandle)> {
+    let store = viewer::store::Store::start_with_budget(
+        root,
+        Arc::new(viewer::store::ByteBudget::new(STORE_BYTES_MAX)),
+    )?;
+    let handle = store
+        .query_handle()
+        .unwrap_or_else(|| unreachable!("a budgeted Store serves queries"));
+
+    Ok((store, handle))
+}
+
 pub struct Worker {
     root: PathBuf,
     shared: Arc<Shared>,
@@ -281,13 +296,7 @@ impl Worker {
 
     /// Starts a live reader over a Store of its own, for a caller with no window to share one.
     pub fn start(root: PathBuf) -> std::io::Result<Self> {
-        let store = viewer::store::Store::start_with_budget(
-            &root,
-            Arc::new(viewer::store::ByteBudget::new(STORE_BYTES_MAX)),
-        )?;
-        let handle = store
-            .query_handle()
-            .unwrap_or_else(|| unreachable!("a budgeted Store serves queries"));
+        let (store, handle) = store_start(&root)?;
         let mut worker = Self::start_from_store(root, handle)?;
         worker.store = Some(store);
 
@@ -357,6 +366,11 @@ impl Worker {
     }
 
     /// The recording this worker reads.
+    #[cfg(test)]
+    pub(crate) fn runs_its_own_store(&self) -> bool {
+        self.store.is_some()
+    }
+
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }

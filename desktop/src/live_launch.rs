@@ -161,15 +161,7 @@ impl Backend {
                 (Worker::start_recorded(root.to_owned())?, None)
             }
             crate::live_source_mode::SourceMode::Live => {
-                let store = Store::start_with_budget(
-                    root,
-                    std::sync::Arc::new(viewer::store::ByteBudget::new(
-                        crate::live_source::STORE_BYTES_MAX,
-                    )),
-                )?;
-                let handle = store
-                    .query_handle()
-                    .unwrap_or_else(|| unreachable!("a budgeted Store serves queries"));
+                let (store, handle) = crate::live_source::store_start(root)?;
                 (
                     Worker::start_from_store(root.to_owned(), handle)?,
                     Some(store),

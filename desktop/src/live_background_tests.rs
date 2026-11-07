@@ -162,6 +162,22 @@ fn showing_after_the_kept_reader_stopped_opens_the_window_over_a_new_reader(
 }
 
 #[gpui::test]
+fn showing_after_the_kept_reader_stopped_reads_the_store_that_went_on(cx: &mut TestAppContext) {
+    // Goal: the new reader takes up the Store that went on while no window was open, since a
+    // second Store over the ring would take in every publication again. Method: stop the kept
+    // reader, show the app, and ask whether the new reader runs a Store of its own.
+    let mut harness = BackgroundHarness::setup(cx);
+    harness.show();
+    harness.close_windows();
+    harness.stop_kept_reader();
+
+    harness.show();
+
+    assert!(!harness.reader(Worker::runs_its_own_store));
+    harness.teardown();
+}
+
+#[gpui::test]
 fn quitting_with_the_window_open_keeps_no_reader(cx: &mut TestAppContext) {
     // Goal: quitting stops the open window's reader rather than leaving it reading until the
     // process exits.
@@ -490,7 +506,9 @@ impl BackgroundHarness {
             root: root.clone(),
             hardware: false,
         };
+        let (store, _handle) = crate::live_source::store_start(&root).unwrap();
         cx.update(|cx| {
+            crate::live_dashboard::install_store(store, cx);
             super::super::collection::install(session, cx);
             install(reopening, cx);
         });
@@ -505,7 +523,15 @@ impl BackgroundHarness {
     /// Opens a live window as a launch that named `named_range` with --minutes does.
     fn launch(&mut self, named_range: Option<Range>) {
         let opening = super::super::Opening {
-            worker: Worker::start(self.root.clone()).unwrap(),
+            worker: self
+                .cx
+                .read(|cx| {
+                    Worker::start_from_store(
+                        self.root.clone(),
+                        crate::live_dashboard::store_query_handle(cx).unwrap(),
+                    )
+                })
+                .unwrap(),
             state: None,
             start: super::super::Start {
                 named_page: None,
