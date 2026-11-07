@@ -76,7 +76,8 @@ fn a_native_partial_name_refusal_keeps_its_stage_predecessor_and_accepted_names(
 
 #[test]
 fn a_machine_reduction_refused_past_the_sample_derives_its_apps_once() {
-    // Goal: a resource refusal after a publication's Apps were derived repeats none of that work.
+    // Goal: a resource refusal after a publication's Apps were derived repeats none of that work
+    // and counts no reduction it refused to do.
     // Method: stage a real publication past its Sample, take the whole budget, resume, free the
     // budget and resume again, counting the work under the publication's trace.
     use persistence::work::ingestion::{Kind, Trace};
@@ -113,6 +114,7 @@ fn a_machine_reduction_refused_past_the_sample_derives_its_apps_once() {
     let count = |kind| events.iter().filter(|event| event.kind == kind).count();
     assert_eq!(count(Kind::AppDerivation), 1);
     assert_eq!(count(Kind::FrameCapture), 1);
+    assert_eq!(count(Kind::MachineReduction), 1);
 }
 
 fn refuse_then_retry(prepared: &mut Prepared, input: &Input<'_>, budget: &Arc<ByteBudget>) {

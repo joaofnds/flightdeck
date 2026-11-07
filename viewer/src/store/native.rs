@@ -322,9 +322,6 @@ impl Prepared {
         input: &Input<'_>,
         budget: &Arc<ByteBudget>,
     ) -> Result<(), PrepareError> {
-        input
-            .source
-            .record_work(persistence::work::ingestion::Kind::MachineReduction);
         let reading = super::readings(input.current)
             .next()
             .unwrap_or_else(|| unreachable!("current native machine"));
@@ -338,6 +335,9 @@ impl Prepared {
                     super::MachineCaptureError::Projection(error) => PrepareError::Source(error),
                 }
             })?;
+        input
+            .source
+            .record_work(persistence::work::ingestion::Kind::MachineReduction);
         if self.machine.as_ref().is_some_and(|machine| {
             matches!(&machine.complete, super::CompleteMachineState::Refused(_))
         }) {
