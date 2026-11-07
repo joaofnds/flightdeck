@@ -22,8 +22,8 @@ use machine_reference::MachineReference;
 
 /// What a chart by App leaves out, and where to find it.
 pub(crate) const APP_STATISTICS_HELP: &str = "Each point is the App's mean over the seconds it \
-    covers. An App that ran only for a short peak may have no line here: pick the peak's stem on \
-    the Mac's chart and read the top Apps of that reading.";
+    covers. An App that ran only for a short peak may have no line here: hold the highest reading \
+    from the Data table of the Mac's chart and read the top Apps of that reading.";
 
 pub enum AppAttributionHistory {
     Ready(History),

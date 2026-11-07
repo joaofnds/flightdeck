@@ -11,13 +11,16 @@ use crate::live_source::{Snapshot, Update};
 #[path = "live_hover_input_tests.rs"]
 mod input_tests;
 
-/// Where the pointer was last seen. GPUI keeps the last pointer position after the pointer
-/// leaves the window, so a hover listener must not trust a hit test until the pointer moves
-/// inside the window again.
+/// Where the pointer was last seen. A hover listener trusts a hit test only `InsideWindow`, and
+/// the next move of the pointer inside the window makes it so again. GPUI keeps the last pointer
+/// position after the pointer leaves the window, and a frame reports a plot a closed dialog
+/// uncovers as hovered although the pointer did not move onto it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PointerPlace {
     InsideWindow,
     OutsideWindow,
+    /// Still where it was when a pick in a dialog closed that dialog and held a second.
+    AtHeldPick,
 }
 
 impl LiveDashboard {

@@ -810,10 +810,10 @@ fn panel_extremes<O: Observations + ?Sized>(
     Ok(Some(extremes))
 }
 
-/// What a line chart's marks stand for, which its help says beside what it measures.
+/// What a line chart's points stand for, which its help says beside what it measures.
 pub(crate) const LINE_STATISTICS_HELP: &str = "Each point is the mean of the readings of its \
-    seconds. A stem marks a single reading that went well past its line, and picking the stem \
-    holds that reading.";
+    seconds, so a single high reading can lie well past its line. The Data table gives each \
+    line's highest reading and holds it.";
 
 /// What a point of a chart of states stands for, which its help says beside what it measures.
 pub(crate) const STATE_STATISTICS_HELP: &str = "A cell that covers several seconds shows the \

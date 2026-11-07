@@ -163,7 +163,7 @@ impl LiveDashboard {
             )
             .on_hover(cx.listener(move |this, hovered, window, cx| {
                 if *hovered {
-                    if this.pointer == crate::live_hover::controller::PointerPlace::OutsideWindow {
+                    if this.pointer != crate::live_hover::controller::PointerPlace::InsideWindow {
                         return;
                     }
                     this.cpu_history_hover(

@@ -32,7 +32,7 @@ fn a_chart_by_app_says_its_points_are_means_and_where_a_short_lived_app_is_found
         "{help}"
     );
     assert!(
-        help.contains("pick the peak's stem on the Mac's chart"),
+        help.contains("hold the highest reading from the Data table of the Mac's chart"),
         "{help}"
     );
 }

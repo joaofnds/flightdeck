@@ -1258,8 +1258,8 @@ impl LiveDashboard {
         let Some(held) = self.held_target(second) else {
             return false;
         };
-        // A request can name another reading of the stretch than the one a chart draws, as a
-        // peak's mark does, and the readings the page holds then show that one.
+        // A request can name another reading of the stretch than the one a chart draws, as a held
+        // maximum does, and the readings the page holds then show that one.
         let target = match &self.request.identity {
             Some(identity) => crate::live_hover::Target {
                 second,

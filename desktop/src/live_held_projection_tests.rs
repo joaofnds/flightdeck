@@ -342,7 +342,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
     #[test]
     fn a_stretch_of_one_second_reaches_what_that_second_reads_on_every_chart() {
         // Goal: a chart's reach reads the series the chart's line reads, on every line the Overview
-        // draws, so no chart marks one reading under another's curve. Method: reduce one second,
+        // draws, so no table gives one reading as another's maximum. Method: reduce one second,
         // then compare what each line reads of it with what it reaches.
         let mut second = reading_at(9_020, 3);
         second.cpu_percent = Some(11.0);
@@ -375,16 +375,17 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         }
     }
     #[test]
-    fn a_chart_says_what_its_points_and_marks_stand_for() {
-        // Goal: a reader who sees a line and a stem can learn which statistic each one is, and that
-        // a state's cell is no mean. Method: read the help of a chart of numbers and of states.
+    fn a_chart_says_what_its_points_stand_for_and_where_its_highest_reading_is() {
+        // Goal: a reader who sees a line can learn which statistic it is and where the reading it
+        // smooths is found, and that a state's cell is no mean. Method: read the help of a chart of
+        // numbers and of states.
         let older = older_seconds(|_, _| {});
 
         let panels = overview_of_older(&older);
 
         let help = |id| panel_named(&panels, id).help.clone().unwrap();
         assert!(help("live-cpu").contains("the mean of the readings of its seconds"));
-        assert!(help("live-cpu").contains("A stem marks a single reading"));
+        assert!(help("live-cpu").contains("The Data table gives each line's highest reading"));
         assert!(help("live-memory-pressure").contains("shows the highest state among them"));
     }
 

@@ -1178,7 +1178,7 @@ fn a_chart_by_app_reads_nothing_of_the_macs_reading() {
 
 #[test]
 fn a_reading_no_point_holds_reads_on_its_charts_scale() {
-    // Goal: a stem on a chart in GiB reads GiB when hovered, as the chart's points do.
+    // Goal: a held maximum on a chart in GiB reads GiB, as the chart's points do.
     // Method: read a point's memory in bytes through the Memory chart's wired line.
     let point = serde_json::json!({"memory_wired_bytes": 2_147_483_648_u64});
 

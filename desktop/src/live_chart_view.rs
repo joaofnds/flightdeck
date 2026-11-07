@@ -251,7 +251,7 @@ impl LiveDashboard {
     }
 
     /// What `line` of `panel` reads at the reading the page shows: its point at `index`, or what
-    /// the reading itself read where the chart draws no point of it, as under a peak's mark.
+    /// the reading itself read where the chart draws no point of it, as a held maximum may.
     fn chart_value(&self, panel: &Panel, line: usize, index: Option<usize>) -> Option<f32> {
         if index.is_some() {
             return chart_line_value(panel, line, index);
@@ -431,7 +431,7 @@ impl LiveDashboard {
                 }
 
                 if *hovered {
-                    if this.pointer == crate::live_hover::controller::PointerPlace::OutsideWindow {
+                    if this.pointer != crate::live_hover::controller::PointerPlace::InsideWindow {
                         return;
                     }
                 } else {
@@ -474,36 +474,12 @@ impl LiveDashboard {
             cx.notify();
         }
         self.drag_move(source, measured.get(), position.x, cx);
-        if let Some(target) = self.chart_hover_peak(panel, measured.get(), position) {
+        if let Some(target) = chart_hover_state(panel, measured.get(), position) {
             self.hover_reading_target(source.clone(), target, hovered_at, cx);
             return;
         }
         let second = chart_hover_second(self.view_window(), measured.get(), position);
         self.chart_hover_update(source, second, hovered_at, cx);
-    }
-
-    /// The target of the peak of `panel` whose mark the pointer at `position` is on, which is the
-    /// reading the peak stands for rather than the second under the pointer.
-    fn chart_hover_peak(
-        &self,
-        panel: &Panel,
-        bounds: Bounds<gpui::Pixels>,
-        position: gpui::Point<gpui::Pixels>,
-    ) -> Option<crate::live_hover::Target> {
-        if panel.kind == "timeline" {
-            let reach = state_reach(panel, chart_hover_fraction(bounds, position)?)?;
-            return Some(crate::live_hover::Target::of_place(&reach.peak));
-        }
-        let inspection = chart_inspection(panel, self.chart_inspection_index(panel));
-        let hidden = self.chart_hidden(panel);
-        let pick = charts::peak_under(panel, bounds, inspection, &hidden, position)?;
-
-        Some(match pick {
-            charts::PeakPick::Reading(place) => crate::live_hover::Target::of_place(&place),
-            charts::PeakPick::Second(second) => {
-                self.hover_target(self.snapshot.as_deref()?, second)
-            }
-        })
     }
 
     fn chart_hover_update(
@@ -1399,6 +1375,21 @@ fn chart_time_row(
 }
 
 /// Inspects the hovered reading, else the selected second, else the newest reading.
+/// The target of the cell of a chart of states the pointer at `position` is on, which is the
+/// reading that reached the state the cell shows rather than the second under the pointer.
+fn chart_hover_state(
+    panel: &Panel,
+    bounds: Bounds<gpui::Pixels>,
+    position: gpui::Point<gpui::Pixels>,
+) -> Option<crate::live_hover::Target> {
+    if panel.kind != "timeline" {
+        return None;
+    }
+    let reach = state_reach(panel, chart_hover_fraction(bounds, position)?)?;
+
+    Some(crate::live_hover::Target::of_place(&reach.peak))
+}
+
 fn chart_inspection(panel: &Panel, index: Option<usize>) -> Inspection {
     let newest = panel
         .lines

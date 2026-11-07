@@ -36,8 +36,8 @@ pub struct Panel {
     /// the clock. A panel with none draws each reading on its own.
     #[serde(skip)]
     pub window: Option<crate::chart_axes::TimeWindow>,
-    /// The reading at each position, which picking a peak of a reading on its own holds. A panel
-    /// with none picks a peak by its second alone.
+    /// The reading at each position, which holding a maximum of a reading on its own holds. A panel
+    /// with none holds a maximum by its second alone.
     #[serde(skip)]
     pub places: Option<Arc<[MachinePlace]>>,
     /// The first second of full-detail readings, before which each reading stands for several

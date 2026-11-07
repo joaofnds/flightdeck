@@ -96,7 +96,7 @@ only from two ticks in a row of one collector run, so the first tick after a mis
 or a collector restart has none. A restart of the persister alone changes no rate.
 
 **Peak**: a reading that went well past the line a chart draws through its neighbours. A chart
-marks it with a stem and keeps the exact reading, so picking the stem holds that reading, even
+keeps the exact reading, so its Data table gives each line's highest reading and holds it, even
 where another run read the same wall second.
 
 **Resource coalition**: the group macOS puts a process in together with related

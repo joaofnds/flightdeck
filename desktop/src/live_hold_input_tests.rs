@@ -42,8 +42,8 @@ const DRAWN: TimeWindow = TimeWindow {
 };
 
 /// The worker's reply following the newest second of a recording whose older tail reads 10% CPU,
-/// with a stretch at `OLDER_STRETCH` that reaches 95% at `OLDER_PEAK`. The reply's own reading
-/// reads 33%, which no read of the peak may show.
+/// with a stretch at `OLDER_STRETCH` that reaches 95% at `OLDER_PEAK`. The reply's own readings
+/// read 33%, which no read of the peak may show.
 fn recording_peaking_in_its_older_tail() -> Box<Snapshot> {
     let run = identity_text(collector::ring::Identity([1, 2])).to_string();
     let boot = identity_text(collector::ring::Identity([3, 4])).to_string();
@@ -67,6 +67,9 @@ fn recording_peaking_in_its_older_tail() -> Box<Snapshot> {
     selection["earlier_trends"] = serde_json::json!(older);
     selection["summary"] = selection["selected"].clone();
     selection["summary"]["cpu_percent"] = serde_json::json!(33.0);
+    for trend in selection["trends"].as_array_mut().unwrap() {
+        trend["cpu_percent"] = serde_json::json!(33.0);
+    }
 
     reply
 }
@@ -766,36 +769,25 @@ fn a_click_on_a_saved_recording_selects_the_second_and_reads_the_window_around_i
 }
 
 #[gpui::test]
-fn a_click_on_a_peaks_mark_on_a_saved_recording_shows_the_reading_that_read_it(
-    cx: &mut TestAppContext,
-) {
-    // Goal: a stem in the older tail of a saved recording shows the reading it names, while the
-    // reader reads the window around it and after, rather than the first reading of the stretch,
-    // which is the one the chart draws there.
-    // Method: the CPU page over the last hour, a click on the mark, the second the page shows,
-    // the reader's reply for that second, then the second and the reading the page shows.
+fn holding_a_maximum_on_a_saved_recording_shows_the_reading_that_read_it(cx: &mut TestAppContext) {
+    // Goal: a line's maximum in the older tail of a saved recording shows the reading it names,
+    // while the reader reads the window around it and after, rather than the first reading of the
+    // stretch, which is the one the chart draws there.
+    // Method: the CPU page over the last hour, the maximum held from the Data table, what the page
+    // asks for, the reader's reply for that second, then the second and reading the page shows.
     let mut harness = InputHarness::open_recorded_route(cx, "cpu");
     harness
         .driver
         .show_reply_at_the_hour(recording_peaking_in_its_older_tail());
-    let position = harness
-        .driver
-        .position_beside_peak("live-cpu-plot", OLDER_PEAK);
-    harness.driver.hover_position(position);
-    harness.driver.context.run_until_parked();
 
-    harness
-        .driver
-        .context
-        .simulate_click(position, Modifiers::none());
-    harness.driver.context.run_until_parked();
-    let (shown_during_read, _) = harness.driver.chart_accessibility_reading("live-cpu");
+    harness.driver.hold_cpu_maximum();
+    let asked = harness.driver.requested_second();
     harness
         .driver
         .reply_with_selection(OLDER_PEAK, OLDER_PEAK + 450, older_peak_selection);
     let (shown, reading) = harness.driver.chart_accessibility_reading("live-cpu");
 
-    assert_eq!(shown_during_read, Some(OLDER_PEAK));
+    assert_eq!(asked, Some(OLDER_PEAK));
     assert_eq!(shown, Some(OLDER_PEAK));
     assert!(reading.ends_with("95%"), "{reading}");
     harness.teardown();
@@ -832,30 +824,27 @@ fn a_click_on_a_state_cell_holds_the_reading_that_reached_its_state(cx: &mut Tes
 }
 
 #[gpui::test]
-fn a_hover_of_a_peaks_mark_reads_out_the_reading_no_point_of_the_chart_holds(
-    cx: &mut TestAppContext,
-) {
-    // Goal: under a stem the chart reads out what the peak read, though it draws another reading
-    // for that stretch, and reads out no other reading while the peak's is on its way.
-    // Method: the CPU page over the last hour, a hover of the mark, the chart's reading, the
-    // reader's reply to the hover, then the chart's reading.
+fn a_hover_where_a_peak_was_read_shows_the_second_under_the_pointer(cx: &mut TestAppContext) {
+    // Goal: nothing on a plot stands for a peak, so no unseen target takes a hover from the second
+    // under the pointer.
+    // Method: the CPU page over the last hour, a hover eight points before a stretch's peak near
+    // the top of the plot, then the second the chart reads out, the reading of the older tail's
+    // ten seconds that holds the second under the pointer.
     let mut harness = InputHarness::open_recorded_route(cx, "cpu");
     harness
         .driver
         .show_reply_at_the_hour(recording_peaking_in_its_older_tail());
     let position = harness
         .driver
-        .position_beside_peak("live-cpu-plot", OLDER_PEAK);
+        .position_beside_second("live-cpu-plot", OLDER_PEAK);
+    let under_the_pointer = harness.driver.second_at_plot_x("live-cpu-plot", position.x);
+    assert_ne!(under_the_pointer, Some(OLDER_PEAK));
 
     harness.driver.hover_position(position);
     harness.driver.context.run_until_parked();
-    let (_, during_read) = harness.driver.chart_accessibility_reading("live-cpu");
-    harness.driver.answer_hover(older_peak_selection);
-    let (shown, reading) = harness.driver.chart_accessibility_reading("live-cpu");
 
-    assert!(during_read.ends_with("Unavailable"), "{during_read}");
-    assert_eq!(shown, Some(OLDER_PEAK));
-    assert!(reading.ends_with("95%"), "{reading}");
+    let (shown, _) = harness.driver.chart_accessibility_reading("live-cpu");
+    assert_eq!(shown, under_the_pointer.map(|second| second - second % 10));
     harness.teardown();
 }
 
@@ -1741,11 +1730,11 @@ fn hour_with_a_brief_app_at(peak: u64) -> viewer::store::View {
 }
 
 #[gpui::test]
-fn a_click_on_a_peaks_mark_ranks_the_short_lived_app_no_chart_draws(cx: &mut TestAppContext) {
+fn holding_a_maximum_ranks_the_short_lived_app_no_chart_draws(cx: &mut TestAppContext) {
     // Goal: an App that ran for the one second of a peak is found from the peak, though its mean
     // over the range puts it on no line of a chart by App.
     // Method: Overview of an hour whose CPU peaks at one second, whose Apps that second are led
-    // by one no other second holds. Read the chart by App, click the mark, read the top Apps.
+    // by one no other second holds. Read the chart by App, hold the maximum, read the top Apps.
     let mut harness = InputHarness::open_route(cx, "overview");
     harness
         .driver
@@ -1753,15 +1742,8 @@ fn a_click_on_a_peaks_mark_ranks_the_short_lived_app_no_chart_draws(cx: &mut Tes
     let drawn = harness.driver.chart_line_names("live-cpu-apps");
     assert!(drawn.iter().any(|name| name == "A"), "{drawn:?}");
     assert!(!drawn.iter().any(|name| name == "Brief"), "{drawn:?}");
-    let position = harness.driver.position_beside_peak("live-cpu-plot", HELD);
 
-    harness.driver.hover_position(position);
-    harness.driver.context.run_until_parked();
-    harness
-        .driver
-        .context
-        .simulate_click(position, Modifiers::none());
-    harness.driver.context.run_until_parked();
+    harness.driver.hold_cpu_maximum();
 
     assert_eq!(harness.driver.ranked_second(), HELD);
     assert_eq!(harness.driver.leading_cpu_app(), "Brief");
@@ -1769,67 +1751,41 @@ fn a_click_on_a_peaks_mark_ranks_the_short_lived_app_no_chart_draws(cx: &mut Tes
 }
 
 #[gpui::test]
-fn a_peaks_mark_stays_a_target_through_a_hold_and_after_letting_go(cx: &mut TestAppContext) {
-    // Goal: holding another second and letting go leave a peak's mark where it was, so a peak seen
+fn a_maximum_can_be_held_during_a_hold_and_after_letting_go(cx: &mut TestAppContext) {
+    // Goal: holding another second and letting go leave a line's maximum as it was, so a peak seen
     // before a hold can still be held during it and after it.
-    // Method: Overview of an hour whose CPU peaks at one second. Hold another second, click beside
-    // the mark, let go, and click beside it again, reading what the page asks the reader for.
+    // Method: Overview of an hour whose CPU peaks at one second. Hold another second, hold the
+    // maximum, let go, and hold it again, reading what the page asks the reader for.
     let mut harness = InputHarness::open_route(cx, "overview");
     harness
         .driver
         .show_view_at_fifteen_minutes(hour_peaking_at(HELD));
-    let plot = "live-cpu-plot";
 
-    harness.driver.click_second_on(plot, HELD + 200);
+    harness.driver.click_second_on("live-cpu-plot", HELD + 200);
     assert_eq!(harness.driver.requested_second(), Some(HELD + 200));
-    let during_hold = harness.driver.position_beside_peak(plot, HELD);
-    harness.driver.hover_position(during_hold);
-    harness.driver.context.run_until_parked();
-    harness
-        .driver
-        .context
-        .simulate_click(during_hold, Modifiers::none());
-    harness.driver.context.run_until_parked();
+    harness.driver.hold_cpu_maximum();
     assert_eq!(harness.driver.requested_second(), Some(HELD));
 
     harness.driver.follow_latest();
     harness.driver.context.run_until_parked();
     assert_ne!(harness.driver.requested_second(), Some(HELD));
-    let after_resume = harness.driver.position_beside_peak(plot, HELD);
-    harness.driver.hover_position(after_resume);
-    harness.driver.context.run_until_parked();
-    harness
-        .driver
-        .context
-        .simulate_click(after_resume, Modifiers::none());
-    harness.driver.context.run_until_parked();
+    harness.driver.hold_cpu_maximum();
 
     assert_eq!(harness.driver.requested_second(), Some(HELD));
     harness.teardown();
 }
 
 #[gpui::test]
-fn a_click_on_a_peaks_mark_holds_the_reading_that_read_it(cx: &mut TestAppContext) {
-    // Goal: a peak's mark is a target of its own, so a click within reach of it holds the reading
-    // the mark stands for, and that reading's own second, rather than the second under the pointer.
-    // Method: Overview of an hour whose CPU peaks at one second, a click eight points before the
-    // peak near the top of the plot, then what the page asks the reader for.
+fn holding_a_maximum_holds_the_reading_that_read_it(cx: &mut TestAppContext) {
+    // Goal: a line's maximum names one reading, so holding it holds that reading and that
+    // reading's own second.
+    // Method: Overview of an hour whose CPU peaks at one second, the maximum held from the Data
+    // table, then what the page asks the reader for.
     let mut harness = InputHarness::open_route(cx, "overview");
     let view = hour_peaking_at(HELD);
     harness.driver.show_view_at_fifteen_minutes(view);
-    let position = harness.driver.position_beside_peak("live-cpu-plot", HELD);
-    assert_ne!(
-        harness.driver.second_at_plot_x("live-cpu-plot", position.x),
-        Some(HELD)
-    );
 
-    harness.driver.hover_position(position);
-    harness.driver.context.run_until_parked();
-    harness
-        .driver
-        .context
-        .simulate_click(position, Modifiers::none());
-    harness.driver.context.run_until_parked();
+    harness.driver.hold_cpu_maximum();
 
     assert_eq!(harness.driver.requested_second(), Some(HELD));
     assert_eq!(
@@ -1844,25 +1800,63 @@ fn a_click_on_a_peaks_mark_holds_the_reading_that_read_it(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn a_click_on_a_peaks_mark_holds_its_run_where_another_read_the_same_second(
-    cx: &mut TestAppContext,
-) {
+fn a_maximum_held_above_a_chart_stays_shown_while_the_pointer_rests(cx: &mut TestAppContext) {
+    // Goal: holding a maximum closes the dialog above the charts, which puts a plot under a
+    // pointer that has not moved. The first frame reports that as a hover, and it must not take
+    // the page from the second the user just picked.
+    // Method: Overview of an hour, a window short enough that the maximum's control lies above
+    // the GPU plot, the maximum held with the pointer left on it, then the second a chart reads
+    // out.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_peaking_at(HELD));
+    harness.driver.place_cpu_maximum_above_the_gpu_plot();
+
+    harness.driver.hold_cpu_maximum();
+
+    let (shown, _) = harness.driver.chart_accessibility_reading("live-cpu");
+    assert_eq!(shown, Some(HELD));
+    harness.teardown();
+}
+
+#[gpui::test]
+fn a_move_after_holding_a_maximum_hovers_the_plot_under_the_pointer(cx: &mut TestAppContext) {
+    // Goal: the hover a held maximum set aside belongs to a pointer that has not moved, so the
+    // next move over that plot reads as an ordinary hover.
+    // Method: the same hold with the pointer left above the GPU plot, one point's move along the
+    // plot, then the second a chart reads out and the second under the pointer.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_peaking_at(HELD));
+    let control = harness.driver.place_cpu_maximum_above_the_gpu_plot();
+    harness.driver.hold_cpu_maximum();
+    let moved = gpui::point(control.x + gpui::px(1.0), control.y);
+    let under_the_pointer = harness
+        .driver
+        .second_at_plot_x("live-gpu-activity-plot", moved.x);
+    assert_ne!(under_the_pointer, Some(HELD));
+
+    harness.driver.hover_position(moved);
+    harness.driver.context.run_until_parked();
+
+    let (shown, _) = harness.driver.chart_accessibility_reading("live-cpu");
+    assert_eq!(shown, under_the_pointer);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn holding_a_maximum_holds_its_run_where_another_read_the_same_second(cx: &mut TestAppContext) {
     // Goal: the peak's own reading is held where two runs read its wall second, though a plain
     // click on that second holds the newest of them.
     // Method: the hour with a second reading of the peak's wall second by another run, read after
-    // the peak, a click on the mark, then the run and publication the page asks the reader for.
+    // the peak, the maximum held, then the run and publication the page asks the reader for.
     let mut harness = InputHarness::open_route(cx, "overview");
     let view = hour_with_a_second_reading_of(hour_peaking_at(HELD), HELD, 900_000);
     harness.driver.show_view_at_fifteen_minutes(view);
-    let position = harness.driver.position_beside_peak("live-cpu-plot", HELD);
 
-    harness.driver.hover_position(position);
-    harness.driver.context.run_until_parked();
-    harness
-        .driver
-        .context
-        .simulate_click(position, Modifiers::none());
-    harness.driver.context.run_until_parked();
+    harness.driver.hold_cpu_maximum();
 
     let identity = harness.driver.requested_identity().unwrap();
     assert_eq!(identity["publication"], HELD);
@@ -1870,6 +1864,24 @@ fn a_click_on_a_peaks_mark_holds_its_run_where_another_read_the_same_second(
         identity["run"],
         identity_text(collector::ring::Identity([1, 2])).to_string()
     );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_keyboard_holds_a_maximum_from_the_data_table(cx: &mut TestAppContext) {
+    // Goal: the Data table is the one route to a line's maximum, so it works from the keyboard.
+    // Method: Overview of an hour whose CPU peaks at one second, the Data table opened, a tab from
+    // its close control to the first maximum, a return there, then what the page asks for.
+    let mut harness = InputHarness::open_route(cx, "overview");
+    harness
+        .driver
+        .show_view_at_fifteen_minutes(hour_peaking_at(HELD));
+    harness.driver.click_control("chart-data:live-cpu");
+
+    harness.driver.press("tab");
+    harness.driver.press("enter");
+
+    assert_eq!(harness.driver.requested_second(), Some(HELD));
     harness.teardown();
 }
 
@@ -1921,9 +1933,34 @@ impl InputDriver {
         self.context.run_until_parked();
     }
 
-    /// A place eight points before the mark of a peak at `second` on the chart whose plot is
-    /// `plot`, close enough to its top to be on any peak that stands beyond its axis.
-    fn position_beside_peak(
+    /// Opens the Data table of the CPU chart and holds the highest reading of its line of all
+    /// cores.
+    fn hold_cpu_maximum(&mut self) {
+        self.click_control("chart-data:live-cpu");
+        self.click_control("chart-maximum:live-cpu:All cores");
+    }
+
+    /// Shortens the window until the dialog over Overview's charts sets the control of the CPU
+    /// chart's highest reading above the GPU plot, and answers where that control's middle lies.
+    fn place_cpu_maximum_above_the_gpu_plot(&mut self) -> gpui::Point<gpui::Pixels> {
+        self.context
+            .simulate_resize(gpui::size(gpui::px(1600.0), gpui::px(800.0)));
+        self.context.run_until_parked();
+        self.click_control("chart-data:live-cpu");
+        let control =
+            super::menu_control_bounds(&mut self.context, "chart-maximum:live-cpu:All cores")
+                .center();
+        assert!(
+            self.plot_bounds("live-gpu-activity-plot")
+                .contains(&control)
+        );
+        self.click_control("chart-data-close");
+
+        control
+    }
+
+    /// A place eight points before `second` on the chart whose plot is `plot`, near its top.
+    fn position_beside_second(
         &mut self,
         plot: &'static str,
         second: u64,
@@ -1940,19 +1977,6 @@ impl InputDriver {
         let fraction = f32::from(x - bounds.left()) / f32::from(bounds.size.width);
 
         self.view_window()?.second_at(fraction)
-    }
-
-    /// Hands the page the reader's answer to the hover's read, its selection changed by `edit`.
-    fn answer_hover(&mut self, edit: impl FnOnce(&mut serde_json::Value)) {
-        self.view.update(&mut self.context, |dashboard, cx| {
-            dashboard.preview_tick(cx);
-            let generation = dashboard.preview.as_ref().unwrap().generation.unwrap();
-            let mut snapshot = super::accepted_snapshot(generation);
-            edit(snapshot.selection.legacy_mut().unwrap());
-            assert!(dashboard.preview_receive(Update::Ready(snapshot)));
-            cx.notify();
-        });
-        self.context.run_until_parked();
     }
 
     /// The identity of the observation the page's request names.

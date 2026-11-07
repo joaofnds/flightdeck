@@ -7,7 +7,7 @@ use std::time::Instant;
 use gpui::{Bounds, Pixels, point, px, size};
 use serde_json::{Value, json};
 
-use crate::charts::{Geometry, Inspection, TimeWindow, peak_under, prepare_lines};
+use crate::charts::{Geometry, Inspection, prepare_lines};
 use crate::data::Panel;
 use crate::projection_bench::Counter;
 
@@ -247,7 +247,6 @@ fn measure(case: &Case, iterations: u32) -> io::Result<Value> {
         }
         let counts = counter.finish();
         let elapsed_ns = started.elapsed().as_nanos();
-        black_box(peak_pick_ns(case));
         if transcript(case) != expected {
             return Err(io::Error::other(
                 "Paint preparation output changed between iterations",
@@ -261,40 +260,11 @@ fn measure(case: &Case, iterations: u32) -> io::Result<Value> {
         json!({"mode":"paint-preparation", "case":case.name,
         "panels":case.panels.len(), "series":case.panels.iter().map(|panel| panel.lines.len())
             .sum::<usize>(), "source_points":points(), "measurements":measurements,
-        "peak_pick_ns":peak_pick_ns(case),
         "counter":"Rust GlobalAlloc requests during production prepare_lines only",
         "scope":"Prepared float bits/geometry/nulls/segments; excludes paths, GPU and pixels"})
     );
 
     Ok(json!({"case":case.name, "prepared":expected}))
-}
-
-/// What one move of the pointer costs across `case`'s panels to find the peak under it, on the
-/// clock a page's charts run on, which the paint comparison's panels leave out.
-fn peak_pick_ns(case: &Case) -> u128 {
-    let panels: Vec<Panel> = case
-        .panels
-        .iter()
-        .map(|panel| Panel {
-            window: Some(TimeWindow {
-                first: 1_000_000,
-                span: viewer::CHARTED_SECONDS,
-            }),
-            ..panel.clone()
-        })
-        .collect();
-    let started = Instant::now();
-    for panel in &panels {
-        black_box(peak_under(
-            panel,
-            bounds(),
-            case.inspection,
-            &case.hidden,
-            point(px(300.0), px(60.0)),
-        ));
-    }
-
-    started.elapsed().as_nanos()
 }
 
 fn bounds() -> Bounds<Pixels> {
