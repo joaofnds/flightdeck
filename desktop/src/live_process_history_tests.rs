@@ -214,8 +214,6 @@ pub(crate) fn request() -> Request {
         route: "apps".into(),
         second: None,
         identity: None,
-        table: "ticks".into(),
-        offset: 0,
         app: Some(AppKey {
             kind: "bundle".into(),
             bytes_hex: "41".into(),

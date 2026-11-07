@@ -64,10 +64,6 @@ fn assert_event_refusal(prepared: &super::Prepared) {
         prepared.app_refusal(),
         Some(super::Unavailable::Input("store tick events"))
     );
-    assert!(matches!(
-        prepared.raw(),
-        Err(super::Unavailable::UnvalidatedFrame)
-    ));
     assert_eq!(
         prepared.apps.missing,
         Some(crate::store::Missing::Refused(

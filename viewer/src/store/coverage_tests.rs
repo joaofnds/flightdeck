@@ -42,7 +42,6 @@ fn the_running_store_answers_a_covered_pin_without_replaying_its_sources() {
         Kind::RingRead,
         Kind::FrameCapture,
         Kind::AppDerivation,
-        Kind::RawCapture,
         Kind::MachineReduction,
     ] {
         let count = |events: &[persistence::work::ingestion::Event]| {

@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::{Value, json};
 
@@ -1857,7 +1855,6 @@ fn accepted_snapshot(generation: u64) -> Box<Snapshot> {
             json!({"second":1000,"context_last_second":1000,"selected":identity,
             "trends":[previous, selected]}),
         ),
-        pages: BTreeMap::new(),
         apps: None,
         detail: None,
         history: None,

@@ -413,7 +413,6 @@ fn assert_ordinary_c_once(events: &[super::Event]) {
     for kind in [
         super::Kind::RingRead,
         super::Kind::FrameCapture,
-        super::Kind::RawCapture,
         super::Kind::AppDerivation,
         super::Kind::Accepted,
     ] {

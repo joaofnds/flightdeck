@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use super::apps::TickApps;
 use super::native::{NativeRead, PrepareError, Prepared};
-use super::raw_cache::RawCache;
 use super::{ByteBudget, Failure, Held, Ring};
 use crate::cancellation::Operation;
 
@@ -29,20 +28,13 @@ pub(super) fn read_native(
             .as_ref()
             .unwrap_or_else(|| unreachable!("only complete Store reads are cancellable")),
     );
-    if held.raw.is_none() {
-        held.raw = Some(RawCache::new(&budget).map_err(|_| Failure::Budget)?);
-    }
     let mut progress = NativeRead::Idle;
     for _ in 0..super::ring::TICKS_PER_READ_MAX {
         held.release_views();
         let previous = held.apps.newest_held().map(Arc::clone);
-        let mut refused = false;
         let read = ring.read_prepared(&budget, operation, previous.as_deref(), |run, prepared| {
-            take(held, run, prepared, &mut refused)
+            take(held, run, prepared)
         });
-        if refused {
-            return Err(Failure::Refused);
-        }
         match read.map_err(read_failure)? {
             NativeRead::Accepted => progress = NativeRead::Accepted,
             NativeRead::Missed => progress = NativeRead::Missed,
@@ -54,41 +46,11 @@ pub(super) fn read_native(
     Ok(progress)
 }
 
-fn take(
-    held: &mut Held,
-    run: &collector::ring::RunIdentity,
-    prepared: &mut Prepared,
-    refused: &mut bool,
-) -> bool {
-    let raw = match prepared.raw() {
-        Ok(raw) => {
-            let cache = held
-                .raw
-                .as_ref()
-                .unwrap_or_else(|| unreachable!("raw retention"));
-            if cache.admit(&prepared.observation, raw).is_err() {
-                *refused = true;
-                return false;
-            }
-
-            Some(Arc::clone(raw))
-        }
-        Err(_) => None,
-    };
-    if let Some(machine) = &prepared.machine {
-        if !held.take(run, machine, TickApps::Loaded(&mut prepared.apps)) {
-            return false;
-        }
+fn take(held: &mut Held, run: &collector::ring::RunIdentity, prepared: &mut Prepared) -> bool {
+    match &prepared.machine {
+        Some(machine) => held.take(run, machine, TickApps::Loaded(&mut prepared.apps)),
+        None => true,
     }
-    if let Some(raw) = raw {
-        let cache = held
-            .raw
-            .as_mut()
-            .unwrap_or_else(|| unreachable!("raw retention"));
-        assert!(cache.insert(prepared.observation, raw).is_ok());
-    }
-
-    true
 }
 
 fn read_failure(error: PrepareError) -> Failure {

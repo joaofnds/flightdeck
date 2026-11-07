@@ -129,11 +129,6 @@ fn run_snapshot(snapshot: &Snapshot) -> Result<Value, String> {
     if snapshot.read_ms < 0.0 {
         return Err("Live soak received a negative read duration".into());
     }
-    for field in ["tail_ticks", "tail_cache_bytes", "tail_cache_bytes_max"] {
-        if snapshot.catalog[field].as_u64().is_none() {
-            return Err(format!("Live soak catalog is missing {field}"));
-        }
-    }
     let context_last_second = workflows::context_last_second(&snapshot.selection)?;
     let coverage =
         workflows::history_coverage(&snapshot.selection, "trends", false, context_last_second)?;
@@ -142,9 +137,6 @@ fn run_snapshot(snapshot: &Snapshot) -> Result<Value, String> {
     Ok(
         json!({"read_ms": snapshot.read_ms, "selected": selected, "rankings": rankings,
         "selected_run_tick": selected["run_tick"], "scalar_history": coverage,
-        "tail_ticks": snapshot.catalog["tail_ticks"],
-        "tail_cache_bytes": snapshot.catalog["tail_cache_bytes"],
-        "tail_cache_bytes_max": snapshot.catalog["tail_cache_bytes_max"],
         "collector_completed": snapshot.catalog["collector_completed"]}),
     )
 }
@@ -240,7 +232,6 @@ fn run_emit(report: &Value) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
     use serde_json::{Value, json};
@@ -256,7 +247,6 @@ mod tests {
         let mut refresh = snapshot(&observation(10));
         refresh.selection.legacy_mut().unwrap()["selected"]["reader_losses"] =
             json!({"publications": 3});
-        refresh.catalog["tail_ticks"] = json!(2);
 
         observations
             .observe(
@@ -280,7 +270,10 @@ mod tests {
         assert_eq!(report["advancing_observations"], false);
         assert_eq!(report["last_observation_age_seconds"], 8.0);
         assert_eq!(report["longest_without_new_observation_seconds"], 8.0);
-        assert_eq!(report["latest"]["tail_ticks"], 2);
+        assert_eq!(
+            report["latest"]["selected"]["reader_losses"]["publications"],
+            3
+        );
     }
 
     #[test]
@@ -375,13 +368,11 @@ mod tests {
         let second = selected["wall_ns"].as_u64().unwrap() / 1_000_000_000;
         Snapshot {
             generation: 1,
-            catalog: json!({"tail_ticks": 1, "tail_cache_bytes": 1024,
-                "tail_cache_bytes_max": 134_217_728, "collector_completed": false}),
+            catalog: json!({"collector_completed": false}),
             selection: crate::live_source::Presentation::Legacy(
                 json!({"selected": selected, "context_last_second": second,
                 "trends": [selected]}),
             ),
-            pages: BTreeMap::new(),
             apps: None,
             detail: None,
             history: None,

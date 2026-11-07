@@ -314,7 +314,6 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         generation: 1,
         catalog: Value::Null,
         selection: crate::live_source::Presentation::Legacy(selected),
-        pages: std::collections::BTreeMap::new(),
         apps: None,
         detail: None,
         history: Some(crate::live_source::Presentation::Legacy(
@@ -336,8 +335,6 @@ fn resident_decode_failure_preserves_machine_panels_and_selected_app_rankings() 
         route: "memory".into(),
         second: None,
         identity: None,
-        table: "ticks".into(),
-        offset: 0,
         app: None,
         apps_offset: 0,
         members_offset: 0,

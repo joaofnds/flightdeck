@@ -230,28 +230,6 @@ impl<'a> View<'a> {
         columns
     }
 
-    pub(super) fn column_storage_bytes(&self) -> usize {
-        if self.derived {
-            return LEVEL_COLUMNS.len() * size_of::<String>()
-                + LEVEL_COLUMNS.iter().map(|name| name.len()).sum::<usize>();
-        }
-
-        let columns = self
-            .table
-            .columns
-            .iter()
-            .chain(self.table.groups.iter().flat_map(|group| group.iter()));
-        let mut count = 0;
-        let mut names = 0;
-        for column in columns {
-            count += 1;
-            names += column.name.len();
-        }
-
-        // Geometric growth can briefly keep the old and replacement column vectors together.
-        3 * count * size_of::<String>() + names
-    }
-
     pub fn order(&self, operation: &Operation) -> Result<Vec<usize>> {
         if self.len() > crate::data::ROWS_MAX {
             return Err(Error::Bound("live raw rows"));
@@ -369,22 +347,6 @@ impl<'a> View<'a> {
 }
 
 impl Cell<'_> {
-    pub(super) fn formatted_capacity(&self, column: &str) -> Result<usize> {
-        match self {
-            Self::Null => Ok(0),
-            Self::Bool(_) | Self::Unsigned(_) | Self::Signed(_) => Ok(128),
-            Self::Float32(value) if value.is_finite() => Ok(128),
-            Self::Float64(value) if value.is_finite() => Ok(1024),
-            Self::Float32(_) if column == "rpm" => Ok(0),
-            Self::Float32(_) | Self::Float64(_) => {
-                Err(Error::Bound("unsupported or nonfinite cell"))
-            }
-            Self::Text(text) => Ok(text.len()),
-            Self::Bytes(bytes) => Ok(bytes.len() * 4),
-            Self::Disks(_) => Ok(persistence::disks::HEX_BYTES_MAX),
-        }
-    }
-
     pub fn number(&self) -> Result<Option<f64>> {
         match self {
             Self::Null => Ok(None),

@@ -12,7 +12,6 @@ fn reads_a_partial_cpu_page_from_real_saved_counters_at_the_exact_same_second_id
     request.identity = Some(json!({"run":"00000000000000010000000000000002",
         "boot":"00000000000000030000000000000004","publication":3}));
     request.cpu_offset = 32;
-    request.offset = 512;
 
     let snapshot = recording.read(request).unwrap();
 
@@ -50,7 +49,6 @@ fn reads_a_partial_cpu_page_from_real_saved_counters_at_the_exact_same_second_id
         panic!("Saved CPU App rankings are unavailable");
     };
     assert_eq!(rankings.selected["publication"], 3);
-    assert!(snapshot.pages.is_empty());
 }
 
 #[test]

@@ -69,7 +69,6 @@ fn a_saved_gap_cannot_retain_the_previous_exact_cpu_details(cx: &mut TestAppCont
             publication: None,
             cpu_publication: None,
             cpu_count: 0,
-            page_publications: Vec::new(),
         }
     );
     assert_eq!(harness.driver.committed_publication(), Some(3));
@@ -274,11 +273,6 @@ impl ReaderHoverDriver {
                     .cpu_detail
                     .as_ref()
                     .map_or(0, |detail| detail.cpus.len()),
-                page_publications: snapshot
-                    .pages
-                    .iter()
-                    .map(|(name, page)| (name.clone(), page["observation"]["publication"].as_u64()))
-                    .collect(),
             }
         })
     }
@@ -321,7 +315,6 @@ struct Reading {
     publication: Option<u64>,
     cpu_publication: Option<u64>,
     cpu_count: usize,
-    page_publications: Vec<(String, Option<u64>)>,
 }
 
 impl Reading {
@@ -331,7 +324,6 @@ impl Reading {
             publication: Some(publication),
             cpu_publication: Some(publication),
             cpu_count: 35,
-            page_publications: Vec::new(),
         }
     }
 }

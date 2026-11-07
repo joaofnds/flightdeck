@@ -19,7 +19,6 @@ mod identity;
 mod page;
 pub(crate) use cells::{Cell, View};
 use identity::Identity;
-pub(crate) use page::AdmittedPage;
 
 /// A candidate may overlap the 128 MiB accepted cache. App Frame/Sample storage has its own
 /// existing bounds; the whole candidate is checked against that same ceiling before commit.
@@ -240,27 +239,6 @@ impl Raw {
                 .ok_or(Error::Bound("live raw storage"))?
                 .machine,
         )
-    }
-
-    /// The original source and clocks travel with the facts, independently of a cache key.
-    pub(crate) fn observation(&self) -> Option<crate::live_app_response::Observation> {
-        let identity = self.identity?;
-        let [tick] = self.machine.ticks.as_slice() else {
-            return None;
-        };
-
-        Some(crate::live_app_response::Observation {
-            recording: identity.recording.0,
-            stamp: crate::apps::Stamp {
-                boot: identity.boot.0,
-                run: identity.run.0,
-                publication: tick.publication,
-                continuous_ns: tick.continuous_ns,
-                awake_ns: tick.awake_ns,
-            },
-            run_tick: tick.run_tick,
-            wall_ns: tick.wall_ns,
-        })
     }
 
     fn capture_events(

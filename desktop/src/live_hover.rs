@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use collector::recording::identity_text;
@@ -258,7 +257,6 @@ fn resident_reading(snapshot: &Snapshot, target: &Target) -> Box<Snapshot> {
         selection: crate::live_source::Presentation::Legacy(json!({"second":target.second,
             "context_last_second":snapshot.selection["context_last_second"],"selected":selected,
             "summary":summary,"alternatives":[],"trends":[]})),
-        pages: BTreeMap::new(),
         apps: None,
         detail: None,
         history: None,

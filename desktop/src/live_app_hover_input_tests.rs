@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowOptions};
@@ -758,7 +757,6 @@ impl AppEpoch {
                 json!({"second":second,"context_last_second":second,"selected":selected,
                 "summary":null,"trends":[system_point(999,1),system_point(1000,2)]}),
             ),
-            pages: BTreeMap::new(),
             apps: Some(crate::live_source::Presentation::Legacy(
                 json!({"selected":selected,"apps":[app],"ungrouped_members":0,
                 "page":{"offset":0,"total":1,"next_offset":null}}),

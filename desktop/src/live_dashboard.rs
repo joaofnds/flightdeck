@@ -551,8 +551,6 @@ impl LiveDashboard {
             route,
             second: None,
             identity: None,
-            table: "ticks".into(),
-            offset: 0,
             app: None,
             apps_offset: 0,
             members_offset: 0,
@@ -659,9 +657,6 @@ impl LiveDashboard {
                     "plot_renders":self.plots.renders(),"plots_held":self.plots.held(),
                     "curve_builds":self.plots.curve_builds(),
                     "read_ms":self.snapshot.as_ref().map(|snapshot| snapshot.read_ms),
-                    "tail_cache_bytes":self.snapshot.as_ref()
-                        .map(|snapshot| &snapshot.catalog["tail_cache_bytes"]),
-                    "tail_ticks":self.snapshot.as_ref().map(|s| &s.catalog["tail_ticks"]),
                     "scalar_points":self.snapshot.as_ref()
                         .and_then(|s| s.selection["trends"].as_array()).map(Vec::len),
                     "cpu_history":self.snapshot.as_ref()
@@ -1083,7 +1078,6 @@ impl LiveDashboard {
         self.chart_inspector = None;
         self.preview = None;
         self.request.route = route.into();
-        self.request.offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
         self.snapshot = None;
@@ -1134,7 +1128,6 @@ impl LiveDashboard {
         }
         self.request.second = second;
         self.request.identity = identity;
-        self.request.offset = 0;
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
@@ -1195,7 +1188,6 @@ impl LiveDashboard {
     fn inspect_target_request(&mut self, target: crate::live_hover::Target) {
         self.request.second = Some(target.second);
         self.request.identity = target.identity;
-        self.request.offset = 0;
         self.request.apps_offset = 0;
         self.request.members_offset = 0;
         self.request.cpu_offset = 0;
@@ -1726,7 +1718,6 @@ impl Render for LiveDashboard {
 mod selection_tests {
     use super::*;
     use serde_json::json;
-    use std::collections::BTreeMap;
 
     #[test]
     fn a_resting_page_keeps_fast_polling_until_store_catch_up_finishes() {
@@ -1768,14 +1759,6 @@ mod selection_tests {
                 json!({"second":1000,"context_last_second":1000,"selected":{"publication":1},
                 "summary":{"memory_total_bytes":4096},"trends":[]}),
             ),
-            pages: (BTreeMap::from([(
-                "ticks".into(),
-                json!({"offset":0,"total":1,"rows":[["1"]],
-                    "columns":["publication"]}),
-            )]))
-            .into_iter()
-            .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
-            .collect(),
             apps: None,
             detail: None,
             history: None,
@@ -1999,7 +1982,6 @@ mod selection_tests {
             json!({"second":1001,"context_last_second":1001,"selected":null,
             "summary":null,"trends":[]}),
         );
-        missing.pages.clear();
 
         assert!(dashboard.receive(Update::Ready(missing)));
 
@@ -2036,7 +2018,6 @@ mod selection_tests {
         let mut next = dashboard().snapshot.take().unwrap();
         let mut dashboard = dashboard();
         next.selection.legacy_mut().unwrap()["selected"]["publication"] = json!(2);
-        next.pages.get_mut("ticks").unwrap().legacy_mut().unwrap()["rows"] = json!([["2"]]);
 
         dashboard.accept(next);
 

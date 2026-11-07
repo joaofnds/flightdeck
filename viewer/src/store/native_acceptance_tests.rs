@@ -368,17 +368,15 @@ fn deny_sampled_take(
 ) -> crate::store::ByteReservation {
     let mut lease = None;
     let previous = held.apps.newest_held().map(Arc::clone);
-    let mut refused = false;
     let result = ring
         .read_prepared(budget, operation, previous.as_deref(), |run, prepared| {
             lease = Some(budget.reserve(budget.maximum() - budget.used()).unwrap());
-            assert!(!take(held, run, prepared, &mut refused));
+            assert!(!take(held, run, prepared));
             assert_eq!(prepared.apps.observation.unwrap().stamp.publication, 7);
             false
         })
         .unwrap();
     assert_eq!(result, NativeRead::Blocked);
-    assert!(!refused);
     lease.unwrap()
 }
 
@@ -580,9 +578,33 @@ fn capture_native_rows(
 }
 
 #[test]
+fn a_clockless_publication_leaves_the_store_taking_in_the_one_after_it() {
+    // Goal: a publication with no clock, which draws no second, holds nothing up behind it.
+    // Method: start a complete Store, publish a clockless reading and a reading after it, and
+    // read them through the Store's acceptance.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_usage(100, &usage(0));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut held = Held::without_recording();
+    held.enable_payload(Arc::clone(&budget));
+    let mut ring = make_ring(&fixture.root, Some(&budget));
+    crate::store::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
+    ring.follow().unwrap();
+    fixture.publish_without_clock();
+    fixture.publish_with_usage(102, &usage(2));
+
+    let read = read_native(&mut held, &mut ring, &operation).unwrap();
+
+    assert_eq!(read, NativeRead::Accepted);
+    assert_eq!(held.newest.unwrap().publication, 3);
+    assert!(ring.caught_up().unwrap());
+}
+
+#[test]
 fn the_complete_store_retains_native_facets_from_one_ingestion() {
     // Goal: ordinary complete Store steps retain measured facts without a second producer.
-    // Method: ingest two real publications, then read summary/process/raw facts and work counts.
+    // Method: ingest two real publications, then read summary/process facts and work counts.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(100, &usage(0));
     fixture.publish_with_usage(101, &usage(1));
@@ -621,17 +643,13 @@ fn the_complete_store_retains_native_facets_from_one_ingestion() {
         .find(|process| process.pid == 7)
         .unwrap();
     assert_eq!(process.cpu_ns(), Amount::Known(100_000_000));
-    let observation = apps.observation.unwrap();
-    let raw = held.raw.as_ref().unwrap().find(&observation).unwrap();
-    let page = raw.raw().page("ticks", 0, &operation).unwrap();
-    assert_eq!(page.shown(0, "publication"), Some("2"));
+    assert_eq!(apps.observation.unwrap().stamp.publication, 2);
     let mut events = Vec::new();
     trace.snapshot(&mut events).unwrap();
     for kind in [
         Kind::RingRead,
         Kind::FrameCapture,
         Kind::AppDerivation,
-        Kind::RawCapture,
         Kind::MachineReduction,
         Kind::Accepted,
     ] {
@@ -641,7 +659,6 @@ fn the_complete_store_retains_native_facets_from_one_ingestion() {
             "{kind:?}"
         );
     }
-    drop(raw);
     drop(view);
     drop(ring);
     drop(held);

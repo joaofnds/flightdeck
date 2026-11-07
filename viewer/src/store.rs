@@ -15,8 +15,6 @@ mod native;
 mod native_acceptance;
 mod payload;
 mod query;
-mod raw_cache;
-mod raw_response;
 mod recording;
 mod response;
 mod ring;
@@ -436,7 +434,6 @@ struct Held {
     ring_complete: bool,
     full_detail_evicted_through_ns: Option<u64>,
     payload_budget: Option<Arc<ByteBudget>>,
-    raw: Option<raw_cache::RawCache>,
     sampled: Option<Span<SampledSecond>>,
     span: Span<MachineSecond>,
     /// Each App's totals at each second of `span`, in the same order.
@@ -563,7 +560,6 @@ impl Held {
             ring_complete: false,
             full_detail_evicted_through_ns: None,
             payload_budget: None,
-            raw: None,
             sampled: None,
             span: Span::new(SECONDS_MAX, seconds),
             apps: Span::new(SECONDS_MAX, apps),
@@ -593,9 +589,6 @@ impl Held {
     fn reset(&mut self) {
         self.checked_catalog = None;
         self.source_status = None;
-        if let Some(raw) = &mut self.raw {
-            raw.clear();
-        }
         self.release_views();
         self.span.clear();
         self.span

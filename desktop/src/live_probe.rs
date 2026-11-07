@@ -97,8 +97,6 @@ fn probe_request(route: &str) -> Request {
         route: route.to_owned(),
         second: None,
         identity: None,
-        table: "processes".to_owned(),
-        offset: 0,
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
@@ -166,11 +164,6 @@ fn probe_validate(snapshot: &Snapshot, route: &str) -> Result<(), String> {
         if snapshot.selection["selected"].is_null() {
             return Err(format!("Live route {route} has no selected observation"));
         }
-    }
-    if !snapshot.pages.is_empty() {
-        return Err(format!(
-            "Live route {route} returned a raw page it has no use for"
-        ));
     }
     if route == "apps" {
         probe_apps(snapshot)?;
@@ -445,9 +438,6 @@ fn probe_missing_validate(missing: &Snapshot) -> Result<(), String> {
     if !missing.selection["summary"].is_null() {
         return Err("Missing second substituted another summary".to_owned());
     }
-    if !missing.pages.is_empty() {
-        return Err("Missing second returned raw pages".to_owned());
-    }
     for payload in [&missing.apps, &missing.detail, &missing.history] {
         if payload.is_some() {
             return Err("Missing second returned App payloads".to_owned());
@@ -468,7 +458,6 @@ fn probe_route_report(snapshot: &Snapshot) -> Result<Value, String> {
     Ok(json!({
         "generation": snapshot.generation,
         "selected": snapshot.selection["selected"],
-        "pages": snapshot.pages.keys().collect::<Vec<_>>(),
         "app_count": snapshot.apps.as_deref().map(|apps| &apps["app_count"]),
         "overview_rankings": rankings,
         "app_attribution": attribution_report(snapshot)?,

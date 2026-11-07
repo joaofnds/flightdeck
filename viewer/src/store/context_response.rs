@@ -39,7 +39,6 @@ impl QueryContext {
             .chain(catalog.and_then(|value| value.last_known_second))
             .max();
         let (latest, origin) = self.latest();
-        let (raw_count, raw_bytes) = self.raw_retention();
 
         json!({"first_second":first,"last_second":last,
             "windows":catalog.map(|value| value.windows),
@@ -47,8 +46,6 @@ impl QueryContext {
             "tables":persistence::schema::TABLES.map(persistence::schema::Table::name),
             "live":true,"history_error":null,"latest_observation":identity(latest, origin),
             "collector_completed":self.source_status().map(|status| status.completed),
-            "tail_ticks":raw_count,"raw_cache_bytes":raw_bytes,
-            "raw_cache_bytes_max":super::raw_cache::BYTES_MAX,
             "source_generation":self.source.generation})
     }
 

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, WindowOptions};
@@ -201,7 +200,6 @@ impl CPUHoverDriver {
                 generation: dashboard.generation,
                 catalog: json!({"first_second":1000,"last_second":1001}),
                 selection: crate::live_source::Presentation::Legacy(selection),
-                pages: BTreeMap::new(),
                 apps: None,
                 detail: None,
                 history: None,

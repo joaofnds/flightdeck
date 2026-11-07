@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "automation")]
@@ -44,8 +45,6 @@ pub struct Request {
     pub route: String,
     pub second: Option<u64>,
     pub identity: Option<Value>,
-    pub table: String,
-    pub offset: u64,
     pub app: Option<AppKey>,
     pub apps_offset: u32,
     pub members_offset: u32,
@@ -110,7 +109,6 @@ pub struct Snapshot {
     pub generation: u64,
     pub catalog: Value,
     pub selection: Presentation<Value>,
-    pub pages: BTreeMap<String, Presentation<Value>>,
     pub apps: Option<Presentation<Value>>,
     pub detail: Option<Presentation<Value>>,
     pub history: Option<Presentation<Value>>,
@@ -1068,7 +1066,6 @@ fn reader_snapshot_owned(
         generation,
         catalog,
         selection,
-        pages: BTreeMap::new(),
         apps: None,
         detail: None,
         history: None,
@@ -1786,9 +1783,6 @@ fn request_validate(request: &Request) -> Result<(), String> {
             | "self"
     ) {
         return Err("Unknown live route".to_owned());
-    }
-    if request.table.len() > 64 {
-        return Err("Live table name exceeds the byte bound".to_owned());
     }
     if let Some(identity) = &request.identity {
         identity_signature(identity)?;

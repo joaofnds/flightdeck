@@ -49,10 +49,7 @@ pub struct QueryContext {
     status: Option<super::ring::Status>,
     latest: Observation,
     latest_origin: super::native::Origin,
-    raw_count: u32,
-    raw_bytes: usize,
     followed: bool,
-    raw: Option<super::raw_cache::RawReading>,
     selection: ContextSelection,
     selected: Observation,
     seconds: Vec<QuerySecond>,
@@ -217,21 +214,8 @@ impl QueryContext {
         (&self.latest, self.latest_origin)
     }
 
-    pub(super) fn raw_retention(&self) -> (u32, usize) {
-        (self.raw_count, self.raw_bytes)
-    }
-
     pub(super) fn followed(&self) -> bool {
         self.followed
-    }
-
-    pub(super) fn raw_reading(
-        &self,
-        observation: &Observation,
-    ) -> Option<&super::raw_cache::RawReading> {
-        self.raw
-            .as_ref()
-            .filter(|raw| raw.observation == *observation)
     }
 
     pub(crate) fn reserve_response(&self, bytes: usize) -> persistence::Result<ByteReservation> {
@@ -633,13 +617,7 @@ fn build_context(
             .unwrap_or_else(|| unreachable!("a query selects accepted Apps"))
             .metadata
             .origin,
-        raw_count: held.raw.as_ref().map_or(0, super::raw_cache::RawCache::len),
-        raw_bytes: held
-            .raw
-            .as_ref()
-            .map_or(0, super::raw_cache::RawCache::bytes),
         followed: target.followed,
-        raw: held.raw.as_ref().and_then(|raw| raw.find(&target.selected)),
         selection: target.selection,
         selected: target.selected,
         seconds,

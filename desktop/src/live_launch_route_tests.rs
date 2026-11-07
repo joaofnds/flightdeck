@@ -75,7 +75,6 @@ fn every_page_past_its_first_rows_shows_what_the_saved_route_shows() {
 
     for (route, _) in ROUTES {
         let mut past_first = request(route);
-        past_first.offset = 1;
         past_first.apps_offset = 1;
         past_first.members_offset = 1;
         past_first.cpu_offset = 32;

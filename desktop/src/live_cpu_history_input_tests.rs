@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, WindowOptions};
@@ -267,7 +266,6 @@ impl CPUHistoryDriver {
                 generation: dashboard.generation,
                 catalog: json!({"first_second":1000,"last_second":1001}),
                 selection: crate::live_source::Presentation::Legacy(fixture.selection),
-                pages: BTreeMap::new(),
                 apps: None,
                 detail: None,
                 history: None,

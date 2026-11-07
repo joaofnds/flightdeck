@@ -39,7 +39,7 @@ pub(super) fn record_route(route: &str) {
     harness.teardown();
     let report = json!({"schemaVersion": 1, "route": route, "request_complete": true,
         "selected": snapshot.selection["selected"], "selection": snapshot.selection,
-        "pages": snapshot.pages, "apps": snapshot.apps, "detail": snapshot.detail,
+        "apps": snapshot.apps, "detail": snapshot.detail,
         "history": snapshot.history, "cpu_detail": snapshot.cpu_detail,
         "source_payloads": payloads, "source_availability": source_availability,
         "availability": availability,
@@ -137,7 +137,7 @@ pub(super) fn record_selections(harness: &Harness, snapshots: [&Snapshot; 4]) {
         &json!({"schemaVersion": 1,
         "input_root": harness.root,
         "snapshots": snapshots.map(|snapshot| json!({
-            "selection": snapshot.selection, "pages": snapshot.pages, "apps": snapshot.apps,
+            "selection": snapshot.selection, "apps": snapshot.apps,
             "detail": snapshot.detail, "history": snapshot.history,
             "availability": payloads::report(snapshot)
                 .unwrap(), "ranks_and_parts": window_values(snapshot),

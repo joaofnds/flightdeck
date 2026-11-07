@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowOptions};
 use serde_json::{Value, json};
 
@@ -484,7 +482,6 @@ impl HoverDriver {
         self.view.update(&mut self.context, |dashboard, cx| {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
             snapshot.selection.legacy_mut().unwrap()["trends"][1]["wall_ns"] = json!(1000 * NS);
-            snapshot.pages.clear();
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             let target =
@@ -516,10 +513,7 @@ impl HoverDriver {
                 dashboard.request.second = Some(Epoch::Accepted.second());
                 dashboard.request.identity = Some(Epoch::Accepted.identity());
             }
-            let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
-            if matches!(self.route, Route::Memory) {
-                snapshot.pages.clear();
-            }
+            let snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -534,7 +528,6 @@ impl HoverDriver {
             let mut snapshot = Epoch::Accepted.snapshot(dashboard.generation, false);
             snapshot.selection.legacy_mut().unwrap()["trends"][1]["memory_free_bytes"] =
                 Value::Null;
-            snapshot.pages.clear();
             assert!(dashboard.take_update(Update::Ready(snapshot)));
             assert!(dashboard.error.is_none(), "{:?}", dashboard.error);
             cx.notify();
@@ -823,15 +816,6 @@ impl Epoch {
                 "selected":self.observation(),"summary":summary,"context_seconds":900,
                 "trends":points}),
             ),
-            pages: (BTreeMap::from([(
-                "processes".into(),
-                json!({
-                "observation":self.observation(),"columns":["name"],
-                "rows":[["accepted-only-row"]],"total":1,"offset":0,"limit":512}),
-            )]))
-            .into_iter()
-            .map(|(key, value)| (key, crate::live_source::Presentation::Legacy(value)))
-            .collect(),
             apps: None,
             detail: None,
             history: None,

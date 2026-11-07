@@ -304,7 +304,6 @@ impl BatchResultFixture {
 
 struct PreservedReadings {
     selection: serde_json::Value,
-    pages: std::collections::BTreeMap<String, serde_json::Value>,
     resident: Arc<crate::live_source::Presentation<crate::live_resident_history::ResidentHistory>>,
     rankings: Arc<crate::live_source::Presentation<crate::live_rankings::Rankings>>,
 }
@@ -313,11 +312,6 @@ impl From<&crate::live_source::Snapshot> for Box<PreservedReadings> {
     fn from(snapshot: &crate::live_source::Snapshot) -> Self {
         Box::new(PreservedReadings {
             selection: snapshot.selection.clone(),
-            pages: snapshot
-                .pages
-                .iter()
-                .map(|(key, value)| (key.clone(), (**value).clone()))
-                .collect(),
             resident: Arc::clone(snapshot.resident_history.as_ref().unwrap()),
             rankings: Arc::clone(snapshot.rankings.as_ref().unwrap()),
         })
@@ -327,12 +321,6 @@ impl From<&crate::live_source::Snapshot> for Box<PreservedReadings> {
 impl PreservedReadings {
     fn assert_unchanged(&self, snapshot: &crate::live_source::Snapshot) {
         assert_eq!(snapshot.selection, self.selection);
-        let pages: std::collections::BTreeMap<_, _> = snapshot
-            .pages
-            .iter()
-            .map(|(key, value)| (key.clone(), (**value).clone()))
-            .collect();
-        assert_eq!(pages, self.pages);
         assert!(Arc::ptr_eq(
             snapshot.resident_history.as_ref().unwrap(),
             &self.resident

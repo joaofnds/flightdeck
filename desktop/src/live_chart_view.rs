@@ -1521,7 +1521,6 @@ fn wall_second(value: &Value) -> Option<u64> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::BTreeMap;
 
     #[test]
     fn a_pointer_on_a_chart_of_states_takes_the_cell_nearest_it() {
@@ -1586,7 +1585,6 @@ mod tests {
                 {"wall_ns":1_000_100_000_000_u64},
                 {"wall_ns":1_000_200_000_000_u64}]}),
             ),
-            pages: BTreeMap::new(),
             apps: None,
             detail: None,
             history: None,

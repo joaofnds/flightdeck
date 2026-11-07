@@ -217,7 +217,6 @@ fn an_oversized_valid_sample_keeps_its_measured_frame_for_the_next_publication()
                         prepared.apps().missing,
                         Some(crate::store::Missing::Refused(_))
                     ));
-                    assert!(prepared.raw().is_ok());
                 }
                 if step == 3 {
                     result = Some(cpu_amount(prepared.apps()));
@@ -265,7 +264,6 @@ fn a_joint_programme_capacity_refusal_keeps_the_current_valid_input() {
                         prepared.apps().missing,
                         Some(crate::store::Missing::Refused(_))
                     ));
-                    assert!(prepared.raw().is_ok());
                 }
                 if step == 3 {
                     result = Some(cpu_amount(prepared.apps()));
@@ -507,7 +505,6 @@ fn invalid_power_keeps_cpu_and_process_input_for_the_next_native_publication() {
                     machine.complete.clone(),
                     machine.cpu_counters().unwrap()[0].ticks.user,
                     process.cpu_ns(),
-                    prepared.raw().is_ok(),
                 ));
                 true
             })
@@ -521,15 +518,13 @@ fn invalid_power_keeps_cpu_and_process_input_for_the_next_native_publication() {
         CompleteMachineState::Refused("unsupported or nonfinite cell")
     ));
     assert_eq!(observed[1].2, 2);
-    assert!(!observed[1].4);
     assert_eq!(observed[2].3, Amount::Known(100_000_000));
-    assert!(observed[2].4);
 }
 
 #[test]
-fn admission_and_pool_retries_reuse_the_prepared_frame_and_single_app_derivation() {
+fn admission_and_pool_retries_read_the_ring_once_and_derive_the_apps_once() {
     // Goal: neither resource refusal nor a held pool slot repeats accepted preparation work.
-    // Method: deny B's Raw allocation after its valid Sample, free pressure, then block its commit.
+    // Method: deny the work of B's Frame, free pressure, then block its commit.
     let mut fixture = Fixture::new_mode(true, 6000, None);
     let app = long_app();
     publish_many(&mut fixture, 1, &Many::new(1, 7, b"w", &app));
@@ -549,7 +544,7 @@ fn admission_and_pool_retries_reuse_the_prepared_frame_and_single_app_derivation
     publish_many(&mut fixture, 2, &Many::new(6000, 1, b"w", &app));
     let frame = frame_bytes(&fixture, 2);
     let pressure = budget
-        .reserve(budget.maximum() - budget.used() - 2 * frame)
+        .reserve(budget.maximum() - budget.used() - frame)
         .unwrap();
 
     let refused = ring.read_prepared(&budget, &operation, Some(&previous), |_, _| {
@@ -557,7 +552,7 @@ fn admission_and_pool_retries_reuse_the_prepared_frame_and_single_app_derivation
     });
     assert!(matches!(
         refused,
-        Err(super::PrepareError::Admission(super::Admission::Raw))
+        Err(super::PrepareError::Admission(super::Admission::FrameWork))
     ));
     assert!(!ring.caught_up().unwrap());
     drop(pressure);
@@ -597,7 +592,7 @@ fn admission_and_pool_retries_reuse_the_prepared_frame_and_single_app_derivation
 }
 
 #[test]
-fn a_clockless_native_tick_keeps_raw_input_without_inventing_a_chart_second() {
+fn a_clockless_native_tick_keeps_its_apps_without_inventing_a_chart_second() {
     // Goal: missing clocks do not erase admitted native facts or create a false chart position.
     // Method: publish A/B/C with no clocks at B and inspect all three through the real Ring.
     let mut fixture = Fixture::new();
@@ -615,8 +610,6 @@ fn a_clockless_native_tick_keeps_raw_input_without_inventing_a_chart_second() {
                 if step == 2 {
                     assert!(prepared.machine.is_none());
                     assert_eq!(prepared.observation.wall_ns, None);
-                    assert_eq!(prepared.raw().unwrap().machine.ticks[0].wall_ns, None);
-                    assert_eq!(prepared.raw().unwrap().machine.cpus[0].ticks.user, 2);
                     assert!(prepared.app_refusal().is_none());
                 }
                 if step == 3 {
@@ -654,10 +647,6 @@ fn an_unadmitted_frame_does_not_let_duplicate_legacy_pids_escape_as_valid_raw() 
                 prepared.app_refusal(),
                 Some(super::Unavailable::Frame("live App process bound"))
             );
-            assert!(matches!(
-                prepared.raw(),
-                Err(super::Unavailable::UnvalidatedFrame)
-            ));
             assert!(prepared.machine.as_ref().unwrap().cpu_counters().is_some());
             true
         })
@@ -713,8 +702,6 @@ fn assert_prepared_once(trace: &persistence::work::ingestion::Trace, publication
     assert_eq!(count(Kind::RingRead), 1);
     assert_eq!(count(Kind::FrameCapture), 1);
     assert_eq!(count(Kind::AppDerivation), 1);
-    assert_eq!(count(Kind::RawCaptureAttempt), 2);
-    assert_eq!(count(Kind::RawCapture), 1);
     assert_eq!(count(Kind::MachineReduction), 1);
 }
 
@@ -774,7 +761,6 @@ fn nan_fans_stay_missing_channels_without_refusing_native_raw_or_summary() {
             machine.complete().unwrap().summary(machine)["fan_rpm"],
             serde_json::json!([null])
         );
-        assert!(prepared.raw().is_ok());
         true
     })
     .unwrap();

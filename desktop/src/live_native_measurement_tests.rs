@@ -183,7 +183,7 @@ fn measure_route(root: &Path, route: &str, expected: &Value) {
     let report = json!({"route": route, "phase": phase, "root": root, "selection_kind": selection,
         "snapshots_to_complete": snapshots,
         "selected": snapshot.selection["selected"], "summary": snapshot.selection["summary"],
-        "context_values": snapshot.selection["trends"], "pages": snapshot.pages,
+        "context_values": snapshot.selection["trends"],
         "effective_threads": {"maximum": std::env::var("POLARS_MAX_THREADS").unwrap(),
             "asynchronous": std::env::var("POLARS_ASYNC_THREAD_COUNT").unwrap()},
         "point_count": snapshot.selection["trends"].as_array().map(Vec::len),

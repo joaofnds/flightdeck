@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::time::Instant;
 
 use serde_json::{Value, json};
@@ -59,7 +58,6 @@ fn snapshot() -> Snapshot {
             json!({"second":1900,"context_last_second":1900,"selected":identity(900),
             "trends":points}),
         ),
-        pages: BTreeMap::new(),
         apps: None,
         detail: None,
         history: None,

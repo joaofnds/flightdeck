@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gpui::{AppContext, TestAppContext, WindowHandle, WindowOptions, WindowVisibility};
@@ -633,7 +632,6 @@ impl VisibilityHarness {
             generation: self.generation(),
             catalog: Value::Null,
             selection: crate::live_source::Presentation::Legacy(json!({})),
-            pages: BTreeMap::new(),
             apps: None,
             detail: None,
             history: None,

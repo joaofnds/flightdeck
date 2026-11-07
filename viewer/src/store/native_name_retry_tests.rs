@@ -38,7 +38,6 @@ fn a_native_partial_name_refusal_keeps_its_stage_predecessor_and_accepted_names(
     let mut prepared = Prepared::new(&input.source).unwrap();
     prepared.capture_frame(&input, &budget).unwrap();
     prepared.capture_sample(&input, &budget).unwrap();
-    prepared.capture_raw(&input, &budget, &operation).unwrap();
     prepared.capture_machine(&input, &budget).unwrap();
     prepared
         .capture_metadata(input.previous_apps, &budget)
@@ -73,6 +72,47 @@ fn a_native_partial_name_refusal_keeps_its_stage_predecessor_and_accepted_names(
     ));
     assert_eq!(budget.used(), 0);
     assert_eq!(observer.used(), 0);
+}
+
+#[test]
+fn a_machine_reduction_refused_past_the_sample_derives_its_apps_once() {
+    // Goal: a resource refusal after a publication's Apps were derived repeats none of that work.
+    // Method: stage a real publication past its Sample, take the whole budget, resume, free the
+    // budget and resume again, counting the work under the publication's trace.
+    use persistence::work::ingestion::{Kind, Trace};
+    let mut fixture = Fixture::new();
+    super::publish_many(
+        &mut fixture,
+        1,
+        &super::Many::new(1, 50, b"prior", b"/Prior.app"),
+    );
+    let trace = Trace::new(fixture.writer.identity().unwrap().recording);
+    let scope = trace.enter();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let captured = Captured::read(&fixture, 1);
+    let names = ProcessNames::new(16, &budget).unwrap();
+    let previous = MachineMinute::default();
+    let input = captured.input(&names, &previous, None, None);
+    let mut prepared = Prepared::new(&input.source).unwrap();
+    prepared.capture_frame(&input, &budget).unwrap();
+    prepared.capture_sample(&input, &budget).unwrap();
+    let pressure = budget.reserve(budget.maximum() - budget.used()).unwrap();
+
+    let refused = prepared.resume(&input, &budget, &operation);
+    drop(pressure);
+    prepared.resume(&input, &budget, &operation).unwrap();
+    drop(scope);
+
+    assert!(matches!(
+        refused,
+        Err(PrepareError::Admission(Admission::Machine(_)))
+    ));
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    let count = |kind| events.iter().filter(|event| event.kind == kind).count();
+    assert_eq!(count(Kind::AppDerivation), 1);
+    assert_eq!(count(Kind::FrameCapture), 1);
 }
 
 fn refuse_then_retry(prepared: &mut Prepared, input: &Input<'_>, budget: &Arc<ByteBudget>) {

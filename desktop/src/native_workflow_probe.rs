@@ -27,7 +27,6 @@ pub fn run(root: PathBuf, deadline: Instant) -> Result<Value, String> {
     dashboard.request.route = "computer".into();
     dashboard.request.second = second;
     dashboard.request.identity = Some(selected.clone());
-    dashboard.request.offset = 512;
     dashboard.chart_hover = dashboard
         .request
         .second
@@ -169,10 +168,6 @@ fn report(dashboard: &mut LiveDashboard, initial: &Value) -> Result<Value, Strin
         return Err("Native recording switch retained previous row or hover state".into());
     }
 
-    if dashboard.request.offset != 0 {
-        return Err("Native recording switch retained the previous page offset".into());
-    }
-
     if dashboard.request.route != "overview" {
         return Err("Successful recording open from Computer did not land on Overview".into());
     }
@@ -197,8 +192,6 @@ fn report(dashboard: &mut LiveDashboard, initial: &Value) -> Result<Value, Strin
         "previous_inspection_cleared":true,"previous_row_hover_page_cleared":true,
         "clipboard_payload_roundtrip":true,"initial_observation":initial,
         "reopened_observation":snapshot.selection["selected"],
-        "tail_cache_bytes":snapshot.catalog["tail_cache_bytes"],
-        "tail_ticks":snapshot.catalog["tail_ticks"],
         "native_picker_clipboard_ime_voiceover_exercised":false});
 
     dashboard.worker.stop();

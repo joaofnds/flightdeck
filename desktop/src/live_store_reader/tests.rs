@@ -842,8 +842,6 @@ fn request(route: &str) -> Request {
         route: route.into(),
         second: None,
         identity: None,
-        table: String::new(),
-        offset: 0,
         app: None,
         apps_offset: 0,
         members_offset: 0,

@@ -772,7 +772,6 @@ impl Recording {
                 "run":identity_text(identity.run).to_string(),
                 "boot":identity_text(identity.boot).to_string(),
                 "publication":self.publication}})),
-            pages: BTreeMap::new(),
             apps: None,
             detail: None,
             history: None,

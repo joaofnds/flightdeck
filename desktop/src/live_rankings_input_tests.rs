@@ -1199,7 +1199,6 @@ impl InputDriver {
 
     fn seed_stale_ranked_offsets(&mut self) {
         self.view.update(&mut self.context, |dashboard, _| {
-            dashboard.request.offset = 512;
             dashboard.request.apps_offset = 512;
             dashboard.request.members_offset = 512;
         });
@@ -1207,7 +1206,6 @@ impl InputDriver {
 
     fn assert_ranked_offsets_reset(&self) {
         self.view.read_with(&self.context, |dashboard, _| {
-            assert_eq!(dashboard.request.offset, 0);
             assert_eq!(dashboard.request.apps_offset, 0);
             assert_eq!(dashboard.request.members_offset, 0);
         });

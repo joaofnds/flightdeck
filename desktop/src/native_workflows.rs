@@ -536,8 +536,6 @@ fn fresh_request(route: &str) -> Request {
         route: route.into(),
         second: None,
         identity: None,
-        table: "ticks".into(),
-        offset: 0,
         app: None,
         apps_offset: 0,
         members_offset: 0,
@@ -572,22 +570,9 @@ pub fn selected_copy(
         serde_json::json!({"second":snapshot.selection["second"],
             "observation":snapshot.selection["selected"],"detail":selected})
     } else {
-        if let Some((table, index)) = expanded {
-            let page = snapshot
-                .pages
-                .get(table)
-                .ok_or("Selected table is unavailable")?;
-            let row = page["rows"]
-                .get(*index)
-                .ok_or("Selected row is unavailable")?;
-            serde_json::json!({"second":snapshot.selection["second"],
-                "observation":snapshot.selection["selected"],"table":table,
-                "columns":page["columns"],"values":row})
-        } else {
-            serde_json::json!({"second":snapshot.selection["second"],
-                "observation":snapshot.selection["selected"],
-                "summary":snapshot.selection["summary"]})
-        }
+        serde_json::json!({"second":snapshot.selection["second"],
+            "observation":snapshot.selection["selected"],
+            "summary":snapshot.selection["summary"]})
     };
     bounded_json(&value)
 }

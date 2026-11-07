@@ -196,15 +196,6 @@ pub(crate) fn normalize_offsets(request: &mut Request, snapshot: &Snapshot) -> R
         }
     }
 
-    let table = if request.route == "cpu" {
-        "processes"
-    } else {
-        &request.table
-    };
-    if let Some(page) = snapshot.pages.get(table) {
-        request.offset = page["offset"].as_u64().ok_or("Missing raw page offset")?;
-    }
-
     if let Some(apps) = &snapshot.apps {
         request.apps_offset = u32::try_from(
             apps["page"]["offset"]

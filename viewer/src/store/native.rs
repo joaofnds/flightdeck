@@ -7,7 +7,6 @@ use super::{AppsSecond, ByteBudget, ByteReservation, MachineSecond, Missing};
 use crate::cancellation::Operation;
 use crate::live_app_response::{Observation, Sample};
 use crate::live_apps::{Frame, Publication, PublicationEvents};
-use crate::live_raw::Raw;
 use crate::recording::MachineMinute;
 
 #[cfg(test)]
@@ -22,7 +21,6 @@ pub(super) struct Prepared {
     pub observation: Observation,
     pub machine: Option<MachineSecond>,
     pub apps: AppsSecond,
-    raw: Option<Result<Arc<Raw>, Unavailable>>,
     frame: Option<OwnedFrame>,
     frame_refused: Option<Unavailable>,
     sample: Option<OwnedSample>,
@@ -68,8 +66,6 @@ pub(super) enum Unavailable {
     Sample(&'static str),
     Aggregate(crate::apps::Error),
     View(crate::apps::Error),
-    Raw(&'static str),
-    UnvalidatedFrame,
 }
 
 #[derive(Debug)]
@@ -98,7 +94,6 @@ pub(super) enum Admission {
     Derivation,
     AppMetadata,
     Payload,
-    Raw,
     Machine(super::MachineAdmission),
 }
 
@@ -106,7 +101,6 @@ pub(super) enum Admission {
 enum Stage {
     Frame,
     Sample,
-    Raw,
     Machine,
     Payload,
     Ready,
@@ -163,7 +157,6 @@ impl Prepared {
             },
             machine: None,
             apps: AppsSecond::default(),
-            raw: None,
             frame: None,
             frame_refused: None,
             sample: None,
@@ -183,12 +176,11 @@ impl Prepared {
         operation: &Operation,
     ) -> Result<(), PrepareError> {
         assert_eq!(self.observation.stamp.publication, input.source.publication);
-        for _ in 0..6 {
+        for _ in 0..5 {
             operation.check().map_err(PrepareError::Source)?;
             match self.stage {
                 Stage::Frame => self.capture_frame(input, budget)?,
                 Stage::Sample => self.capture_sample(input, budget)?,
-                Stage::Raw => self.capture_raw(input, budget, operation)?,
                 Stage::Machine => self.capture_machine(input, budget)?,
                 Stage::Payload => self.capture_payload(input, budget)?,
                 Stage::Ready => return Ok(()),
@@ -202,14 +194,6 @@ impl Prepared {
     pub fn apps(&self) -> &AppsSecond {
         assert!(self.stage == Stage::Ready);
         &self.apps
-    }
-
-    pub fn raw(&self) -> Result<&Arc<Raw>, &Unavailable> {
-        assert!(self.stage == Stage::Ready);
-        self.raw
-            .as_ref()
-            .unwrap_or_else(|| unreachable!("prepared raw facet"))
-            .as_ref()
     }
 
     #[cfg(test)]
@@ -286,7 +270,7 @@ impl Prepared {
     ) -> Result<(), PrepareError> {
         let Some(frame) = &self.frame else {
             self.sample_refused = self.frame_refused;
-            self.stage = Stage::Raw;
+            self.stage = Stage::Machine;
             return Ok(());
         };
         let mut reservation = reserve(
@@ -329,40 +313,6 @@ impl Prepared {
             }
         }
         drop(work);
-        self.stage = Stage::Raw;
-        Ok(())
-    }
-
-    fn capture_raw(
-        &mut self,
-        input: &Input<'_>,
-        budget: &Arc<ByteBudget>,
-        operation: &Operation,
-    ) -> Result<(), PrepareError> {
-        if self.frame.is_none() {
-            self.raw = Some(Err(Unavailable::UnvalidatedFrame));
-        } else {
-            let mut raw = None;
-            self.raw = Some(
-                match Raw::capture_budgeted(
-                    &input.source,
-                    &input.events,
-                    operation,
-                    Some(budget),
-                    &mut raw,
-                ) {
-                    Ok(()) => Ok(Arc::new(
-                        raw.unwrap_or_else(|| unreachable!("captured raw")),
-                    )),
-                    Err(crate::live_raw::CaptureError::Budget) => {
-                        return Err(PrepareError::Admission(Admission::Raw));
-                    }
-                    Err(crate::live_raw::CaptureError::Capture(error)) => {
-                        Err(bound(error, Unavailable::Raw)?)
-                    }
-                },
-            );
-        }
         self.stage = Stage::Machine;
         Ok(())
     }
@@ -533,13 +483,9 @@ impl AppMetadata {
 impl Unavailable {
     pub fn reason(&self) -> &'static str {
         match self {
-            Self::Input(reason)
-            | Self::Frame(reason)
-            | Self::Sample(reason)
-            | Self::Raw(reason) => reason,
+            Self::Input(reason) | Self::Frame(reason) | Self::Sample(reason) => reason,
             Self::View(_) => "live App exit interval bound",
             Self::Aggregate(_) => "live App aggregate input",
-            Self::UnvalidatedFrame => "native Frame was not admitted",
         }
     }
 }

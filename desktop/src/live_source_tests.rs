@@ -23,7 +23,6 @@ fn an_empty_recording_reports_absence_without_requiring_a_live_ring() {
     assert!(snapshot.selection["second"].is_null());
     assert!(snapshot.selection["selected"].is_null());
     assert_eq!(snapshot.selection["trends"], json!([]));
-    assert!(snapshot.pages.is_empty());
 }
 
 #[test]
@@ -82,7 +81,6 @@ fn reader_diagnostics_returns_catalog_without_reading_a_selected_gap() {
 
     assert_eq!(snapshot.catalog["last_second"], 1002);
     assert!(snapshot.selection.is_null());
-    assert!(snapshot.pages.is_empty());
     assert!(snapshot.cpu_detail.is_none());
     assert!(snapshot.cpu_history.is_none());
 }
@@ -1107,7 +1105,6 @@ fn a_sealed_recording_leaves_a_missing_second_empty() {
     assert_eq!(snapshot.selection["second"], 1001);
     assert!(snapshot.selection["selected"].is_null());
     assert!(snapshot.selection["summary"].is_null());
-    assert!(snapshot.pages.is_empty());
 }
 
 struct SealedRecording {
@@ -1285,8 +1282,6 @@ impl SealedRecording {
             route: "overview".into(),
             second: None,
             identity: None,
-            table: "ticks".into(),
-            offset: 0,
             cpu_offset: 0,
             load_resident_history: true,
             load_app_attribution_history: true,
@@ -1371,8 +1366,6 @@ fn the_default_app_survives_a_new_first_row_and_an_empty_page() {
         route: "apps".into(),
         second: None,
         identity: None,
-        table: "ticks".into(),
-        offset: 0,
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
@@ -1543,8 +1536,6 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
         route: "overview".to_owned(),
         second: None,
         identity: None,
-        table: "ticks".to_owned(),
-        offset: 0,
         cpu_offset: 0,
         load_resident_history: true,
         load_app_attribution_history: true,
@@ -1642,7 +1633,6 @@ fn live_overview_formats_no_cell() {
 
     let snapshot = worker.read_at(&fixture.root).unwrap().unwrap();
 
-    assert!(snapshot.pages.is_empty());
     assert_eq!(snapshot.selection["summary"]["fan_rpm"][0], 1234.0);
     let work = measured.counts();
     assert_eq!(work.staged_ticks, 0);

@@ -353,7 +353,6 @@ fn hold_resident_unread() -> crate::live_source::Snapshot {
         generation: 0,
         catalog: serde_json::Value::Null,
         selection: crate::live_source::Presentation::Legacy(serde_json::Value::Null),
-        pages: std::collections::BTreeMap::new(),
         apps: None,
         detail: None,
         history: None,
