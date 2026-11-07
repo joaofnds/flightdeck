@@ -666,6 +666,7 @@ fn a_query_that_comes_with_a_new_reading_is_answered_from_it() {
     .unwrap();
     let handle = store.query_handle().unwrap();
     ready_context(&handle);
+    until_caught_up(&store);
 
     let told_to_wait = (0_u64..7)
         .filter(|index| {
@@ -781,6 +782,21 @@ fn next_reply(handle: &super::QueryHandle) -> super::QueryOutcome {
         thread::sleep(Duration::from_millis(10));
     }
     panic!("the Store did not reply within its attempts");
+}
+
+/// Waits until the Store has ended its startup and holds no View it has not handed over. A query
+/// it answers before then finds it behind any reading that arrives, as its startup reads none.
+fn until_caught_up(store: &Store) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..1000 {
+        drop(store.take());
+        if !store.pending() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the Store did not catch up");
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the Store did not catch up within its attempts");
 }
 
 fn ready_context(handle: &super::QueryHandle) -> Arc<super::QueryContext> {
