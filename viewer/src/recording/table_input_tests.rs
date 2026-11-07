@@ -88,6 +88,38 @@ fn admitted_app_parts_reuse_one_source_for_version_and_payload_after_replacement
 }
 
 #[test]
+fn a_minute_its_caller_verified_takes_each_table_it_reads_through_admission() {
+    // Goal: a session's minute charges every table to its allowance, not only the ticks it opens
+    // with, since the plain read of a saved table validates a file alike and charges nothing.
+    // Method: read the App parts of such a minute through a capture that counts what it takes.
+    let fixture = parts_fixture();
+    let marker = parts_marker(&fixture);
+    let source = SealedSource {
+        root: &fixture.root,
+        marker: &marker,
+    };
+    let manifest = persistence::read_committed(source.root, source.marker).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let captures = AtomicUsize::new(0);
+    let capture = |file, budget: &Arc<ByteBudget>| {
+        captures.fetch_add(1, Ordering::Relaxed);
+        AdmittedTable::from_file_budgeted(file, budget)
+    };
+    let minute =
+        ScopedSealedMinute::committed_using(&source, &manifest, &budget, &operation, &capture)
+            .unwrap();
+    let captures_of_ticks = captures.load(Ordering::Relaxed);
+    let mut apps = AppMinute::default();
+
+    let parts = read_apps(&minute, &mut apps).unwrap();
+
+    assert_eq!(parts, AppParts::Read);
+    assert_eq!(captures_of_ticks, 1);
+    assert_eq!(captures.load(Ordering::Relaxed), 2);
+}
+
+#[test]
 fn incompatible_app_parts_version_skips_a_key_page_that_cannot_decode() {
     // Goal: version fallback must not eagerly decode unused key payloads.
     // Method: corrupt compressed key bytes while preserving admitted headers and metadata.

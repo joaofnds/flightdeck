@@ -856,6 +856,39 @@ mod tests {
     }
 
     #[test]
+    fn a_minute_counts_the_minute_before_it_lends_toward_what_a_reader_may_hold() {
+        // Goal: the older tail stays inside the bound on what a reader holds, as a context that
+        // keeps its predecessor's minute does. Method: read an empty minute beside a kept minute
+        // past the bound, which a read of either alone would not reach.
+        let fixture = crate::session::retention_tests::saved_seconds();
+        let session = Session::open(&fixture.root).unwrap();
+        let bound = metrics::READER_MINUTES_BYTES_MAX;
+        let last = Last {
+            reading: None,
+            minute: MachineMinute {
+                fans: Vec::with_capacity(bound / size_of::<crate::recording::FanRow>() + 1),
+                ..MachineMinute::default()
+            },
+        };
+        let step = Step {
+            window: 0,
+            holder: Holder::Kept {
+                window: 1,
+                last: &last,
+            },
+        };
+
+        let result = session
+            .earlier_minute(step, &MachineMinute::default())
+            .map(|_kept| ());
+
+        assert!(
+            matches!(result, Err(Error::Bound("context minute bytes"))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn thinning_keeps_the_first_observation_of_each_stretch() {
         // Goal: an older tail keeps one reading per ten seconds, even where seconds are missing.
         // Method: thin observations that fill one stretch, skip one, and start another.

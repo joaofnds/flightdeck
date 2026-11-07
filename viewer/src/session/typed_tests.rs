@@ -8,7 +8,8 @@ use super::retention_tests::saved_seconds;
 use super::{ContextRange, Session, minute_refusal};
 use crate::LiveSession;
 use crate::live::identity_fixture::Fixture;
-use crate::metrics::{Minutes, READER_MINUTES_BYTES_MAX, trends_minute};
+use crate::live_raw::Cell;
+use crate::metrics::{Minutes, READER_MINUTES_BYTES_MAX, minutes_bytes_check, trends_minute};
 use crate::recording::{
     FanRow, MACHINE_TEXT_BYTES_MAX, MachineMinute, Refused, TABLE_ROWS_PER_TICK_MAX,
 };
@@ -408,6 +409,28 @@ fn typed_repeated(frame: &DataFrame, height: usize) -> DataFrame {
 fn typed_column(mut frame: DataFrame, column: Column) -> DataFrame {
     frame.with_column(column).unwrap();
     frame
+}
+
+#[test]
+fn a_reader_may_hold_minutes_up_to_its_bound_and_no_more() {
+    // Goal: the bound on what a reader holds names the most it may hold.
+    // Method: check the bound itself and a byte past it.
+    let at_the_bound = minutes_bytes_check(READER_MINUTES_BYTES_MAX);
+    let past_the_bound = minutes_bytes_check(READER_MINUTES_BYTES_MAX + 1);
+
+    assert!(at_the_bound.is_ok(), "{at_the_bound:?}");
+    assert!(
+        matches!(past_the_bound, Err(Error::Bound("context minute bytes"))),
+        "{past_the_bound:?}"
+    );
+}
+
+#[test]
+fn a_gauge_no_sensor_could_read_is_no_number() {
+    // Goal: where a reading is read as a number, one that is no number counts as missing.
+    // Method: read the cells of a gauge that is not a number and of one past every number.
+    assert_eq!(Cell::Float32(f32::NAN).number().unwrap(), None);
+    assert_eq!(Cell::Float32(f32::INFINITY).number().unwrap(), None);
 }
 
 /// A counter column `name` of `height` cells that hold nothing.
