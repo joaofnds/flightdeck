@@ -282,9 +282,11 @@ impl LiveSession {
         if self.saved_listed_second.abs_diff(context_last_second) < SAVED_LISTING_SECONDS {
             return Ok(());
         }
+
+        self.list_saved()?;
         self.saved_listed_second = context_last_second;
 
-        self.list_saved()
+        Ok(())
     }
 
     pub fn poll(&mut self) -> Result<bool> {

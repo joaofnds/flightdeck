@@ -73,6 +73,29 @@ fn a_session_lists_the_saved_minutes_once_its_context_has_moved_a_minute() {
 }
 
 #[test]
+fn a_canceled_listing_lists_again_at_the_next_read() {
+    // Goal: a listing a newer request canceled costs the page no minute of waiting for what the
+    // recording saved. Method: save a minute, list with the epoch canceled, then list for the
+    // same context in the next epoch.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..1, earlier_wall);
+    let control = Arc::new(Cancellation::default());
+    let mut session = LiveSession::open_history_with(&fixture.root, control.clone(), 0).unwrap();
+    session.list_saved_for(EARLIER_BASE).unwrap();
+    let listed = session.catalog()["last_second"].clone();
+    earlier_publish_minutes(&mut fixture, 1..2, earlier_wall);
+    control.cancel().unwrap();
+
+    let canceled = session.list_saved_for(EARLIER_BASE + 60);
+    session.begin(control.epoch()).unwrap();
+    session.list_saved_for(EARLIER_BASE + 60).unwrap();
+
+    assert!(matches!(canceled, Err(Error::Io(error))
+        if error.kind() == std::io::ErrorKind::Interrupted));
+    assert_ne!(session.catalog()["last_second"], listed);
+}
+
+#[test]
 fn reads_each_minute_of_the_older_tail_once() {
     // Goal: following the newest second reads each sealed minute of the older tail from saved
     // history once. Method: seal an hour of minutes, read the tail, then count the saved
