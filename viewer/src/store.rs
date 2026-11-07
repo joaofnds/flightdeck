@@ -490,14 +490,15 @@ impl Newest {
         second.publication <= self.publication
     }
 
-    /// Whether a store whose newest second is `self` holds the Apps of `second` of run `run` in
-    /// its stretches already, as a second of the same run no newer than `apps_publication`.
-    fn holds_apps(&self, run: &RunIdentity, second: &MachineSecond) -> bool {
+    /// Whether a store whose newest second is `self` holds the Apps of the second of publication
+    /// `publication` of run `run` in its stretches already, as a second of the same run no newer
+    /// than `apps_publication`.
+    fn holds_apps(&self, run: &RunIdentity, publication: u64) -> bool {
         if self.run != *run {
             return false;
         }
 
-        second.publication <= self.apps_publication
+        publication <= self.apps_publication
     }
 }
 
@@ -789,12 +790,11 @@ impl Held {
         let span = &self.span;
         let apps = &self.apps;
         let earlier = &self.earlier;
-        // The payload store installs a second's Apps after it takes the second in, so its
-        // stretches never add them up, and its Views hold none. A store that owes its stretches
-        // the Apps of older minutes writes each stretch again as it adds them, which a View
-        // holding the stretch would leave no buffer for, so it hands over none until then.
-        let stretches =
-            (self.payload_budget.is_none() && self.owed.is_none()).then_some(&self.stretches);
+        // A store still loading holds stretches of no Apps. One that owes its stretches the Apps
+        // of its minutes writes each stretch again as it adds them, which a View holding the
+        // stretch would leave no buffer for, so it hands over none until then.
+        let stretches = (self.startup == StartupState::Complete && self.owed.is_none())
+            .then_some(&self.stretches);
         let sampled = &self.sampled;
         let complete = self.startup == StartupState::Complete;
         let failure = self.failure;
@@ -929,7 +929,13 @@ fn starts_stretch(newest: Option<&MachineSecond>, second: &MachineSecond) -> boo
 
 /// The stretch of `EARLIER_STRIDE_SECONDS` that holds `second`. Both divisions floor.
 fn stretch(second: &MachineSecond) -> u64 {
-    stretch_of_wall_second(second.wall_ns / 1_000_000_000)
+    stretch_of_wall_ns(second.wall_ns)
+}
+
+/// The stretch of `EARLIER_STRIDE_SECONDS` that holds the wall time `wall_ns`. Both divisions
+/// floor.
+fn stretch_of_wall_ns(wall_ns: u64) -> u64 {
+    stretch_of_wall_second(wall_ns / 1_000_000_000)
 }
 
 /// The stretch of `EARLIER_STRIDE_SECONDS` that holds the wall second `wall_second`, which
@@ -1037,8 +1043,8 @@ fn run_owed_add(
 /// Where a walk through the seconds a launch handed over stands, as the store took them in.
 #[derive(Default)]
 struct OwedWalk {
-    /// The newest second the store took in, as it stood once it took that second in.
-    newest: Option<Newest>,
+    /// The run and publication of the newest second the store took in.
+    newest: Option<(RunIdentity, u64)>,
     /// The first second of the stretch the store took that second into.
     start: Option<StretchStart>,
 }
@@ -1052,22 +1058,18 @@ struct StretchStart {
 }
 
 impl OwedWalk {
-    /// The first second of the stretch the store took `second` of run `run` into, or `None`
-    /// where it held the second already and took it in no second time.
-    fn step(&mut self, run: &RunIdentity, second: &MachineSecond) -> Option<StretchStart> {
-        if self
-            .newest
-            .as_ref()
-            .is_some_and(|newest| newest.holds(run, second))
-        {
+    /// The first second of the stretch the store took the second of `tick` of run `run` into,
+    /// or `None` where it held that second already and took it in no second time, as a second of
+    /// the same run no newer than the newest it took in.
+    fn step(&mut self, run: &RunIdentity, tick: &recording::OwedTick) -> Option<StretchStart> {
+        if self.newest.is_some_and(|(newest_run, publication)| {
+            newest_run == *run && tick.publication <= publication
+        }) {
             return None;
         }
 
-        // The launch handed over no Apps added up over a stretch, so its newest second moves as
-        // it moves for a second without Apps.
-        let apps = TickApps::Missing(&Missing::Unread);
-        self.newest = Some(Newest::after(self.newest.as_ref(), run, second, &apps));
-        let stretch = stretch(second);
+        self.newest = Some((*run, tick.publication));
+        let stretch = stretch_of_wall_ns(tick.wall_ns);
         if let Some(start) = self.start {
             if start.stretch == stretch {
                 return Some(start);
@@ -1076,7 +1078,7 @@ impl OwedWalk {
         let start = StretchStart {
             stretch,
             run: *run,
-            publication: second.publication,
+            publication: tick.publication,
         };
         self.start = Some(start);
         Some(start)
