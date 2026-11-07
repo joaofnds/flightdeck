@@ -367,34 +367,6 @@ fn staged_history_then_a_clock_set_back_leave_the_leaders_of_the_seconds_after_i
     assert_eq!(cohorts.resident[0].bytes.as_slice(), b"N");
 }
 
-#[test]
-fn a_store_still_loading_hands_over_no_stretches() {
-    // Goal: a View handed over while the store loads holds none of its stretches, since the
-    // Apps the load then owes write each stretch again, and a View that kept them would leave
-    // that write no buffer once it passes the few the store keeps spare.
-    // Method: stage a startup over sealed minutes to Primary and publish what it holds.
-    let fixture = primary_fixture();
-    let operation = Arc::new(crate::Cancellation::default())
-        .operation(0)
-        .unwrap();
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
-    held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
-    let mut startup = super::recording::staged::Startup::new();
-    let input = super::recording::staged::Input {
-        root: &fixture.root,
-        budget: &budget,
-        operation: &operation,
-    };
-    drive_primary(&mut startup, &input, &mut held, &mut ring);
-    assert_ne!(held.stretches.held().count(), 0);
-
-    let view = published_view(&mut held);
-
-    assert!(view.stretches.is_empty());
-}
-
 pub(super) fn published_view(held: &mut super::Held) -> Arc<super::View> {
     let mailbox = super::Mailbox::new();
     held.publish(&mailbox);

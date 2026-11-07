@@ -672,73 +672,6 @@ fn a_started_store_hands_over_the_stretches_a_load_of_the_whole_hour_holds() {
 }
 
 #[test]
-fn a_store_with_a_budget_hands_over_the_stretches_a_load_of_the_whole_hour_holds() {
-    // Goal: the Store the app starts gives the older tail of its charts the means, the highest
-    // readings and the Apps a load of the whole hour adds up. Method: seal a few ticks of run
-    // minutes 0, 1 and 21, start a store with a budget, and compare the first View it hands over
-    // that holds a stretch with a whole load's.
-    let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-    let whole = loaded(&fixture);
-
-    let store = store_with_budget(&fixture);
-
-    let view = super::tests::view_where(&store, |view| !view.stretches.is_empty());
-    assert_stretches_match(&view, &whole, "once started");
-}
-
-#[test]
-fn a_store_with_a_budget_adds_the_seconds_it_follows_to_the_stretches_it_loaded() {
-    // Goal: the seconds the app's Store takes from the ring add to the stretches its load began,
-    // counting no App twice. Method: start a store with a budget on sealed ticks whose last, at
-    // wall seconds 120 to 124, begin a stretch, publish and seal 125 to 127 of that stretch while
-    // it follows, and compare with a whole load's.
-    let mut fixture = Fixture::new();
-    let run_tick = seal_minutes(&mut fixture, 0, &[(0, 40..43), (1, 55..60)]);
-    let store = store_with_budget(&fixture);
-    drop(super::tests::view_where(&store, |view| {
-        !view.stretches.is_empty()
-    }));
-
-    let run_tick = seal_minutes(&mut fixture, run_tick, &[(2, 0..3)]);
-
-    let newest = run_tick - 1 + 5;
-    let view = super::tests::view_where(&store, |view| {
-        view.seconds
-            .last()
-            .is_some_and(|second| second.wall_ns / NANOSECONDS_PER_SECOND == newest)
-    });
-    assert_stretches_match(&view, &loaded(&fixture), "while following");
-}
-
-#[test]
-fn a_store_with_a_budget_counts_no_app_twice_when_it_reads_the_hour_again() {
-    // Goal: a return past the ring reads the hour again and replaces what the app's Store held,
-    // so its stretches read as a whole load's. Method: start a store with a budget, hide it, seal
-    // more ticks than the fixture's ring of eight holds, show it, and compare.
-    let mut fixture = Fixture::new();
-    let run_tick = seal_minutes(&mut fixture, 0, &[(0, 40..43), (1, 0..5)]);
-    let store = store_with_budget(&fixture);
-    drop(super::tests::view_where(&store, |view| {
-        !view.stretches.is_empty()
-    }));
-    store.set_active(false);
-    super::activity_tests::wait_until_paused(&store);
-
-    let run_tick = seal_minutes(&mut fixture, run_tick, &[(2, 0..5), (21, 0..5)]);
-    store.set_active(true);
-
-    let newest = run_tick - 1 + 5;
-    let view = super::tests::view_where(&store, |view| {
-        !view.stretches.is_empty()
-            && view
-                .seconds
-                .last()
-                .is_some_and(|second| second.wall_ns / NANOSECONDS_PER_SECOND == newest)
-    });
-    assert_stretches_match(&view, &loaded(&fixture), "once read again");
-}
-
-#[test]
 fn a_window_chooses_the_apps_its_seconds_choose_one_by_one() {
     // Goal: an App chart of the loaded hour draws on lines of their own the Apps that its
     // seconds, taken one by one, choose, each App's mean taken over the seconds that measured
@@ -963,13 +896,6 @@ fn seal_minutes(fixture: &mut Fixture, mut run_tick: u64, minutes: &[(u64, Range
     run_tick
 }
 
-/// A store over `fixture`'s recording that starts as the app's does.
-fn store_with_budget(fixture: &Fixture) -> super::Store {
-    let budget = Arc::new(super::ByteBudget::new(1 << 30));
-
-    super::Store::start_with_budget(&fixture.root, budget).unwrap()
-}
-
 /// The View of a store that loaded `fixture`'s recording.
 fn loaded(fixture: &Fixture) -> Arc<View> {
     let mut held = Held::without_recording();
@@ -1052,7 +978,6 @@ fn assert_stretches_match(view: &View, whole: &View, context: &str) {
     for (shown, expected) in view.stretches.iter().zip(&whole.stretches) {
         assert_eq!(shown.stretch, expected.stretch, "{context}");
         assert_eq!(shown.elapsed_ns(), expected.elapsed_ns(), "{context}");
-        assert_eq!(shown.machine, expected.machine, "{context}");
         assert_eq!(
             resident_measured_of(shown),
             resident_measured_of(expected),

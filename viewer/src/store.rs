@@ -789,11 +789,12 @@ impl Held {
         let span = &self.span;
         let apps = &self.apps;
         let earlier = &self.earlier;
-        // A store still loading holds stretches of no Apps. One that owes its stretches the Apps
-        // of its minutes writes each stretch again as it adds them, which a View holding the
-        // stretch would leave no buffer for, so it hands over none until then.
-        let stretches = (self.startup == StartupState::Complete && self.owed.is_none())
-            .then_some(&self.stretches);
+        // The payload store installs a second's Apps after it takes the second in, so its
+        // stretches never add them up, and its Views hold none. A store that owes its stretches
+        // the Apps of older minutes writes each stretch again as it adds them, which a View
+        // holding the stretch would leave no buffer for, so it hands over none until then.
+        let stretches =
+            (self.payload_budget.is_none() && self.owed.is_none()).then_some(&self.stretches);
         let sampled = &self.sampled;
         let complete = self.startup == StartupState::Complete;
         let failure = self.failure;

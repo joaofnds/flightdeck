@@ -6,7 +6,7 @@ use std::sync::Arc;
 use persistence::engine::{AdmissionRefusal, AdmittedTable};
 use persistence::{Error, Manifest};
 
-use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, Owed, catalog, payload};
+use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, catalog, payload};
 use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::cancellation::Operation;
 use crate::live_app_response::Observation;
@@ -416,23 +416,9 @@ impl Startup {
         self.revalidate(input)?;
         input.operation.check()?;
         held.startup = crate::store::StartupState::Complete;
-        held.owed = self.history_owed();
         self.cursor.decoder.predecessor = None;
         self.phase = Phase::Complete;
         Ok(())
-    }
-
-    /// The Apps the store owes its stretches, since a load installs a second's Apps only where
-    /// the store holds that second alone. A boundary minute lies outside the loaded hour.
-    fn history_owed(&mut self) -> Option<Owed> {
-        let found: Vec<Found> = self
-            .minutes
-            .drain(..)
-            .filter(|minute| minute.boundary_path.is_none())
-            .map(|minute| minute.found)
-            .collect();
-
-        (!found.is_empty()).then(|| Owed::all(found))
     }
 
     fn history_boundary(&mut self, input: &Input<'_>, held: &Held) -> Result<(), Failure> {
