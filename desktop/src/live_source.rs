@@ -789,15 +789,30 @@ fn reader_read(
     match reader_snapshot(reader, root, command, shared) {
         Ok(Some(snapshot)) => Some(Update::Ready(snapshot)),
         Ok(None) => None,
-        Err(message) => {
-            reader.retry_after = Instant::now() + RETRY_INTERVAL;
-            reader.last_generation = 0;
-            Some(Update::Failed {
-                generation: command.generation,
-                message,
-            })
-        }
+        Err(message) => Some(reader_failed(reader, command, message)),
     }
+}
+
+fn reader_failed(reader: &mut Reader, command: &Command, message: String) -> Update {
+    reader.retry_after = Instant::now() + RETRY_INTERVAL;
+    reader.last_generation = 0;
+    Update::Failed {
+        generation: command.generation,
+        message,
+    }
+}
+
+/// Whether the page shows no reading of the recording, as Self-monitoring does, whose figures are
+/// the app's own, so a hold neither moves it nor waits for the second it names.
+fn route_shows_no_reading(route: &str) -> bool {
+    route == "self"
+}
+
+/// Whether the read goes without the older tail of a page's selection.
+fn reader_earlier_skips(request: &Request) -> bool {
+    request.earlier == Earlier::Skip
+        || request.route == "apps"
+        || route_shows_no_reading(&request.route)
 }
 
 fn reader_snapshot(
@@ -940,15 +955,16 @@ enum Arrivals {
 }
 
 fn reader_snapshot_arrivals(reader: &Reader, command: &Command, first_snapshot: bool) -> Arrivals {
-    let due = match command.request.route.as_str() {
-        "self" => true,
-        _ => match command.mode {
+    let due = if route_shows_no_reading(&command.request.route) {
+        true
+    } else {
+        match command.mode {
             SourceMode::Live => match command.request.second {
                 None => true,
                 Some(_) => first_snapshot && command.context == Context::Select,
             },
             SourceMode::Recorded => command.request.second.is_none(),
-        },
+        }
     };
     if !due {
         return Arrivals::Leave;
@@ -1005,7 +1021,7 @@ fn reader_snapshot_session<'session>(
 /// Whether the request asks for a chosen second of a page other than `self`, which a published
 /// generation already answers.
 fn reader_snapshot_is_pinned(request: &Request) -> bool {
-    request.second.is_some() && request.route != "self"
+    request.second.is_some() && !route_shows_no_reading(&request.route)
 }
 
 /// Remembers what the reader published, so the next command can tell whether anything changed.
@@ -1210,7 +1226,7 @@ fn reader_earlier(
     kept_tail_only: bool,
     selection: &mut Value,
 ) -> bool {
-    if request.earlier == Earlier::Skip || request.route == "apps" {
+    if reader_earlier_skips(request) {
         return false;
     }
     let Some(last) = crate::live_projection::context_last_second(selection) else {

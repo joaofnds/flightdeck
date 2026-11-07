@@ -19,7 +19,7 @@ use viewer::store::{
     QuerySelection, QueryToken, QueryUnavailable,
 };
 
-use super::{Command, Context, Earlier, Histories, Presentation, Reader, Shared, Snapshot, Update};
+use super::{Command, Context, Histories, Presentation, Reader, Shared, Snapshot, Update};
 
 /// Steps of the worker, ten seconds of them at its pace, a page waits for the Store to answer it.
 /// Past them the saved minutes answer, or the limit on contexts says so, since a Store that cannot
@@ -65,6 +65,11 @@ impl StoreReader {
         }
         self.context = None;
         self.pending = None;
+        self.forget_page();
+    }
+
+    /// What the reader knows of the page it read, which a new page or a rest starts over.
+    fn forget_page(&mut self) {
         self.published = 0;
         self.tail_pending = false;
         self.store_waits = 0;
@@ -86,9 +91,7 @@ impl StoreReader {
                 .map_err(|error| format!("Store query: {error:?}"))?;
             self.pending = None;
             self.generation = command.generation;
-            self.published = 0;
-            self.tail_pending = false;
-            self.store_waits = 0;
+            self.forget_page();
         }
         if self.published == command.generation {
             if self.snapshot_published_stands(command, shared)? {
@@ -106,25 +109,8 @@ impl StoreReader {
             }
         }
         if let Some(context) = &self.context {
-            if command.request.second == Some(context.selected_second()) {
-                if context.readiness() == QueryReadiness::Complete {
-                    if !context.selected().detached() {
-                        return self.snapshot_query(command, shared);
-                    }
-                    let identity_matches = match &command.request.identity {
-                        Some(identity) => {
-                            context
-                                .observation_for_identity(context.selected_second(), identity)
-                                .map_err(|error| error.to_string())?
-                                == context.selected().observation
-                        }
-                        None => true,
-                    };
-                    if identity_matches {
-                        return payload::snapshot(context, command, shared, None)
-                            .map(Answer::Ready);
-                    }
-                }
+            if detached_context_answers(context, command)? {
+                return payload::snapshot(context, command, shared, None).map(Answer::Ready);
             }
         }
 
@@ -145,7 +131,7 @@ impl StoreReader {
         if command.request.second.is_some() {
             if !self.tail_pending {
                 if complete {
-                    if !route_shows_no_reading(&command.request.route) {
+                    if !super::route_shows_no_reading(&command.request.route) {
                         return Ok(true);
                     }
                 }
@@ -389,7 +375,7 @@ impl StoreReader {
     }
 
     fn query_selection(&self, command: &Command) -> Result<QuerySelection, String> {
-        if route_shows_no_reading(&command.request.route) {
+        if super::route_shows_no_reading(&command.request.route) {
             return Ok(QuerySelection::FollowLatest);
         }
         let Some(second) = command.request.second else {
@@ -417,10 +403,25 @@ impl StoreReader {
     }
 }
 
-/// Whether the page shows no reading of the recording, as Self-monitoring does, whose figures are
-/// the app's own, so a hold neither moves it nor waits for the second it names.
-fn route_shows_no_reading(route: &str) -> bool {
-    route == "self"
+/// Whether the whole context of a second the Store's span has left answers a read of that second.
+fn detached_context_answers(context: &QueryContext, command: &Command) -> Result<bool, String> {
+    if command.request.second != Some(context.selected_second()) {
+        return Ok(false);
+    }
+    if context.readiness() != QueryReadiness::Complete {
+        return Ok(false);
+    }
+    if !context.selected().detached() {
+        return Ok(false);
+    }
+    let Some(identity) = &command.request.identity else {
+        return Ok(true);
+    };
+    let observation = context
+        .observation_for_identity(context.selected_second(), identity)
+        .map_err(|error| error.to_string())?;
+
+    Ok(observation == context.selected().observation)
 }
 
 pub(super) fn read(
@@ -469,18 +470,9 @@ pub(super) fn read(
                 }
                 snapshot.map(Update::Ready)
             }
-            Err(message) => Some(read_failed(reader, command, message)),
+            Err(message) => Some(super::reader_failed(reader, command, message)),
         },
-        Err(message) => Some(read_failed(reader, command, message)),
-    }
-}
-
-fn read_failed(reader: &mut Reader, command: &Command, message: String) -> Update {
-    reader.retry_after = Instant::now() + super::RETRY_INTERVAL;
-    reader.last_generation = 0;
-    Update::Failed {
-        generation: command.generation,
-        message,
+        Err(message) => Some(super::reader_failed(reader, command, message)),
     }
 }
 
@@ -527,13 +519,7 @@ fn read_earlier(
     shared: &Shared,
     snapshot: &mut Snapshot,
 ) -> bool {
-    if command.request.earlier == Earlier::Skip {
-        return false;
-    }
-    if command.request.route == "apps" {
-        return false;
-    }
-    if route_shows_no_reading(&command.request.route) {
+    if super::reader_earlier_skips(&command.request) {
         return false;
     }
     // A page's first step reads what the saved minutes keep, and its next step reads the rest.
