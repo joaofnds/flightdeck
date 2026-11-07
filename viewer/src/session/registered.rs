@@ -11,7 +11,7 @@ use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::{Catalog, KnownReading};
 use persistence::resources::ByteBudget;
 use persistence::retention::Retained;
-use persistence::{Error, Manifest, Result, WindowIdentity};
+use persistence::{Error, Manifest, Result};
 
 use super::earlier::{LEAD_IN_SECONDS, LOADED_SECONDS};
 use super::{ContextRange, NS, Session, TimeBounds};
@@ -163,22 +163,6 @@ impl Registered {
         windows.sort_by_key(|manifest| (manifest.identity.run.run.0, manifest.publication_first));
 
         Ok(windows)
-    }
-
-    /// Whether the newest saved window of `identity`'s run has reached `identity`'s.
-    pub(super) fn window_saved(
-        &self,
-        identity: &WindowIdentity,
-        operation: &Operation,
-    ) -> Result<bool> {
-        let mut work = ReadWork::default();
-        let tail = registered_retry(operation, || {
-            self.catalog
-                .window_at_or_before(&identity.run, u64::MAX, &mut work)
-                .map_err(Error::from)
-        })?;
-
-        Ok(tail.is_some_and(|manifest| manifest.identity.window >= identity.window))
     }
 }
 
@@ -371,11 +355,6 @@ impl Session {
             .registered
             .windows(span.needed, span.loaded, &self.operation)?
             == self.windows)
-    }
-
-    /// Whether `identity`'s window is saved.
-    pub(crate) fn window_saved(&self, identity: &WindowIdentity) -> Result<bool> {
-        self.registered.window_saved(identity, &self.operation)
     }
 }
 

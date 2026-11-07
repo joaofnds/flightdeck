@@ -5,7 +5,7 @@ use std::sync::Arc;
 use persistence::{Error, Result};
 use serde_json::Value;
 
-use super::window::{self, Window, WindowValue};
+use super::window::{Window, WindowValue};
 use crate::LiveSession;
 use crate::live_app_response::{Observation, Rank, RankedApp, Ranks, Sample};
 use crate::session::ContextRange;
@@ -79,33 +79,18 @@ impl LiveSession {
         })
     }
 
-    /// Ranks the observations of the selected window that their cached samples or sealed
-    /// minutes rank already, and replays nothing, so a newly opened page shows them with its
-    /// first readings. `rank_window` ranks the rest.
+    /// Ranks the observations of the selected window that their sealed minutes rank already, and
+    /// replays nothing, so a newly opened page shows them with its first readings. `rank_window`
+    /// ranks the rest.
     pub fn rank_window_kept(&mut self) -> Result<()> {
         let operation = self.operation.begin(self.operation.epoch())?;
         operation.run(|| {
             let mut ranks = std::mem::take(&mut self.app_ranks);
-            let ranked = self.fill_window_kept(&mut ranks, &(), Sample::ranks);
+            let ranked = self.fill_window_kept(&mut ranks, &());
             self.app_ranks = ranks;
 
             ranked
         })
-    }
-
-    /// Ranks the observation the session polled last, and drops those older than its window.
-    pub(super) fn poll_ranks(&mut self, first_ns: u64) -> Result<()> {
-        let current = self
-            .observations
-            .back()
-            .ok_or(Error::Bound("ranked live observation"))?;
-        let ranks = current
-            .app_sample
-            .as_deref()
-            .ok_or(Error::Bound("ranked live sample"))?
-            .ranks()?;
-
-        window::poll(&mut self.app_ranks, first_ns, ranks)
     }
 }
 

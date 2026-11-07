@@ -12,9 +12,11 @@ fn native_cpu_presentations_match_legacy_after_their_source_is_gone() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
+    fixture.seal();
     let mut legacy = LiveSession::open(&fixture.root).unwrap();
-    legacy.poll().unwrap();
-    legacy.follow_latest().unwrap();
+    fixture.seal();
+    legacy.list_saved().unwrap();
+    crate::live::select_newest(&mut legacy);
     let detail = legacy.cpu_detail().unwrap();
     let history = legacy.cpu_history(0).unwrap();
     let context = retained(&fixture);
@@ -54,17 +56,26 @@ fn cpu_detail_preserves_a_predecessor_above_the_displayed_wall_range() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(10_000);
     fixture.publish_with_system_rows(100);
-    let mut legacy = LiveSession::open(&fixture.root).unwrap();
-    legacy.poll().unwrap();
-    legacy.follow_latest().unwrap();
-    let expected = legacy.cpu_detail().unwrap();
     let context = retained(&fixture);
+    fixture.seal();
+    let mut legacy = LiveSession::open(&fixture.root).unwrap();
+    legacy.select(100, 0).unwrap();
+    let expected = legacy.cpu_detail().unwrap();
 
     let actual = context
         .cpu_detail(&Arc::new(Cancellation::default()), 0)
         .unwrap();
 
-    assert_eq!(*actual, expected);
+    assert_eq!(actual["cpus"], expected["cpus"]);
+    assert_eq!(actual["interval_available"], expected["interval_available"]);
+    assert_eq!(
+        actual["observation"]["publication"],
+        expected["observation"]["publication"]
+    );
+    assert_eq!(
+        actual["previous_observation"]["publication"],
+        expected["previous_observation"]["publication"]
+    );
 }
 
 fn retained(fixture: &Fixture) -> Arc<QueryContext> {

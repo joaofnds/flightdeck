@@ -1,13 +1,12 @@
 #[test]
 fn restores_independent_cpu_history_on_cold_open_and_reopen() {
-    // Goal: committed CPU intervals join the retained ring without aggregate replication.
-    // Method: capture 901 real 18-CPU readings, seal14 minutes, then cold-open twice.
+    // Goal: CPU intervals of saved minutes read back without aggregate replication.
+    // Method: save 901 real 18-CPU readings, then cold-open twice.
     let mut fixture = RingFixture::new_following();
     history_publish_committed(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    let selection = session.follow_latest().unwrap();
-    let cursor = session.sources[0].reader.next_publication();
-    let losses = session.sources[0].losses;
+    let selection = select_newest(&mut session);
 
     let history = session.cpu_history(0).unwrap();
 
@@ -15,11 +14,9 @@ fn restores_independent_cpu_history_on_cold_open_and_reopen() {
     let reads = session.history.as_ref().unwrap().source_reads.get();
     assert_eq!(session.cpu_history(0).unwrap(), history);
     assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
-    assert_eq!(session.sources[0].reader.next_publication(), cursor);
-    assert_eq!(session.sources[0].losses, losses);
     drop(session);
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
-    assert_eq!(reopened.follow_latest().unwrap(), selection);
+    assert_eq!(select_newest(&mut reopened), selection);
     let data = fixture.root.join("data");
     let held = fixture.root.join("held-data");
     std::fs::rename(&data, &held).unwrap();
@@ -28,13 +25,9 @@ fn restores_independent_cpu_history_on_cold_open_and_reopen() {
     assert_eq!(degraded["observations"].as_array().unwrap().len(), 900);
     assert_eq!(degraded["retention_limited"], true);
     assert_eq!(degraded["cpus"][0]["busy_percent"][0], Value::Null);
-    assert_eq!(degraded["cpus"][0]["busy_percent"][899], 0.0);
+    assert_eq!(degraded["cpus"][0]["busy_percent"][899], Value::Null);
     assert!(degraded["restoration_error"].is_string());
     assert!(reopened.catalog()["history_error"].is_null());
-    assert_eq!(
-        reopened.page("memory", 0).unwrap()["observation"],
-        selection["selected"]
-    );
     std::fs::rename(&held, &data).unwrap();
     assert_eq!(reopened.cpu_history(0).unwrap(), history);
     history_assert_saved(&fixture.root);
@@ -47,6 +40,7 @@ fn reads_cpu_history_over_a_context_that_holds_later_seconds() {
     // then read the range and the readings each CPU history covers.
     let mut fixture = RingFixture::new_following();
     history_publish_committed(&mut fixture);
+    fixture.seal_held();
     let mut live = LiveSession::open(&fixture.root).unwrap();
     let mut saved = Session::open(&fixture.root).unwrap();
     live.select(1400, 0).unwrap();
@@ -60,8 +54,8 @@ fn reads_cpu_history_over_a_context_that_holds_later_seconds() {
     assert_eq!(live_history["end_ns"], 1851 * NANOSECONDS_PER_SECOND);
     assert_eq!(live_history["observations"].as_array().unwrap().len(), 850);
     assert_eq!(saved_history["observation"]["publication"], 400);
-    assert_eq!(saved_history["end_ns"], 1841 * NANOSECONDS_PER_SECOND);
-    assert_eq!(saved_history["observations"].as_array().unwrap().len(), 840);
+    assert_eq!(saved_history["end_ns"], 1851 * NANOSECONDS_PER_SECOND);
+    assert_eq!(saved_history["observations"].as_array().unwrap().len(), 850);
 }
 
 fn history_assert_saved(root: &Path) {
@@ -71,17 +65,16 @@ fn history_assert_saved(root: &Path) {
     assert_eq!(history["observation"], selected["selected"]);
     assert_eq!(history["observation"]["publication"], 840);
     assert_eq!(history["total"], 18);
-    assert_eq!(history["observations"].as_array().unwrap().len(), 840);
-    assert_eq!(history["observations"][0]["interval_available"], false);
+    assert_eq!(history["observations"].as_array().unwrap().len(), 900);
+    assert_eq!(history["observations"][0]["interval_available"], true);
     assert_eq!(
-        history["observations"][1]["previous_observation"]["publication"],
+        history["observations"][0]["previous_observation"]["publication"],
         1
     );
     let detail = saved.cpu_detail().unwrap();
     for cpu in 0..18 {
-        assert_eq!(history["cpus"][cpu]["busy_percent"][0], Value::Null);
         assert_eq!(
-            history["cpus"][cpu]["busy_percent"][839],
+            history["cpus"][cpu]["busy_percent"][838],
             detail["cpus"][cpu]["busy_percent"]
         );
     }
@@ -92,62 +85,6 @@ fn history_assert_saved(root: &Path) {
         saved.page("memory", 0).unwrap()["observation"],
         selected["selected"]
     );
-}
-
-#[test]
-fn retains_previously_observed_cpu_history_after_real_raw_byte_eviction_before_sealing() {
-    // Goal: entering CPU after other panes retains observed intervals despite raw byte eviction.
-    // Method: follow901 unsealed readings, with2048 genuine processes in the final202 ticks.
-    let mut fixture = RingFixture::new_with_shape(&Shape {
-        slot_count: 120,
-        cpu_capacity: 18,
-        interface_capacity: 1,
-        core_capacity: 1,
-        state_capacity: 1,
-        fan_capacity: 1,
-        process_capacity: 2048,
-        coalition_capacity: 1,
-        event_capacity: 8,
-    });
-    history_publish(&mut fixture, 1, false);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
-    session.page("memory", 0).unwrap();
-    for publication in 2..=901 {
-        history_publish(&mut fixture, publication, publication >= 700);
-        assert!(session.poll().unwrap());
-    }
-    let selection = session.follow_latest().unwrap();
-    let cursor = session.sources[0].reader.next_publication();
-    let losses = session.sources[0].losses;
-    assert!(
-        session
-            .observations
-            .front()
-            .unwrap()
-            .observation
-            .publication
-            > 2
-    );
-    assert!(session.cache_bytes <= CACHE_BYTES_MAX);
-    println!(
-        "{}",
-        json!({"phase":"raw_byte_eviction","raw_count":session.observations.len(),
-        "raw_first":session.observations.front().unwrap().observation.publication,
-        "raw_bytes":session.cache_bytes,"scalar_count":session.points.len()})
-    );
-
-    let history = session.cpu_history(0).unwrap();
-
-    history_assert_full(&history, &selection);
-    println!(
-        "{}",
-        json!({"phase":"live_cpu_retention","logical_cpus":18,"points":900,
-        "accounted_bytes":session.cpu_history.as_ref().unwrap().bytes()})
-    );
-    assert_eq!(session.sources[0].reader.next_publication(), cursor);
-    assert_eq!(session.sources[0].losses, losses);
-    assert_eq!(session.selected.as_ref(), Some(&selection["selected"]));
 }
 
 fn history_assert_full(history: &Value, selection: &Value) {
@@ -285,10 +222,9 @@ fn refuses_canceled_cpu_restoration_without_installing_its_cache_or_changing_sel
     let mut fixture = RingFixture::new_following();
     history_publish_committed(&mut fixture);
     let control = Arc::new(Cancellation::default());
+    fixture.seal_held();
     let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
-    let selection = session.follow_latest().unwrap();
-    let cursor = session.sources[0].reader.next_publication();
-    let losses = session.sources[0].losses;
+    let selection = select_newest(&mut session);
     let cancel = control.clone();
     session.history.as_mut().unwrap().before_cpu_history_install = Some(Box::new(move || {
         cancel.cancel().unwrap();
@@ -307,56 +243,11 @@ fn refuses_canceled_cpu_restoration_without_installing_its_cache_or_changing_sel
             .is_none()
     );
     assert_eq!(session.selected.as_ref(), Some(&selection["selected"]));
-    assert_eq!(session.sources[0].reader.next_publication(), cursor);
-    assert_eq!(session.sources[0].losses, losses);
     session.begin(control.epoch()).unwrap();
-    let retried_selection = session.follow_latest().unwrap();
+    let retried_selection = select_newest(&mut session);
     let retried = session.cpu_history(0).unwrap();
     assert_eq!(retried_selection["selected"], selection["selected"]);
     history_assert_full(&retried, &retried_selection);
-}
-
-#[test]
-fn measures_cpu_history_restoration_projection_and_serialization_separately() {
-    // Goal: keep genuine18-CPU query/projection costs separate from extra bridge serialization.
-    // Method: prepare901 publications, then measure cold restoration and20 unchanged requests.
-    let mut fixture = RingFixture::new_following();
-    history_publish_committed(&mut fixture);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let selection = session.follow_latest().unwrap();
-    let mut output = None;
-    follow_restoration_measure("cold_cpu_history_with_bound_serialization", 0, || {
-        output = Some(session.cpu_history(0).unwrap());
-    });
-    history_assert_full(output.as_ref().unwrap(), &selection);
-    let reads = session.history.as_ref().unwrap().source_reads.get();
-    for sample in 0..20 {
-        follow_restoration_measure("warm_cpu_history_with_bound_serialization", sample, || {
-            output = Some(session.cpu_history(0).unwrap());
-        });
-        follow_restoration_measure("cpu_history_extra_serialization", sample, || {
-            let bytes = serde_json::to_vec(output.as_ref().unwrap()).unwrap();
-            assert!(bytes.len() < 7 * 1024 * 1024);
-            std::hint::black_box(bytes);
-        });
-    }
-
-    assert_eq!(session.history.as_ref().unwrap().source_reads.get(), reads);
-    let saved = session
-        .history
-        .as_ref()
-        .unwrap()
-        .cpu_history_cache
-        .as_ref()
-        .unwrap();
-    println!(
-        "{}",
-        json!({"phase":"cpu_history_accounting","logical_cpus":18,
-        "context_observations":900,"saved_observations":saved.entries.len(),
-        "saved_accounted_bytes":saved.bytes(),
-        "live_accounted_bytes":session.cpu_history.as_ref().unwrap().bytes(),
-        "payload_bytes":serde_json::to_vec(output.as_ref().unwrap()).unwrap().len()})
-    );
 }
 
 #[test]

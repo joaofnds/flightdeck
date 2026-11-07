@@ -60,7 +60,7 @@ fn warm_pressure_rebuilds_old_excluded_points() {
     assert_eq!(first.points[0].observation, limited.points[0].observation);
     let mut resident = cold.history.saved_residents.borrow_mut();
     assert!(resident.take_groups().is_none());
-    assert!(cold.history.bytes + resident.bytes() <= BYTES_MAX);
+    assert!(resident.bytes() <= BYTES_MAX);
 }
 
 #[test]
@@ -491,7 +491,7 @@ fn other_owners(cold: &Cold) {
     cold.history
         .resident_response(
             &crate::live_app_response::Selected::ending_at(selected).unwrap(),
-            Some(&cold.saved),
+            &cold.saved,
             &operation,
         )
         .unwrap();
@@ -499,7 +499,7 @@ fn other_owners(cold: &Cold) {
         .history
         .attribution_batch_response(
             &crate::live_app_response::Selected::ending_at(selected).unwrap(),
-            Some(&cold.saved),
+            &cold.saved,
             &operation,
         )
         .unwrap();

@@ -120,8 +120,9 @@ macro_rules! started_exit {
             let mut session = LiveSession::open(&fixture.root).unwrap();
             $scenario.publish(&mut fixture);
 
-            session.poll().unwrap();
-            session.follow_latest().unwrap();
+            fixture.seal();
+            session.list_saved().unwrap();
+            crate::select_newest(&mut session);
             let page = session.apps_page(0).unwrap();
 
             assert_eq!(page["process_count"], $processes);
@@ -230,7 +231,9 @@ fn retains_a_verified_event_only_app_without_a_previous_publication() {
     StartedExit::default().publish(&mut fixture);
 
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
 
     assert_eq!(page["process_count"], 1);
@@ -250,11 +253,12 @@ fn retains_event_only_program_bytes_after_the_source_buffers_are_reused() {
     publish_empty(&mut fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     StartedExit::default().publish(&mut fixture);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     publish(&mut fixture, 3);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     session.select(1002, 0).unwrap();
     let detail = session
@@ -281,8 +285,9 @@ fn associates_each_short_lived_app_beside_scheduled_members() {
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish_mixed_starts(&mut fixture);
 
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
     let first = session
         .app_detail(

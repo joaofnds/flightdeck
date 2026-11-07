@@ -15,18 +15,12 @@ fn retains_selected_group_rates_and_exact_bytes_across_sealing() {
     let mut usage = usage();
     usage.awake_ns_at_start = 0;
     usage.disk_read_bytes = 9_007_199_254_740_993;
-    let mut session = LiveSession::open(&fixture.root).unwrap();
     fixture.publish_with_usage(1001, &usage);
-    session.poll().unwrap();
     usage.user_ns += 500_000_000;
     usage.energy_nj += 4_000_000_000;
     usage.disk_read_bytes += 4096;
     usage.disk_written_bytes += 1024;
     fixture.publish_with_usage(1002, &usage);
-    session.poll().unwrap();
-
-    let live = selected(&mut session);
-    drop(session);
     fixture.seal();
     collector::recording::Registry {
         runs: Vec::new(),
@@ -37,9 +31,8 @@ fn retains_selected_group_rates_and_exact_bytes_across_sealing() {
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
     let saved = selected(&mut reopened);
 
-    assert_eq!(live["points"], saved["points"]);
-    assert_eq!(live["executable_name"]["bytes_hex"], "63757272656e74");
-    let point = live["points"].as_array().unwrap().last().unwrap();
+    assert_eq!(saved["executable_name"]["bytes_hex"], "63757272656e74");
+    let point = saved["points"].as_array().unwrap().last().unwrap();
     assert_eq!(point["cpu_percent_one_core"], 25.0);
     assert_eq!(point["energy_watts"], 2.0);
     assert_eq!(point["disk_read_bytes"]["known"], 4096);
@@ -61,9 +54,10 @@ fn keeps_a_group_apart_from_the_other_executables_of_its_app_across_sealing() {
     ];
     let mut session = LiveSession::open(&fixture.root).unwrap();
     named::publish(&mut fixture, 1, &rows);
-    session.poll().unwrap();
+    session.list_saved().unwrap();
     named::publish(&mut fixture, 2, &rows);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     let live = worker(&mut session);
     drop(session);
     fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
@@ -125,7 +119,8 @@ fn sums_same_byte_names_across_pids_without_merging_other_apps() {
     named::publish(&mut fixture, 1, &rows);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     named::publish(&mut fixture, 2, &rows);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let grouped = session
@@ -164,7 +159,8 @@ fn gaps_an_exec_crossing_inside_the_same_app() {
         2,
         &[named::member(7, b"after", b"/A.app", current)],
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let group = session
@@ -195,7 +191,8 @@ fn retains_verified_exit_counters_without_carrying_memory_forward() {
     let mut exited = named::member(7, b"worker", b"/A.app", current);
     exited.exited = true;
     named::publish(&mut fixture, 2, &[exited]);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let group = session
@@ -215,7 +212,6 @@ fn retains_verified_exit_counters_without_carrying_memory_forward() {
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
 
-    assert_eq!(reopened.catalog()["tail_ticks"], 0);
     assert_eq!(saved["points"][1]["cpu_ns"], amount(100_000_000, 1));
     assert_eq!(saved["points"][1]["energy_nj"], amount(200_000_000, 1));
     assert_eq!(saved["points"][1]["disk_read_bytes"], amount(4_096, 1));
@@ -245,7 +241,8 @@ fn retains_partial_group_coverage_instead_of_fabricating_missing_members() {
         2,
         &[named::member(7, b"worker", b"/A.app", reset), refused],
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let group = session
@@ -274,7 +271,8 @@ fn retains_app_and_name_identity_after_the_last_instance_is_gone() {
     );
     let mut session = LiveSession::open(&fixture.root).unwrap();
     named::publish(&mut fixture, 2, &[]);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let group = session
@@ -295,6 +293,7 @@ fn cancels_selected_group_replay_without_returning_a_partial_response() {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1001, &usage());
     let cancellation = std::sync::Arc::new(crate::Cancellation::default());
+    fixture.seal();
     let mut session =
         LiveSession::open_with(&fixture.root, std::sync::Arc::clone(&cancellation), 0).unwrap();
     session.select(1001, 0).unwrap();
@@ -304,50 +303,6 @@ fn cancels_selected_group_replay_without_returning_a_partial_response() {
 
     assert!(matches!(result, Err(persistence::Error::Io(error))
         if error.kind() == std::io::ErrorKind::Interrupted));
-}
-
-#[test]
-fn trims_optional_groups_before_app_facts_under_a_full_live_context() {
-    // A real 600-App, 900-tick tail exceeds the group budget while ordinary App facts still fit.
-    let mut fixture = named::dense();
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let started = std::time::Instant::now();
-    named::dense_context(&mut fixture, &mut session);
-    session.select(1900, 0).unwrap();
-    let mut path = b"/Apps/0000/".to_vec();
-    path.resize(1020, b'x');
-    path.extend_from_slice(b".app");
-
-    let group = session
-        .app_process_history(KeyKind::Bundle, &path, b"worker")
-        .unwrap();
-    let app = session.app_history(KeyKind::Bundle, &path).unwrap();
-    let cpu = session
-        .app_attribution_history(crate::AppAttributionMetric::Cpu)
-        .unwrap();
-    let power = session
-        .app_attribution_history(crate::AppAttributionMetric::Power)
-        .unwrap();
-    let repeated = session
-        .app_attribution_history(crate::AppAttributionMetric::Cpu)
-        .unwrap();
-
-    assert_eq!(app["points"].as_array().unwrap().len(), 900);
-    assert_eq!(app["coverage"]["retention_limited"], false);
-    assert_eq!(group["coverage"]["retention_limited"], true);
-    assert_eq!(group["points"][0]["source_available"], false);
-    assert_eq!(group["points"][899]["source_available"], true);
-    assert_eq!(group["points"][899]["cpu_ns"]["known"], 1000);
-    assert_eq!(cpu["points"], repeated["points"]);
-    assert_eq!(power["points"].as_array().unwrap().len(), 900);
-    assert!(group["coverage"]["cache_bytes"].as_u64().unwrap() <= 75_497_472);
-    println!(
-        "{}",
-        serde_json::json!({"fixture_only":true,
-        "apps":600,"observations":900,"wall_ms":started.elapsed().as_millis(),
-        "group_coverage":group["coverage"],"app_coverage":app["coverage"],
-        "cpu_coverage":cpu["coverage"],"power_coverage":power["coverage"]})
-    );
 }
 
 #[test]
@@ -399,35 +354,6 @@ fn reuses_separate_saved_app_and_group_targets_when_the_ui_alternates_them() {
 }
 
 #[test]
-fn preserves_group_facts_and_absent_name_semantics_across_committed_overlap() {
-    // Committed overlap preserves measured live facts and observed absence of another name.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_usage(1001, &usage());
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    fixture.publish_with_usage(1002, &usage());
-    session.poll().unwrap();
-    let live = selected(&mut session);
-    fixture.seal();
-
-    session.refresh_history().unwrap();
-    let restored = selected(&mut session);
-    let absent = session
-        .app_process_history(KeyKind::Bundle, b"/Apps/Current.app", b"absent")
-        .unwrap();
-
-    assert_eq!(restored["points"], live["points"]);
-    assert_eq!(
-        restored["coverage"]["live_group_cache_bytes"],
-        live["coverage"]["live_group_cache_bytes"]
-    );
-    assert_eq!(restored["coverage"]["live_group_observations_retained"], 2);
-    assert_eq!(restored["coverage"]["retention_limited"], false);
-    assert_eq!(absent["points"][1]["source_available"], true);
-    assert_eq!(absent["points"][1]["members"], Value::Null);
-    assert_eq!(absent["executable_name"]["bytes_hex"], "616273656e74");
-}
-
-#[test]
 fn refuses_a_warm_group_trace_after_its_commitment_disappears() {
     // A discarded live payload cannot turn a failed saved commitment into successful output.
     let mut fixture = Fixture::new();
@@ -470,7 +396,8 @@ fn preserves_large_group_amounts_and_suppresses_an_overflowed_gauge() {
             named::member(8, b"worker", b"/A.app", extra),
         ],
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let group = session
@@ -490,123 +417,7 @@ fn preserves_large_group_amounts_and_suppresses_an_overflowed_gauge() {
 }
 
 #[test]
-fn retains_a_live_group_publication_omitted_inside_a_committed_range() {
-    // A real sparse sealed minute encloses p2 without recording its measured group interval.
-    let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(56);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    publish_interval(&mut fixture, &mut session, 1, false);
-    publish_interval(&mut fixture, &mut session, 2, false);
-    publish_interval(&mut fixture, &mut session, 3, false);
-    session.select(1003, 0).unwrap();
-    let before = session
-        .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
-        .unwrap();
-    named::seal_past_lost_second(
-        &mut fixture,
-        4..11,
-        &[named::member(7, b"worker", b"/A.app", usage())],
-    );
-
-    session.refresh_history().unwrap();
-    let after = session
-        .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
-        .unwrap();
-
-    assert_eq!(
-        session.history.as_ref().unwrap().windows[0].publication_first,
-        1
-    );
-    assert_eq!(
-        session.history.as_ref().unwrap().windows[0].publication_end,
-        4
-    );
-    assert_eq!(before["points"][1]["cpu_ns"]["known"], 100_000_000);
-    assert_eq!(before["points"][1]["disk_read_bytes"]["known"], 4096);
-    assert_eq!(after["points"], before["points"]);
-    assert_eq!(after["coverage"]["retention_limited"], false);
-}
-
-#[test]
-fn retains_a_live_group_interval_when_only_its_endpoint_is_committed() {
-    // Saving p2 alone cannot replace the valid interval captured against uncommitted p1.
-    let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(57);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    publish_interval(&mut fixture, &mut session, 1, false);
-    publish_interval(&mut fixture, &mut session, 2, false);
-    session.select(1002, 0).unwrap();
-    let before = session
-        .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
-        .unwrap();
-    publish_past_first_second(&mut fixture);
-    fixture.seal_minute(0);
-
-    session.refresh_history().unwrap();
-    let after = session
-        .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
-        .unwrap();
-
-    assert_eq!(before["points"][1]["energy_nj"]["known"], 200_000_000);
-    assert_eq!(before["points"][1]["disk_io_bytes"]["known"], 5120);
-    assert_eq!(after["points"], before["points"]);
-}
-
-#[test]
-fn retains_a_live_terminal_interval_when_its_baseline_is_not_committed() {
-    // A terminal saved endpoint without p1 cannot erase the captured verified exit work.
-    let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(57);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    publish_interval(&mut fixture, &mut session, 1, false);
-    publish_interval(&mut fixture, &mut session, 2, true);
-    session.select(1002, 0).unwrap();
-    let before = session
-        .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
-        .unwrap();
-    publish_past_first_second(&mut fixture);
-    fixture.seal_minute(0);
-
-    session.refresh_history().unwrap();
-    let after = session
-        .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
-        .unwrap();
-
-    assert_eq!(before["points"][1]["disk_read_bytes"]["known"], 4096);
-    assert_eq!(before["points"][1]["resident_bytes"]["measured_members"], 0);
-    assert_eq!(after["points"], before["points"]);
-}
-
-/// Publishes the ticks that overwrite the first publication in the ring.
-fn publish_past_first_second(fixture: &mut Fixture) {
-    for publication in 3..10 {
-        named::publish(
-            fixture,
-            publication,
-            &[named::member(7, b"worker", b"/A.app", usage())],
-        );
-    }
-}
-
-fn publish_interval(
-    fixture: &mut Fixture,
-    session: &mut LiveSession,
-    publication: u64,
-    exited: bool,
-) {
-    let mut amount = usage();
-    amount.user_ns += publication * 100_000_000;
-    amount.energy_nj += publication * 200_000_000;
-    amount.disk_read_bytes = publication * 4096;
-    amount.disk_written_bytes = publication * 1024;
-    let mut row = named::member(7, b"worker", b"/A.app", amount);
-    row.exited = exited;
-    named::publish(fixture, publication, &[row]);
-    session.poll().unwrap();
-}
-
-#[test]
-fn sums_independent_nonzero_member_amounts_and_rates_in_live_and_saved_history() {
+fn sums_independent_nonzero_member_amounts_and_rates_of_saved_history() {
     // Distinct contributions pin every exact group subtotal independently of shared aggregation.
     let mut fixture = Fixture::new();
     named::publish(
@@ -618,37 +429,21 @@ fn sums_independent_nonzero_member_amounts_and_rates_in_live_and_saved_history()
         ],
     );
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    let mut first = usage();
-    first.user_ns += 100_000_000;
-    first.system_ns += 20_000_000;
-    first.energy_nj += 400_000_000;
-    first.disk_read_bytes = 1024;
-    first.disk_written_bytes = 256;
-    first.resident_bytes = 1000;
-    first.footprint_bytes = 3000;
-    let mut second = usage();
-    second.user_ns += 200_000_000;
-    second.system_ns += 40_000_000;
-    second.energy_nj += 600_000_000;
-    second.disk_read_bytes = 2048;
-    second.disk_written_bytes = 512;
-    second.resident_bytes = 2000;
-    second.footprint_bytes = 5000;
     named::publish(
         &mut fixture,
         2,
         &[
-            named::member(7, b"worker", b"/A.app", first),
-            named::member(8, b"worker", b"/A.app", second),
+            named::member(7, b"worker", b"/A.app", sums_first_member_usage()),
+            named::member(8, b"worker", b"/A.app", sums_second_member_usage()),
         ],
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
-    let live = session
+    let listed = session
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
-    fixture.seal();
     drop(session);
     collector::recording::Registry {
         runs: Vec::new(),
@@ -658,12 +453,12 @@ fn sums_independent_nonzero_member_amounts_and_rates_in_live_and_saved_history()
     .unwrap();
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
     reopened.select(1002, 0).unwrap();
-    let saved = reopened
+    let unregistered = reopened
         .app_process_history(KeyKind::Bundle, b"/A.app", b"worker")
         .unwrap();
 
     assert_eq!(
-        metric_values(&live["points"][1]),
+        metric_values(&listed["points"][1]),
         serde_json::json!({
         "cpu_ns":amount(360_000_000,2),"energy_nj":amount(1_000_000_000,2),
         "resident_bytes":amount(3_000,2),"footprint_bytes":amount(8_000,2),
@@ -673,8 +468,32 @@ fn sums_independent_nonzero_member_amounts_and_rates_in_live_and_saved_history()
         "disk_written_bps":768.0,"elapsed_ns":1_000_000_000,
         "members":2})
     );
-    assert!((live["points"][1]["disk_io_bps"].as_f64().unwrap() - 3840.0).abs() < 1e-9);
-    assert_eq!(saved["points"], live["points"]);
+    assert!((listed["points"][1]["disk_io_bps"].as_f64().unwrap() - 3840.0).abs() < 1e-9);
+    assert_eq!(unregistered["points"], listed["points"]);
+}
+
+fn sums_first_member_usage() -> collector::processes::Usage {
+    let mut first = usage();
+    first.user_ns += 100_000_000;
+    first.system_ns += 20_000_000;
+    first.energy_nj += 400_000_000;
+    first.disk_read_bytes = 1024;
+    first.disk_written_bytes = 256;
+    first.resident_bytes = 1000;
+    first.footprint_bytes = 3000;
+    first
+}
+
+fn sums_second_member_usage() -> collector::processes::Usage {
+    let mut second = usage();
+    second.user_ns += 200_000_000;
+    second.system_ns += 40_000_000;
+    second.energy_nj += 600_000_000;
+    second.disk_read_bytes = 2048;
+    second.disk_written_bytes = 512;
+    second.resident_bytes = 2000;
+    second.footprint_bytes = 5000;
+    second
 }
 
 fn amount(known: u64, measured_members: u32) -> Value {

@@ -71,21 +71,6 @@ const _: () = {
 };
 
 impl<'operation> Reduction<'operation> {
-    pub(crate) fn contains_live(&self, observation: &Observation) -> Result<bool> {
-        if let Ok(index) = self
-            .points
-            .binary_search_by_key(&identity(observation), |point| {
-                identity(&point.capture.observation)
-            })
-        {
-            let point = &self.points[index];
-            if point.capture.observation != *observation {
-                return Err(Error::Bound("conflicting resident history observation"));
-            }
-            return Ok(point.source == Source::Live);
-        }
-        Ok(false)
-    }
     pub(crate) fn new(selected: &Selected, operation: &'operation Operation) -> Self {
         Self {
             selected: *selected,

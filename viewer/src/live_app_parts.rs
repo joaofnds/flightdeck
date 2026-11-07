@@ -2,9 +2,9 @@
 //! page shows any second's App detail at once.
 use std::sync::Arc;
 
-use persistence::{Error, Result};
+use persistence::Result;
 
-use super::window::{self, Window, WindowValue};
+use super::window::{Window, WindowValue};
 use crate::LiveSession;
 use crate::live_app_response::{AppPart, KeyKind, Observation};
 use crate::session::ContextRange;
@@ -95,25 +95,6 @@ impl LiveSession {
 
             parted
         })
-    }
-
-    /// Keeps the kept App's part of the observation the session polled last, and drops those
-    /// older than its window.
-    pub(super) fn poll_parts(&mut self, first_ns: u64) -> Result<()> {
-        let Some(app) = &self.parts_app else {
-            return Ok(());
-        };
-        let current = self
-            .observations
-            .back()
-            .ok_or(Error::Bound("App part live observation"))?;
-        let part = current
-            .app_sample
-            .as_deref()
-            .ok_or(Error::Bound("App part live sample"))?
-            .app_part(app.kind, &app.bytes)?;
-
-        window::poll(&mut self.app_parts, first_ns, part)
     }
 }
 

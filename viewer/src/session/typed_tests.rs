@@ -138,20 +138,6 @@ fn a_restored_selection_formats_no_cell() {
 }
 
 #[test]
-fn a_restored_context_formats_no_cell() {
-    // Goal: a session that follows a recording it reopened computes its points without text.
-    // Method: open a live session over saved minutes alone and follow its newest reading.
-    let fixture = saved_seconds();
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let measured = persistence::work::observe();
-
-    let response = session.follow_latest().unwrap();
-
-    assert_eq!(measured.counts().string_cells, 0);
-    assert!(!response["selected"].is_null());
-}
-
-#[test]
 fn a_reading_of_every_gauge_formats_no_cell() {
     // Goal: a gauge reaches its reading as a number.
     // Method: count the cells of a selection on a minute holding system and battery readings.

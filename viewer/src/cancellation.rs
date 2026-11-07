@@ -18,8 +18,6 @@ pub struct Cancellation {
     epoch: AtomicU64,
     interrupts: Mutex<Vec<Arc<InterruptHandle>>>,
     wake: Condvar,
-    #[cfg(test)]
-    page_row_interrupt: AtomicBool,
 }
 
 pub(crate) struct Operation {
@@ -45,11 +43,6 @@ impl Drop for Completion<'_> {
 }
 
 impl Cancellation {
-    #[cfg(test)]
-    pub(crate) fn interrupt_after_page_row(&self) {
-        self.page_row_interrupt.store(true, Ordering::Release);
-    }
-
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
@@ -83,18 +76,6 @@ impl Cancellation {
 }
 
 impl Operation {
-    #[cfg(test)]
-    pub(crate) fn page_row(&self) -> Result<()> {
-        if self
-            .cancellation
-            .page_row_interrupt
-            .swap(false, Ordering::AcqRel)
-        {
-            self.cancellation.cancel()?;
-        }
-        Ok(())
-    }
-
     pub fn run<T>(&self, action: impl FnOnce() -> Result<T>) -> Result<T> {
         self.check()?;
         let finished = AtomicBool::new(false);

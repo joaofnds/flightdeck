@@ -1,4 +1,4 @@
-use super::{App, CompactMeasure, Selection, apps, count, key};
+use super::{CompactMeasure, Selection, apps, count, key};
 use crate::app_process_groups_history::ProcessGroupReading;
 use crate::live_app_response::json::AppView;
 use crate::live_app_response::{self as response, AppPart, Measure, Observation};
@@ -95,45 +95,6 @@ impl TracePoint {
             elapsed_ns: header.elapsed_ns,
             totals,
             captured: true,
-        }
-    }
-
-    pub(super) fn from_group(
-        observation: &Observation,
-        elapsed_ns: Option<u64>,
-        totals: Option<&Totals>,
-        output: &mut Self,
-    ) {
-        *output = Self {
-            observation: *observation,
-            elapsed_ns,
-            totals: totals.copied(),
-            captured: true,
-        };
-    }
-
-    pub(super) fn from_live(
-        observation: &Observation,
-        elapsed_ns: Option<u64>,
-        app: Option<&App>,
-    ) -> Self {
-        Self {
-            observation: *observation,
-            elapsed_ns,
-            captured: true,
-            totals: app.map(|app| Totals {
-                members: app.members,
-                membership_complete: app.membership_complete,
-                cpu_ns: app.cpu_ns,
-                energy_nj: app.energy_nj,
-                gpu_ns: app.gpu_ns,
-                disk_read_bytes: app.disk_read_bytes,
-                disk_written_bytes: app.disk_written_bytes,
-                disk_io_bytes: app.disk_io_bytes,
-                resident_bytes: app.resident_bytes,
-                footprint_bytes: app.footprint_bytes,
-                ..Totals::default()
-            }),
         }
     }
 

@@ -82,22 +82,6 @@ impl<'operation> Reduction<'operation> {
         }
     }
 
-    pub(crate) fn contains_live(&self, observation: &Observation) -> Result<bool> {
-        match self
-            .points
-            .binary_search_by_key(&identity(observation), |point| {
-                identity(&point.capture.coverage.observation)
-            }) {
-            Ok(index) => {
-                if self.points[index].capture.coverage.observation != *observation {
-                    return Err(Error::Bound("conflicting attribution observation"));
-                }
-                Ok(self.points[index].source == Source::Live)
-            }
-            Err(_) => Ok(false),
-        }
-    }
-
     pub(crate) fn observe<'key>(
         &mut self,
         capture: &Capture,

@@ -17,8 +17,9 @@ fn resident_history_keeps_exact_gauge_bytes_without_a_counter_baseline() {
     // Capture one real publication: a resident gauge needs no predecessor or float conversion.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(9_007_199_254_740_993));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let response = session.app_resident_history().unwrap();
 
@@ -49,8 +50,9 @@ fn resident_history_restores_the_same_cohort_and_points_after_the_ring_retires()
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(11));
     fixture.publish_with_usage(1001, &usage(29));
+    fixture.seal();
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.follow_latest().unwrap();
+    crate::live::select_newest(&mut live);
     let before = live.app_resident_history().unwrap();
     assert_eq!(before["cohort"][0]["sum_bytes"], "40");
     fixture.seal();
@@ -69,27 +71,6 @@ fn resident_history_restores_the_same_cohort_and_points_after_the_ring_retires()
     assert_eq!(after["cohort"], before["cohort"]);
     assert_eq!(after["points"], before["points"]);
     assert_eq!(after["selected"], before["selected"]);
-    assert_eq!(after["coverage"]["committed_observations"], 2);
-}
-
-#[test]
-fn resident_history_counts_a_saved_live_overlap_once_without_changing_the_cohort() {
-    // Seal the same real publications while their live facts remain cached, then merge them.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_usage(1000, &usage(11));
-    fixture.publish_with_usage(1001, &usage(29));
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
-    let before = session.app_resident_history().unwrap();
-    fixture.seal();
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
-
-    let after = session.app_resident_history().unwrap();
-
-    assert_eq!(after["cohort"], before["cohort"]);
-    assert_eq!(after["points"], before["points"]);
-    assert_eq!(after["cohort"][0]["samples"], 2);
     assert_eq!(after["coverage"]["committed_observations"], 2);
 }
 

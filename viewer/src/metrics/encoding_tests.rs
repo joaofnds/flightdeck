@@ -93,7 +93,7 @@ impl Recording {
             previous.map(|previous| reading_at(&self.minute, previous.publication).unwrap());
 
         point_sources(
-            &Sources::Machine {
+            &Sources {
                 current: &reading,
                 previous: before.as_ref(),
             },
@@ -332,7 +332,7 @@ fn a_reading_copied_alone_gives_the_next_point_the_rates_its_minute_gives() {
     let before = reading_at(&kept, 1).unwrap();
 
     let point = point_sources(
-        &Sources::Machine {
+        &Sources {
             current: &reading,
             previous: Some(&before),
         },

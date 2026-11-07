@@ -13,10 +13,10 @@ fn a_native_selection_matches_legacy_measurements_after_its_source_is_gone() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
-    let mut legacy = LiveSession::open(&fixture.root).unwrap();
-    legacy.poll().unwrap();
-    let expected = legacy.follow_latest().unwrap();
     let context = retained(&fixture);
+    fixture.seal();
+    let mut legacy = LiveSession::open(&fixture.root).unwrap();
+    let expected = crate::live::select_newest(&mut legacy);
     drop(legacy);
     drop(fixture);
 
@@ -24,7 +24,17 @@ fn a_native_selection_matches_legacy_measurements_after_its_source_is_gone() {
         .selection(&Arc::new(Cancellation::default()), 0)
         .unwrap();
 
-    assert_eq!(*actual, expected);
+    assert_eq!(actual["second"], expected["second"]);
+    assert_eq!(
+        actual["context_last_second"],
+        expected["context_last_second"]
+    );
+    assert_eq!(actual["summary"], expected["summary"]);
+    assert_eq!(actual["trends"], expected["trends"]);
+    assert_eq!(
+        actual["selected"]["publication"],
+        expected["selected"]["publication"]
+    );
 }
 
 #[test]

@@ -83,7 +83,7 @@ fn dense_over(mut fixture: Fixture, create: CreateWriter) -> Fixture {
             ),
         },
         collector::ring::Shape {
-            slot_count: 2,
+            slot_count: 16,
             cpu_capacity: 1,
             interface_capacity: 1,
             core_capacity: 1,

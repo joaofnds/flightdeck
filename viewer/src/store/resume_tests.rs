@@ -167,11 +167,9 @@ fn opening_pinned_context_does_not_ingest_the_live_ring() {
     fixture.publish_with_system_rows(100);
     let cancellation = std::sync::Arc::new(crate::cancellation::Cancellation::default());
 
-    let session = crate::LiveSession::open_history_with(&fixture.root, cancellation, 0).unwrap();
+    let session = crate::LiveSession::open_with(&fixture.root, cancellation, 0).unwrap();
 
     assert!(session.catalog()["last_second"].is_null());
-    assert_eq!(session.catalog()["tail_ticks"], 0);
-    assert!(session.catalog()["collector_completed"].is_null());
 }
 
 #[test]

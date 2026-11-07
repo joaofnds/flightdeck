@@ -95,7 +95,6 @@ impl QueryContext {
             selected: &selected,
             context_last_second: self.context_last_second(),
             context: &context,
-            live: None,
             saved: None,
             retained: Some(&retained),
             offset,

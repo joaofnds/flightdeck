@@ -79,7 +79,7 @@ impl Fixture {
         let before = previous.map(|_| self.reading(current.publication - 1));
 
         point_sources(
-            &Sources::Machine {
+            &Sources {
                 current: &reading,
                 previous: before.as_ref(),
             },

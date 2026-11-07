@@ -1,7 +1,6 @@
 use serde_json::Value;
 
 use super::*;
-use crate::live::identity_fixture::Fixture;
 use crate::live::window::fixture::{observation_key, saved_only, saved_with_apps};
 use crate::live_app_response::{Key, KeyKind, PROCESSES_PAGE_ROWS_MAX, Page};
 
@@ -120,93 +119,6 @@ fn part_window_drops_the_parts_of_an_app_of_the_other_kind() {
         };
         (kind, app.bytes.clone())
     });
-}
-
-#[test]
-fn poll_parts_gives_each_live_second_the_kept_apps_detail() {
-    // Goal: a live second has the selected App's detail as soon as the session polls it.
-    // Method: keep an App's parts over one live second, poll a second one, and compare its
-    // part with a read of it.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
-    let app = selected_app(&session);
-    session.part_window(app.kind, &app.bytes).unwrap();
-    fixture.publish_with_system_rows(1001);
-
-    session.poll().unwrap();
-
-    let latest = session.follow_latest().unwrap()["selected"].clone();
-    let parts = session.app_parts();
-    let part = parts.get(&observation_key(&latest)).unwrap();
-    let expected = session.app_detail(app.kind, &app.bytes, 0).unwrap();
-    assert_eq!(part.detail(first_page()).unwrap(), expected);
-}
-
-#[test]
-fn poll_drops_the_part_of_a_reading_that_expired_with_no_new_reading() {
-    // Goal: the kept App's part of a reading the period no longer covers leaves with it, also where
-    // no new reading ever comes in.
-    // Method: keep an App's parts over two live seconds, place the cutoff past the first, and poll
-    // with nothing new.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let first = session.follow_latest().unwrap()["selected"].clone();
-    let app = selected_app(&session);
-    session.part_window(app.kind, &app.bytes).unwrap();
-    fixture.publish_with_system_rows(1001);
-    session.poll().unwrap();
-    let last = session.follow_latest().unwrap()["selected"].clone();
-    let boot = fixture.writer.identity().unwrap().boot;
-    crate::session::retention_tests::expire_boot_before(&fixture.root, boot, 1_000_000_000);
-
-    session.poll().unwrap();
-
-    assert!(session.app_parts().get(&observation_key(&first)).is_none());
-    assert!(session.app_parts().get(&observation_key(&last)).is_some());
-}
-
-#[test]
-fn poll_parts_keeps_nothing_until_an_app_is_kept() {
-    // Goal: a session whose Apps page never asked for an App spends no memory on parts.
-    // Method: poll two live seconds without keeping any App's parts.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-
-    let latest = session.follow_latest().unwrap()["selected"].clone();
-    assert!(session.app_parts().get(&observation_key(&latest)).is_none());
-}
-
-#[test]
-fn poll_keeps_the_parts_of_a_selected_earlier_window() {
-    // Goal: a page that polls live while an earlier second is selected leaves the kept App's
-    // parts of that window, so returning to it replays nothing.
-    // Method: keep an App's parts of a saved window, publish a live second over fifteen
-    // minutes past it, poll, and look the selected second up.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal();
-    fixture.publish_with_system_rows(3000);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let selected = session.select(1001, 0).unwrap()["selected"].clone();
-    let app = selected_app(&session);
-    session.part_window(app.kind, &app.bytes).unwrap();
-    fixture.publish_with_system_rows(3001);
-
-    session.poll().unwrap();
-
-    assert!(
-        session
-            .app_parts()
-            .get(&observation_key(&selected))
-            .is_some()
-    );
 }
 
 /// Keeps the selected App's parts of a saved window, then those of the App `other` names, and

@@ -3,16 +3,15 @@ use std::cell::{Cell, RefCell};
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use super::{BYTES_MAX, Cache, History, Observation, Operation, Point, ResidentCache};
+use super::{BYTES_MAX, Cache, History, Operation, ResidentCache};
 use crate::Session;
 use crate::app_attribution_history::cache::Point as SavedPoint;
 use crate::app_attribution_history::{AppAttributionHistories, AppAttributionMetric, Reduction};
-use crate::live::resident_history::{Source, identity};
+use crate::live::resident_history::Source;
 use crate::live_app_response::Selected;
 
 struct Batch<'operation> {
     states: [MetricState<'operation>; 3],
-    live: Vec<Observation>,
 }
 
 enum MetricState<'operation> {
@@ -48,7 +47,6 @@ const METRICS: [AppAttributionMetric; 3] = [
 const OBSERVATIONS_MAX: usize = 4096;
 const _: () = {
     assert!(OBSERVATIONS_MAX == crate::session::OBSERVATIONS_MAX);
-    assert!(OBSERVATIONS_MAX * size_of::<Observation>() <= 512 * 1024);
     assert!(METRICS.len() == 3);
 };
 
@@ -56,38 +54,19 @@ impl History {
     pub(crate) fn attribution_batch_response(
         &self,
         selected: &Selected,
-        saved: Option<&Session>,
+        saved: &Session,
         operation: &Operation,
     ) -> Result<Box<AppAttributionHistories>> {
-        let mut batch = Batch::new(self, selected, operation)?;
-        if let Some(saved) = saved {
-            return self.attribution_batch_saved(
-                &SavedQuery {
-                    selected,
-                    saved,
-                    operation,
-                    available: BYTES_MAX.saturating_sub(self.bytes),
-                },
-                &mut batch,
-            );
-        }
-
-        batch.choose(operation)?;
-        batch.project_live(self, operation)?;
-        let response = batch.finish(self, None, operation)?;
-        operation.check()?;
-        if [
-            response.cpu.is_ok(),
-            response.power.is_ok(),
-            response.disk.is_ok(),
-        ]
-        .into_iter()
-        .all(|ready| ready)
-        {
-            self.saved_residents.replace(ResidentCache::new());
-        }
-
-        Ok(response)
+        let mut batch = Batch::new(selected, operation);
+        self.attribution_batch_saved(
+            &SavedQuery {
+                selected,
+                saved,
+                operation,
+                available: BYTES_MAX,
+            },
+            &mut batch,
+        )
     }
 
     fn attribution_batch_saved(
@@ -97,20 +76,19 @@ impl History {
     ) -> Result<Box<AppAttributionHistories>> {
         let mut lease = CacheLease::new(self);
         let space = lease.prepare(query.available, query.operation)?;
-        batch.retain(&mut lease.rates, query, space)?;
+        Batch::retain(&mut lease.rates, query, space)?;
         query.saved.validate_attribution_cache(&lease.rates)?;
         query
             .saved
             .with_app_attribution_replay(query.selected, |replay| {
                 let uncached =
-                    Self::attribution_batch_prepare(query, batch, &mut lease.rates, replay, space)?;
+                    Self::attribution_batch_prepare(query, &mut lease.rates, replay, space)?;
                 self.attribution_batch_replay(query, batch, &mut lease, replay, uncached)
             })
     }
 
     fn attribution_batch_prepare(
         query: &SavedQuery<'_>,
-        batch: &Batch<'_>,
         rates: &mut Cache,
         replay: &mut crate::session::AttributionReplay,
         space: usize,
@@ -119,10 +97,6 @@ impl History {
         let missing = Cell::new(0_usize);
         let before = rates.borrow().count();
         query.saved.attribution_replay_plan(replay, |observation| {
-            if batch.contains_live(observation)? {
-                return Ok(true);
-            }
-
             if rates.borrow().contains(observation, query.operation)? {
                 return Ok(true);
             }
@@ -156,10 +130,6 @@ impl History {
                 .retain(query.operation, |_observation| Ok(true))?;
         }
         query.saved.attribution_replay_plan(replay, |observation| {
-            if batch.contains_live(observation)? {
-                return Ok(true);
-            }
-
             rates.borrow().contains(observation, query.operation)
         })?;
         Ok(uncached)
@@ -185,7 +155,6 @@ impl History {
         #[cfg(test)]
         probe_before_project();
         query.operation.check()?;
-        batch.project_live(self, query.operation)?;
         for point in lease.rates.points() {
             query.operation.check()?;
             batch.project_saved(point);
@@ -233,82 +202,19 @@ impl History {
 }
 
 impl<'operation> Batch<'operation> {
-    fn new(
-        history: &History,
-        selected: &Selected,
-        operation: &'operation Operation,
-    ) -> Result<Box<Self>> {
-        let mut batch = Box::new(Self {
+    fn new(selected: &Selected, operation: &'operation Operation) -> Self {
+        Self {
             states: [
                 MetricState::Ready(Box::new(Reduction::new(selected, METRICS[0], operation))),
                 MetricState::Ready(Box::new(Reduction::new(selected, METRICS[1], operation))),
                 MetricState::Ready(Box::new(Reduction::new(selected, METRICS[2], operation))),
             ],
-            live: Vec::with_capacity(OBSERVATIONS_MAX),
-        });
-        assert!(history.points.len() <= OBSERVATIONS_MAX);
-        let summable = history.attribution_summable(selected);
-        for point in &history.points {
-            operation.check()?;
-            if point.observation.recording != selected.observation().recording {
-                return Err(Error::Bound("attribution recording"));
-            }
-
-            let wall = point
-                .observation
-                .wall_ns
-                .ok_or(Error::Bound("attribution point clock"))?;
-            if selected.holds(wall / 1_000_000_000) {
-                batch.live.push(point.observation);
-            }
-            if summable {
-                for state in &mut batch.states {
-                    state.apply(|reduction| {
-                        reduction.observe_summed(&point.attribution_capture(), Source::Live)
-                    });
-                }
-            } else {
-                batch.observe_live(point);
-            }
-        }
-        if summable {
-            for (metric, state) in METRICS.into_iter().zip(&mut batch.states) {
-                state.apply(|reduction| reduction.merge(history.sums.totals(metric)));
-            }
-        }
-        batch.live.sort_by_key(identity);
-        for pair in batch.live.windows(2) {
-            if identity(&pair[0]) == identity(&pair[1]) {
-                return Err(Error::Bound("duplicate attribution observation"));
-            }
-        }
-
-        Ok(batch)
-    }
-
-    fn contains_live(&self, observation: &Observation) -> Result<bool> {
-        match self
-            .live
-            .binary_search_by_key(&identity(observation), identity)
-        {
-            Ok(index) => {
-                if self.live[index] != *observation {
-                    return Err(Error::Bound("conflicting attribution observation"));
-                }
-
-                Ok(true)
-            }
-            Err(_) => Ok(false),
         }
     }
 
-    fn retain(&self, rates: &mut Cache, query: &SavedQuery<'_>, available: usize) -> Result<()> {
+    fn retain(rates: &mut Cache, query: &SavedQuery<'_>, available: usize) -> Result<()> {
         rates.retain(query.operation, |observation| {
             query.operation.check()?;
-            if self.contains_live(observation)? {
-                return Ok(false);
-            }
-
             Ok(observation
                 .wall_ns
                 .is_some_and(|wall| query.selected.holds(wall / 1_000_000_000)))
@@ -316,18 +222,6 @@ impl<'operation> Batch<'operation> {
         rates.resume(available);
 
         Ok(())
-    }
-
-    fn observe_live(&mut self, point: &Point) {
-        for (metric, state) in METRICS.into_iter().zip(&mut self.states) {
-            state.apply(|reduction| {
-                reduction.observe(
-                    &point.attribution_capture(),
-                    point.attribution_apps(metric),
-                    Source::Live,
-                )
-            });
-        }
     }
 
     fn observe_summed(&mut self, rates: &Cache, operation: &Operation) -> Result<()> {
@@ -358,23 +252,6 @@ impl<'operation> Batch<'operation> {
             state.apply(Reduction::choose);
         }
         operation.check()
-    }
-
-    fn project_live(&mut self, history: &History, operation: &Operation) -> Result<()> {
-        for point in &history.points {
-            operation.check()?;
-            for (metric, state) in METRICS.into_iter().zip(&mut self.states) {
-                state.apply(|reduction| {
-                    reduction.project(
-                        &point.attribution_capture(),
-                        point.attribution_apps(metric),
-                        Source::Live,
-                    )
-                });
-            }
-        }
-
-        Ok(())
     }
 
     fn project_saved(&mut self, point: &SavedPoint) {
@@ -416,13 +293,13 @@ impl<'operation> MetricState<'operation> {
         }
     }
 
-    fn finish(self, history: &History, coverage: Option<&SavedCoverage>) -> Result<Value> {
+    fn finish(self, _history: &History, coverage: Option<&SavedCoverage>) -> Result<Value> {
         let reduction = match self {
             Self::Ready(reduction) => reduction,
             Self::Failed(error) => return Err(error),
         };
         let (committed, bytes) = coverage.map_or((0, 0), |value| (value.committed, value.bytes));
-        let mut response = history.attribution_finish(*reduction, committed, bytes)?;
+        let mut response = super::attribution_finish(*reduction, committed, bytes)?;
         if let Some(coverage) = coverage {
             response["coverage"]["saved_cache_limited"] = json!(coverage.uncached > 0);
             response["coverage"]["saved_observations_cached"] = json!(coverage.cached);
@@ -446,7 +323,7 @@ impl<'history> CacheLease<'history> {
     }
 
     fn prepare(&mut self, available: usize, operation: &Operation) -> Result<usize> {
-        assert!(available <= BYTES_MAX.saturating_sub(self.history.bytes));
+        assert!(available <= BYTES_MAX);
         if self.resident.bytes() > available {
             self.resident = ResidentCache::new();
         }
@@ -471,7 +348,7 @@ impl Drop for CacheLease<'_> {
             let rates = std::mem::replace(&mut self.rates, Cache::new());
             self.resident.install_attribution(rates);
         }
-        assert!(self.history.bytes + self.resident.bytes() <= BYTES_MAX);
+        assert!(self.resident.bytes() <= BYTES_MAX);
         let resident = std::mem::replace(&mut self.resident, ResidentCache::new());
         self.history.saved_residents.replace(resident);
     }

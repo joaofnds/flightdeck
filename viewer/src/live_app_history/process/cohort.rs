@@ -3,7 +3,7 @@ use persistence::{Error, Result};
 use crate::app_process_groups_history::ProcessGroupReading;
 use crate::app_process_groups_history::reduce::{Capture, Phase, Reduction};
 use crate::cancellation::Operation;
-use crate::live_app_history::{History, Point, Target, key};
+use crate::live_app_history::Target;
 use crate::live_app_response::json::ProcessView;
 use crate::live_app_response::{AppPart, Observation, Process, Sample};
 use crate::live_apps::Frame;
@@ -17,20 +17,6 @@ pub(crate) const CAPTURE_WORK_BYTES_MAX: usize = size_of::<Vec<SavedGroup<'stati
     + crate::apps::PROCESS_INTERVALS_MAX * size_of::<SavedGroup<'static>>();
 
 const _: () = assert!(CAPTURE_WORK_BYTES_MAX < 7 * 1024 * 1024);
-
-impl History {
-    pub(crate) fn process_groups_visit(
-        &self,
-        target: &Target<'_>,
-        reduction: &mut Reduction<'_>,
-        phase: Phase,
-    ) -> Result<()> {
-        for point in &self.points {
-            process_groups_visit_point(point, target, reduction, phase, true)?;
-        }
-        Ok(())
-    }
-}
 
 pub(crate) struct Snapshot {
     pub observation: Observation,
@@ -284,95 +270,4 @@ fn capture_groups<'sample>(
     }
 
     Ok(())
-}
-
-fn process_groups_visit_point(
-    point: &Point,
-    target: &Target<'_>,
-    reduction: &mut Reduction<'_>,
-    phase: Phase,
-    live: bool,
-) -> Result<()> {
-    let app = key(target.kind, target.bytes);
-    let index = point
-        .apps
-        .partition_point(|candidate| candidate.key.view() < app);
-    let app_index = point
-        .apps
-        .get(index)
-        .filter(|candidate| candidate.key.view() == app)
-        .map(|_| index);
-    let unnamed_members = process_groups_visit_point_unnamed_members(point, app_index)?;
-    if !reduction.begin(
-        &Capture {
-            observation: &point.observation,
-            elapsed_ns: point.elapsed_ns,
-            source_available: point.groups.is_some(),
-            membership_complete: point.membership_complete,
-            unnamed_members,
-            live,
-        },
-        phase,
-    )? {
-        return Ok(());
-    }
-
-    let Some(app_index) = app_index else {
-        return Ok(());
-    };
-
-    let groups = point
-        .groups
-        .as_ref()
-        .ok_or(Error::Bound("process cohort group source"))?;
-    for group in groups {
-        if usize::from(group.app_index) != app_index {
-            continue;
-        }
-
-        let totals = group
-            .totals
-            .as_ref()
-            .ok_or(Error::Bound("process cohort group totals"))?;
-        let mut reading = ProcessGroupReading::EMPTY;
-        totals.process_group_reading(&mut reading);
-
-        reduction.group(&group.executable, &reading)?;
-    }
-
-    Ok(())
-}
-
-fn process_groups_visit_point_unnamed_members(
-    point: &Point,
-    app_index: Option<usize>,
-) -> Result<Option<u32>> {
-    let Some(groups) = &point.groups else {
-        return Ok(None);
-    };
-
-    let Some(app_index) = app_index else {
-        return Ok(Some(0));
-    };
-
-    let mut named = 0_u32;
-    for group in groups {
-        if usize::from(group.app_index) == app_index {
-            if !group.executable.is_empty() {
-                let totals = group
-                    .totals
-                    .as_ref()
-                    .ok_or(Error::Bound("process cohort member totals"))?;
-                named += u32::from(totals.members);
-            }
-        }
-    }
-
-    let members = u32::from(point.apps[app_index].members);
-
-    Ok(Some(
-        members
-            .checked_sub(named)
-            .ok_or(Error::Bound("process cohort unnamed members"))?,
-    ))
 }

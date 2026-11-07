@@ -18,36 +18,28 @@ macro_rules! disk_history_interval {
             usage.awake_ns_at_start = 0;
             usage.disk_read_bytes = 9_007_199_254_740_993;
             usage.disk_written_bytes = 9_007_199_254_741_993;
-            let mut session = LiveSession::open(&fixture.root).unwrap();
             fixture.publish_with_usage(1001, &usage);
-            session.poll().unwrap();
             usage.disk_read_bytes += 4096;
             usage.disk_written_bytes += 1024;
             fixture.publish_with_usage(1002, &usage);
-            session.poll().unwrap();
-
-            let live = selected_disk(&mut session, "live");
-            drop(session);
             seal_fixture(&fixture, $start);
             let mut reopened = LiveSession::open(&fixture.root).unwrap();
-            assert_eq!(reopened.catalog()["tail_ticks"], 0);
             let saved = selected_disk(&mut reopened, "saved_cold");
             let warm = selected_disk(&mut reopened, "saved_warm");
 
-            assert_eq!(live, saved);
             assert_eq!(saved, warm);
-            assert_eq!(live["app"]["disk_read_bytes"]["known"], 4096);
-            assert_eq!(live["app"]["disk_written_bytes"]["known"], 1024);
-            assert_eq!(live["app"]["disk_io_bytes"]["known"], 5120);
-            assert_eq!(live["app"]["disk_read_bps"], $read);
-            assert_eq!(live["app"]["disk_written_bps"], $written);
-            assert_eq!(live["app"]["disk_io_bps"], $combined);
-            assert_eq!(live["process"]["disk_read_bps"], $read);
-            assert_eq!(live["process"]["disk_written_bps"], $written);
-            assert_eq!(live["process"]["disk_io_bps"], $combined);
-            assert_eq!(live["history"], live["app"]);
-            assert_eq!(live["first"]["disk_io_bps"], Value::Null);
-            assert_eq!(live["first"]["disk_io_bytes"]["measured_members"], 0);
+            assert_eq!(saved["app"]["disk_read_bytes"]["known"], 4096);
+            assert_eq!(saved["app"]["disk_written_bytes"]["known"], 1024);
+            assert_eq!(saved["app"]["disk_io_bytes"]["known"], 5120);
+            assert_eq!(saved["app"]["disk_read_bps"], $read);
+            assert_eq!(saved["app"]["disk_written_bps"], $written);
+            assert_eq!(saved["app"]["disk_io_bps"], $combined);
+            assert_eq!(saved["process"]["disk_read_bps"], $read);
+            assert_eq!(saved["process"]["disk_written_bps"], $written);
+            assert_eq!(saved["process"]["disk_io_bps"], $combined);
+            assert_eq!(saved["history"], saved["app"]);
+            assert_eq!(saved["first"]["disk_io_bps"], Value::Null);
+            assert_eq!(saved["first"]["disk_io_bytes"]["measured_members"], 0);
         }
     };
 }

@@ -558,6 +558,10 @@ impl Session {
         ))
     }
 
+    /// The observations of `range`, in no order, with their points in `output`, in time order.
+    /// Up to `CONTEXT_READERS` threads read them, each a contiguous run of the windows that may
+    /// hold them, so the reads wait on each other no more than the file system makes them.
+    #[cfg(test)]
     pub(crate) fn context(&self, range: ContextRange, output: &mut Vec<Value>) -> Result<()> {
         assert!(range.first_ns < range.end_ns);
         assert!(output.is_empty());
@@ -566,9 +570,6 @@ impl Session {
             .run(|| self.context_read(range, output).map(|_observations| ()))
     }
 
-    /// The observations of `range`, in no order, with their points in `output`, in time order.
-    /// Up to `CONTEXT_READERS` threads read them, each a contiguous run of the windows that may
-    /// hold them, so the reads wait on each other no more than the file system makes them.
     fn context_read(
         &self,
         range: ContextRange,

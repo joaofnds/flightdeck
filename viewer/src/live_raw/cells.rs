@@ -1,8 +1,6 @@
 use model::catalog;
 use persistence::{Error, Result, schema};
 
-use super::{Operation, Raw};
-
 pub(crate) enum Cell<'a> {
     Null,
     Bool(bool),
@@ -11,12 +9,9 @@ pub(crate) enum Cell<'a> {
     Float32(f32),
     Float64(f64),
     Text(&'a str),
-    Bytes(&'a [u8]),
-    Disks(&'a collector::disks::DiskSnapshot),
 }
 
 pub(crate) struct View<'a> {
-    raw: Option<&'a Raw>,
     machine: crate::store::Reading<'a>,
     table: &'static catalog::Table,
     levels: Vec<LevelState>,
@@ -39,56 +34,6 @@ const LEVEL_COLUMNS: [&str; 5] = [
 ];
 
 impl<'a> View<'a> {
-    pub(super) fn native_scratch_bytes(raw: &Raw, name: &str) -> usize {
-        if name != "core_level_states" {
-            return 0;
-        }
-        if raw
-            .machine
-            .ticks
-            .first()
-            .is_none_or(|tick| tick.performance_levels.is_none())
-        {
-            return 0;
-        }
-
-        let count = raw.machine.core_states.len().min(512);
-        let node = 11 * size_of::<((u64, u64), LevelState)>() + 12 * size_of::<usize>() + 32;
-
-        count * (node + size_of::<LevelState>())
-    }
-
-    pub fn native(raw: &'a Raw, name: &str, output: &mut Option<Self>) -> Result<()> {
-        assert!(output.is_none());
-        let derived = name == "core_level_states";
-        let table = if derived {
-            &catalog::CORE_STATES
-        } else {
-            catalog::TABLES
-                .into_iter()
-                .find(|table| table.name == name)
-                .ok_or(Error::Bound("table name"))?
-        };
-
-        *output = Some(Self {
-            raw: Some(raw),
-            machine: crate::store::readings(&raw.machine)
-                .next()
-                .ok_or(Error::Bound("native machine reading"))?,
-            table,
-            levels: Vec::new(),
-            derived,
-        });
-        if derived {
-            output
-                .as_mut()
-                .ok_or(Error::Bound("live raw view"))?
-                .aggregate_levels()?;
-        }
-
-        Ok(())
-    }
-
     /// Borrows already decoded machine rows; the native catalog and cell mapping stay shared.
     pub fn machine(reading: &crate::store::Reading<'a>, name: &str) -> Result<Self> {
         let derived = name == "core_level_states";
@@ -101,7 +46,6 @@ impl<'a> View<'a> {
                 .ok_or(Error::Bound("table name"))?
         };
         let mut view = Self {
-            raw: None,
             machine: *reading,
             table,
             levels: Vec::new(),
@@ -111,10 +55,6 @@ impl<'a> View<'a> {
             view.aggregate_levels()?;
         }
         Ok(view)
-    }
-
-    fn raw(&self) -> &'a Raw {
-        self.raw.unwrap_or_else(|| unreachable!("raw-only table"))
     }
 
     fn aggregate_levels(&mut self) -> Result<()> {
@@ -171,13 +111,6 @@ impl<'a> View<'a> {
             "gpu_states" => machine.gpu_states.len(),
             "core_states" => machine.core_states.len(),
             "fans" => machine.fans.len(),
-            "coalitions" => self.raw().coalitions.len(),
-            "processes" => self
-                .raw()
-                .identities
-                .as_ref()
-                .map_or(self.raw().processes.len(), Vec::len),
-            "events" => self.raw().events.len(),
             _ => unreachable!("catalog raw table"),
         }
     }
@@ -191,101 +124,6 @@ impl<'a> View<'a> {
             .iter()
             .chain(self.table.groups.iter().flat_map(|group| group.iter()))
             .any(|column| column.name == name)
-    }
-
-    fn captured_group(&self, group: &[catalog::Column]) -> bool {
-        let tick = &self.machine.tick;
-        match group[0].name {
-            "battery_version" => tick.battery.is_some(),
-            "physical_disks" => tick.disks.is_some(),
-            "cpu_celsius" => tick.cpu_celsius.is_some() || tick.gpu_celsius.is_some(),
-            "load_average_1" | "frequency_khz" => self.machine.tick.system.is_some(),
-            "identity_version" => self.raw().identities.is_some(),
-            // A captured publication proves association; these fields are synthesized last.
-            "event_observation_version" => false,
-            "gpu_ns" => self.machine.tick.system.is_some() && self.raw().identities.is_some(),
-            _ => unreachable!("catalog optional group"),
-        }
-    }
-
-    pub fn columns(&self) -> Vec<String> {
-        if self.derived {
-            return LEVEL_COLUMNS.map(String::from).to_vec();
-        }
-        // Query normalization appended absent groups after the encoder's captured groups.
-        // Preserve that public order, including a system-only or battery-only tick.
-        let mut columns: Vec<_> = self
-            .table
-            .columns
-            .iter()
-            .map(|column| column.name.to_owned())
-            .collect();
-        for captured in [true, false] {
-            for group in self.table.groups {
-                if self.captured_group(group) == captured {
-                    columns.extend(group.iter().map(|column| column.name.to_owned()));
-                }
-            }
-        }
-        columns
-    }
-
-    pub fn order(&self, operation: &Operation) -> Result<Vec<usize>> {
-        if self.len() > crate::data::ROWS_MAX {
-            return Err(Error::Bound("live raw rows"));
-        }
-
-        let mut order: Vec<_> = (0..self.len()).collect();
-        operation.check()?;
-        match self.table.name {
-            "processes" => order.sort_unstable_by_key(|index| self.process_key(*index)),
-            "events" => order.sort_unstable_by_key(|index| {
-                let event = &self.raw().events[*index];
-                let (pid, usage, _, _, _, _) = event_facts(&event.event);
-                let awake = usage.map(|usage| usage.awake_ns_at_start);
-                (pid, awake.is_none(), awake, event.number)
-            }),
-            "interfaces" => {
-                order.sort_unstable_by_key(|index| self.machine.interfaces[*index].interface.index);
-            }
-            "coalitions" => order.sort_unstable_by_key(|index| self.raw().coalitions[*index].id),
-            _ => {}
-        }
-        operation.check()?;
-        Ok(order)
-    }
-
-    fn process_key(&self, index: usize) -> (i32, bool, Option<u64>) {
-        let (pid, process, _) = self.process(index);
-        let awake = process.map(|process| process.usage.awake_ns_at_start);
-        (pid, awake.is_none(), awake)
-    }
-
-    fn process(
-        &self,
-        index: usize,
-    ) -> (
-        i32,
-        Option<&'a collector::processes::Process>,
-        Option<&'a super::Identity>,
-    ) {
-        if let Some(identities) = &self.raw().identities {
-            let identity = &identities[index];
-            let process = if identity.usage == schema::availability::MEASURED {
-                let index = self
-                    .raw()
-                    .processes
-                    .binary_search_by_key(&identity.pid, |process| process.pid)
-                    .unwrap_or_else(|_| unreachable!("capture validated each measured identity"));
-                Some(&self.raw().processes[index])
-            } else {
-                None
-            };
-            (identity.pid, process, Some(identity))
-        } else {
-            let process = &self.raw().processes[index];
-            (process.pid, Some(process), None)
-        }
     }
 
     pub fn disks(&self, snapshot: &mut collector::disks::DiskSnapshot) -> bool {
@@ -338,9 +176,6 @@ impl<'a> View<'a> {
                 "rpm" => Cell::Float32(self.machine.fans[row].rpm),
                 _ => unreachable!("fan columns"),
             },
-            "processes" => self.process_cell(row, name),
-            "events" => self.event_cell(row, name),
-            "coalitions" => self.coalition(row, name),
             _ => unreachable!("catalog raw table"),
         })
     }
@@ -355,34 +190,6 @@ impl Cell<'_> {
             _ => Err(Error::Bound("number metric cell")),
         }
     }
-
-    pub fn format(&self, column: &str) -> Result<Option<String>> {
-        persistence::work::record(|counts| counts.string_cells += 1);
-        let text = match self {
-            Self::Bool(value) => value.to_string(),
-            Self::Unsigned(value) => value.to_string(),
-            Self::Signed(value) => value.to_string(),
-            Self::Float32(value) if value.is_finite() => value.to_string(),
-            Self::Null => return Ok(None),
-            Self::Float32(_) if column == "rpm" => return Ok(None),
-            Self::Float64(value) if value.is_finite() => value.to_string(),
-            Self::Float32(_) | Self::Float64(_) => {
-                return Err(Error::Bound("unsupported or nonfinite cell"));
-            }
-            Self::Text(value) => (*value).to_owned(),
-            Self::Disks(value) => persistence::disks::encode(value)?,
-            Self::Bytes(value) => {
-                let mut text = String::with_capacity(value.len() * 4);
-                crate::byte_display::append(&mut text, value);
-                return Ok(Some(text));
-            }
-        };
-        if text.len() > 4096 {
-            return Err(Error::Bound("cell bytes"));
-        }
-
-        Ok(Some(text))
-    }
 }
 
 fn unsigned(value: impl Into<u64>) -> Cell<'static> {
@@ -393,57 +200,6 @@ fn optional_unsigned(value: Option<impl Into<u64>>) -> Cell<'static> {
 }
 fn boolean(value: Option<bool>) -> Cell<'static> {
     value.map_or(Cell::Null, Cell::Bool)
-}
-
-fn event_facts(
-    event: &collector::tracker::Event,
-) -> (
-    i32,
-    Option<&collector::processes::Usage>,
-    u8,
-    Option<u64>,
-    u8,
-    Option<u8>,
-) {
-    use collector::processes::Unreadable;
-    use collector::tracker::{Event, Noticed};
-    match event {
-        Event::Start { pid, coalition } => (
-            *pid,
-            None,
-            schema::event_kind::START,
-            *coalition,
-            schema::availability::NOT_APPLICABLE,
-            None,
-        ),
-        Event::Exec { pid } => (
-            *pid,
-            None,
-            schema::event_kind::EXEC,
-            None,
-            schema::availability::NOT_APPLICABLE,
-            None,
-        ),
-        Event::Exit { pid, last, noticed } => {
-            let (usage, availability) = match last {
-                Ok(usage) => (Some(usage), schema::availability::MEASURED),
-                Err(Unreadable::Refused) => (None, schema::availability::REFUSED),
-                Err(Unreadable::Gone) => (None, schema::availability::GONE),
-            };
-            let noticed = match noticed {
-                Noticed::OnExit => schema::noticed::ON_EXIT,
-                Noticed::AlreadyExited => schema::noticed::ALREADY_EXITED,
-            };
-            (
-                *pid,
-                usage,
-                schema::event_kind::EXIT,
-                None,
-                availability,
-                Some(noticed),
-            )
-        }
-    }
 }
 
 impl<'a> View<'a> {
@@ -461,16 +217,7 @@ impl<'a> View<'a> {
             "soc_celsius" => tick.soc_celsius.map_or(Cell::Null, Cell::Float32),
             "cpu_celsius" => tick.cpu_celsius.map_or(Cell::Null, Cell::Float32),
             "gpu_celsius" => tick.gpu_celsius.map_or(Cell::Null, Cell::Float32),
-            "processes_refused" => unsigned(self.raw().refused),
-            "processes_gone" => unsigned(self.raw().gone),
-            "events_first" => unsigned(self.raw().event_range.start),
-            "events_end" => unsigned(self.raw().event_range.end),
-            "dropped_starts" => unsigned(self.raw().dropped.starts),
-            "dropped_execs" => unsigned(self.raw().dropped.execs),
-            "dropped_exits" => unsigned(self.raw().dropped.exits),
             "gpu_state_count" => unsigned(collector::u64_from_usize(self.machine.gpu_states.len())),
-            "core_count" => unsigned(self.raw().core_count),
-            "physical_disks" => tick.disks.as_ref().map_or(Cell::Null, Cell::Disks),
             _ if name.starts_with("battery_") => self.battery(name),
             _ => self.system(name),
         }
@@ -646,145 +393,5 @@ impl<'a> View<'a> {
             "frequency_khz" => optional_unsigned(core.frequency_khz),
             _ => unreachable!("core columns"),
         }
-    }
-
-    fn coalition(&self, row: usize, name: &str) -> Cell<'a> {
-        let coalition = &self.raw().coalitions[row];
-        match name {
-            "coalition" => unsigned(coalition.id),
-            "tasks_started" => unsigned(coalition.tasks_started),
-            "tasks_exited" => unsigned(coalition.tasks_exited),
-            "cpu_ns" => unsigned(coalition.cpu_ns),
-            "interrupt_wakeups" => unsigned(coalition.interrupt_wakeups),
-            "idle_wakeups" => unsigned(coalition.idle_wakeups),
-            "disk_read_bytes" => unsigned(coalition.disk_read_bytes),
-            "disk_written_bytes" => unsigned(coalition.disk_written_bytes),
-            "gpu_ns" => unsigned(coalition.gpu_ns),
-            "energy_nj" => unsigned(coalition.energy_nj),
-            _ => unreachable!("coalition columns"),
-        }
-    }
-
-    fn process_cell(&self, row: usize, name: &str) -> Cell<'a> {
-        let (pid, process, identity) = self.process(row);
-        match name {
-            "pid" => Cell::Signed(i64::from(pid)),
-            "gpu_ns" => optional_unsigned(self.raw().gpu_ns.get(row).copied().flatten()),
-            "threads" => process.map_or(Cell::Null, |process| {
-                Cell::Signed(i64::from(process.task.threads))
-            }),
-            "faults" => process.map_or(Cell::Null, |process| {
-                Cell::Signed(i64::from(process.task.faults))
-            }),
-            "context_switches" => process.map_or(Cell::Null, |process| {
-                Cell::Signed(i64::from(process.task.context_switches))
-            }),
-            "mach_syscalls" => process.map_or(Cell::Null, |process| {
-                Cell::Signed(i64::from(process.task.mach_syscalls))
-            }),
-            "unix_syscalls" => process.map_or(Cell::Null, |process| {
-                Cell::Signed(i64::from(process.task.unix_syscalls))
-            }),
-            _ if name.starts_with("identity_")
-                || [
-                    "usage_availability",
-                    "process_unique_id",
-                    "pid_version",
-                    "executable_name",
-                    "app_path",
-                ]
-                .contains(&name) =>
-            {
-                self.identity(identity, name)
-            }
-            _ => usage(process.map(|process| &process.usage), name),
-        }
-    }
-
-    fn identity(&self, identity: Option<&'a super::Identity>, name: &str) -> Cell<'a> {
-        match name {
-            "identity_version" => optional_unsigned(identity.map(|_| schema::IDENTITY_VERSION)),
-            "identity_availability" => unsigned(
-                identity.map_or(schema::identity_availability::UNSUPPORTED, |identity| {
-                    identity.availability
-                }),
-            ),
-            "usage_availability" => {
-                unsigned(identity.map_or(schema::availability::MEASURED, |identity| identity.usage))
-            }
-            "process_unique_id" => optional_unsigned(
-                identity
-                    .and_then(|identity| identity.creation)
-                    .map(|creation| creation.unique_id),
-            ),
-            "pid_version" => identity
-                .and_then(|identity| identity.creation)
-                .map_or(Cell::Null, |creation| {
-                    Cell::Signed(i64::from(creation.pid_version))
-                }),
-            "executable_name" => identity
-                .and_then(|identity| identity.name.as_ref())
-                .map_or(Cell::Null, |range| {
-                    Cell::Bytes(&self.raw().arena[range.clone()])
-                }),
-            "app_path" => identity
-                .and_then(|identity| identity.app.as_ref())
-                .map_or(Cell::Null, |range| {
-                    Cell::Bytes(&self.raw().arena[range.clone()])
-                }),
-            _ => unreachable!("identity columns"),
-        }
-    }
-
-    fn event_cell(&self, row: usize, name: &str) -> Cell<'a> {
-        let event = &self.raw().events[row];
-        let (pid, measured, kind, coalition, availability, noticed) = event_facts(&event.event);
-        match name {
-            "event" => unsigned(event.number),
-            "event_observation_version" => unsigned(persistence::event_observation::VERSION),
-            "event_observation_availability" => {
-                unsigned(persistence::event_observation::ASSOCIATED)
-            }
-            "run_tick" => unsigned(event.tick),
-            "pid" => Cell::Signed(i64::from(pid)),
-            "kind" => unsigned(kind),
-            "coalition" => optional_unsigned(coalition),
-            "availability" => unsigned(availability),
-            "noticed" => optional_unsigned(noticed),
-            "usage_availability" if event.identity.is_none() => unsigned(availability),
-            _ if name.starts_with("identity_")
-                || [
-                    "usage_availability",
-                    "process_unique_id",
-                    "pid_version",
-                    "executable_name",
-                    "app_path",
-                ]
-                .contains(&name) =>
-            {
-                self.identity(event.identity.as_ref(), name)
-            }
-            _ => usage(measured, name),
-        }
-    }
-}
-
-fn usage<'a>(usage: Option<&collector::processes::Usage>, name: &str) -> Cell<'a> {
-    match name {
-        "awake_ns_at_start" => optional_unsigned(usage.map(|usage| usage.awake_ns_at_start)),
-        "user_ns" => optional_unsigned(usage.map(|usage| usage.user_ns)),
-        "system_ns" => optional_unsigned(usage.map(|usage| usage.system_ns)),
-        "energy_nj" => optional_unsigned(usage.map(|usage| usage.energy_nj)),
-        "instructions" => optional_unsigned(usage.map(|usage| usage.instructions)),
-        "super_instructions" => optional_unsigned(usage.map(|usage| usage.super_instructions)),
-        "cycles" => optional_unsigned(usage.map(|usage| usage.cycles)),
-        "idle_wakeups" => optional_unsigned(usage.map(|usage| usage.idle_wakeups)),
-        "interrupt_wakeups" => optional_unsigned(usage.map(|usage| usage.interrupt_wakeups)),
-        "pageins" => optional_unsigned(usage.map(|usage| usage.pageins)),
-        "resident_bytes" => optional_unsigned(usage.map(|usage| usage.resident_bytes)),
-        "footprint_bytes" => optional_unsigned(usage.map(|usage| usage.footprint_bytes)),
-        "disk_read_bytes" => optional_unsigned(usage.map(|usage| usage.disk_read_bytes)),
-        "disk_written_bytes" => optional_unsigned(usage.map(|usage| usage.disk_written_bytes)),
-        _ => unreachable!("usage columns"),
     }
 }

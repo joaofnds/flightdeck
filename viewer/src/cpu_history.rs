@@ -1,17 +1,14 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 use persistence::{Error, Result};
 use serde_json::{Value, json};
 
-use crate::cpu_history_sample::{self, CounterSample, Identity, Interval};
+use crate::cpu_history_sample::{self, Identity, Interval};
 use crate::session::{ContextRange, OBSERVATIONS_MAX, Observation};
 
 pub(crate) const PAGE_CPUS: usize = 32;
 pub(crate) const RESPONSE_BYTES_MAX: usize = 7 * 1024 * 1024;
 pub(crate) const CACHE_BYTES_MAX: usize = 80 * 1024 * 1024;
-const LIVE_BYTES_MAX: usize = 64 * 1024 * 1024;
-const SOURCES_MAX: usize = 2;
-const NS: u64 = 1_000_000_000;
 
 pub(crate) struct Cache {
     pub range: ContextRange,
@@ -39,17 +36,10 @@ enum EntryRef<'a> {
     Retained(&'a RetainedEntry<'a>),
 }
 
-pub(crate) struct History {
-    entries: VecDeque<Entry>,
-    previous: Vec<CounterSample>,
-    heap_bytes: usize,
-}
-
 pub(crate) struct Request<'a> {
     pub selected: &'a Value,
     pub context_last_second: u64,
     pub context: &'a [Identity],
-    pub live: Option<&'a History>,
     pub saved: Option<&'a Cache>,
     pub retained: Option<&'a [RetainedEntry<'a>]>,
     pub offset: u32,
@@ -57,7 +47,6 @@ pub(crate) struct Request<'a> {
 
 #[derive(Clone, Copy, Default)]
 struct Merged<'a> {
-    live: Option<&'a Entry>,
     saved: Option<&'a Entry>,
     retained: Option<&'a RetainedEntry<'a>>,
 }
@@ -66,7 +55,7 @@ type Key<'a> = (&'a str, &'a str, u64);
 type Index<'a> = BTreeMap<Key<'a>, Merged<'a>>;
 
 const _: () = {
-    assert!(size_of::<Merged<'static>>() <= 3 * size_of::<usize>());
+    assert!(size_of::<Merged<'static>>() <= 2 * size_of::<usize>());
     assert!(size_of::<EntryRef<'static>>() <= 16);
     assert!(PAGE_CPUS * OBSERVATIONS_MAX <= 131_072);
     assert!(RESPONSE_BYTES_MAX < 8 * 1024 * 1024);
@@ -101,129 +90,6 @@ impl Entry {
                 previous.run.capacity() + previous.boot.capacity()
             })
             + self.values.capacity() * size_of::<Option<f64>>()
-    }
-}
-
-impl History {
-    pub fn init(output: &mut Option<Self>) {
-        assert!(output.is_none());
-
-        *output = Some(Self {
-            entries: VecDeque::with_capacity(OBSERVATIONS_MAX),
-            previous: Vec::with_capacity(SOURCES_MAX),
-            heap_bytes: 0,
-        });
-    }
-
-    pub fn capture_rows(
-        &mut self,
-        identity: &Identity,
-        rows: &[crate::recording::CpuRow],
-    ) -> Result<()> {
-        let mut counters = Vec::new();
-        cpu_history_sample::counters_rows(rows, &mut counters)?;
-        self.capture_counters(identity, counters)
-    }
-
-    fn capture_counters(
-        &mut self,
-        identity: &Identity,
-        counters: cpu_history_sample::Counters,
-    ) -> Result<()> {
-        let current = CounterSample {
-            identity: identity.clone(),
-            counters,
-        };
-        let previous = self.previous.iter().position(|sample| {
-            sample.identity.run == identity.run && sample.identity.boot == identity.boot
-        });
-        if let Some(index) = previous {
-            if self.previous[index].identity.observation.publication
-                == identity.observation.publication
-            {
-                if !self.previous[index].identity.same(identity) {
-                    return Err(Error::Bound("changed retained CPU identity"));
-                }
-
-                if self.previous[index].counters != current.counters {
-                    return Err(Error::Bound("changed retained CPU counters"));
-                }
-
-                return Ok(());
-            }
-        }
-
-        let mut entry = None;
-        Entry::derive(
-            &Interval {
-                current: &current,
-                previous: previous.map(|index| &self.previous[index]),
-            },
-            &mut entry,
-        )?;
-        let entry = entry.ok_or(Error::Bound("CPU interval output"))?;
-        if self.entries.len() == OBSERVATIONS_MAX {
-            self.capture_remove()?;
-        }
-
-        self.heap_bytes += entry.heap_bytes();
-        self.entries.push_back(entry);
-        if let Some(index) = previous {
-            self.previous[index] = current;
-        } else {
-            if self.previous.len() == SOURCES_MAX {
-                self.previous.remove(0);
-            }
-            self.previous.push(current);
-        }
-        let first_ns = (identity.observation.wall / NS).saturating_sub(899) * NS;
-
-        self.capture_evict(first_ns)
-    }
-
-    fn capture_evict(&mut self, first_ns: u64) -> Result<()> {
-        for _attempt in 0..=OBSERVATIONS_MAX {
-            let expired = self
-                .entries
-                .front()
-                .is_some_and(|entry| entry.identity.observation.wall < first_ns);
-            if !expired {
-                if self.bytes() <= LIVE_BYTES_MAX {
-                    return Ok(());
-                }
-            }
-
-            self.capture_remove()?;
-        }
-
-        Err(Error::Bound("CPU retention eviction"))
-    }
-
-    fn capture_remove(&mut self) -> Result<()> {
-        let removed = self
-            .entries
-            .pop_front()
-            .ok_or(Error::Bound("CPU retention budget"))?;
-
-        self.heap_bytes -= removed.heap_bytes();
-
-        Ok(())
-    }
-
-    pub fn bytes(&self) -> usize {
-        size_of::<Self>()
-            + self.entries.capacity() * size_of::<Entry>()
-            + self.heap_bytes
-            + self.previous.capacity() * size_of::<CounterSample>()
-            + self
-                .previous
-                .iter()
-                .map(|sample| {
-                    sample.identity.run.capacity()
-                        + sample.identity.boot.capacity()
-                        + sample.counters.capacity() * size_of::<[Option<u64>; 4]>()
-                })
-                .sum::<usize>()
     }
 }
 
@@ -421,15 +287,6 @@ fn project_index<'a>(request: &'a Request<'a>, output: &mut Index<'a>) -> Result
             }
         }
     }
-    if let Some(live) = request.live {
-        for entry in &live.entries {
-            let slot = output.entry(key(&entry.identity)).or_default();
-            if slot.live.replace(entry).is_some() {
-                return Err(Error::Bound("duplicate live CPU observation"));
-            }
-        }
-    }
-
     Ok(())
 }
 
@@ -477,20 +334,11 @@ impl<'a> Merged<'a> {
         if let Some(entry) = self.retained {
             return Some(EntryRef::Retained(entry));
         }
-        if self.live.is_some_and(|entry| entry.interval_available) {
-            return self.live.map(EntryRef::Owned);
-        }
-
-        if self.saved.is_some_and(|entry| entry.interval_available) {
-            return self.saved.map(EntryRef::Owned);
-        }
-
-        self.live.or(self.saved).map(EntryRef::Owned)
+        self.saved.map(EntryRef::Owned)
     }
 
     fn validate(&self, identity: &Identity) -> Result<()> {
         for entry in [
-            self.live.map(EntryRef::Owned),
             self.saved.map(EntryRef::Owned),
             self.retained.map(EntryRef::Retained),
         ]
@@ -503,24 +351,6 @@ impl<'a> Merged<'a> {
 
             if entry.values().len() > cpu_history_sample::CPUS_MAX {
                 return Err(Error::Bound("logical CPU count"));
-            }
-        }
-        if let (Some(live), Some(saved)) = (self.live, self.saved) {
-            if live.values.len() != saved.values.len() {
-                return Err(Error::Bound("changed CPU history domain"));
-            }
-
-            if live.interval_available {
-                if saved.interval_available {
-                    let same = live
-                        .previous
-                        .as_ref()
-                        .zip(saved.previous.as_ref())
-                        .is_some_and(|(left, right)| left.same(right));
-                    if !same {
-                        return Err(Error::Bound("changed CPU history predecessor"));
-                    }
-                }
             }
         }
 

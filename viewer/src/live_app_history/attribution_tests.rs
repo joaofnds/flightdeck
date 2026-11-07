@@ -4,6 +4,7 @@ use super::*;
 use crate::Cancellation;
 use crate::apps::Stamp;
 use crate::live::identity_fixture::Fixture;
+use crate::live_app_response::Observation;
 use persistence::Error;
 
 struct Pressure {
@@ -120,29 +121,6 @@ fn attribution_saturated_cache_refuses_a_canceled_warm_query() {
         if error.kind() == std::io::ErrorKind::Interrupted));
 }
 
-#[test]
-fn attribution_reports_zero_remaining_cache_space_without_underflow_or_losing_context() {
-    // A fully occupied live-tail budget leaves no saved-cache allocation and keeps output exact.
-    let mut pressure = Pressure::new();
-    pressure.history.bytes = BYTES_MAX;
-
-    let actual = pressure
-        .history
-        .attribution_response(
-            &Selected::ending_at(pressure.selected).unwrap(),
-            AppAttributionMetric::Cpu,
-            Some(&pressure.saved),
-            &pressure.operation,
-        )
-        .unwrap();
-
-    assert_eq!(actual["points"], pressure.expected[0]["points"]);
-    assert_eq!(actual["cohort"], pressure.expected[0]["cohort"]);
-    assert_eq!(actual["coverage"]["saved_observations_cached"], 0);
-    assert_eq!(actual["coverage"]["saved_observations_uncached"], 6);
-    assert_eq!(actual["coverage"]["saved_cache_limited"], true);
-}
-
 impl Pressure {
     fn new() -> Self {
         let fixture = context();
@@ -156,7 +134,7 @@ impl Pressure {
             .attribution_response(
                 &Selected::ending_at(selected).unwrap(),
                 AppAttributionMetric::Cpu,
-                Some(&saved),
+                &saved,
                 &operation,
             )
             .unwrap();
@@ -165,7 +143,7 @@ impl Pressure {
             .attribution_response(
                 &Selected::ending_at(selected).unwrap(),
                 AppAttributionMetric::Power,
-                Some(&saved),
+                &saved,
                 &operation,
             )
             .unwrap();

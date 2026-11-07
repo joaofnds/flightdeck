@@ -65,7 +65,7 @@ pub(crate) fn trends(
             .transpose()?;
         points.push(trends_point(
             reader,
-            &Sources::Machine {
+            &Sources {
                 current: &current,
                 previous: before.as_ref(),
             },
@@ -222,24 +222,6 @@ fn key_previous(reader: &Reader<'_>, observation: &Observation) -> ObservationKe
     )
 }
 
-pub(crate) fn point_native(
-    raw: &crate::live_raw::Raw,
-    before: Option<&crate::live_raw::Raw>,
-    current: &Observation,
-    previous: Option<&Observation>,
-    segment: u64,
-) -> Result<Value> {
-    point_sources(
-        &Sources::Native {
-            current: raw,
-            previous: before,
-        },
-        current,
-        previous,
-        segment,
-    )
-}
-
 fn get<'a>(
     tables: &Sources<'a>,
     observation: &Observation,
@@ -309,6 +291,7 @@ fn capture_sources(
     Ok(value)
 }
 
+#[cfg(test)]
 pub(crate) fn public_point(point: &Value) -> Result<Value> {
     let mut value = point.clone();
     value

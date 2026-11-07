@@ -1016,7 +1016,7 @@ fn reader_snapshot_session<'session>(
         session
     } else {
         slot.insert(
-            LiveSession::open_history_with(root, Arc::clone(&shared.cancellation), command.epoch)
+            LiveSession::open_with(root, Arc::clone(&shared.cancellation), command.epoch)
                 .map_err(|error| error.to_string())?,
         )
     };

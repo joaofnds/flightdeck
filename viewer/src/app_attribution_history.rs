@@ -54,7 +54,7 @@ impl LiveSession {
             let selected = self.selected_in_context()?;
             self.app_history.attribution_batch_response(
                 &selected,
-                self.history.as_ref(),
+                self.saved_session()?,
                 &self.operation,
             )
         })
@@ -79,7 +79,7 @@ impl LiveSession {
             self.app_history.attribution_response(
                 &selected,
                 metric,
-                self.history.as_ref(),
+                self.saved_session()?,
                 &self.operation,
             )
         })

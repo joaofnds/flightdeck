@@ -20,23 +20,21 @@ fn follows_and_reopens_battery_gauges_with_unavailable_publications() {
         adapter_watts: Some(94),
     };
     battery_publish(&mut fixture, 1, None);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    assert!(session.follow_latest().unwrap()["summary"]["battery"].is_null());
     battery_publish(&mut fixture, 2, Some(&battery));
-    assert!(session.poll().unwrap());
-    let first = session.follow_latest().unwrap();
     battery_publish(&mut fixture, 3, None);
-    assert!(session.poll().unwrap());
-    let missing = session.follow_latest().unwrap();
     battery_publish(&mut fixture, 4, Some(&battery));
-    assert!(session.poll().unwrap());
-    let last = session.follow_latest().unwrap();
     fixture.seal_held();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let unavailable = session.select(1001, 0).unwrap();
+    let first = session.select(1002, 0).unwrap();
+    let missing = session.select(1003, 0).unwrap();
+    let last = session.select(1004, 0).unwrap();
     let mut saved = Session::open(&fixture.root).unwrap();
     let sealed = saved.select(1004, 0).unwrap();
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
     let restored = reopened.select(1004, 0).unwrap();
 
+    assert!(unavailable["summary"]["battery"].is_null());
     assert_eq!(first["summary"]["battery"]["charge_percent"], 55.0);
     assert_eq!(first["summary"]["battery"]["cycle_count"], 11);
     assert_eq!(first["summary"]["battery"]["power_watts"], 0.0);
@@ -56,7 +54,7 @@ fn battery_fixture() -> RingFixture {
         name_prefix: format!("/fdbv{}x{serial}", std::process::id()),
     };
     let shape = Shape {
-        slot_count: 2,
+        slot_count: 8,
         cpu_capacity: 1,
         interface_capacity: 1,
         core_capacity: 1,

@@ -11,8 +11,9 @@ fn a_session_listing_the_saved_minutes_learns_of_a_new_one_and_reads_no_ring() {
     // save another minute, list, and read what the session knows.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..1, earlier_wall);
+    fixture.seal_held();
     let mut session =
-        LiveSession::open_history_with(&fixture.root, Arc::new(Cancellation::default()), 0)
+        LiveSession::open_with(&fixture.root, Arc::new(Cancellation::default()), 0)
             .unwrap();
     let listed = session.catalog()["last_second"].clone();
     earlier_publish_minutes(&mut fixture, 1..2, earlier_wall);
@@ -22,7 +23,6 @@ fn a_session_listing_the_saved_minutes_learns_of_a_new_one_and_reads_no_ring() {
 
     let catalog = session.catalog();
     assert_ne!(catalog["last_second"], listed);
-    assert!(catalog["latest_observation"].is_null());
 }
 
 #[test]
@@ -34,8 +34,9 @@ fn a_session_refused_a_listing_keeps_the_minutes_it_knows_and_says_why() {
 
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..2, earlier_wall);
+    fixture.seal_held();
     let mut session =
-        LiveSession::open_history_with(&fixture.root, Arc::new(Cancellation::default()), 0)
+        LiveSession::open_with(&fixture.root, Arc::new(Cancellation::default()), 0)
             .unwrap();
     let listed = session.catalog()["last_second"].clone();
     let data = fixture.root.join("data");
@@ -57,8 +58,9 @@ fn a_session_lists_the_saved_minutes_once_its_context_has_moved_a_minute() {
     // second short of a minute later and for one a minute later.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..1, earlier_wall);
+    fixture.seal_held();
     let mut session =
-        LiveSession::open_history_with(&fixture.root, Arc::new(Cancellation::default()), 0)
+        LiveSession::open_with(&fixture.root, Arc::new(Cancellation::default()), 0)
             .unwrap();
     session.list_saved_for(EARLIER_BASE).unwrap();
     let listed = session.catalog()["last_second"].clone();
@@ -80,7 +82,8 @@ fn a_canceled_listing_lists_again_at_the_next_read() {
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..1, earlier_wall);
     let control = Arc::new(Cancellation::default());
-    let mut session = LiveSession::open_history_with(&fixture.root, control.clone(), 0).unwrap();
+    fixture.seal_held();
+    let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
     session.list_saved_for(EARLIER_BASE).unwrap();
     let listed = session.catalog()["last_second"].clone();
     earlier_publish_minutes(&mut fixture, 1..2, earlier_wall);
@@ -102,6 +105,7 @@ fn reads_each_minute_of_the_older_tail_once() {
     // sources read for it and for the strides after it that stay inside the same minutes.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let opened = earlier_reads(&session);
 
@@ -154,6 +158,7 @@ fn the_older_tail_leaves_out_what_expired() {
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
     let last = earlier_context_last(EARLIER_LIMIT);
+    fixture.seal_held();
     let whole = LiveSession::open(&fixture.root)
         .unwrap()
         .earlier_context(last)
@@ -198,6 +203,7 @@ fn the_older_tail_starts_inside_a_stretch_the_period_cut_from_its_first_second()
     let cut_ns = (tick - 1) * NANOSECONDS_PER_SECOND;
     crate::session::retention_tests::expire_before(&fixture.root, cut_ns);
 
+    fixture.seal_held();
     let tail = LiveSession::open(&fixture.root)
         .unwrap()
         .earlier_context(earlier_context_last(EARLIER_LIMIT))
@@ -218,6 +224,7 @@ fn the_older_tail_reads_on_past_a_minute_removal_took_from_under_its_list() {
     crate::session::retention_tests::expire_boot_before(&fixture.root, boot, 0);
     earlier_publish(&mut fixture);
     let last = earlier_context_last(EARLIER_LIMIT);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session
         .earlier_context(earlier_context_last(EARLIER_LIMIT + 600))
@@ -244,6 +251,7 @@ fn reads_only_the_sources_of_a_newly_needed_minute() {
     // EARLIER_BASE + 3120, and count the saved minutes read for the move.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session
         .earlier_context(earlier_context_last(EARLIER_LIMIT))
@@ -264,6 +272,7 @@ fn reads_each_minute_once_while_minutes_seal() {
     // which reach minutes 0 to 14 in all, and count the saved minutes every session read.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..12, earlier_wall);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
     let (_, reads) = earlier_follow(&mut fixture, &mut session);
@@ -278,6 +287,7 @@ fn rereads_only_the_minute_after_a_removed_one() {
     // list, and count the saved minutes the next read takes.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let last = earlier_context_last(EARLIER_LIMIT);
     session.earlier_context(last).unwrap();
@@ -342,6 +352,7 @@ fn drops_the_minutes_a_tail_leaves() {
     // minutes 13 and 14, return, and count the saved minutes the return takes.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let newest = earlier_context_last(EARLIER_BASE + 3400);
     session.earlier_context(newest).unwrap();
@@ -363,6 +374,7 @@ fn numbers_one_segment_for_each_run_of_consecutive_seconds() {
     // seconds by segment.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
     let tail = session
@@ -387,6 +399,7 @@ fn gives_the_tail_a_reopened_session_reads_while_minutes_seal() {
     // session's.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..12, earlier_wall);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
     let (kept, _) = earlier_follow(&mut fixture, &mut session);
@@ -405,6 +418,7 @@ fn gives_the_tail_a_reopened_session_reads_after_a_minute_is_removed() {
     // compare the tail with a newly opened session's.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let last = earlier_context_last(EARLIER_LIMIT);
     let before = session.earlier_context(last).unwrap();
@@ -444,6 +458,7 @@ fn gives_the_tail_a_reopened_session_reads_after_the_limit_moves_back() {
     // session's.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session
         .earlier_context(earlier_context_last(EARLIER_BASE + 3400))
@@ -463,6 +478,7 @@ fn makes_each_point_as_the_full_detail_context_makes_the_same_reading() {
     // minutes 2 to 6, and compare every point the two share apart from its segment.
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let tail = session
         .earlier_context(earlier_context_last(EARLIER_LIMIT))
@@ -503,6 +519,7 @@ fn each_point_reaches_what_the_readings_of_its_stretch_read() {
     // with what they read.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..3, |tick| EARLIER_BASE + tick);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let tail = session
         .earlier_context(earlier_context_last(EARLIER_BASE + 180))
@@ -540,6 +557,7 @@ fn a_stretch_two_minutes_share_reaches_the_readings_of_both() {
     // first of the next, whose memory rises with the tick.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..3, |tick| EARLIER_BASE + tick + 5);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
     let tail = session
@@ -583,6 +601,7 @@ fn inspecting_the_place_a_point_names_loads_the_reading_that_read_its_peak() {
     // what a point names, and compare the reading with what the point says it reached.
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..2, |tick| EARLIER_BASE + tick);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let tail = session
         .earlier_context(earlier_context_last(EARLIER_BASE + 120))
@@ -611,6 +630,7 @@ fn a_stretch_two_runs_read_names_the_run_that_read_its_peak() {
     earlier_publish_minutes(&mut fixture, 0..2, |tick| EARLIER_BASE + tick);
     let mut restarted = fixture.next_run();
     earlier_publish_minutes(&mut restarted, 0..2, |tick| EARLIER_BASE + tick + 100);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let tail = session
         .earlier_context(earlier_context_last(EARLIER_BASE + 300))
@@ -650,6 +670,7 @@ fn a_point_reaches_no_reading_the_period_no_longer_covers() {
     let seconds = EARLIER_BASE + 2_100;
     crate::session::retention_tests::expire_before(&fixture.root, boot_cut);
 
+    fixture.seal_held();
     let tail = LiveSession::open(&fixture.root)
         .unwrap()
         .earlier_context(earlier_context_last(seconds))
@@ -683,6 +704,7 @@ fn a_reading_that_gives_no_point_costs_its_stretch_only_its_own_reach() {
         },
     );
 
+    fixture.seal_held();
     let tail = LiveSession::open(&fixture.root)
         .unwrap()
         .earlier_context(earlier_context_last(EARLIER_BASE + 60))
@@ -730,6 +752,7 @@ fn a_minute_whose_clock_runs_backwards_refuses_the_tail_and_does_not_abort() {
     );
     crate::session::retention_tests::expire_before(&fixture.root, 5 * NANOSECONDS_PER_SECOND);
 
+    fixture.seal_held();
     let tail = LiveSession::open(&fixture.root)
         .unwrap()
         .earlier_context(earlier_context_last(EARLIER_BASE + 60));
@@ -746,6 +769,7 @@ fn the_last_point_says_what_the_seconds_at_the_join_reached() {
     let mut fixture = RingFixture::new_following();
     earlier_publish_minutes(&mut fixture, 0..2, |tick| EARLIER_BASE + tick);
     let limit = EARLIER_BASE + 60;
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
     let tail = session
@@ -771,6 +795,7 @@ fn makes_each_point_from_the_reading_before_it_in_its_own_run() {
     earlier_publish_minutes(&mut fixture, 0..8, earlier_wall);
     let mut restarted = fixture.next_run();
     earlier_publish_minutes(&mut restarted, 0..8, |tick| earlier_wall(tick) + 8 * 240);
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let tail = session
         .earlier_context(earlier_context_last(EARLIER_LIMIT))
@@ -806,6 +831,7 @@ fn stops_reading_minutes_once_the_kept_readings_pass_the_bound() {
         earlier_publish_minutes(&mut run, 0..15, wall);
         runs.push(run);
     }
+    fixture.seal_held();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     let last = earlier_context_last(EARLIER_LIMIT);
     let opened = earlier_reads(&session);
@@ -830,6 +856,7 @@ fn answers_a_kept_tail_after_its_read_is_canceled() {
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
     let control = Arc::new(Cancellation::default());
+    fixture.seal_held();
     let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
     let last = earlier_context_last(EARLIER_LIMIT);
     let tail = session.earlier_context(last).unwrap();
@@ -849,6 +876,7 @@ fn keeps_the_minutes_a_canceled_fill_finished() {
     let mut fixture = RingFixture::new_following();
     earlier_publish(&mut fixture);
     let control = Arc::new(Cancellation::default());
+    fixture.seal_held();
     let mut session = LiveSession::open_with(&fixture.root, control.clone(), 0).unwrap();
     let cancel = control.clone();
     session.earlier.after_minute = Some(Box::new(move || cancel.cancel().unwrap()));
@@ -1049,6 +1077,7 @@ fn a_points_reach_holds_no_more_than_its_stretch_however_long_the_recording() {
     let reach_of = |minutes: u64| {
         let mut fixture = RingFixture::new_following();
         earlier_publish_minutes(&mut fixture, 0..minutes, earlier_wall);
+        fixture.seal_held();
         let mut session = LiveSession::open(&fixture.root).unwrap();
         let limit = earlier_wall(minutes * 60);
         let tail = session

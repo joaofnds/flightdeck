@@ -40,12 +40,6 @@ pub(crate) trait SumKey {
     fn view(&self) -> AppKey<'_>;
 }
 
-/// A key the totals own, for seconds whose own keys must not gain another reference.
-pub(crate) struct OwnedKey {
-    bundle: bool,
-    bytes: Box<[u8]>,
-}
-
 impl<K: SumKey> Sums<K> {
     pub(crate) fn new() -> Self {
         Self {
@@ -167,17 +161,6 @@ impl<K: SumKey> Sums<K> {
         keys + (capacity - self.entries.capacity()) * size_of::<Entry<K>>()
     }
 
-    /// The bytes the entries and their keys take now, counted from scratch.
-    #[cfg(test)]
-    pub(crate) fn bytes(&self) -> usize {
-        self.entries.capacity() * size_of::<Entry<K>>()
-            + self
-                .entries
-                .iter()
-                .map(|entry| entry.key_bytes)
-                .sum::<usize>()
-    }
-
     pub(crate) fn totals(
         &self,
         metric: AppAttributionMetric,
@@ -205,31 +188,6 @@ impl<K: SumKey> Sums<K> {
 
         self.entries
             .binary_search_by(|entry| entry.key.view().cmp(key))
-    }
-}
-
-impl OwnedKey {
-    pub(crate) fn capture(key: &AppKey<'_>) -> Self {
-        let (AppKey::Bundle(bytes) | AppKey::Executable(bytes)) = key;
-        Self {
-            bundle: matches!(key, AppKey::Bundle(_)),
-            bytes: (*bytes).into(),
-        }
-    }
-
-    pub(crate) fn heap_bytes(key: &AppKey<'_>) -> usize {
-        let (AppKey::Bundle(bytes) | AppKey::Executable(bytes)) = key;
-        bytes.len()
-    }
-}
-
-impl SumKey for OwnedKey {
-    fn view(&self) -> AppKey<'_> {
-        if self.bundle {
-            AppKey::Bundle(&self.bytes)
-        } else {
-            AppKey::Executable(&self.bytes)
-        }
     }
 }
 

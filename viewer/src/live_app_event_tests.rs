@@ -1,94 +1,5 @@
 use collector::ring::IdentityPublication;
 
-#[test]
-fn rehydrates_adjacent_event_only_app_identity() {
-    // Goal: selecting an evicted raw sample preserves the adjacent captured App identity.
-    // Method: retain both ring publications and scalar points, then discard raw cached rows.
-    let mut fixture = identity_fixture::Fixture::new();
-    publish(&mut fixture, 1);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    publish(&mut fixture, 2);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
-    let kind = KeyKind::Bundle;
-    let key = b"/Applications/B.app";
-    let expected = session.app_detail(kind, key, 0).unwrap();
-    session.observations.clear();
-    session.cache_bytes = 0;
-    let cursor = session.sources[0].reader.next_publication();
-    let event_cursor = session.sources[0].reader.next_event();
-    let losses = session.catalog()["reader_losses"].clone();
-
-    session.select(1002, 0).unwrap();
-    let detail = session.app_detail(kind, key, 0).unwrap();
-
-    assert_eq!(session.apps_page(0).unwrap()["process_count"], 1);
-    assert_eq!(detail, expected);
-    assert_eq!(detail["app"]["members"], 1);
-    assert_eq!(detail["app"]["live_members"], 0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], 0);
-    assert_eq!(detail["app"]["cpu_percent_one_core"], Value::Null);
-    assert_eq!(detail["app"]["energy_joules"], Value::Null);
-    assert_eq!(
-        detail["processes"][0]["resident_bytes"]["known"],
-        104_857_600
-    );
-    assert_eq!(session.sources[0].reader.next_publication(), cursor);
-    assert_eq!(session.sources[0].reader.next_event(), event_cursor);
-    assert_eq!(session.catalog()["reader_losses"], losses);
-    assert!(!session.poll().unwrap());
-}
-
-fn publish(fixture: &mut identity_fixture::Fixture, publication: u64) {
-    use collector::ring::{
-        IdentityUnavailable, ProcessCreation, ProcessIdentity, ProgramBytes, UsageAvailability,
-    };
-    let creation = ProcessCreation {
-        unique_id: 700,
-        pid_version: 2,
-    };
-    let mut program = None;
-    fixture
-        .writer
-        .intern_program(
-            &ProgramBytes {
-                executable_name: b"worker",
-                app_path: Some(b"/Applications/B.app"),
-            },
-            &mut program,
-        )
-        .unwrap();
-    let event = if publication == 1 {
-        collector::tracker::Event::Exec { pid: 7 }
-    } else {
-        collector::tracker::Event::Exit {
-            pid: 7,
-            last: Ok(publish_usage()),
-            noticed: collector::tracker::Noticed::OnExit,
-        }
-    };
-    let identity = IdentityObservation {
-        pid: 7,
-        usage: if publication == 1 {
-            UsageAvailability::NotApplicable
-        } else {
-            UsageAvailability::Measured
-        },
-        identity: if publication == 1 {
-            ProcessIdentity::Measured {
-                creation,
-                program: program.unwrap(),
-            }
-        } else {
-            ProcessIdentity::Unavailable {
-                creation: Some(creation),
-                reason: IdentityUnavailable::Unsupported,
-            }
-        },
-    };
-    publish_observation(fixture, publication, &event, &identity);
-}
-
 fn publish_observation(
     fixture: &mut identity_fixture::Fixture,
     publication: u64,
@@ -198,8 +109,9 @@ fn gap_exit_outputs(
     let mut fixture = identity_fixture::Fixture::new();
     fixture.start_at_run_tick(58);
     fixture.publish_with_usage(1058, &publish_usage());
+    fixture.seal();
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    assert_eq!(live.follow_latest().unwrap()["selected"]["publication"], 1);
+    assert_eq!(select_newest(&mut live)["selected"]["publication"], 1);
     let event = collector::tracker::Event::Exit {
         pid: 7,
         last: *last,
@@ -221,8 +133,9 @@ fn gap_exit_outputs(
         },
     };
     publish_observation(&mut fixture, 60, &event, &identity);
-    assert!(live.poll().unwrap());
-    let selected = live.follow_latest().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
+    let selected = select_newest(&mut live);
     let run = fixture.writer.identity().unwrap();
     assert_eq!(
         selected["selected"]["run"],
@@ -317,7 +230,7 @@ fn gap_exit_histories(saved: &Session, selection: &Value, expected: &Value) {
     assert_eq!(attribution, *expected);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let groups = History::new()
-        .process_groups_response(&selected, &target, Some(saved), &[], &operation)
+        .process_groups_response(&selected, &target, saved, &[], &operation)
         .unwrap();
     assert_eq!(groups.named_group_count, 1);
     let point = groups.points.last().unwrap();
@@ -450,16 +363,14 @@ fn restores_rates_from_the_first_consecutive_successor_after_a_gap() {
     // Method: compare complete live and saved App pages from native run ticks zero, two, three.
     let mut fixture = identity_fixture::Fixture::new();
     fixture.publish_with_system_rows(1001);
-    let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.follow_latest().unwrap();
     fixture.skip_run_ticks(1);
     fixture.publish_with_system_rows(1003);
-    assert!(live.poll().unwrap());
-    live.follow_latest().unwrap();
-    let gap = live.apps_page(0).unwrap();
     fixture.publish_with_system_rows(1004);
-    assert!(live.poll().unwrap());
-    live.follow_latest().unwrap();
+    fixture.seal();
+    let mut live = LiveSession::open(&fixture.root).unwrap();
+    live.select(1003, 0).unwrap();
+    let gap = live.apps_page(0).unwrap();
+    live.select(1004, 0).unwrap();
     let successor = live.apps_page(0).unwrap();
     assert_eq!(gap["elapsed_ns"], Value::Null);
     assert_eq!(gap["previous"]["publication"], "1");
@@ -472,7 +383,6 @@ fn restores_rates_from_the_first_consecutive_successor_after_a_gap() {
         .as_f64()
         .unwrap();
     assert!((rate - 0.000_000_1).abs() < 1e-20);
-    fixture.seal();
     let mut saved = Session::open(&fixture.root).unwrap();
     let selected = saved.select(1003, 0).unwrap()["selected"].clone();
     let saved_gap = saved

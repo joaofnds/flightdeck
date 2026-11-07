@@ -16,15 +16,15 @@ fn blocks_prior_app_bytes_after_ambiguous_current_starts() {
         ..Scenario::default()
     }
     .publish_at(&mut fixture, 2);
-    live.poll().unwrap();
-    live.follow_latest().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
+    crate::select_newest(&mut live);
 
     let page = live.apps_page(0).unwrap();
 
     assert_eq!(page["app_count"], 0);
     assert_eq!(page["process_count"], 1);
     assert_eq!(page["ungrouped_members"], 1);
-    fixture.seal();
     collector::recording::Registry {
         runs: Vec::new(),
         evictions: 0,
@@ -52,12 +52,12 @@ fn retains_a_start_only_app_at_its_next_publication_exit() {
         ..Scenario::default()
     }
     .publish_at(&mut fixture, 2);
-    live.poll().unwrap();
-    live.follow_latest().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
+    crate::select_newest(&mut live);
     let kind = viewer::live_app_response::KeyKind::Bundle;
     let key = b"/Applications/D.app";
     let detail = live.app_detail(kind, key, 0).unwrap();
-    fixture.seal();
     collector::recording::Registry {
         runs: Vec::new(),
         evictions: 0,
@@ -97,8 +97,9 @@ fn retains_an_event_only_app_from_the_adjacent_publication_after_reopen() {
         ..Scenario::default()
     }
     .publish_at(&mut fixture, 2);
-    live.poll().unwrap();
-    live.follow_latest().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
+    crate::select_newest(&mut live);
 
     let page = live.apps_page(0).unwrap();
 
@@ -119,7 +120,6 @@ fn retains_an_event_only_app_from_the_adjacent_publication_after_reopen() {
         detail["processes"][0]["resident_bytes"]["known"],
         104_857_600
     );
-    fixture.seal();
     collector::recording::Registry {
         runs: Vec::new(),
         evictions: 0,
@@ -146,12 +146,12 @@ fn keeps_exec_exit_membership_when_selected_from_committed_history() {
     publish_empty(&mut fixture);
     let mut live = LiveSession::open(&fixture.root).unwrap();
     Scenario::default().publish(&mut fixture);
-    live.poll().unwrap();
-    live.follow_latest().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
+    crate::select_newest(&mut live);
     let kind = viewer::live_app_response::KeyKind::Bundle;
     let key = b"/Applications/B.app";
     let expected = live.app_detail(kind, key, 0).unwrap();
-    fixture.seal();
     collector::recording::Registry {
         runs: Vec::new(),
         evictions: 0,
@@ -184,8 +184,9 @@ fn retains_an_app_observed_at_exec_before_its_verified_exit() {
     let mut session = LiveSession::open(&fixture.root).unwrap();
     Scenario::default().publish(&mut fixture);
 
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
 
     assert_eq!(page["process_count"], 1);
@@ -224,8 +225,9 @@ fn retains_the_new_app_without_attributing_a_cross_exec_interval() {
     let mut session = LiveSession::open(&fixture.root).unwrap();
     Scenario::default().publish(&mut fixture);
 
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
     let detail = session
         .app_detail(
@@ -266,8 +268,9 @@ fn prefers_later_captured_program_bytes_over_a_matching_predecessor_version() {
     }
     .publish(&mut fixture);
 
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
 
     assert_eq!(page["apps"][0]["key"]["display"], "/Applications/B.app");
@@ -304,8 +307,9 @@ fn associates_exec_bytes_beside_both_scheduled_and_start_programs() {
     }
     .publish(&mut fixture);
 
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
     let detail = session
         .app_detail(
@@ -359,8 +363,9 @@ fn retains_the_latest_observed_image_before_exit_once() {
     }
     .publish(&mut fixture);
 
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
 
     assert_eq!(page["process_count"], 1);
@@ -376,10 +381,12 @@ fn owns_exec_program_bytes_after_the_live_source_is_reused() {
     publish_empty(&mut fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     Scenario::default().publish(&mut fixture);
-    session.poll().unwrap();
+    session.list_saved().unwrap();
     publish(&mut fixture, 3);
-    session.poll().unwrap();
+    session.list_saved().unwrap();
 
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
     let detail = session
         .app_detail(
@@ -418,8 +425,9 @@ macro_rules! interrupted_predecessor {
             }
             .publish(&mut fixture);
 
-            session.poll().unwrap();
-            session.follow_latest().unwrap();
+            fixture.seal();
+            session.list_saved().unwrap();
+            crate::select_newest(&mut session);
             let page = session.apps_page(0).unwrap();
 
             assert_eq!(page["process_count"], 1);
@@ -449,8 +457,9 @@ macro_rules! unjoined_exec {
             let mut session = LiveSession::open(&fixture.root).unwrap();
             $scenario.publish(&mut fixture);
 
-            session.poll().unwrap();
-            session.follow_latest().unwrap();
+            fixture.seal();
+            session.list_saved().unwrap();
+            crate::select_newest(&mut session);
             let page = session.apps_page(0).unwrap();
 
             assert_eq!(page["process_count"], 0);
@@ -506,12 +515,12 @@ macro_rules! committed_attribution {
             publish(&mut fixture, 1);
             let mut live = LiveSession::open(&fixture.root).unwrap();
             scenario.publish(&mut fixture);
-            live.poll().unwrap();
-            live.follow_latest().unwrap();
+            fixture.seal();
+            live.list_saved().unwrap();
+            crate::select_newest(&mut live);
             let kind = viewer::live_app_response::KeyKind::Bundle;
             let expected = live.app_detail(kind, $key, 0).unwrap();
             let expected_page = live.apps_page(0).unwrap();
-            fixture.seal();
             collector::recording::Registry {
                 runs: Vec::new(),
                 evictions: 0,
@@ -631,10 +640,10 @@ fn keeps_duplicate_exit_evidence_ambiguous_after_reopen() {
         ..ExitScenario::default()
     }
     .publish(&mut fixture);
-    live.poll().unwrap();
-    live.follow_latest().unwrap();
-    let expected = live.apps_page(0).unwrap();
     fixture.seal();
+    live.list_saved().unwrap();
+    crate::select_newest(&mut live);
+    let expected = live.apps_page(0).unwrap();
     collector::recording::Registry {
         runs: Vec::new(),
         evictions: 0,

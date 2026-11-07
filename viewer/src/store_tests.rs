@@ -1148,14 +1148,14 @@ fn a_second_ranks_its_apps_as_the_worker_ranks_them() {
     for second in 100..103 {
         fixture.publish_with_system_rows(second);
     }
-    let mut session = crate::LiveSession::open(&fixture.root).unwrap();
-    session.select(102, 0).unwrap();
-    let expected = session.selected_ranks().unwrap();
-
     let store = Store::start(&fixture.root).unwrap();
-
     let view = view_where(&store, |view| view.seconds.len() == 3);
-    assert_eq!(view.apps[2].ranks(), Ok(expected));
+    fixture.seal();
+    let mut session = crate::LiveSession::open(&fixture.root).unwrap();
+
+    session.select(102, 0).unwrap();
+
+    assert_eq!(view.apps[2].ranks(), Ok(session.selected_ranks().unwrap()));
 }
 
 #[test]
@@ -1893,17 +1893,17 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
         // minutes later, so the seconds A led lie before those the charts draw.
         let mut fixture = named::dense_with_system();
         named::publish(&mut fixture, 1, &burst_rows(1));
-        let mut session = LiveSession::open(&fixture.root).unwrap();
         let store = Store::start(&fixture.root).unwrap();
         let mut view = view_where(&store, |view| view.seconds.len() == 1);
 
         for publication in [2, 962, 963] {
             named::publish(&mut fixture, publication, &burst_rows(publication));
-            session.poll().unwrap();
             view = view_where(&store, |view| {
                 super::held_through(view, 1_000 + publication)
             });
         }
+        fixture.seal();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
         session.select(1_963, 0).unwrap();
         let cpu = chosen_by_worker_of(&session, AppAttributionMetric::Cpu);
         let resident = chosen_by_worker_of_resident(&session);
@@ -1998,16 +1998,16 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     ) -> (Fixture, LiveSession, Arc<View>) {
         let mut fixture = named::dense_with_system();
         named::publish(&mut fixture, 1, &rows_at(1));
-        let mut session = LiveSession::open(&fixture.root).unwrap();
         let store = Store::start(&fixture.root).unwrap();
         let mut view = view_where(&store, |view| view.seconds.len() == 1);
 
         for publication in 2..=last {
             named::publish(&mut fixture, publication, &rows_at(publication));
-            session.poll().unwrap();
             let count = usize::try_from(publication).unwrap();
             view = view_where(&store, |view| view.seconds.len() == count);
         }
+        fixture.seal();
+        let mut session = LiveSession::open(&fixture.root).unwrap();
         session.select(1_000 + last, 0).unwrap();
 
         (fixture, session, view)

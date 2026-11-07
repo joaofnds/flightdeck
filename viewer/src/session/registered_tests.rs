@@ -380,12 +380,12 @@ fn a_live_session_lists_a_minute_once_it_is_saved() {
     fixture.publish_with_system_rows(SECOND_FIRST);
     fixture.skip_run_ticks(59);
     let mut session = crate::LiveSession::open(&fixture.root).unwrap();
-    session.poll().unwrap();
     let before = session.catalog();
     fixture.publish_with_system_rows(SECOND_FIRST + 60);
     fixture.seal();
 
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
 
     assert_eq!(before["windows"], 0);
     assert_eq!(session.catalog()["windows"], 2);
@@ -524,20 +524,24 @@ fn a_recording_past_the_old_cap_of_windows_reads_at_both_ends() {
 
     let listed_below = registered_read_both_ends(&fixture, SECOND_FIRST, newest);
     let mut live = crate::LiveSession::open(&fixture.root).unwrap();
-    live.poll().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
     registered_save_minute(&mut fixture, newest + 60);
-    live.poll().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
     let live_at = live.catalog();
     let readings_at = registered_readings(&fixture);
     let listed_at = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 60);
     registered_save_minute(&mut fixture, newest + 120);
-    live.poll().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
     let live_above = live.catalog();
     let readings_above = registered_readings(&fixture);
     let listed_above = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 120);
     registered_link_between(&fixture, SECOND_BETWEEN, below - 1..twice - 4);
     registered_save_minute(&mut fixture, newest + 180);
-    live.poll().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
     let live_twice = live.catalog();
     let readings_twice = registered_readings(&fixture);
     let listed_twice = registered_read_both_ends(&fixture, SECOND_FIRST, newest + 180);
@@ -576,14 +580,16 @@ fn two_runs_on_one_second_stay_selectable_past_the_old_cap() {
     registered_save_minute(&mut fixture, SECOND_BETWEEN + below + 20_000);
     let readings_past_the_cap = registered_readings(&fixture);
     let mut live = crate::LiveSession::open(&fixture.root).unwrap();
-    live.poll().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
     let mut sharing = Fixture::new_mode(true, 2, Some(&fixture));
     sharing.start_at_run_tick(58);
     sharing.publish_with_system_rows(SECOND_FIRST);
 
     sharing.seal();
 
-    live.poll().unwrap();
+    sharing.seal();
+    live.list_saved().unwrap();
     let mut session = Session::open(&fixture.root).unwrap();
     let one = session.select(SECOND_FIRST, 0).unwrap();
     let other = session.select(SECOND_FIRST, 1).unwrap();

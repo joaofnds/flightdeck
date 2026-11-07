@@ -10,7 +10,7 @@ use crate::cpu_history_sample::Identity;
 use crate::live_app_response::Selected;
 
 type PointKey = ([u64; 2], [u64; 2], [u64; 2], u64);
-type Points = BTreeMap<PointKey, (TracePoint, bool)>;
+type Points = BTreeMap<PointKey, TracePoint>;
 
 pub(crate) struct Merge<'a> {
     pub selected: &'a Selected,
@@ -50,34 +50,16 @@ impl History {
                 selected: request.selected,
                 observation: &point.observation,
             })? {
-                insert(&mut points, point, false)?;
-            }
-        }
-
-        for point in &self.points {
-            request.operation.check()?;
-            if in_range(Range {
-                selected: request.selected,
-                observation: &point.observation,
-            })? {
-                let trace = point.trace(request.target);
-                if !trace.source_available() {
-                    if points.contains_key(&insert_point_key(&trace.observation)) {
-                        continue;
-                    }
-                }
-                insert(&mut points, &trace, true)?;
+                insert(&mut points, point)?;
             }
         }
 
         let missing = if response_merged_context_missing(request, &mut points)? {
             true
         } else {
-            points
-                .values()
-                .any(|(point, _live)| !point.source_available())
+            points.values().any(|point| !point.source_available())
         };
-        let mut points: Vec<_> = points.into_values().map(|(point, _live)| point).collect();
+        let mut points: Vec<_> = points.into_values().collect();
 
         points.sort_by_key(|point| {
             (
@@ -94,7 +76,6 @@ impl History {
         let response = crate::live_app_response::bounded(json!({
             "selected": request.selected.observation().json(), "context_seconds": 900,
             "points": points, "coverage": {"retention_limited": missing,
-                "live_retention_limited": self.retention_limited,
                 "observations_retained": count, "cache_bytes": self.total_bytes(),
                 "cache_bytes_max": BYTES_MAX, "committed_observations": request.saved.len()}
         }))?;
@@ -104,23 +85,16 @@ impl History {
     }
 }
 
-fn insert(points: &mut Points, point: &TracePoint, live: bool) -> Result<()> {
+fn insert(points: &mut Points, point: &TracePoint) -> Result<()> {
     let key = insert_point_key(&point.observation);
-    if let Some((existing, existing_live)) = points.get(&key) {
-        if *existing_live == live {
-            return Err(Error::Bound("duplicate App history observation"));
-        }
-
-        if existing.observation != point.observation {
-            return Err(Error::Bound("conflicting App history observation"));
-        }
-    } else {
-        if points.len() == OBSERVATIONS_MAX {
-            return Err(Error::Bound("App history merged observations"));
-        }
+    if points.contains_key(&key) {
+        return Err(Error::Bound("duplicate App history observation"));
+    }
+    if points.len() == OBSERVATIONS_MAX {
+        return Err(Error::Bound("App history merged observations"));
     }
 
-    points.insert(key, (*point, live));
+    points.insert(key, *point);
 
     Ok(())
 }
@@ -170,7 +144,7 @@ fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> 
             return Err(Error::Bound("duplicate App history context"));
         }
 
-        if let Some((point, _live)) = points.get(&key) {
+        if let Some(point) = points.get(&key) {
             let observation = &identity.observation;
             if point.observation.run_tick != observation.run_tick {
                 return Err(Error::Bound("App history context run tick"));
@@ -203,7 +177,7 @@ fn response_merged_context_missing(request: &Merge<'_>, points: &mut Points) -> 
                 return Err(Error::Bound("App history context range"));
             }
 
-            insert(points, &TracePoint::unavailable(&observation), false)?;
+            insert(points, &TracePoint::unavailable(&observation))?;
             missing = true;
         }
     }

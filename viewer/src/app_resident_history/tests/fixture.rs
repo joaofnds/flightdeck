@@ -14,6 +14,7 @@ pub(super) struct ResidentFixture {
     pub root: PathBuf,
     writer: Writer,
     publication: u64,
+    persister: std::sync::Mutex<persistence::worker::HeldWindows>,
 }
 
 pub(super) struct Resident<'key> {
@@ -47,7 +48,7 @@ impl ResidentFixture {
             name_prefix: format!("/fdrs{}x{serial}", std::process::id()),
         };
         let shape = Shape {
-            slot_count: 2,
+            slot_count: 8,
             cpu_capacity: 1,
             interface_capacity: 1,
             core_capacity: 1,
@@ -64,11 +65,36 @@ impl ResidentFixture {
         .into_parts();
         registered.unwrap();
 
+        // These clocks count from this Mac's boot, which can lie past a shorter period.
+        persistence::retention::Period::from_seconds(10 * 365 * 86_400)
+            .unwrap()
+            .write(&collector::recording::private::PrivateDirectory::open(&root).unwrap())
+            .unwrap();
+
         Self {
             root,
             writer,
             publication: 0,
+            persister: std::sync::Mutex::default(),
         }
+    }
+
+    pub fn seal(&self) {
+        let store = persistence::Store::open(&self.root).unwrap();
+        let run = collector::recording::RegisteredRun {
+            identity: self.writer.identity().unwrap(),
+            ring_name: self.writer.name().to_owned(),
+            collector_pid: 0,
+        };
+        let mut held = self.persister.lock().unwrap();
+        persistence::worker::seal_held_windows(
+            &store,
+            &run,
+            None,
+            &mut held,
+            &crate::live::identity_fixture::Underived,
+        )
+        .unwrap();
     }
 
     pub fn publish(&mut self, residents: &[Resident<'_>]) {
@@ -136,7 +162,7 @@ impl ResidentFixture {
             .publish_with_identity(
                 &Readings {
                     run_tick: self.publication,
-                    cpus: &[],
+                    cpus: &[collector::machine::CPUTicks::default()],
                     memory: &memory,
                     interfaces: &[],
                     ioreport: None,

@@ -318,12 +318,7 @@ impl Session {
         replay: &mut Replay,
         cache: &mut ResidentCache,
         available: usize,
-        mut live: impl FnMut(&Observation) -> Result<bool>,
     ) -> Result<bool> {
-        replay.exclude(&self.operation, |observation| {
-            cache.contains(observation, &self.operation)?;
-            live(observation)
-        })?;
         cache.retain(&self.operation, |observation| {
             replay.needs(observation, &self.operation)
         })?;

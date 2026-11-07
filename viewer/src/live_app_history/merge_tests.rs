@@ -3,46 +3,9 @@ use std::sync::Arc;
 use persistence::Error;
 use serde_json::Value;
 
-use super::{App, CompactMeasure, History, KeyKind, Merge, Observation, Target, TracePoint};
+use super::{History, KeyKind, Merge, Observation, Target, TracePoint};
 use crate::Cancellation;
-use crate::apps::Stamp;
-use crate::live_app_response::Measure;
-
-#[test]
-fn prefers_the_entire_live_point_without_summing_the_saved_overlap() {
-    // Goal: scheduled saved totals cannot erase verified live contributions or mix denominators.
-    // Method: merge one saved endpoint with a live endpoint carrying independent totals and time.
-    let mut history = History::new();
-    history.push(live(2), 0);
-    let saved = [trace(2, 7)];
-
-    let response = response(&history, &saved, &observation(2)).unwrap();
-
-    assert_eq!(response["points"].as_array().unwrap().len(), 1);
-    assert_eq!(response["points"][0]["cpu_ns"]["known"], 42);
-    assert_eq!(response["points"][0]["elapsed_ns"], 1_000_000_000);
-    assert_eq!(response["points"][0]["cpu_percent_one_core"], 0.000_004_2);
-    assert_eq!(response["points"][0]["disk_read_bytes"]["known"], 42);
-    assert_eq!(response["points"][0]["disk_written_bytes"]["known"], 42);
-    assert_eq!(response["points"][0]["disk_io_bytes"]["known"], 42);
-    assert_eq!(response["points"][0]["disk_read_bps"], 42.0);
-    assert_eq!(response["points"][0]["disk_written_bps"], 42.0);
-    assert_eq!(response["points"][0]["disk_io_bps"], 42.0);
-}
-
-#[test]
-fn rejects_conflicting_clocks_for_the_same_saved_and_live_publication() {
-    // Goal: an overlap cannot silently replace a structurally different observation.
-    // Method: give one exact run/publication two different continuous timestamps.
-    let mut history = History::new();
-    history.push(live(2), 0);
-    let mut saved = trace(2, 7);
-    saved.observation.stamp.continuous_ns = Some(9_000_000_000);
-
-    let result = response(&history, &[saved], &observation(2));
-
-    assert!(matches!(result, Err(Error::Bound(_))));
-}
+use crate::apps::{AppTotals, Stamp, Subtotal};
 
 #[test]
 fn rejects_duplicate_saved_observations_instead_of_double_counting_them() {
@@ -57,27 +20,11 @@ fn rejects_duplicate_saved_observations_instead_of_double_counting_them() {
 }
 
 #[test]
-fn joins_adjacent_saved_and_live_points_with_one_recomputed_segment() {
-    // Goal: independent cache segment identifiers do not introduce a false chart gap.
-    // Method: merge saved publication one and consecutive live publication two.
-    let mut history = History::new();
-    history.push(live(2), 0);
-    let saved = [trace(1, 7)];
-
-    let response = response(&history, &saved, &observation(2)).unwrap();
-
-    assert_eq!(response["points"].as_array().unwrap().len(), 2);
-    assert_eq!(response["points"][0]["segment"], "0");
-    assert_eq!(response["points"][1]["segment"], "0");
-}
-
-#[test]
 fn breaks_the_merged_segment_across_a_missing_publication() {
     // Goal: a chart cannot bridge a missing observation after combining caches.
-    // Method: leave publication two absent between saved one and live three.
-    let mut history = History::new();
-    history.push(live(3), 0);
-    let saved = [trace(1, 7)];
+    // Method: leave publication two absent between saved one and saved three.
+    let history = History::new();
+    let saved = [trace(1, 7), trace(3, 9)];
 
     let response = response(&history, &saved, &observation(3)).unwrap();
 
@@ -113,7 +60,7 @@ fn retains_a_null_point_when_the_target_has_no_attributed_members() {
     // Goal: absence of attributed members cannot become measured zero in the restored trace.
     // Method: place an observation with no target totals between two captured target facts.
     let history = History::new();
-    let absent = TracePoint::from_live(&observation(2), Some(1_000_000_000), None);
+    let absent = TracePoint::from_totals(&observation(2), Some(1_000_000_000), None);
     let saved = [trace(1, 7), absent, trace(3, 9)];
 
     let response = response(&history, &saved, &observation(3)).unwrap();
@@ -218,9 +165,8 @@ fn emits_a_null_gap_for_a_known_context_observation_without_app_facts() {
 fn retains_the_entire_first_second_of_merged_history() {
     // Goal: the inclusive first second keeps fractional saved observations at the edge of the
     // charted seconds, the lead-in before the 15 minutes. Method: merge saved endpoints
-    // immediately before and inside that second with a live endpoint.
-    let mut history = History::new();
-    history.push(live(900), 0);
+    // immediately before and inside that second.
+    let history = History::new();
     let mut first = trace(1, 7);
     first.observation.wall_ns = Some(941_900_000_000);
     let mut older = trace(0, 9);
@@ -228,7 +174,7 @@ fn retains_the_entire_first_second_of_merged_history() {
 
     let response = response(&history, &[older, first], &observation(900)).unwrap();
 
-    assert_eq!(response["points"].as_array().unwrap().len(), 2);
+    assert_eq!(response["points"].as_array().unwrap().len(), 1);
     assert_eq!(
         response["points"][0]["observation"]["stamp"]["publication"],
         "1"
@@ -262,51 +208,26 @@ fn response(
 }
 
 fn trace(publication: u64, amount: u64) -> TracePoint {
-    let measure = CompactMeasure::capture(&Measure {
+    let subtotal = || Subtotal {
         known: amount,
         measured_members: 1,
         unavailable_members: 0,
         overflowed: false,
-    });
-    let app = App {
-        key: super::compact::capture_key(
-            &crate::live_app_response::Key {
-                kind: KeyKind::Executable,
-                bytes: b"app".to_vec(),
-                display: String::new(),
-            },
-            &[],
-            &mut 0,
-        ),
+    };
+    let totals = AppTotals {
         members: 1,
-        membership_complete: false,
-        cpu_ns: measure,
-        energy_nj: measure,
-        gpu_ns: measure,
-        disk_read_bytes: measure,
-        disk_written_bytes: measure,
-        disk_io_bytes: measure,
-        resident_bytes: measure,
-        footprint_bytes: measure,
+        cpu_ns: subtotal(),
+        energy_nj: subtotal(),
+        gpu_ns: subtotal(),
+        disk_read_bytes: subtotal(),
+        disk_written_bytes: subtotal(),
+        disk_io_bytes: subtotal(),
+        resident_bytes: subtotal(),
+        footprint_bytes: subtotal(),
+        ..AppTotals::default()
     };
 
-    TracePoint::from_live(&observation(publication), Some(500_000_000), Some(&app))
-}
-
-fn live(publication: u64) -> Box<super::Point> {
-    let mut point = super::tests::point(publication, 1);
-    point.observation = observation(publication);
-    point.apps[0].key = super::compact::capture_key(
-        &crate::live_app_response::Key {
-            kind: KeyKind::Executable,
-            bytes: b"app".to_vec(),
-            display: String::new(),
-        },
-        &[],
-        &mut 0,
-    );
-
-    point
+    TracePoint::from_totals(&observation(publication), Some(500_000_000), Some(&totals))
 }
 
 fn observation(publication: u64) -> Observation {

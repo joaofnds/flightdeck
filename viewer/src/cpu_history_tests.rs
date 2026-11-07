@@ -1,5 +1,7 @@
 use super::*;
-use crate::cpu_history_sample::Counters;
+use crate::cpu_history_sample::{CounterSample, Counters};
+
+const NS: u64 = 1_000_000_000;
 
 #[derive(Clone, Copy)]
 struct IdentitySpec {
@@ -42,7 +44,6 @@ fn pages_a_maximum_domain_and_maximum_observation_count_inside_the_byte_bound() 
         selected: &selected,
         context_last_second: last_second(&selected),
         context: &context,
-        live: None,
         saved: Some(&cache),
         retained: None,
         offset: 992,
@@ -121,7 +122,6 @@ fn response(entries: Vec<Entry>, offset: u32) -> Result<Value> {
         selected: &selected,
         context_last_second: last_second(&selected),
         context: &context,
-        live: None,
         saved: Some(&cache),
         retained: None,
         offset,
@@ -220,7 +220,6 @@ fn rejects_more_than_4096_context_observations() {
         selected: &selected,
         context_last_second: last_second(&selected),
         context: &context,
-        live: None,
         saved: None,
         retained: None,
         offset: 0,
@@ -359,46 +358,6 @@ fn retains_distinct_observations_inside_one_wall_second() {
     assert_eq!(response["cpus"][0]["busy_percent"], json!([75.0]));
 }
 
-macro_rules! complementary_case {
-    ($name:ident,$live_valid:expr) => {
-        #[test]
-        fn $name() {
-            // Goal: an incomplete duplicate cannot erase a valid independently derived interval.
-            // Method: merge the same identity with a predecessor available in only one source.
-            let mut valid = entry(2,vec![Some(25.0),Some(75.0)]);
-            let mut missing = valid.clone();
-            missing.interval_available=false;
-            missing.previous=None;
-            missing.values.fill(None);
-            if !$live_valid {std::mem::swap(&mut valid,&mut missing);}
-            let context = vec![valid.identity.clone()];
-            let selected = context[0].json();
-            let mut live = None;
-            History::init(&mut live);
-            live.as_mut().unwrap().entries.push_back(valid);
-            let context_last_second = last_second(&selected);
-            let range = ContextRange::ending_at(context_last_second).unwrap();
-            let saved = Cache {range,entries:vec![missing]};
-
-            let response = project(&Request {selected:&selected,context_last_second,
-                context:&context,live:live.as_ref(),saved:Some(&saved),retained:None,
-                offset:0}).unwrap();
-
-            assert_eq!(response["observations"][0]["interval_available"],true);
-            assert_eq!(response["cpus"],json!([{ "cpu":0,"busy_percent":[25.0]},
-                {"cpu":1,"busy_percent":[75.0]}]));
-        }
-    };
-}
-complementary_case!(
-    retains_live_intervals_when_committed_predecessors_are_missing,
-    true
-);
-complementary_case!(
-    recovers_live_intervals_from_complete_committed_predecessors,
-    false
-);
-
 #[test]
 fn rejects_a_cpu_history_response_above_seven_mib() {
     // Goal: future observation metadata cannot bypass the separate payload byte budget.
@@ -416,7 +375,6 @@ fn rejects_a_cpu_history_response_above_seven_mib() {
         selected: &selected,
         context_last_second: last_second(&selected),
         context: &context,
-        live: None,
         saved: Some(&saved),
         retained: None,
         offset: 0,
@@ -430,53 +388,29 @@ fn rejects_a_cpu_history_response_above_seven_mib() {
 
 #[test]
 fn reports_retention_limits_without_fabricating_dropped_cpu_values() {
-    // Goal: reaching the count bound leaves truthful gaps in an older selected window.
-    // Method: ingest4097 real typed CPU tables inside one second and inspect4096 prior identities.
-    let mut history = None;
-    History::init(&mut history);
-    let history = history.as_mut().unwrap();
-    let mut context = Vec::new();
-    for publication in 1..=4097 {
-        let identity = identity(IdentitySpec {
-            publication,
-            wall: 1001 * NS + publication * 100_000,
-        });
-        let ticks = u32::try_from(publication).unwrap();
-        let row = crate::recording::CpuRow {
-            publication,
-            cpu: 0,
-            ticks: collector::machine::CPUTicks {
-                user: ticks,
-                system: 0,
-                nice: 0,
-                idle: ticks,
-            },
-        };
-        history.capture_rows(&identity, &[row]).unwrap();
-        if publication <= 4096 {
-            context.push(identity);
-        }
-    }
-    let selected = context.last().unwrap().json();
+    // Goal: an observation the saved minutes no longer give leaves a truthful gap.
+    // Method: project a context of two observations whose first has no saved entry.
+    let dropped = entry(2, vec![Some(50.0)]);
+    let kept = entry(3, vec![Some(50.0)]);
+    let context = vec![dropped.identity.clone(), kept.identity.clone()];
+    let selected = context[1].json();
+    let saved = Cache {
+        range: ContextRange::ending_at(last_second(&selected)).unwrap(),
+        entries: vec![kept],
+    };
 
     let response = project(&Request {
         selected: &selected,
         context_last_second: last_second(&selected),
         context: &context,
-        live: Some(history),
-        saved: None,
+        saved: Some(&saved),
         retained: None,
         offset: 0,
     })
     .unwrap();
 
     assert_eq!(response["retention_limited"], true);
-    assert_eq!(response["observations"].as_array().unwrap().len(), 4096);
-    assert_eq!(response["cpus"][0]["busy_percent"][0], Value::Null);
-    assert_eq!(response["cpus"][0]["busy_percent"][1], 50.0);
-    assert_eq!(response["cpus"][0]["busy_percent"][4095], 50.0);
-    assert!(history.bytes() <= LIVE_BYTES_MAX);
-    assert_eq!(history.entries.len(), 4096);
+    assert_eq!(response["cpus"][0]["busy_percent"], json!([null, 50.0]));
 }
 
 /// The second `selected`'s readings were taken in, where these contexts end.

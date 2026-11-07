@@ -22,7 +22,7 @@ impl LiveSession {
             self.app_history.process_groups_response(
                 &selected,
                 &target,
-                self.history.as_ref(),
+                self.saved_session()?,
                 &self.selected_context,
                 &self.operation,
             )

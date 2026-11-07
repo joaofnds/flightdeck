@@ -98,52 +98,6 @@ fn owns_exact_disk_deltas_and_rates_after_the_ring_is_retired() {
     assert_eq!(detail["processes"][0]["disk_io_bps"], 5120.0);
 }
 
-#[test]
-fn retains_a_full_rolling_disk_history_from_real_ring_publications() {
-    // Goal: compact disk history retains exactly the latest 900 elapsed seconds after rollover.
-    // Method: capture 901 actual identity publications, retire sources and serialize the trace.
-    let mut fixture = Fixture::new();
-    let mut previous = None;
-    let mut sample = None;
-    let mut history = crate::live_app_history::History::new();
-    for second in 1..=901 {
-        let selected = fixture.frame(second);
-        Sample::capture(&selected, previous.as_deref(), &mut sample).unwrap();
-        let mut point = None;
-        history.capture(sample.as_deref().unwrap(), 0, &mut point);
-        let first = (1_800_000_000 + second).saturating_sub(899) * 1_000_000_000;
-        history.push(point.unwrap(), first);
-        previous = Some(selected);
-    }
-    let selected = sample.unwrap().selected;
-    drop(previous);
-    drop(fixture);
-    let cancellation = std::sync::Arc::new(crate::Cancellation::default());
-    let operation = cancellation.operation(0).unwrap();
-
-    let response = history
-        .response(
-            &crate::live_app_response::Selected::ending_at(selected).unwrap(),
-            &crate::live_app_history::Target {
-                kind: super::KeyKind::Bundle,
-                bytes: b"/A.app",
-            },
-            &operation,
-        )
-        .unwrap();
-
-    let points = response["points"].as_array().unwrap();
-    assert_eq!(points.len(), 900);
-    assert_eq!(points[0]["observation"]["stamp"]["publication"], "2");
-    assert_eq!(points[899]["observation"]["stamp"]["publication"], "901");
-    assert_eq!(points[0]["disk_io_bytes"]["known"], 5120);
-    assert_eq!(points[899]["disk_read_bps"], 4096.0);
-    assert_eq!(points[899]["disk_written_bps"], 1024.0);
-    assert_eq!(points[899]["disk_io_bps"], 5120.0);
-    assert_eq!(response["coverage"]["retention_limited"], false);
-    assert_eq!(response["coverage"]["cache_bytes_max"], 75_497_472);
-}
-
 struct Fixture {
     root: PathBuf,
     ring: String,

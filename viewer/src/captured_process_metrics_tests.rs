@@ -36,7 +36,8 @@ fn captured_two_second_rates_and_current_threads_survive_saved_reopen() {
     );
     second.threads = 5;
     named::publish_with_interval(&mut fixture, 2, &[first, second], 2_000_000_000);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let live = selected(&mut session);
@@ -97,7 +98,8 @@ fn reset_wakeups_keep_the_measured_peer_and_independent_pageins() {
             named::member(8, b"worker", b"/A.app", usage(106, 12)),
         ],
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let actual = selected(&mut session);
@@ -125,6 +127,7 @@ macro_rules! current_threads {
             let mut row = named::member(7, b"worker", b"/A.app", usage(100, 10));
             row.threads = $input;
             named::publish(&mut fixture, 1, &[row]);
+            fixture.seal();
             let mut session = LiveSession::open(&fixture.root).unwrap();
             session.select(1001, 0).unwrap();
 
@@ -173,7 +176,8 @@ fn verified_exits_keep_final_counter_deltas_without_a_present_thread_gauge() {
     let mut exit = named::member(7, b"worker", b"/A.app", usage(106, 14));
     exit.exited = true;
     named::publish(&mut fixture, 2, &[exit]);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let actual = selected(&mut session);
@@ -225,7 +229,8 @@ macro_rules! captured_lifetime {
             row.threads = 8;
             $change(&mut row);
             named::publish(&mut fixture, 2, &[row]);
-            session.poll().unwrap();
+            fixture.seal();
+            session.list_saved().unwrap();
             session.select(1002, 0).unwrap();
 
             let actual = selected(&mut session);
@@ -272,7 +277,8 @@ fn zero_elapsed_keeps_current_threads_and_refuses_counter_rates() {
         &[named::member(7, b"worker", b"/A.app", usage(106, 14))],
         0,
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let actual = selected(&mut session);
@@ -319,7 +325,8 @@ fn all_added_measures_reuse_the_cpu_cohort_and_exact_other_members() {
         })
         .collect();
     named::publish(&mut fixture, 2, &after);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let history = session
@@ -359,7 +366,8 @@ fn ordinary_app_shape_stays_compact_while_process_groups_keep_ten_measures() {
     let mut row = named::member(7, b"worker", b"/A.app", usage(106, 14));
     row.threads = 8;
     named::publish(&mut fixture, 2, &[row]);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let app = session.app_history(KeyKind::Bundle, b"/A.app").unwrap();

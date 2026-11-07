@@ -49,7 +49,8 @@ fn retains_two_names_and_exact_directional_measures_after_cold_reopen() {
             named::member(9, b"helper", b"/A.app", helper),
         ],
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
     let expected = json!({"cpu":360_000_000,"energy":1_000_000_000,
         "read":9_007_199_254_743_041_u64,"written":9_007_199_254_741_507_u64,
@@ -100,7 +101,8 @@ fn includes_all_513_members_outside_a_loaded_member_page() {
         .map(|pid| named::member(pid, b"worker", b"/A.app", next))
         .collect();
     named::publish(&mut fixture, 2, &rows);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
     let detail = session.app_detail(KeyKind::Bundle, b"/A.app", 512).unwrap();
 
@@ -137,7 +139,8 @@ fn retains_an_app_outside_the_first_page_of_apps() {
     named::publish(&mut fixture, 1, &rows);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     named::publish(&mut fixture, 2, &rows);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
     let first = session.apps_page(0).unwrap();
 
@@ -159,16 +162,14 @@ fn preserves_group_identity_across_pid_reuse_and_absence_at_the_selected_second(
         1,
         &[named::member(7, b"worker\xff", b"/A.app", usage())],
     );
-    let mut session = LiveSession::open(&fixture.root).unwrap();
     named::publish(&mut fixture, 2, &[]);
-    session.poll().unwrap();
     let mut reused = named::member(7, b"worker\xff", b"/A.app", usage());
     reused.version = 2;
     reused.usage.as_mut().unwrap().resident_bytes = 4000;
     named::publish(&mut fixture, 3, &[reused]);
-    session.poll().unwrap();
     named::publish(&mut fixture, 4, &[]);
-    session.poll().unwrap();
+    fixture.seal();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1004, 0).unwrap();
 
     let cohort = session
@@ -219,7 +220,8 @@ fn includes_every_nonleader_in_typed_other_with_sixteen_disk_lines_available() {
         })
         .collect();
     named::publish(&mut fixture, 2, &rows);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let cohort = session
@@ -263,6 +265,7 @@ fn refuses_an_app_key_larger_than_the_captured_source_bound() {
         1,
         &[named::member(7, b"worker", b"/A.app", usage())],
     );
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1001, 0).unwrap();
     let key = vec![b'x'; 4096];
@@ -286,7 +289,8 @@ fn unavailable_identity_never_fabricates_an_app_membership_or_named_series() {
     named::publish(&mut fixture, 1, &rows);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     named::publish(&mut fixture, 2, &rows);
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let cohort = session
@@ -320,7 +324,8 @@ fn preserves_known_directional_subtotals_and_unavailable_member_counts() {
         2,
         &[named::member(7, b"worker", b"/A.app", measured), refused],
     );
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let cohort = session
@@ -417,52 +422,6 @@ fn warm_public_cohort_reuses_saved_facts_without_decoding_a_saved_frame() {
         !reached.load(std::sync::atomic::Ordering::Acquire),
         "A warm selected-App cohort must not decode any saved Frame"
     );
-}
-
-#[test]
-fn advancing_public_live_endpoint_reuses_saved_facts_and_exact_bytes() {
-    // Resume a retired source and select its next live endpoint without replaying saved Frames.
-    let mut cold = cold(Arc::new(Cancellation::default()));
-    cold.session
-        .app_process_groups_history(KeyKind::Bundle, b"/A.app")
-        .unwrap();
-    collector::recording::Registry {
-        runs: vec![collector::recording::RegisteredRun {
-            identity: cold.fixture.writer.identity().unwrap(),
-            ring_name: cold.fixture.writer.name().to_owned(),
-            collector_pid: 0,
-        }],
-        evictions: 0,
-    }
-    .write(&cold.fixture.root)
-    .unwrap();
-    let mut current = usage();
-    current.disk_read_bytes += 160;
-    current.disk_written_bytes += 80;
-    current.resident_bytes = 4000;
-    named::publish(
-        &mut cold.fixture,
-        3,
-        &[named::member(7, b"worker", b"/A.app", current)],
-    );
-    cold.session.poll().unwrap();
-    cold.session.select(1003, 0).unwrap();
-    let before = crate::session::ProcessGroupsReplay::test_frame_decodes();
-
-    let result = cold
-        .session
-        .app_process_groups_history(KeyKind::Bundle, b"/A.app")
-        .unwrap();
-
-    assert_eq!(
-        crate::session::ProcessGroupsReplay::test_frame_decodes(),
-        before
-    );
-    assert_eq!(result.points.len(), 3);
-    assert_eq!(values(&result, b"worker", 0)["resident"], 1000);
-    assert_eq!(values(&result, b"worker", 2)["read"], 160);
-    assert_eq!(values(&result, b"worker", 2)["written"], 80);
-    assert_eq!(values(&result, b"worker", 2)["resident"], 4000);
 }
 
 #[test]

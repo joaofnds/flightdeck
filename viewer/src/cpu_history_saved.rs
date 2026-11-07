@@ -26,7 +26,6 @@ impl Session {
                 selected: &selected,
                 context_last_second,
                 context: &self.selected_context,
-                live: None,
                 saved: self.cpu_history_cache.as_ref(),
                 retained: None,
                 offset,

@@ -100,7 +100,7 @@ pub(crate) fn capture(
     let current = observation(reading);
     let before = previous.map(observation);
     super::capture_sources(
-        &crate::metric_view::Sources::Machine {
+        &crate::metric_view::Sources {
             current: reading,
             previous,
         },

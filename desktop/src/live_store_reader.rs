@@ -515,9 +515,8 @@ fn read_saved_open(
     shared: &Shared,
 ) -> Result<(), String> {
     if reader.session.is_none() {
-        let session =
-            LiveSession::open_history_with(root, Arc::clone(&shared.cancellation), command.epoch)
-                .map_err(|error| error.to_string())?;
+        let session = LiveSession::open_with(root, Arc::clone(&shared.cancellation), command.epoch)
+            .map_err(|error| error.to_string())?;
         reader.session = Some(session);
     }
 

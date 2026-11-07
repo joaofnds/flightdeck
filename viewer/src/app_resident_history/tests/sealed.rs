@@ -384,7 +384,7 @@ fn resident_history_within(session: &LiveSession, available: usize) -> Value {
             let selected = session.selected_in_context()?;
             session.app_history.resident_response_within(
                 &selected,
-                session.history.as_ref(),
+                session.saved_session()?,
                 &session.operation,
                 available,
             )

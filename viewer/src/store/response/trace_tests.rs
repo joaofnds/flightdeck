@@ -93,8 +93,10 @@ fn retained_app_trace_matches_the_native_live_session() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(101, 0).unwrap();
     let expected = session
         .app_history(KeyKind::Bundle, b"/Apps/Current.app")

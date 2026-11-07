@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::live::identity_fixture::Fixture;
 use crate::live::window::fixture::{
     damage, observation_key, saved_in_two_minutes, saved_only, saved_with_apps,
     saved_with_apps_after_a_lead_in,
@@ -225,113 +224,6 @@ fn rank_window_keeps_sharing_the_ranks_of_a_covered_window() {
     session.rank_window().unwrap();
 
     assert!(Arc::ptr_eq(&shared, &session.app_ranks()));
-}
-
-#[test]
-fn rank_window_ranks_the_cached_live_observations_of_a_window_it_returns_to() {
-    // Goal: returning from an earlier window ranks the live seconds no saved minute holds yet.
-    // Method: rank an earlier saved window, which drops the live window's ranks, then follow
-    // the live seconds again and rank their window.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.seal();
-    fixture.publish_with_system_rows(2000);
-    fixture.publish_with_system_rows(2001);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.select(1000, 0).unwrap();
-    session.rank_window().unwrap();
-    let latest = session.follow_latest().unwrap()["selected"].clone();
-    assert!(session.app_ranks().get(&observation_key(&latest)).is_none());
-
-    session.rank_window().unwrap();
-
-    assert!(session.app_ranks().get(&observation_key(&latest)).is_some());
-}
-
-#[test]
-fn poll_ranks_each_live_observation_from_its_sample() {
-    // Goal: a live second has its ranks as soon as the session polls it.
-    // Method: open a session over two live seconds and compare the latest one's ranks with the
-    // ranks of its sample.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-
-    let selected = session.follow_latest().unwrap()["selected"].clone();
-    assert_eq!(
-        summary(
-            session
-                .app_ranks()
-                .get(&observation_key(&selected))
-                .unwrap()
-        ),
-        selected_ranks(&session)
-    );
-}
-
-#[test]
-fn poll_ranks_drops_observations_older_than_the_window() {
-    // Goal: the ranks stay bounded to the window a hover can reach.
-    // Method: poll a live second, then one 900 seconds later, and look the first one up.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let first = session.follow_latest().unwrap()["selected"].clone();
-    assert!(session.app_ranks().get(&observation_key(&first)).is_some());
-    fixture.publish_with_system_rows(1900);
-
-    session.poll().unwrap();
-
-    assert!(session.app_ranks().get(&observation_key(&first)).is_none());
-}
-
-#[test]
-fn poll_drops_the_ranks_of_a_reading_that_expired_with_no_new_reading() {
-    // Goal: the ranks of a reading the period no longer covers leave with it, also where no new
-    // reading ever comes in.
-    // Method: follow two live seconds, place the cutoff past the first, and poll with nothing new.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let first = session.follow_latest().unwrap()["selected"].clone();
-    fixture.publish_with_system_rows(1001);
-    session.poll().unwrap();
-    let last = session.follow_latest().unwrap()["selected"].clone();
-    let boot = fixture.writer.identity().unwrap().boot;
-    crate::session::retention_tests::expire_boot_before(&fixture.root, boot, 1_000_000_000);
-
-    session.poll().unwrap();
-
-    assert!(session.app_ranks().get(&observation_key(&first)).is_none());
-    assert!(session.app_ranks().get(&observation_key(&last)).is_some());
-}
-
-#[test]
-fn poll_keeps_the_ranks_of_a_selected_earlier_window() {
-    // Goal: a page that polls live while an earlier second is selected, such as
-    // Self-monitoring, leaves that window's ranks, so returning to it replays nothing.
-    // Method: rank a saved window, publish a live second over fifteen minutes past it, poll,
-    // and look the selected second up.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal();
-    fixture.publish_with_system_rows(3000);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    let selected = session.select(1001, 0).unwrap()["selected"].clone();
-    session.rank_window().unwrap();
-    fixture.publish_with_system_rows(3001);
-
-    session.poll().unwrap();
-
-    assert!(
-        session
-            .app_ranks()
-            .get(&observation_key(&selected))
-            .is_some()
-    );
 }
 
 fn selected_ranks(session: &LiveSession) -> Value {

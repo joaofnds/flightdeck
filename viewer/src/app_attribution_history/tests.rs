@@ -18,8 +18,9 @@ fn disk_attribution_keeps_exact_combined_deltas_and_continuous_rates_after_reope
     counters.disk_read_bytes += 4096;
     counters.disk_written_bytes += 1024;
     fixture.publish_with_usage(1001, &counters);
+    fixture.seal();
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.follow_latest().unwrap();
+    crate::live::select_newest(&mut live);
     let before = live
         .app_attribution_history(AppAttributionMetric::Disk)
         .unwrap();
@@ -76,8 +77,9 @@ fn disk_attribution_restores_verified_exit_work_and_reuses_cpu_warmed_saved_fact
     counters.disk_read_bytes = 5000;
     counters.disk_written_bytes = 8000;
     publish_exits_with_usage(&mut fixture, &counters);
+    fixture.seal();
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.follow_latest().unwrap();
+    crate::live::select_newest(&mut live);
     let before = live
         .app_attribution_history(AppAttributionMetric::Disk)
         .unwrap();
@@ -149,8 +151,9 @@ fn attribution_preserves_cpu_above_one_core_and_actual_interval_power() {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(0));
     fixture.publish_with_usage(1001, &usage(1_200_000_000));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let cpu = session
         .app_attribution_history(AppAttributionMetric::Cpu)
@@ -199,8 +202,9 @@ fn attribution_restores_both_metrics_and_reuses_saved_intervals() {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(0));
     fixture.publish_with_usage(1001, &usage(1_200_000_000));
+    fixture.seal();
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.follow_latest().unwrap();
+    crate::live::select_newest(&mut live);
     let cpu = live
         .app_attribution_history(AppAttributionMetric::Cpu)
         .unwrap();
@@ -269,6 +273,7 @@ fn attribution_preserves_same_second_observations_and_breaks_their_segment() {
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(0));
     fixture.publish_with_usage(1000, &usage(1_200_000_000));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1000, 0).unwrap();
 
@@ -348,8 +353,9 @@ fn attribution_uses_continuous_elapsed_time_and_withholds_refused_members() {
     fixture.set_clock_intervals(2_000_000_000, 1_000_000_000);
     fixture.publish_with_usage(1000, &usage(0));
     fixture.publish_with_usage(1001, &usage(1_200_000_000));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let cpu = session
         .app_attribution_history(AppAttributionMetric::Cpu)
@@ -398,38 +404,15 @@ fn attribution_refuses_a_superseded_operation_even_with_warm_saved_facts() {
 }
 
 #[test]
-fn attribution_counts_saved_live_overlap_once_and_prefers_the_live_observation() {
-    // Sealing observations already held live must not duplicate their work or alter their cohort.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_usage(1000, &usage(0));
-    fixture.publish_with_usage(1001, &usage(1_200_000_000));
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
-    let before = session
-        .app_attribution_history(AppAttributionMetric::Cpu)
-        .unwrap();
-    fixture.seal();
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
-
-    let after = session
-        .app_attribution_history(AppAttributionMetric::Cpu)
-        .unwrap();
-
-    assert_eq!(after["points"], before["points"]);
-    assert_eq!(after["cohort"], before["cohort"]);
-    assert_eq!(after["coverage"]["committed_observations"], 2);
-}
-
-#[test]
 fn attribution_keeps_verified_exit_deltas_after_cold_reopen_without_resident_gauges() {
     // Actual terminal usage remains CPU/power work while its resident gauge ceases to exist.
     let mut fixture = Fixture::new();
     fixture.publish_with_usage(1000, &usage(0));
     fixture.publish_with_usage(1001, &usage(1_000_000_000));
     publish_exits(&mut fixture);
+    fixture.seal();
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.follow_latest().unwrap();
+    crate::live::select_newest(&mut live);
     let before = live
         .app_attribution_history(AppAttributionMetric::Cpu)
         .unwrap();

@@ -16,8 +16,9 @@ fn aggregates_live_apps_from_the_exact_selected_publication() {
     publish(&mut fixture, 1);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish(&mut fixture, 2);
-    session.poll().unwrap();
-    let selected = session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    let selected = crate::select_newest(&mut session);
 
     let page = session.apps_page(0).unwrap();
 
@@ -46,8 +47,9 @@ fn keeps_process_members_beside_their_exact_live_app_subtotals() {
     publish(&mut fixture, 1);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish(&mut fixture, 2);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let detail = session
         .app_detail(
@@ -77,8 +79,9 @@ fn includes_verified_final_usage_beside_the_exited_live_app_member() {
     publish(&mut fixture, 1);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish_exit(&mut fixture);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let detail = session
         .app_detail(
@@ -124,8 +127,9 @@ fn retains_an_app_that_starts_and_exits_between_scheduled_samples() {
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish_started_exit(&mut fixture);
 
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let page = session.apps_page(0).unwrap();
 
     assert_eq!(page["process_count"], 1);
@@ -193,8 +197,9 @@ macro_rules! unassociated_exit {
             publish(&mut fixture, 1);
             let mut session = LiveSession::open(&fixture.root).unwrap();
             $scenario.publish(&mut fixture);
-            session.poll().unwrap();
-            session.follow_latest().unwrap();
+            fixture.seal();
+            session.list_saved().unwrap();
+            crate::select_newest(&mut session);
 
             let page = session.apps_page(0).unwrap();
 
@@ -256,8 +261,9 @@ fn retains_known_exit_subtotals_beside_dropped_event_coverage() {
             ..ExitScenario::default()
         }
         .publish(&mut fixture);
-        session.poll().unwrap();
-        session.follow_latest().unwrap();
+        fixture.seal();
+        session.list_saved().unwrap();
+        crate::select_newest(&mut session);
 
         let page = session.apps_page(0).unwrap();
 
@@ -284,12 +290,12 @@ fn retains_a_verified_exit_after_unrelated_event_ring_overwrite() {
     let mut forged = ForgedSource::new(&fixture.root, fixture.writer.name());
     forged.claim_event_newest(33);
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.poll().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1002, 0).unwrap();
 
     let page = session.apps_page(0).unwrap();
 
-    assert_eq!(session.catalog()["reader_losses"][0]["losses"]["events"], 1);
     assert_eq!(page["process_count"], 2);
     assert_eq!(page["apps"][0]["cpu_percent_one_core"], 50.0);
     assert_eq!(page["membership_complete"], false);
@@ -311,8 +317,9 @@ fn retains_process_membership_without_assigning_an_exec_crossing_exit_to_the_old
         ..ExitScenario::default()
     }
     .publish(&mut fixture);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let page = session.apps_page(0).unwrap();
 
@@ -337,8 +344,9 @@ fn replaces_a_scheduled_member_with_its_verified_exit_once() {
         ..ExitScenario::default()
     }
     .publish(&mut fixture);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let detail = session
         .app_detail(
@@ -375,8 +383,9 @@ fn refuses_final_counters_that_regress_after_the_scheduled_sample() {
         ..ExitScenario::default()
     }
     .publish(&mut fixture);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let detail = session
         .app_detail(
@@ -422,8 +431,9 @@ fn retains_a_reused_pid_as_distinct_from_its_predecessor_exit() {
         ..ExitScenario::default()
     }
     .publish(&mut fixture);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let detail = session
         .app_detail(
@@ -458,8 +468,9 @@ fn keeps_refused_final_usage_unavailable_beside_the_last_resident_gauge() {
         ..ExitScenario::default()
     }
     .publish(&mut fixture);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let detail = session
         .app_detail(
@@ -490,7 +501,9 @@ fn does_not_invent_a_birth_baseline_for_an_exit_without_a_predecessor() {
     let mut fixture = Fixture::new();
     publish_exit(&mut fixture);
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let page = session.apps_page(0).unwrap();
 
@@ -499,83 +512,6 @@ fn does_not_invent_a_birth_baseline_for_an_exit_without_a_predecessor() {
         page["apps"][0]["cpu_percent_one_core"],
         serde_json::Value::Null
     );
-}
-
-#[test]
-fn reconstructs_verified_exit_totals_after_real_raw_cache_eviction() {
-    // Goal: selecting an evicted raw observation preserves its exit-aware App totals.
-    // Method: evict two small observations with real 12000-member publications, then rehydrate.
-    let mut fixture = Fixture::new_mode(true, 12_000, None);
-    publish(&mut fixture, 1);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    publish_exit(&mut fixture);
-    session.poll().unwrap();
-    for second in 1003..=1020 {
-        publish_pressure(&mut fixture, second);
-        session.poll().unwrap();
-    }
-    let retained = session.catalog()["tail_ticks"].as_u64().unwrap();
-
-    let selected = session.select(1002, 0).unwrap();
-    let detail = session
-        .app_detail(
-            viewer::live_app_response::KeyKind::Bundle,
-            b"/Applications/A.app",
-            0,
-        )
-        .unwrap();
-
-    assert!(retained < 20);
-    assert_eq!(selected["selected"]["publication"], 2);
-    assert_eq!(detail["app"]["cpu_percent_one_core"], 50.0);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], 52_428_800);
-    assert_eq!(detail["processes"][0]["state"], "exited_verified");
-}
-
-fn publish_pressure(fixture: &mut Fixture, second: u64) {
-    let mut program = None;
-    fixture
-        .writer
-        .intern_program(
-            &collector::ring::ProgramBytes {
-                executable_name: b"helper",
-                app_path: Some(b"/Applications/A.app"),
-            },
-            &mut program,
-        )
-        .unwrap();
-    let identities: Vec<_> = (1..=12_000)
-        .map(|pid| IdentityObservation {
-            pid,
-            usage: UsageAvailability::Refused,
-            identity: ProcessIdentity::Measured {
-                creation: ProcessCreation {
-                    unique_id: u64::try_from(pid + 10_000).unwrap(),
-                    pid_version: 1,
-                },
-                program: program.unwrap(),
-            },
-        })
-        .collect();
-    let memory = Memory::default();
-    let mut readings = readings(&[], &memory, second);
-    readings.processes_refused = 12_000;
-
-    fixture
-        .writer
-        .publish_with_identity(
-            &readings,
-            Some(&ObservationTimes {
-                wall_ns: second * 1_000_000_000,
-                continuous_ns: (second - 1000) * 1_000_000_000,
-                awake_ns: (second - 1000) * 1_000_000_000,
-            }),
-            &IdentityPublication {
-                processes: &identities,
-                events: &[],
-            },
-        )
-        .unwrap();
 }
 
 #[test]
@@ -594,8 +530,10 @@ fn leaves_an_exit_unattributed_across_a_missing_publication() {
     for sample in 4..=10 {
         publish(&mut fixture, sample);
     }
-    session.poll().unwrap();
+    session.list_saved().unwrap();
 
+    fixture.seal();
+    session.list_saved().unwrap();
     session.select(1003, 0).unwrap();
     let page = session.apps_page(0).unwrap();
 
@@ -766,8 +704,9 @@ fn retains_exact_app_history_while_following_the_fifteen_minute_window() {
     publish(&mut fixture, 1);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish(&mut fixture, 2);
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
 
     let history = session
         .app_history(
@@ -790,185 +729,6 @@ fn retains_exact_app_history_while_following_the_fifteen_minute_window() {
 }
 
 #[test]
-fn retains_the_charted_seconds_for_an_ordinary_live_app_population() {
-    // A real identity ring keeps 640 distinct Apps throughout 961 observed publications, the 960
-    // seconds an App chart holds: the 900 of the context and the lead-in before them.
-    let mut fixture = AppPopulation::new();
-    fixture.publish(1);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-
-    fixture.observe_through(&mut session, 961);
-    let selection = session.follow_latest().unwrap();
-    let history = session
-        .app_history(
-            viewer::live_app_response::KeyKind::Bundle,
-            b"/Applications/History Capacity 0000.app",
-        )
-        .unwrap();
-
-    let points = history["points"].as_array().unwrap();
-    assert_eq!(points.len(), 960);
-    assert_eq!(history["coverage"]["retention_limited"], false);
-    assert_eq!(history["coverage"]["observations_retained"], 960);
-    assert_eq!(selection["selected"]["publication"], 961);
-    assert_eq!(history["selected"]["stamp"]["publication"], "961");
-    assert_eq!(points[0]["observation"]["stamp"]["publication"], "2");
-    assert_eq!(points[959]["observation"]["stamp"]["publication"], "961");
-    assert_eq!(points[0]["resident_bytes"]["known"], 200);
-    assert_eq!(points[959]["resident_bytes"]["known"], 96100);
-    assert_eq!(points[0]["cpu_ns"]["known"], 1_000_000);
-    assert_eq!(points[959]["cpu_ns"]["known"], 1_000_000);
-    assert!(history["coverage"]["cache_bytes"].as_u64().unwrap() < 72 * 1024 * 1024);
-    eprintln!("ordinary App history coverage: {}", history["coverage"]);
-}
-
-struct AppPopulation {
-    root: std::path::PathBuf,
-    writer: collector::ring::Writer,
-    processes: Vec<Process>,
-    identities: Vec<IdentityObservation>,
-}
-
-impl AppPopulation {
-    fn new() -> Self {
-        let token =
-            collector::recording::identity_text(collector::recording::random_identity().unwrap())
-                .to_string();
-        let root = std::env::temp_dir().join(format!("flightdeck-app-history-{token}"));
-        drop(persistence::Store::open(&root).unwrap());
-        let place = collector::ring::Place {
-            lock_path: root.join("ring.lock"),
-            name_prefix: format!("/fdah{}", std::process::id()),
-        };
-        let shape = collector::ring::Shape {
-            slot_count: 2,
-            cpu_capacity: 1,
-            interface_capacity: 1,
-            core_capacity: 1,
-            state_capacity: 1,
-            fan_capacity: 1,
-            process_capacity: 640,
-            coalition_capacity: 1,
-            event_capacity: 1,
-        };
-        let (writer, registered) = collector::recording::Registration::start_with_identity(
-            &root,
-            &place,
-            shape,
-            collector::ring::DictionaryCapacity {
-                entries: 640,
-                arena_bytes: 65_536,
-            },
-            0,
-        )
-        .unwrap()
-        .into_parts();
-        registered.unwrap();
-        let mut fixture = Self {
-            root,
-            writer,
-            processes: Vec::with_capacity(640),
-            identities: Vec::with_capacity(640),
-        };
-
-        fixture.initialize_apps();
-
-        fixture
-    }
-
-    fn initialize_apps(&mut self) {
-        for index in 0..640 {
-            let path = format!("/Applications/History Capacity {index:04}.app");
-            let mut program = None;
-            self.writer
-                .intern_program(
-                    &collector::ring::ProgramBytes {
-                        executable_name: b"main",
-                        app_path: Some(path.as_bytes()),
-                    },
-                    &mut program,
-                )
-                .unwrap();
-            let mut process = process(0, 0);
-            process.pid = index + 7;
-            self.identities.push(IdentityObservation {
-                pid: process.pid,
-                usage: UsageAvailability::Measured,
-                identity: ProcessIdentity::Measured {
-                    creation: ProcessCreation {
-                        unique_id: u64::try_from(index + 700).unwrap(),
-                        pid_version: 1,
-                    },
-                    program: program.unwrap(),
-                },
-            });
-            self.processes.push(process);
-        }
-    }
-
-    fn publish(&mut self, publication: u64) {
-        for (index, process) in self.processes.iter_mut().enumerate() {
-            process.usage.user_ns = publication * 1_000_000;
-            process.usage.energy_nj = publication * 2_000_000;
-            process.usage.resident_bytes = publication * 100 + u64::try_from(index).unwrap();
-            process.usage.footprint_bytes = publication * 200 + u64::try_from(index).unwrap();
-        }
-        let memory = Memory::default();
-
-        self.writer
-            .publish_with_identity(
-                &readings(&self.processes, &memory, publication),
-                Some(&ObservationTimes {
-                    wall_ns: (1000 + publication) * 1_000_000_000,
-                    continuous_ns: publication * 1_000_000_000,
-                    awake_ns: publication * 1_000_000_000,
-                }),
-                &IdentityPublication {
-                    processes: &self.identities,
-                    events: &[],
-                },
-            )
-            .unwrap();
-    }
-
-    fn observe_through(&mut self, session: &mut LiveSession, last: u64) {
-        let timebase = collector::clock::Timebase::read().unwrap();
-        let pid = i32::try_from(std::process::id()).unwrap();
-        let before = collector::processes::read_usage(timebase, pid)
-            .unwrap()
-            .unwrap();
-        let started = std::time::Instant::now();
-
-        for publication in 2..=last {
-            self.publish(publication);
-            session.poll().unwrap();
-        }
-        let elapsed_ns = started.elapsed().as_nanos();
-        let after = collector::processes::read_usage(timebase, pid)
-            .unwrap()
-            .unwrap();
-        let footprint = persistence::resources::Footprint::read().unwrap();
-
-        eprintln!(
-            "{}",
-            serde_json::json!({"fixture_publications":last,"apps_per_publication":640,
-                "elapsed_ns":elapsed_ns,
-                "process_cpu_ns":after.user_ns+after.system_ns-before.user_ns-before.system_ns,
-                "physical_footprint_bytes":footprint.current_bytes,
-                "process_lifetime_footprint_max_bytes":footprint.lifetime_bytes_max})
-        );
-    }
-}
-
-impl Drop for AppPopulation {
-    fn drop(&mut self) {
-        self.writer.finish();
-        collector::ring::unlink_generation(self.writer.name()).unwrap();
-        std::fs::remove_dir_all(&self.root).unwrap();
-    }
-}
-
-#[test]
 fn retains_the_entire_inclusive_lower_second_with_fractional_wall_clocks() {
     // Nanosecond observation clocks must not trim part of the chart's first included second.
     let mut fixture = Fixture::new();
@@ -987,9 +747,11 @@ fn retains_the_entire_inclusive_lower_second_with_fractional_wall_clocks() {
             wall_ns: 1_900_900_000_000,
         },
     );
-    session.poll().unwrap();
+    session.list_saved().unwrap();
 
-    let selection = session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    let selection = crate::select_newest(&mut session);
     let history = session
         .app_history(
             viewer::live_app_response::KeyKind::Bundle,
@@ -1007,52 +769,13 @@ struct Moment {
 }
 
 #[test]
-fn keeps_compact_app_trends_after_actual_raw_cache_pressure() {
-    // Real 12000-member publications evict raw rows without discarding small App histories.
-    let mut fixture = Fixture::new_mode(true, 12_000, None);
-    fixture.publish(1000);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    for second in 1001..=1031 {
-        fixture.publish(second);
-        session.poll().unwrap();
-    }
-    session.follow_latest().unwrap();
-
-    let history = session
-        .app_history(
-            viewer::live_app_response::KeyKind::Bundle,
-            b"/Apps/Current.app",
-        )
-        .unwrap();
-    let catalog = session.catalog();
-
-    assert!(catalog["tail_ticks"].as_u64().unwrap() < 32);
-    assert_eq!(history["points"].as_array().unwrap().len(), 32);
-    assert_eq!(
-        history["points"][0]["observation"]["stamp"]["publication"],
-        "1"
-    );
-    assert_eq!(
-        history["points"][31]["observation"]["stamp"]["publication"],
-        "32"
-    );
-    assert_eq!(history["points"][31]["cpu_ns"]["known"], 1);
-    assert_eq!(history["points"][31]["resident_bytes"]["known"], 11);
-    assert_eq!(history["coverage"]["retention_limited"], false);
-    assert!(
-        history["coverage"]["cache_bytes"].as_u64().unwrap()
-            <= history["coverage"]["cache_bytes_max"].as_u64().unwrap()
-    );
-}
-
-#[test]
 fn keeps_app_history_with_an_explicit_gap_after_its_last_process_disappears() {
     // A selected App ending is normal live state, not a failed dashboard query.
     let mut fixture = Fixture::new();
     publish(&mut fixture, 1);
     let mut session = LiveSession::open(&fixture.root).unwrap();
     publish(&mut fixture, 2);
-    session.poll().unwrap();
+    session.list_saved().unwrap();
     let memory = Memory::default();
     fixture
         .writer
@@ -1069,8 +792,9 @@ fn keeps_app_history_with_an_explicit_gap_after_its_last_process_disappears() {
             },
         )
         .unwrap();
-    session.poll().unwrap();
-    session.follow_latest().unwrap();
+    fixture.seal();
+    session.list_saved().unwrap();
+    crate::select_newest(&mut session);
     let kind = viewer::live_app_response::KeyKind::Bundle;
     let key = b"/Applications/A.app";
 

@@ -75,38 +75,6 @@ fn restores_app_history_without_a_registered_live_source() {
 }
 
 #[test]
-fn keeps_live_app_readings_when_committed_history_becomes_unreadable() {
-    // Goal: losing optional saved history cannot blank independently retained live readings.
-    // Method: warm the saved trace, withhold its real data directory, then recover it.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1001);
-    fixture.publish_with_system_rows(1002);
-    fixture.seal();
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
-    let kind = viewer::live_app_response::KeyKind::Bundle;
-    let key = b"/Apps/Current.app";
-    let before = session.app_history(kind, key).unwrap();
-    let data = fixture.root.join("data");
-    let withheld = fixture.root.join("withheld-data");
-    std::fs::rename(&data, &withheld).unwrap();
-
-    let history = session.app_history(kind, key).unwrap();
-    let detail = session.app_detail(kind, key, 0).unwrap();
-
-    assert_eq!(history["points"], before["points"]);
-    assert_eq!(history["selected"], before["selected"]);
-    assert_eq!(history["points"][1]["cpu_ns"]["known"], 1);
-    assert_eq!(detail["app"]["resident_bytes"]["known"], 11);
-    assert!(history["restoration_error"].as_str().unwrap().len() <= 2048);
-    assert!(!history["restoration_error"].as_str().unwrap().is_empty());
-    std::fs::rename(&withheld, &data).unwrap();
-    let recovered = session.app_history(kind, key).unwrap();
-    assert_eq!(recovered["points"], before["points"]);
-    assert!(recovered["restoration_error"].is_null());
-}
-
-#[test]
 fn preserves_refused_members_and_raw_app_bytes_in_committed_observations() {
     // Goal: cold App identity preserves byte keys and keeps refused quantities unavailable.
     // Method: reopen a sealed member with non-UTF-8 App/program bytes and refused usage.

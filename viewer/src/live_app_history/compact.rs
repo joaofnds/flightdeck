@@ -1,15 +1,4 @@
-use std::cmp::Ordering;
-use std::sync::Arc;
-
-use crate::apps::AppKey;
-use crate::live_app_response::{Key, KeyKind, Measure};
-
-use super::App;
-
-pub(super) struct HistoryKey {
-    kind: KeyKind,
-    bytes: Vec<u8>,
-}
+use crate::live_app_response::Measure;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CompactMeasure {
@@ -24,22 +13,9 @@ const OVERFLOWED: u32 = 1 << (2 * MEMBERS_BITS);
 
 const _: () = {
     assert!(crate::apps::PROCESS_INTERVALS_MAX < 1 << MEMBERS_BITS);
-    assert!(align_of::<HistoryKey>() <= align_of::<usize>());
     assert!(align_of::<CompactMeasure>() <= align_of::<u32>());
     assert!(size_of::<CompactMeasure>() <= 12);
-    assert!(size_of::<App>() <= 112);
 };
-
-impl HistoryKey {
-    pub(super) fn view(&self) -> AppKey<'_> {
-        super::key(self.kind, &self.bytes)
-    }
-
-    pub(super) fn bytes(&self) -> usize {
-        // Arc retains two reference counts beside the owned key and its byte allocation.
-        2 * size_of::<usize>() + size_of::<Self>() + self.bytes.capacity()
-    }
-}
 
 impl CompactMeasure {
     pub(crate) fn capture(source: &Measure) -> Self {
@@ -79,29 +55,4 @@ pub(super) fn count(value: u32) -> u16 {
     assert!(value <= maximum);
 
     u16::try_from(value).unwrap_or_else(|_| unreachable!("App member limit fits u16"))
-}
-
-pub(super) fn capture_key(
-    source: &Key,
-    previous: &[App],
-    previous_index: &mut usize,
-) -> Arc<HistoryKey> {
-    let target = super::key(source.kind, &source.bytes);
-
-    for _attempt in 0..=previous.len() {
-        let Some(app) = previous.get(*previous_index) else {
-            break;
-        };
-
-        match app.key.view().cmp(&target) {
-            Ordering::Less => *previous_index += 1,
-            Ordering::Equal => return Arc::clone(&app.key),
-            Ordering::Greater => break,
-        }
-    }
-
-    Arc::new(HistoryKey {
-        kind: source.kind,
-        bytes: source.bytes.clone(),
-    })
 }

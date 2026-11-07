@@ -4,8 +4,7 @@ use super::*;
 use crate::Cancellation;
 use crate::apps::Stamp;
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_history::{App, CompactMeasure, compact};
-use crate::live_app_response::{Key, KeyKind, Measure};
+use crate::live_app_response::{Measure, Observation};
 use collector::processes::Usage;
 
 struct SavedFixture {
@@ -16,41 +15,6 @@ struct SavedFixture {
     operation: Operation,
     expected: [Value; 3],
     limited_bytes: usize,
-}
-
-#[test]
-fn batch_keeps_distinct_eight_app_cohorts_other_and_missing_observations() {
-    // Rotated leaders and a missing middle publication forbid sharing CPU's cohort or zeros.
-    let history = distinct_history();
-    let selected = observation(3);
-    let cancellation = Arc::new(Cancellation::default());
-    let operation = cancellation.operation(0).unwrap();
-    let expected = METRICS.map(|metric| {
-        history
-            .attribution_response(
-                &Selected::ending_at(selected).unwrap(),
-                metric,
-                None,
-                &operation,
-            )
-            .unwrap()
-    });
-
-    let batch = history
-        .attribution_batch_response(&Selected::ending_at(selected).unwrap(), None, &operation)
-        .unwrap();
-
-    assert_batch(&batch, &expected);
-    let cpu = batch.cpu.as_ref().unwrap();
-    let power = batch.power.as_ref().unwrap();
-    let disk = batch.disk.as_ref().unwrap();
-    assert_ne!(cpu["cohort"], power["cohort"]);
-    assert_ne!(cpu["cohort"], disk["cohort"]);
-    assert_ne!(power["cohort"], disk["cohort"]);
-    assert_eq!(cpu["cohort"].as_array().unwrap().len(), 8);
-    assert_eq!(cpu["points"][0]["other"]["app_count"], 4);
-    assert_eq!(cpu["points"][1]["source_available"], false);
-    assert_eq!(cpu["points"][1]["other"], Value::Null);
 }
 
 #[test]
@@ -124,14 +88,9 @@ fn batch_cancellation_restores_warm_facts_and_refuses_every_metric() {
                 selected: &Selected::ending_at(fixture.selected).unwrap(),
                 saved: &fixture.saved,
                 operation: &operation,
-                available: BYTES_MAX.saturating_sub(history.bytes),
+                available: BYTES_MAX,
             },
-            &mut Batch::new(
-                &history,
-                &Selected::ending_at(fixture.selected).unwrap(),
-                &operation,
-            )
-            .unwrap(),
+            &mut Batch::new(&Selected::ending_at(fixture.selected).unwrap(), &operation),
         )
         .unwrap();
     assert_batch(&retry, &fixture.expected);
@@ -167,7 +126,7 @@ fn batch_final_validation_rejects_replaced_cached_files_and_restores_ownership()
     let rates = resident.take_attribution();
     assert_eq!(rates.count(), retained);
     resident.install_attribution(rates);
-    assert!(history.bytes + resident.bytes() <= BYTES_MAX);
+    assert!(resident.bytes() <= BYTES_MAX);
 }
 
 #[test]
@@ -189,29 +148,13 @@ fn batch_disk_failure_preserves_cpu_and_power() {
 }
 
 fn assert_metric_failure(failed: usize) {
-    let history = distinct_history();
+    let history = History::new();
     let selected = observation(3);
     let cancellation = Arc::new(Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
-    let expected = METRICS.map(|metric| {
-        history
-            .attribution_response(
-                &Selected::ending_at(selected).unwrap(),
-                metric,
-                None,
-                &operation,
-            )
-            .unwrap()
-    });
-    let mut batch = Batch::new(
-        &history,
-        &Selected::ending_at(selected).unwrap(),
-        &operation,
-    )
-    .unwrap();
+    let mut batch = Batch::new(&Selected::ending_at(selected).unwrap(), &operation);
     batch.states[failed].apply(|_reduction| Err(Error::Bound("batch metric test failure")));
     batch.choose(&operation).unwrap();
-    batch.project_live(&history, &operation).unwrap();
 
     let result = batch.finish(&history, None, &operation).unwrap();
 
@@ -225,7 +168,7 @@ fn assert_metric_failure(failed: usize) {
                 Err(Error::Bound("batch metric test failure"))
             ));
         } else {
-            assert_payload(value.as_ref().unwrap(), &expected[index]);
+            assert!(value.is_ok());
         }
     }
 }
@@ -803,12 +746,7 @@ fn assert_context_boundary(keys: &[Vec<u8>], extra: &[u8], error: &'static str) 
     let history = History::new();
     let cancellation = Arc::new(Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
-    let mut batch = Batch::new(
-        &history,
-        &Selected::ending_at(observation(3)).unwrap(),
-        &operation,
-    )
-    .unwrap();
+    let mut batch = Batch::new(&Selected::ending_at(observation(3)).unwrap(), &operation);
     let mut capture = crate::app_attribution_history::Capture {
         coverage: crate::live::resident_history::Capture {
             observation: observation(1),
@@ -850,7 +788,12 @@ fn assert_context_boundary(keys: &[Vec<u8>], extra: &[u8], error: &'static str) 
 fn boundary_reading(key: &[u8]) -> crate::app_attribution_history::Reading<'_> {
     crate::app_attribution_history::Reading {
         key: crate::apps::AppKey::Bundle(key),
-        measure: amount(1).measure(),
+        measure: Measure {
+            known: 1,
+            measured_members: 1,
+            unavailable_members: 0,
+            overflowed: false,
+        },
         members: 1,
         membership_complete: true,
     }
@@ -892,7 +835,7 @@ impl SavedFixture {
                 .attribution_response(
                     &Selected::ending_at(selected).unwrap(),
                     metric,
-                    Some(&saved),
+                    &saved,
                     &operation,
                 )
                 .unwrap()
@@ -913,11 +856,10 @@ impl SavedFixture {
 
     fn query(&self, history: &History, available: usize) -> Result<Box<AppAttributionHistories>> {
         let mut batch = Batch::new(
-            history,
             &Selected::ending_at(self.selected).unwrap(),
             &self.operation,
-        )?;
-        let available = available.min(BYTES_MAX.saturating_sub(history.bytes));
+        );
+        let available = available.min(BYTES_MAX);
         history.attribution_batch_saved(
             &SavedQuery {
                 selected: &Selected::ending_at(self.selected).unwrap(),
@@ -928,60 +870,6 @@ impl SavedFixture {
             &mut batch,
         )
     }
-}
-
-fn distinct_history() -> Box<History> {
-    let mut history = Box::new(History::new());
-    for publication in [1, 3] {
-        let mut point = Box::new(Point {
-            observation: observation(publication),
-            segment: 0,
-            elapsed_ns: Some(1_000_000_000),
-            apps: Vec::with_capacity(12),
-            groups: None,
-            membership_complete: true,
-            live_ungrouped_members: 0,
-            ungrouped_members: 0,
-            usage_refused: 0,
-            usage_gone: 0,
-        });
-        for index in 0..12 {
-            let bytes = format!("/Apps/{index:02}.app").into_bytes();
-            let key = Key {
-                kind: KeyKind::Bundle,
-                display: "App".into(),
-                bytes,
-            };
-            let mut previous = 0;
-            let zero = amount(0);
-            point.apps.push(App {
-                key: compact::capture_key(&key, &[], &mut previous),
-                members: 1,
-                membership_complete: true,
-                cpu_ns: amount(100 - index),
-                energy_nj: amount(100 - (index + 4) % 12),
-                gpu_ns: amount(100 - (index + 6) % 12),
-                disk_io_bytes: amount(100 - (index + 8) % 12),
-                disk_read_bytes: zero,
-                disk_written_bytes: zero,
-                resident_bytes: zero,
-                footprint_bytes: zero,
-            });
-        }
-        history.push(point, 0);
-    }
-    history.observations.insert(1, observation(2));
-
-    history
-}
-
-fn amount(known: u64) -> CompactMeasure {
-    CompactMeasure::capture(&Measure {
-        known,
-        measured_members: 1,
-        unavailable_members: 0,
-        overflowed: false,
-    })
 }
 
 fn observation(publication: u64) -> Observation {
@@ -1164,14 +1052,14 @@ fn saved_batch_at(
 ) -> Result<Box<AppAttributionHistories>> {
     let cancellation = Arc::new(Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
-    let mut batch = Batch::new(history, selected, &operation).unwrap();
+    let mut batch = Batch::new(selected, &operation);
 
     history.attribution_batch_saved(
         &SavedQuery {
             selected,
             saved,
             operation: &operation,
-            available: available.min(BYTES_MAX.saturating_sub(history.bytes)),
+            available: available.min(BYTES_MAX),
         },
         &mut batch,
     )

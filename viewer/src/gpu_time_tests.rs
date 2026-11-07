@@ -87,6 +87,7 @@ fn gpu_live() -> (Fixture, GpuReads) {
             process(9, b"other", b"/B.app", busy, Some(1_100_000_000)),
         ],
     );
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
 
     let live = gpu_reads(&mut session);

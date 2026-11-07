@@ -10,7 +10,7 @@ impl LiveSession {
             let selected = self.selected_in_context()?;
 
             self.app_history
-                .resident_response(&selected, self.history.as_ref(), &self.operation)
+                .resident_response(&selected, self.saved_session()?, &self.operation)
         })
     }
 }

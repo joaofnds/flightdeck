@@ -1,6 +1,6 @@
 //! The older tail of the scalar context: one reading in every stretch of seconds from before the
 //! full-detail context, so a chart can span the whole loaded hour without the viewer holding or
-//! sending every second of it. A live session keeps each sealed minute the tail needs, read
+//! sending every second of it. A saved session keeps each sealed minute the tail needs, read
 //! once, and assembles each stride's tail from the minutes it keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,7 +110,7 @@ impl TailRange {
     }
 }
 
-/// The sealed minutes the older tail of a live session keeps. The tail assembled from them is
+/// The sealed minutes the older tail of a saved session keeps. The tail assembled from them is
 /// kept by the `Session` whose list it was assembled from, so a refreshed list never answers
 /// with a tail of the list before it.
 #[derive(Default)]
@@ -689,7 +689,7 @@ impl Session {
 
         metrics::trends_point(
             &self.reader(),
-            &Sources::Machine {
+            &Sources {
                 current: &reading,
                 previous: before.as_ref(),
             },

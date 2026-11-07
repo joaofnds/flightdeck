@@ -47,7 +47,7 @@ impl Envelope {
 }
 
 fn capture(options: &command::Capture<'_>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut session = viewer::LiveSession::open_history_with(
+    let mut session = viewer::LiveSession::open_with(
         options.recording,
         Arc::new(viewer::Cancellation::default()),
         0,

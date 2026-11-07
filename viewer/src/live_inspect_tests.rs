@@ -39,8 +39,8 @@ fn saved_minutes(minutes: u64) -> Fixture {
 /// from the saved minutes or the ring.
 fn evicted_session(fixture: &Fixture) -> LiveSession {
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.poll().unwrap();
-    live.poll_evict(u64::MAX).unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
 
     live
 }
@@ -198,47 +198,6 @@ fn reads_a_second_the_ring_alone_holds() {
 }
 
 #[test]
-fn refuses_a_ring_observation_at_another_second() {
-    // Goal: a hover never reads a neighbour the ring holds in place of the second it names.
-    // Method: publish two seconds without sealing them, hold neither live, and inspect second
-    // 1001 by the identity of second 1000's observation.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    let mut live = evicted_session(&fixture);
-    let identity = hover_identity(&live.select(1001, 0).unwrap(), 1000);
-
-    let inspected = live.inspect(1001, &identity);
-
-    assert!(matches!(
-        inspected,
-        Err(Error::Bound("inspected observation second"))
-    ));
-}
-
-#[test]
-fn reads_a_live_second_without_the_saved_minutes() {
-    // Goal: a hover on a second the session holds live reads it from the live readings, never
-    // the saved minutes, though a minute keeps it too.
-    // Method: seal two seconds and hold both live, commit to the older, read the newer, and
-    // count the saved tables the read takes.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(1000);
-    fixture.publish_with_system_rows(1001);
-    fixture.seal();
-    let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.poll().unwrap();
-    let identity = hover_identity(&live.select(1001, 0).unwrap(), 1001);
-    live.select(1000, 0).unwrap();
-    let reads = live.history.as_ref().unwrap().source_reads.get();
-
-    let inspected = live.inspect(1001, &identity).unwrap();
-
-    assert!(same(&inspected["selected"], &identity));
-    assert_eq!(live.history.as_ref().unwrap().source_reads.get(), reads);
-}
-
-#[test]
 fn brings_the_summary_a_selection_of_its_live_second_brings() {
     // Goal: a hover on a live second shows the readings a click on that second shows.
     // Method: publish two seconds without sealing them, select the older, commit to the newer,
@@ -246,8 +205,10 @@ fn brings_the_summary_a_selection_of_its_live_second_brings() {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1000);
     fixture.publish_with_system_rows(1001);
+    fixture.seal();
     let mut live = LiveSession::open(&fixture.root).unwrap();
-    live.poll().unwrap();
+    fixture.seal();
+    live.list_saved().unwrap();
     let selected = live.select(1000, 0).unwrap();
     let identity = hover_identity(&selected, 1000);
     live.select(1001, 0).unwrap();

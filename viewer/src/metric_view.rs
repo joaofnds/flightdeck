@@ -1,8 +1,8 @@
-//! Borrowed, typed access to machine facts. Saved minutes decode before this boundary and live
-//! facts never become text cells, so both run the same metric reducers and presentation.
+//! Borrowed, typed access to machine facts. Saved minutes and the Store's readings decode before
+//! this boundary and never become text cells, so both run the same metric reducers.
 use persistence::{Error, Result};
 
-use crate::live_raw::{Cell, Raw};
+use crate::live_raw::Cell;
 
 pub(crate) struct View<'a>(pub(crate) crate::live_raw::View<'a>);
 
@@ -58,15 +58,10 @@ impl Key<'_> {
     }
 }
 
-pub(crate) enum Sources<'a> {
-    Machine {
-        current: &'a crate::store::Reading<'a>,
-        previous: Option<&'a crate::store::Reading<'a>>,
-    },
-    Native {
-        current: &'a Raw,
-        previous: Option<&'a Raw>,
-    },
+/// The reading a reducer reads, and the one before it that its rates take their change from.
+pub(crate) struct Sources<'a> {
+    pub current: &'a crate::store::Reading<'a>,
+    pub previous: Option<&'a crate::store::Reading<'a>>,
 }
 
 impl<'a> Sources<'a> {
@@ -84,27 +79,13 @@ impl<'a> Sources<'a> {
         observation: &crate::session::Observation,
         name: &'static str,
     ) -> Result<Option<View<'a>>> {
-        match self {
-            Self::Machine { current, previous } => {
-                let reading = if current.tick.publication == observation.publication {
-                    *current
-                } else {
-                    previous.ok_or(Error::Bound("metric predecessor"))?
-                };
-                let view = crate::live_raw::View::machine(reading, name)?;
-                Ok((view.len() > 0).then_some(View(view)))
-            }
-            Self::Native { current, previous } => {
-                let raw = if current.machine.ticks[0].publication == observation.publication {
-                    *current
-                } else {
-                    previous.ok_or(Error::Bound("metric predecessor"))?
-                };
-                let mut view = None;
-                raw.view(name, &mut view)?;
-                Ok(Some(View(view.ok_or(Error::Bound("metric view"))?)))
-            }
-        }
+        let reading = if self.current.tick.publication == observation.publication {
+            self.current
+        } else {
+            self.previous.ok_or(Error::Bound("metric predecessor"))?
+        };
+        let view = crate::live_raw::View::machine(reading, name)?;
+        Ok((view.len() > 0).then_some(View(view)))
     }
 }
 

@@ -6,7 +6,6 @@ use crate::app_process_groups_history::cache::Cache;
 use crate::app_process_groups_history::reduce::{Phase, Reduction};
 use crate::cancellation::Operation;
 use crate::live_app_history::{BYTES_MAX, History, ResidentCache, Target};
-use crate::live_app_response::Observation;
 use crate::live_app_response::Selected;
 
 struct Query<'query, 'key> {
@@ -31,33 +30,22 @@ impl History {
         &self,
         selected: &Selected,
         target: &Target<'_>,
-        saved: Option<&Session>,
+        saved: &Session,
         context: &[crate::cpu_history_sample::Identity],
         operation: &Operation,
     ) -> Result<Box<AppProcessGroupsHistory>> {
-        let mut reduction = Reduction::new(selected, target.kind, target.bytes, operation)?;
-        self.process_groups_visit(target, &mut reduction, Phase::Observe)?;
-        if let Some(saved) = saved {
-            return self.process_groups_response_saved(
-                &Query {
-                    selected,
-                    target,
-                    saved,
-                    context,
-                    operation,
-                    available: BYTES_MAX - self.bytes,
-                },
-                reduction,
-            );
-        }
-
-        self.saved_residents.borrow_mut().take_groups();
-
-        reduction.context(context)?;
-        reduction.choose()?;
-        self.process_groups_visit(target, &mut reduction, Phase::Project)?;
-
-        reduction.finish()
+        let reduction = Reduction::new(selected, target.kind, target.bytes, operation)?;
+        self.process_groups_response_saved(
+            &Query {
+                selected,
+                target,
+                saved,
+                context,
+                operation,
+                available: BYTES_MAX,
+            },
+            reduction,
+        )
     }
 
     fn process_groups_response_saved(
@@ -78,7 +66,7 @@ impl History {
             query
                 .saved
                 .with_process_groups_replay(query.selected, query.target, |replay| {
-                    self.process_groups_response_saved_replay(query, replay, &mut lease, reduction)
+                    Self::process_groups_response_saved_replay(query, replay, &mut lease, reduction)
                 })?;
 
         query.operation.check()?;
@@ -87,17 +75,16 @@ impl History {
         Ok(result)
     }
 
-    /// The groups of the selected App, observed and then projected from the live history, the
-    /// cache, the replay of the saved minutes and the parts sealed windows keep.
+    /// The groups of the selected App, observed and then projected from the groups cache, the
+    /// replay of the saved minutes and the parts sealed windows keep.
     fn process_groups_response_saved_replay(
-        &self,
         query: &Query<'_, '_>,
         replay: &mut crate::session::ProcessGroupsReplay,
         lease: &mut Lease<'_>,
         mut reduction: Box<Reduction<'_>>,
     ) -> Result<Box<AppProcessGroupsHistory>> {
         let cached =
-            self.process_groups_response_saved_restore(query, replay, lease, &mut reduction)?;
+            Self::process_groups_response_saved_restore(query, replay, lease, &mut reduction)?;
         Self::process_groups_response_saved_kept(query, replay, &mut reduction, Phase::Observe)?;
         reduction.context(query.context)?;
         reduction.choose()?;
@@ -109,14 +96,13 @@ impl History {
         });
 
         query.operation.check()?;
-        self.process_groups_visit(query.target, &mut reduction, Phase::Project)?;
         if cached {
             Self::process_groups_response_saved_cached(lease, &mut reduction, Phase::Project)?;
         } else {
             // Overflow may have removed facts used during Observe. Restore the entire plan.
             query
                 .saved
-                .process_groups_plan(replay, |observation| self.groups_live(observation))?;
+                .process_groups_plan(replay, |_observation| Ok(false))?;
             query
                 .saved
                 .visit_process_groups(replay, |frame, previous, _predecessor| {
@@ -135,21 +121,15 @@ impl History {
     }
 
     fn process_groups_response_saved_restore(
-        &self,
         query: &Query<'_, '_>,
         replay: &mut crate::session::ProcessGroupsReplay,
         lease: &mut Lease<'_>,
         reduction: &mut Reduction<'_>,
     ) -> Result<bool> {
         let space = lease.space();
-        let mut cached =
-            self.process_groups_response_saved_restore_prepare(query, replay, lease)?;
+        let mut cached = Self::process_groups_response_saved_restore_prepare(query, replay, lease)?;
 
         query.saved.process_groups_plan(replay, |observation| {
-            if self.groups_live(observation)? {
-                return Ok(true);
-            }
-
             if cached {
                 return lease
                     .groups
@@ -233,7 +213,6 @@ impl History {
     }
 
     fn process_groups_response_saved_restore_prepare(
-        &self,
         query: &Query<'_, '_>,
         replay: &crate::session::ProcessGroupsReplay,
         lease: &mut Lease<'_>,
@@ -244,10 +223,6 @@ impl History {
         };
 
         cache.retain(query.operation, |point| {
-            if self.groups_live(&point.observation)? {
-                return Ok(false);
-            }
-
             query.saved.process_groups_cache_needed(replay, point)
         })?;
 
@@ -259,34 +234,6 @@ impl History {
 
         Ok(cached)
     }
-
-    fn groups_live(&self, observation: &Observation) -> Result<bool> {
-        for point in &self.points {
-            if point.observation.recording != observation.recording {
-                continue;
-            }
-
-            if point.observation.stamp.boot != observation.stamp.boot {
-                continue;
-            }
-
-            if point.observation.stamp.run != observation.stamp.run {
-                continue;
-            }
-
-            if point.observation.stamp.publication != observation.stamp.publication {
-                continue;
-            }
-
-            if point.observation != *observation {
-                return Err(Error::Bound("process group live observation conflict"));
-            }
-
-            return Ok(point.groups.is_some());
-        }
-
-        Ok(false)
-    }
 }
 
 impl Lease<'_> {
@@ -295,7 +242,7 @@ impl Lease<'_> {
         // The open page's groups may use the whole budget, since leaving them no room
         // replays every saved minute twice on each reading. Other pages' caches give way
         // when this answer commits.
-        self.available = available.min(BYTES_MAX - self.history.bytes);
+        self.available = available.min(BYTES_MAX);
         self.groups = previous.filter(|cache| cache.matches(target));
         if self.groups.is_none() {
             self.groups = Some(Cache::new(target));
@@ -335,7 +282,7 @@ impl Drop for Lease<'_> {
             }
         }
 
-        assert!(self.history.bytes + self.resident.bytes() <= BYTES_MAX);
+        assert!(self.resident.bytes() <= BYTES_MAX);
 
         let resident = std::mem::replace(&mut self.resident, ResidentCache::new());
         self.history.saved_residents.replace(resident);

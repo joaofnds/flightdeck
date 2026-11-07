@@ -24,8 +24,9 @@ fn resident_history_orders_fractional_means_before_integer_ties() {
     let mut fixture = ResidentFixture::new();
     fixture.publish(&rows(&[Some(1), Some(1)]));
     fixture.publish(&rows(&[Some(1), Some(2)]));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let response = session.app_resident_history().unwrap();
 
@@ -61,8 +62,9 @@ fn resident_history_keeps_interval_leaders_when_the_current_leader_changes() {
         Some(1),
         Some(100),
     ]));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let response = session.app_resident_history().unwrap();
 
@@ -97,8 +99,9 @@ fn resident_history_compares_exact_means_and_skips_unavailable_denominators() {
     fixture.publish(&rows(&values));
     values[8] = Some(9_007_199_254_740_993);
     fixture.publish(&rows(&values));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let response = session.app_resident_history().unwrap();
 
@@ -123,6 +126,7 @@ fn resident_history_preserves_distinct_observations_in_the_same_wall_second() {
     let mut fixture = ResidentFixture::new();
     fixture.publish_at(&rows(&[Some(10)]), 1_000_000_000_000);
     fixture.publish_at(&rows(&[Some(90)]), 1_000_000_000_000);
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
     session.select(1000, 0).unwrap();
 
@@ -179,8 +183,9 @@ fn resident_history_keeps_partial_residents_eligible_and_refused_readings_unavai
             bytes: Some(2),
         },
     ]);
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let response = session.app_resident_history().unwrap();
 
@@ -204,8 +209,9 @@ fn resident_history_reports_overflow_when_other_adds_large_captured_apps() {
     // Ten maximal gauges choose eight deterministic ties; Other must not wrap the final pair.
     let mut fixture = ResidentFixture::new();
     fixture.publish(&rows(&[Some(u64::MAX); 10]));
+    fixture.seal();
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let response = session.app_resident_history().unwrap();
 
@@ -248,7 +254,7 @@ fn resident_history_accepts_the_bounded_context_union_across_app_churn() {
     // Each observation fits the population bound; together they reach exactly 24,000 keys.
     let fixture = churned(24_000);
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let response = session.app_resident_history().unwrap();
 
@@ -261,7 +267,7 @@ fn resident_history_refuses_context_churn_above_the_population_bound() {
     // A valid second observation cannot add an unbounded context union behind a top-eight result.
     let fixture = churned(24_001);
     let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
+    crate::live::select_newest(&mut session);
 
     let result = session.app_resident_history();
 
@@ -289,72 +295,7 @@ fn churned(count: usize) -> ResidentFixture {
     );
     fixture.publish(&rows[..12_000]);
     fixture.publish(&rows[12_000..]);
+    fixture.seal();
 
     fixture
-}
-
-#[test]
-fn resident_history_preserves_context_gaps_after_compact_facts_are_evicted() {
-    // Byte pressure may evict App facts, but cannot remove their observed times or invent zeros.
-    let (fixture, session, first) = dense_context();
-
-    let response = session.app_resident_history().unwrap();
-
-    assert_eq!(response["points"].as_array().unwrap().len(), 400);
-    assert_eq!(response["points"][0]["observation"], first);
-    assert_eq!(
-        response["points"][0]["observation"]["stamp"]["publication"],
-        "1"
-    );
-    assert_eq!(response["points"][0]["source_available"], false);
-    assert_eq!(response["points"][0]["membership_complete"], Value::Null);
-    assert_eq!(response["points"][0]["usage_refused"], Value::Null);
-    assert_eq!(
-        response["points"][0]["apps"],
-        json!([null, null, null, null, null, null, null, null])
-    );
-    assert_eq!(response["points"][0]["other"], Value::Null);
-    assert_eq!(response["points"][399]["source_available"], true);
-    assert_eq!(response["points"][399]["apps"][0]["known"], 1);
-    assert_eq!(response["coverage"]["retention_limited"], true);
-    drop(session);
-    drop(fixture);
-}
-
-fn dense_context() -> (ResidentFixture, LiveSession, Value) {
-    let keys: Vec<_> = (0..2000)
-        .map(|index| format!("/Apps/{index:04}.app").into_bytes())
-        .collect();
-    let residents: Vec<_> = keys
-        .iter()
-        .map(|key| Resident {
-            key,
-            bytes: Some(1),
-        })
-        .collect();
-    let mut fixture = ResidentFixture::with_capacity(
-        2000,
-        collector::ring::DictionaryCapacity {
-            entries: 4096,
-            arena_bytes: 256_000,
-        },
-    );
-    fixture.publish(&residents);
-    let mut session = LiveSession::open(&fixture.root).unwrap();
-    session.follow_latest().unwrap();
-    let first = session
-        .app_detail(
-            crate::live_app_response::KeyKind::Bundle,
-            b"/Apps/0000.app",
-            0,
-        )
-        .unwrap()["selected"]
-        .clone();
-    for _observation in 1..400 {
-        fixture.publish(&residents);
-        session.poll().unwrap();
-    }
-    session.follow_latest().unwrap();
-
-    (fixture, session, first)
 }
