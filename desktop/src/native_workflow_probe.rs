@@ -189,7 +189,7 @@ fn report(dashboard: &mut LiveDashboard, initial: &Value) -> Result<Value, Strin
     let report = json!({"same_recording_reopen_succeeded":true,
         "invalid_open_from_computer_preserved_readable_original":true,
         "successful_open_from_computer_landed_overview":true,
-        "previous_inspection_cleared":true,"previous_row_hover_page_cleared":true,
+        "previous_inspection_cleared":true,
         "clipboard_payload_roundtrip":true,"initial_observation":initial,
         "reopened_observation":snapshot.selection["selected"],
         "native_picker_clipboard_ime_voiceover_exercised":false});

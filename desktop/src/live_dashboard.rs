@@ -517,8 +517,7 @@ impl LiveDashboard {
         self.follows_live_mac()
     }
 
-    /// Whether the window follows the live Mac's newest second, on whichever page it shows. The
-    /// store ingests while it does, so Overview opened again has no minutes to catch up from.
+    /// Whether the window follows the live Mac's newest second, on whichever page it shows.
     fn follows_live_mac(&self) -> bool {
         if !self.reads_live_mac() {
             return false;

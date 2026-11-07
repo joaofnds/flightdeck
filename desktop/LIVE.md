@@ -351,7 +351,7 @@ needs a longer profile before interpreting the prototype's steady-state cost.
 ## Historical parity and limits
 
 Live mode implements Overview, CPU & processes, Apps, Memory, GPU, Energy, Network,
-Computer and Recorded readings. Memory categories stack only on Overview; dedicated
+Computer and Self-monitoring. Memory categories stack only on Overview; dedicated
 memory charts keep them independent. Energy series remain independent. Network
 sends plot below zero. The schematic uses recorded CPU/GPU activity, installed RAM
 and validated fan channels, with unavailable sensors labeled explicitly.

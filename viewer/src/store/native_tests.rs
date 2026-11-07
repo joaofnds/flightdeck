@@ -630,8 +630,8 @@ fn a_clockless_native_tick_keeps_its_apps_without_inventing_a_chart_second() {
 }
 
 #[test]
-fn an_unadmitted_frame_does_not_let_duplicate_legacy_pids_escape_as_valid_raw() {
-    // Goal: Frame capacity cannot skip structural process validation and promote invalid raw.
+fn an_unadmitted_frame_does_not_let_duplicate_legacy_pids_through() {
+    // Goal: Frame capacity cannot skip structural process validation.
     // Method: a real legacy publication has too many rows and duplicates the same PID throughout.
     let count = crate::apps::PROCESS_INTERVALS_MAX + 1;
     let mut fixture = Fixture::new_mode(false, u64::try_from(count).unwrap(), None);
@@ -745,9 +745,9 @@ fn publish_legacy_duplicates(fixture: &mut Fixture, count: usize) {
 }
 
 #[test]
-fn nan_fans_stay_missing_channels_without_refusing_native_raw_or_summary() {
+fn nan_fans_stay_missing_channels_without_refusing_the_summary() {
     // Goal: unavailable fan channels keep the existing exception at the real native boundary.
-    // Method: publish NaN fan speed beside valid power and inspect both owned facets.
+    // Method: publish NaN fan speed beside valid power and inspect the summary.
     let mut fixture = Fixture::new();
     publish_smc(&mut fixture, 1, Some(12.0), true, f32::NAN);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));

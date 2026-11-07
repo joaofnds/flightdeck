@@ -27,7 +27,7 @@ use super::{Command, Context, Earlier, Histories, Presentation, Reader, Shared, 
 const STORE_WAITS_MAX: u32 = 40;
 
 /// What one step of the reader found.
-enum Reading {
+enum Answer {
     /// The Store has not answered, or its answer changes nothing the page shows.
     Waiting,
     Ready(Box<Snapshot>),
@@ -70,7 +70,7 @@ impl StoreReader {
         self.store_waits = 0;
     }
 
-    fn snapshot(&mut self, command: &mut Command, shared: &Shared) -> Result<Reading, String> {
+    fn snapshot(&mut self, command: &mut Command, shared: &Shared) -> Result<Answer, String> {
         if shared.cancellation.epoch() != command.epoch {
             #[cfg(test)]
             super::measurement::abandoned(shared, command.generation);
@@ -78,7 +78,7 @@ impl StoreReader {
                 .cancel()
                 .map_err(|error| format!("Store query: {error:?}"))?;
             self.pending = None;
-            return Ok(Reading::Waiting);
+            return Ok(Answer::Waiting);
         }
         if self.generation != command.generation {
             self.handle
@@ -92,7 +92,7 @@ impl StoreReader {
         }
         if self.published == command.generation {
             if self.snapshot_published_stands(command, shared)? {
-                return Ok(Reading::Waiting);
+                return Ok(Answer::Waiting);
             }
         }
         if command.context == Context::Keep {
@@ -101,7 +101,7 @@ impl StoreReader {
         if self.tail_pending {
             if let Some(context) = &self.context {
                 if context.readiness() == QueryReadiness::Complete {
-                    return payload::snapshot(context, command, shared, None).map(Reading::Ready);
+                    return payload::snapshot(context, command, shared, None).map(Answer::Ready);
                 }
             }
         }
@@ -122,7 +122,7 @@ impl StoreReader {
                     };
                     if identity_matches {
                         return payload::snapshot(context, command, shared, None)
-                            .map(Reading::Ready);
+                            .map(Answer::Ready);
                     }
                 }
             }
@@ -156,7 +156,7 @@ impl StoreReader {
         Ok(mailbox.output.is_some())
     }
 
-    fn snapshot_kept(&mut self, command: &mut Command, shared: &Shared) -> Result<Reading, String> {
+    fn snapshot_kept(&mut self, command: &mut Command, shared: &Shared) -> Result<Answer, String> {
         let Some(context) = &self.context else {
             return self.snapshot_query(command, shared);
         };
@@ -171,7 +171,7 @@ impl StoreReader {
         &mut self,
         command: &mut Command,
         shared: &Shared,
-    ) -> Result<Reading, String> {
+    ) -> Result<Answer, String> {
         let context = self
             .context
             .as_ref()
@@ -186,20 +186,20 @@ impl StoreReader {
             .as_ref()
             .ok_or("A kept Store read needs identity")?;
         if !context.retains_second(second) {
-            return Ok(Reading::Saved);
+            return Ok(Answer::Saved);
         }
         let observation = context
             .observation_for_identity(second, identity)
             .map_err(|error| error.to_string())?;
 
-        payload::snapshot(context, command, shared, Some(&observation)).map(Reading::Ready)
+        payload::snapshot(context, command, shared, Some(&observation)).map(Answer::Ready)
     }
 
     fn snapshot_kept_refresh(
         &mut self,
         command: &mut Command,
         shared: &Shared,
-    ) -> Result<Reading, String> {
+    ) -> Result<Answer, String> {
         let context = self.context.as_ref().ok_or("Missing Store context")?;
         if self.pending.is_none() {
             let token = self
@@ -222,7 +222,7 @@ impl StoreReader {
         };
 
         if self.pending != Some((command.generation, reply.token)) {
-            return Ok(Reading::Waiting);
+            return Ok(Answer::Waiting);
         }
 
         self.pending = None;
@@ -230,7 +230,7 @@ impl StoreReader {
             QueryOutcome::Ready(context) => {
                 self.store_waits = 0;
                 if context.readiness() == QueryReadiness::Primary {
-                    return Ok(Reading::Waiting);
+                    return Ok(Answer::Waiting);
                 }
 
                 self.context = Some(context);
@@ -241,11 +241,7 @@ impl StoreReader {
         }
     }
 
-    fn snapshot_query(
-        &mut self,
-        command: &mut Command,
-        shared: &Shared,
-    ) -> Result<Reading, String> {
+    fn snapshot_query(&mut self, command: &mut Command, shared: &Shared) -> Result<Answer, String> {
         if self.pending.is_none() {
             let selection = self.query_selection(command)?;
             if self.published == 0 {
@@ -258,7 +254,7 @@ impl StoreReader {
             return Ok(self.waited());
         };
         if self.pending != Some((command.generation, reply.token)) {
-            return Ok(Reading::Waiting);
+            return Ok(Answer::Waiting);
         }
         self.pending = None;
         let context = match reply.outcome {
@@ -269,7 +265,7 @@ impl StoreReader {
         self.store_waits = 0;
         if self.published == command.generation {
             if self.repeats_selection(&context) {
-                return Ok(Reading::Waiting);
+                return Ok(Answer::Waiting);
             }
         }
         if let Some(identity) = &command.request.identity {
@@ -296,34 +292,34 @@ impl StoreReader {
                     })
                     .map_err(|error| format!("Store exact query: {error:?}"))?;
                 self.pending = Some((command.generation, token));
-                return Ok(Reading::Waiting);
+                return Ok(Answer::Waiting);
             }
         }
         let snapshot = payload::snapshot(&context, command, shared, None)?;
         self.context = Some(context);
 
-        Ok(Reading::Ready(snapshot))
+        Ok(Answer::Ready(snapshot))
     }
 
     /// What a step that asked the Store does: it waits for the answer, whatever the wait so far,
     /// since that answer may be the one that says why the page cannot be read.
-    fn submitted(&mut self) -> Reading {
+    fn submitted(&mut self) -> Answer {
         self.store_waits = self.store_waits.saturating_add(1);
-        Reading::Waiting
+        Answer::Waiting
     }
 
     /// What a step that has no answer from the Store does: it waits, up to the bound.
-    fn waited(&mut self) -> Reading {
+    fn waited(&mut self) -> Answer {
         if self.store_waits < STORE_WAITS_MAX {
             self.store_waits += 1;
-            return Reading::Waiting;
+            return Answer::Waiting;
         }
 
-        Reading::Saved
+        Answer::Saved
     }
 
     /// What a step does with a query the Store could not yet or cannot answer from what it holds.
-    fn needs_load(&mut self, reason: QueryNeedsLoad) -> Reading {
+    fn needs_load(&mut self, reason: QueryNeedsLoad) -> Answer {
         match reason {
             QueryNeedsLoad::AppsPending
             | QueryNeedsLoad::UncheckedCoverage
@@ -334,18 +330,18 @@ impl StoreReader {
             }
             QueryNeedsLoad::OutsideCoverage
             | QueryNeedsLoad::FullDetailEvicted
-            | QueryNeedsLoad::MissingObservation => Reading::Saved,
+            | QueryNeedsLoad::MissingObservation => Answer::Saved,
         }
     }
 
     /// The window lets go of the context it shows once it takes the reading the reader published,
     /// so a limit that lasts means something else keeps a context.
-    fn unavailable(&mut self, reason: QueryUnavailable) -> Result<Reading, String> {
+    fn unavailable(&mut self, reason: QueryUnavailable) -> Result<Answer, String> {
         match reason {
-            QueryUnavailable::NoReadings | QueryUnavailable::NoObservation => Ok(Reading::Saved),
+            QueryUnavailable::NoReadings | QueryUnavailable::NoObservation => Ok(Answer::Saved),
             QueryUnavailable::ContextLimit if self.store_waits < STORE_WAITS_MAX => {
                 self.store_waits += 1;
-                Ok(Reading::Waiting)
+                Ok(Answer::Waiting)
             }
             reason => Err(format!("Store readings unavailable: {reason:?}")),
         }
@@ -448,7 +444,7 @@ pub(super) fn read(
         .as_mut()
         .unwrap_or_else(|| unreachable!("Store reader branch"));
     match store.snapshot(command, shared) {
-        Ok(Reading::Ready(mut snapshot)) => {
+        Ok(Answer::Ready(mut snapshot)) => {
             store.published = command.generation;
             snapshot.catalog["path"] = serde_json::json!(root);
             let histories = if snapshot.histories_pending {
@@ -463,8 +459,8 @@ pub(super) fn read(
             super::reader_snapshot_record(reader, command, &snapshot, histories);
             Some(Update::Ready(snapshot))
         }
-        Ok(Reading::Waiting) => None,
-        Ok(Reading::Saved) => match read_saved(reader, root, command, shared) {
+        Ok(Answer::Waiting) => None,
+        Ok(Answer::Saved) => match read_saved(reader, root, command, shared) {
             Ok(snapshot) => {
                 // What the recording saves comes a minute apart, so a page it answered asks again
                 // a second later rather than at the worker's pace, unless part of the page is due.

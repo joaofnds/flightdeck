@@ -80,8 +80,7 @@ pub(super) fn install_menu_bar(cx: &mut App) {
 }
 
 /// Keeps the reader of a live window when the user closes it, so the window opened again reads
-/// through it and shows its readings at once, rather than after the seconds a new reader takes
-/// to replay the recording.
+/// through it and shows its readings at once.
 pub(super) fn keep_reader(dashboard: &Entity<LiveDashboard>, cx: &mut App) {
     if !cx.has_global::<Background>() {
         return;

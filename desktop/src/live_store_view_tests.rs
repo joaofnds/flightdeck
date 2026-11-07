@@ -1187,7 +1187,7 @@ fn assert_same_panels(panels: &[Rc<Panel>], expected: &[Rc<Panel>]) {
 
 #[gpui::test]
 fn hidden_window_pauses_the_store_and_showing_it_resumes_ingestion(cx: &mut gpui::TestAppContext) {
-    // Goal: native visibility controls store work as well as the legacy page reader.
+    // Goal: native visibility controls the Store's work.
     // Method: hide and show a real window over a registered source and observe store parking.
     use gpui::{AppContext, WindowOptions, WindowVisibility};
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
@@ -1218,8 +1218,8 @@ fn hidden_window_pauses_the_store_and_showing_it_resumes_ingestion(cx: &mut gpui
 
 #[gpui::test]
 fn showing_a_pinned_window_wakes_the_store_and_keeps_the_second(cx: &mut gpui::TestAppContext) {
-    // Goal: restoring a pinned selection never starts live ingestion in the store.
-    // Method: show a pinned window over a paused real store, then explicitly return to live.
+    // Goal: a pinned window shown again wakes the Store, which goes on taking in readings, and
+    // keeps the second it holds. Method: show a pinned window over a paused real Store.
     use gpui::{AppContext, WindowOptions, WindowVisibility};
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();

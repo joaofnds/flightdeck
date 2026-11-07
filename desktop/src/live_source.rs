@@ -21,7 +21,8 @@ pub use store_reader::presentation::Presentation;
 /// What the Store may hold of readings and of the responses the window shows. The hour of a Mac
 /// with 918 processes reached 283 MB as it loaded, a held View keeps a span apart from the one the
 /// Store goes on filling, and the window's two contexts come on top, so this leaves room for more
-/// than three times those processes.
+/// than three times those processes. The older tail a page's selection carries is charged to no
+/// budget, since it comes from the saved minutes through the page's own session.
 pub const STORE_BYTES_MAX: usize = 1024 * 1024 * 1024;
 
 /// Starts a live window's Store over `root`, and the handle a `Worker` reads it through.
@@ -194,11 +195,10 @@ struct Mailbox {
     generation: u64,
     request: Option<Command>,
     output: Option<Update>,
-    /// The window reading through the worker closed, so the worker drops its page and keeps its
-    /// session following the recording until the next window asks for one.
+    /// The window reading through the worker closed, so the worker drops its page and reads
+    /// nothing until the next window asks for one.
     rest: bool,
-    /// The worker reads no page, so its step opens the session a request reads through, or polls
-    /// it, and cancelling would discard the open or cut the poll short for the request to redo.
+    /// The worker reads no page, so a request has nothing of its to cancel.
     resting: bool,
 }
 
@@ -673,8 +673,8 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
     }
 }
 
-/// Reads the page the worker reads, or keeps a resting reader following the recording, and
-/// returns how long the worker waits before its next step.
+/// Reads the page the worker reads, if any, and returns how long the worker waits before its
+/// next step.
 fn worker_step(
     root: &std::path::Path,
     shared: &Shared,
@@ -960,8 +960,8 @@ fn reader_snapshot_arrivals(reader: &Reader, command: &Command, first_snapshot: 
     Arrivals::Read
 }
 
-/// The reader's session, opened on the first read and begun for the command's epoch. A live
-/// selection first catches up the ring, then keeps that endpoint while deferred work finishes.
+/// The reader's session, opened on the first read and begun for the command's epoch. A session
+/// that reads a ring catches it up first, then keeps that endpoint while deferred work finishes.
 fn reader_snapshot_session<'session>(
     slot: &'session mut Option<LiveSession>,
     root: &std::path::Path,

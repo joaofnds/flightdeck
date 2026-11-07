@@ -144,10 +144,10 @@ Xcode's separate Metal compiler component. Startup measurements include that cos
 steady-state measurements begin after warmup. No toolchain or hooks are installed.
 
 Live mode provides Overview, CPU, Apps, Memory, GPU, Storage,
-Energy, Network, Battery, Computer, Self-monitoring and Recorded readings
+Energy, Network, Battery, Computer and Self-monitoring
 destinations. Click a chart to pause at a
-second; use time arrows, same-second publication choices, and Resume live. Expand
-raw rows to read exact stored values, page through raw/App/process results, and
+second; use time arrows, same-second publication choices, and Resume live. Page
+through App and process results, and
 select an App to inspect its observed histories and process instances. Executable
 rows group the loaded process page. Selecting a captured name loads its CPU,
 resident memory, footprint, process power, disk, wakeup, page-in and thread histories

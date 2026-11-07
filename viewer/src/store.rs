@@ -163,7 +163,7 @@ pub struct View {
     /// Each App's readings added up over each stretch of `EARLIER_STRIDE_SECONDS` of the loaded
     /// hour, oldest first, but the stretch of the newest second, which later seconds may add to.
     pub stretches: Vec<Arc<AppsStretch>>,
-    /// Older hover payloads, populated only by the opt-in complete payload store.
+    /// Older hover payloads, populated only by a Store with a budget.
     pub sampled: Vec<Arc<SampledSecond>>,
     /// Whether the View holds the Apps of every second and stretch it holds, which the store
     /// loads at startup after the readings of the Mac and the Apps of the newest second.
@@ -615,8 +615,8 @@ impl Held {
     /// Takes `second` of run `run` in after the newest, with what the store found of its Apps,
     /// `apps`, and keeps the second the live span lets go of where it is the first of its
     /// stretch. A second of the run no newer than the newest taken in is held already. Returns
-    /// false and changes nothing where a span has no buffer to write, so the caller takes the
-    /// second again at its next step.
+    /// false and changes nothing where the budget refuses the second's sample, so the caller
+    /// takes the second again at its next step.
     fn take(&mut self, run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>) -> bool {
         if self.holds(run, second) {
             return true;
@@ -951,7 +951,7 @@ fn startup(
 
     if let Some(budget) = &budget {
         let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
-            // No View is out during startup, so every buffer is free.
+            // A window's Store starts through `startup_staged`, so only tests load this way.
             assert!(held.take(run, second, apps));
         };
         let outcome = recording::load_payload(root, budget, operation, take);
@@ -973,7 +973,7 @@ fn expire_place(second: &MachineSecond) -> Option<(Identity, u64)> {
 
 fn startup_launch(root: &Path, held: &mut Held) {
     let launch = recording::load_launch(root, |run, second, apps| {
-        // No View is out during startup, so every buffer is free.
+        // A Store with no budget refuses no sample.
         assert!(held.take(run, second, apps));
     });
 
@@ -1102,7 +1102,7 @@ fn startup_accept(
     Ok(())
 }
 
-/// The opt-in constructor uses the same producer while yielding between finite source steps.
+/// A Store with a budget uses the same producer while yielding between finite source steps.
 fn startup_staged(
     root: &Path,
     held: &mut Held,

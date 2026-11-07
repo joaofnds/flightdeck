@@ -46,8 +46,8 @@ impl<T> Buffers<T> {
 
     /// A buffer written by `fill`, made new where every buffer is held. The next buffer is the
     /// one written longest ago, which a span has let go of once it is full, so its new one takes
-    /// its place and only the View holding it keeps it alive. The readings in memory are so
-    /// these buffers and what the Views hold.
+    /// its place and only the View holding it keeps it alive. The readings in memory are these
+    /// buffers and what the Views hold.
     fn write_replacing(&mut self, fill: impl FnOnce(&mut T)) -> Arc<T> {
         let index = self.write_index().unwrap_or_else(|| {
             self.all[self.next] = Arc::new((self.make)());

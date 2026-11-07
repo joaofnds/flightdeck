@@ -375,8 +375,8 @@ fn customize(input: Input, readings: &mut collector::ring::Readings<'_>) {
 
 #[test]
 fn withholds_app_rates_but_keeps_exit_evidence_after_a_missed_run_tick() {
-    // Goal: both launch-created consumers retain App evidence without crossing a missed tick.
-    // Method: give both launch-created consumers two native publications with run ticks 0 and 2.
+    // Goal: the Store keeps App evidence without crossing a missed tick. Method: give the launch
+    // two native publications with run ticks 0 and 2, and read the page.
     let mut harness = None;
     Harness::setup(Input::RunTickGap, &mut harness);
     let mut harness = harness.unwrap();
@@ -580,7 +580,7 @@ macro_rules! route_oracle {
     ($name:ident, $route:literal) => {
         #[test]
         fn $name() {
-            // Goal: retain a complete route oracle before changing its ingestion owner.
+            // Goal: a route's whole output can be written down and compared between builds.
             // Method: complete the production backend and presentation over finite native input.
             output::record_route($route);
         }
@@ -600,9 +600,9 @@ route_oracle!(freezes_computer_launch_output, "computer");
 route_oracle!(freezes_self_launch_output, "self");
 
 #[test]
-fn keeps_legacy_numeric_sources_available_to_both_launch_readers() {
-    // Goal: the constructor keeps pre-dictionary recordings available during consolidation.
-    // Method: complete registered legacy input through both launch-created consumers.
+fn keeps_legacy_numeric_sources_available_through_the_live_launch() {
+    // Goal: the launch keeps pre-dictionary recordings available.
+    // Method: complete registered legacy input through the launch's Store and its reader.
     let mut harness = None;
     Harness::setup(Input::Sealed(SourceLayout::Legacy), &mut harness);
     let mut harness = harness.unwrap();

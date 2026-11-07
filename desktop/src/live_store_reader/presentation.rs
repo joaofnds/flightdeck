@@ -23,7 +23,8 @@ impl<T> Presentation<T> {
         }
     }
 
-    /// Edits the value and keeps its admission owner.
+    /// Edits the value and keeps its admission owner, which charges nothing for what the edit
+    /// adds.
     pub fn edited(self, edit: impl FnOnce(&mut T)) -> Self
     where
         T: Clone,
