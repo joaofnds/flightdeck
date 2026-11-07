@@ -554,3 +554,91 @@ fn pressure_recording() -> Fixture {
     .unwrap();
     fixture
 }
+
+/// A recording with one damaged saved minute, whose Store holds what a load left behind when the
+/// recording's newest run changed under it.
+fn run_changed_during_load() -> (Fixture, super::Held, super::Ring, super::Shared) {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(160);
+    fixture.seal_minute(1);
+    super::tests::empty_ticks_file(&fixture, 0);
+    let budget = std::sync::Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
+    let mut held = super::Held::with_payload(fixture.root.clone(), budget.clone());
+    let ring = super::make_ring(&fixture.root, Some(&budget));
+    held.left_out = Some(super::Failure::ChangedIdentity);
+
+    (fixture, held, ring, reconciliation_shared())
+}
+
+/// Reads the hour as the Store's next pass does.
+fn run_changed_refresh(fixture: &Fixture, held: &mut super::Held, ring: &mut super::Ring) -> bool {
+    let shared = reconciliation_shared();
+    let mut buffers = super::recording::LoadBuffers::default();
+    let cancellation = std::sync::Arc::new(crate::cancellation::Cancellation::default());
+    let operation = cancellation.operation(0).unwrap();
+
+    super::refresh(
+        &fixture.root,
+        held,
+        ring,
+        &shared,
+        &mut buffers,
+        Some(&operation),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_run_registered_during_a_load_reads_the_hour_again() {
+    // Goal: a recorder that registers its run while the Store reads the hour costs one more read,
+    // since a load with no catalog would leave every page without an answer.
+    // Method: leave the Store as that load leaves it, take its retry and read the hour.
+    let (fixture, mut held, mut ring, shared) = run_changed_during_load();
+
+    let retried = super::run_retry(&mut held, &ring, &shared);
+    let loaded = run_changed_refresh(&fixture, &mut held, &mut ring);
+
+    assert!(retried);
+    assert!(shared.catch_up.load(std::sync::atomic::Ordering::Acquire));
+    assert!(loaded);
+    assert_eq!(held.left_out, Some(super::Failure::Refused));
+    assert!(held.checked_catalog.is_some());
+}
+
+#[test]
+fn a_run_gone_from_the_recording_starts_the_load_over() {
+    // Goal: the retry reaches a recording that no longer lists the run the Store held, where a
+    // load continuing from that run would refuse again at every pass.
+    // Method: hold a place in a run the recording does not list, take the retry and read the hour.
+    let (fixture, mut held, mut ring, shared) = run_changed_during_load();
+    let mut run = fixture.writer.identity().unwrap();
+    run.run.0[0] ^= 1;
+    held.newest = Some(super::Newest {
+        run,
+        publication: 1,
+        segment: 0,
+        apps_publication: 1,
+    });
+
+    super::run_retry(&mut held, &ring, &shared);
+    run_changed_refresh(&fixture, &mut held, &mut ring);
+
+    assert_eq!(held.left_out, Some(super::Failure::Refused));
+    assert!(held.checked_catalog.is_some());
+}
+
+#[test]
+fn a_minute_left_out_for_its_damage_reads_no_hour_again_at_once() {
+    // Goal: a damaged minute stays left out without the Store rereading the hour at every pass.
+    // Method: leave the Store with a refused minute and ask for its retry.
+    let (_fixture, mut held, ring, shared) = run_changed_during_load();
+    held.left_out = Some(super::Failure::Refused);
+
+    let retried = super::run_retry(&mut held, &ring, &shared);
+
+    assert!(!retried);
+    assert!(!shared.catch_up.load(std::sync::atomic::Ordering::Acquire));
+}

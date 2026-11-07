@@ -1425,7 +1425,11 @@ fn run_queries(held: &mut Held, ring: &mut Ring, queries: &query::Queries) {
 }
 
 fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
-    if !ring.reload_required() {
+    // A load that lost its run holds no catalog, so the Store could answer no query until it read
+    // the hour again. That read starts over, since what it would continue from may be what went.
+    if held.left_out == Some(Failure::ChangedIdentity) {
+        held.reset();
+    } else if !ring.reload_required() {
         if !coverage::source_changed(held, ring) {
             return false;
         }
