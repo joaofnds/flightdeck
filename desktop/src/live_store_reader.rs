@@ -511,6 +511,9 @@ fn read_earlier(
     if command.request.route == "apps" {
         return false;
     }
+    if route_shows_no_reading(&command.request.route) {
+        return false;
+    }
     // A page's first step reads what the saved minutes keep, and its next step reads the rest.
     let tail_pending = reader
         .store
@@ -530,7 +533,7 @@ fn read_earlier(
     pending
 }
 
-fn read_earlier_selection(
+pub(super) fn read_earlier_selection(
     reader: &mut Reader,
     root: &std::path::Path,
     command: &Command,
@@ -541,7 +544,20 @@ fn read_earlier_selection(
     let scope =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::History);
     let session = read_saved_open(reader, root, command, shared).and_then(|()| {
-        super::reader_snapshot_session(&mut reader.session, root, command, shared, false)
+        let session = super::reader_snapshot_session(
+            &mut reader.session,
+            root,
+            command,
+            shared,
+            super::Arrivals::Leave,
+        )?;
+        if let Some(last) = crate::live_projection::context_last_second(selection) {
+            session
+                .list_saved_for(last)
+                .map_err(|error| error.to_string())?;
+        }
+
+        Ok(session)
     });
     let pending = match session {
         Ok(session) => super::reader_earlier(session, &command.request, kept_tail_only, selection),

@@ -49,6 +49,8 @@ const CONTEXT_BYTES_MAX: usize = 8 * 1024 * 1024;
 const PENDING_WINDOWS_MAX: usize = OBSERVATIONS_MAX;
 const WINDOW_MARKERS_PER_POLL_MAX: usize = 16;
 const HISTORY_REFRESH_POLLS_MAX: usize = 256;
+/// How far a context moves before a session that reads no ring lists the saved minutes again.
+const SAVED_LISTING_SECONDS: u64 = 60;
 const CANDIDATE_BYTES_MAX: usize = crate::live_raw::RAW_BYTES_MAX
     + crate::live_apps::FRAME_BYTES_MAX
     + crate::live_app_response::SAMPLE_BYTES_MAX
@@ -100,6 +102,8 @@ pub struct LiveSession {
     /// Whether the selection follows the latest live second, so a poll ranks it and keeps its
     /// part. A selected earlier second keeps its window's, which a poll would drop.
     follows_live: bool,
+    /// The context's last second when this session last listed the saved minutes for it.
+    saved_listed_second: u64,
     #[cfg(test)]
     before_projection: Option<Box<dyn FnOnce()>>,
     #[cfg(test)]
@@ -236,6 +240,7 @@ impl LiveSession {
             parts_app: None,
             app_parts: Arc::default(),
             follows_live: true,
+            saved_listed_second: 0,
             #[cfg(test)]
             before_projection: None,
             #[cfg(test)]
@@ -258,6 +263,28 @@ impl LiveSession {
             history.begin(epoch)?;
         }
         Ok(())
+    }
+
+    /// Lists what the recording saved since the session last looked, and reads no ring, for a
+    /// session whose live readings a Store takes in. A refused list leaves the session with the
+    /// minutes it knows and says why beside them, as a poll does.
+    pub fn list_saved(&mut self) -> Result<()> {
+        let operation = self.operation.begin(self.operation.epoch())?;
+        operation.run(|| match self.refresh_history() {
+            Ok(()) => Ok(()),
+            Err(error) => self.history_failure(error),
+        })
+    }
+
+    /// `list_saved` for a page read once a second, which lists only as often as the recording
+    /// saves a minute, however often its context ending at `context_last_second` moves.
+    pub fn list_saved_for(&mut self, context_last_second: u64) -> Result<()> {
+        if self.saved_listed_second.abs_diff(context_last_second) < SAVED_LISTING_SECONDS {
+            return Ok(());
+        }
+        self.saved_listed_second = context_last_second;
+
+        self.list_saved()
     }
 
     pub fn poll(&mut self) -> Result<bool> {

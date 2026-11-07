@@ -808,8 +808,8 @@ fn reader_snapshot(
         kept_tail_only,
     } = reader_snapshot_plan(reader, &command.request.route);
     let first_snapshot = reader.last_generation != command.generation;
-    let session =
-        reader_snapshot_session(&mut reader.session, root, command, shared, first_snapshot)?;
+    let arrivals = reader_snapshot_arrivals(reader, command, first_snapshot);
+    let session = reader_snapshot_session(&mut reader.session, root, command, shared, arrivals)?;
     let catalog = session.catalog();
     if published {
         if reader.last_catalog.as_ref() == Some(&catalog) {
@@ -916,6 +916,38 @@ fn reader_snapshot_histories(session: &LiveSession, snapshot: &Snapshot) -> Hist
     }
 }
 
+/// What a reader's session does before a read to learn what arrived since the last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arrivals {
+    /// It reads the ring and the saved minutes, as the only reader of a saved recording.
+    Read,
+    /// It lists the saved minutes, since the Store alone takes in the live Mac's readings.
+    List,
+    /// It reads from what it already knows, as a step that keeps its endpoint does.
+    Leave,
+}
+
+fn reader_snapshot_arrivals(reader: &Reader, command: &Command, first_snapshot: bool) -> Arrivals {
+    let due = match command.request.route.as_str() {
+        "self" => true,
+        _ => match command.mode {
+            SourceMode::Live => match command.request.second {
+                None => true,
+                Some(_) => first_snapshot && command.context == Context::Select,
+            },
+            SourceMode::Recorded => command.request.second.is_none(),
+        },
+    };
+    if !due {
+        return Arrivals::Leave;
+    }
+    if reader.store.is_some() {
+        return Arrivals::List;
+    }
+
+    Arrivals::Read
+}
+
 /// The reader's session, opened on the first read and begun for the command's epoch. A live
 /// selection first catches up the ring, then keeps that endpoint while deferred work finishes.
 fn reader_snapshot_session<'session>(
@@ -923,7 +955,7 @@ fn reader_snapshot_session<'session>(
     root: &std::path::Path,
     command: &Command,
     shared: &Shared,
-    first_snapshot: bool,
+    arrivals: Arrivals,
 ) -> Result<&'session mut LiveSession, String> {
     let session = if let Some(session) = slot {
         session
@@ -943,22 +975,16 @@ fn reader_snapshot_session<'session>(
         .map_err(|error| error.to_string())?;
     #[cfg(test)]
     measurement::checkpoint(shared, command.generation, measurement::Stage::Reading);
-    let poll = match command.request.route.as_str() {
-        "self" => true,
-        _ => match command.mode {
-            SourceMode::Live => match command.request.second {
-                None => true,
-                Some(_) => first_snapshot && command.context == Context::Select,
-            },
-            SourceMode::Recorded => command.request.second.is_none(),
-        },
-    };
-    if poll {
-        session.poll().map_err(|error| {
-            #[cfg(test)]
-            measurement::interrupted(shared, command.generation, &error);
-            error.to_string()
-        })?;
+    match arrivals {
+        Arrivals::Read => {
+            session.poll().map_err(|error| {
+                #[cfg(test)]
+                measurement::interrupted(shared, command.generation, &error);
+                error.to_string()
+            })?;
+        }
+        Arrivals::List => session.list_saved().map_err(|error| error.to_string())?,
+        Arrivals::Leave => {}
     }
 
     Ok(session)
@@ -1071,8 +1097,8 @@ fn reader_computer(
     published: bool,
 ) -> Result<Option<Box<Snapshot>>, String> {
     let first_snapshot = reader.last_generation != command.generation;
-    let session =
-        reader_snapshot_session(&mut reader.session, root, command, shared, first_snapshot)?;
+    let arrivals = reader_snapshot_arrivals(reader, command, first_snapshot);
+    let session = reader_snapshot_session(&mut reader.session, root, command, shared, arrivals)?;
     let catalog = session.catalog();
     if published {
         if reader.last_catalog.as_ref() == Some(&catalog) {

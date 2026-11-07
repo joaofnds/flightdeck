@@ -1,6 +1,6 @@
 //! Every page the app registers, read through the live launch.
 
-use persistence::work::ingestion::{Kind, Producer};
+use persistence::work::ingestion::{Event, Kind, Producer};
 use serde_json::{Value, json};
 
 use super::{Harness, Input, SourceLayout, count, request, source};
@@ -22,19 +22,29 @@ fn no_page_takes_in_a_publication_the_store_took_in() {
     harness.teardown();
 
     let events = harness.events();
-    for kind in [
-        Kind::MachineReduction,
-        Kind::AppDerivation,
-        Kind::Accepted,
-        Kind::FrameCapture,
-        Kind::RawCapture,
-        Kind::NativeCollect,
-    ] {
-        assert_eq!(count(&events, Producer::Worker, kind, 2), 0, "{kind:?}");
-    }
+    assert_worker_took_in_nothing(&events);
     for kind in [Kind::MachineReduction, Kind::AppDerivation, Kind::Accepted] {
         assert_eq!(count(&events, Producer::Store, kind, 2), 1, "{kind:?}");
     }
+}
+
+#[test]
+fn a_second_the_store_leaves_to_the_saved_minutes_takes_in_no_publication() {
+    // Goal: the reader that answers a second the Store does not hold leaves the live Mac's
+    // readings to the Store. Method: hold a second before any reading on the page of a CPU chart,
+    // which the Store leaves to the saved minutes, and count the work of the reader that answers.
+    let mut harness = None;
+    Harness::setup(Input::Sealed(SourceLayout::Identity), &mut harness);
+    let mut harness = harness.unwrap();
+    harness.read_publication("overview", 2);
+    let mut held = request("cpu");
+    held.second = Some(source::SECOND_FIRST - 3_600);
+
+    let answer = harness.read_request(held);
+    harness.teardown();
+
+    assert!(answer.unwrap().selection["selected"].is_null());
+    assert_worker_took_in_nothing(&harness.events());
 }
 
 #[test]
@@ -166,6 +176,30 @@ fn the_self_page_waits_for_no_second_a_hold_names() {
     let live = pages.harness.read_request(held);
 
     assert!(live.is_ok(), "{:?}", live.err());
+}
+
+/// Refuses any reading of the ring by the worker, whatever it was made for: one made for a page's
+/// older tail still takes in what the Store took in.
+fn assert_worker_took_in_nothing(events: &[Event]) {
+    for kind in [
+        Kind::MachineReduction,
+        Kind::AppDerivation,
+        Kind::Accepted,
+        Kind::RingReadAttempt,
+        Kind::RingRead,
+        Kind::FrameCaptureAttempt,
+        Kind::FrameCapture,
+        Kind::RawCaptureAttempt,
+        Kind::RawCapture,
+        Kind::NativeCollect,
+    ] {
+        let taken = events
+            .iter()
+            .filter(|event| event.producer == Producer::Worker)
+            .filter(|event| event.kind == kind)
+            .count();
+        assert_eq!(taken, 0, "{kind:?}");
+    }
 }
 
 fn copied_second(snapshot: &Snapshot, request: &Request) -> Value {

@@ -236,6 +236,40 @@ fn pages_of_one_metric_leave_their_app_history_to_their_next_read() {
 }
 
 #[test]
+fn a_followed_page_older_tail_takes_in_a_minute_saved_after_the_session_opened() {
+    // Goal: a page that follows the newest second, whose session reads no ring, still draws the
+    // minutes saved since. Method: read a page's older tail, save another older minute, and read
+    // the tail of a context a minute later.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+    let first = reader.earlier(&recording, 2200);
+    assert_eq!(first["earlier_trends"].as_array().unwrap().len(), 1);
+    recording.seal_older_minute(1100);
+
+    let later = reader.earlier(&recording, 2260);
+
+    assert_eq!(later["earlier_trends"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_session_told_to_list_takes_in_a_minute_saved_after_it_opened() {
+    // Goal: a reader whose live readings a Store takes in still learns what was saved since it
+    // opened. Method: open the reader's session, save another minute, leave the session be, and
+    // then have it list.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    let opened = reader.session_windows(&recording, super::Arrivals::Leave);
+    recording.seal_older_minute(1100);
+
+    let left = reader.session_windows(&recording, super::Arrivals::Leave);
+    let listed = reader.session_windows(&recording, super::Arrivals::List);
+
+    assert_eq!(left, opened);
+    assert_eq!(listed, opened + 1);
+}
+
+#[test]
 fn a_page_that_reads_its_app_histories_early_reads_an_older_tail_next() {
     // Goal: an opened page whose first readings brought its App histories reads an older tail
     // its session does not keep straight after them.
@@ -878,6 +912,36 @@ impl SnapshotReader {
         self.read_at(&recording.root)
     }
 
+    /// How many saved minutes the reader's session knows once it has done `arrivals`.
+    fn session_windows(&mut self, recording: &SealedRecording, arrivals: super::Arrivals) -> u64 {
+        let session = super::reader_snapshot_session(
+            &mut self.reader.session,
+            &recording.root,
+            &self.command,
+            &self.shared,
+            arrivals,
+        )
+        .unwrap();
+
+        session.catalog()["windows"].as_u64().unwrap()
+    }
+
+    /// What a page's older tail adds to a selection whose context ends at `last_second`.
+    fn earlier(&mut self, recording: &SealedRecording, last_second: u64) -> serde_json::Value {
+        let mut selection = json!({"context_last_second": last_second});
+        let pending = super::store_reader::read_earlier_selection(
+            &mut self.reader,
+            &recording.root,
+            &self.command,
+            &self.shared,
+            false,
+            &mut selection,
+        );
+        assert!(!pending);
+
+        selection
+    }
+
     fn read_at(&mut self, root: &std::path::Path) -> Result<Option<Box<super::Snapshot>>, String> {
         super::reader_snapshot(&mut self.reader, root, &mut self.command, &self.shared)
     }
@@ -1147,6 +1211,23 @@ impl SealedRecording {
         drop(store);
 
         recording
+    }
+
+    /// Saves a minute of another run to the recording of `with_an_older_minute`, whose one
+    /// reading lies at `second`.
+    fn seal_older_minute(&self, second: u64) {
+        let store = persistence::Store::open(&self.root).unwrap();
+        let identity = persistence::WindowIdentity {
+            run: collector::ring::RunIdentity {
+                recording: store.recording(),
+                run: collector::ring::Identity([5, 6]),
+                boot: collector::ring::Identity([3, 4]),
+            },
+            window: 0,
+        };
+        let mut window = Self::window(identity);
+        Self::append(&mut window, 1, second);
+        Self::commit_derived(&self.root, &window, &Underived);
     }
 
     fn window(identity: persistence::WindowIdentity) -> persistence::Window {

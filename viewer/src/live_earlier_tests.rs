@@ -5,6 +5,74 @@ const EARLIER_BASE: u64 = 10_000;
 const EARLIER_LIMIT: u64 = EARLIER_BASE + 3000;
 
 #[test]
+fn a_session_listing_the_saved_minutes_learns_of_a_new_one_and_reads_no_ring() {
+    // Goal: a session whose live readings a Store takes in sees what is saved after it opened
+    // without reading the ring. Method: open a session that reads no ring on a running recording,
+    // save another minute, list, and read what the session knows.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..1, earlier_wall);
+    let mut session =
+        LiveSession::open_history_with(&fixture.root, Arc::new(Cancellation::default()), 0)
+            .unwrap();
+    let listed = session.catalog()["last_second"].clone();
+    earlier_publish_minutes(&mut fixture, 1..2, earlier_wall);
+    assert_eq!(session.catalog()["last_second"], listed);
+
+    session.list_saved().unwrap();
+
+    let catalog = session.catalog();
+    assert_ne!(catalog["last_second"], listed);
+    assert!(catalog["latest_observation"].is_null());
+}
+
+#[test]
+fn a_session_refused_a_listing_keeps_the_minutes_it_knows_and_says_why() {
+    // Goal: a list the recording refuses leaves a page drawing what it has, with the reason beside
+    // it, rather than failing the page. Method: open a session that reads no ring, make the
+    // recording's saved minutes unreadable, list, and read what the session knows.
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..2, earlier_wall);
+    let mut session =
+        LiveSession::open_history_with(&fixture.root, Arc::new(Cancellation::default()), 0)
+            .unwrap();
+    let listed = session.catalog()["last_second"].clone();
+    let data = fixture.root.join("data");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let answer = session.list_saved();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    answer.unwrap();
+    let catalog = session.catalog();
+    assert_eq!(catalog["last_second"], listed);
+    assert!(catalog["history_error"].is_string());
+}
+
+#[test]
+fn a_session_lists_the_saved_minutes_once_its_context_has_moved_a_minute() {
+    // Goal: a page read every second opens the recording's list about once a minute, as the
+    // recording saves one. Method: list for a context, save another minute, list for a context a
+    // second short of a minute later and for one a minute later.
+    let mut fixture = RingFixture::new_following();
+    earlier_publish_minutes(&mut fixture, 0..1, earlier_wall);
+    let mut session =
+        LiveSession::open_history_with(&fixture.root, Arc::new(Cancellation::default()), 0)
+            .unwrap();
+    session.list_saved_for(EARLIER_BASE).unwrap();
+    let listed = session.catalog()["last_second"].clone();
+    earlier_publish_minutes(&mut fixture, 1..2, earlier_wall);
+
+    session.list_saved_for(EARLIER_BASE + 59).unwrap();
+    let within_the_minute = session.catalog()["last_second"].clone();
+    session.list_saved_for(EARLIER_BASE + 60).unwrap();
+
+    assert_eq!(within_the_minute, listed);
+    assert_ne!(session.catalog()["last_second"], listed);
+}
+
+#[test]
 fn reads_each_minute_of_the_older_tail_once() {
     // Goal: following the newest second reads each sealed minute of the older tail from saved
     // history once. Method: seal an hour of minutes, read the tail, then count the saved
