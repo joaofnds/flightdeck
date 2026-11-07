@@ -696,6 +696,25 @@ fn overview_lays_out_its_artwork_before_a_reading_is_available() {
 }
 
 #[test]
+fn copying_during_app_switch_refuses_retained_details_from_the_previous_app() {
+    // Goal: selecting one App cannot copy the details kept from the App before it. Method: keep
+    // App A's details on the snapshot, ask for App B, and copy.
+    let mut snapshot = snapshot();
+    snapshot.detail = Some(crate::live_source::Presentation::Legacy(
+        json!({"app":{"key":{"kind":"bundle","bytes_hex":"41"}}}),
+    ));
+    let mut request = fresh_request("apps");
+    request.app = Some(AppKey {
+        kind: "bundle".into(),
+        bytes_hex: "42".into(),
+    });
+
+    let copied = selected_copy(Some(&snapshot), &request, None);
+
+    assert!(copied.is_err());
+}
+
+#[test]
 fn copying_an_expanded_process_keeps_its_creation_identity_and_exact_counters() {
     // A selected process is copied as that process, rather than the entire App or a raw page.
     let mut snapshot = snapshot();
