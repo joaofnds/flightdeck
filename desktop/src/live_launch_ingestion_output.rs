@@ -246,7 +246,7 @@ fn preserves_full_integer_precision_in_structured_source_work() {
     assert!(serde_json::to_vec(&value).unwrap().len() < 1024);
 }
 
-fn window_values(snapshot: &Snapshot) -> Value {
+pub(super) fn window_values(snapshot: &Snapshot) -> Value {
     let points = snapshot.selection["trends"]
         .as_array()
         .map_or(&[][..], Vec::as_slice);
@@ -299,7 +299,7 @@ fn ranked(ranks: &viewer::live_app_response::Ranks) -> Value {
         })).collect::<Vec<_>>()})
 }
 
-fn process_history(snapshot: &Snapshot) -> Value {
+pub(super) fn process_history(snapshot: &Snapshot) -> Value {
     use crate::live_process_history::ProcessHistory;
     match snapshot.process_history.as_deref().map(|value| &**value) {
         None => Value::Null,

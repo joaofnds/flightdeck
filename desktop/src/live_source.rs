@@ -187,19 +187,6 @@ struct Mailbox {
     /// The worker reads no page, so its step opens the session a request reads through, or polls
     /// it, and cancelling would discard the open or cut the poll short for the request to redo.
     resting: bool,
-    /// How the reader rests while it reads no page.
-    rest_kind: Rest,
-}
-
-/// How a reader that reads no page spends its rest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Rest {
-    /// Its session follows the recording, so the next page reads only what arrived since the
-    /// reader's last step.
-    Following,
-    /// Its session stays where it is, since its window draws its page from the store's View, and
-    /// the next page reads what arrived since the rest began.
-    Idle,
 }
 
 struct Command {
@@ -310,7 +297,7 @@ impl Worker {
     }
 
     pub fn start_recorded(root: PathBuf) -> std::io::Result<Self> {
-        Self::start_mode(root, SourceMode::Recorded, Rest::Following)
+        Self::start_reader(root, SourceMode::Recorded, None, WORKER_STEPS_MAX)
     }
 
     /// Starts the source-free live client over the canonical Store's independent query handle.
@@ -318,13 +305,7 @@ impl Worker {
         root: PathBuf,
         handle: viewer::store::QueryHandle,
     ) -> std::io::Result<Self> {
-        Self::start_reader(
-            root,
-            SourceMode::Live,
-            Rest::Idle,
-            Some(handle),
-            WORKER_STEPS_MAX,
-        )
+        Self::start_reader(root, SourceMode::Live, Some(handle), WORKER_STEPS_MAX)
     }
 
     pub fn mode(&self) -> SourceMode {
@@ -347,19 +328,14 @@ impl Worker {
         self.thread.as_ref().map(|thread| thread.thread().id())
     }
 
-    fn start_mode(root: PathBuf, mode: SourceMode, rest: Rest) -> std::io::Result<Self> {
-        Self::start_reader(root, mode, rest, None, WORKER_STEPS_MAX)
-    }
-
     fn start_reader(
         root: PathBuf,
         mode: SourceMode,
-        rest: Rest,
         store: Option<viewer::store::QueryHandle>,
         steps_max: u64,
     ) -> std::io::Result<Self> {
         assert!(steps_max > 0);
-        let shared = Arc::new(Shared::with_rest(rest));
+        let shared = Arc::new(Shared::new());
         let control = Arc::clone(&shared);
         let worker_root = root.clone();
         let observation =
@@ -511,7 +487,6 @@ impl Worker {
             mailbox.request = None;
             mailbox.output = None;
             mailbox.rest = true;
-            mailbox.rest_kind = Rest::Idle;
             self.shared.wake.notify_one();
         }
 
@@ -549,10 +524,6 @@ impl Worker {
 
 impl Shared {
     fn new() -> Self {
-        Self::with_rest(Rest::Following)
-    }
-
-    fn with_rest(rest_kind: Rest) -> Self {
         Self {
             #[cfg(test)]
             measurement_staged: AtomicBool::new(false),
@@ -578,7 +549,6 @@ impl Shared {
                 output: None,
                 rest: false,
                 resting: true,
-                rest_kind,
             }),
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
@@ -716,22 +686,7 @@ fn worker_step(
         }
         worker_pause(reader, command)
     } else {
-        if worker_step_follows(shared) {
-            reader_follow(reader, root, shared);
-        }
         POLL_INTERVAL
-    }
-}
-
-/// Whether the resting reader keeps its session following the recording.
-fn worker_step_follows(shared: &Shared) -> bool {
-    match shared.mailbox.lock() {
-        Ok(mailbox) => mailbox.rest_kind == Rest::Following,
-        Err(error) => {
-            eprintln!("flightdeck GPUI reader mailbox: {error}");
-            shared.stopped.store(true, Ordering::Release);
-            false
-        }
     }
 }
 
@@ -802,48 +757,6 @@ fn reader_rest(reader: &mut Reader) {
     reader.last_route.clear();
     if let Some(store) = &mut reader.store {
         store.rest();
-    }
-}
-
-/// Keeps a resting reader's session following the recording, so the next page reads only what
-/// arrived since this step rather than everything since its window closed. A reader without a
-/// session opens one, and a session that fails to follow is dropped for the next step to open.
-fn reader_follow(reader: &mut Reader, root: &std::path::Path, shared: &Shared) {
-    if reader.store.is_some() {
-        return;
-    }
-    let Some(session) = &mut reader.session else {
-        reader_follow_open(reader, root, shared);
-        return;
-    };
-
-    let followed = session
-        .begin(shared.cancellation.epoch())
-        .and_then(|()| session.poll());
-    match followed {
-        Ok(_changed) => {}
-        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
-        Err(error) => {
-            eprintln!("Kept Flightdeck reader stopped following the recording: {error}");
-            reader.session = None;
-        }
-    }
-}
-
-/// Opens the resting reader's session, at most once each retry interval, since a window closed
-/// before its reader opened the recording would otherwise reopen over none.
-fn reader_follow_open(reader: &mut Reader, root: &std::path::Path, shared: &Shared) {
-    if Instant::now() < reader.retry_after {
-        return;
-    }
-    let epoch = shared.cancellation.epoch();
-    match LiveSession::open_with(root, Arc::clone(&shared.cancellation), epoch) {
-        Ok(session) => reader.session = Some(session),
-        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
-        Err(error) => {
-            eprintln!("Kept Flightdeck reader could not open the recording: {error}");
-            reader.retry_after = Instant::now() + RETRY_INTERVAL;
-        }
     }
 }
 

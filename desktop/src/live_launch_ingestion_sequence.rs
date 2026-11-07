@@ -58,6 +58,12 @@ impl Sequence {
         .unwrap();
     }
 
+    fn store(&self) -> &viewer::store::Store {
+        let backend = self.harness.backend.as_ref().unwrap();
+
+        backend.store.as_ref().unwrap()
+    }
+
     fn setup_writer(&mut self, recording: collector::ring::Identity) {
         let identity = collector::recording::new_run_identity(recording).unwrap();
         let root = &self.harness.root;
@@ -250,6 +256,45 @@ impl Drop for Sequence {
         if self.harness.input.is_none() {
             assert!(self.harness.backend.is_none());
             std::fs::remove_dir_all(&self.harness.root).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_store_woken_after_a_hide_takes_in_what_it_missed_once() {
+    // Goal: a window shown again reconciles its Store once, and no read of the page takes in what
+    // it missed as well. Method: park the Store as a hide does, publish, wake it, read a page,
+    // and count the work on each missed publication per producer.
+    let mut sequence = None;
+    Sequence::setup(&mut sequence);
+    let mut sequence = sequence.unwrap();
+    sequence.publish(1, |_| {});
+    sequence.harness.read_publication("cpu", 2);
+    sequence.store().set_active(false);
+    sequence.publish(2, |_| {});
+    sequence.publish(3, |_| {});
+
+    sequence.store().set_active(true);
+    sequence.harness.read_publication("cpu", 4);
+    sequence.teardown();
+
+    let events = sequence.harness.events();
+    for publication in [3, 4] {
+        for kind in [
+            super::Kind::MachineReduction,
+            super::Kind::AppDerivation,
+            super::Kind::Accepted,
+        ] {
+            assert_eq!(
+                super::count(&events, super::Producer::Store, kind, publication),
+                1,
+                "{kind:?} {publication}"
+            );
+            assert_eq!(
+                super::count(&events, super::Producer::Worker, kind, publication),
+                0,
+                "{kind:?} {publication}"
+            );
         }
     }
 }

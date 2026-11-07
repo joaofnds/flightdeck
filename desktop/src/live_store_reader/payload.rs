@@ -16,7 +16,7 @@ pub(super) fn snapshot(
     inspected: Option<&Observation>,
 ) -> Result<Box<Snapshot>, String> {
     let observation = inspected.copied().unwrap_or(context.selected().observation);
-    let selection = if super::route_reads_the_newest(&command.request.route) {
+    let selection = if super::route_shows_no_reading(&command.request.route) {
         Presentation::Legacy(Value::Null)
     } else {
         Presentation::Store(

@@ -18,6 +18,9 @@ mod output;
 #[path = "live_launch_ingestion_sequence.rs"]
 mod sequence;
 
+#[path = "live_launch_route_tests.rs"]
+mod routes;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceLayout {
     Legacy,

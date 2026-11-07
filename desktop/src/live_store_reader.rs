@@ -143,7 +143,7 @@ impl StoreReader {
         if command.request.second.is_some() {
             if !self.tail_pending {
                 if complete {
-                    if !route_reads_the_newest(&command.request.route) {
+                    if !route_shows_no_reading(&command.request.route) {
                         return Ok(true);
                     }
                 }
@@ -374,7 +374,7 @@ impl StoreReader {
     }
 
     fn query_selection(&self, command: &Command) -> Result<QuerySelection, String> {
-        if route_reads_the_newest(&command.request.route) {
+        if route_shows_no_reading(&command.request.route) {
             return Ok(QuerySelection::FollowLatest);
         }
         let Some(second) = command.request.second else {
@@ -402,10 +402,10 @@ impl StoreReader {
     }
 }
 
-/// Whether the page shows the newest reading even while the user holds a second, as Computer and
-/// Self-monitoring do, which hold no second of their own.
-fn route_reads_the_newest(route: &str) -> bool {
-    matches!(route, "computer" | "self")
+/// Whether the page shows no reading of the recording, as Self-monitoring does, whose figures are
+/// the app's own, so a hold neither moves it nor waits for the second it names.
+fn route_shows_no_reading(route: &str) -> bool {
+    route == "self"
 }
 
 pub(super) fn read(

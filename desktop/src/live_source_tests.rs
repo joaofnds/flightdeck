@@ -443,8 +443,8 @@ fn a_handed_over_reader_reads_the_next_windows_page_as_newly_opened() {
 
 #[test]
 fn a_handed_over_reader_leaves_its_session_where_it_is() {
-    // Goal: a reader whose window draws its page from the store's View reads nothing while it
-    // rests, since following the recording would cost the window more than the View it draws.
+    // Goal: a reader reads nothing while it rests, since the store goes on following the
+    // recording and following it here too would take in each publication twice.
     // Method: read a live ring, hand the reader over idle, publish a tick, and step the reader
     // as the worker does.
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
@@ -534,7 +534,6 @@ fn a_fresh_replacement_reader_waits_for_a_request_without_opening_live_data() {
         &mut None,
     );
 
-    assert!(!super::worker_step_follows(&worker.shared));
     assert!(reader.reader.session.is_none());
 }
 
@@ -558,22 +557,8 @@ fn a_chosen_reading_keeps_its_context_while_deferred_work_finishes() {
 }
 
 #[test]
-fn a_resting_reader_without_a_session_opens_one() {
-    // Goal: a window closed before its reader opened the recording still opens again at once.
-    // Method: step a reader that never read a page as the worker steps a resting one.
-    let recording = SealedRecording::new();
-    let mut reader = SnapshotReader::new();
-
-    let pause = reader.step_resting(&recording.root);
-
-    assert_eq!(pause, super::POLL_INTERVAL);
-    assert_eq!(reader.session().catalog()["last_second"], 1002);
-}
-
-#[test]
 fn a_request_to_a_resting_reader_lets_its_step_finish() {
-    // Goal: a launch's first request does not throw away the session the resting reader is
-    // opening, since the request reads through that same session.
+    // Goal: a first request cancels nothing, since a resting reader has no read to give up.
     // Method: let the reader rest, then send it a request and compare the cancellation epoch.
     let mut reader = SnapshotReader::new();
     let mut kept = reader.hand_over();
@@ -659,7 +644,6 @@ fn a_window_automatically_reads_the_next_batch_when_its_step_run_ends() {
     let mut worker = Worker::start_reader(
         recording.root.clone(),
         crate::live_source_mode::SourceMode::Live,
-        super::Rest::Following,
         None,
         1,
     )
@@ -869,7 +853,6 @@ impl SnapshotReader {
                     output: None,
                     rest: false,
                     resting: false,
-                    rest_kind: super::Rest::Following,
                 }),
                 wake: Condvar::new(),
                 stopped: AtomicBool::new(false),
