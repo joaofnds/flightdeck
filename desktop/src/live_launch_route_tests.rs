@@ -382,6 +382,84 @@ impl Pages {
 
 /// Two saved minutes further apart than the Store's span, read through a Store's worker and through
 /// a saved recording's reader.
+#[test]
+fn inspecting_a_second_the_stores_context_leaves_out_reads_the_saved_minutes() {
+    // Goal: an inspected second older than the Store's context, as a chart's older tail offers,
+    // reads as the saved route reads it rather than failing. Method: open a page on the Store, name
+    // the older second as the saved route names it, and inspect it.
+    let mut pages = OlderPages::new();
+    let saved = finished_page(&mut pages.saved, OlderPages::held("memory"));
+    let identity = saved.selection["selected"].clone();
+    finished_page(&mut pages.live, request("memory"));
+    let mut inspection = OlderPages::held("memory");
+    inspection.identity = Some(identity.clone());
+    inspection.load_resident_history = false;
+    inspection.load_app_attribution_history = false;
+    inspection.load_process_history = false;
+    inspection.earlier = crate::live_source::Earlier::Skip;
+
+    let generation = pages.live.inspect(inspection).unwrap();
+    let inspected = finished_generation(&mut pages.live, generation);
+
+    assert_eq!(inspected.selection["selected"], identity);
+}
+
+#[test]
+fn the_computer_page_of_a_saved_recording_shows_its_newest_reading_under_a_hold() {
+    // Goal: a recording opened as saved reads its Computer page as it reads with no hold, since no
+    // chart of it offers one. Method: ask the saved route's Computer page for an older second.
+    let mut pages = OlderPages::new();
+
+    let saved = finished_page(&mut pages.saved, OlderPages::held("computer"));
+
+    assert_eq!(saved.selection["second"], OlderPages::NEWEST);
+}
+
+#[test]
+fn the_computer_page_shows_the_newest_reading_where_a_hold_has_none() {
+    // Goal: a hold on a second with no reading leaves the Computer page its facts. Method: hold a
+    // second between the recording's readings past the Store's hour, through a Store's worker.
+    let mut pages = OlderPages::new();
+    let mut held = OlderPages::held("computer");
+    held.second = Some(OlderPages::BETWEEN);
+
+    let live = finished_page(&mut pages.live, held);
+
+    assert_eq!(live.selection["second"], OlderPages::NEWEST);
+    assert!(!live.selection["selected"].is_null());
+}
+
+#[test]
+fn a_page_reads_its_older_tail_only_as_history() {
+    // Goal: the reads of a page's older tail are all the reader does, and the count of a
+    // publication's work leaves them out by what they are. Method: open a page over minutes one of
+    // which lies before its full detail, through a Store's worker, and class the reader's work.
+    let recording = crate::live_source::tests::SealedRecording::with_an_older_kept_minute();
+    let trace = persistence::work::ingestion::Trace::new(
+        collector::recording::read_identity(&recording.root).unwrap(),
+    );
+    let scope = trace.enter();
+    let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+    let mut live = Worker::start_from_store(recording.root.clone(), handle).unwrap();
+    let mut with_tail = request("overview");
+    with_tail.earlier = crate::live_source::Earlier::Load;
+
+    let page = finished_page(&mut live, with_tail);
+    live.stop();
+    drop(store);
+    drop(scope);
+
+    assert_eq!(
+        page.selection["earlier_trends"].as_array().unwrap().len(),
+        1
+    );
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    let reader = || events.iter().filter(|e| e.producer == Producer::Worker);
+    assert!(reader().count() > 0);
+    assert_eq!(saved_reads(&events), reader().count());
+}
+
 struct OlderPages {
     live: Worker,
     saved: Worker,
@@ -392,6 +470,8 @@ struct OlderPages {
 
 impl OlderPages {
     const SECOND: u64 = 1000;
+    const BETWEEN: u64 = 1500;
+    const NEWEST: u64 = 8200;
 
     fn new() -> Self {
         let recording =
@@ -428,6 +508,11 @@ impl Drop for OlderPages {
 
 fn finished_page(worker: &mut Worker, request: Request) -> Box<Snapshot> {
     let generation = worker.request(request).unwrap();
+
+    finished_generation(worker, generation)
+}
+
+fn finished_generation(worker: &mut Worker, generation: u64) -> Box<Snapshot> {
     for _step in 0..4_000 {
         match worker.take().unwrap() {
             Some(Update::Ready(snapshot)) => {

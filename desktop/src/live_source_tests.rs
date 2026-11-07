@@ -880,6 +880,7 @@ impl SnapshotReader {
                     output: None,
                     rest: false,
                     resting: false,
+                    pause_end: crate::live_source::PauseEnd::Time,
                 }),
                 wake: Condvar::new(),
                 stopped: AtomicBool::new(false),
@@ -1178,7 +1179,7 @@ impl SealedRecording {
 
     /// The recording of `with_an_older_minute`, sealed with the App parts and ranks of each of
     /// its observations.
-    fn with_an_older_kept_minute() -> Self {
+    pub(crate) fn with_an_older_kept_minute() -> Self {
         Self::older_minute(&persistence::sealed_apps::SealedApps::default(), 2200)
     }
 
@@ -1589,7 +1590,7 @@ fn a_new_request_ends_the_pause_between_polls() {
     let (ended, ending) = std::sync::mpsc::channel();
     let shared = Arc::clone(&worker.shared);
     let pausing = std::thread::spawn(move || {
-        worker_pause_for(&shared, Duration::from_secs(60));
+        worker_pause_for(&shared, Duration::from_secs(60), None);
         ended.send(()).unwrap();
     });
     std::thread::sleep(Duration::from_millis(50));

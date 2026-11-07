@@ -1336,10 +1336,8 @@ fn run(
         if shared.stop.load(Ordering::Acquire) {
             return;
         }
-        if let Some(queries) = &shared.queries {
-            run_queries(held, ring, queries);
-        }
         if !shared.active.load(Ordering::Acquire) {
+            run_answers(held, ring, shared);
             shared.paused.store(true, Ordering::Release);
             thread::park();
             shared.paused.store(false, Ordering::Release);
@@ -1356,6 +1354,7 @@ fn run(
                 }
                 Ok(false) => {
                     shared.catch_up.store(true, Ordering::Release);
+                    run_answers(held, ring, shared);
                     thread::park_timeout(WAIT);
                     continue;
                 }
@@ -1374,6 +1373,9 @@ fn run(
             eprintln!("flightdeck store publication: {error}");
             return;
         }
+        // After the step, since a query that came with a new reading in the ring would otherwise
+        // be told the Store has not caught up, and ask again a poll later.
+        run_answers(held, ring, shared);
         if run_retry(held, ring, shared) {
             waited = Ok(());
             continue;
@@ -1385,10 +1387,25 @@ fn run(
             thread::sleep(WAIT);
             Ok(())
         } else {
-            ring.wait(WAIT)
+            run_wait(ring, shared)
         };
     }
     unreachable!("the store thread steps until the store is dropped");
+}
+
+/// Waits on the ring, leaving where a consumer can reach it what ends that wait.
+fn run_wait(ring: &Ring, shared: &Shared) -> Result<(), Failure> {
+    if let Some(queries) = &shared.queries {
+        queries.set_ring_waker(ring.waker());
+    }
+
+    ring.wait(WAIT)
+}
+
+fn run_answers(held: &mut Held, ring: &mut Ring, shared: &Shared) {
+    if let Some(queries) = &shared.queries {
+        run_queries(held, ring, queries);
+    }
 }
 
 fn run_queries(held: &mut Held, ring: &mut Ring, queries: &query::Queries) {

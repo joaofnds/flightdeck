@@ -5,14 +5,33 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use super::object::Mapping;
 use super::{
     Found, FoundEvent, HEADER_PUBLICATION_NEWEST, LockedName, Opened, RunIdentity, Shape, Tick,
-    layout, read_identity, read_newest,
+    layout, open_ring, read_identity, read_newest, wake_all,
 };
 use crate::coalitions::Coalition;
 use crate::interfaces::Interface;
 use crate::machine::CPUTicks;
 use crate::processes::Process;
+
+/// Ends a `RingReader::wait` from another thread that has other work for that reader. It maps the
+/// ring itself, so it stays valid when the reader moves on to another mapping.
+pub struct RingWaker {
+    mapping: Mapping,
+}
+
+// The waker only reads the mapping's address and wakes on an atomic word in it, and it unmaps once.
+unsafe impl Send for RingWaker {}
+unsafe impl Sync for RingWaker {}
+
+impl RingWaker {
+    /// Wakes every reader of every process that waits on the ring, and returns the errno of a wake
+    /// macOS refused.
+    pub fn wake(&self) -> Result<(), i32> {
+        wake_all(&self.mapping.words()[HEADER_PUBLICATION_NEWEST])
+    }
+}
 
 /// Storage allocated by the caller, outside shared-library generation changes.
 pub struct TickBuffers {
@@ -66,6 +85,13 @@ impl RingReader {
         }
         self.opened.events.next = next;
         Ok(())
+    }
+
+    /// The way another thread ends this reader's `wait`.
+    pub fn waker(&self) -> io::Result<RingWaker> {
+        let (mapping, _layout) = open_ring(self.name())?;
+
+        Ok(RingWaker { mapping })
     }
 
     /// Sleeps until the writer publishes past the publications the reader has read, for at

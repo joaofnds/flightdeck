@@ -68,6 +68,23 @@ impl StoreReader {
         self.forget_page();
     }
 
+    /// The handle whose answer ends the worker's pause, while a page shows nothing until its first
+    /// reading comes. A page that shows its readings asks again at the worker's pace, however soon
+    /// the Store answers.
+    pub(super) fn answer_awaited(&self) -> Option<&QueryHandle> {
+        if self.published == self.generation {
+            return None;
+        }
+
+        Some(&self.handle)
+    }
+
+    /// Whether the page's next step goes on with no wait, to the rest of a page the saved minutes
+    /// answered, since a query of that page's ends the pause when answered.
+    pub(super) fn reads_on(&self) -> bool {
+        self.published != self.generation && self.pending.is_none()
+    }
+
     /// What the reader knows of the page it read, which a new page or a rest starts over.
     fn forget_page(&mut self) {
         self.published = 0;
@@ -200,7 +217,7 @@ impl StoreReader {
                 })
                 .map_err(|error| format!("Store kept query: {error:?}"))?;
             self.pending = Some((command.generation, token));
-            return Ok(self.submitted());
+            return Ok(Answer::Waiting);
         }
 
         let Some(reply) = self.handle.take() else {
@@ -234,7 +251,7 @@ impl StoreReader {
                 self.context = None;
             }
             self.snapshot_query_submit(command, selection)?;
-            return Ok(self.submitted());
+            return Ok(Answer::Waiting);
         }
         let Some(reply) = self.handle.take() else {
             return Ok(self.waited());
@@ -287,14 +304,9 @@ impl StoreReader {
         Ok(Answer::Ready(snapshot))
     }
 
-    /// What a step that asked the Store does: it waits for the answer, whatever the wait so far,
-    /// since that answer may be the one that says why the page cannot be read.
-    fn submitted(&mut self) -> Answer {
-        self.store_waits = self.store_waits.saturating_add(1);
-        Answer::Waiting
-    }
-
-    /// What a step that has no answer from the Store does: it waits, up to the bound.
+    /// What a step that has no answer from the Store does: it waits, up to the bound. A step that
+    /// asks the Store always waits and counts nothing, since the answer ends the pause after it,
+    /// and that answer may be the one that says why the page cannot be read.
     fn waited(&mut self) -> Answer {
         if self.store_waits < STORE_WAITS_MAX {
             self.store_waits += 1;
@@ -353,6 +365,9 @@ impl StoreReader {
             })
             .map_err(|error| format!("Store query: {error:?}"))?;
         self.pending = Some((command.generation, token));
+        if let Some(handle) = self.answer_awaited() {
+            handle.wake_store();
+        }
 
         Ok(())
     }

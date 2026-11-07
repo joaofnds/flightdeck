@@ -200,6 +200,14 @@ struct Mailbox {
     rest: bool,
     /// The worker reads no page, so a request has nothing of its to cancel.
     resting: bool,
+    pause_end: PauseEnd,
+}
+
+/// What ends the worker's pause besides its time, a request, a rest and a stop.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PauseEnd {
+    Time,
+    StoreAnswer,
 }
 
 struct Command {
@@ -343,6 +351,9 @@ impl Worker {
     ) -> std::io::Result<Self> {
         assert!(steps_max > 0);
         let shared = Arc::new(Shared::new());
+        if let Some(handle) = &store {
+            worker_answer_wakes(&shared, handle);
+        }
         let control = Arc::clone(&shared);
         let worker_root = root.clone();
         let observation =
@@ -561,6 +572,7 @@ impl Shared {
                 output: None,
                 rest: false,
                 resting: true,
+                pause_end: PauseEnd::Time,
             }),
             wake: Condvar::new(),
             stopped: AtomicBool::new(false),
@@ -627,7 +639,11 @@ fn worker_lease(
             Received::Broken => return Lease::Ended,
         }
         let pause = worker_step(root, shared, reader, command);
-        worker_pause_for(shared, pause);
+        let answer = reader
+            .store
+            .as_ref()
+            .and_then(store_reader::StoreReader::answer_awaited);
+        worker_pause_for(shared, pause, answer);
     }
     Lease::Renewed
 }
@@ -704,11 +720,11 @@ fn worker_step(
 
 /// How long the worker waits before its next step. A page whose readings were just published
 /// with its App histories or its older tail pending has them read at once, since it shows them
-/// as being read.
+/// as being read. A page the Store published reads the rest at the worker's pace.
 fn worker_pause(reader: &Reader, command: &Command) -> Duration {
     if reader.last_generation == command.generation {
         if reader_pending(reader, command.generation) {
-            if reader.store.is_some() {
+            if reader.store.as_ref().is_some_and(|store| !store.reads_on()) {
                 return POLL_INTERVAL;
             }
             return Duration::ZERO;
@@ -717,11 +733,12 @@ fn worker_pause(reader: &Reader, command: &Command) -> Duration {
     POLL_INTERVAL
 }
 
-/// Pauses the worker for `pause`, or until a request, a rest or a stop arrives, so a page the
-/// reader asks for is read at once.
-fn worker_pause_for(shared: &Shared, pause: Duration) {
+/// Pauses the worker for `pause`, or until a request, a rest or a stop arrives or the Store gives
+/// the `answer` a page waits for, so a page the reader asks for is read at once. With no answer
+/// awaited, what the Store says waits for the next step.
+fn worker_pause_for(shared: &Shared, pause: Duration, answer: Option<&viewer::store::QueryHandle>) {
     match shared.mailbox.lock() {
-        Ok(mailbox) => {
+        Ok(mut mailbox) => {
             if mailbox.request.is_some() {
                 return;
             }
@@ -731,6 +748,15 @@ fn worker_pause_for(shared: &Shared, pause: Duration) {
             if shared.stopped.load(Ordering::Acquire) {
                 return;
             }
+            // An answer that lands after this read finds the flag set, since it takes this lock.
+            if answer.is_some_and(viewer::store::QueryHandle::answered) {
+                return;
+            }
+            mailbox.pause_end = if answer.is_some() {
+                PauseEnd::StoreAnswer
+            } else {
+                PauseEnd::Time
+            };
             if let Err(error) = shared.wake.wait_timeout(mailbox, pause) {
                 eprintln!("flightdeck GPUI reader pause: {error}");
                 shared.stopped.store(true, Ordering::Release);
@@ -741,6 +767,25 @@ fn worker_pause_for(shared: &Shared, pause: Duration) {
             shared.stopped.store(true, Ordering::Release);
         }
     }
+}
+
+/// Has each answer of the Store end a pause that waits for it. The Store outlives a worker it
+/// served, so it keeps no hold on that worker's mailbox.
+fn worker_answer_wakes(shared: &Arc<Shared>, handle: &viewer::store::QueryHandle) {
+    let shared = Arc::downgrade(shared);
+    handle.on_reply(move || {
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        match shared.mailbox.lock() {
+            Ok(mailbox) => {
+                if mailbox.pause_end == PauseEnd::StoreAnswer {
+                    shared.wake.notify_all();
+                }
+            }
+            Err(error) => eprintln!("flightdeck GPUI reader mailbox: {error}"),
+        }
+    });
 }
 
 fn worker_publish(shared: &Shared, generation: u64, output: Update) {

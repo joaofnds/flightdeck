@@ -296,6 +296,343 @@ fn store_parked_behind_the_ring() -> (
     (recording, store, handle)
 }
 
+#[test]
+fn the_stores_answer_ends_the_pause_of_a_page_waiting_for_it() {
+    // Goal: a page shows as soon as the Store answers it, rather than a whole poll later.
+    // Method: pause a thread for a minute on the real mailbox, see it wait, then ask the real
+    // Store, and wait up to thirty seconds, which keeps the verdict independent of how busy the
+    // machine is.
+    let (_recording, _store, handle) = store_answering();
+    let shared = Arc::new(crate::live_source::Shared::new());
+    crate::live_source::worker_answer_wakes(&shared, &handle);
+    let (ended, ending) = std::sync::mpsc::channel();
+    let pausing = std::thread::spawn({
+        let shared = Arc::clone(&shared);
+        let handle = handle.clone();
+        move || {
+            crate::live_source::worker_pause_for(&shared, Duration::from_secs(60), Some(&handle));
+            ended.send(()).unwrap();
+        }
+    });
+    wait_until_the_pause_awaits_an_answer(&shared);
+
+    handle.submit(latest_query()).unwrap();
+
+    ending.recv_timeout(Duration::from_secs(30)).unwrap();
+    pausing.join().unwrap();
+}
+
+#[test]
+fn an_answer_that_landed_before_the_pause_ends_it_at_once() {
+    // Goal: an answer landing between the step that asked and its pause costs the page no poll.
+    // Method: let the real Store answer first, then pause for a minute, which would outlast the
+    // limit if the pause did not look for the answer.
+    let (_recording, _store, handle) = store_answering();
+    let shared = crate::live_source::Shared::new();
+    handle.submit(latest_query()).unwrap();
+    wait_until_answered(&handle);
+    let started = Instant::now();
+
+    crate::live_source::worker_pause_for(&shared, Duration::from_secs(60), Some(&handle));
+
+    assert!(started.elapsed() < Duration::from_secs(30));
+}
+
+#[test]
+fn a_page_with_no_reading_yet_awaits_the_stores_answer() {
+    // Goal: the wake applies to a page whose first reading is due.
+    // Method: step the reader once, which asks the Store.
+    let (_recording, _store, handle) = store_answering();
+    let mut adapter = Adapter::new(handle);
+
+    assert!(adapter.read().is_none());
+
+    assert!(
+        adapter
+            .reader
+            .store
+            .as_ref()
+            .unwrap()
+            .answer_awaited()
+            .is_some()
+    );
+}
+
+#[test]
+fn a_page_showing_its_readings_awaits_no_answer() {
+    // Goal: a page that follows the Mac asks at the worker's pace, since an answer that ended the
+    // pause would double the queries it costs while the Mac is followed.
+    // Method: step the reader past its first reading until it asks the Store again.
+    let (recording, _store, handle) = store_answering();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("network");
+    assert!(matches!(
+        adapter.update_within(Duration::from_secs(10)),
+        Update::Ready(_)
+    ));
+
+    assert!(adapter.read().is_none());
+
+    assert!(adapter.reader.store.as_ref().unwrap().pending.is_some());
+    assert!(
+        adapter
+            .reader
+            .store
+            .as_ref()
+            .unwrap()
+            .answer_awaited()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_store_that_never_answers_holds_the_page_for_every_step_of_the_wait() {
+    // Goal: the wait lasts the same whether the Store says nothing or keeps saying not yet, since
+    // an answer now ends the pause after the step that asked, and counting that step would halve
+    // it.
+    // Method: step a reader over a Store with no room to start, which never replies, and count.
+    let recording = LiveRecording::new();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(1024)),
+    )
+    .unwrap();
+    let mut adapter = Adapter::on_root(store.query_handle().unwrap(), &recording.root);
+    assert!(adapter.read().is_none());
+
+    for _ in 0..super::super::STORE_WAITS_MAX {
+        assert!(adapter.read().is_none());
+    }
+
+    assert!(adapter.read().is_some());
+}
+
+#[test]
+fn a_page_asking_for_its_first_reading_ends_the_stores_wait_on_the_ring() {
+    // Goal: a new page does not wait out the 100 ms the Store waits for the next reading.
+    // Method: publish nothing, so that only the page can end that wait, and take the quickest of
+    // many, since one quick answer shows the wait ended, however busy the machine is for the rest.
+    let (recording, _store, handle) = store_answering();
+    let mut adapter = Adapter::on_root(handle.clone(), &recording.root);
+
+    let quickest = (0..20)
+        .map(|_| {
+            adapter.submit(request("network"), crate::live_source::Context::Select);
+            adapter_time_to_answer(&mut adapter, &handle)
+        })
+        .min()
+        .unwrap();
+
+    assert!(quickest < WAIT_ON_THE_RING_HALF);
+}
+
+#[test]
+fn a_page_following_the_mac_leaves_the_store_to_its_wait_on_the_ring() {
+    // Goal: a followed page's refreshes do not wake the Store, since that wake reaches every reader
+    // of the ring, the persister too, at the rate the page asks.
+    // Method: publish nothing, and take the slowest of a few refreshes, since one slow answer shows
+    // the wait ran, however a busy machine moved the rest.
+    let (recording, _store, handle) = store_answering();
+    let mut adapter = Adapter::on_root(handle.clone(), &recording.root);
+    adapter.command.request = request("network");
+    assert!(matches!(
+        adapter.update_within(Duration::from_secs(10)),
+        Update::Ready(_)
+    ));
+
+    let slowest = (0..5)
+        .map(|_| adapter_time_to_answer(&mut adapter, &handle))
+        .max()
+        .unwrap();
+
+    assert!(slowest >= WAIT_ON_THE_RING_HALF);
+}
+
+const WAIT_ON_THE_RING_HALF: Duration = Duration::from_millis(50);
+
+/// How long the Store takes to answer what the reader's next step asks, from a moment when the
+/// Store has gone back to waiting on the ring.
+fn adapter_time_to_answer(adapter: &mut Adapter, handle: &viewer::store::QueryHandle) -> Duration {
+    std::thread::sleep(Duration::from_millis(10));
+    let started = Instant::now();
+    assert!(adapter.read().is_none());
+    wait_until_answered(handle);
+    let answered = started.elapsed();
+    adapter.read();
+
+    answered
+}
+
+#[test]
+fn an_answer_no_page_waits_for_leaves_the_pause_to_run() {
+    // Goal: a page that follows the Mac asks at the worker's pace, since an answer that ended the
+    // pause would double the queries it costs.
+    // Method: pause for half a second with no answer awaited while the real Store answers.
+    let (_recording, _store, handle) = store_answering();
+    let shared = Arc::new(crate::live_source::Shared::new());
+    crate::live_source::worker_answer_wakes(&shared, &handle);
+    handle.submit(latest_query()).unwrap();
+    let pause = Duration::from_millis(500);
+    let started = Instant::now();
+
+    crate::live_source::worker_pause_for(&shared, pause, None);
+
+    assert!(handle.answered());
+    assert!(started.elapsed() >= pause);
+}
+
+#[test]
+fn a_page_the_saved_minutes_answer_reads_the_rest_at_once() {
+    // Goal: a page reads the rest of what the saved minutes answer straight after showing its first
+    // part, since it asks the Store nothing it has to wait for.
+    // Method: hold a second past the Store's hour, one step at a time, and read the pause after the
+    // step that showed the page, then the pause while the Store is asked again.
+    let recording = crate::live_source::tests::SealedRecording::with_a_minute_past_the_store_hour();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("overview");
+    adapter.command.request.second = Some(1000);
+    assert!(matches!(
+        adapter.update_within(Duration::from_secs(10)),
+        Update::Ready(_)
+    ));
+    assert!(crate::live_source::reader_pending(&adapter.reader, 1));
+
+    let after_the_first_part = crate::live_source::worker_pause(&adapter.reader, &adapter.command);
+    let asked = adapter.read();
+    let while_asking = crate::live_source::worker_pause(&adapter.reader, &adapter.command);
+    let Update::Ready(rest) = adapter.update_within(Duration::from_secs(10)) else {
+        panic!("the rest of the page did not read");
+    };
+
+    assert_eq!(after_the_first_part, Duration::ZERO);
+    assert!(asked.is_none());
+    assert_eq!(while_asking, crate::live_source::POLL_INTERVAL);
+    assert!(!rest.histories_pending);
+}
+
+#[test]
+fn a_page_showing_its_readings_asks_the_store_for_the_rest_at_the_workers_pace() {
+    // Goal: a page that shows its readings and has the rest of itself to come does not spin the
+    // worker on a Store with nothing new to say.
+    // Method: open a page on a Store whose history reads are denied, so it gives only its first
+    // readings, and read the pause.
+    let (harness, _budget, _lease) = Harness::denied_history();
+    let handle = harness.store.as_ref().unwrap().query_handle().unwrap();
+    let mut adapter = Adapter::new(handle);
+    adapter.ready_for(viewer::store::QueryReadiness::Primary);
+    assert!(crate::live_source::reader_pending(&adapter.reader, 1));
+
+    let pause = crate::live_source::worker_pause(&adapter.reader, &adapter.command);
+
+    assert_eq!(pause, crate::live_source::POLL_INTERVAL);
+}
+
+#[test]
+fn the_apps_page_reads_no_older_tail() {
+    // Goal: the Apps page, whose charts draw no older tail, costs no read of one.
+    // Method: open it on a Store over minutes one of which lies before its full detail, and read it
+    // to its end.
+    let recording = crate::live_source::tests::SealedRecording::with_an_older_kept_minute();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("apps");
+    adapter.command.request.earlier = crate::live_source::Earlier::Load;
+
+    let page = adapter.finished_within(Duration::from_secs(10));
+
+    assert!(page.selection.get("earlier_trends").is_none());
+}
+
+#[test]
+fn a_failed_read_counts_as_unread_and_rests_the_reader() {
+    // Goal: a page whose read failed counts as not read, and the reader takes a second before it
+    // tries again, however soon the Store answers.
+    // Method: a page shown before the read, a Store that leaves it to the saved minutes, and a root
+    // that holds no recording.
+    let (_recording, _store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::new(handle);
+    adapter.reader.last_generation = adapter.command.generation;
+
+    let failed = adapter.first_update();
+
+    assert!(matches!(failed, Update::Failed { .. }));
+    assert!(!crate::live_source::reader_published(
+        &adapter.reader,
+        adapter.command.generation
+    ));
+    assert!(adapter.reader.retry_after > Instant::now());
+}
+
+fn store_answering() -> (
+    LiveRecording,
+    viewer::store::Store,
+    viewer::store::QueryHandle,
+) {
+    let mut recording = LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    Harness::ready_context(&handle);
+
+    (recording, store, handle)
+}
+
+fn latest_query() -> viewer::store::QueryRequest {
+    viewer::store::QueryRequest {
+        epoch: 0,
+        source: None,
+        selection: viewer::store::QuerySelection::FollowLatest,
+    }
+}
+
+fn wait_until_the_pause_awaits_an_answer(shared: &crate::live_source::Shared) {
+    for _attempt in 0..6_000 {
+        if shared.mailbox.lock().unwrap().pause_end == crate::live_source::PauseEnd::StoreAnswer {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the pause never began");
+}
+
+fn wait_until_complete(handle: &viewer::store::QueryHandle) {
+    for _attempt in 0..6_000 {
+        if Harness::ready_context(handle).readiness() == viewer::store::QueryReadiness::Complete {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the Store never finished reading");
+}
+
+fn wait_until_answered(handle: &viewer::store::QueryHandle) {
+    for _attempt in 0..6_000 {
+        if handle.answered() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the Store never answered");
+}
+
 struct Adapter {
     root: std::path::PathBuf,
     reader: crate::live_source::Reader,
@@ -361,6 +698,19 @@ impl Adapter {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("the reader kept waiting within its attempts");
+    }
+
+    /// The page once the reader has read all of it, a step at the worker's quickest.
+    fn finished_within(&mut self, limit: Duration) -> Box<Snapshot> {
+        for _ in 0..1_000 {
+            let Update::Ready(page) = self.update_within(limit) else {
+                panic!("the page failed");
+            };
+            if !page.histories_pending {
+                return page;
+            }
+        }
+        panic!("the page never finished within its attempts");
     }
 
     fn submit(&mut self, request: Request, context: crate::live_source::Context) {

@@ -556,6 +556,73 @@ fn a_producer_exit_answers_an_accepted_request_with_closed() {
     );
 }
 
+#[test]
+fn an_answer_tells_the_consumer_after_it_can_be_taken() {
+    // Goal: a consumer told of an answer finds it, so the call can end the consumer's wait.
+    // Method: serve a real sealed fixture and look, from inside the call, for the answer.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let (told, telling) = std::sync::mpsc::channel();
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    handle.on_reply({
+        let handle = handle.clone();
+        move || told.send(handle.answered()).unwrap()
+    });
+    handle
+        .submit(request(QuerySelection::FollowLatest))
+        .unwrap();
+
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    assert_eq!(telling.try_recv(), Ok(true));
+}
+
+#[test]
+fn a_producer_exit_tells_the_consumer_of_its_closed_answer() {
+    // Goal: a consumer waiting for an answer learns at once that its Store stopped.
+    // Method: close the producer while a request waits, and look, from inside the call, for the
+    // closed answer.
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    let (told, telling) = std::sync::mpsc::channel();
+    handle.on_reply({
+        let handle = handle.clone();
+        move || told.send(handle.answered()).unwrap()
+    });
+    handle
+        .submit(request(QuerySelection::FollowLatest))
+        .unwrap();
+
+    queries.close();
+
+    assert_eq!(telling.try_recv(), Ok(true));
+}
+
+#[test]
+fn a_canceled_query_tells_the_consumer_nothing() {
+    // Goal: a pause waiting for an answer is not ended by work the consumer dropped.
+    // Method: cancel a request that reached the producer, then serve.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    let (told, telling) = std::sync::mpsc::channel();
+    handle.on_reply(move || told.send(()).unwrap());
+    handle
+        .submit(request(QuerySelection::FollowLatest))
+        .unwrap();
+    handle.cancel().unwrap();
+
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    assert!(telling.try_recv().is_err());
+}
+
 fn take(held: &mut Held, fixture: &Fixture, publication: u64, second: u64) {
     let machine = crate::store::MachineSecond {
         publication,

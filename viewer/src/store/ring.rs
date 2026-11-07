@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{
-    Found, FoundEvent, IdentityObservation, RingReader, RunIdentity, Shape, Tick,
+    Found, FoundEvent, IdentityObservation, RingReader, RingWaker, RunIdentity, Shape, Tick,
 };
 use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
 use persistence::{Error, NumberedEvent};
@@ -80,6 +80,8 @@ pub(super) struct Status {
 /// The ring of one run, and the room to take its ticks in.
 struct Source {
     reader: RingReader,
+    /// What ends a wait on the ring, while the ring can still be mapped.
+    waker: Option<Arc<RingWaker>>,
     identity: RunIdentity,
     complete: bool,
     tick: Tick,
@@ -521,6 +523,11 @@ impl Ring {
         Ok(newest.ring_name == source.reader.name())
     }
 
+    /// What ends a wait on the ring the store follows.
+    pub(super) fn waker(&self) -> Option<Arc<RingWaker>> {
+        self.source.as_ref()?.waker.clone()
+    }
+
     /// Sleeps until the ring publishes past what the store read, for at most `timeout`. Where
     /// the store follows no ring yet, or holds a second it could not take, the ring would not
     /// wake it, so it sleeps all of `timeout`.
@@ -542,6 +549,18 @@ impl Ring {
     }
 }
 
+/// What ends a wait on the reader's ring. A ring that can no longer be mapped has a writer gone,
+/// so a request lasts at most the rest of that wait.
+fn source_waker(reader: &RingReader) -> Option<Arc<RingWaker>> {
+    match reader.waker() {
+        Ok(waker) => Some(Arc::new(waker)),
+        Err(error) => {
+            eprintln!("flightdeck Store ring waker: {error}");
+            None
+        }
+    }
+}
+
 impl Source {
     fn follow(&mut self, mut reader: RingReader) -> Result<(), Failure> {
         if reader.shape() != self.reader.shape() {
@@ -560,6 +579,7 @@ impl Source {
             .seek_publication(next)
             .map_err(|error| Failure::Ring(error.kind()))?;
         assert!(self.native_pending.is_none());
+        self.waker = source_waker(&reader);
         self.reader = reader;
         self.process_names = None;
 
@@ -659,6 +679,7 @@ impl Source {
         let previous = minute_of(&shape)?;
         let machine_workspace_bytes = current.heap_bytes() + previous.heap_bytes();
         Ok(Self {
+            waker: source_waker(&reader),
             reader,
             identity,
             complete,

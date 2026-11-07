@@ -147,6 +147,59 @@ fn a_missing_replacement_generation_republishes_unqualified_metadata() {
 }
 
 #[test]
+fn a_new_generation_of_the_same_run_can_end_the_wait_on_its_ring() {
+    // Goal: a page's wake reaches a Store that followed its run to a new mapping of the ring.
+    // Method: follow a real writer to a new generation, wait a minute on that ring, wake it over
+    // and over from another thread until the wait ends, and see that it ended early.
+    let fixture = Fixture::new();
+    let identity = fixture.writer.identity().unwrap();
+    let shape = collector::ring::RingReader::open_generation(fixture.writer.name())
+        .unwrap()
+        .shape();
+    let place = generation_place(&fixture, "replacement.lock");
+    let mut generations = Generations::default();
+    let mut writer = generation_writer(&place, shape, &identity);
+    generations.keep(&writer);
+    publish_generation_app_tick(&mut writer, 0);
+    register_ring(&fixture, writer.name());
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let mut held = super::Held::without_recording();
+    let mut ring = super::Ring::new(fixture.root.clone());
+    stepped_view(&mut held, &mut ring, &operation);
+    drop(writer);
+    let mut writer = generation_writer(&place, shape, &identity);
+    generations.keep(&writer);
+    publish_generation_app_tick(&mut writer, 1);
+    register_ring(&fixture, writer.name());
+    ring.resume().unwrap();
+    stepped_view(&mut held, &mut ring, &operation);
+    let waker = ring.waker().unwrap();
+    let waited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waking = std::thread::spawn({
+        let waited = Arc::clone(&waited);
+        move || {
+            for _attempt in 0..6_000 {
+                if waited.load(Ordering::Acquire) {
+                    return;
+                }
+                waker.wake().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    });
+    let started = std::time::Instant::now();
+
+    ring.wait(std::time::Duration::from_secs(60)).unwrap();
+
+    waited.store(true, Ordering::Release);
+    waking.join().unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    drop(writer);
+}
+
+#[test]
 fn a_new_generation_of_the_same_run_preserves_the_readers_predecessor() {
     // Goal: a generation change follows its registered name without losing consecutive rates.
     // Method: restart a real writer in the same Place and check publication two and CPU rate.

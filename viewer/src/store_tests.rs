@@ -651,6 +651,121 @@ fn latest_request() -> super::QueryRequest {
     }
 }
 
+#[test]
+fn a_query_that_comes_with_a_new_reading_is_answered_from_it() {
+    // Goal: a page opened as a reading arrives shows at once, rather than being told the Store has
+    // not caught up and asking again a poll later.
+    // Method: ask the Store right after each of many publications, which reaches it while the
+    // ring holds a reading it has not taken, and count the answers that tell the page to wait.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let store = Store::start_with_budget(
+        &fixture.root,
+        Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    ready_context(&handle);
+
+    let told_to_wait = (0_u64..7)
+        .filter(|index| {
+            fixture.publish_with_system_rows(101 + index);
+            matches!(latest_reply(&handle), super::QueryOutcome::NeedsLoad(_))
+        })
+        .count();
+
+    assert_eq!(told_to_wait, 0);
+}
+
+#[test]
+fn a_woken_store_answers_without_waiting_out_its_wait_on_the_ring() {
+    // Goal: a page that shows nothing until the Store answers is not kept waiting by the Store's
+    // wait on a ring that publishes nothing.
+    // Method: ask soon after each answer, which finds the Store in that wait, and take the quickest
+    // answer. A wait that lasts costs every one of them most of `WAIT`, however fast the machine,
+    // and one quick answer shows it ended, however busy the machine is for the others.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let store = Store::start_with_budget(
+        &fixture.root,
+        Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    ready_context(&handle);
+
+    let quickest = (0..10)
+        .map(|_attempt| {
+            thread::sleep(Duration::from_millis(10));
+            let started = Instant::now();
+            handle.submit(latest_request()).unwrap();
+            handle.wake_store();
+            next_reply(&handle);
+            started.elapsed()
+        })
+        .min()
+        .unwrap();
+
+    assert!(quickest < super::WAIT / 2);
+}
+
+#[test]
+fn a_parked_store_answers_a_page() {
+    // Goal: a recording that goes on past a closed window still answers a window that opens.
+    // Method: park the Store, as the last window's close does, and ask it.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    let store = Store::start_with_budget(
+        &fixture.root,
+        Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
+    )
+    .unwrap();
+    let handle = store.query_handle().unwrap();
+    ready_context(&handle);
+    store.set_active(false);
+    super::activity_tests::wait_until_paused(&store);
+
+    let reply = latest_reply(&handle);
+
+    assert!(matches!(reply, super::QueryOutcome::Ready(_)));
+}
+
+#[test]
+fn a_store_whose_every_reading_lies_in_a_damaged_minute_says_so() {
+    // Goal: a Store left with no second because its one saved minute reads badly says that, where
+    // it would otherwise say nothing was ever recorded.
+    // Method: damage the only minute of a recording whose next run has published nothing, and ask.
+    let mut first = Fixture::new();
+    first.publish_with_system_rows(100);
+    first.seal_minute(0);
+    empty_ticks_file(&first, 0);
+    let next = Fixture::new_mode(false, 2, Some(&first));
+    let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
+    let store = Store::start_with_budget(&next.root, budget).unwrap();
+    let handle = store.query_handle().unwrap();
+
+    let outcome = reply_past_the_load(&handle);
+
+    assert!(matches!(
+        outcome,
+        super::QueryOutcome::Unavailable(super::QueryUnavailable::SourceFailure(Failure::Refused))
+    ));
+}
+
+/// The first answer past those that say the Store still loads, failing after ten seconds.
+fn reply_past_the_load(handle: &super::QueryHandle) -> super::QueryOutcome {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..1000 {
+        let outcome = latest_reply(handle);
+        if !matches!(outcome, super::QueryOutcome::NeedsLoad(_)) {
+            return outcome;
+        }
+        assert!(Instant::now() < deadline, "the Store kept loading");
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the Store kept loading within its attempts");
+}
+
 fn latest_reply(handle: &super::QueryHandle) -> super::QueryOutcome {
     handle.submit(latest_request()).unwrap();
     next_reply(handle)

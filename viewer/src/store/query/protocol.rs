@@ -1,7 +1,9 @@
 //! One replaceable request and one replaceable answer, separate from the UI View mailbox.
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::Thread;
+
+use collector::ring::RingWaker;
 
 use super::{ByteBudget, CheckedCoverage, Held, QueryOutcome, QueryUnavailable, SourceGeneration};
 
@@ -65,9 +67,20 @@ struct State {
     request: Option<(QueryToken, QueryRequest)>,
     in_flight: Option<QueryToken>,
     reply: Option<QueryReply>,
+    replied: Option<Arc<dyn Fn() + Send + Sync>>,
+    ring_waker: Option<Arc<RingWaker>>,
 }
 
 impl Queries {
+    /// Leaves where a consumer can reach it what ends the Store's wait on its ring.
+    pub(crate) fn set_ring_waker(&self, ring_waker: Option<Arc<RingWaker>>) {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ring_waker = ring_waker;
+    }
+
     pub(crate) fn requested(&self) -> bool {
         self.shared
             .state
@@ -140,6 +153,7 @@ impl Queries {
                     unreachable!("only supersession or producer closure cancels a build");
                 };
                 state.reply = Some(QueryReply { token, outcome });
+                announce_reply(state);
             }
         }
     }
@@ -167,8 +181,19 @@ impl Queries {
                     token,
                     outcome: QueryOutcome::Unavailable(QueryUnavailable::Closed),
                 });
+                announce_reply(state);
             }
         }
+    }
+}
+
+/// Tells the consumer an answer landed, with the lock let go, since the consumer's call takes a
+/// lock of its own under which it reads whether an answer waits.
+fn announce_reply(state: MutexGuard<'_, State>) {
+    let replied = state.replied.clone();
+    drop(state);
+    if let Some(replied) = replied {
+        replied();
     }
 }
 
@@ -200,6 +225,24 @@ impl QueryHandle {
         self.thread.unpark();
 
         Ok(token)
+    }
+
+    /// Ends the Store's wait on its ring, for a request whose page shows nothing until answered.
+    /// A refusal leaves the request to the end of that wait. The wake reaches every reader of the
+    /// ring, so a request that only refreshes a page leaves the Store to its own pace.
+    pub fn wake_store(&self) {
+        let ring_waker = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .ring_waker
+            .clone();
+        if let Some(ring_waker) = ring_waker {
+            if let Err(errno) = ring_waker.wake() {
+                eprintln!("flightdeck Store wake: errno {errno}");
+            }
+        }
     }
 
     /// Cancels pending and in-flight work while leaving contexts already displayed usable.
@@ -240,6 +283,27 @@ impl QueryHandle {
         }
 
         state.reply.is_some()
+    }
+
+    /// Calls `replied` on the Store's thread each time an answer lands, in place of any earlier
+    /// call, so a consumer waiting on a condition of its own can end that wait.
+    pub fn on_reply(&self, replied: impl Fn() + Send + Sync + 'static) {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replied = Some(Arc::new(replied));
+    }
+
+    /// Whether an answer waits to be taken.
+    #[must_use]
+    pub fn answered(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reply
+            .is_some()
     }
 
     #[must_use]

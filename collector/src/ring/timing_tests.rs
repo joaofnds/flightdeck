@@ -393,3 +393,33 @@ impl Drop for Source {
         std::fs::remove_file(&self.place.lock_path).unwrap();
     }
 }
+
+#[test]
+fn a_waker_ends_a_readers_wait() {
+    // Goal: another thread can end a reader's wait when it has other work for that reader.
+    // Method: wait for a minute on a real ring that publishes nothing more, and wake it until the
+    // wait ends, up to thirty seconds.
+    let mut source = Source::new(3);
+    source.publish(73, None::<&ObservationTimes>);
+    let waker = RingReader::open(&source.place.lock_path)
+        .unwrap()
+        .waker()
+        .unwrap();
+    let lock_path = source.place.lock_path.clone();
+    let (ended, ending) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        let mut reader = RingReader::open(&lock_path).unwrap();
+        let mut timing = PublicationTiming::default();
+        reader.read_timing_into(&mut timing).unwrap();
+        reader.wait(Duration::from_secs(60)).unwrap();
+        ended.send(()).unwrap();
+    });
+
+    let woken = (0..6_000).any(|_attempt| {
+        waker.wake().unwrap();
+        ending.recv_timeout(Duration::from_millis(5)).is_ok()
+    });
+
+    assert!(woken);
+    waiting.join().unwrap();
+}

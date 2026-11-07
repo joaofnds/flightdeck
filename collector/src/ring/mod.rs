@@ -52,7 +52,7 @@ use object::{
 };
 pub use system::{GPU_NS_MAX, SystemPublication, SystemSnapshot};
 pub use tick::{Dropped, Readings, Tick};
-pub use view::{PublicationTiming, RingReader, TickBuffers};
+pub use view::{PublicationTiming, RingReader, RingWaker, TickBuffers};
 
 /// Explicit opt-in dictionary bounds; default writers continue using layout 3.
 #[derive(Debug, Clone, Copy)]

@@ -604,6 +604,30 @@ fn core_tick(publication: u64) -> viewer::recording::TickRow {
     }
 }
 
+#[test]
+fn a_page_opens_without_waiting_out_the_workers_poll() {
+    // Goal: the real worker over the real Store shows a page sooner than its poll interval.
+    // Method: open pages over and over and take the quickest. A pause the Store's answer does not
+    // end costs every read the poll interval, however fast the machine, and one quick read among
+    // these shows it ended, however busy the machine is for the others.
+    let mut harness = Harness::new();
+    harness.worker.request(request("network")).unwrap();
+    harness.ready();
+    let routes = ["battery", "network"];
+
+    let quickest = (0..20)
+        .map(|index| {
+            let started = Instant::now();
+            harness.worker.request(request(routes[index % 2])).unwrap();
+            harness.ready();
+            started.elapsed()
+        })
+        .min()
+        .unwrap();
+
+    assert!(quickest < crate::live_source::POLL_INTERVAL);
+}
+
 struct Harness {
     worker: Worker,
     store: Option<viewer::store::Store>,
