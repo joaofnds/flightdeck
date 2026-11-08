@@ -28,6 +28,12 @@ mod tests {
     const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
     const PROCESS_ZERO_PID: i32 = 41_000;
     const GIB: u64 = 1 << 30;
+    /// The fixed identities the generator gives the recording, the boot and the runs.
+    const RECORDING: Identity = Identity([0x9e37_79b9_7f4a_7c15, 0xbf58_476d_1ce4_e5b9]);
+    const BOOT: Identity = Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6c_dd1d]);
+    const RUN_FIRST: Identity = Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]);
+    const RUN_SECOND: Identity = Identity([0xe703_7ed1_a0b4_28db, 0x8ebc_6af0_9c88_c6e3]);
+    const RUN_OBSERVATIONS: Identity = Identity([0x2d35_8dcc_aa6c_78a5, 0x8bb8_4b93_962e_acc9]);
     /// The first period's incident seconds, one at each position of a ten-second bucket.
     const INCIDENT_SECONDS: [u64; 10] = [10, 21, 32, 43, 54, 65, 76, 87, 98, 109];
 
@@ -354,8 +360,6 @@ mod tests {
         // them alike. Method: read the recording's identity and the run identities its registry
         // lists.
         let input = input();
-        let recording = Identity([0x9e37_79b9_7f4a_7c15, 0xbf58_476d_1ce4_e5b9]);
-        let boot = Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6c_dd1d]);
         let runs: Vec<RunIdentity> = Registry::read(&input.directory)
             .unwrap()
             .runs
@@ -365,19 +369,8 @@ mod tests {
 
         assert_eq!(
             (
-                recording,
-                vec![
-                    RunIdentity {
-                        recording,
-                        run: Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]),
-                        boot,
-                    },
-                    RunIdentity {
-                        recording,
-                        run: Identity([0xe703_7ed1_a0b4_28db, 0x8ebc_6af0_9c88_c6e3]),
-                        boot,
-                    },
-                ],
+                RECORDING,
+                vec![run_identity(RUN_FIRST), run_identity(RUN_SECOND)]
             ),
             (
                 collector::recording::read_identity(&input.directory).unwrap(),
@@ -444,6 +437,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn observes_seconds_120_to_122_again_half_a_second_later_in_the_same_boot() {
+        // Goal: a third run reads wall seconds 120 to 122 a second time, at the continuous clock
+        // the first primary run reads them at plus 500 ms in the same boot, so each of those
+        // seconds has two observations to choose between. Method: read the clocks of the third
+        // run's saved ticks and of the first primary run's ticks at those seconds.
+        let input = input();
+        let observations = input.saved_clocks(&run_identity(RUN_OBSERVATIONS));
+        let primary = [120, 121, 122].map(|second| {
+            let tick = input.saved_rows(second, "ticks", "wall_ns, continuous_ns", "TRUE");
+            (cell::<u64>(&tick, 0), cell::<u64>(&tick, 1))
+        });
+
+        assert_eq!(
+            primary
+                .iter()
+                .map(|(wall_ns, continuous_ns)| (*wall_ns, continuous_ns + 500_000_000))
+                .collect::<Vec<_>>(),
+            observations
+        );
+    }
+
+    #[test]
+    fn saves_every_minute_of_the_primary_runs_with_no_loss() {
+        // Goal: the third run is retired before the second primary run's registration evicts it,
+        // so no saved minute of a primary run records a lost publication, a lost event or a loss
+        // of unknown extent. Method: read the losses of each saved minute.
+        let input = input();
+        let losses: BTreeSet<(u64, u64, bool)> = input
+            .saved_minutes()
+            .iter()
+            .map(|minute| {
+                (
+                    minute.losses.publications,
+                    minute.losses.events,
+                    minute.losses.unknown,
+                )
+            })
+            .collect();
+
+        assert_eq!(BTreeSet::from([(0, 0, false)]), losses);
+    }
+
     /// The SMC's readings between the contract's special seconds.
     fn smc_baseline() -> Smc {
         Smc {
@@ -461,6 +497,15 @@ mod tests {
             energy_nj: 1_000 * (valid + 19 * incidents),
             disk_read_bytes: 4_096 * valid,
             disk_written_bytes: 2_048 * valid,
+        }
+    }
+
+    /// The identity of the generator's run `run`.
+    fn run_identity(run: Identity) -> RunIdentity {
+        RunIdentity {
+            recording: RECORDING,
+            run,
+            boot: BOOT,
         }
     }
 
@@ -848,6 +893,27 @@ mod tests {
                     )
                 })
                 .collect()
+        }
+
+        /// The wall and continuous clocks of each saved tick of the run `run`, in time order.
+        fn saved_clocks(&self, run: &RunIdentity) -> Vec<(u64, u64)> {
+            let mut clocks = Vec::new();
+            for minute in saved_windows::saved_manifests(&self.directory, run) {
+                let ticks = query(
+                    &self
+                        .directory
+                        .join(&minute.data_directory)
+                        .join("ticks.parquet"),
+                    "SELECT wall_ns, continuous_ns FROM saved ORDER BY wall_ns",
+                );
+                for index in 0..ticks.height() {
+                    let row = persistence::engine::Row::new(&ticks, index).unwrap();
+                    clocks.push((row.get(0).unwrap(), row.get(1).unwrap()));
+                }
+            }
+            clocks.sort_unstable();
+
+            clocks
         }
 
         /// The manifest of each saved minute of every run.

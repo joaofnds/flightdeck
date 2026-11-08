@@ -81,6 +81,26 @@ const BOOT_IDENTITY: Identity = Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6
 const RUN_FIRST_IDENTITY: Identity = Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]);
 /// The second primary run's identity.
 const RUN_SECOND_IDENTITY: Identity = Identity([0xe703_7ed1_a0b4_28db, 0x8ebc_6af0_9c88_c6e3]);
+/// The three-observation run's identity.
+const RUN_OBSERVATIONS_IDENTITY: Identity =
+    Identity([0x2d35_8dcc_aa6c_78a5, 0x8bb8_4b93_962e_acc9]);
+/// The wall seconds the three-observation run reads a second time, the contract's 120 to 122.
+const OBSERVATIONS_SECONDS: Range<u64> = 120..123;
+/// How much later on the continuous and awake clocks the three-observation run reads each of
+/// its seconds than the first primary run, so the two observations of a second differ.
+const OBSERVATIONS_LATER_NS: u64 = NANOSECONDS_PER_SECOND / 2;
+/// The three-observation run.
+const OBSERVATIONS_RUN: RunPlan = RunPlan {
+    identity: RUN_OBSERVATIONS_IDENTITY,
+    first: OBSERVATIONS_SECONDS.start,
+    later_ns: OBSERVATIONS_LATER_NS,
+};
+/// The first primary run, which starts at the input's first second.
+const FIRST_RUN: RunPlan = RunPlan {
+    identity: RUN_FIRST_IDENTITY,
+    first: 0,
+    later_ns: 0,
+};
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -180,6 +200,11 @@ const _: () = {
     assert!(INCIDENT_PROCESS < ROTATING_FIRST);
     // Each primary run holds a saved minute at least.
     assert!(0 < run_split(SECONDS_MIN));
+    // The three-observation run reads seconds of the first primary run, none of them special.
+    assert!(OBSERVATIONS_SECONDS.end <= run_split(SECONDS_MIN));
+    assert!(INCIDENT_OFFSETS[INCIDENT_OFFSETS.len() - 1] < OBSERVATIONS_SECONDS.start);
+    // An observation stays within its own second.
+    assert!(OBSERVATIONS_LATER_NS < NANOSECONDS_PER_SECOND);
     // The non-UTF-8 name rotates, so its exits and starts name it too.
     assert!(ROTATING_FIRST <= NON_UTF8_PROCESS);
     assert!(NON_UTF8_PROCESS < PROCESSES);
@@ -284,11 +309,27 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
     };
     let split = run_split(seconds);
 
-    let mut first = Run::start(directory, &place, &control, RUN_FIRST_IDENTITY, 0)?;
+    // The three-observation run goes first, so the second primary run's registration evicts it
+    // rather than the first primary run from the registry of two, which then lists the primary
+    // runs.
+    let mut observations = Run::start(directory, &place, &control, &OBSERVATIONS_RUN)?;
+    observations.publish(OBSERVATIONS_SECONDS)?;
+    observations.finish()?;
+
+    let mut first = Run::start(directory, &place, &control, &FIRST_RUN)?;
     first.publish(0..split)?;
     first.finish()?;
 
-    let mut second = Run::start(directory, &place, &control, RUN_SECOND_IDENTITY, split)?;
+    let mut second = Run::start(
+        directory,
+        &place,
+        &control,
+        &RunPlan {
+            identity: RUN_SECOND_IDENTITY,
+            first: split,
+            later_ns: 0,
+        },
+    )?;
     let last_minute_first = second.publish(split..seconds)?;
     second.paced.wait_for_saved(last_minute_first)?;
     // A pass that finds nothing to save ends in the worker's pause, so the process ends with the
@@ -314,8 +355,18 @@ const fn run_split(seconds: u64) -> u64 {
     seconds / 2 / SECONDS_PER_MINUTE * SECONDS_PER_MINUTE
 }
 
-/// One primary run as the generator publishes it: its writer, the generated Mac its ring names,
-/// and its worker's progress.
+/// Which run the generator publishes and when it reads the input's seconds.
+#[derive(Clone, Copy)]
+struct RunPlan {
+    identity: Identity,
+    /// The input's second the run starts at, its tick 0.
+    first: u64,
+    /// How much later than the input's continuous and awake clocks the run reads each second.
+    later_ns: u64,
+}
+
+/// One run as the generator publishes it: its writer, the generated Mac its ring names, and its
+/// worker's progress.
 struct Run<'a> {
     writer: Writer,
     machine: Machine,
@@ -323,14 +374,13 @@ struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
-    /// Registers the run `identity` of the recording `directory` at the ring place `place`, to
-    /// start at the input's second `first`, and starts its worker, which reports to `control`.
+    /// Registers the run `plan` names of the recording `directory` at the ring place `place`,
+    /// and starts its worker, which reports to `control`.
     fn start(
         directory: &Path,
         place: &Place,
         control: &'a Control,
-        identity: Identity,
-        first: u64,
+        plan: &RunPlan,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let started = Registration::start_with_system_as(
             directory,
@@ -340,9 +390,9 @@ impl<'a> Run<'a> {
                 entries: 65_536,
                 arena_bytes: 64 * 1024 * 1024,
             },
-            ORIGIN_CONTINUOUS_NS + first * NANOSECONDS_PER_SECOND,
+            ORIGIN_CONTINUOUS_NS + plan.first * NANOSECONDS_PER_SECOND + plan.later_ns,
             FixedRun {
-                run: identity,
+                run: plan.identity,
                 boot: BOOT_IDENTITY,
             },
         )?;
@@ -350,7 +400,7 @@ impl<'a> Run<'a> {
         registered?;
         // The worker starts once the run is registered, since a worker that finds no run exits.
         let worker = generate_worker(directory, control.authority())?;
-        let machine = Machine::start(&mut writer, first)?;
+        let machine = Machine::start(&mut writer, plan)?;
         let saved_end = writer.publication_newest() + 1;
 
         Ok(Self {
@@ -358,7 +408,7 @@ impl<'a> Run<'a> {
             machine,
             paced: Paced {
                 control,
-                run: identity,
+                run: plan.identity,
                 worker,
                 saved_end,
                 heartbeat_ns: 0,
@@ -542,8 +592,8 @@ impl Paced<'_> {
 /// The generated Mac: its processes in increasing pid order, the programs they run, and what
 /// it is, which no second changes.
 struct Machine {
-    /// The input's second the run starts at, its tick 0.
-    run_first: u64,
+    /// The run that reads the generated Mac.
+    run: RunPlan,
     programs: Vec<ProgramReference>,
     facts: MachineFacts,
     /// Each process's GPU time, which the contract does not name, so it reads zero.
@@ -551,9 +601,8 @@ struct Machine {
 }
 
 impl Machine {
-    /// The generated Mac as the run that starts at the input's second `run_first` and
-    /// publishes through `writer` reads it.
-    fn start(writer: &mut Writer, run_first: u64) -> Result<Self, Box<dyn std::error::Error>> {
+    /// The generated Mac as the run `run`, which publishes through `writer`, reads it.
+    fn start(writer: &mut Writer, run: &RunPlan) -> Result<Self, Box<dyn std::error::Error>> {
         // The ring has room for each device the generated Mac has, and for no other.
         assert_eq!(RUN_SHAPE.interface_capacity, u64::from(INTERFACES));
         assert_eq!(
@@ -575,7 +624,7 @@ impl Machine {
         }
 
         Ok(Self {
-            run_first,
+            run: *run,
             programs,
             facts: start_facts()?,
             process_gpu_ns: vec![Some(0); usize::try_from(PROCESSES)?],
@@ -589,10 +638,12 @@ impl Machine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let times = ObservationTimes {
             wall_ns: ORIGIN_WALL_NS + second * NANOSECONDS_PER_SECOND,
-            continuous_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
-            awake_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
+            continuous_ns: ORIGIN_CONTINUOUS_NS
+                + second * NANOSECONDS_PER_SECOND
+                + self.run.later_ns,
+            awake_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND + self.run.later_ns,
         };
-        let read = Second::read(&self.programs, self.run_first, second, times.continuous_ns)?;
+        let read = Second::read(&self.programs, &self.run, second, &times)?;
         let smc = if second % PERIOD_SECONDS == SMC_UNAVAILABLE_SECOND {
             None
         } else {
@@ -606,7 +657,7 @@ impl Machine {
         };
         let readings = Readings {
             // A collector counts its run's ticks from its warm-up tick, tick 0.
-            run_tick: second - self.run_first,
+            run_tick: second - self.run.first,
             cpus: &read.cpus,
             memory: &read.memory,
             interfaces: &read.interfaces,
@@ -668,13 +719,13 @@ struct Second {
 }
 
 impl Second {
-    /// The readings of `second`, whose continuous clock is `continuous_ns`, of processes that
-    /// run `programs`, in the run that starts at `run_first`.
+    /// The readings of `second`, which the run `run` reads at `times`, of processes that run
+    /// `programs`.
     fn read(
         programs: &[ProgramReference],
-        run_first: u64,
+        run: &RunPlan,
         second: u64,
-        continuous_ns: u64,
+        times: &ObservationTimes,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let valid = valid_seconds(second);
         let incidents = incident_seconds(second);
@@ -695,7 +746,7 @@ impl Second {
             second
         };
         let (events, event_identities) =
-            publish_rotations(programs, rotated_first.max(run_first + 1)..=second)?;
+            publish_rotations(programs, rotated_first.max(run.first + 1)..=second)?;
         let thermal_pressure = match offset {
             THERMAL_FAIR_SECOND => THERMAL_MODERATE,
             THERMAL_SERIOUS_SECOND => THERMAL_HEAVY,
@@ -733,8 +784,8 @@ impl Second {
                     * (GPU_STATE_ACTIVE_NS_PER_INCIDENT_SECOND - GPU_STATE_ACTIVE_NS_PER_SECOND);
                 GPU_STATES],
             cores: (0..CPUS).map(|core| publish_core(core, valid)).collect(),
-            battery: publish_battery(continuous_ns),
-            disks: publish_disks(continuous_ns, valid)?,
+            battery: publish_battery(times.continuous_ns),
+            disks: publish_disks(times.continuous_ns, valid)?,
             system: publish_system(thermal_pressure),
         })
     }
