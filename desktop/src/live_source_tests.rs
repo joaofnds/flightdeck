@@ -527,25 +527,24 @@ fn a_handed_over_reader_reads_the_next_windows_page_as_newly_opened() {
 
 #[test]
 fn a_handed_over_reader_leaves_its_session_where_it_is() {
-    // Goal: a reader reads nothing while it rests, since the store goes on following the
-    // recording and following it here too would take in each publication twice.
-    // Method: read a live ring, hand the reader over idle, publish a tick, and step the reader
-    // as the worker does.
-    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish();
+    // Goal: a reader reads and publishes nothing while it rests, since the store goes on
+    // following the recording and reading it here too would take in each minute twice.
+    // Method: read the saved minutes, hand the reader over idle, save a newer minute, and step
+    // the reader as the worker does.
+    let recording = SealedRecording::with_an_older_minute();
     let mut reader = SnapshotReader::new();
     reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.read_at(&recording.root).unwrap().unwrap();
-    let read = reader.session().catalog()["last_second"].as_u64();
     let _kept = reader.hand_over();
-    recording.publish();
+    recording.seal_older_minute(3000);
 
     let received = reader.receive();
     let pause = reader.step_resting(&recording.root);
 
     assert_eq!(received, (super::Received::Continued, false));
     assert_eq!(pause, super::POLL_INTERVAL);
-    assert_eq!(reader.session().catalog()["last_second"].as_u64(), read);
+    assert!(reader.shared.mailbox.lock().unwrap().output.is_none());
+    assert_eq!(reader.session().catalog()["last_second"], 2200);
 }
 
 #[test]
