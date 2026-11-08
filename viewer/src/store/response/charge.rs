@@ -5,7 +5,8 @@ use serde_json::Value;
 // This bounds formatter schema nesting independently of the number of processes or points.
 const NESTING_MAX: usize = 64;
 const VALUES_MAX: usize = 1024 * 1024;
-const BYTES_MAX: usize = 64 * 1024 * 1024;
+/// The most one Store JSON value may charge, which bounds every presentation built as one.
+pub(crate) const JSON_BYTES_MAX: usize = 64 * 1024 * 1024;
 const NODE_BYTES: usize = 11 * size_of::<(String, Value)>() + 12 * size_of::<usize>() + 32;
 
 /// JSON maps grow from literals in these responses. The pinned `BTreeMap` has eleven slots per
@@ -38,7 +39,7 @@ pub(crate) fn json_charge(value: &Value) -> Result<usize> {
             json_charge_push(&mut pending, &mut depth, &mut children)?;
         }
         current = json_charge_next(&mut pending, &mut depth, &mut bytes);
-        if bytes > BYTES_MAX {
+        if bytes > JSON_BYTES_MAX {
             return Err(Error::Bound("Store JSON retained bytes"));
         }
     }

@@ -171,3 +171,84 @@ fn reads_a_minute_without_disk_readings_beside_a_measured_one_without_fabricatin
     assert!(unmeasured["trends"][2]["storage"].is_null());
 }
 
+#[test]
+fn a_followed_chart_of_the_most_disks_presents_every_charted_second() {
+    // Goal: the Store presents the Overview's whole chart for the most disks the collector reads.
+    // Method: follow a ring of 1,000 seconds of that many disks, then read the newest selection.
+    let mut fixture = storage_fixture_with_slots(1024);
+    for tick in 1..=1000 {
+        let disks = storage_snapshot_of_disks(tick, collector::disks::DISKS_MAX);
+        storage_publish(&mut fixture, tick, Some(&disks));
+    }
+    let store = crate::store::Store::start(&fixture.root).unwrap();
+    let context = storage_context_at(&store, 2000);
+
+    let selection = context.selection(&Arc::new(Cancellation::default()), 0);
+
+    let trends = selection.unwrap()["trends"].as_array().unwrap().len();
+    assert_eq!(u64::try_from(trends).unwrap(), CHARTED_SECONDS);
+}
+
+fn storage_snapshot_of_disks(tick: u64, count: usize) -> DiskSnapshot {
+    let mut snapshot = DiskSnapshot {
+        source_continuous_ns: tick * NANOSECONDS_PER_SECOND,
+        state: ScanState::Complete,
+        count,
+        ..DiskSnapshot::default()
+    };
+    for (index, record) in snapshot.records[..count].iter_mut().enumerate() {
+        let disk = u64::try_from(index).unwrap() + 1;
+        *record = DiskReading {
+            driver_id: disk,
+            media_id: 100 + disk,
+            read_bytes: Some(tick * 4096 * disk),
+            write_bytes: Some(tick * 8192 * disk),
+            read_operations: Some(tick * 2 * disk),
+            write_operations: Some(tick * 4 * disk),
+            read_errors: Some(0),
+            write_errors: Some(0),
+            read_time_ns: Some(tick * 6_000_000 * disk),
+            write_time_ns: Some(tick * 20_000_000 * disk),
+            ..DiskReading::default()
+        };
+        let name = format!("disk{index}");
+        record.name[..name.len()].copy_from_slice(name.as_bytes());
+    }
+    snapshot
+}
+
+/// Follows the Store until its context selects `second`.
+fn storage_context_at(store: &crate::store::Store, second: u64) -> Arc<crate::store::QueryContext> {
+    let handle = store.query_handle();
+    let request = crate::store::QueryRequest {
+        epoch: 0,
+        source: None,
+        selection: crate::store::QuerySelection::FollowLatest,
+    };
+    handle.submit(request).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    for _ in 0..3000 {
+        if let Some(reply) = handle.take() {
+            match reply.outcome {
+                crate::store::QueryOutcome::Ready(context)
+                    if context.selected_second() == second =>
+                {
+                    return context;
+                }
+                crate::store::QueryOutcome::Unavailable(reason) => {
+                    panic!("unavailable: {reason:?}")
+                }
+                _ => {
+                    handle.submit(request).unwrap();
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Store never selected {second}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    panic!("the Store never selected {second} within its attempts");
+}

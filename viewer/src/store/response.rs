@@ -7,7 +7,7 @@ mod owned;
 mod pages;
 mod trace;
 
-pub(crate) use charge::json_charge;
+pub(crate) use charge::{JSON_BYTES_MAX, json_charge};
 pub use owned::Response;
 
 use std::ops::Deref;

@@ -7,14 +7,17 @@ use persistence::{Error, Result};
 use serde_json::{Value, json};
 
 use super::native::Origin;
-use super::response::json_charge;
+use super::response::{JSON_BYTES_MAX, json_charge};
 use super::{QueryContext, QuerySecond, Response};
 use crate::Cancellation;
 use crate::live_app_response::Observation;
 use crate::session::ContextRange;
 
-const CONTEXT_BYTES_MAX: usize = 32 * 1024 * 1024;
+/// The selection's summary point and the alternatives at its second.
 const POINT_BYTES_MAX: usize = 8 * 1024 * 1024;
+/// The chart's points take what one JSON value may hold beside the summary and alternatives,
+/// since a selection is built as one.
+const CONTEXT_BYTES_MAX: usize = JSON_BYTES_MAX - POINT_BYTES_MAX;
 
 #[cfg(test)]
 #[path = "context_response_tests.rs"]
