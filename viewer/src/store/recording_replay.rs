@@ -97,15 +97,16 @@ impl Decoder {
         *next += 1;
     }
 
-    /// Replays `processes`, a minute's process frames, deriving no Apps, so that the last of them
-    /// gives the first second of the minute after it its App rates.
+    /// Replays `processes`, a minute's process frames, from the frame at `first`, deriving no
+    /// Apps, so that the last of them gives the first second of the minute after it its App rates.
     pub(super) fn visit_predecessor(
         &mut self,
         processes: &ProcessBatch,
+        first: usize,
         operation: &Operation,
     ) -> Result<(), Refused> {
         operation.check()?;
-        let mut next = 0;
+        let mut next = first;
         let result = self.replay(
             processes,
             &mut Input {

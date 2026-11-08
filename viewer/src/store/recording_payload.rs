@@ -63,6 +63,11 @@ pub(super) fn load(
 /// so a decoder seeds from the read that the decoder of the minute before it decodes. Each result
 /// is a minute's decoder, its seconds and why its decoder could not be seeded, in the order of
 /// `group`.
+///
+/// Where there are several, a thread decoding a seeded minute seeds from only the last frame of
+/// the minute before it, which rates its first second, while another thread seeds from all of
+/// that minute's frames, since an earlier frame can refuse the minute. A decoding whose seed the
+/// whole minute does not agree with is done again.
 fn load_group(
     input: &LoadInput<'_>,
     carried: Decoder,
@@ -85,13 +90,10 @@ fn load_group(
         (None, None) => None,
     };
     if let [found] = group {
-        return vec![load_group_decode(
-            input,
-            carried,
-            before_of(0),
-            found,
-            &reads[offset],
-        )];
+        let seeded = load_group_seeded(input, carried, before_of(0), 0);
+        return vec![seeded.and_then(|(decoder, unseeded)| {
+            load_group_decode(input, decoder, unseeded, found, &reads[offset])
+        })];
     }
 
     thread::scope(|scope| {
@@ -99,39 +101,124 @@ fn load_group(
             .iter()
             .enumerate()
             .map(|(index, found)| {
-                let decoder = carried.take();
+                let carried = carried.take();
                 let before = before_of(index);
                 let read = &reads[index + offset];
-                let observation = persistence::work::ingestion::inherit_current();
-                thread::Builder::new()
-                    .name(String::from("flightdeck-decoder"))
-                    .spawn_scoped(scope, move || {
-                        let observation = observation.enter();
-                        let result = load_group_decode(input, decoder, before, found, read);
-                        drop(observation);
-                        result
-                    })
+                let seeder = match (&carried, before) {
+                    (None, Some((before, before_read))) => {
+                        Some(load_group_spawn(scope, "flightdeck-seeder", move || {
+                            load_group_seed(input, before, before_read, 0)
+                        }))
+                    }
+                    _ => None,
+                };
+                let decoder = load_group_spawn(scope, "flightdeck-decoder", move || {
+                    load_group_guess(input, carried, before, found, read)
+                });
+                (seeder, decoder)
             })
             .collect();
 
         decoders
             .into_iter()
-            .map(|decoder| match decoder {
-                Ok(handle) => match handle.join() {
-                    Ok(decoded) => decoded,
-                    Err(panic) => panic::resume_unwind(panic),
-                },
-                Err(error) => Ok(Decoded {
-                    decoder: Decoder::default(),
-                    completion: Batch {
-                        seconds: Vec::new(),
-                        left_out: Some(Failure::Loader(error.kind())),
-                    },
-                    unseeded: None,
-                }),
+            .enumerate()
+            .map(|(index, (seeder, decoder))| {
+                let guessed = match decoder {
+                    Ok(handle) => load_group_join(handle),
+                    Err(error) => return Ok(Decoded::unstarted(&error)),
+                };
+                let full = match seeder {
+                    None => return guessed.map(|(_, decoded)| decoded),
+                    Some(Ok(handle)) => load_group_join(handle),
+                    Some(Err(error)) => return Ok(Decoded::unstarted(&error)),
+                };
+                load_group_checked(input, guessed, full, &group[index], &reads[index + offset])
             })
             .collect()
     })
+}
+
+/// Decodes `found`, which `read` read, with `carried`, the decoder of the minute before it, or
+/// with a decoder seeded from only the last frame of `before`, that minute and its read, and
+/// gives the seed the decoding began from.
+fn load_group_guess(
+    input: &LoadInput<'_>,
+    carried: Option<Decoder>,
+    before: Option<(&Found, &Result<MinuteRead<'_>, Failure>)>,
+    found: &Found,
+    read: &Result<MinuteRead<'_>, Failure>,
+) -> persistence::Result<(SeedKey, Decoded)> {
+    let last = before.map_or(0, |(_, before_read)| load_group_last_frame(before_read));
+    let (decoder, unseeded) = load_group_seeded(input, carried, before, last)?;
+    let seed = decoder.seed_key();
+
+    load_group_decode(input, decoder, unseeded, found, read).map(|decoded| (seed, decoded))
+}
+
+/// `carried`, the decoder of the minute before the one it decodes, or a decoder seeded from the
+/// frames of `before`, that minute and its read, from the one at `first`, and why it could not be
+/// seeded, where it could not.
+fn load_group_seeded(
+    input: &LoadInput<'_>,
+    carried: Option<Decoder>,
+    before: Option<(&Found, &Result<MinuteRead<'_>, Failure>)>,
+    first: usize,
+) -> persistence::Result<(Decoder, Option<Failure>)> {
+    match (carried, before) {
+        (Some(decoder), _) => Ok((decoder, None)),
+        (None, Some((before, read))) => load_group_seed(input, before, read, first),
+        (None, None) => unreachable!("a minute with none before it in the load has a decoder"),
+    }
+}
+
+/// Runs `work` on a thread named `name` of `scope`, in the ingestion observation of this thread.
+fn load_group_spawn<'scope, T: Send + 'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    name: &str,
+    work: impl FnOnce() -> T + Send + 'scope,
+) -> std::io::Result<thread::ScopedJoinHandle<'scope, T>> {
+    let observation = persistence::work::ingestion::inherit_current();
+    thread::Builder::new()
+        .name(String::from(name))
+        .spawn_scoped(scope, move || {
+            let observation = observation.enter();
+            let result = work();
+            drop(observation);
+            result
+        })
+}
+
+/// What the thread of `handle` returned, or its panic, which goes on in this thread.
+fn load_group_join<T>(handle: thread::ScopedJoinHandle<'_, T>) -> T {
+    match handle.join() {
+        Ok(result) => result,
+        Err(panic) => panic::resume_unwind(panic),
+    }
+}
+
+/// The index of the last process frame `read` holds, the one that rates the minute after it.
+fn load_group_last_frame(read: &Result<MinuteRead<'_>, Failure>) -> usize {
+    read.as_ref()
+        .map_or(0, |read| read.processes.endpoints.len().saturating_sub(1))
+}
+
+/// The decoding of `found`, which `read` read: `guessed`, decoded from a seed of only the last
+/// frame of the minute before it, where `full`, the decoder seeded from all that minute's frames,
+/// holds the same seed, and otherwise a decoding from `full`.
+fn load_group_checked(
+    input: &LoadInput<'_>,
+    guessed: persistence::Result<(SeedKey, Decoded)>,
+    full: persistence::Result<(Decoder, Option<Failure>)>,
+    found: &Found,
+    read: &Result<MinuteRead<'_>, Failure>,
+) -> persistence::Result<Decoded> {
+    let (whole, unseeded) = full?;
+    let (seed, guess) = guessed?;
+    if seed == whole.seed_key() {
+        return Ok(Decoded { unseeded, ..guess });
+    }
+
+    load_group_decode(input, whole, unseeded, found, read)
 }
 
 /// Reads `predecessor`, where the load continues from it, and then the minutes of `group`, a
@@ -174,25 +261,14 @@ fn load_group_reads<'input>(
             .enumerate()
             .map(|(index, found)| {
                 let read = &read;
-                let observation = persistence::work::ingestion::inherit_current();
-                thread::Builder::new()
-                    .name(String::from("flightdeck-reader"))
-                    .spawn_scoped(scope, move || {
-                        let observation = observation.enter();
-                        let result = read(index, found);
-                        drop(observation);
-                        result
-                    })
+                load_group_spawn(scope, "flightdeck-reader", move || read(index, found))
             })
             .collect();
 
         readers
             .into_iter()
             .map(|reader| match reader {
-                Ok(handle) => match handle.join() {
-                    Ok(read) => read,
-                    Err(panic) => panic::resume_unwind(panic),
-                },
+                Ok(handle) => load_group_join(handle),
                 Err(error) => Err(Failure::Loader(error.kind())),
             })
             .collect()
@@ -209,21 +285,30 @@ struct Decoded {
     unseeded: Option<Failure>,
 }
 
-/// Decodes `found`, which `read` read, with `decoder`, the decoder of the minute before it, or
-/// where another thread decodes that minute or the store holds its seconds, with a decoder seeded
-/// from `before`, that minute and its read.
+impl Decoded {
+    /// What a minute gives whose thread `error` kept from starting: none of its seconds.
+    fn unstarted(error: &std::io::Error) -> Self {
+        Self {
+            decoder: Decoder::default(),
+            completion: Batch {
+                seconds: Vec::new(),
+                left_out: Some(Failure::Loader(error.kind())),
+            },
+            unseeded: None,
+        }
+    }
+}
+
+/// Decodes `found`, which `read` read, with `decoder`, the decoder of the minute before it or one
+/// seeded from that minute, which `unseeded` says why it could not be seeded from, where it could
+/// not.
 fn load_group_decode(
     input: &LoadInput<'_>,
-    decoder: Option<Decoder>,
-    before: Option<(&Found, &Result<MinuteRead<'_>, Failure>)>,
+    mut decoder: Decoder,
+    unseeded: Option<Failure>,
     found: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
 ) -> persistence::Result<Decoded> {
-    let (mut decoder, unseeded) = match (decoder, before) {
-        (Some(decoder), _) => (decoder, None),
-        (None, Some((before, read))) => load_group_seed(input, before, read)?,
-        (None, None) => unreachable!("a minute after the first of a group has one before it"),
-    };
     input.operation.check()?;
 
     let completion = decoder.decode_read(found, read, input.budget, input.operation);
@@ -236,18 +321,20 @@ fn load_group_decode(
 
 /// A decoder holding what rates the minute after `before`, which `read` read, as the decoder of
 /// `before` holds after decoding it, without the catalog of `before`, which that decoder counts,
-/// and why it could not take in `before`, where it could not.
+/// and why it could not take in `before`, where it could not. It replays the frames of `before`
+/// from the one at `first`, so a seed from a later frame than the first is a guess.
 fn load_group_seed(
     input: &LoadInput<'_>,
     before: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
+    first: usize,
 ) -> persistence::Result<(Decoder, Option<Failure>)> {
     let _purpose =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
     input.operation.check()?;
     let mut decoder = Decoder::default();
 
-    let seeded = decoder.seed(before, read, input.operation);
+    let seeded = decoder.seed(before, read, first, input.operation);
     if seeded.is_err() {
         assert!(decoder.predecessor.is_none());
         assert!(decoder.previous_run.is_none());
@@ -380,7 +467,26 @@ pub(super) struct Decoder {
     machine_reservation: Option<ByteReservation>,
 }
 
+/// What a decoder seeded from one minute rates the first second of the next with: the run and
+/// publication of the frame it keeps, where it keeps one, and the run of the machine readings it
+/// keeps, where it keeps them. Two seeds of one read that agree on it hold the same.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SeedKey {
+    predecessor: Option<(RunIdentity, u64)>,
+    previous_run: Option<RunIdentity>,
+}
+
 impl Decoder {
+    fn seed_key(&self) -> SeedKey {
+        SeedKey {
+            predecessor: self.predecessor.as_ref().map(|before| {
+                let (endpoint, _) = before.previous();
+                (endpoint.identity, endpoint.stamp.publication)
+            }),
+            previous_run: self.previous_run,
+        }
+    }
+
     pub(super) fn terminal(&mut self) -> Option<super::Terminal> {
         let run = self.previous_run.take()?;
         let terminal = super::Terminal::from_minute(
@@ -483,17 +589,18 @@ impl Decoder {
     }
 
     /// Takes in of `found`, which `read` read, only its machine readings and the last of its
-    /// process frames, which give the first second of the minute after it its rates, and leaves
-    /// its seconds unread.
+    /// process frames, which give the first second of the minute after it its rates, replaying
+    /// its frames from the one at `first`, and leaves its seconds unread.
     fn seed(
         &mut self,
         found: &Found,
         read: &Result<MinuteRead<'_>, Failure>,
+        first: usize,
         operation: &Operation,
     ) -> Result<(), Failure> {
         let visited = match read {
             Ok(read) => self
-                .visit_predecessor(&read.processes, operation)
+                .visit_predecessor(&read.processes, first, operation)
                 .map(|()| read)
                 .map_err(|refused| load_refusal(&refused)),
             Err(failure) => Err(*failure),

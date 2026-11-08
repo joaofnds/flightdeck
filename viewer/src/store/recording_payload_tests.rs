@@ -1472,6 +1472,53 @@ fn a_continued_load_rates_a_minute_decoded_beside_the_minute_before_it() {
     );
 }
 
+#[test]
+fn a_continued_load_takes_no_rates_from_a_minute_that_refuses_an_earlier_reading() {
+    // Goal: a minute a return decodes at once with the minute before it takes no rates from that
+    // minute where it refuses a reading before its last, as when the two are decoded in turn,
+    // although its last reading alone would rate it.
+    // Method: name the process twice in publication 2, the first reading of the minute before
+    // publication 4, load after publication 1, and check that publication 4 has no rates.
+    let fixture = catch_up_fixture();
+    name_one_process_twice_in_publication_2(&fixture);
+
+    let (machine, apps) = publication_4_loaded_after(&fixture, 1);
+
+    assert!(!machine.follows());
+    assert_eq!(machine.cpu_percent, None);
+    assert_eq!(apps.elapsed_ns, None);
+}
+
+/// Replaces the processes of the minute of `catch_up_fixture` that holds publication 2 with a copy
+/// whose rows of publication 2 all name pid 7, which a reader refuses.
+fn name_one_process_twice_in_publication_2(fixture: &Fixture) {
+    use polars::prelude::{col, lit, when};
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    let minute = found
+        .iter()
+        .find(|minute| minute.publication_end == 4)
+        .unwrap();
+    let manifest = persistence::read_committed(&fixture.root, &minute.marker).unwrap();
+    let processes = fixture
+        .root
+        .join(manifest.data_directory)
+        .join("processes.parquet");
+    let mut damaged = persistence::engine::scan(&processes)
+        .unwrap()
+        .with_column(
+            when(col("publication").eq(lit(2_u64)))
+                .then(lit(7_i32))
+                .otherwise(col("pid"))
+                .alias("pid"),
+        )
+        .collect()
+        .unwrap();
+    let replacement = fixture.root.join("damaged-processes.parquet");
+    events_loader_write(&replacement, &mut damaged);
+    std::fs::rename(replacement, processes).unwrap();
+}
+
 /// The seconds of publication 4 of `catch_up_fixture`, as a load that continues from
 /// `publication` hands them over.
 fn publication_4_loaded_after(
