@@ -50,6 +50,10 @@ const ZERO_SECOND: u64 = 300;
 const MISSED_SECOND: u64 = 301;
 /// The second of each period whose SMC is not read, as the contract's unavailable source at 302.
 const SMC_UNAVAILABLE_SECOND: u64 = 302;
+/// The seconds of each period at fair and at serious thermal states, between the nominal seconds
+/// 303 and 306 of the contract's transitions.
+const THERMAL_FAIR_SECOND: u64 = 304;
+const THERMAL_SERIOUS_SECOND: u64 = 305;
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -97,8 +101,11 @@ const GAUGES_ZERO: Gauges = Gauges {
     memory_used_bytes: 0,
 };
 const LOAD_AVERAGE: [f64; 3] = [2.0, 1.5, 1.0];
-/// The thermal pressure macOS publishes as nominal.
+/// The thermal pressure levels macOS publishes as nominal, moderate and heavy, which the charts
+/// name Nominal, Fair and Serious.
 const THERMAL_NOMINAL: u8 = 0;
+const THERMAL_MODERATE: u8 = 1;
+const THERMAL_HEAVY: u8 = 2;
 /// How long the generator waits for the worker to save a minute before it gives up.
 const SEAL_WAIT_MAX: Duration = Duration::from_mins(2);
 const SEAL_POLL: Duration = Duration::from_millis(10);
@@ -114,6 +121,10 @@ const _: () = {
     assert!(SMC_UNAVAILABLE_SECOND < PERIOD_SECONDS);
     assert!(SMC_UNAVAILABLE_SECOND != ZERO_SECOND);
     assert!(SMC_UNAVAILABLE_SECOND != MISSED_SECOND);
+    // The thermal transitions follow the other special seconds, each a second of its own.
+    assert!(SMC_UNAVAILABLE_SECOND + 1 < THERMAL_FAIR_SECOND);
+    assert!(THERMAL_FAIR_SECOND + 1 == THERMAL_SERIOUS_SECOND);
+    assert!(THERMAL_SERIOUS_SECOND + 1 < PERIOD_SECONDS);
     // Each CPU idles for what it does not spend, so no CPU's idle ticks fall below zero.
     assert!(CPUS < 85);
     // A third of the cores are super cores.
@@ -528,6 +539,11 @@ impl Second {
         } else {
             GAUGES_BASELINE
         };
+        let thermal_pressure = match second % PERIOD_SECONDS {
+            THERMAL_FAIR_SECOND => THERMAL_MODERATE,
+            THERMAL_SERIOUS_SECOND => THERMAL_HEAVY,
+            _ => THERMAL_NOMINAL,
+        };
 
         Ok(Self {
             processes: (0..PROCESSES)
@@ -550,7 +566,7 @@ impl Second {
             cores: (0..CPUS).map(|core| publish_core(core, valid)).collect(),
             battery: publish_battery(continuous_ns),
             disks: publish_disks(continuous_ns, valid)?,
-            system: publish_system(),
+            system: publish_system(thermal_pressure),
         })
     }
 }
@@ -749,13 +765,14 @@ fn publish_disks(
     })
 }
 
-/// The system fields, which read the same each second.
-fn publish_system() -> SystemReading {
+/// The system fields, which read the same each second but for the thermal pressure, macOS's
+/// level `thermal_pressure`.
+fn publish_system(thermal_pressure: u8) -> SystemReading {
     SystemReading {
         load_average: Some(LOAD_AVERAGE),
         open_files: Some(4_096),
         open_files_limit: Some(122_880),
-        thermal_pressure: Some(THERMAL_NOMINAL),
+        thermal_pressure: Some(thermal_pressure),
         gpu_memory: Some(GpuMemoryReading {
             in_use_bytes: Some(GIB),
             allocated_bytes: Some(2 * GIB),

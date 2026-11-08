@@ -156,6 +156,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn passes_through_fair_and_serious_thermal_states_from_nominal_and_back() {
+        // Goal: seconds 303 to 306 read the contract's thermal transitions, nominal, fair, serious
+        // and nominal, which macOS publishes as the pressure levels nominal, moderate and heavy
+        // and the charts name Nominal, Fair and Serious. Method: read each second's level.
+        let levels = [303, 304, 305, 306].map(|second| input().thermal_pressure(second));
+
+        assert_eq!([Some(0), Some(1), Some(2), Some(0)], levels);
+    }
+
     /// The SMC's readings between the contract's special seconds.
     fn smc_baseline() -> Smc {
         Smc {
@@ -287,6 +297,14 @@ mod tests {
                 load: field::<f64>(&ticks, "load_average_1").is_some(),
                 system: field::<u32>(&ticks, "machine_cpu_cores").is_some(),
             }
+        }
+
+        /// The thermal pressure level macOS published at `second`.
+        fn thermal_pressure(&self, second: u64) -> Option<u8> {
+            field(
+                &self.saved_row(second, "ticks", "thermal_pressure", "TRUE"),
+                "thermal_pressure",
+            )
         }
 
         /// The SMC's readings, as `second` of the input reads them.
