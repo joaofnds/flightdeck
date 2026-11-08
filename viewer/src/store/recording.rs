@@ -243,7 +243,9 @@ fn load_payload_window_using(
     thread::scope(|scope| {
         // Where the listing cannot start on a thread of its own, the load lists the hour first, as
         // a load that continues nothing does.
-        let Ok(finder) = load_payload_finder(scope, root, window) else {
+        let Ok(finder) = spawn_observed(scope, "flightdeck-finder", move || {
+            load_payload_listed(root, window)
+        }) else {
             return load_payload_found(&input, window, load_payload_listed(root, window), take);
         };
         // A walk that fails leaves the load to the listing, which says why the recording cannot be
@@ -254,7 +256,7 @@ fn load_payload_window_using(
             Ok(_) | Err(_) => None,
         };
         let Some(walked) = walked else {
-            return load_payload_found(&input, window, load_payload_join(finder), take);
+            return load_payload_found(&input, window, join_or_resume(finder), take);
         };
 
         load_payload_walked(&input, window, finder, walked, take)
@@ -285,7 +287,7 @@ fn load_payload_walked(
     let (predecessor, minutes) = load_payload_minutes(Continuity::Extend, &walked);
     let started = payload::start(input, predecessor, minutes)?;
     drop(tentative_scope);
-    let listing = load_payload_join(finder);
+    let listing = join_or_resume(finder);
     if !load_payload_agrees(window, &listing, &walked) {
         tentative.discard();
         drop(started);
@@ -313,31 +315,6 @@ fn load_payload_listed(root: &Path, window: &LoadWindow<'_>) -> Listing {
     let discovered = catalog::find(root, &mut found, window);
 
     Listing { found, discovered }
-}
-
-/// What the listing of `finder` found, or its panic, which goes on in this thread.
-fn load_payload_join(finder: thread::ScopedJoinHandle<'_, Listing>) -> Listing {
-    match finder.join() {
-        Ok(listed) => listed,
-        Err(panic) => panic::resume_unwind(panic),
-    }
-}
-
-/// Lists the loaded hour on a thread of `scope`, as a load in `window` lists it.
-fn load_payload_finder<'scope>(
-    scope: &'scope thread::Scope<'scope, '_>,
-    root: &'scope Path,
-    window: &'scope LoadWindow<'_>,
-) -> io::Result<thread::ScopedJoinHandle<'scope, Listing>> {
-    let observation = persistence::work::ingestion::inherit_current();
-    thread::Builder::new()
-        .name(String::from("flightdeck-finder"))
-        .spawn_scoped(scope, move || {
-            let observation = observation.enter();
-            let listed = load_payload_listed(root, window);
-            drop(observation);
-            listed
-        })
 }
 
 /// Whether `listing` read the catalog and found what a walk found as `walked`, oldest first.
@@ -667,25 +644,16 @@ fn load_batches(root: &Path, found: &[Found], buffers: &mut LoadBuffers) -> Vec<
                 .next()
                 .unwrap_or_else(|| unreachable!("one buffer per bounded batch"));
             let minutes = &found[batch];
-            let observation = persistence::work::ingestion::inherit_current();
-            let loader = thread::Builder::new()
-                .name(String::from("flightdeck-loader"))
-                .spawn_scoped(scope, move || {
-                    let observation = observation.enter();
-                    let result = load_batch(root, minutes, &mut Fold::new(), buffer);
-                    drop(observation);
-                    result
-                });
+            let loader = spawn_observed(scope, "flightdeck-loader", move || {
+                load_batch(root, minutes, &mut Fold::new(), buffer)
+            });
             loaders.push(loader);
         }
 
         let mut batches = Vec::with_capacity(loaders.len());
         for loader in loaders {
             let batch = match loader {
-                Ok(handle) => match handle.join() {
-                    Ok(batch) => batch,
-                    Err(panic) => panic::resume_unwind(panic),
-                },
+                Ok(handle) => join_or_resume(handle),
                 Err(error) => Batch {
                     seconds: Vec::new(),
                     left_out: Some(Failure::Loader(error.kind())),
@@ -695,6 +663,31 @@ fn load_batches(root: &Path, found: &[Found], buffers: &mut LoadBuffers) -> Vec<
         }
         batches
     })
+}
+
+/// Runs `work` on a thread named `name` of `scope`, in the ingestion observation of this thread.
+fn spawn_observed<'scope, T: Send + 'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    name: &str,
+    work: impl FnOnce() -> T + Send + 'scope,
+) -> io::Result<thread::ScopedJoinHandle<'scope, T>> {
+    let observation = persistence::work::ingestion::inherit_current();
+    thread::Builder::new()
+        .name(String::from(name))
+        .spawn_scoped(scope, move || {
+            let observation = observation.enter();
+            let result = work();
+            drop(observation);
+            result
+        })
+}
+
+/// What the thread of `handle` returned, or its panic, which goes on in this thread.
+fn join_or_resume<T>(handle: thread::ScopedJoinHandle<'_, T>) -> T {
+    match handle.join() {
+        Ok(result) => result,
+        Err(panic) => panic::resume_unwind(panic),
+    }
 }
 
 /// Splits minutes that cost `costs` to decode, oldest first, into at most `LOADERS_MAX` batches

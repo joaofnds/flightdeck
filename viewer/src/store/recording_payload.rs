@@ -1,6 +1,5 @@
 //! The Store's complete process decoder, sharing the recorded App rule and predecessor.
 use std::mem;
-use std::panic;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
@@ -134,7 +133,7 @@ fn load_group(
 
     thread::scope(|scope| {
         let seeder = predecessor.map(|predecessor| {
-            load_group_spawn(scope, "flightdeck-seeder", || {
+            super::spawn_observed(scope, "flightdeck-seeder", || {
                 load_group_seed(input, predecessor, &reads[0], 0)
             })
         });
@@ -145,7 +144,7 @@ fn load_group(
                 let carried = carried.take();
                 let before = before_of(index);
                 let read = &reads[index + offset];
-                load_group_spawn(scope, "flightdeck-decoder", move || {
+                super::spawn_observed(scope, "flightdeck-decoder", move || {
                     let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
                     let guessed = load_group_guess(input, carried, before, found, read);
                     drop(tentative_scope);
@@ -154,7 +153,7 @@ fn load_group(
             })
             .collect();
 
-        let whole = seeder.map(|seeder| seeder.map(load_group_join));
+        let whole = seeder.map(|seeder| seeder.map(super::join_or_resume));
         load_group_settled_minutes(input, group, &reads[offset..], whole, decoders)
     })
 }
@@ -177,7 +176,7 @@ fn load_group_settled_minutes(
     let mut settled: Vec<persistence::Result<DecodedMinute>> = Vec::with_capacity(group.len());
     for ((found, read), decoder) in group.iter().zip(reads).zip(decoders) {
         let guessed = match decoder {
-            Ok(handle) => load_group_join(handle),
+            Ok(handle) => super::join_or_resume(handle),
             Err(error) => {
                 settled.push(Ok(DecodedMinute::unstarted(&error)));
                 continue;
@@ -251,31 +250,6 @@ fn load_group_seeded(
     }
 }
 
-/// Runs `work` on a thread named `name` of `scope`, in the ingestion observation of this thread.
-fn load_group_spawn<'scope, T: Send + 'scope>(
-    scope: &'scope thread::Scope<'scope, '_>,
-    name: &str,
-    work: impl FnOnce() -> T + Send + 'scope,
-) -> std::io::Result<thread::ScopedJoinHandle<'scope, T>> {
-    let observation = persistence::work::ingestion::inherit_current();
-    thread::Builder::new()
-        .name(String::from(name))
-        .spawn_scoped(scope, move || {
-            let observation = observation.enter();
-            let result = work();
-            drop(observation);
-            result
-        })
-}
-
-/// What the thread of `handle` returned, or its panic, which goes on in this thread.
-fn load_group_join<T>(handle: thread::ScopedJoinHandle<'_, T>) -> T {
-    match handle.join() {
-        Ok(result) => result,
-        Err(panic) => panic::resume_unwind(panic),
-    }
-}
-
 /// The index of the last process frame `read` holds, the one that rates the minute after it.
 fn load_group_last_frame_index(read: &Result<MinuteRead<'_>, Failure>) -> usize {
     read.as_ref()
@@ -346,14 +320,14 @@ fn load_group_reads<'input>(
             .enumerate()
             .map(|(index, found)| {
                 let read = &read;
-                load_group_spawn(scope, "flightdeck-reader", move || read(index, found))
+                super::spawn_observed(scope, "flightdeck-reader", move || read(index, found))
             })
             .collect();
 
         readers
             .into_iter()
             .map(|reader| match reader {
-                Ok(handle) => load_group_join(handle),
+                Ok(handle) => super::join_or_resume(handle),
                 Err(error) => Err(Failure::Loader(error.kind())),
             })
             .collect()
