@@ -145,6 +145,7 @@ impl LiveSession {
     pub fn select(&mut self, second: u64, alternative: usize) -> Result<Value> {
         self.selected = None;
         self.operation.check()?;
+        select_time(second)?;
         if self.select_refresh_due()? {
             self.refresh_history()?;
         }
@@ -158,10 +159,7 @@ impl LiveSession {
     pub fn select_listed(&mut self, second: u64, alternative: usize) -> Result<Value> {
         self.selected = None;
         self.operation.check()?;
-        second
-            .checked_add(1)
-            .and_then(|end| end.checked_mul(NANOSECONDS_PER_SECOND))
-            .ok_or(Error::Bound("selection time"))?;
+        select_time(second)?;
         let selection = ContextSelection::of(second, self.newest_second());
         let saved = match &mut self.history {
             Some(history) => {
@@ -590,6 +588,16 @@ impl LiveSession {
 
         Ok(())
     }
+}
+
+/// Refuses a `second` whose end the clock cannot hold, before a selection reads anything for it.
+fn select_time(second: u64) -> Result<()> {
+    second
+        .checked_add(1)
+        .and_then(|end| end.checked_mul(NANOSECONDS_PER_SECOND))
+        .ok_or(Error::Bound("selection time"))?;
+
+    Ok(())
 }
 
 /// A selection of `second` with nothing read from the saved minutes.
