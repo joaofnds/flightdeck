@@ -48,6 +48,8 @@ const PERIOD_SECONDS: u64 = 600;
 const ZERO_SECOND: u64 = 300;
 /// The second of each period whose tick is missed, as `t mod 600 = 301` in the contract.
 const MISSED_SECOND: u64 = 301;
+/// The second of each period whose SMC is not read, as the contract's unavailable source at 302.
+const SMC_UNAVAILABLE_SECOND: u64 = 302;
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -108,6 +110,10 @@ const _: () = {
     assert!(ZERO_SECOND < PERIOD_SECONDS);
     assert!(MISSED_SECOND < PERIOD_SECONDS);
     assert!(ZERO_SECOND != MISSED_SECOND);
+    // The SMC is unavailable in a second of its own, whose counters advance.
+    assert!(SMC_UNAVAILABLE_SECOND < PERIOD_SECONDS);
+    assert!(SMC_UNAVAILABLE_SECOND != ZERO_SECOND);
+    assert!(SMC_UNAVAILABLE_SECOND != MISSED_SECOND);
     // Each CPU idles for what it does not spend, so no CPU's idle ticks fall below zero.
     assert!(CPUS < 85);
     // A third of the cores are super cores.
@@ -439,6 +445,17 @@ impl Machine {
             awake_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
         };
         let read = Second::read(&self.programs, second, times.continuous_ns)?;
+        let smc = if second % PERIOD_SECONDS == SMC_UNAVAILABLE_SECOND {
+            None
+        } else {
+            Some(SmcReadings {
+                power_watts: read.gauges.power_watts,
+                soc_celsius: read.gauges.temperatures_celsius[0],
+                cpu_celsius: Some(read.gauges.temperatures_celsius[1]),
+                gpu_celsius: Some(read.gauges.temperatures_celsius[2]),
+                fan_rpm: &read.gauges.fan_rpm,
+            })
+        };
         let readings = Readings {
             run_tick: second,
             cpus: &read.cpus,
@@ -449,13 +466,7 @@ impl Machine {
                 gpu_active_ns: &read.gpu_active_ns,
                 cores: &read.cores,
             }),
-            smc: Some(SmcReadings {
-                power_watts: read.gauges.power_watts,
-                soc_celsius: read.gauges.temperatures_celsius[0],
-                cpu_celsius: Some(read.gauges.temperatures_celsius[1]),
-                gpu_celsius: Some(read.gauges.temperatures_celsius[2]),
-                fan_rpm: &read.gauges.fan_rpm,
-            }),
+            smc,
             processes: &read.processes,
             processes_refused: 0,
             processes_gone: 0,

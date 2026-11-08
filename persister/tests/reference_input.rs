@@ -120,21 +120,49 @@ mod tests {
             [
                 Gauges {
                     gpu_active_ns: 100_000_000,
-                    power_watts: Some(5.0),
-                    fan_rpm: vec![1_200.0, 1_300.0],
-                    temperatures_celsius: [Some(35.0), Some(36.0), Some(37.0)],
+                    smc: smc_baseline(),
                     memory_used_bytes: 8 * GIB,
                 },
                 Gauges {
                     gpu_active_ns: 0,
-                    power_watts: Some(0.0),
-                    fan_rpm: vec![0.0, 0.0],
-                    temperatures_celsius: [Some(0.0), None, None],
+                    smc: Smc {
+                        power_watts: Some(0.0),
+                        fan_rpm: vec![0.0, 0.0],
+                        temperatures_celsius: [Some(0.0), None, None],
+                    },
                     memory_used_bytes: 0,
                 },
             ],
             gauges
         );
+    }
+
+    #[test]
+    fn reads_no_smc_gauge_in_the_second_the_smc_is_unavailable() {
+        // Goal: second 302's unavailable source, the SMC, leaves its gauges absent rather than
+        // zero, and only for that second. Method: read the SMC's gauges at seconds 302 and 303.
+        let smc = [302, 303].map(|second| input().smc(second));
+
+        assert_eq!(
+            [
+                Smc {
+                    power_watts: None,
+                    fan_rpm: Vec::new(),
+                    temperatures_celsius: [None; 3],
+                },
+                smc_baseline(),
+            ],
+            smc
+        );
+    }
+
+    /// The SMC's readings between the contract's special seconds.
+    fn smc_baseline() -> Smc {
+        Smc {
+            power_watts: Some(5.0),
+            fan_rpm: vec![1_200.0, 1_300.0],
+            temperatures_celsius: [Some(35.0), Some(36.0), Some(37.0)],
+        }
     }
 
     /// Process 0's counters after `valid` valid seconds, as the contract gives them for process
@@ -261,14 +289,8 @@ mod tests {
             }
         }
 
-        /// The gauges the contract names, as `second` of the input reads them.
-        fn gauges(&self, second: u64) -> Gauges {
-            let gpu_active_ns = |second| -> u64 {
-                cell(
-                    &self.saved_rows(second, "gpu_states", "SUM(active_ns)", "TRUE"),
-                    0,
-                )
-            };
+        /// The SMC's readings, as `second` of the input reads them.
+        fn smc(&self, second: u64) -> Smc {
             let ticks = self.saved_row(
                 second,
                 "ticks",
@@ -276,15 +298,8 @@ mod tests {
                 "TRUE",
             );
             let fans = self.saved_rows(second, "fans", "rpm", "TRUE ORDER BY fan");
-            let memory = self.saved_row(
-                second,
-                "memory",
-                "anonymous_bytes - purgeable_bytes + wired_bytes + compressed_bytes",
-                "TRUE",
-            );
 
-            Gauges {
-                gpu_active_ns: gpu_active_ns(second) - gpu_active_ns(second - 1),
+            Smc {
                 power_watts: cell(&ticks, 0),
                 fan_rpm: (0..fans.height())
                     .map(|row| {
@@ -300,6 +315,27 @@ mod tests {
                         .get(column)
                         .unwrap()
                 }),
+            }
+        }
+
+        /// The gauges the contract names, as `second` of the input reads them.
+        fn gauges(&self, second: u64) -> Gauges {
+            let gpu_active_ns = |second| -> u64 {
+                cell(
+                    &self.saved_rows(second, "gpu_states", "SUM(active_ns)", "TRUE"),
+                    0,
+                )
+            };
+            let memory = self.saved_row(
+                second,
+                "memory",
+                "anonymous_bytes - purgeable_bytes + wired_bytes + compressed_bytes",
+                "TRUE",
+            );
+
+            Gauges {
+                gpu_active_ns: gpu_active_ns(second) - gpu_active_ns(second - 1),
+                smc: self.smc(second),
                 memory_used_bytes: cell(&memory, 0),
             }
         }
@@ -419,16 +455,22 @@ mod tests {
         system: bool,
     }
 
-    /// The gauges the contract names: the GPU's active time over the second before, the power,
-    /// the fans, the chip's, the CPU's and the GPU's temperatures, and the machine memory, as
-    /// the memory chart adds it up.
+    /// The gauges the contract names: the GPU's active time over the second before, the SMC's
+    /// gauges, and the machine memory, as the memory chart adds it up.
     #[derive(Debug, PartialEq)]
     struct Gauges {
         gpu_active_ns: u64,
+        smc: Smc,
+        memory_used_bytes: u64,
+    }
+
+    /// The gauges the SMC reads: the power, the fans, and the chip's, the CPU's and the GPU's
+    /// temperatures.
+    #[derive(Debug, PartialEq)]
+    struct Smc {
         power_watts: Option<f32>,
         fan_rpm: Vec<f32>,
         temperatures_celsius: [Option<f32>; 3],
-        memory_used_bytes: u64,
     }
 
     /// Each interface's index and name, and each disk's driver and media identities.
