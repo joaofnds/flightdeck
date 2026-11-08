@@ -36,10 +36,10 @@ pub(super) fn find(
 
 /// The minutes a load continuing from `since` reads, newest first down to the one holding `since`,
 /// found by walking back from the newest window of `since`'s run one lookup a minute. None where
-/// `since`'s run is not the recording's newest run, or the walk meets a gap, a minute whose clock
-/// is before the loaded hour of `window` or no minute holding `since` within `MINUTES_MAX`
-/// minutes. `find` stays the check, since it lists the loaded hour by clock and keeps only what
-/// retention holds, which a walk by publication does not see.
+/// `since`'s run is not the recording's newest run, or where the walk runs out of windows, reaches
+/// a minute whose clock is before the loaded hour of `window` or finds no minute holding `since`
+/// within `MINUTES_MAX` minutes. `find` stays the check, since it lists the loaded hour by clock
+/// and keeps only what retention holds, which a walk by publication does not see.
 pub(super) fn walk(
     root: &Path,
     since: &crate::store::Newest,
@@ -54,19 +54,13 @@ pub(super) fn walk(
         return Ok(None);
     }
     let catalog = super::find_window_catalog(root)?;
-    let lookup = |publication: u64| {
-        catalog_retry(|| {
-            Ok(catalog.window_at_or_before(&since.run, publication, &mut ReadWork::default())?)
-        })
-        .map_err(find_failure)
-    };
 
     let mut walked = Vec::with_capacity(MINUTES_MAX);
-    let mut next = lookup(u64::MAX)?;
-    let first_ns = next.as_ref().and_then(|newest| newest.wall_ns).map(|wall| {
-        wall.max
-            .saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000)
-    });
+    let mut next = find_window_at_or_before(&catalog, &since.run, u64::MAX)?;
+    let first_ns = next
+        .as_ref()
+        .and_then(|newest| newest.wall_ns)
+        .map(|wall| find_first_ns(window, wall.max));
     while walked.len() < MINUTES_MAX {
         let Some(manifest) = next.take() else {
             return Ok(None);
@@ -76,12 +70,13 @@ pub(super) fn walk(
                 return Ok(None);
             }
         }
-        let previous = match manifest.publication_first.checked_sub(1) {
-            Some(before) => lookup(before)?,
-            None => None,
-        };
-        walked.push(find_found(root, &runs, &manifest, previous.as_ref()));
-        if manifest.publication_end.saturating_sub(1) <= since.publication {
+        let previous = find_previous(&catalog, &since.run, &manifest)?;
+        let minute = find_found(root, &runs, &manifest, previous.as_ref());
+        // The listing keeps the minutes down to the one `find_predecessor` names, so the walk stops
+        // where it would.
+        let holds_since = find_predecessor(std::slice::from_ref(&minute), since).is_some();
+        walked.push(minute);
+        if holds_since {
             return Ok(Some(walked));
         }
         next = previous;
@@ -128,10 +123,7 @@ fn find_windows_newest(
     runs: &[RunIdentity],
 ) -> Result<Option<Manifest>, Failure> {
     for run in runs.iter().rev() {
-        let newest = catalog_retry(|| {
-            Ok(catalog.window_at_or_before(run, u64::MAX, &mut ReadWork::default())?)
-        })
-        .map_err(find_failure)?;
+        let newest = find_window_at_or_before(catalog, run, u64::MAX)?;
         if newest.is_some() {
             return Ok(newest);
         }
@@ -149,15 +141,9 @@ fn find_windows(
     found: &mut Vec<Found>,
     window: &LoadWindow<'_>,
 ) -> Result<CheckedCatalog, Failure> {
-    let lookup = |read: &mut dyn FnMut() -> persistence::Result<_>| {
-        catalog_retry(read).map_err(find_failure)
-    };
     if let Some(since) = window.since {
         if !runs.contains(&since.run) {
-            let saved = lookup(&mut || {
-                Ok(catalog.window_at_or_before(&since.run, u64::MAX, &mut ReadWork::default())?)
-            })?;
-            if saved.is_none() {
+            if find_window_at_or_before(catalog, &since.run, u64::MAX)?.is_none() {
                 return Err(Failure::ChangedIdentity);
             }
         }
@@ -172,8 +158,7 @@ fn find_windows(
         Some(manifest) => manifest.wall_ns.map(|wall| wall.max),
         None => ends.map(|(_first, last)| last),
     };
-    let first_ns = newest_ns
-        .map(|newest| newest.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000));
+    let first_ns = newest_ns.map(|newest| find_first_ns(window, newest));
     let mut minutes = catalog_retry(|| {
         catalog.windows_in(first_ns.unwrap_or(0), u64::MAX, &mut ReadWork::default())
     })
@@ -260,21 +245,38 @@ fn find_windows_range(
         if found.len() == MINUTES_MAX {
             return Err(Failure::Commits(io::ErrorKind::InvalidData));
         }
-        let previous = match manifest.publication_first.checked_sub(1) {
-            Some(before) => catalog_retry(|| {
-                Ok(catalog.window_at_or_before(
-                    &manifest.identity.run,
-                    before,
-                    &mut ReadWork::default(),
-                )?)
-            })
-            .map_err(find_failure)?,
-            None => None,
-        };
+        let previous = find_previous(catalog, &manifest.identity.run, manifest)?;
         found.push(find_found(root, runs, manifest, previous.as_ref()));
     }
 
     Ok(())
+}
+
+/// The clock of the oldest reading a load in `window` reads, where the newest is at `newest_ns`.
+fn find_first_ns(window: &LoadWindow<'_>, newest_ns: u64) -> u64 {
+    newest_ns.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000)
+}
+
+/// The window before `manifest` in `run`, its run, where it has one.
+fn find_previous(
+    catalog: &Catalog,
+    run: &RunIdentity,
+    manifest: &Manifest,
+) -> Result<Option<Manifest>, Failure> {
+    match manifest.publication_first.checked_sub(1) {
+        Some(before) => find_window_at_or_before(catalog, run, before),
+        None => Ok(None),
+    }
+}
+
+/// The saved window of `run` holding `publication`, or the newest one before it.
+fn find_window_at_or_before(
+    catalog: &Catalog,
+    run: &RunIdentity,
+    publication: u64,
+) -> Result<Option<Manifest>, Failure> {
+    catalog_retry(|| Ok(catalog.window_at_or_before(run, publication, &mut ReadWork::default())?))
+        .map_err(find_failure)
 }
 
 /// The minute of `manifest`, whose window before it in its run is `previous`, where it has one.

@@ -282,7 +282,8 @@ fn load_payload_walked(
 ) -> persistence::Result<Outcome> {
     walked.reverse();
     let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
-    let started = payload::start(input, walked.first(), &walked[1..])?;
+    let (predecessor, minutes) = load_payload_minutes(Continuity::Extend, &walked);
+    let started = payload::start(input, predecessor, minutes)?;
     drop(tentative_scope);
     let listing = load_payload_join(finder);
     if !load_payload_agrees(window, &listing, &walked) {
@@ -398,7 +399,7 @@ fn load_payload_certified(
     // for one of that minute's seconds goes to the saved minutes, which say why it cannot be read.
     if matches!(outcome.left_out, None | Some(Failure::Refused)) {
         if admitted {
-            load_payload_certify(input.root, checked, continuity, &mut outcome);
+            load_payload_attach_catalog(input.root, checked, continuity, &mut outcome);
         }
     }
     input.operation.check()?;
@@ -422,7 +423,7 @@ fn load_payload_minutes(continuity: Continuity, found: &[Found]) -> (Option<&Fou
 
 /// Hands `outcome` the catalog `checked`, which the load found, where the recording is still the
 /// one it was found in, and the decoded clocks where the load decoded every minute it counts.
-fn load_payload_certify(
+fn load_payload_attach_catalog(
     root: &Path,
     mut checked: CheckedCatalog,
     continuity: Continuity,
