@@ -1280,7 +1280,7 @@ fn a_live_page_other_than_overview_keeps_the_store_ingesting(cx: &mut gpui::Test
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let store = recording.start_store();
     store.set_active(false);
     cx.update(|cx| super::install_store(store, cx));
     wait_for_store_activity(cx, true);
@@ -1363,7 +1363,7 @@ fn a_live_window_that_opens_a_saved_recording_parks_the_store(cx: &mut gpui::Tes
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let store = recording.start_store();
     cx.update(|cx| super::install_store(store, cx));
     let page = cx.update(|cx| cx.new(|_| opening_on("cpu")));
     page.update(cx, LiveDashboard::tick);
@@ -1450,7 +1450,7 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     use gpui::AppContext;
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let store = recording.start_store();
     store.set_active(false);
     cx.update(|cx| super::install_store(store, cx));
     wait_for_store_activity(cx, true);

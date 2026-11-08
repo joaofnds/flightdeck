@@ -207,8 +207,7 @@ fn missing_middle_app_ranks_preserve_complete_sibling_observations() {
     fixture.publish_with_system_rows(101);
     fixture.publish_with_system_rows(102);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     let mut ring = crate::store::ring::Ring::new(fixture.root.clone());
     ring.follow().unwrap();
     ring.read(|run, second, apps| {
@@ -258,8 +257,7 @@ pub(super) fn saved_context(fixture: &Fixture) -> Arc<QueryContext> {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     let outcome = crate::store::recording::load_payload(
         &fixture.root,
         &budget,
@@ -278,8 +276,7 @@ pub(super) fn native_context(fixture: &Fixture) -> Arc<QueryContext> {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
     ring.follow().unwrap();
     crate::store::native_acceptance::read_native(&mut held, &mut ring, &operation).unwrap();

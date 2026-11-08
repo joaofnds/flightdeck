@@ -94,9 +94,10 @@ fn an_overwrite_after_attachment_stays_unqualified_at_the_newest_cursor() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::without_recording();
-    held.enable_payload(Arc::new(super::ByteBudget::new(256 * 1024 * 1024)));
-    let mut ring = super::make_ring(&fixture.root, held.payload_budget.as_ref());
+    let mut held = super::Held::without_recording_with_payload(Arc::new(super::ByteBudget::new(
+        256 * 1024 * 1024,
+    )));
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
     ring.follow().unwrap();
     for second in 10_002..10_010 {
@@ -128,9 +129,10 @@ fn a_missing_replacement_generation_republishes_unqualified_metadata() {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = super::Held::without_recording();
-    held.enable_payload(Arc::new(super::ByteBudget::new(256 * 1024 * 1024)));
-    let mut ring = super::make_ring(&fixture.root, held.payload_budget.as_ref());
+    let mut held = super::Held::without_recording_with_payload(Arc::new(super::ByteBudget::new(
+        256 * 1024 * 1024,
+    )));
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
@@ -166,7 +168,7 @@ fn a_new_generation_of_the_same_run_can_end_the_wait_on_its_ring() {
         .operation(0)
         .unwrap();
     let mut held = super::Held::without_recording();
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     stepped_view(&mut held, &mut ring, &operation);
     drop(writer);
     let mut writer = generation_writer(&place, shape, &identity);
@@ -218,7 +220,7 @@ fn a_new_generation_of_the_same_run_preserves_the_readers_predecessor() {
         .operation(0)
         .unwrap();
     let mut held = super::Held::without_recording();
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
     drop(writer);
@@ -247,29 +249,6 @@ fn a_new_generation_of_the_same_run_preserves_the_readers_predecessor() {
 }
 
 #[test]
-fn an_unplaced_tick_cannot_qualify_older_held_readings() {
-    // Goal: an unsupported clock cannot make older displayed facts look caught up.
-    // Method: consume one known tick, then publish a real legacy tick without observed clocks.
-    let mut fixture = Fixture::new_mode(false, 2, None);
-    fixture.publish_with_events(10_000, &[]);
-    let operation = Arc::new(crate::Cancellation::default())
-        .operation(0)
-        .unwrap();
-    let mut held = super::Held::without_recording();
-    let mut ring = super::Ring::new(fixture.root.clone());
-    let initial = stepped_view(&mut held, &mut ring, &operation);
-    assert!(initial.ring_complete);
-
-    with_generation_tick(1, |readings| fixture.writer.publish(&readings));
-    let replacement = stepped_view(&mut held, &mut ring, &operation);
-
-    assert!(!replacement.ring_complete);
-    assert!(replacement.version > initial.version);
-    assert_eq!(replacement.seconds, initial.seconds);
-    assert!(initial.ring_complete);
-}
-
-#[test]
 fn a_new_run_waits_until_the_old_pending_publication_is_accepted() {
     // Goal: a registry change cannot pair an old pending machine tick with another run's Apps.
     // Method: refuse a real first-run tick, register a second run, then accept each in order.
@@ -286,10 +265,10 @@ fn a_new_run_waits_until_the_old_pending_publication_is_accepted() {
 
     ring.resume().unwrap();
     ring.read(|run, machine, apps| {
-        let super::TickApps::Derived(sample) = apps else {
-            panic!("the first run's identity sample is still owned");
+        let super::TickApps::Loaded(second) = apps else {
+            panic!("the store's read loads each tick's Apps");
         };
-        assert_eq!(sample.selected.stamp.run, first_identity.run.0);
+        assert_eq!(second.observation.unwrap().stamp.run, first_identity.run.0);
         accepted.push((*run, machine.publication));
         true
     })
@@ -325,7 +304,7 @@ fn a_restarted_publication_sequence_cannot_reuse_a_registered_run_identity() {
         .operation(0)
         .unwrap();
     let mut held = super::Held::without_recording();
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
     drop(writer);
@@ -356,7 +335,7 @@ fn a_completion_read_failure_stays_unqualified_after_the_header_recovers() {
         .operation(0)
         .unwrap();
     let mut held = super::Held::without_recording();
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
 
@@ -403,7 +382,7 @@ fn changed_recording(change: impl FnOnce(&std::path::Path) -> super::Failure) {
         .operation(0)
         .unwrap();
     let mut held = super::Held::without_recording();
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     let initial = stepped_view(&mut held, &mut ring, &operation);
     assert!(initial.ring_complete);
     let failure = change(&fixture.root);
@@ -604,7 +583,7 @@ fn stepped_view(
             ring,
             Ok(()),
             &mailbox,
-            Some(operation),
+            operation,
             super::Publication::Complete,
         )
         .unwrap();

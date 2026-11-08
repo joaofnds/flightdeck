@@ -373,28 +373,6 @@ fn a_store_continuation_with_no_reply_uses_the_nonzero_polling_cadence() {
 }
 
 #[test]
-fn opt_in_construction_allocates_fewer_bytes_than_legacy_app_row_pools() {
-    // Goal: budgeted construction does not allocate the legacy per-second App vectors.
-    // Method: count allocations on the calling thread of both actual public constructors.
-    let recording = LiveRecording::new();
-    let (legacy, legacy_counts) =
-        crate::allocation_tests::measure(|| viewer::store::Store::start(&recording.root).unwrap());
-    drop(legacy);
-    let budget = Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024));
-    let lease = budget.reserve(budget.maximum()).unwrap();
-
-    let (payload, payload_counts) = crate::allocation_tests::measure(|| {
-        viewer::store::Store::start_with_budget(&recording.root, budget).unwrap()
-    });
-
-    eprintln!("Store constructor allocations legacy={legacy_counts:?} opt_in={payload_counts:?}");
-    assert!(payload_counts.bytes < legacy_counts.bytes);
-    assert!(payload_counts.calls < legacy_counts.calls);
-    drop(lease);
-    drop(payload);
-}
-
-#[test]
 fn a_store_worker_delivers_network_without_reading_or_deriving_the_source() {
     // Goal: the staged Worker presents complete Network facts from the single Store owner.
     // Method: publish real native readings, run both owners, and trace Worker source work.
@@ -678,7 +656,7 @@ impl Harness {
         );
         let scope = trace.enter();
         let store = viewer::store::Store::start_with_budget(&recording.root, budget).unwrap();
-        let handle = store.query_handle().unwrap();
+        let handle = store.query_handle();
         let worker = Worker::start_from_store(recording.root.clone(), handle.clone()).unwrap();
         (
             Self {
@@ -694,7 +672,7 @@ impl Harness {
     }
 
     fn wait_until_the_store_reads_past(&self, source: u64) {
-        let handle = self.store.as_ref().unwrap().query_handle().unwrap();
+        let handle = self.store.as_ref().unwrap().query_handle();
         let deadline = Instant::now() + Duration::from_secs(10);
         for _ in 0..1000 {
             if Self::ready_context(&handle).source.generation > source {
@@ -745,7 +723,7 @@ impl Harness {
         Arc<viewer::store::QueryContext>,
         Arc<viewer::store::QueryContext>,
     ) {
-        let handle = self.store.as_ref().unwrap().query_handle().unwrap();
+        let handle = self.store.as_ref().unwrap().query_handle();
         let first = Self::ready_context(&handle);
         let second = Self::ready_context(&handle);
         assert_eq!(handle.contexts_held(), 2);
@@ -815,8 +793,7 @@ impl Harness {
         )
         .unwrap();
         let worker =
-            Worker::start_from_store(recording.root.clone(), store.query_handle().unwrap())
-                .unwrap();
+            Worker::start_from_store(recording.root.clone(), store.query_handle()).unwrap();
 
         Self {
             worker,

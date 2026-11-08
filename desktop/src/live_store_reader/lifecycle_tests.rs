@@ -69,7 +69,7 @@ fn a_cancelled_kept_primary_refresh_cannot_replace_a_new_selection() {
     // Goal: an inspection awaiting Complete loses its reply when its operation is cancelled.
     // Method: submit a real kept query during history denial, cancel, then complete a selection.
     let (harness, budget, lease) = Harness::denied_history();
-    let handle = harness.store.as_ref().unwrap().query_handle().unwrap();
+    let handle = harness.store.as_ref().unwrap().query_handle();
     let mut adapter = Adapter::new(handle.clone());
     let primary = adapter.ready_for(viewer::store::QueryReadiness::Primary);
     let source = primary.catalog["source_generation"].clone();
@@ -115,7 +115,7 @@ fn a_store_missing_its_ring_leaves_the_page_to_the_saved_minutes() {
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
     )
     .unwrap();
-    let mut adapter = Adapter::on_root(store.query_handle().unwrap(), &recording.root);
+    let mut adapter = Adapter::on_root(store.query_handle(), &recording.root);
 
     let update = adapter.first_update();
 
@@ -136,7 +136,7 @@ fn a_recording_that_never_appears_says_so() {
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
     )
     .unwrap();
-    let mut adapter = Adapter::on_root(store.query_handle().unwrap(), &directory);
+    let mut adapter = Adapter::on_root(store.query_handle(), &directory);
 
     let update = adapter.first_update();
 
@@ -218,7 +218,7 @@ fn a_second_whose_apps_are_unread_holds_the_page_until_the_store_reads_them() {
     // short of the bounded wait on a root with no recording, where a saved read fails, then let
     // the Store read on.
     let (harness, _budget, lease) = Harness::denied_history();
-    let mut adapter = Adapter::new(harness.store.as_ref().unwrap().query_handle().unwrap());
+    let mut adapter = Adapter::new(harness.store.as_ref().unwrap().query_handle());
     let primary = adapter.ready_for(viewer::store::QueryReadiness::Primary);
     let mut older = request("memory");
     older.second = Some(1000);
@@ -287,7 +287,7 @@ fn store_parked_behind_the_ring() -> (
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
     )
     .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     Harness::ready_context(&handle);
     store.set_active(false);
     Harness::wait_until_paused(&store);
@@ -397,7 +397,7 @@ fn a_store_that_never_answers_holds_the_page_for_every_step_of_the_wait() {
         Arc::new(viewer::store::ByteBudget::new(1024)),
     )
     .unwrap();
-    let mut adapter = Adapter::on_root(store.query_handle().unwrap(), &recording.root);
+    let mut adapter = Adapter::on_root(store.query_handle(), &recording.root);
     assert!(adapter.read().is_none());
 
     for _ in 0..super::super::STORE_WAITS_MAX {
@@ -594,7 +594,7 @@ fn a_page_the_saved_minutes_answer_reads_the_rest_at_once() {
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
     )
     .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     wait_until_complete(&handle);
     let mut adapter = Adapter::on_root(handle, &recording.root);
     adapter.command.request = request("overview");
@@ -625,7 +625,7 @@ fn a_page_showing_its_readings_asks_the_store_for_the_rest_at_the_workers_pace()
     // Method: open a page on a Store whose history reads are denied, so it gives only its first
     // readings, and read the pause.
     let (harness, _budget, _lease) = Harness::denied_history();
-    let handle = harness.store.as_ref().unwrap().query_handle().unwrap();
+    let handle = harness.store.as_ref().unwrap().query_handle();
     let mut adapter = Adapter::new(handle);
     adapter.ready_for(viewer::store::QueryReadiness::Primary);
     assert!(crate::live_source::reader_pending(&adapter.reader, 1));
@@ -646,7 +646,7 @@ fn the_apps_page_reads_no_older_tail() {
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
     )
     .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     wait_until_complete(&handle);
     let mut adapter = Adapter::on_root(handle, &recording.root);
     adapter.command.request = request("apps");
@@ -690,7 +690,7 @@ fn store_answering() -> (
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
     )
     .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     Harness::ready_context(&handle);
 
     (recording, store, handle)
@@ -876,8 +876,7 @@ impl Harness {
         let store =
             viewer::store::Store::start_with_budget(&recording.root, Arc::clone(&budget)).unwrap();
         let worker =
-            Worker::start_from_store(recording.root.clone(), store.query_handle().unwrap())
-                .unwrap();
+            Worker::start_from_store(recording.root.clone(), store.query_handle()).unwrap();
 
         (
             Self {

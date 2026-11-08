@@ -71,7 +71,10 @@ fn a_store_lets_go_of_older_seconds_and_of_each_stretch_that_adds_up_an_expired_
     // Method: take in more seconds than the live span holds, one a second on both clocks, place
     // the cutoff inside a stretch, and read the View.
     let fixture = Fixture::new();
-    let mut held = Held::new(fixture.root.clone());
+    let mut held = Held::new(
+        fixture.root.clone(),
+        Arc::new(ByteBudget::new(256 * 1024 * 1024)),
+    );
 
     let view = past_the_live_span_view(&fixture, &mut held);
 
@@ -87,7 +90,7 @@ fn a_complete_store_lets_go_of_the_sample_beside_each_older_second() {
     // Method: as for a store that holds no samples, with a store that does.
     let fixture = Fixture::new();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::with_payload(fixture.root.clone(), budget);
+    let mut held = Held::new(fixture.root.clone(), budget);
 
     let view = past_the_live_span_view(&fixture, &mut held);
 
@@ -102,7 +105,10 @@ fn a_second_with_no_clock_stops_nothing_expiring_behind_it() {
     // Method: take in a hundred seconds, the tenth with no clock, place the cutoff at the
     // forty-fifth, and read the View.
     let fixture = Fixture::new();
-    let mut held = Held::new(fixture.root.clone());
+    let mut held = Held::new(
+        fixture.root.clone(),
+        Arc::new(ByteBudget::new(256 * 1024 * 1024)),
+    );
     expire_boot_before(&fixture.root, RUN.boot, 45 * NS);
     for tick in 1..=100 {
         let second = MachineSecond {
@@ -193,12 +199,17 @@ fn a_store_goes_on_through_a_removal_pass() {
 
 /// The wall seconds and CPU rates a load of the whole hour takes in, oldest first.
 fn hour_of_seconds(root: &std::path::Path) -> Vec<(u64, Option<f64>)> {
-    let mut buffers = super::recording::LoadBuffers::default();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
     let mut seconds = Vec::new();
-    let left_out = super::recording::load_hour(root, None, &mut buffers, |_, _, second, _| {
-        seconds.push((second.wall_ns / NS, second.cpu_percent));
-    });
-    assert_eq!(left_out, None);
+    let outcome =
+        super::recording::load_payload_hour(root, &budget, &operation, None, |_, second, _| {
+            seconds.push((second.wall_ns / NS, second.cpu_percent));
+        })
+        .unwrap();
+    assert_eq!(outcome.left_out, None);
 
     seconds
 }

@@ -69,13 +69,6 @@ impl AppRows {
     pub(in crate::store) fn rows_mut(&mut self) -> &mut [AppRow] {
         &mut self.rows
     }
-
-    pub(in crate::store) fn append(&mut self, other: &mut Self) {
-        assert!(self.reservation.is_none());
-        assert!(other.reservation.is_none());
-        assert!(self.rows.capacity() >= self.rows.len() + other.rows.len());
-        self.rows.append(&mut other.rows);
-    }
 }
 
 impl TryFrom<Vec<AppRow>> for AppRows {

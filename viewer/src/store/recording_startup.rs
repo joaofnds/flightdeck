@@ -607,14 +607,14 @@ fn target(held: &Held, observation: &Observation) -> Target {
         return Target::Recent(index);
     }
 
-    if let Some(sampled) = &held.sampled {
-        if let Some(index) = sampled
-            .held()
-            .position(|sample| sample.observation == *observation)
-        {
-            return Target::Older(index);
-        }
+    if let Some(index) = held
+        .sampled
+        .held()
+        .position(|sample| sample.observation == *observation)
+    {
+        return Target::Older(index);
     }
+
     Target::Outside
 }
 
@@ -717,10 +717,7 @@ fn install(
                 .replace(index, |apps| mem::swap(apps, &mut candidate.apps)))
         }
         Target::Older(index) => {
-            let sampled = held
-                .sampled
-                .as_mut()
-                .unwrap_or_else(|| unreachable!("older target"));
+            let sampled = &mut held.sampled;
             if candidate.sampled.is_none() {
                 let machine = &sampled
                     .get(index)

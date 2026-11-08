@@ -17,7 +17,7 @@ fn primary_startup_serves_selected_apps_before_historical_apps() {
         .unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
 
     held.startup = super::StartupState::Loading;
     let mut startup = super::recording::staged::Startup::new();
@@ -185,7 +185,7 @@ fn cancellation_between_primary_and_complete_releases_only_unretained_startup_ow
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -211,28 +211,20 @@ fn cancellation_between_primary_and_complete_releases_only_unretained_startup_ow
 }
 
 #[test]
-fn payload_construction_keeps_legacy_app_row_capacity_outside_the_opt_in_owner() {
-    // Goal: opt-in buffers cannot preallocate unadmitted legacy App rows.
-    // Method: inspect every free pool slot immediately after both real Held constructors.
-    let mut legacy = super::Held::without_recording();
+fn a_store_preallocates_no_app_rows_its_budget_did_not_admit() {
+    // Goal: the store's buffers cannot preallocate App rows its budget did not admit.
+    // Method: inspect every free pool slot immediately after the store's state is constructed.
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut payload = super::Held::without_recording_with_payload(Arc::clone(&budget));
-    let mut legacy_count = 0;
-    let mut payload_count = 0;
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut count = 0;
 
-    legacy.release_views();
-    payload.release_views();
-    legacy.apps.release(|apps| {
-        assert_eq!(apps.apps.capacity(), super::APPS_PER_SECOND_MAX);
-        legacy_count += 1;
-    });
-    payload.apps.release(|apps| {
+    held.release_views();
+    held.apps.release(|apps| {
         assert_eq!(apps.apps.capacity(), 0);
-        payload_count += 1;
+        count += 1;
     });
 
-    assert_eq!(legacy_count, super::SECONDS_MAX + super::SECONDS_HELD_MAX);
-    assert_eq!(payload_count, legacy_count);
+    assert_eq!(count, super::SECONDS_MAX + super::SECONDS_HELD_MAX);
     assert_eq!(budget.used(), 0);
 }
 
@@ -252,7 +244,7 @@ pub(super) fn drive_primary(
                 ring,
                 Ok(()),
                 &super::Mailbox::new(),
-                Some(input.operation),
+                input.operation,
                 super::Publication::Deferred,
             )
             .unwrap();
@@ -317,7 +309,7 @@ fn staged_history_then_a_clock_set_back_leave_the_leaders_of_the_seconds_after_i
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -380,7 +372,7 @@ fn a_store_still_loading_hands_over_no_stretches() {
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -410,7 +402,7 @@ fn a_store_with_a_budget_reduces_each_saved_reading_once_as_it_adds_the_apps_it_
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -555,7 +547,7 @@ fn selected_apps_use_an_available_source_predecessor_below_wall_pruning() {
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -595,7 +587,7 @@ fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
     held.span = super::Span::new(2, super::Buffers::new(3, super::MachineSecond::default));
     held.apps = super::Span::new(2, super::Buffers::new(3, AppsSecond::default));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -606,7 +598,7 @@ fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
 
     drive_complete(&mut startup, &input, &mut held, &mut ring);
 
-    let older = held.sampled.as_ref().unwrap().get(0).unwrap();
+    let older = held.sampled.get(0).unwrap();
     assert_eq!(older.observation.stamp.publication, 2);
     let ranks = older.ranks().unwrap();
     let disk = ranks
@@ -663,8 +655,6 @@ fn unread_machine_retention_needs_no_admission_even_after_recent_and_older_evict
     assert_eq!(held.earlier.len(), 25);
     assert!(
         held.sampled
-            .as_ref()
-            .unwrap()
             .held()
             .all(|sample| matches!(sample.ranks(), Err(super::Missing::Unread)))
     );
@@ -698,12 +688,9 @@ fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_bou
     held.span = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
     held.apps = super::Span::new(1, super::Buffers::new(2, AppsSecond::default));
     held.earlier = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
-    held.sampled = Some(super::Span::new(
-        1,
-        super::Buffers::new(2, super::SampledSecond::empty),
-    ));
+    held.sampled = super::Span::new(1, super::Buffers::new(2, super::SampledSecond::empty));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -715,14 +702,7 @@ fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_bou
     drive_complete(&mut startup, &input, &mut held, &mut ring);
 
     assert_eq!(
-        held.sampled
-            .as_ref()
-            .unwrap()
-            .get(0)
-            .unwrap()
-            .observation
-            .stamp
-            .publication,
+        held.sampled.get(0).unwrap().observation.stamp.publication,
         3
     );
     let mut events = Vec::new();
@@ -759,7 +739,7 @@ fn a_clockless_source_tail_is_handed_off_once_after_an_earlier_displayable_selec
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = super::StartupState::Loading;
-    let mut ring = super::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
     let input = super::recording::staged::Input {
         root: &fixture.root,
@@ -805,8 +785,7 @@ fn cancellation_immediately_before_publication_leaves_no_startup_view() {
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     let outcome =
         super::recording::load_payload(&fixture.root, &budget, &operation, |run, second, apps| {
             assert!(held.take(run, second, apps));
@@ -824,7 +803,7 @@ fn cancellation_immediately_before_publication_leaves_no_startup_view() {
         &mut ring,
         Ok(()),
         &mailbox,
-        Some(&operation),
+        &operation,
         super::Publication::Complete,
     );
 
@@ -899,8 +878,7 @@ fn cancellation_after_last_consumption_rejects_the_terminal_handoff() {
     let cancellation = Arc::new(crate::cancellation::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     let mut accepted = 0;
 
     let outcome =
@@ -919,7 +897,7 @@ fn cancellation_after_last_consumption_rejects_the_terminal_handoff() {
         &mut ring,
         Ok(()),
         &mailbox,
-        Some(&operation),
+        &operation,
         super::Publication::Complete,
     );
 
@@ -1054,7 +1032,7 @@ fn sealed_minutes_release_each_completion_before_decoding_the_next() {
                 panic!("valid fixture machine and App rows must decode");
             };
             let mut taken = AppsSecond::with_room();
-            taken.take(super::apps::TickApps::Loaded(loaded), None, Some(&budget));
+            taken.take(super::apps::TickApps::Loaded(loaded), None);
             let count = taken
                 .processes
                 .as_ref()
@@ -1188,7 +1166,7 @@ fn consumed_completions_release_displaced_payloads_but_preserve_readers() {
         &operation,
         &capture,
         |_, second, apps| {
-            span.push(|buffer| buffer.take(apps, None, Some(&budget)));
+            span.push(|buffer| buffer.take(apps, None));
             let newest = span.newest_held().unwrap();
             assert_eq!(newest.processes.as_ref().unwrap().len(), 2);
             publications.push(second.publication);

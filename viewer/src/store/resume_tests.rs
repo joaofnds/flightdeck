@@ -10,7 +10,9 @@ fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
     fixture.publish_with_events(100, &[]);
     fixture.seal_minute(0);
     let (mut held, mut ring) = reconciliation_held(&fixture);
-    let mut buffers = super::recording::LoadBuffers::default();
+    let operation = std::sync::Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
     fixture.skip_run_ticks(59);
     for second in 101..109 {
         fixture.publish_with_events(second, &[]);
@@ -24,17 +26,7 @@ fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
 
     assert!(shared.mailbox.take().is_none());
     assert!(super::run_retry(&mut held, &ring, &shared));
-    assert!(
-        super::refresh(
-            &fixture.root,
-            &mut held,
-            &mut ring,
-            &shared,
-            &mut buffers,
-            None
-        )
-        .unwrap()
-    );
+    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, &operation,).unwrap());
     for _ in 0..2 {
         reconciliation_step(&mut held, &mut ring, &shared);
         assert!(!super::run_retry(&mut held, &ring, &shared));
@@ -51,56 +43,11 @@ fn a_checkpoint_overwritten_after_admission_reloads_before_publishing() {
     assert_eq!(resumed.left_out, None);
 }
 
-#[test]
-fn a_ring_overrun_during_a_resume_reads_only_the_minutes_sealed_since_its_newest_second() {
-    // Goal: losing the place in the ring keeps the held hour, as a long return does.
-    // Method: hold two sealed minutes, take the oldest offline, overrun the ring, reconcile.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_events(100, &[]);
-    fixture.seal_minute(0);
-    fixture.skip_run_ticks(59);
-    fixture.publish_with_events(160, &[]);
-    fixture.seal_minute(1);
-    let (mut held, mut ring) = reconciliation_held(&fixture);
-    let mut buffers = super::recording::LoadBuffers::default();
-    take_minute_offline(&fixture, 0);
-    fixture.skip_run_ticks(59);
-    for second in 161..169 {
-        fixture.publish_with_events(second, &[]);
-    }
-    fixture.seal_minute(2);
-    assert!(ring.covers(held.newest.as_ref().unwrap()).unwrap());
-    fixture.publish_with_events(169, &[]);
-    let shared = reconciliation_shared();
-    reconciliation_step(&mut held, &mut ring, &shared);
-    assert!(super::run_retry(&mut held, &ring, &shared));
-
-    let refreshed = super::refresh(
-        &fixture.root,
-        &mut held,
-        &mut ring,
-        &shared,
-        &mut buffers,
-        None,
-    );
-    for _ in 0..2 {
-        reconciliation_step(&mut held, &mut ring, &shared);
-    }
-
-    assert!(refreshed.unwrap());
-    let resumed = shared.mailbox.take().unwrap();
-    let mut expected = vec![100, 160];
-    expected.extend(161..170);
-    assert_eq!(seconds_of(&resumed), expected);
-    assert_eq!(resumed.failure, None);
-    assert_eq!(resumed.left_out, None);
-}
-
 /// The store thread's held hour over `fixture` before its first step, following the ring past
 /// the newest sealed minute.
 fn reconciliation_held(fixture: &Fixture) -> (super::Held, super::Ring) {
     let mut held = super::Held::without_recording();
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     let cancellation = std::sync::Arc::new(crate::cancellation::Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
@@ -116,7 +63,9 @@ fn reconciliation_step(held: &mut super::Held, ring: &mut super::Ring, shared: &
         ring,
         Ok(()),
         &shared.mailbox,
-        None,
+        &std::sync::Arc::new(crate::cancellation::Cancellation::default())
+            .operation(0)
+            .unwrap(),
         Publication::Complete,
     )
     .unwrap();
@@ -125,7 +74,7 @@ fn reconciliation_step(held: &mut super::Held, ring: &mut super::Ring, shared: &
 fn reconciliation_shared() -> super::Shared {
     use std::sync::atomic::AtomicBool;
     super::Shared {
-        queries: None,
+        queries: crate::store::query::Queries::new(),
         mailbox: Mailbox::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),
@@ -204,79 +153,6 @@ fn resuming_preserves_the_first_unsealed_readings_machine_and_app_rates() {
     assert!(expected.follows());
     assert_eq!(*resumed.seconds[index], expected);
     assert_eq!(resumed.apps[index], expected_apps);
-}
-
-#[test]
-fn a_resume_beyond_ring_retention_reads_only_the_minutes_sealed_since_its_newest_second() {
-    // Goal: a return keeps the held hour and reads only what the recording sealed while hidden.
-    // Method: hold two sealed minutes, hide, seal nine more whose publications overrun the
-    // fixture's eight-slot ring, take the oldest offline, show.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_events(100, &[]);
-    fixture.seal_minute(0);
-    fixture.skip_run_ticks(59);
-    fixture.publish_with_events(160, &[]);
-    fixture.seal_minute(1);
-    let store = Store::start(&fixture.root).unwrap();
-    drop(view_where(&store, |_| true));
-    store.set_active(false);
-    super::activity_tests::wait_until_paused(&store);
-    for minute in 2..=10 {
-        fixture.skip_run_ticks(59);
-        fixture.publish_with_events(100 + minute * 60, &[]);
-        fixture.seal_minute(minute);
-    }
-    take_minute_offline(&fixture, 0);
-
-    store.set_active(true);
-    let resumed = view_where(&store, |_| true);
-
-    assert_eq!(
-        seconds_of(&resumed),
-        (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
-    );
-    assert_eq!(resumed.failure, None);
-    assert_eq!(resumed.left_out, None);
-}
-
-#[test]
-fn a_resume_past_the_newest_sealed_minute_reads_only_that_minute_again() {
-    // Goal: a return whose newest held second follows the newest sealed minute reads that
-    // minute alone, to seed the rates after it, and keeps the rest of the held hour.
-    // Method: hold two sealed minutes and a later second, hide, publish nine more seconds
-    // without sealing them, which overrun the fixture's eight-slot ring, take the oldest
-    // minute offline, show.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_events(100, &[]);
-    fixture.seal_minute(0);
-    fixture.skip_run_ticks(59);
-    fixture.publish_with_events(160, &[]);
-    fixture.seal_minute(1);
-    fixture.skip_run_ticks(59);
-    fixture.publish_with_events(220, &[]);
-    let store = Store::start(&fixture.root).unwrap();
-    drop(view_where(&store, |view| {
-        view.seconds
-            .last()
-            .is_some_and(|second| second.wall_ns == 220_000_000_000)
-    }));
-    store.set_active(false);
-    super::activity_tests::wait_until_paused(&store);
-    for second in 221..230 {
-        fixture.publish_with_events(second, &[]);
-    }
-    take_minute_offline(&fixture, 0);
-
-    store.set_active(true);
-    let resumed = view_where(&store, |view| {
-        view.seconds
-            .last()
-            .is_some_and(|second| second.wall_ns == 229_000_000_000)
-    });
-
-    assert_eq!(seconds_of(&resumed)[..3], [100, 160, 220]);
-    assert_eq!(resumed.failure, None);
-    assert_eq!(resumed.left_out, None);
 }
 
 #[test]
@@ -413,38 +289,6 @@ fn a_resume_retries_refused_history_until_it_is_recovered() {
     );
 }
 
-#[test]
-fn a_refused_predecessor_does_not_discard_accepted_history() {
-    // Goal: a refused checkpoint minute is distinct from one outside the loaded hour.
-    // Method: retain two minutes, refuse the newer one, then catch up nine more minutes whose
-    // publications overrun the fixture's eight-slot ring.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_events(100, &[]);
-    fixture.seal_minute(0);
-    fixture.skip_run_ticks(59);
-    fixture.publish_with_events(160, &[]);
-    fixture.seal_minute(1);
-    let store = Store::start(&fixture.root).unwrap();
-    drop(view_where(&store, |_| true));
-    store.set_active(false);
-    super::activity_tests::wait_until_paused(&store);
-    take_minute_offline(&fixture, 1);
-    for minute in 2..=10 {
-        fixture.skip_run_ticks(59);
-        fixture.publish_with_events(100 + minute * 60, &[]);
-        fixture.seal_minute(minute);
-    }
-
-    store.set_active(true);
-    let resumed = view_where(&store, |_| true);
-
-    assert_eq!(resumed.left_out, Some(super::Failure::Refused));
-    assert_eq!(
-        seconds_of(&resumed),
-        (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
-    );
-}
-
 /// Spoils a minute's saved readings without changing discovery of its committed marker.
 fn take_minute_offline(fixture: &Fixture, minute: u64) {
     let ticks = minute_ticks(fixture, minute);
@@ -490,7 +334,7 @@ fn ordinary_ingestion_delivers_every_reading_while_a_retained_view_holds_the_buf
             super::apps::TickApps::Missing(&super::Missing::Unread)
         ));
     }
-    let mut ring = super::Ring::new(fixture.root.clone());
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     ring.follow().unwrap();
     ring.read(|run, second, apps| held.take(run, second, apps))
         .unwrap();
@@ -506,7 +350,9 @@ fn ordinary_ingestion_delivers_every_reading_while_a_retained_view_holds_the_buf
         &mut ring,
         Ok(()),
         &mailbox,
-        None,
+        &std::sync::Arc::new(crate::cancellation::Cancellation::default())
+            .operation(0)
+            .unwrap(),
         Publication::Progress,
     )
     .unwrap();
@@ -564,8 +410,8 @@ fn run_changed_during_load() -> (Fixture, super::Held, super::Ring, super::Share
     fixture.seal_minute(1);
     super::tests::empty_ticks_file(&fixture, 0);
     let budget = std::sync::Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::with_payload(fixture.root.clone(), budget.clone());
-    let ring = super::make_ring(&fixture.root, Some(&budget));
+    let mut held = super::Held::new(fixture.root.clone(), budget.clone());
+    let ring = super::make_ring(&fixture.root, &budget);
     held.left_out = Some(super::Failure::ChangedIdentity);
 
     (fixture, held, ring, reconciliation_shared())
@@ -574,19 +420,10 @@ fn run_changed_during_load() -> (Fixture, super::Held, super::Ring, super::Share
 /// Reads the hour as the Store's next pass does.
 fn run_changed_refresh(fixture: &Fixture, held: &mut super::Held, ring: &mut super::Ring) -> bool {
     let shared = reconciliation_shared();
-    let mut buffers = super::recording::LoadBuffers::default();
     let cancellation = std::sync::Arc::new(crate::cancellation::Cancellation::default());
     let operation = cancellation.operation(0).unwrap();
 
-    super::refresh(
-        &fixture.root,
-        held,
-        ring,
-        &shared,
-        &mut buffers,
-        Some(&operation),
-    )
-    .unwrap()
+    super::refresh(&fixture.root, held, ring, &shared, &operation).unwrap()
 }
 
 #[test]
@@ -618,7 +455,6 @@ fn a_run_gone_from_the_recording_starts_the_load_over() {
         run,
         publication: 1,
         segment: 0,
-        apps_publication: 1,
     });
 
     super::run_retry(&mut held, &ring, &shared);

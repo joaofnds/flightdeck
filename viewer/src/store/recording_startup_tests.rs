@@ -142,7 +142,7 @@ fn a_changed_manifest_after_machine_loading_refuses_the_process_upgrade() {
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = crate::store::StartupState::Loading;
-    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = Startup::new();
     let input = Input {
         root: &fixture.root,
@@ -310,7 +310,7 @@ impl GuardStage {
                 .unwrap(),
             startup: Startup::new(),
             held,
-            ring: crate::store::native_acceptance::make_ring(&fixture.root, Some(budget)),
+            ring: crate::store::native_acceptance::make_ring(&fixture.root, budget),
         }
     }
 
@@ -559,7 +559,7 @@ fn selected_startup_payloads_share_one_input_name_owner_after_startup_retires() 
     let trace = crate::store::payload::NameTrace::new(4, &observer);
     let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     held.startup = crate::store::StartupState::Loading;
-    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, Some(&budget));
+    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = Startup::new();
     let input = Input {
         root: &fixture.root,

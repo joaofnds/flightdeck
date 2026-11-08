@@ -128,6 +128,12 @@ impl PartialEq for AppMetadata {
 }
 
 impl Prepared {
+    /// The App rule's sample of the publication, where the rule took it.
+    #[cfg(test)]
+    pub(super) fn sample(&self) -> Option<&Sample> {
+        self.sample.as_ref().map(OwnedSample::get)
+    }
+
     /// An acquisition bound is a candidate fact, unlike an interrupted or failed source read.
     pub(super) fn refuse_events(&mut self) {
         assert!(self.stage == Stage::Frame);
@@ -408,7 +414,7 @@ impl Prepared {
                 .reason();
             let reason = Error::Bound(reason).to_string();
             self.apps
-                .take(super::apps::TickApps::Refused(&reason), previous, None);
+                .take(super::apps::TickApps::Refused(&reason), previous);
             self.apps.observation = Some(self.observation);
         }
         reservation.shrink_to(metadata_actual(&self.apps));

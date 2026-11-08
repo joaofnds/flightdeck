@@ -150,41 +150,6 @@ fn derive_apps_samples(
 }
 
 impl SealedMinute<'_> {
-    /// Retains valid source input even when joint derivation or presentation reaches its bound.
-    /// Integrity failures still break the predecessor, by the same rule as native ingestion.
-    pub(crate) fn terminal_processes(
-        &self,
-        operation: &Operation,
-    ) -> Result<Option<Before>, Refused> {
-        let mut before: Option<Before> = None;
-        read_processes_with_operation(self, operation, |endpoint, frame| {
-            let previous = before
-                .as_ref()
-                .filter(|before| {
-                    frame
-                        .observation()
-                        .can_use_predecessor(&before.endpoint.observation())
-                })
-                .map(|before| &*before.frame);
-            let valid_input = match frame.validate_input_typed(previous) {
-                Ok(()) => true,
-                Err(error) => error.retains_input(),
-            };
-            if valid_input {
-                before = Some(Before {
-                    endpoint: *endpoint,
-                    frame,
-                    reservation: None,
-                });
-            } else {
-                before = None;
-            }
-            Ok(())
-        })?;
-
-        Ok(before)
-    }
-
     /// Visits each observation's typed sample or refusal, including unattributed processes.
     /// A refused presentation preserves valid input without suppressing later observations.
     pub(crate) fn visit_samples(

@@ -11,11 +11,8 @@ use crate::cancellation::Operation;
 #[path = "native_acceptance_tests.rs"]
 mod tests;
 
-pub(super) fn make_ring(root: &Path, budget: Option<&Arc<ByteBudget>>) -> Ring {
-    match budget {
-        Some(budget) => Ring::with_budget(root.to_owned(), Arc::clone(budget)),
-        None => Ring::new(root.to_owned()),
-    }
+pub(super) fn make_ring(root: &Path, budget: &Arc<ByteBudget>) -> Ring {
+    Ring::with_budget(root.to_owned(), Arc::clone(budget))
 }
 
 pub(super) fn read_native(
@@ -23,11 +20,7 @@ pub(super) fn read_native(
     ring: &mut Ring,
     operation: &Operation,
 ) -> Result<NativeRead, Failure> {
-    let budget = Arc::clone(
-        held.payload_budget
-            .as_ref()
-            .unwrap_or_else(|| unreachable!("only complete Store reads are cancellable")),
-    );
+    let budget = Arc::clone(&held.payload_budget);
     let mut progress = NativeRead::Idle;
     for _ in 0..super::ring::TICKS_PER_READ_MAX {
         held.release_views();
@@ -53,7 +46,7 @@ fn take(held: &mut Held, run: &collector::ring::RunIdentity, prepared: &mut Prep
     }
 }
 
-fn read_failure(error: PrepareError) -> Failure {
+pub(super) fn read_failure(error: PrepareError) -> Failure {
     match error {
         PrepareError::Admission(_) => Failure::Budget,
         PrepareError::Source(persistence::Error::Io(error)) => Failure::Ring(error.kind()),

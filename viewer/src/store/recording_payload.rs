@@ -20,28 +20,6 @@ use persistence::engine::AdmissionRefusal;
 #[path = "recording_payload_tests.rs"]
 mod tests;
 
-pub(super) fn terminal(
-    root: &Path,
-    found: &Found,
-    budget: &Arc<ByteBudget>,
-    operation: &Operation,
-    capture: &crate::recording::InputCapture<'_>,
-) -> Result<Option<super::Terminal>, Refused> {
-    let _purpose =
-        persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
-    operation.check()?;
-    let sealed = open_minute(root, found, budget, operation, capture)?;
-    let mut machine = MachineMinute::default();
-    read_machine(&sealed, &mut machine)?;
-    operation.check()?;
-    let process = sealed.terminal_processes(operation)?;
-    operation.check()?;
-    sealed.revalidate_full()?;
-    operation.check()?;
-
-    Ok(super::Terminal::from_minute(found.run, machine, process))
-}
-
 pub(super) fn load(
     root: &Path,
     minutes: &[Found],
@@ -307,11 +285,7 @@ pub(super) fn load_minute_rows(
     };
     let metadata = super::super::native::AppMetadata::admitted(budget, reason.as_deref());
     let Ok(metadata) = metadata else {
-        second.take(
-            TickApps::Missing(&super::Missing::Budget),
-            previous,
-            Some(budget),
-        );
+        second.take(TickApps::Missing(&super::Missing::Budget), previous);
         return;
     };
     if let Ok(sample) = sample {
@@ -321,7 +295,7 @@ pub(super) fn load_minute_rows(
             0
         };
         if let Err(missing) = second.apps.replace_admitted(count, budget) {
-            second.take(TickApps::Missing(&missing), previous, Some(budget));
+            second.take(TickApps::Missing(&missing), previous);
             return;
         }
         second.fill(sample, previous, Some(budget));
@@ -329,7 +303,6 @@ pub(super) fn load_minute_rows(
         second.take(
             TickApps::Refused(reason.as_deref().unwrap_or_else(|| unreachable!("refusal"))),
             previous,
-            Some(budget),
         );
     }
     second.metadata = metadata;

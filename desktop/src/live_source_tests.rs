@@ -642,7 +642,7 @@ fn a_window_automatically_reads_the_next_batch_when_its_step_run_ends() {
     let mut worker = Worker::start_reader(
         recording.root.clone(),
         crate::live_source_mode::SourceMode::Live,
-        Some(store.query_handle().unwrap()),
+        Some(store.query_handle()),
         1,
     )
     .unwrap();

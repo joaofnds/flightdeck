@@ -80,14 +80,15 @@ fn both_adapters_preserve_the_exact_observation_when_apps_exceed_the_bound() {
     publish_named_processes(&mut fixture, 0, &names, 2_049);
     let mut ring = super::ring::Ring::new(fixture.root.clone());
     ring.follow().unwrap();
+    let identity = fixture.writer.identity().unwrap();
     ring.read(|_, _, apps| {
-        let super::apps::TickApps::Derived(sample) = apps else {
-            panic!("the App count fits Sample's bound");
+        let super::apps::TickApps::Loaded(second) = apps else {
+            panic!("the store's read loads each tick's Apps");
         };
-        let mut second = super::AppsSecond::with_room();
-        second.take(super::apps::TickApps::Derived(sample), None, None);
+        let observation = second.observation.unwrap();
         assert_eq!(second.missing, Some(super::Missing::TooMany));
-        assert_eq!(second.observation, Some(sample.selected));
+        assert_eq!(observation.stamp.run, identity.run.0);
+        assert_eq!(observation.stamp.publication, 1);
         true
     })
     .unwrap();
@@ -141,8 +142,7 @@ pub(super) fn expand_program_dictionary(fixture: &mut Fixture) {
 
 fn sealed_payload_view(fixture: &Fixture) -> Arc<View> {
     let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -379,9 +379,8 @@ fn sealed_payloads_match_ring_payloads_including_refused_processes() {
 fn an_older_sample_keeps_its_identity_and_ranked_apps_without_a_recording() {
     // Goal: a thirty-minute-back hover uses resident machine readings and rankings together.
     // Method: advance a store directly, then inspect its sampled payload with no source reader.
-    let mut held = super::Held::without_recording();
     let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     for second in 100..=1_900 {
         let reading = second_at(second);
         let mut apps = ranked_second(&reading, Some(&budget));
@@ -492,7 +491,7 @@ fn an_exhausted_ingestion_budget_accepts_no_partial_observation() {
     let budget = Arc::new(super::ByteBudget::new(0));
 
     let store = Store::start_with_budget(&fixture.root, Arc::clone(&budget)).unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     handle
         .submit(super::QueryRequest {
             epoch: 0,
@@ -529,7 +528,7 @@ fn a_recording_the_store_cannot_read_says_why_until_the_cause_clears() {
     fs::set_permissions(&identity, fs::Permissions::from_mode(0o000)).unwrap();
     let budget = Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX));
     let store = Store::start_with_budget(&fixture.root, budget).unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
 
     let refused = latest_reply(&handle);
     fs::set_permissions(&identity, mode).unwrap();
@@ -563,7 +562,7 @@ fn damaged_minute_store(minute: u64) -> (Fixture, Store, super::QueryHandle) {
     empty_ticks_file(&fixture, minute);
     let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
     let store = Store::start_with_budget(&fixture.root, budget).unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
 
     (fixture, store, handle)
 }
@@ -631,7 +630,7 @@ fn a_recording_not_yet_made_holds_a_query_with_no_failure() {
     fs::rename(&fixture.root, &away).unwrap();
     let budget = Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX));
     let store = Store::start_with_budget(&fixture.root, budget).unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     handle.submit(latest_request()).unwrap();
     thread::sleep(3 * super::WAIT);
     let while_away = handle.take();
@@ -664,7 +663,7 @@ fn a_query_that_comes_with_a_new_reading_is_answered_from_it() {
         Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
     )
     .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     ready_context(&handle);
     until_caught_up(&store);
 
@@ -692,7 +691,7 @@ fn a_woken_store_answers_without_waiting_out_its_wait_on_the_ring() {
         Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
     )
     .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     ready_context(&handle);
 
     let quickest = (0..10)
@@ -721,7 +720,7 @@ fn a_parked_store_answers_a_page() {
         Arc::new(super::ByteBudget::new(COMPLETE_CAPTURE_BYTES_MAX)),
     )
     .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     ready_context(&handle);
     store.set_active(false);
     super::activity_tests::wait_until_paused(&store);
@@ -743,7 +742,7 @@ fn a_store_whose_every_reading_lies_in_a_damaged_minute_says_so() {
     let next = Fixture::new_mode(false, 2, Some(&first));
     let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
     let store = Store::start_with_budget(&next.root, budget).unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
 
     let outcome = reply_past_the_load(&handle);
 
@@ -945,9 +944,8 @@ fn a_sampled_refusal_reserves_its_owned_reason() {
 fn a_retained_older_sample_stays_immutable_after_its_tail_expires() {
     // Goal: recycling the sampled tail never changes a sample held by an older reader.
     // Method: retain just its first sample, advance past the tail, and inspect both Views.
-    let mut held = super::Held::without_recording();
     let budget = Arc::new(super::ByteBudget::new(4 * 1024 * 1024));
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     for second in 100..=1_900 {
         let reading = second_at(second);
         let mut apps = ranked_second(&reading, Some(&budget));
@@ -1325,19 +1323,24 @@ mod while_the_store_follows_the_newest_run {
 }
 
 mod when_the_folder_holds_no_recording {
-    use super::{ErrorKind, Failure, Store, view_where};
+    use super::{Fixture, Store, view_where};
 
     #[test]
-    fn the_view_reports_the_missing_recording() {
-        // Goal: a window over a folder the collector never recorded into says why it shows no
-        // readings. Method: start a store over a folder that does not exist.
-        let root =
-            std::env::temp_dir().join(format!("flightdeck-store-missing-{}", std::process::id()));
+    fn the_store_follows_a_recording_the_collector_makes_after_it_starts() {
+        // Goal: a window that opens before the collector made its recording shows the recording
+        // once the collector makes it, rather than a failure. Method: move a recording out of its
+        // folder, start a store over the empty path, move the recording back, and wait for its
+        // readings.
+        let mut fixture = Fixture::new();
+        fixture.publish_with_system_rows(100);
+        let aside = fixture.root.with_extension("aside");
+        std::fs::rename(&fixture.root, &aside).unwrap();
+        let store = Store::start(&fixture.root).unwrap();
 
-        let store = Store::start(&root).unwrap();
+        std::fs::rename(&aside, &fixture.root).unwrap();
 
-        let view = view_where(&store, |view| view.failure.is_some());
-        assert_eq!(view.failure, Some(Failure::Recording(ErrorKind::NotFound)));
+        let view = view_where(&store, |view| !view.seconds.is_empty());
+        assert_eq!(view.failure, None);
     }
 }
 
@@ -1583,12 +1586,12 @@ fn wall_seconds_of(seconds: &[Arc<super::MachineSecond>]) -> Vec<u64> {
 }
 
 mod when_the_recording_holds_sealed_minutes {
-    use std::sync::Arc;
 
     use super::{
-        Failure, Fixture, Store, View, empty_ticks_file, held_through, view_where, wall_seconds_of,
+        Failure, Fixture, Store, View, drawn, empty_ticks_file, held_through, view_where,
+        wall_seconds_of,
     };
-    use crate::store::{MachineSecond, Missing};
+    use crate::store::MachineSecond;
 
     #[test]
     fn the_store_holds_the_sealed_seconds_the_ring_no_longer_holds() {
@@ -1667,38 +1670,8 @@ mod when_the_recording_holds_sealed_minutes {
 
         let expected = view_where(&from_ring, |view| held_through(view, 246));
         let view = view_where(&from_recording, |view| held_through(view, 246));
-        assert_eq!(view.apps, expected.apps);
+        assert_eq!(drawn(&view.apps), drawn(&expected.apps));
         assert_eq!(view.apps[3].missing, None);
-        assert!(Arc::ptr_eq(
-            &view.apps[2].apps[0].name,
-            &view.apps[3].apps[0].name
-        ));
-    }
-
-    #[test]
-    fn a_sealed_second_older_than_the_live_span_holds_no_apps() {
-        // Goal: the store reads the Apps of the 18 minutes a live chart draws and none older,
-        // which keeps its launch short and its memory small. Method: seal a minute, seal another
-        // more than 18 minutes later, both with their Apps, publish until the ring holds neither,
-        // and start a store.
-        let mut fixture = Fixture::new();
-        let derive = persistence::sealed_apps::SealedApps::default();
-        fixture.publish_with_system_rows(100);
-        fixture.seal_minute_derived(0, &derive);
-        fixture.skip_run_ticks(59);
-        fixture.publish_with_system_rows(1_300);
-        fixture.seal_minute_derived(1, &derive);
-        fixture.skip_run_ticks(59);
-        for second in 1_400..1_408 {
-            fixture.publish_with_system_rows(second);
-        }
-
-        let store = Store::start(&fixture.root).unwrap();
-
-        let view = view_where(&store, |view| held_through(view, 1_407));
-        assert_eq!(wall_seconds_of(&view.seconds)[..2], [100, 1_300]);
-        assert_eq!(view.apps[0].missing, Some(Missing::Unread));
-        assert_eq!(view.apps[1].missing, None);
     }
 
     #[test]
@@ -2280,6 +2253,30 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
 }
 
 /// Whether the newest second `view` holds is at whole wall second `wall_second`.
+/// What a page draws of one second's Apps.
+type Drawn<'second> = (
+    &'second super::AppRows,
+    &'second super::Totals,
+    &'second Option<super::Missing>,
+    &'second Option<crate::live_app_response::Observation>,
+    Option<u64>,
+);
+
+/// What a page draws of each of `apps`, which leaves out where the store took the second from.
+fn drawn(apps: &[Arc<super::AppsSecond>]) -> Vec<Drawn<'_>> {
+    apps.iter()
+        .map(|second| {
+            (
+                &second.apps,
+                &second.totals,
+                &second.missing,
+                &second.observation,
+                second.elapsed_ns,
+            )
+        })
+        .collect()
+}
+
 fn held_through(view: &View, wall_second: u64) -> bool {
     view.seconds
         .last()

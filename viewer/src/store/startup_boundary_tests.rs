@@ -231,7 +231,7 @@ fn assert_no_cancelled_view(stage: &mut GuardStage) {
         &mut stage.ring,
         Ok(()),
         &mailbox,
-        Some(&stage.operation),
+        &stage.operation,
         crate::store::Publication::Complete,
     );
     assert!(matches!(result, Err(Error::Io(error))
@@ -272,7 +272,7 @@ fn full_staged_retention_reuses_sample_spares_and_keeps_a_detached_primary_immut
     stage.advance(&fixture, &budget).unwrap();
     stage.advance(&fixture, &budget).unwrap();
     assert_eq!(historical_apps(&trace), 12);
-    assert_eq!(stage.held.sampled.as_ref().unwrap().free(), 8);
+    assert_eq!(stage.held.sampled.free(), 8);
     assert_sampled_prefix(&stage.held);
     append_native(&mut fixture, &mut stage);
     stage.complete(&fixture, &budget);
@@ -293,7 +293,7 @@ fn assert_large_primary(held: &Held, primary: &crate::store::QueryContext) {
     assert_eq!(held.span.get(0).unwrap().publication, 1296);
     assert_eq!(held.span.newest().unwrap().publication, 2375);
     assert_eq!(held.earlier.len(), 259);
-    let sampled = held.sampled.as_ref().unwrap();
+    let sampled = &held.sampled;
     assert_eq!(sampled.len(), 259);
     assert_eq!(sampled.free(), 8);
     for index in 0..259 {
@@ -357,7 +357,7 @@ fn primary_headers(context: &crate::store::QueryContext) -> Vec<(Observation, u6
 }
 
 fn assert_sampled_prefix(held: &Held) {
-    let sampled = held.sampled.as_ref().unwrap();
+    let sampled = &held.sampled;
     for index in 0..12 {
         let sample = sampled.get(index).unwrap();
         assert_eq!(
@@ -437,7 +437,7 @@ fn assert_large_final(held: &mut Held) {
     assert_eq!(held.span.newest().unwrap().run_tick, 2439);
     assert_eq!(held.span.newest().unwrap().wall_ns, 13_734_000_000_000);
     assert!(held.apps.held().all(|apps| apps.missing.is_none()));
-    let sampled = held.sampled.as_ref().unwrap();
+    let sampled = &held.sampled;
     assert_eq!(sampled.len(), 259);
     assert_eq!(sampled.get(0).unwrap().observation.stamp.publication, 36);
     assert_eq!(

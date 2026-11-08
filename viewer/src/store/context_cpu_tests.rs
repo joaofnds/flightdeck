@@ -82,7 +82,7 @@ fn retained(fixture: &Fixture) -> Arc<QueryContext> {
     let store =
         Store::start_with_budget(&fixture.root, Arc::new(ByteBudget::new(256 * 1024 * 1024)))
             .unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     let request = QueryRequest {
         epoch: 0,
         source: None,

@@ -342,7 +342,7 @@ fn an_overview_shown_again_waits_for_its_installed_store_without_a_second_reader
     // Method: show a completed page before its real store's replacement View and step both.
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let store = recording.start_store();
     let mut window = VisibilityHarness::open(cx);
     window.answer_readings(&[reading_at(999, 0), reading_at(1000, 0)]);
     window.tick();
@@ -383,7 +383,7 @@ fn reopening_a_completed_live_overview_waits_for_the_store_without_a_second_read
     // Method: transfer a completed page's actual retained state and idle reader into a new page.
     let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
     recording.publish();
-    let store = viewer::store::Store::start(&recording.root).unwrap();
+    let store = recording.start_store();
     let mut window = VisibilityHarness::open(cx);
     window.answer_readings(&[reading_at(999, 0), reading_at(1000, 0)]);
     window.tick();

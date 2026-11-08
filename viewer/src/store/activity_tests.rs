@@ -60,7 +60,7 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
     let mut held = super::Held::without_recording();
     let mut ring = super::Ring::new(fixture.root.clone());
     let shared = super::Shared {
-        queries: None,
+        queries: crate::store::query::Queries::new(),
         mailbox: super::Mailbox::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),
@@ -70,18 +70,10 @@ fn resuming_keeps_sealed_readings_private_until_the_live_ring_is_loaded() {
         cancellation: Arc::new(crate::cancellation::Cancellation::default()),
     };
 
-    let mut buffers = super::recording::LoadBuffers::default();
-    assert!(
-        super::refresh(
-            &fixture.root,
-            &mut held,
-            &mut ring,
-            &shared,
-            &mut buffers,
-            None
-        )
-        .unwrap()
-    );
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, &operation,).unwrap());
 
     assert!(shared.mailbox.take().is_none());
 }
@@ -218,7 +210,7 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
         fixture.publish_with_system_rows(second);
     }
     let shared = super::Shared {
-        queries: None,
+        queries: crate::store::query::Queries::new(),
         mailbox: super::Mailbox::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),
@@ -228,18 +220,10 @@ fn resuming_reuses_the_live_reader_instead_of_reprocessing_consumed_ticks() {
         cancellation: Arc::new(crate::cancellation::Cancellation::default()),
     };
 
-    let mut buffers = super::recording::LoadBuffers::default();
-    assert!(
-        super::refresh(
-            &fixture.root,
-            &mut held,
-            &mut ring,
-            &shared,
-            &mut buffers,
-            None
-        )
-        .unwrap()
-    );
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, &operation,).unwrap());
     ring.follow().unwrap();
     let mut publications = Vec::new();
     let mut consecutive = Vec::new();

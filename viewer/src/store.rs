@@ -163,7 +163,7 @@ pub struct View {
     /// Each App's readings added up over each stretch of `EARLIER_STRIDE_SECONDS` of the loaded
     /// hour, oldest first, but the stretch of the newest second, which later seconds may add to.
     pub stretches: Vec<Arc<AppsStretch>>,
-    /// Older hover payloads, populated only by a Store with a budget.
+    /// The hover payloads of `earlier`, in the same order.
     pub sampled: Vec<Arc<SampledSecond>>,
     /// Whether the View holds the Apps of every second and stretch it holds, which the store
     /// loads at startup after the readings of the Mac and the Apps of the newest second.
@@ -243,7 +243,7 @@ pub struct Store {
 
 struct Shared {
     mailbox: Mailbox<View>,
-    queries: Option<query::Queries>,
+    queries: query::Queries,
     stop: AtomicBool,
     active: AtomicBool,
     catch_up: AtomicBool,
@@ -254,8 +254,9 @@ struct Shared {
 
 impl Store {
     /// Starts the store thread over the recording at `root`.
-    pub fn start(root: &Path) -> io::Result<Self> {
-        Self::start_inner(root, None)
+    #[cfg(test)]
+    pub(crate) fn start(root: &Path) -> io::Result<Self> {
+        Self::start_with_payload(root, 1024 * 1024 * 1024)
     }
 
     /// Starts a store of full process and App payloads with an explicit retained-byte budget.
@@ -265,13 +266,9 @@ impl Store {
 
     /// Shares reservations with the caller's loader inputs, decoded work and retained results.
     pub fn start_with_budget(root: &Path, budget: Arc<ByteBudget>) -> io::Result<Self> {
-        Self::start_inner(root, Some(budget))
-    }
-
-    fn start_inner(root: &Path, budget: Option<Arc<ByteBudget>>) -> io::Result<Self> {
         let shared = Arc::new(Shared {
             mailbox: Mailbox::new(),
-            queries: budget.as_ref().map(|_| query::Queries::new()),
+            queries: query::Queries::new(),
             stop: AtomicBool::new(false),
             active: AtomicBool::new(true),
             catch_up: AtomicBool::new(false),
@@ -280,10 +277,7 @@ impl Store {
             cancellation: Arc::new(Cancellation::default()),
         });
         let root = root.to_owned();
-        let mut held = match budget {
-            Some(budget) => Held::with_payload(root.clone(), budget),
-            None => Held::new(root.clone()),
-        };
+        let mut held = Held::new(root.clone(), budget);
         let operation = Arc::clone(&shared.cancellation)
             .operation(0)
             .map_err(io::Error::other)?;
@@ -296,32 +290,24 @@ impl Store {
             .spawn(move || {
                 let observation = observation.enter();
                 // A ring's mapping stays on the thread that maps it.
-                let mut ring = make_ring(&root, held.payload_budget.as_ref());
-                let started = if held.payload_budget.is_some() {
-                    startup_staged(&root, &mut held, &mut ring, &thread_shared, &operation)
-                } else {
-                    startup(&root, &mut held, &mut ring, &operation)
-                };
+                let mut ring = make_ring(&root, &held.payload_budget);
+                let started =
+                    startup_staged(&root, &mut held, &mut ring, &thread_shared, &operation);
                 if let Err(error) = started {
-                    if let Some(queries) = &thread_shared.queries {
-                        queries.close();
-                    }
+                    thread_shared.queries.close();
                     eprintln!("flightdeck store startup: {error}");
                     return;
                 }
                 let mut load_buffers = recording::LoadBuffers::default();
-                let operation = held.payload_budget.as_ref().map(|_| &operation);
                 run(
                     &root,
                     &mut held,
                     &mut ring,
                     &thread_shared,
                     &mut load_buffers,
-                    operation,
+                    &operation,
                 );
-                if let Some(queries) = &thread_shared.queries {
-                    queries.close();
-                }
+                thread_shared.queries.close();
                 drop(observation);
             })?;
 
@@ -390,13 +376,15 @@ impl Store {
         self.shared.mailbox.take()
     }
 
-    /// An independent source-free query mailbox, enabled only by the complete-payload path.
+    /// An independent source-free query mailbox.
     #[must_use]
-    pub fn query_handle(&self) -> Option<QueryHandle> {
-        let queries = self.shared.queries.as_ref()?;
-        let thread = self.thread.as_ref()?;
+    pub fn query_handle(&self) -> QueryHandle {
+        let thread = self
+            .thread
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("only dropping the store takes its thread"));
 
-        Some(queries.handle(thread.thread().clone()))
+        self.shared.queries.handle(thread.thread().clone())
     }
 }
 
@@ -432,8 +420,8 @@ struct Held {
     covers_hour: bool,
     ring_complete: bool,
     full_detail_evicted_through_ns: Option<u64>,
-    payload_budget: Option<Arc<ByteBudget>>,
-    sampled: Option<Span<SampledSecond>>,
+    payload_budget: Arc<ByteBudget>,
+    sampled: Span<SampledSecond>,
     span: Span<MachineSecond>,
     /// Each App's totals at each second of `span`, in the same order.
     apps: Span<AppsSecond>,
@@ -458,25 +446,16 @@ struct Newest {
     run: RunIdentity,
     publication: u64,
     segment: u64,
-    /// The publication of the newest second of `run` whose Apps the stretches hold, which a
-    /// loader hands over with an older second, so it is never older than `publication`.
-    apps_publication: u64,
 }
 
 impl Newest {
     /// The newest second of a store whose newest second was `newest` once it takes `second` of
-    /// run `run` in, with what it found of the second's Apps, `apps`.
-    fn after(
-        newest: Option<&Self>,
-        run: &RunIdentity,
-        second: &MachineSecond,
-        apps: &TickApps<'_>,
-    ) -> Self {
+    /// run `run` in.
+    fn after(newest: Option<&Self>, run: &RunIdentity, second: &MachineSecond) -> Self {
         Self {
             run: *run,
             publication: second.publication,
             segment: segment(newest, run, second),
-            apps_publication: apps_publication(newest, run, second, apps),
         }
     }
 
@@ -489,17 +468,6 @@ impl Newest {
 
         second.publication <= self.publication
     }
-
-    /// Whether a store whose newest second is `self` holds the Apps of the second of publication
-    /// `publication` of run `run` in its stretches already, as a second of the same run no newer
-    /// than `apps_publication`.
-    fn holds_apps(&self, run: &RunIdentity, publication: u64) -> bool {
-        if self.run != *run {
-            return false;
-        }
-
-        publication <= self.apps_publication
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -510,31 +478,21 @@ enum StartupState {
 }
 
 impl Held {
-    fn new(root: PathBuf) -> Self {
-        Self::with_apps(root, AppsSecond::with_room)
-    }
-
-    fn with_payload(root: PathBuf, budget: Arc<ByteBudget>) -> Self {
-        let mut held = Self::with_apps(root, AppsSecond::default);
-        held.enable_payload(budget);
-        held
-    }
-
     /// A store with no recording behind it, where no retention period applies.
     #[cfg(test)]
     fn without_recording() -> Self {
-        Self::new(PathBuf::new())
+        Self::without_recording_with_payload(Arc::new(ByteBudget::new(1024 * 1024 * 1024)))
     }
 
-    /// As `without_recording`, for a store that holds samples.
+    /// As `without_recording`, for a store that holds samples under `budget`.
     #[cfg(test)]
     fn without_recording_with_payload(budget: Arc<ByteBudget>) -> Self {
-        Self::with_payload(PathBuf::new(), budget)
+        Self::new(PathBuf::new(), budget)
     }
 
-    fn with_apps(root: PathBuf, make_apps: fn() -> AppsSecond) -> Self {
+    fn new(root: PathBuf, budget: Arc<ByteBudget>) -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
-        let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, make_apps);
+        let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, AppsSecond::default);
         let earlier = Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, MachineSecond::default);
         let views = Buffers::new(VIEWS_MAX, || View {
             version: 0,
@@ -542,7 +500,7 @@ impl Held {
             apps: Vec::with_capacity(SECONDS_MAX),
             earlier: Vec::with_capacity(EARLIER_MAX),
             stretches: Vec::with_capacity(STRETCHES_MAX),
-            sampled: Vec::new(),
+            sampled: Vec::with_capacity(EARLIER_MAX),
             apps_loaded: false,
             failure: None,
             left_out: None,
@@ -559,8 +517,11 @@ impl Held {
             covers_hour: false,
             ring_complete: false,
             full_detail_evicted_through_ns: None,
-            payload_budget: None,
-            sampled: None,
+            payload_budget: budget,
+            sampled: Span::new(
+                EARLIER_MAX,
+                Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, SampledSecond::empty),
+            ),
             span: Span::new(SECONDS_MAX, seconds),
             apps: Span::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
@@ -575,17 +536,6 @@ impl Held {
         }
     }
 
-    fn enable_payload(&mut self, budget: Arc<ByteBudget>) {
-        assert!(self.span.is_empty());
-        self.payload_budget = Some(budget);
-        self.sampled = Some(Span::new(
-            EARLIER_MAX,
-            Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, SampledSecond::empty),
-        ));
-        self.views
-            .release(|view| view.sampled = Vec::with_capacity(EARLIER_MAX));
-    }
-
     fn reset(&mut self) {
         self.checked_catalog = None;
         self.source_status = None;
@@ -595,16 +545,15 @@ impl Held {
             .release(|second| *second = MachineSecond::default());
         self.apps.clear();
         self.apps
-            .release(|apps| apps.take(TickApps::Missing(&Missing::Unread), None, None));
+            .release(|apps| apps.take(TickApps::Missing(&Missing::Unread), None));
         self.earlier.clear();
         self.earlier
             .release(|second| *second = MachineSecond::default());
         self.stretches.clear();
         self.owed = None;
-        if let Some(sampled) = &mut self.sampled {
-            sampled.clear();
-            sampled.release(|sample| *sample = SampledSecond::empty());
-        }
+        self.sampled.clear();
+        self.sampled
+            .release(|sample| *sample = SampledSecond::empty());
         self.newest = None;
         self.covers_hour = false;
         self.ring_complete = false;
@@ -631,12 +580,10 @@ impl Held {
         let Ok(prepared_sample) = self.take_sample(kept.as_ref()) else {
             return false;
         };
-        let newest = Newest::after(self.newest.as_ref(), run, second, &apps);
+        let newest = Newest::after(self.newest.as_ref(), run, second);
         if let Some(kept) = kept {
-            if let Some(sampled) = &mut self.sampled {
-                let sample = prepared_sample.unwrap_or_else(|| unreachable!("admitted sample"));
-                sampled.push(|buffer| *buffer = sample);
-            }
+            let sample = prepared_sample.unwrap_or_else(|| unreachable!("admitted sample"));
+            self.sampled.push(|buffer| *buffer = sample);
             self.earlier.push(|buffer| *buffer = kept);
         }
         self.take_current(run, second, apps, newest.segment);
@@ -668,10 +615,6 @@ impl Held {
             return Ok(None);
         };
 
-        let Some(budget) = &self.payload_budget else {
-            return Ok(None);
-        };
-
         let apps = self
             .apps
             .leaving()
@@ -683,7 +626,7 @@ impl Held {
                     .unwrap_or_else(|| unreachable!("departing identity")),
             )));
         }
-        SampledSecond::admitted(kept, apps, budget).map(Some)
+        SampledSecond::admitted(kept, apps, &self.payload_budget).map(Some)
     }
 
     fn take_current(
@@ -705,9 +648,8 @@ impl Held {
         };
         let previous = self.apps.newest_held().map(Arc::clone);
         let tick = take_observation(run, second);
-        let budget = self.payload_budget.as_ref();
         self.apps.push(|buffer| {
-            buffer.take(apps, previous.as_deref(), budget);
+            buffer.take(apps, previous.as_deref());
             if buffer.observation.is_none() {
                 buffer.observation = Some(tick);
             }
@@ -733,25 +675,22 @@ impl Held {
             view.stretches.clear();
             view.sampled.clear();
         });
-        if self.payload_budget.is_some() {
-            self.apps.release(|apps| {
-                if apps.apps.reserved_bytes() == 0 {
-                    if apps.apps.capacity() > 0 {
-                        apps.take(TickApps::Missing(&Missing::Unread), None, None);
-                        return;
-                    }
+        self.apps.release(|apps| {
+            if apps.apps.reserved_bytes() == 0 {
+                if apps.apps.capacity() > 0 {
+                    apps.take(TickApps::Missing(&Missing::Unread), None);
+                    return;
                 }
-                *apps = AppsSecond::default();
-            });
-        }
+            }
+            *apps = AppsSecond::default();
+        });
         self.span
             .release(|second| *second = MachineSecond::default());
         self.earlier
             .release(|second| *second = MachineSecond::default());
         self.stretches.release();
-        if let Some(sampled) = &mut self.sampled {
-            sampled.release(|second| *second = SampledSecond::empty());
-        }
+        self.sampled
+            .release(|second| *second = SampledSecond::empty());
     }
 
     /// Lets go of what the retention period no longer covers, oldest first, so the next View
@@ -767,9 +706,7 @@ impl Held {
         let mut removed = self.stretches.expire(&retained);
         for _ in 0..self.earlier.expired_count(&retained, expire_place) {
             self.earlier.remove_oldest();
-            if let Some(sampled) = &mut self.sampled {
-                sampled.remove_oldest();
-            }
+            self.sampled.remove_oldest();
             removed = true;
         }
         for _ in 0..self.span.expired_count(&retained, expire_place) {
@@ -822,10 +759,8 @@ impl Held {
             if let Some(stretches) = stretches {
                 view.stretches.extend(stretches.held().map(Arc::clone));
             }
-            if let Some(sampled) = sampled {
-                view.sampled.extend(sampled.held().map(Arc::clone));
-                assert_eq!(view.sampled.len(), view.earlier.len());
-            }
+            view.sampled.extend(sampled.held().map(Arc::clone));
+            assert_eq!(view.sampled.len(), view.earlier.len());
             view.apps_loaded = complete;
             view.failure = failure;
             view.left_out = left_out;
@@ -881,29 +816,6 @@ fn take_consecutive(previous: Option<&AppsSecond>, second: &AppsSecond) -> bool 
     consecutive(&Interval { before, after })
 }
 
-/// The publication of the newest second of run `run` whose Apps the stretches hold once the
-/// store takes `second` of that run in after `newest` with `apps`, what it found of the second's
-/// Apps.
-fn apps_publication(
-    newest: Option<&Newest>,
-    run: &RunIdentity,
-    second: &MachineSecond,
-    apps: &TickApps<'_>,
-) -> u64 {
-    let held = match newest {
-        Some(newest) if newest.run == *run => newest.apps_publication.max(second.publication),
-        _ => second.publication,
-    };
-
-    match apps {
-        TickApps::Folded(folded) => {
-            assert!(folded.publication >= second.publication);
-            held.max(folded.publication)
-        }
-        _ => held,
-    }
-}
-
 /// The segment of `second` of run `run`, taken in after `newest`.
 fn segment(newest: Option<&Newest>, run: &RunIdentity, second: &MachineSecond) -> u64 {
     let Some(newest) = newest else {
@@ -945,48 +857,9 @@ pub fn stretch_of_wall_second(wall_second: u64) -> u64 {
     wall_second / EARLIER_STRIDE_SECONDS
 }
 
-/// Loads the sealed prefix before following the ring, keeping legacy startup separate.
-fn startup(
-    root: &Path,
-    held: &mut Held,
-    ring: &mut Ring,
-    operation: &Operation,
-) -> persistence::Result<()> {
-    let budget = held.payload_budget.clone();
-
-    if let Some(budget) = &budget {
-        let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
-            // A window's Store starts through `startup_staged`, so only tests load this way.
-            assert!(held.take(run, second, apps));
-        };
-        let outcome = recording::load_payload(root, budget, operation, take);
-
-        startup_accept(outcome, held, ring, operation)
-    } else {
-        startup_launch(root, held);
-
-        Ok(())
-    }
-}
-
-/// Loads the sealed hour with the Apps of the live span's minutes, and notes the older minutes,
-/// whose Apps the store adds to its stretches once it hands over its first View.
 /// Where `second` lies on the retention clock, which one with no clock has no place on.
 fn expire_place(second: &MachineSecond) -> Option<(Identity, u64)> {
     Some((Identity(second.boot), second.continuous_ns?))
-}
-
-fn startup_launch(root: &Path, held: &mut Held) {
-    let launch = recording::load_launch(root, |run, second, apps| {
-        // A Store with no budget refuses no sample.
-        assert!(held.take(run, second, apps));
-    });
-
-    held.left_out = launch.left_out;
-    if held.left_out.is_none() {
-        held.covers_hour = true;
-    }
-    held.owed = launch.owed;
 }
 
 /// Adds up the Apps a launch owes the store's stretches once the main thread has taken the
@@ -1085,6 +958,25 @@ impl OwedWalk {
     }
 }
 
+/// Loads the sealed hour in one pass and follows the ring from its newest minute, as a test sets
+/// up the store a window starts through `startup_staged`.
+#[cfg(test)]
+fn startup(
+    root: &Path,
+    held: &mut Held,
+    ring: &mut Ring,
+    operation: &Operation,
+) -> persistence::Result<()> {
+    let budget = Arc::clone(&held.payload_budget);
+    let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
+        assert!(held.take(run, second, apps));
+    };
+    let outcome = recording::load_payload(root, &budget, operation, take);
+
+    startup_accept(outcome, held, ring, operation)
+}
+
+#[cfg(test)]
 fn startup_accept(
     outcome: persistence::Result<recording::Outcome>,
     held: &mut Held,
@@ -1112,11 +1004,7 @@ fn startup_staged(
     operation: &Operation,
 ) -> persistence::Result<()> {
     use recording::staged::{Failure as StartupFailure, Input, Startup};
-    let budget = Arc::clone(
-        held.payload_budget
-            .as_ref()
-            .unwrap_or_else(|| unreachable!()),
-    );
+    let budget = Arc::clone(&held.payload_budget);
     let input = Input {
         root,
         budget: &budget,
@@ -1163,7 +1051,7 @@ fn startup_staged(
         if restart {
             held.reset();
             held.startup = StartupState::Loading;
-            *ring = make_ring(root, Some(&budget));
+            *ring = make_ring(root, &budget);
             startup = Startup::new();
             blocked = None;
         }
@@ -1185,8 +1073,7 @@ fn startup_staged_refused(
     }
     *reported = Some(failure);
     held.failure = Some(failure);
-    let queries = shared.queries.as_ref().unwrap_or_else(|| unreachable!());
-    run_queries(held, ring, queries);
+    run_queries(held, ring, &shared.queries);
     thread::park_timeout(STARTUP_RETRY_WAIT);
 }
 
@@ -1208,10 +1095,9 @@ fn startup_staged_turn(
     }
 
     if held.startup == StartupState::Primary {
-        let queries = shared.queries.as_ref().unwrap_or_else(|| unreachable!());
-        if queries.requested() {
+        if shared.queries.requested() {
             startup.revalidate(input)?;
-            run_queries(held, ring, queries);
+            run_queries(held, ring, &shared.queries);
         }
         startup_staged_native(input, held, ring, shared)?;
         if coverage::source_changed(held, ring) {
@@ -1278,7 +1164,7 @@ fn startup_staged_native(
         ring,
         Ok(()),
         &shared.mailbox,
-        Some(input.operation),
+        input.operation,
         Publication::Deferred,
     )?;
     if ring.reload_required() {
@@ -1319,7 +1205,7 @@ fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
     StartupCapacity {
         bytes: budget.used(),
         apps: held.apps.free(),
-        sampled: held.sampled.as_ref().map_or(0, Span::free),
+        sampled: held.sampled.free(),
         newest: held.newest.map(|newest| (newest.run, newest.publication)),
     }
 }
@@ -1331,7 +1217,7 @@ fn run(
     ring: &mut Ring,
     shared: &Shared,
     load_buffers: &mut recording::LoadBuffers,
-    operation: Option<&Operation>,
+    operation: &Operation,
 ) {
     let mut waited = Ok(());
     for _ in 0..STEPS_MAX {
@@ -1350,7 +1236,7 @@ fn run(
             shared.catching_up.store(true, Ordering::Release);
         }
         if shared.catch_up.swap(false, Ordering::AcqRel) {
-            match refresh(root, held, ring, shared, load_buffers, operation) {
+            match refresh(root, held, ring, shared, operation) {
                 Ok(true) => {
                     waited = Ok(());
                 }
@@ -1397,24 +1283,16 @@ fn run(
 
 /// Waits on the ring, leaving where a consumer can reach it what ends that wait.
 fn run_wait(ring: &Ring, shared: &Shared) -> Result<(), Failure> {
-    if let Some(queries) = &shared.queries {
-        queries.set_ring_waker(ring.waker());
-    }
+    shared.queries.set_ring_waker(ring.waker());
 
     ring.wait(WAIT)
 }
 
 fn run_answers(held: &mut Held, ring: &mut Ring, shared: &Shared) {
-    if let Some(queries) = &shared.queries {
-        run_queries(held, ring, queries);
-    }
+    run_queries(held, ring, &shared.queries);
 }
 
 fn run_queries(held: &mut Held, ring: &mut Ring, queries: &query::Queries) {
-    let budget = held
-        .payload_budget
-        .as_ref()
-        .unwrap_or_else(|| unreachable!("only the complete Store enables queries"));
     let checked = match coverage::checked(held, ring) {
         Ok(checked) => checked,
         Err(failure) => {
@@ -1423,7 +1301,7 @@ fn run_queries(held: &mut Held, ring: &mut Ring, queries: &query::Queries) {
             None
         }
     };
-    queries.serve(held, checked.as_ref(), budget);
+    queries.serve(held, checked.as_ref(), &held.payload_budget);
 }
 
 fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
@@ -1479,8 +1357,7 @@ fn refresh(
     held: &mut Held,
     ring: &mut Ring,
     shared: &Shared,
-    load_buffers: &mut recording::LoadBuffers,
-    operation: Option<&Operation>,
+    operation: &Operation,
 ) -> persistence::Result<bool> {
     drop(shared.mailbox.take());
     held.unpublished = true;
@@ -1491,86 +1368,56 @@ fn refresh(
                 Ok(false) => {}
                 Err(failure) => {
                     held.failure = Some(failure);
-                    *ring = make_ring(root, held.payload_budget.as_ref());
+                    *ring = make_ring(root, &held.payload_budget);
                     return Ok(true);
                 }
             }
         }
     }
 
-    refresh_load(root, held, ring, shared, load_buffers, operation)
+    refresh_load(root, held, ring, shared, operation)
 }
 
-/// Takes in what the recording sealed after the newest second the store holds, and follows a
-/// new ring from the newest sealed minute where the recording handed any second over. An hour
-/// that left a sealed minute out reads every minute again, so the refused one is retried, while
-/// losing the place in the ring alone leaves the held minutes as they are. The payload store
-/// reads the whole hour each time, so the Apps its sealed minutes saved replace the live ones.
+/// Reads the loaded hour's sealed minutes again, so the Apps they saved replace the live ones, and
+/// follows a new ring from the newest of them. Losing the place in the ring alone leaves the held
+/// minutes as they are.
 fn refresh_load(
     root: &Path,
     held: &mut Held,
     ring: &mut Ring,
     shared: &Shared,
-    load_buffers: &mut recording::LoadBuffers,
-    operation: Option<&Operation>,
+    operation: &Operation,
 ) -> persistence::Result<bool> {
-    let budget = held.payload_budget.clone();
+    let budget = Arc::clone(&held.payload_budget);
     let since = held.newest;
-    let retries_hour = held.left_out.is_some();
     let mut accepted = true;
     let mut loaded = false;
     let mut checked_catalog = None;
-    let mut next_ring = make_ring(root, budget.as_ref());
-    let mut take = |continuity, run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
+    let mut next_ring = make_ring(root, &budget);
+    let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
         if !shared.active.load(Ordering::Acquire) {
             accepted = false;
         }
         if accepted {
             if !loaded {
-                if continuity == recording::Continuity::Replace {
-                    held.reset();
-                }
+                held.reset();
                 loaded = true;
             }
             accepted = held.take(run, second, apps);
         }
     };
-    let left_out = if let Some(budget) = &budget {
-        let operation = operation.unwrap_or_else(|| unreachable!("payload reads are cancellable"));
-        let outcome = recording::load_payload_hour(
-            root,
-            budget,
-            operation,
-            since.as_ref(),
-            |run, second, apps| take(recording::Continuity::Replace, run, second, apps),
-        )?;
-        if accepted {
-            next_ring.accept(outcome.terminal);
-            checked_catalog = outcome.checked_catalog;
-        }
-        outcome.left_out
-    } else {
-        if retries_hour {
-            recording::load_hour(root, since.as_ref(), load_buffers, take)
-        } else {
-            recording::load_since(root, since.as_ref(), load_buffers, take)
-        }
-    };
+    let outcome = recording::load_payload_hour(root, &budget, operation, since.as_ref(), take)?;
+    if accepted {
+        next_ring.accept(outcome.terminal);
+        checked_catalog = outcome.checked_catalog;
+    }
+    let left_out = outcome.left_out;
     if held.left_out != left_out {
         held.left_out = left_out;
         held.unpublished = true;
     }
-    if budget.is_none() {
-        if loaded {
-            let operation =
-                Arc::clone(&shared.cancellation).operation(shared.cancellation.epoch())?;
-            next_ring.accept(recording::terminal(root, &operation)?);
-        }
-    }
     if accepted {
-        if budget.is_some() {
-            coverage::accept_catalog(held, checked_catalog)?;
-        }
+        coverage::accept_catalog(held, checked_catalog)?;
         held.covers_hour = left_out.is_none();
         refresh_load_finish(held, ring, next_ring, loaded);
     }
@@ -1600,28 +1447,19 @@ enum Publication {
 
 /// Takes in what the ring published since the last step, follows the newest run, and hands
 /// over a View where anything changed. `waited` is how the wait before the step went.
-/// The return value reports native admission; the legacy path performs no native read.
+/// The return value reports native admission.
 fn step(
     held: &mut Held,
     ring: &mut Ring,
     waited: Result<(), Failure>,
     mailbox: &Mailbox<View>,
-    operation: Option<&Operation>,
+    operation: &Operation,
     publication: Publication,
 ) -> persistence::Result<NativeRead> {
-    if let Some(operation) = operation {
-        operation.check()?;
-    }
+    operation.check()?;
     let mut failure = waited.err();
 
-    let read = if held.payload_budget.is_some() {
-        let operation = operation.ok_or(persistence::Error::Bound("complete Store operation"))?;
-        read_native(held, ring, operation)
-    } else {
-        ring.read(|run, second, apps| held.take(run, second, apps))
-            .map(|()| NativeRead::Idle)
-    };
-    let progress = match read {
+    let progress = match read_native(held, ring, operation) {
         Ok(progress) => progress,
         Err(read) => {
             failure = Some(read);
@@ -1633,9 +1471,7 @@ fn step(
         failure = Some(followed);
     }
 
-    if let Some(operation) = operation {
-        operation.check()?;
-    }
+    operation.check()?;
 
     if ring.reload_required() {
         return Ok(progress);

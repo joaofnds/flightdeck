@@ -279,7 +279,6 @@ fn a_stretch_a_load_added_up_part_of_holds_none_where_that_part_holds_more_apps_
     }
     let folded = Folded {
         apps: folding.finish().unwrap(),
-        publication: 1_001,
     };
     let mut held = Held::without_recording();
     assert!(held.take(&RUN, &second_at(1_000), TickApps::Folded(&folded)));
@@ -325,91 +324,6 @@ fn a_load_adds_up_the_apps_of_older_minutes_as_their_seconds_add_up() {
 }
 
 #[test]
-fn a_catch_up_adds_up_no_second_the_store_holds() {
-    // Goal: a store that catches up on minutes it missed adds each second's Apps to its stretch
-    // once, though the load hands over again the seconds it holds of the minute it held last.
-    // Method: seal a few ticks of run minutes 0 and 1, and have the store take the seconds up to
-    // wall second 66 alone, as it does when it takes minute 1's first seconds live before the
-    // minute seals. Then seal ticks of minute 21 and catch up, so minutes 0 and 1 are older than
-    // the seconds whose Apps the store holds one by one and the stretch of wall seconds 60 to 69
-    // crosses them. Compare that stretch with the one a store that loads the whole recording at
-    // once holds.
-    let older = [(0, 55..60), (1, 0..5)];
-    let newer = [(21, 0..5)];
-    let mut fixture = recording_of(&older);
-    let mut held = Held::without_recording();
-    let failure = recording::load_hour(
-        &fixture.root,
-        None,
-        &mut recording::LoadBuffers::default(),
-        |_, run, second, apps| {
-            if second.wall_ns < 67 * 1_000_000_000 {
-                assert!(held.take(run, second, apps));
-            }
-        },
-    );
-    assert_eq!(failure, None);
-    seal_minutes(&mut fixture, 65, &newer);
-    let whole = loaded(&fixture);
-    let cohort = cohort_of(&whole);
-
-    let since = held.newest;
-    let failure = recording::load_since(
-        &fixture.root,
-        since.as_ref(),
-        &mut recording::LoadBuffers::default(),
-        |continuity, run, second, apps| {
-            assert_eq!(continuity, recording::Continuity::Extend);
-            assert!(held.take(run, second, apps));
-        },
-    );
-
-    assert_eq!(failure, None);
-    let view = published(&mut held);
-    let expected = &whole.stretches[0];
-    assert_eq!(expected.stretch, 6);
-    assert!(first_app_amount(&expected.attribution(AppAttributionMetric::Cpu, &cohort)) > 0);
-    assert_eq!(view.stretches[0].stretch, expected.stretch);
-    assert_eq!(
-        readings_of(&view.stretches[0], &cohort),
-        readings_of(expected, &cohort)
-    );
-}
-
-#[test]
-fn a_load_stopped_at_any_second_then_caught_up_adds_up_each_stretch_whole() {
-    // Goal: a load the store stops partway, as when the window hides, leaves no stretch adding
-    // up fewer seconds once the store catches up. Method: seal a few ticks of run minutes 0, 1
-    // and 21, so the stretch of wall seconds 60 to 69 is older than the seconds whose Apps the
-    // store holds one by one and crosses minutes 0 and 1, which two loaders decode. Stop a load
-    // at each second of that stretch and the one after it, and catch up.
-    let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-
-    assert_stopped_loads_catch_up(&fixture, 60..71);
-}
-
-#[test]
-fn a_load_stopped_inside_a_stretch_across_a_restart_then_caught_up_adds_up_the_stretch_whole() {
-    // Goal: a stopped load leaves no stretch counting a second twice or not at all where the
-    // collector restarted inside the stretch. Method: seal ticks of run minutes 0 to 2 of one run,
-    // the last at wall seconds 180 to 184, then ticks of the next run from wall second 185 on, so
-    // the stretch of wall seconds 180 to 189 is older than the seconds whose Apps the store holds
-    // one by one and holds both runs. Seven minutes put two on each loader, so one loader decodes
-    // both runs of that stretch. Stop a load at each second of that stretch and the one after it,
-    // and catch up.
-    let first = recording_of(&[(0, 0..5), (1, 55..60), (2, 55..60)]);
-    let mut next = Fixture::new_mode(true, 2, Some(&first));
-    next.start_at_run_tick(180);
-    seal_minutes(
-        &mut next,
-        180,
-        &[(3, 0..5), (4, 0..5), (5, 0..5), (23, 0..5)],
-    );
-
-    assert_stopped_loads_catch_up(&first, 180..191);
-}
-
-#[test]
 fn a_launch_that_owes_older_minutes_apps_hands_over_no_stretch() {
     // Goal: a store that starts hands over its first View before it reads the Apps of the
     // minutes older than the live span, and that View draws no stretch without them, while it
@@ -419,7 +333,7 @@ fn a_launch_that_owes_older_minutes_apps_hands_over_no_stretch() {
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let mut held = Held::without_recording();
 
-    super::startup_launch(&fixture.root, &mut held);
+    launch(&fixture, &mut held);
 
     let view = published(&mut held);
     assert!(view.stretches.is_empty());
@@ -436,7 +350,7 @@ fn a_launch_adds_up_the_apps_it_owes_once_the_main_thread_takes_its_first_view()
     // its first View, and run the pass while that View waits and again once it is taken.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let mut held = Held::without_recording();
-    super::startup_launch(&fixture.root, &mut held);
+    launch(&fixture, &mut held);
     let mailbox = Mailbox::new();
     held.publish(&mailbox);
     let mut buffers = recording::LoadBuffers::default();
@@ -510,7 +424,7 @@ fn a_launch_adds_up_the_apps_it_owes_while_a_view_holds_every_stretch_the_store_
     seal_minutes(&mut fixture, 9 * 60 + 5, &[(59, 0..5)]);
     let whole = loaded(&fixture);
     let mut held = Held::without_recording();
-    super::startup_launch(&fixture.root, &mut held);
+    launch(&fixture, &mut held);
     // The launch closed ten stretches and opened an eleventh, which wall second 10,000 closes.
     let closed = u64::try_from(STRETCHES_MAX).unwrap() - 11;
     for wall_second in 10_000..=10_000 + closed * 10 {
@@ -538,32 +452,6 @@ fn a_launch_adds_up_the_apps_it_owes_while_a_view_holds_every_stretch_the_store_
 }
 
 #[test]
-fn a_launch_adds_up_the_apps_it_owes_once_it_catches_up_on_newer_minutes() {
-    // Goal: a store that takes in newer minutes before it adds up the Apps it owes its older
-    // stretches holds each stretch a load of the whole hour holds once it adds them up. Method:
-    // seal a few ticks of run minutes 0, 1 and 21 and launch a store, then seal ticks of minute 22
-    // and catch the store up on them. Add up the Apps the store owes and compare its stretches
-    // with a whole load's.
-    let mut fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
-    let mut held = Held::without_recording();
-    super::startup_launch(&fixture.root, &mut held);
-    seal_minutes(&mut fixture, 21 * 60 + 5, &[(22, 0..5)]);
-    catch_up(&mut held, &fixture);
-    let owed = held.owed.take().unwrap();
-    let whole = loaded(&fixture);
-
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut recording::LoadBuffers::default(),
-    );
-
-    assert_eq!(held.left_out, None);
-    assert_stretches_match(&published(&mut held), &whole, "after the catch-up");
-}
-
-#[test]
 fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete() {
     // Goal: a store that cannot read the Apps of a minute it owes its stretches says that it
     // holds less of the hour than the recording sealed. Method: seal a few ticks of run minutes
@@ -571,7 +459,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete()
     // owes.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let mut held = Held::without_recording();
-    super::startup_launch(&fixture.root, &mut held);
+    launch(&fixture, &mut held);
     assert!(held.covers_hour);
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
@@ -597,7 +485,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_adds_up_those_of_the_other_mi
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (2, 0..5), (21, 0..5)]);
     let whole = loaded(&fixture);
     let mut held = Held::without_recording();
-    super::startup_launch(&fixture.root, &mut held);
+    launch(&fixture, &mut held);
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
 
@@ -632,7 +520,7 @@ fn a_launch_adds_up_no_apps_it_owes_a_stretch_the_store_let_go_of() {
     // its stretches.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let mut held = Held::without_recording();
-    super::startup_launch(&fixture.root, &mut held);
+    launch(&fixture, &mut held);
     let closed = u64::try_from(STRETCHES_MAX).unwrap() + 2;
     for wall_second in 10_000..=10_000 + closed * 10 {
         let unread = TickApps::Missing(&Missing::Unread);
@@ -978,47 +866,43 @@ fn loaded(fixture: &Fixture) -> Arc<View> {
     published(&mut held)
 }
 
-/// Loads `fixture`'s recording into `held`, as the store does as it starts.
+/// Loads `fixture`'s recording into `held`, as the store does as it reads the whole hour again.
 fn load_into(held: &mut Held, fixture: &Fixture) {
-    let failure = recording::load_hour(
+    let budget = Arc::clone(&held.payload_budget);
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let outcome = recording::load_payload_hour(
         &fixture.root,
+        &budget,
+        &operation,
         None,
-        &mut recording::LoadBuffers::default(),
-        |_, run, second, apps| {
+        |run, second, apps| {
             assert!(held.take(run, second, apps));
         },
-    );
-    assert_eq!(failure, None);
+    )
+    .unwrap();
+    assert_eq!(outcome.left_out, None);
 }
 
-/// Asserts that a store that loads `fixture`'s recording, stops before the second at each of
-/// `stop_seconds`, then catches up, as the store does once the window shows again, holds the
-/// stretches a store that loads the whole recording at once holds.
-fn assert_stopped_loads_catch_up(fixture: &Fixture, stop_seconds: Range<u64>) {
-    let whole = loaded(fixture);
-    assert!(!whole.stretches.is_empty());
-    for expected in &whole.stretches {
-        assert!(expected.holds_apps());
-    }
+/// Starts a store on `fixture`'s recording in `held`, as a window's Store starts, which leaves
+/// the Apps of the recording's sealed minutes owed to its stretches.
+fn launch(fixture: &Fixture, held: &mut Held) {
+    use std::sync::atomic::AtomicBool;
+    let shared = super::Shared {
+        queries: crate::store::query::Queries::new(),
+        mailbox: Mailbox::new(),
+        stop: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        catch_up: AtomicBool::new(false),
+        catching_up: AtomicBool::new(true),
+        paused: AtomicBool::new(false),
+        cancellation: Arc::new(crate::cancellation::Cancellation::default()),
+    };
+    let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
+    let operation = Arc::clone(&shared.cancellation).operation(0).unwrap();
 
-    for stop_second in stop_seconds {
-        let mut held = Held::without_recording();
-        let failure = recording::load_hour(
-            &fixture.root,
-            None,
-            &mut recording::LoadBuffers::default(),
-            |_, run, second, apps| {
-                if second.wall_ns < stop_second * 1_000_000_000 {
-                    assert!(held.take(run, second, apps));
-                }
-            },
-        );
-        assert_eq!(failure, None);
-        catch_up(&mut held, fixture);
-        let view = published(&mut held);
-
-        assert_stretches_match(&view, &whole, &format!("stopped at {stop_second}"));
-    }
+    super::startup_staged(&fixture.root, held, &mut ring, &shared, &operation).unwrap();
 }
 
 /// Asserts that a store that launches on `fixture`'s recording, then adds up the Apps it owes
@@ -1030,7 +914,7 @@ fn assert_owed_apps_add_up(fixture: &Fixture) {
         assert!(expected.holds_apps());
     }
     let mut held = Held::without_recording();
-    super::startup_launch(&fixture.root, &mut held);
+    launch(fixture, &mut held);
     let owed = held.owed.take().unwrap();
 
     super::run_owed_add(
@@ -1064,26 +948,6 @@ fn assert_stretches_match(view: &View, whole: &View, context: &str) {
             "{context}"
         );
     }
-}
-
-/// Catches `held` up on `fixture`'s recording after its newest second, as the store does, which
-/// lets go of every second it holds where the load replaces them.
-fn catch_up(held: &mut Held, fixture: &Fixture) {
-    let since = held.newest;
-    let mut first = true;
-    let failure = recording::load_since(
-        &fixture.root,
-        since.as_ref(),
-        &mut recording::LoadBuffers::default(),
-        |continuity, run, second, apps| {
-            if first && continuity == recording::Continuity::Replace {
-                held.reset();
-            }
-            first = false;
-            assert!(held.take(run, second, apps));
-        },
-    );
-    assert_eq!(failure, None);
 }
 
 /// The Apps of the newest second `view` holds.
@@ -1312,8 +1176,11 @@ fn second_at(wall_second: u64) -> MachineSecond {
 
 /// The Apps at `wall_second`, as `used` names them, in key order.
 fn second_with(wall_second: u64, used: &[Used<'_>]) -> AppsSecond {
+    let budget = Arc::new(super::ByteBudget::new(1024 * 1024 * 1024));
+    let mut rows = AppRows::default();
+    rows.replace_admitted(used.len(), &budget).unwrap();
     let mut apps = AppsSecond {
-        apps: AppRows::with_capacity(used.len()),
+        apps: rows,
         observation: Some(super::take_observation(&RUN, &second_at(wall_second))),
         missing: None,
         elapsed_ns: Some(NANOSECONDS_PER_SECOND),

@@ -27,11 +27,8 @@ mod buffer_tests;
 #[path = "recording_discovery_tests.rs"]
 mod discovery_tests;
 
-use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
-use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
-use persistence::retention::Retained;
 
 use super::apps::{Kept, TickApps};
 use super::stretch::{Folded, Folding};
@@ -40,8 +37,8 @@ use crate::recording::{
     AppMinute, AppParts, AppRow, MachineMinute, Refused, SampleRow, SealedMinute, read_apps,
     read_machine,
 };
+use crate::session::LOADED_SECONDS;
 use crate::session::registered::catalog_retry;
-use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 
 /// Accepted sealed observations, their incomplete-read status and their independent predecessors.
 pub(super) struct Outcome {
@@ -145,6 +142,7 @@ impl Terminal {
 }
 
 /// Decodes and consumes the opt-in payload prefix one minute at a time under caller cancellation.
+#[cfg(test)]
 pub(super) fn load_payload(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
@@ -160,6 +158,7 @@ pub(super) fn load_payload(
     )
 }
 
+#[cfg(test)]
 pub(super) fn load_payload_using(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
@@ -297,21 +296,13 @@ fn load_payload_admitted(apps: &TickApps<'_>) -> bool {
 
             !matches!(&apps.processes, Err(Missing::Budget))
         }
-        TickApps::Missing(_)
-        | TickApps::Derived(_)
-        | TickApps::Refused(_)
-        | TickApps::Folded(_) => true,
+        TickApps::Missing(_) | TickApps::Refused(_) | TickApps::Folded(_) => true,
     }
 }
 
 /// The sealed minutes the store reads at launch at most. The hour and its lead-in span 61
 /// minutes, and each stop or recovery of a collector seals a shorter one.
 pub(super) const MINUTES_MAX: usize = 128;
-
-/// How far before the newest sealed second the store reads Apps: the live span's 18 minutes.
-const APPS_NS: u64 = 1_080 * 1_000_000_000;
-
-const _: () = assert!(super::SECONDS_MAX == 1_080);
 
 struct LoadWindow<'a> {
     since: Option<&'a super::Newest>,
@@ -325,46 +316,6 @@ impl<'a> LoadWindow<'a> {
             since,
             seconds: LOADED_SECONDS,
             unread: true,
-        }
-    }
-}
-
-/// Reconstructs only the newest saved minute's predecessor for a freshly opened live ring.
-pub(super) fn terminal(
-    root: &Path,
-    operation: &crate::cancellation::Operation,
-) -> persistence::Result<Option<Terminal>> {
-    const BYTES_MAX: usize = 256 * 1024 * 1024;
-    operation.check()?;
-    let mut found = Vec::with_capacity(MINUTES_MAX);
-    find_window(
-        root,
-        &mut found,
-        &LoadWindow {
-            since: None,
-            seconds: 1,
-            unread: false,
-        },
-    )
-    .map_err(|failure| persistence::Error::Io(io::Error::other(format!("{failure:?}"))))?;
-    operation.check()?;
-    let Some(found) = found.first() else {
-        return Ok(None);
-    };
-    let budget = Arc::new(super::ByteBudget::new(BYTES_MAX));
-    let terminal = payload::terminal(
-        root,
-        found,
-        &budget,
-        operation,
-        &persistence::engine::AdmittedTable::from_file_budgeted,
-    );
-    operation.check()?;
-    match terminal {
-        Ok(terminal) => Ok(terminal),
-        Err(failure) => {
-            eprintln!("flightdeck store rate predecessor: {failure:?}");
-            Ok(None)
         }
     }
 }
@@ -385,201 +336,31 @@ struct BoundaryKey {
     publication_end: u64,
 }
 
-impl Found {
-    /// Whether the store holds the minute's Apps at each of its seconds, where it holds those of
-    /// minutes whose ticks reach `apps_from_ns`. It holds those of an older minute added up over
-    /// each stretch.
-    fn apps_by_second(&self, apps_from_ns: u64) -> bool {
-        match self.wall_ns_max {
-            Some(wall_ns) => wall_ns >= apps_from_ns,
-            None => true,
-        }
-    }
-}
-
-/// What a launch loaded of the hour.
-pub(super) struct Launch {
-    pub(super) left_out: Option<Failure>,
-    /// The minutes whose Apps the launch left for `load_owed` to add up over each stretch, where
-    /// it left any.
-    pub(super) owed: Option<Owed>,
-}
-
-/// The loaded hour's minutes as a launch found them, newest last, the older of which hold Apps
-/// the store's stretches lack.
+/// The loaded hour's minutes, oldest first, whose Apps the store's stretches lack.
 pub(super) struct Owed {
     found: Vec<Found>,
-    apps_from_ns: u64,
-}
-
-/// Hands `take` the run, the second and the Apps of each tick the loaded hour's sealed minutes
-/// hold, oldest first, as `load_hour` does, but with the Apps of the live span's minutes alone, so
-/// the store hands over its first View before it reads those of the older minutes. Returns why
-/// the store holds less of the hour than the recording sealed, where it does, and the minutes
-/// whose Apps the store still owes its stretches.
-pub(super) fn load_launch(
-    root: &Path,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
-) -> Launch {
-    let mut found = Vec::with_capacity(MINUTES_MAX);
-    let continuity = match find_window(root, &mut found, &LoadWindow::all(None)) {
-        Ok(continuity) => continuity,
-        Err(failure) => {
-            return Launch {
-                left_out: Some(failure),
-                owed: None,
-            };
-        }
-    };
-    // A load since no second the store holds replaces what it holds.
-    assert_eq!(continuity, Continuity::Replace);
-
-    let apps_from_ns = apps_from_ns(&found);
-    found.reverse();
-    let apps = AppsLoad {
-        from_ns: apps_from_ns,
-        read: AppsRead::BySecond,
-        held: None,
-    };
-    let left_out = load_found(root, &found, apps, None, take);
-
-    let owes = found
-        .iter()
-        .any(|minute| !minute.apps_by_second(apps_from_ns));
-    Launch {
-        left_out,
-        owed: owes.then_some(Owed {
-            found,
-            apps_from_ns,
-        }),
-    }
 }
 
 impl Owed {
     /// The Apps of every minute of `found`, oldest first, which a load that took the minutes' ticks
     /// in without them owes the store's stretches.
     fn all(found: Vec<Found>) -> Self {
-        Self {
-            found,
-            apps_from_ns: u64::MAX,
-        }
+        Self { found }
     }
 }
 
 /// Hands `take` the run, the place and the Apps of each tick of the minutes `owed` holds, oldest
-/// first, as `load_launch` handed them over, with what a loader adds up over each stretch of the
-/// Apps of the minutes older than the live span. It reduces none of their machine readings,
-/// which the store took in already. Returns why it handed over fewer than the minutes sealed,
-/// where it did.
+/// first, with what a loader adds up of their Apps over each stretch. It reduces none of their
+/// machine readings, which the store took in already. Returns why it handed over fewer than the
+/// minutes sealed, where it did.
 pub(super) fn load_owed(
     root: &Path,
     owed: &Owed,
     buffers: &mut LoadBuffers,
-    take: impl FnMut(&RunIdentity, &OwedTick, TickApps<'_>),
-) -> Option<Failure> {
-    let apps = AppsLoad {
-        from_ns: owed.apps_from_ns,
-        read: AppsRead::Folded,
-        held: None,
-    };
-
-    load_found(root, &owed.found, apps, Some(buffers), take)
-}
-
-/// Whether the ticks a load hands over replace the seconds the store holds or continue them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Continuity {
-    Replace,
-    Extend,
-}
-
-/// Hands `take` the ticks of every minute the loaded hour holds, oldest first, to replace what
-/// the store holds, once `since`'s run is found to be still one of the recording's runs.
-pub(super) fn load_hour(
-    root: &Path,
-    since: Option<&super::Newest>,
-    buffers: &mut LoadBuffers,
-    take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
-) -> Option<Failure> {
-    load_window_inner(
-        root,
-        &LoadWindow {
-            since,
-            seconds: LOADED_SECONDS,
-            unread: false,
-        },
-        Some(buffers),
-        take,
-    )
-}
-
-/// Hands `take` the ticks of the minutes sealed after `since`, oldest first, after those of
-/// the newest minute that holds `since`'s run no further than `since`, which seeds the rates of
-/// the minute after it. Where the loaded hour holds no such minute, `take` gets the whole hour.
-pub(super) fn load_since(
-    root: &Path,
-    since: Option<&super::Newest>,
-    buffers: &mut LoadBuffers,
-    take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
-) -> Option<Failure> {
-    load_window_inner(root, &LoadWindow::all(since), Some(buffers), take)
-}
-
-fn load_window_inner(
-    root: &Path,
-    window: &LoadWindow<'_>,
-    buffers: Option<&mut LoadBuffers>,
-    mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
-) -> Option<Failure> {
-    let mut found = Vec::with_capacity(MINUTES_MAX);
-    let continuity = match find_window(root, &mut found, window) {
-        Ok(continuity) => continuity,
-        Err(failure) => return Some(failure),
-    };
-
-    let from_ns = apps_from_ns(&found);
-    found.reverse();
-    // A load that continues the store's seconds hands over seconds the store holds already,
-    // which it takes in no second time.
-    let held = match continuity {
-        Continuity::Extend => window.since,
-        Continuity::Replace => None,
-    };
-
-    load_found(
-        root,
-        &found,
-        AppsLoad {
-            from_ns,
-            read: AppsRead::All,
-            held,
-        },
-        buffers,
-        |run, second, apps| take(continuity, run, second, apps),
-    )
-}
-
-/// The oldest wall time of the seconds whose Apps the store holds one by one, where `found`
-/// holds the loaded hour's minutes newest first.
-fn apps_from_ns(found: &[Found]) -> u64 {
-    found
-        .first()
-        .and_then(|newest| newest.wall_ns_max)
-        .map_or(0, |newest| newest.saturating_sub(APPS_NS))
-}
-
-/// Hands `take` the run, the second and the Apps of each tick of the minutes of `found`, oldest
-/// first, as `apps` says the load reads their Apps. Returns why it handed over fewer than the
-/// minutes sealed, where it did.
-fn load_found<S: Tick>(
-    root: &Path,
-    found: &[Found],
-    apps: AppsLoad<'_>,
-    buffers: Option<&mut LoadBuffers>,
-    mut take: impl FnMut(&RunIdentity, &S, TickApps<'_>),
+    mut take: impl FnMut(&RunIdentity, &OwedTick, TickApps<'_>),
 ) -> Option<Failure> {
     let mut left_out = None;
-    for mut batch in load_batches(root, found, apps, buffers) {
+    for mut batch in load_batches(root, &owed.found, buffers) {
         for loaded in &mut batch.seconds {
             take(&loaded.run, &loaded.second, loaded.apps.tick());
         }
@@ -591,6 +372,28 @@ fn load_found<S: Tick>(
     left_out
 }
 
+/// The Apps second a load of a sealed minute makes of `sample`, the tick after the one whose Apps
+/// second is `previous`, under `budget`.
+#[cfg(test)]
+pub(super) fn sample_second(
+    sample: &crate::live_app_response::Sample,
+    previous: Option<&AppsSecond>,
+    budget: &Arc<super::ByteBudget>,
+) -> AppsSecond {
+    let mut second = AppsSecond::default();
+    let mut names = None;
+    payload::load_minute_rows(&Ok(sample), previous, budget, &mut second);
+    payload::load_minute_payload(
+        &Ok(sample),
+        budget,
+        sample.processes().len(),
+        &mut names,
+        &mut second,
+    );
+    second.observation = Some(sample.selected);
+    second
+}
+
 /// The threads that decode the loaded hour's sealed minutes at once.
 const LOADERS_MAX: usize = 6;
 
@@ -599,11 +402,6 @@ const LOADERS_MAX: usize = 6;
 pub(super) struct LoadBuffers {
     apps: [AppMinute; LOADERS_MAX],
 }
-
-/// What decoding a sealed minute with its Apps costs, counted in minutes decoded without them.
-/// The newest 18 minutes of a recording of about 460 Apps a second took 3.6 ms each for their
-/// readings and 7.1 ms more for their Apps on 2026-10-23.
-const APPS_COST: usize = 3;
 
 /// The ticks a sealed minute holds where none was missed.
 const TICKS_PER_MINUTE: usize = 60;
@@ -622,43 +420,6 @@ struct Loaded<S = MachineSecond> {
     apps: LoadedApps,
 }
 
-/// What a loader hands over of a tick it decoded.
-trait Tick: Sized + Send {
-    /// What the loader hands over of `reading`, a tick of run `run`, whose run's reading before
-    /// it is `previous`, or `None` where the tick has no wall clock, since a second without one
-    /// has no place on a chart.
-    fn of(run: &RunIdentity, reading: &Reading<'_>, previous: Option<&Reading<'_>>)
-    -> Option<Self>;
-
-    fn publication(&self) -> u64;
-
-    fn wall_ns(&self) -> u64;
-}
-
-impl Tick for MachineSecond {
-    fn of(
-        run: &RunIdentity,
-        reading: &Reading<'_>,
-        previous: Option<&Reading<'_>>,
-    ) -> Option<Self> {
-        persistence::work::ingestion::record_publication(
-            *run,
-            reading.tick.publication,
-            persistence::work::ingestion::Kind::MachineReduction,
-        );
-
-        MachineSecond::of(reading, previous)
-    }
-
-    fn publication(&self) -> u64 {
-        self.publication
-    }
-
-    fn wall_ns(&self) -> u64 {
-        self.wall_ns
-    }
-}
-
 /// A tick of a minute whose Apps the store owes its stretches, by its publication and its wall
 /// clock, which place it, since the store took its second in already.
 pub(super) struct OwedTick {
@@ -666,24 +427,14 @@ pub(super) struct OwedTick {
     pub(super) wall_ns: u64,
 }
 
-impl Tick for OwedTick {
-    fn of(
-        _run: &RunIdentity,
-        reading: &Reading<'_>,
-        _previous: Option<&Reading<'_>>,
-    ) -> Option<Self> {
+impl OwedTick {
+    /// What the fold hands over of `reading`, or `None` where the tick has no wall clock, since a
+    /// second without one has no place on a chart.
+    fn of(reading: &Reading<'_>) -> Option<Self> {
         Some(Self {
             publication: reading.tick.publication,
             wall_ns: reading.tick.wall_ns?,
         })
-    }
-
-    fn publication(&self) -> u64 {
-        self.publication
-    }
-
-    fn wall_ns(&self) -> u64 {
-        self.wall_ns
     }
 }
 
@@ -710,6 +461,7 @@ impl LoadedApps {
     }
 
     /// The tick's Apps, where the loader holds them at the tick.
+    #[cfg(test)]
     fn second(&self) -> Option<&AppsSecond> {
         match self {
             Self::Second(apps) => Some(apps),
@@ -727,79 +479,25 @@ impl From<Result<AppsSecond, Missing>> for LoadedApps {
     }
 }
 
-/// What a load does with the Apps of the loaded hour's minutes.
-#[derive(Clone, Copy)]
-struct AppsLoad<'since> {
-    /// The oldest wall time of the seconds whose Apps the store holds one by one. The Apps of a
-    /// minute whose ticks do not reach it are added up over each stretch.
-    from_ns: u64,
-    read: AppsRead,
-    /// The newest second the store holds already. The loader adds up none of the seconds whose
-    /// Apps the store holds.
-    held: Option<&'since super::Newest>,
-}
-
-/// Which of the loaded hour's minutes a load reads the Apps of.
-#[derive(Clone, Copy)]
-enum AppsRead {
-    All,
-    /// Those of the minutes whose Apps the store holds at each second.
-    BySecond,
-    /// Those of the minutes whose Apps the store holds added up over each stretch.
-    Folded,
-}
-
-impl AppsRead {
-    /// Whether a load reads the Apps of `minute`, where the store holds those of the minutes
-    /// whose ticks reach `apps_from_ns` at each second.
-    fn reads(self, minute: &Found, apps_from_ns: u64) -> bool {
-        match self {
-            Self::All => true,
-            Self::BySecond => minute.apps_by_second(apps_from_ns),
-            Self::Folded => !minute.apps_by_second(apps_from_ns),
-        }
-    }
-}
-
 /// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
-/// batch on a loader of its own, with their Apps as `apps` says. Returns the batches in the
-/// order of `found`.
-fn load_batches<S: Tick>(
-    root: &Path,
-    found: &[Found],
-    apps: AppsLoad<'_>,
-    buffers: Option<&mut LoadBuffers>,
-) -> Vec<Batch<S>> {
-    let costs: Vec<usize> = found
-        .iter()
-        .map(|minute| {
-            if apps.read.reads(minute, apps.from_ns) {
-                APPS_COST
-            } else {
-                1
-            }
-        })
-        .collect();
+/// batch on a loader of its own, and adds up their Apps over each stretch. Returns the batches
+/// in the order of `found`.
+fn load_batches(root: &Path, found: &[Found], buffers: &mut LoadBuffers) -> Vec<Batch<OwedTick>> {
+    let costs = vec![1; found.len()];
     thread::scope(|scope| {
         let mut loaders = Vec::with_capacity(LOADERS_MAX);
-        let mut buffers = buffers.map(|buffers| buffers.apps.iter_mut());
+        let mut buffers = buffers.apps.iter_mut();
         for batch in load_batches_split(&costs) {
-            let buffer = buffers.as_mut().map(|buffers| {
-                buffers
-                    .next()
-                    .unwrap_or_else(|| unreachable!("one buffer per bounded batch"))
-            });
-            let before = batch
-                .start
-                .checked_sub(1)
-                .and_then(|before| found.get(before));
+            let buffer = buffers
+                .next()
+                .unwrap_or_else(|| unreachable!("one buffer per bounded batch"));
             let minutes = &found[batch];
             let observation = persistence::work::ingestion::inherit_current();
             let loader = thread::Builder::new()
                 .name(String::from("flightdeck-loader"))
                 .spawn_scoped(scope, move || {
                     let observation = observation.enter();
-                    let result = load_batch_using(root, before, minutes, apps, buffer);
+                    let result = load_batch(root, minutes, &mut Fold::new(), buffer);
                     drop(observation);
                     result
                 });
@@ -848,81 +546,30 @@ pub(super) fn load_batches_split(costs: &[usize]) -> Vec<Range<usize>> {
     batches
 }
 
-/// Startup releases its decode storage with the batch; catch-up borrows the store's buffers.
-fn load_batch_using<S: Tick>(
+/// Decodes `minutes`, oldest first, with their Apps, which `fold` adds up over each stretch.
+fn load_batch(
     root: &Path,
-    before: Option<&Found>,
     minutes: &[Found],
-    apps: AppsLoad<'_>,
-    buffer: Option<&mut AppMinute>,
-) -> Batch<S> {
-    let mut fresh = AppMinute::default();
-    load_batch(
-        root,
-        before,
-        minutes,
-        &mut Fold::new(apps),
-        buffer.unwrap_or(&mut fresh),
-    )
-}
-
-/// Decodes `minutes`, oldest first, with their Apps, which `fold` adds up over each stretch
-/// where the minute is older than those whose Apps the store holds at each second. The first
-/// minute's first second takes its rates from the last tick of the minute `before` it, which the
-/// loader before this one decodes too.
-fn load_batch<S: Tick>(
-    root: &Path,
-    before: Option<&Found>,
-    minutes: &[Found],
-    fold: &mut Fold<'_>,
+    fold: &mut Fold,
     apps: &mut AppMinute,
-) -> Batch<S> {
+) -> Batch<OwedTick> {
     let mut batch = Batch {
         seconds: Vec::with_capacity(minutes.len() * TICKS_PER_MINUTE),
         left_out: None,
     };
-    let mut current = MachineMinute::default();
-    let mut previous = MachineMinute::default();
-    let mut previous_run = None;
-    if let Some(before) = before {
-        let _purpose = persistence::work::ingestion::purpose(
-            persistence::work::ingestion::Purpose::Predecessor,
-        );
-        // The loader that decodes the minute before reports it where it does not decode.
-        if decode(root, &before.marker, &mut previous, None).is_ok() {
-            previous_run = Some(before.run);
-        }
-    }
-
+    let mut machine = MachineMinute::default();
     for minute in minutes {
-        let read = fold.apps.read.reads(minute, fold.apps.from_ns);
-        let Ok(missing) = decode(
-            root,
-            &minute.marker,
-            &mut current,
-            read.then_some(&mut *apps),
-        ) else {
+        let Ok(missing) = decode(root, &minute.marker, &mut machine, apps) else {
             batch.left_out = Some(Failure::Refused);
-            previous_run = None;
             continue;
         };
 
-        // Rates never cross a run, so a minute's first second follows only its own run's.
-        let before = if previous_run == Some(minute.run) {
-            readings(&previous).last()
-        } else {
-            None
-        };
         let decoded = Decoded {
             run: &minute.run,
-            machine: &current,
+            machine: &machine,
             apps: missing.map_or(Ok(&*apps), Err),
-            folded: !minute.apps_by_second(fold.apps.from_ns),
         };
-        load_minute(&decoded, before, &mut batch.seconds, fold);
-
-        mem::swap(&mut current, &mut previous);
-        previous_run = Some(minute.run);
+        load_minute(&decoded, &mut batch.seconds, fold);
     }
     fold.finish(&mut batch.seconds);
 
@@ -930,10 +577,8 @@ fn load_batch<S: Tick>(
     batch
 }
 
-/// What a loader adds up of the Apps of the minutes older than those whose Apps the store holds
-/// at each second, as `apps` says.
-struct Fold<'since> {
-    apps: AppsLoad<'since>,
+/// What a loader adds up of the Apps of the minutes it decodes.
+struct Fold {
     stretches: Folding,
     /// The Apps of the second being added up and those of the second added up before it, whose
     /// names it shares.
@@ -948,14 +593,11 @@ struct Part {
     /// Where the oldest of them stands among the batch's seconds.
     first_index: usize,
     run: RunIdentity,
-    /// The publication of the newest of them.
-    publication: u64,
 }
 
-impl<'since> Fold<'since> {
-    fn new(apps: AppsLoad<'since>) -> Self {
+impl Fold {
+    fn new() -> Self {
         Self {
-            apps,
             stretches: Folding::new(),
             current: AppsSecond::with_room(),
             previous: AppsSecond::with_room(),
@@ -965,7 +607,7 @@ impl<'since> Fold<'since> {
 
     /// Hands the stretch it is adding up to the oldest second of `seconds` it added up into it,
     /// where it added any.
-    fn finish<S>(&mut self, seconds: &mut [Loaded<S>]) {
+    fn finish(&mut self, seconds: &mut [Loaded<OwedTick>]) {
         if let Some(folded) = self.stretches.finish() {
             self.hand_over(folded, seconds);
         }
@@ -974,17 +616,14 @@ impl<'since> Fold<'since> {
     /// Hands `folded`, the stretch it added up, to the oldest second of `seconds` it added up
     /// into it, which holds none of its Apps until then. A load that stops after that second
     /// leaves the store holding the Apps of every second of the stretch it added up.
-    fn hand_over<S>(&mut self, folded: AppsStretch, seconds: &mut [Loaded<S>]) {
+    fn hand_over(&mut self, folded: AppsStretch, seconds: &mut [Loaded<OwedTick>]) {
         let Some(part) = self.part.take() else {
             unreachable!("a stretch adds up at least one second");
         };
         let apps = &mut seconds[part.first_index].apps;
         assert!(matches!(apps, LoadedApps::Missing(Missing::Unread)));
 
-        *apps = LoadedApps::Folded(Folded {
-            apps: folded,
-            publication: part.publication,
-        });
+        *apps = LoadedApps::Folded(Folded { apps: folded });
     }
 }
 
@@ -994,65 +633,42 @@ struct Decoded<'minute> {
     machine: &'minute MachineMinute,
     /// The Apps the minute keeps, or why the loader holds none of them.
     apps: Result<&'minute AppMinute, Missing>,
-    /// Whether the loader adds up the minute's Apps over each stretch rather than holding them
-    /// at each second.
-    folded: bool,
 }
 
-/// Pushes the run, what `S` hands over and the Apps of each tick of `minute` onto `seconds`,
-/// whose reading before it is `before` for the minute's first. `fold` adds up the Apps of a
-/// minute the store holds by stretch.
-fn load_minute<S: Tick>(
-    minute: &Decoded<'_>,
-    before: Option<Reading<'_>>,
-    seconds: &mut Vec<Loaded<S>>,
-    fold: &mut Fold<'_>,
-) {
-    let mut previous = before;
+/// Pushes the run, the place and the Apps of each tick of `minute` onto `seconds`, as `fold`
+/// adds them up.
+fn load_minute(minute: &Decoded<'_>, seconds: &mut Vec<Loaded<OwedTick>>, fold: &mut Fold) {
     let mut kept = KeptWalk::default();
     for reading in readings(minute.machine) {
-        if let Some(second) = S::of(minute.run, &reading, previous.as_ref()) {
-            let apps = if minute.folded {
-                load_minute_fold(minute, &second, &mut kept, fold, seconds)
-            } else {
-                let held = seconds.last().and_then(|loaded| loaded.apps.second());
-                load_minute_apps(minute, second.publication(), &mut kept, held).into()
-            };
+        if let Some(second) = OwedTick::of(&reading) {
+            let apps = load_minute_fold(minute, &second, &mut kept, fold, seconds);
             seconds.push(Loaded {
                 run: *minute.run,
                 second,
                 apps,
             });
         }
-        previous = Some(reading);
     }
 }
 
-/// Adds the Apps `minute` keeps of `second` to the stretch `fold` adds up, where it keeps them
-/// and the store does not hold them already, and hands the stretch it added up before to the
+/// Adds the Apps `minute` keeps of `second` to the stretch `fold` adds up, where it keeps them,
+/// and hands the stretch it added up before to the
 /// oldest of `seconds` it added up into it, where `second` belongs to another stretch or run.
 /// `kept` is where the walk through the minute's Apps stands. Returns what the loader holds of
 /// the second's Apps at the second, which `fold` makes the stretch it hands over at the oldest
 /// second it adds up.
-fn load_minute_fold<S: Tick>(
+fn load_minute_fold(
     minute: &Decoded<'_>,
-    second: &S,
+    second: &OwedTick,
     kept: &mut KeptWalk,
-    fold: &mut Fold<'_>,
-    seconds: &mut [Loaded<S>],
+    fold: &mut Fold,
+    seconds: &mut [Loaded<OwedTick>],
 ) -> LoadedApps {
-    if fold
-        .apps
-        .held
-        .is_some_and(|held| held.holds_apps(minute.run, second.publication()))
-    {
-        return LoadedApps::Missing(Missing::Unread);
-    }
     let apps = match &minute.apps {
         Ok(apps) => apps,
         Err(missing) => return LoadedApps::Missing(missing.clone()),
     };
-    let Some((sample, rows)) = kept.find(apps, second.publication()) else {
+    let Some((sample, rows)) = kept.find(apps, second.publication) else {
         return LoadedApps::Missing(Missing::Refused(String::from(
             "the sealed minute keeps no sample of this second",
         )));
@@ -1079,49 +695,18 @@ fn load_minute_fold<S: Tick>(
     }
     if let Some(folded) = fold
         .stretches
-        .add(super::stretch_of_wall_ns(second.wall_ns()), &fold.current)
+        .add(super::stretch_of_wall_ns(second.wall_ns), &fold.current)
     {
         fold.hand_over(folded, seconds);
     }
     mem::swap(&mut fold.current, &mut fold.previous);
-    match &mut fold.part {
-        Some(part) => part.publication = second.publication(),
-        None => {
-            fold.part = Some(Part {
-                first_index: seconds.len(),
-                run: *minute.run,
-                publication: second.publication(),
-            });
-        }
+    if fold.part.is_none() {
+        fold.part = Some(Part {
+            first_index: seconds.len(),
+            run: *minute.run,
+        });
     }
     LoadedApps::Missing(Missing::Unread)
-}
-
-/// The Apps `minute` keeps of the tick of publication `publication`, or why it gives none.
-/// `kept` is where the walk through the minute's Apps stands, and an App the second `previous`
-/// holds keeps the name it holds there.
-fn load_minute_apps(
-    minute: &Decoded<'_>,
-    publication: u64,
-    kept: &mut KeptWalk,
-    previous: Option<&AppsSecond>,
-) -> Result<AppsSecond, Missing> {
-    let apps = minute.apps.as_ref().map_err(Clone::clone)?;
-    let Some((sample, rows)) = kept.find(apps, publication) else {
-        return Err(Missing::Refused(String::from(
-            "the sealed minute keeps no sample of this second",
-        )));
-    };
-
-    let mut second = AppsSecond::with_room_for(rows.len());
-    let kept = Kept {
-        run: minute.run,
-        sample,
-        rows,
-        minute: apps,
-    };
-    second.keep(&kept, previous);
-    Ok(second)
 }
 
 /// Where a walk through a minute's kept samples and App rows, in publication order, stands.
@@ -1165,20 +750,17 @@ impl KeptWalk {
 }
 
 /// Verifies the minute the marker at `marker` seals and decodes its machine readings into
-/// `machine`, and its Apps into `apps` where it is given. Returns why `apps` holds none of the
+/// `machine` and its Apps into `apps`. Returns why `apps` holds none of the
 /// minute's Apps, where it holds none.
 fn decode(
     root: &Path,
     marker: &Path,
     machine: &mut MachineMinute,
-    apps: Option<&mut AppMinute>,
+    apps: &mut AppMinute,
 ) -> Result<Option<Missing>, Refused> {
     let sealed = SealedMinute::open(root, marker)?;
     read_machine(&sealed, machine)?;
 
-    let Some(apps) = apps else {
-        return Ok(Some(Missing::Unread));
-    };
     apps.clear();
     match read_apps(&sealed, apps) {
         Ok(AppParts::Read) => Ok(None),
@@ -1196,69 +778,6 @@ fn decode_refusal(refused: &Refused) -> String {
     }
 }
 
-/// Finds the sealed minutes of the loaded hour into `found`, newest first, from the newest run
-/// the recording registers back.
-#[cfg(test)]
-fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> Result<(), Failure> {
-    find_window(root, found, &LoadWindow::all(since)).map(|_| ())
-}
-
-fn find_window(
-    root: &Path,
-    found: &mut Vec<Found>,
-    window: &LoadWindow<'_>,
-) -> Result<Continuity, Failure> {
-    assert!(window.seconds > 0);
-    assert!(window.seconds <= LOADED_SECONDS);
-    let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
-    let mut buffer: RegistryBuffer = [0; _];
-    let registry = Registry::read_into(&root.join("runs"), &mut buffer)
-        .map_err(|error| Failure::Registry(error.kind()))?;
-    let mut runs = Vec::new();
-    for run in registry.runs() {
-        let run = run.map_err(|error| Failure::Registry(error.kind()))?;
-        runs.push(run.identity);
-    }
-
-    if let Some(since) = window.since {
-        if since.run.recording != recording {
-            return Err(Failure::ForeignRecording);
-        }
-        if !runs.contains(&since.run) {
-            return Err(Failure::ChangedIdentity);
-        }
-    }
-    // Every run is searched, since a load that finds no held minute to continue from replaces
-    // the hour, and the hour reaches back into the runs before `since`'s.
-    let mut oldest_ns = None;
-    let catalog = find_window_catalog(root)?;
-    let retained = Retained::read(root, runs.iter().map(|run| run.boot));
-    for run in runs.iter().rev() {
-        let finding = FindRun {
-            root,
-            run,
-            span_ns: (window.seconds + LEAD_IN_SECONDS) * 1_000_000_000,
-            retained: &retained,
-        };
-        let more = finding
-            .find(&catalog, &mut oldest_ns, found)
-            .map_err(|error| Failure::Commits(error.kind()))?;
-        if !more {
-            break;
-        }
-    }
-    if window.unread {
-        if let Some(since) = window.since {
-            if let Some(predecessor) = find_predecessor(found, since) {
-                found.truncate(predecessor + 1);
-                return Ok(Continuity::Extend);
-            }
-        }
-    }
-
-    Ok(Continuity::Replace)
-}
-
 /// The catalog of the recording at `root`. A root no writer finished setting up is a recording not
 /// there yet, as one with no identity is, however far its setup got.
 pub(super) fn find_window_catalog(root: &Path) -> Result<Catalog, Failure> {
@@ -1273,6 +792,13 @@ pub(super) fn find_window_catalog(root: &Path) -> Result<Catalog, Failure> {
     })
 }
 
+/// Finds the sealed minutes of the loaded hour into `found`, newest first, as a load since `since`
+/// finds them.
+#[cfg(test)]
+fn find(root: &Path, found: &mut Vec<Found>, since: Option<&super::Newest>) -> Result<(), Failure> {
+    catalog::find(root, found, &LoadWindow::all(since)).map(|_| ())
+}
+
 /// The index in `found`, newest first, of the newest minute the store holds whole, which seeds
 /// the rates of the new minutes before it, where `found` holds one.
 fn find_predecessor(found: &[Found], since: &super::Newest) -> Option<usize> {
@@ -1283,84 +809,6 @@ fn find_predecessor(found: &[Found], since: &super::Newest) -> Option<usize> {
         }
         minute.publication_end.saturating_sub(1) <= since.publication
     })
-}
-
-/// The search for the sealed minutes of one run of the recording.
-struct FindRun<'a> {
-    root: &'a Path,
-    run: &'a RunIdentity,
-    span_ns: u64,
-    retained: &'a Retained,
-}
-
-impl FindRun<'_> {
-    /// Finds the run's sealed minutes newer than `oldest_ns` into `found`, newest first, where
-    /// the first minute found sets `oldest_ns`. Returns false at the old boundary and fails
-    /// if another required minute exceeds `found`'s capacity. The catalog names the minute before
-    /// a minute, so this reads one proof for each minute it finds and no list of them. The walk
-    /// ends at the minute just before the oldest with a second to show, which gives that second
-    /// its rates, since removal may take any minute older than that from under this list.
-    fn find(
-        &self,
-        catalog: &Catalog,
-        oldest_ns: &mut Option<u64>,
-        found: &mut Vec<Found>,
-    ) -> io::Result<bool> {
-        let mut last = u64::MAX;
-        let mut shows_newer = false;
-        for _minute in 0..=MINUTES_MAX {
-            let manifest = catalog_retry(|| {
-                catalog
-                    .window_at_or_before(self.run, last, &mut ReadWork::default())
-                    .map_err(persistence::Error::from)
-            })
-            .map_err(find_failure)?;
-            let Some(manifest) = manifest else {
-                return Ok(true);
-            };
-            let oldest = *oldest_ns.get_or_insert_with(|| {
-                manifest
-                    .wall_ns
-                    .map_or(0, |wall| wall.max.saturating_sub(self.span_ns))
-            });
-            if manifest.wall_ns.is_some_and(|wall| wall.max < oldest) {
-                return Ok(false);
-            }
-            let shows = self
-                .retained
-                .holds_any(self.run.boot, manifest.continuous_ns);
-            if !shows && !shows_newer {
-                return Ok(true);
-            }
-            if found.len() == MINUTES_MAX {
-                return Err(io::Error::from(io::ErrorKind::InvalidData));
-            }
-            found.push(Found {
-                run: *self.run,
-                marker: persistence::commitment_path(self.root, &manifest),
-                wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
-                publication_end: manifest.publication_end,
-                previous_source: None,
-            });
-            if !shows {
-                return Ok(true);
-            }
-            shows_newer = true;
-            let Some(before) = manifest.publication_first.checked_sub(1) else {
-                return Ok(true);
-            };
-            last = before;
-        }
-
-        Err(io::Error::from(io::ErrorKind::InvalidData))
-    }
-}
-
-fn find_failure(error: persistence::Error) -> io::Error {
-    match error {
-        persistence::Error::Io(error) => error,
-        _ => io::Error::from(io::ErrorKind::InvalidData),
-    }
 }
 
 /// The working memory of a load's catalog lookups, each of which reserves its cursor's.

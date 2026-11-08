@@ -71,7 +71,7 @@ pub(super) fn store_pending(cx: &App) -> bool {
 
 /// The handle a new reader of the app's Store queries it through, where the app runs one.
 pub(crate) fn store_query_handle(cx: &App) -> Option<viewer::store::QueryHandle> {
-    cx.try_global::<LiveStore>()?.0.query_handle()
+    Some(cx.try_global::<LiveStore>()?.0.query_handle())
 }
 
 pub(super) fn store_installed(cx: &App) -> bool {

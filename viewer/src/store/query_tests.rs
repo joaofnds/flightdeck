@@ -642,8 +642,7 @@ fn load(fixture: &Fixture) -> (Held, Arc<ByteBudget>) {
     let operation = Arc::new(crate::cancellation::Cancellation::default())
         .operation(0)
         .unwrap();
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     crate::store::recording::load_payload(
         &fixture.root,
         &budget,

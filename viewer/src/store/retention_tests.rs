@@ -30,11 +30,7 @@ fn complete_retention_admits_an_explicit_refusal_before_evicting_its_recent_owne
     held.span = super::Span::new(1, super::Buffers::new(2, MachineSecond::default));
     held.apps = super::Span::new(1, super::Buffers::new(2, super::AppsSecond::default));
     let mut refused = super::AppsSecond::default();
-    refused.take(
-        super::TickApps::Refused("store tick events"),
-        None,
-        Some(&budget),
-    );
+    refused.take(super::TickApps::Refused("store tick events"), None);
     refused.observation = Some(super::take_observation(&RUN, &second(1)));
     assert!(held.take(&RUN, &second(1), super::TickApps::Loaded(&mut refused)));
     let lease = budget.reserve(budget.maximum() - budget.used()).unwrap();
@@ -55,7 +51,7 @@ fn complete_retention_admits_an_explicit_refusal_before_evicting_its_recent_owne
     assert!(held.take(&RUN, &second(2), super::TickApps::Loaded(&mut next)));
 
     assert_eq!(held.newest.unwrap().publication, 2);
-    let older = held.sampled.as_ref().unwrap().newest().unwrap();
+    let older = held.sampled.newest().unwrap();
     assert_eq!(older.observation.stamp.publication, 1);
     let Err(super::Missing::Refused(reason)) = older.ranks() else {
         panic!("explicit refusal");

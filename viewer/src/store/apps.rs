@@ -87,8 +87,6 @@ pub enum Missing {
 pub(super) enum TickApps<'tick> {
     /// Why the store holds none of the tick's Apps.
     Missing(&'tick Missing),
-    /// The App rule's sample of the tick.
-    Derived(&'tick Sample),
     /// Why the App rule refused the tick.
     Refused(&'tick str),
     /// The Apps a loader read from the tick's sealed minute, which the store holds in place of
@@ -135,54 +133,19 @@ impl AppsSecond {
         }
     }
 
-    /// A second with room for `count` Apps, and never more than `APPS_PER_SECOND_MAX`, holding
-    /// none, as a loader holds what it read of a tick until the store takes it in.
-    pub(super) fn with_room_for(count: usize) -> Self {
-        Self {
-            apps: AppRows::with_capacity(count.min(APPS_PER_SECOND_MAX)),
-            ..Self::default()
-        }
-    }
-
     /// Holds what the store found of a tick's Apps, `apps`. An App the second `previous` holds
     /// keeps the name it holds there.
-    pub(super) fn take(
-        &mut self,
-        apps: TickApps<'_>,
-        previous: Option<&Self>,
-        budget: Option<&Arc<super::ByteBudget>>,
-    ) {
+    pub(super) fn take(&mut self, apps: TickApps<'_>, previous: Option<&Self>) {
         match apps {
             TickApps::Missing(missing) => self.clear(missing.clone()),
-            TickApps::Derived(sample) => {
-                self.processes = Err(Missing::Unread);
-                self.fill(sample, previous, budget);
-                self.observation = Some(sample.selected);
-                if self.missing.is_none() {
-                    self.processes = match budget {
-                        Some(budget) => super::Payload::capture(sample, budget).map(Arc::new),
-                        None => Err(Missing::Unread),
-                    };
-                }
-            }
             TickApps::Refused(error) => self.clear(Missing::Refused(error.to_owned())),
             TickApps::Folded(_) => self.clear(Missing::Unread),
             TickApps::Loaded(loaded) => {
-                if budget.is_some() {
-                    assert_eq!(
-                        loaded.apps.reserved_bytes(),
-                        loaded.apps.capacity() * size_of::<AppRow>()
-                    );
-                    mem::swap(self, loaded);
-                } else {
-                    // Legacy loading writes only used pages of the startup-allocated pool.
-                    let mut room = mem::take(&mut self.apps);
-                    mem::swap(self, loaded);
-                    room.clear();
-                    room.append(&mut self.apps);
-                    self.apps = room;
-                    assert!(self.apps.capacity() >= APPS_PER_SECOND_MAX);
-                }
+                assert_eq!(
+                    loaded.apps.reserved_bytes(),
+                    loaded.apps.capacity() * size_of::<AppRow>()
+                );
+                mem::swap(self, loaded);
                 self.take_names(previous);
             }
         }

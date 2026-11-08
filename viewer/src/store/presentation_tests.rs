@@ -3,7 +3,7 @@ use std::sync::Arc;
 use persistence::Error;
 use serde_json::Value;
 
-use super::{AppsSecond, Missing, TickApps};
+use super::{AppsSecond, Missing};
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{APPS_PAGE_ROWS_MAX, Detail, Page, Sample};
 use crate::store::ByteBudget;
@@ -81,14 +81,14 @@ fn borrowed_pages_preserve_the_same_json_from_native_and_saved_samples() {
     let marker = fixture.marker(0);
     let minute = crate::recording::SealedMinute::open(&fixture.root, &marker).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut saved = AppsSecond::with_room();
+    let mut saved = AppsSecond::default();
     let mut before = None;
     let mut legacy_saved = Vec::new();
     minute
         .visit_samples(&mut before, |_, sample| {
             let sample = sample.unwrap();
             legacy_saved = sample_pages(sample);
-            saved.take(TickApps::Derived(sample), None, Some(&budget));
+            saved = crate::store::recording::sample_second(sample, None, &budget);
             Ok(())
         })
         .unwrap();
@@ -308,20 +308,26 @@ fn native_second(identity: bool, count: u64) -> (AppsSecond, Vec<Value>) {
 }
 
 fn retained_fixture(fixture: &Fixture) -> (AppsSecond, Vec<Value>) {
-    let mut ring = crate::store::ring::Ring::new(fixture.root.clone());
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut second = AppsSecond::with_room();
+    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, &budget);
+    let operation = Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let mut second = AppsSecond::default();
     let mut expected = Vec::new();
     ring.follow().unwrap();
-    ring.read(|_, _, apps| {
-        let TickApps::Derived(sample) = apps else {
-            panic!("the native fixture supplies derived App samples");
-        };
-        expected = sample_pages(sample);
-        second.take(TickApps::Derived(sample), None, Some(&budget));
-        true
-    })
-    .unwrap();
+    for _ in 0..crate::store::ring::TICKS_PER_READ_MAX {
+        let read = ring
+            .read_prepared(&budget, &operation, None, |_, prepared| {
+                expected = sample_pages(prepared.sample().unwrap());
+                second = std::mem::take(&mut prepared.apps);
+                true
+            })
+            .unwrap();
+        if matches!(read, crate::store::native::NativeRead::Idle) {
+            break;
+        }
+    }
     drop(ring);
 
     (second, expected)

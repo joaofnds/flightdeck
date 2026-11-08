@@ -16,7 +16,7 @@ fn the_running_store_answers_a_covered_pin_without_replaying_its_sources() {
     let scope = trace.enter();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let store = Store::start_with_budget(&fixture.root, Arc::clone(&budget)).unwrap();
-    let handle = store.query_handle().unwrap();
+    let handle = store.query_handle();
     let followed = ready(&handle, QuerySelection::FollowLatest);
     assert_eq!(followed.selected().observation.stamp.publication, 2);
     assert_eq!(followed.seconds().len(), 2);

@@ -24,14 +24,7 @@ fn sampled_ranking_admission_precedes_native_eviction_during_staged_history() {
     let (mut held, mut ring, mut startup) = staged_small_span(&input);
     assert_eq!(recent_publication(&held, 0), 5);
     assert_eq!(
-        held.sampled
-            .as_ref()
-            .unwrap()
-            .newest()
-            .unwrap()
-            .observation
-            .stamp
-            .publication,
+        held.sampled.newest().unwrap().observation.stamp.publication,
         3
     );
     fixture.publish_with_usage(1122, &usage(122));
@@ -44,7 +37,7 @@ fn sampled_ranking_admission_precedes_native_eviction_during_staged_history() {
     drop(lease);
     read_native(&mut held, &mut ring, &operation).unwrap();
     assert_eq!(held.newest.unwrap().publication, 7);
-    let older = held.sampled.as_ref().unwrap().newest().unwrap();
+    let older = held.sampled.newest().unwrap();
     assert_eq!(older.observation.stamp.publication, 5);
     assert_eq!(older.ranks().unwrap().app_count, 2);
     let input = crate::store::recording::staged::Input {
@@ -97,7 +90,7 @@ fn retired_private_apps_release_budget_before_the_next_real_source_capture() {
         crate::store::Buffers::new(2, crate::store::MachineSecond::default),
     );
     held.apps = crate::store::Span::new(1, crate::store::Buffers::new(2, AppsSecond::default));
-    let mut ring = make_ring(&fixture.root, Some(&budget));
+    let mut ring = make_ring(&fixture.root, &budget);
     ring.follow().unwrap();
     read_native(&mut held, &mut ring, &operation).unwrap();
     let reader = Arc::clone(held.apps.newest_held().unwrap());
@@ -180,7 +173,7 @@ fn staged_before_primary(
     );
     held.apps = crate::store::Span::new(2, crate::store::Buffers::new(3, AppsSecond::default));
     held.startup = crate::store::StartupState::Loading;
-    let mut ring = make_ring(input.root, Some(input.budget));
+    let mut ring = make_ring(input.root, input.budget);
     let mut startup = crate::store::recording::staged::Startup::new();
     for _ in 0..crate::store::recording::MINUTES_MAX * 2 {
         if matches!(
@@ -192,7 +185,7 @@ fn staged_before_primary(
                 &mut ring,
                 Ok(()),
                 &crate::store::Mailbox::new(),
-                Some(input.operation),
+                input.operation,
                 crate::store::Publication::Deferred,
             )
             .unwrap();
@@ -350,7 +343,7 @@ fn startup_shared() -> crate::store::Shared {
     use std::sync::atomic::AtomicBool;
     crate::store::Shared {
         mailbox: crate::store::Mailbox::new(),
-        queries: Some(crate::store::query::Queries::new()),
+        queries: crate::store::query::Queries::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),
         catch_up: AtomicBool::new(false),
@@ -388,9 +381,8 @@ fn accepted_app_rows_keep_the_capacity_their_reservation_admitted() {
     fixture.publish_with_usage(100, &usage(0));
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
-    let mut ring = make_ring(&fixture.root, Some(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut ring = make_ring(&fixture.root, &budget);
     ring.follow().unwrap();
 
     read_native(&mut held, &mut ring, &operation).unwrap();
@@ -414,11 +406,7 @@ fn cleared_native_app_storage_remains_charged_until_its_capacity_is_freed() {
     assert!(!second.apps.is_empty());
     assert!(second.metadata.bytes() > 0);
 
-    second.take(
-        TickApps::Missing(&crate::store::Missing::Unread),
-        None,
-        None,
-    );
+    second.take(TickApps::Missing(&crate::store::Missing::Unread), None);
 
     assert!(second.apps.is_empty());
     let retained_rows = second.apps.capacity() * size_of::<AppRow>();
@@ -447,7 +435,7 @@ fn a_native_app_pool_slot_accepts_the_rows_of_a_saved_observation() {
 
     let outcome =
         crate::store::recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
-            second.take(apps, None, Some(&budget));
+            second.take(apps, None);
             loaded_count += 1;
         })
         .unwrap();
@@ -522,9 +510,8 @@ fn resetting_the_store_preserves_charges_for_retained_app_row_capacity() {
     fixture.publish_with_usage(100, &usage(0));
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
-    let mut ring = make_ring(&fixture.root, Some(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut ring = make_ring(&fixture.root, &budget);
     ring.follow().unwrap();
     read_native(&mut held, &mut ring, &operation).unwrap();
     let bytes = held.apps.newest().unwrap().apps.reserved_bytes();
@@ -562,13 +549,13 @@ fn capture_native_rows(
 ) {
     assert!(count <= 2);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut ring = make_ring(&fixture.root, Some(budget));
+    let mut ring = make_ring(&fixture.root, budget);
     ring.follow().unwrap();
 
     for _ in 0..count {
         let read = ring
             .read_prepared(budget, &operation, None, |_, prepared| {
-                second.take(TickApps::Loaded(&mut prepared.apps), None, Some(budget));
+                second.take(TickApps::Loaded(&mut prepared.apps), None);
                 true
             })
             .unwrap();
@@ -586,9 +573,8 @@ fn a_clockless_publication_leaves_the_store_taking_in_the_one_after_it() {
     fixture.publish_with_usage(100, &usage(0));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
-    let mut ring = make_ring(&fixture.root, Some(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut ring = make_ring(&fixture.root, &budget);
     crate::store::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
     ring.follow().unwrap();
     fixture.publish_without_clock();
@@ -613,9 +599,8 @@ fn the_complete_store_retains_native_facets_from_one_ingestion() {
     let scope = trace.enter();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
-    let mut ring = make_ring(&fixture.root, Some(&budget));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut ring = make_ring(&fixture.root, &budget);
     crate::store::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
     let mailbox = crate::store::Mailbox::new();
     for _ in 0..2 {
@@ -624,7 +609,7 @@ fn the_complete_store_retains_native_facets_from_one_ingestion() {
             &mut ring,
             Ok(()),
             &mailbox,
-            Some(&operation),
+            &operation,
             crate::store::Publication::Complete,
         )
         .unwrap();

@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use super::{AppDetails, Payload, ProcessName, ProcessRow};
+use super::{Payload, ProcessName, ProcessRow};
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
-use crate::live_app_response::{Bytes, RankedApp, Sample};
-use crate::store::apps::TickApps;
+use crate::live_app_response::{Bytes, Sample};
 use crate::store::{AppsSecond, ByteBudget};
 
 #[test]
@@ -90,73 +89,6 @@ fn equal_names_from_independent_sources_keep_separate_admissions() {
     assert!(other_budget.used() > 0);
     drop(other_payload);
     assert_eq!(other_budget.used(), 0);
-}
-
-#[test]
-fn a_partial_name_refusal_releases_the_unpublished_payload_and_all_new_names() {
-    // Goal: refusal cannot publish a partial process list or leak earlier name admissions.
-    // Method: leave room for containers and the first name at the real ingestion boundary.
-    let sample = native_sample();
-    assert_eq!(sample.processes().len(), 2);
-    let first_name = sample
-        .processes()
-        .iter()
-        .filter_map(|row| row.executable_name.as_ref())
-        .min_by(|left, right| left.bytes.cmp(&right.bytes))
-        .unwrap();
-    let payload_bytes = 2 * size_of::<usize>()
-        + size_of::<Payload>()
-        + sample.processes().len() * size_of::<ProcessRow>()
-        + sample.apps().len() * size_of::<AppDetails>();
-    let first_name_bytes = 2 * size_of::<usize>()
-        + size_of::<ProcessName>()
-        + first_name.bytes.len()
-        + first_name.display.len();
-    let app_names: usize = sample
-        .apps()
-        .iter()
-        .map(|app| {
-            2 * size_of::<usize>()
-                + size_of::<RankedApp>()
-                + app.key.bytes.len()
-                + app.display_name.len()
-        })
-        .sum();
-    let budget = Arc::new(ByteBudget::new(64 * 1024));
-    let work_bytes =
-        sample.processes().len() * (2 * size_of::<Arc<ProcessName>>() + size_of::<&Bytes>());
-    let pressure = budget
-        .reserve(budget.maximum() - app_names - payload_bytes - first_name_bytes - work_bytes)
-        .unwrap();
-    let mut refused = AppsSecond::with_room_for(sample.apps().len());
-
-    refused.take(TickApps::Derived(&sample), None, Some(&budget));
-
-    assert!(refused.missing.is_none());
-    assert!(matches!(
-        refused.processes,
-        Err(crate::store::Missing::Budget)
-    ));
-    assert_eq!(refused.observation, Some(sample.selected));
-    assert_eq!(budget.used_peak(), budget.maximum());
-    assert_eq!(budget.used(), pressure.bytes() + app_names);
-    drop(refused);
-    assert_eq!(budget.used(), pressure.bytes());
-    drop(pressure);
-    let mut retry = AppsSecond::with_room_for(sample.apps().len());
-    retry.take(TickApps::Derived(&sample), None, Some(&budget));
-    let payload = retry.processes.as_ref().unwrap();
-    assert_eq!(payload.len(), sample.processes().len());
-    for (retained, original) in payload.iter().zip(sample.processes()) {
-        assert_eq!(retained.pid, original.pid);
-        assert_eq!(retained.creation, original.creation);
-        assert_eq!(
-            retained.executable_name().unwrap().bytes,
-            original.executable_name.as_ref().unwrap().bytes
-        );
-    }
-    drop(retry);
-    assert_eq!(budget.used(), 0);
 }
 
 #[test]

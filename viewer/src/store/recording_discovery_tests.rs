@@ -44,15 +44,15 @@ fn a_damaged_recording_reports_a_failure_instead_of_no_minutes() {
     fixture.publish_with_events(10_000, &[]);
     fixture.seal();
     std::fs::remove_dir(fixture.root.join("event-fragments")).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
-    let left_out = super::load_since(
-        &fixture.root,
-        None,
-        &mut super::LoadBuffers::default(),
-        |_, _, _, _| {},
+    let outcome = super::load_payload(&fixture.root, &budget, &operation, |_, _, _| {});
+
+    assert_eq!(
+        outcome.unwrap().left_out,
+        Some(Failure::Commits(ErrorKind::InvalidData))
     );
-
-    assert_eq!(left_out, Some(Failure::Commits(ErrorKind::InvalidData)));
 }
 
 macro_rules! a_root_it_cannot_read_reports_a_failure_instead_of_no_minutes {
@@ -60,20 +60,13 @@ macro_rules! a_root_it_cannot_read_reports_a_failure_instead_of_no_minutes {
         #[test]
         fn $name() {
             // Goal: a load names why it read nothing where the root holds nothing it can read.
-            // Method: load a root of another format or still being set up, by both of its routes.
+            // Method: load a root of another format or still being set up.
             let root = $root;
             let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
             let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
-            let load = super::load_since(
-                &root,
-                None,
-                &mut super::LoadBuffers::default(),
-                |_, _, _, _| {},
-            );
             let payload = super::load_payload(&root, &budget, &operation, |_, _, _| {});
 
-            assert_eq!(load, Some($failure));
             assert_eq!(payload.unwrap().left_out, Some($failure));
             std::fs::remove_dir_all(root).unwrap();
         }
@@ -234,7 +227,6 @@ fn an_unread_checkpoint_load_does_not_certify_skipped_old_windows() {
         run: fixture.writer.identity().unwrap(),
         publication: 2,
         segment: 0,
-        apps_publication: 2,
     };
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
@@ -290,29 +282,6 @@ fn an_unbounded_newest_minute_cannot_borrow_an_older_time_anchor() {
     assert_eq!(actual, [1, 2, 4]);
 }
 
-#[test]
-fn ordinary_discovery_does_not_borrow_an_anchor_before_an_unbounded_newest_minute() {
-    // Goal: the ordinary loader keeps relevant machine and App history after a clock rollback.
-    // Method: inspect the early derived App reading preceding a mixed newest minute.
-    let fixture = unbounded_newest_minute();
-    let mut actual = Vec::new();
-    let mut first_has_apps = false;
-
-    let left_out = super::load_launch(&fixture.root, |_, second, apps| {
-        actual.push(second.publication);
-        if second.publication == 1 {
-            if let crate::store::apps::TickApps::Loaded(apps) = apps {
-                first_has_apps = !apps.apps.is_empty();
-            }
-        }
-    })
-    .left_out;
-
-    assert_eq!(left_out, None);
-    assert_eq!(actual, [1, 2, 4]);
-    assert!(first_has_apps);
-}
-
 fn unbounded_newest_minute() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.publish_with_events(1_000, &[]);
@@ -335,45 +304,6 @@ fn unbounded_newest_minute() -> Fixture {
     );
 
     fixture
-}
-
-#[test]
-fn ordinary_discovery_keeps_known_readings_when_the_minute_has_no_wall_bounds() {
-    // Goal: ordinary ingestion preserves known observations in a partially clocked minute.
-    // Method: run the ordinary loader over the same real mixed-clock input as the payload path.
-    let fixture = mixed_wall_minute();
-    let mut actual = Vec::new();
-
-    let left_out = super::load_launch(&fixture.root, |_, second, _| {
-        actual.push(second.publication);
-    })
-    .left_out;
-
-    assert_eq!(left_out, None);
-    assert_eq!(actual, [2]);
-}
-
-#[test]
-fn ordinary_discovery_keeps_the_apps_of_a_known_reading_in_an_unbounded_minute() {
-    // Goal: uncertain minute bounds cannot classify a known reading's Apps as old and unread.
-    // Method: inspect the actual ordinary-loader App result for the mixed minute's known tick.
-    let fixture = mixed_wall_minute_using(&persistence::sealed_apps::SealedApps::default());
-    let mut actual = None;
-
-    let left_out = super::load_launch(&fixture.root, |_, second, apps| {
-        let crate::store::apps::TickApps::Loaded(apps) = apps else {
-            panic!("the ordinary loader returns the known tick's Apps");
-        };
-        actual = Some((
-            second.publication,
-            apps.missing.clone(),
-            apps.apps.is_empty(),
-        ));
-    })
-    .left_out;
-
-    assert_eq!(left_out, None);
-    assert_eq!(actual, Some((2, None, false)));
 }
 
 #[test]
@@ -440,26 +370,19 @@ fn mixed_wall_minute_using(derive: &dyn persistence::worker::Derive) -> Fixture 
 #[test]
 fn a_capacity_stop_reports_incomplete_history_before_decoding() {
     // Goal: a bounded discovery cannot present a truncated source window as complete.
-    // Method: seal 129 short windows inside the requested hour and invoke both loaders.
+    // Method: seal 129 short windows inside the requested hour and load them.
     let fixture = short_windows(129);
     let mut accepted = 0;
-
-    let left_out = super::load_since(
-        &fixture.root,
-        None,
-        &mut super::LoadBuffers::default(),
-        |_, _, _, _| accepted += 1,
-    );
-
-    assert_eq!(left_out, Some(Failure::Commits(ErrorKind::InvalidData)));
-    assert_eq!(accepted, 0);
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
 
     let outcome =
         super::load_payload(&fixture.root, &budget, &operation, |_, _, _| accepted += 1).unwrap();
 
-    assert_eq!(outcome.left_out, left_out);
+    assert_eq!(
+        outcome.left_out,
+        Some(Failure::Commits(ErrorKind::InvalidData))
+    );
     assert_eq!(outcome.checked_catalog, None);
     assert!(outcome.terminal.is_none());
     assert_eq!(accepted, 0);
@@ -486,7 +409,7 @@ fn exactly_full_discovery_succeeds_when_the_next_window_is_outside_the_period() 
     let fixture = short_windows(129);
     let mut found = Vec::new();
 
-    let result = super::find_window(
+    let result = super::catalog::find(
         &fixture.root,
         &mut found,
         &super::LoadWindow {
@@ -496,7 +419,7 @@ fn exactly_full_discovery_succeeds_when_the_next_window_is_outside_the_period() 
         },
     );
 
-    assert_eq!(result, Ok(super::Continuity::Replace));
+    assert!(result.is_ok());
     assert_eq!(found.len(), 128);
     assert_eq!(found.last().unwrap().publication_end, 3);
 }
@@ -571,7 +494,6 @@ fn payload_discovery_refuses_an_unknown_checkpoint_run() {
         run,
         publication: 1,
         segment: 0,
-        apps_publication: 1,
     };
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();

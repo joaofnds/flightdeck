@@ -33,9 +33,7 @@ pub fn store_start(
         root,
         Arc::new(viewer::store::ByteBudget::new(STORE_BYTES_MAX)),
     )?;
-    let handle = store
-        .query_handle()
-        .unwrap_or_else(|| unreachable!("a budgeted Store serves queries"));
+    let handle = store.query_handle();
 
     Ok((store, handle))
 }

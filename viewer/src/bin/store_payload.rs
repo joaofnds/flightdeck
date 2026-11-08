@@ -37,7 +37,6 @@ struct Arguments {
     recording: PathBuf,
     bytes: usize,
     seconds: u64,
-    legacy: bool,
 }
 
 #[derive(Default)]
@@ -53,17 +52,13 @@ struct PayloadCounts {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     persistence::engine::initialize_process()?;
-    let arguments = Arguments::parse(&std::env::args().skip(1).take(8).collect::<Vec<_>>())?;
+    let arguments = Arguments::parse(&std::env::args().skip(1).take(7).collect::<Vec<_>>())?;
     let watchdog = Watchdog::with_operation_limit(FOOTPRINT_BYTES_MAX, Duration::from_secs(90))?;
     let operation = watchdog.operation()?;
     let budget = Arc::new(ByteBudget::new(arguments.bytes));
     report_footprint("before_store", &budget)?;
     let started = Instant::now();
-    let store = if arguments.legacy {
-        Store::start(&arguments.recording)?
-    } else {
-        Store::start_with_budget(&arguments.recording, Arc::clone(&budget))?
-    };
+    let store = Store::start_with_budget(&arguments.recording, Arc::clone(&budget))?;
     let mut latest = None;
     for _step in 0..arguments.seconds * STEPS_PER_SECOND {
         if let Some(view) = store.take() {
@@ -122,16 +117,10 @@ fn first_view(
 
 impl Arguments {
     fn parse(arguments: &[String]) -> io::Result<Self> {
-        if !matches!(arguments.len(), 6 | 7) {
+        if arguments.len() != 6 {
             return Err(io::Error::other(
-                "--recording PATH --payload-bytes N --seconds N [--legacy]",
+                "--recording PATH --payload-bytes N --seconds N",
             ));
-        }
-        let legacy = arguments.len() == 7;
-        if legacy {
-            if arguments[6] != "--legacy" {
-                return Err(io::Error::other("expected --legacy"));
-            }
         }
         for (index, name) in [(0, "--recording"), (2, "--payload-bytes"), (4, "--seconds")] {
             if arguments[index] != name {
@@ -150,7 +139,6 @@ impl Arguments {
             recording: PathBuf::from(&arguments[1]),
             bytes,
             seconds,
-            legacy,
         })
     }
 }

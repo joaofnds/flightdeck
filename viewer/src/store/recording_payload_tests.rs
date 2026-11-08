@@ -9,7 +9,8 @@ use crate::store::{AppsSecond, ByteBudget};
 
 #[test]
 fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
-    // Goal: preserve the exact terminal. Method: compare three real steps with its own reader.
+    // Goal: preserve the exact terminal. Method: compare three real steps with a load of every
+    // minute in one pass.
     let fixture = catch_up_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
@@ -45,15 +46,7 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
         })
         .unwrap();
     let outcome = cursor.finish(&operation).unwrap();
-    let expected = super::terminal(
-        &fixture.root,
-        &found[2],
-        &budget,
-        &operation,
-        &AdmittedTable::from_file_budgeted,
-    )
-    .unwrap()
-    .unwrap();
+    let expected = one_pass_terminal(&fixture.root, &operation);
 
     assert_eq!(accepted, [1, 2, 3, 4]);
     assert_eq!(outcome.left_out, None);
@@ -82,7 +75,8 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
 #[test]
 fn cursor_steps_preserve_the_first_live_successor() {
     // Goal: pausing at minute boundaries preserves the first live machine and process rates.
-    // Method: seed real ring readers with a stepped cursor and the independent terminal reader.
+    // Method: seed real ring readers with a stepped cursor and with a load of every minute in one
+    // pass.
     let mut fixture = catch_up_fixture();
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
@@ -96,15 +90,7 @@ fn cursor_steps_preserve_the_first_live_successor() {
         capture: &AdmittedTable::from_file_budgeted,
     };
     let mut cursor = Cursor::new(found.len());
-    let expected = super::terminal(
-        &fixture.root,
-        &found[2],
-        &budget,
-        &operation,
-        &AdmittedTable::from_file_budgeted,
-    )
-    .unwrap()
-    .unwrap();
+    let expected = one_pass_terminal(&fixture.root, &operation);
 
     cursor.step(&input, &found[0], |_, _, _| {}).unwrap();
     cursor.step(&input, &found[1], |_, _, _| {}).unwrap();
@@ -172,7 +158,7 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
     let mut retained = AppsSecond::with_room();
     cursor
         .step(&input, &found[0], |_, _, apps| {
-            retained.take(apps, None, Some(&budget));
+            retained.take(apps, None);
         })
         .unwrap();
     let reader = Arc::new(retained);
@@ -327,119 +313,16 @@ fn saved_computer_labels_keep_the_legacy_text_domain_through_the_store_loader() 
     assert_eq!(budget.used(), 0);
 }
 
-#[test]
-fn terminal_only_load_preserves_exact_source_without_deriving_apps() {
-    // Goal: predecessor proof keeps exact terminal input without deriving App totals.
-    // Method: trace terminal loading of two populated observations in a real sealed minute.
-    use persistence::work::ingestion::{Key, Kind, Purpose, Trace};
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(100);
-    fixture.publish_with_system_rows(101);
-    fixture.seal_minute(0);
-    let identity = fixture.writer.identity().unwrap();
-    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+/// The terminal a load of every minute of the recording at `root` in one pass hands over.
+fn one_pass_terminal(
+    root: &std::path::Path,
+    operation: &crate::cancellation::Operation,
+) -> super::super::Terminal {
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found, None).unwrap();
-    assert_eq!(found.len(), 1);
-    let mut decoder = Decoder::default();
-    let batch = decoder.decode(
-        &fixture.root,
-        &found[0],
-        &budget,
-        &operation,
-        &AdmittedTable::from_file_budgeted,
-    );
-    assert_eq!(batch.seconds.len(), 2);
-    for second in &batch.seconds {
-        assert!(second.apps.second().is_some());
-    }
-    let expected = decoder.terminal().unwrap();
-    let trace = Trace::new(identity.recording);
-
-    let scope = trace.enter();
-    let terminal = super::terminal(
-        &fixture.root,
-        &found[0],
-        &budget,
-        &operation,
-        &AdmittedTable::from_file_budgeted,
-    )
-    .unwrap()
-    .unwrap();
-    drop(scope);
-
-    assert_eq!(terminal.run, identity);
-    assert_eq!(terminal.machine, expected.machine);
-    let (endpoint, frame) = terminal.process.unwrap().into_parts();
-    let (expected_endpoint, expected_frame) = expected.process.unwrap().into_parts();
-    assert_eq!(endpoint.identity, identity);
-    assert_eq!(endpoint.stamp.publication, 2);
-    assert_eq!(endpoint.run_tick, 1);
-    assert_eq!(endpoint.stamp, expected_endpoint.stamp);
-    assert_eq!(frame, expected_frame);
-    let mut events = Vec::new();
-    trace.snapshot(&mut events).unwrap();
-    let count = |kind| events.iter().filter(|event| event.kind == kind).count();
-    eprintln!(
-        "terminal-source-work AppDerivation={} CommittedFrameCapture={}",
-        count(Kind::AppDerivation),
-        count(Kind::CommittedFrameCapture)
-    );
-    assert!(
-        events
-            .iter()
-            .all(|event| event.purpose == Purpose::Predecessor)
-    );
-    assert!(events.iter().any(|event| matches!(event.key,
-        Key::Publication { run, publication: 2 } if run == identity)));
-    assert_eq!(count(Kind::CommittedFrameCapture), 2);
-    assert_eq!(count(Kind::AppDerivation), 0);
-}
-
-#[test]
-fn terminal_only_load_preserves_the_full_decoders_first_successor() {
-    // Goal: discarding presentations keeps exact machine and App rates across the saved tail.
-    // Method: seed independent real ring readers from the full and terminal-only decoders.
-    let mut fixture = Fixture::new();
-    fixture.start_at_run_tick(57);
-    fixture.publish_with_system_rows(100);
-    fixture.publish_with_system_rows(101);
-    fixture.seal_minute(0);
-    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found, None).unwrap();
-    let mut decoder = Decoder::default();
-    drop(decoder.decode(
-        &fixture.root,
-        &found[0],
-        &budget,
-        &operation,
-        &AdmittedTable::from_file_budgeted,
-    ));
-    let full = decoder.terminal().unwrap();
-    let terminal = super::terminal(
-        &fixture.root,
-        &found[0],
-        &budget,
-        &operation,
-        &AdmittedTable::from_file_budgeted,
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(terminal.run, full.run);
-    assert_eq!(terminal.machine, full.machine);
-    fixture.publish_with_system_rows(102);
-
-    let expected = terminal_successor(&fixture.root, full);
-    let resumed = terminal_successor(&fixture.root, terminal);
-
-    assert!(expected.0.follows());
-    assert_eq!(expected.0.cpu_percent, Some(50.0));
-    assert_eq!(expected.1.elapsed_ns, Some(1_000_000_000));
-    assert_eq!(resumed, expected);
-    assert_eq!(budget.used(), 0);
+    super::super::load_payload(root, &budget, operation, |_, _, _| {})
+        .unwrap()
+        .terminal
+        .unwrap()
 }
 
 fn terminal_successor(
@@ -452,7 +335,7 @@ fn terminal_successor(
     let mut result = Vec::new();
     ring.read(|_, second, apps| {
         let mut owned = AppsSecond::with_room();
-        owned.take(apps, None, None);
+        owned.take(apps, None);
         result.push((second.clone(), owned));
         true
     })
@@ -460,130 +343,6 @@ fn terminal_successor(
     assert_eq!(result.len(), 1);
 
     result.remove(0)
-}
-
-#[test]
-fn terminal_only_load_refuses_a_changed_consumed_file() {
-    // Goal: a saved predecessor gets the same final commitment check as full decoding.
-    // Method: make an admitted process table nonprivate before terminal decoding finishes.
-    use std::os::unix::fs::PermissionsExt;
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(100);
-    fixture.seal();
-    let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found, None).unwrap();
-    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
-    let processes = fixture
-        .root
-        .join(manifest.data_directory)
-        .join("processes.parquet");
-    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-
-    let result = super::terminal(
-        &fixture.root,
-        &found[0],
-        &budget,
-        &operation,
-        &|file, budget| {
-            let input = AdmittedTable::from_file_budgeted(file, budget)?;
-            if input.contains_column("resident_bytes") {
-                std::fs::set_permissions(&processes, std::fs::Permissions::from_mode(0o644))
-                    .unwrap();
-            }
-            Ok(input)
-        },
-    );
-
-    assert!(matches!(
-        result,
-        Err(crate::recording::Refused::Commitment(_))
-    ));
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn terminal_only_load_honors_cancellation_after_the_last_table_capture() {
-    // Goal: cancellation cannot publish a predecessor even after its inputs were admitted.
-    // Method: advance the operation epoch while capturing the minute's event table.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(100);
-    fixture.seal();
-    let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found, None).unwrap();
-    let cancellation = Arc::new(Cancellation::default());
-    let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-
-    let result = super::terminal(
-        &fixture.root,
-        &found[0],
-        &budget,
-        &operation,
-        &|file, budget| {
-            let input = AdmittedTable::from_file_budgeted(file, budget)?;
-            if input.contains_column("event") {
-                cancellation.cancel().unwrap();
-            }
-            Ok(input)
-        },
-    );
-
-    assert!(matches!(
-        result,
-        Err(crate::recording::Refused::Decode(persistence::Error::Io(error)))
-        if error.kind() == std::io::ErrorKind::Interrupted
-    ));
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn terminal_only_load_refuses_a_malformed_earlier_frame_even_with_a_valid_last_frame() {
-    // Goal: selecting the terminal frame does not skip semantic validation of earlier rows.
-    // Method: duplicate a PID only at the first of two committed process observations.
-    use polars::prelude::{col, lit, when};
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(100);
-    fixture.publish_with_system_rows(101);
-    fixture.seal();
-    let mut found = Vec::new();
-    super::super::find(&fixture.root, &mut found, None).unwrap();
-    let manifest = persistence::read_committed(&fixture.root, &found[0].marker).unwrap();
-    let processes = fixture
-        .root
-        .join(manifest.data_directory)
-        .join("processes.parquet");
-    let mut damaged = persistence::engine::scan(&processes)
-        .unwrap()
-        .with_column(
-            when(col("publication").eq(lit(1_u64)))
-                .then(lit(7_i32))
-                .otherwise(col("pid"))
-                .alias("pid"),
-        )
-        .collect()
-        .unwrap();
-    let replacement = fixture.root.join("damaged-processes.parquet");
-    events_loader_write(&replacement, &mut damaged);
-    std::fs::rename(replacement, processes).unwrap();
-    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-
-    let result = super::terminal(
-        &fixture.root,
-        &found[0],
-        &budget,
-        &operation,
-        &AdmittedTable::from_file_budgeted,
-    );
-
-    assert!(matches!(
-        result,
-        Err(crate::recording::Refused::Decode(
-            persistence::Error::Bound("duplicate committed App PID")
-        ))
-    ));
-    assert_eq!(budget.used(), 0);
 }
 
 #[test]
@@ -604,24 +363,9 @@ fn terminal_admission_preserves_presentation_refusal_and_recovery() {
             &operation,
             &AdmittedTable::from_file_budgeted,
         );
-        let terminal = super::terminal(
-            &fixture.root,
-            &found[0],
-            &budget,
-            &operation,
-            &AdmittedTable::from_file_budgeted,
-        )
-        .unwrap()
-        .unwrap();
 
-        assert!(terminal.process.is_some());
-        assert_eq!(terminal.process.is_some(), decoder.predecessor.is_some());
-        if let Some(process) = terminal.process {
-            let (endpoint, frame) = process.into_parts();
-            let (expected, expected_frame) = decoder.predecessor.take().unwrap().into_parts();
-            assert_eq!(endpoint.stamp, expected.stamp);
-            assert_eq!(frame, expected_frame);
-        }
+        let (endpoint, _) = decoder.predecessor.take().unwrap().into_parts();
+        assert_eq!(endpoint.stamp.publication, 2);
         assert_eq!(
             full.seconds
                 .last()
@@ -1096,7 +840,7 @@ fn cancellation_after_decode_releases_pending_payloads_without_consuming() {
     );
     let mut retained = AppsSecond::with_room();
     load_consume(first, &operation, |_, _, apps| {
-        retained.take(apps, None, Some(&budget));
+        retained.take(apps, None);
     })
     .unwrap();
     let reader = Arc::new(retained);
@@ -1411,12 +1155,7 @@ fn events_loader_expected(
     sealed
         .visit_samples_with_operation(&mut before, operation, |_, sample| {
             let sample = sample.unwrap();
-            let mut second = AppsSecond::with_room_for(sample.apps().len());
-            second.take(
-                crate::store::apps::TickApps::Derived(sample),
-                apps.last(),
-                Some(budget),
-            );
+            let mut second = super::super::sample_second(sample, apps.last(), budget);
             second.metadata.origin = crate::store::native::Origin::Saved(*sealed.losses());
             apps.push(second);
 
@@ -1670,7 +1409,6 @@ fn catch_up_keeps_only_unseen_minutes_and_their_predecessor_for_decoding() {
         run: fixture.writer.identity().unwrap(),
         publication: 3,
         segment: 0,
-        apps_publication: 3,
     };
     let mut found = Vec::new();
 
@@ -1689,7 +1427,6 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
         run: fixture.writer.identity().unwrap(),
         publication: 3,
         segment: 0,
-        apps_publication: 3,
     };
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();

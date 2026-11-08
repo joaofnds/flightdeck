@@ -80,7 +80,7 @@ fn pending_older_candidate_resolves_outside_without_overwriting_the_native_sampl
     // Method: pin sampled pub1, stall admitted pub3, then let native pub7 sample resolved pub5.
     let mut run = PendingStage::new(primary_fixture(), 2, OLDER_TICKS);
     run.stage.held.earlier = Span::new(1, Buffers::new(2, MachineSecond::default));
-    run.stage.held.sampled = Some(Span::new(1, Buffers::new(2, SampledSecond::empty)));
+    run.stage.held.sampled = Span::new(1, Buffers::new(2, SampledSecond::empty));
     let budget = Arc::clone(&run.budget);
     let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
@@ -155,12 +155,7 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     run.reach_phase(Phase::History);
     assert!(!run.turn());
     run.assert_pending_recent(1);
-    let handle = run
-        .shared
-        .queries
-        .as_ref()
-        .unwrap()
-        .handle(std::thread::current());
+    let handle = run.shared.queries.handle(std::thread::current());
     let selected = run.observation(6);
 
     let retained = run.primary_reply(&handle);
@@ -186,7 +181,7 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     );
     assert!(handle.take().is_none());
     assert!(handle.pending());
-    assert!(run.shared.queries.as_ref().unwrap().requested());
+    assert!(run.shared.queries.requested());
     assert!(run.shared.mailbox.take().is_none());
     assert_eq!(run.stage.accepted(), accepted);
     run.assert_pending_recent(1);
@@ -203,7 +198,7 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     assert_primary_query(&retained, &selected);
     handle.cancel().unwrap();
     assert!(!handle.pending());
-    assert!(!run.shared.queries.as_ref().unwrap().requested());
+    assert!(!run.shared.queries.requested());
     drop((handle, pinned, run, scope, trace));
     assert!(!root.try_exists().unwrap());
     assert!(budget.used() > 0);
@@ -312,7 +307,7 @@ impl PendingStage {
                 selection: crate::store::QuerySelection::FollowLatest,
             })
             .unwrap();
-        assert!(self.shared.queries.as_ref().unwrap().requested());
+        assert!(self.shared.queries.requested());
         assert!(handle.pending());
         assert!(handle.take().is_none());
         token
@@ -327,7 +322,7 @@ impl PendingStage {
         let reply = handle.take().unwrap();
         assert_eq!(reply.token, token);
         assert!(!handle.pending());
-        assert!(!self.shared.queries.as_ref().unwrap().requested());
+        assert!(!self.shared.queries.requested());
         let crate::store::QueryOutcome::Ready(context) = reply.outcome else {
             panic!("unchanged witness did not serve a real Ready control");
         };
@@ -430,21 +425,13 @@ impl PendingStage {
         self.stage
             .held
             .sampled
-            .as_ref()
-            .unwrap()
             .held()
             .find(|sample| sample.observation == self.observation(publication))
             .unwrap()
     }
 
     fn sampled_held(&self) -> &Arc<SampledSecond> {
-        self.stage
-            .held
-            .sampled
-            .as_ref()
-            .unwrap()
-            .newest_held()
-            .unwrap()
+        self.stage.held.sampled.newest_held().unwrap()
     }
 
     fn assert_recent_push_room(&self) {
@@ -458,7 +445,7 @@ impl PendingStage {
     }
 
     fn assert_sampled_push_room(&self) {
-        let sampled = self.stage.held.sampled.as_ref().unwrap();
+        let sampled = &self.stage.held.sampled;
         assert_eq!(sampled.free(), 0);
         assert_eq!(sampled.len(), 1);
         assert_eq!(Arc::strong_count(sampled.held().next().unwrap()), 2);
@@ -573,8 +560,6 @@ impl PendingStage {
             .stage
             .held
             .sampled
-            .as_ref()
-            .unwrap()
             .held()
             .map(|sample| sample.observation.stamp.publication)
             .collect();
@@ -615,7 +600,7 @@ impl PendingStage {
             assert_eq!(apps.observation, Some(observation));
             assert_eq!(Some(machine.wall_ns), observation.wall_ns);
         }
-        let sampled = self.stage.held.sampled.as_ref().unwrap();
+        let sampled = &self.stage.held.sampled;
         assert_eq!(self.stage.held.earlier.len(), sampled.len());
         for (machine, sample) in self.stage.held.earlier.held().zip(sampled.held()) {
             assert_eq!(sample.observation, self.observation(machine.publication));
@@ -672,7 +657,7 @@ fn startup_shared() -> crate::store::Shared {
     use std::sync::atomic::AtomicBool;
     crate::store::Shared {
         mailbox: crate::store::Mailbox::new(),
-        queries: Some(crate::store::query::Queries::new()),
+        queries: crate::store::query::Queries::new(),
         stop: AtomicBool::new(false),
         active: AtomicBool::new(true),
         catch_up: AtomicBool::new(false),

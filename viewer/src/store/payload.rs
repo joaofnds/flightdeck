@@ -101,14 +101,6 @@ impl Payload {
         &self.apps
     }
 
-    pub(super) fn capture(sample: &Sample, budget: &Arc<ByteBudget>) -> Result<Self, Missing> {
-        let names = ProcessNames::new(sample.processes().len(), budget)?;
-        let (payload, additions) = Self::capture_with_names(sample, &names)?;
-        drop(additions);
-
-        Ok(payload)
-    }
-
     pub(super) fn capture_with_names(
         sample: &Sample,
         names: &ProcessNames,

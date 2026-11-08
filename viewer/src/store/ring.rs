@@ -15,12 +15,9 @@ use collector::ring::{
 use collector::tracker::{EVENTS_PER_TICK_MAX, Event};
 use persistence::{Error, NumberedEvent};
 
-use super::apps::TickApps;
+use super::Failure;
 use super::native::{Input, OwnedFrame, PrepareError, Prepared};
-use super::{Failure, MachineSecond, readings};
 use crate::cancellation::Operation;
-use crate::live_app_response::Sample;
-use crate::live_apps::committed::Endpoint;
 use crate::live_apps::{Frame, Publication, PublicationEvents};
 use crate::recording::MachineMinute;
 #[path = "native_workspace.rs"]
@@ -42,14 +39,11 @@ const MAPPED_BYTES_MAX: usize = 1 << 30;
 
 pub(super) struct Ring {
     root: PathBuf,
-    budget: Option<Arc<super::ByteBudget>>,
+    budget: Arc<super::ByteBudget>,
     runs: PathBuf,
     registry: RegistryBuffer,
     source: Option<Source>,
     terminal: Option<super::recording::Terminal>,
-    /// A second read from the ring that the store could not take yet, and whether the App rule
-    /// derived its Apps, which the source's sample holds, or why it refused them.
-    pending: Option<(MachineSecond, Result<(), String>)>,
     /// The steps since the store last looked at the runs registry, and what it found there.
     unlooked_steps: u32,
     followed: Result<(), Failure>,
@@ -94,12 +88,8 @@ struct Source {
     /// second from the ring is derived as one from a sealed minute is.
     current: MachineMinute,
     previous: MachineMinute,
-    /// The App rule's frame of the tick read last and of the one before it the rule took.
-    frame: Option<Box<Frame>>,
+    /// The App rule's frame of the saved minute before the ring's first tick.
     previous_frame: Option<Box<Frame>>,
-    previous_endpoint: Option<Endpoint>,
-    /// The App rule's sample of the tick read last.
-    sample: Option<Box<Sample>>,
     native_pending: Option<Prepared>,
     process_names: Option<super::payload::ProcessNames>,
     native_frame: Option<OwnedFrame>,
@@ -112,15 +102,14 @@ struct Source {
 }
 
 impl Ring {
-    pub(super) fn new(root: PathBuf) -> Self {
+    pub(super) fn with_budget(root: PathBuf, budget: Arc<super::ByteBudget>) -> Self {
         Self {
-            budget: None,
+            budget,
             runs: root.join("runs"),
             root,
             registry: [0; _],
             source: None,
             terminal: None,
-            pending: None,
             unlooked_steps: FOLLOW_STEPS,
             followed: Ok(()),
             registered: false,
@@ -129,10 +118,46 @@ impl Ring {
         }
     }
 
-    pub(super) fn with_budget(root: PathBuf, budget: Arc<super::ByteBudget>) -> Self {
-        let mut ring = Self::new(root);
-        ring.budget = Some(budget);
-        ring
+    /// A ring with a budget of its own, which a test that reads no publication into a store through
+    /// it gives it.
+    #[cfg(test)]
+    pub(super) fn new(root: PathBuf) -> Self {
+        Self::with_budget(root, Arc::new(super::ByteBudget::new(1024 * 1024 * 1024)))
+    }
+
+    /// Hands `push` the run, the second and the Apps of each tick the ring published since the
+    /// last read, oldest first, as the store's read prepares them, until the ring has no more or
+    /// `push` refuses one, which the next read hands it again.
+    #[cfg(test)]
+    pub(super) fn read<Push>(&mut self, mut push: Push) -> Result<(), Failure>
+    where
+        Push: FnMut(&RunIdentity, &super::MachineSecond, super::apps::TickApps<'_>) -> bool,
+    {
+        let budget = Arc::clone(&self.budget);
+        let operation = Arc::new(crate::cancellation::Cancellation::default())
+            .operation(0)
+            .unwrap();
+        for _ in 0..TICKS_PER_READ_MAX {
+            let read =
+                self.read_prepared(&budget, &operation, None, |run, prepared| {
+                    match &prepared.machine {
+                        Some(machine) => push(
+                            run,
+                            machine,
+                            super::apps::TickApps::Loaded(&mut prepared.apps),
+                        ),
+                        None => true,
+                    }
+                });
+            match read.map_err(super::native_acceptance::read_failure)? {
+                super::native::NativeRead::Accepted | super::native::NativeRead::Missed => {}
+                super::native::NativeRead::Idle | super::native::NativeRead::Blocked => {
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Prepares at most one publication so its payload sees the newest accepted App names.
@@ -144,11 +169,7 @@ impl Ring {
         mut push: impl FnMut(&RunIdentity, &mut Prepared) -> bool,
     ) -> Result<super::native::NativeRead, PrepareError> {
         use super::native::NativeRead;
-        assert!(
-            self.budget
-                .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(owner, budget))
-        );
+        assert!(Arc::ptr_eq(&self.budget, budget));
         let Some(source) = &mut self.source else {
             return Ok(NativeRead::Idle);
         };
@@ -202,63 +223,6 @@ impl Ring {
         self.terminal = terminal;
     }
 
-    /// Hands `push` the run, the second and the Apps of each tick the ring published since the
-    /// last read, oldest first, until the ring has no more or `push` refuses one, which the next
-    /// read hands it again.
-    pub(super) fn read(
-        &mut self,
-        mut push: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>) -> bool,
-    ) -> Result<(), Failure> {
-        let Some(source) = &mut self.source else {
-            return Ok(());
-        };
-
-        for _ in 0..TICKS_PER_READ_MAX {
-            if self.pending.is_none() {
-                match source.read_tick() {
-                    Ok(Found::Publication { publication, .. }) => {
-                        self.published = true;
-                        if let Some(second) = source.second(publication) {
-                            self.pending = Some((second, source.apps(publication)));
-                        } else {
-                            source.complete = false;
-                        }
-                    }
-                    Ok(Found::Missed { .. }) => {
-                        source.complete = false;
-                        if self.delta.is_some() {
-                            self.delta = Some(Delta::Overrun);
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                    Ok(Found::Nothing) => return Ok(()),
-                    Err(error) => {
-                        source.complete = false;
-                        return Err(Failure::Ring(error.kind()));
-                    }
-                }
-            }
-
-            let Some((second, apps)) = &self.pending else {
-                continue;
-            };
-            let apps = match apps {
-                Ok(()) => match source.sample.as_deref() {
-                    Some(sample) => TickApps::Derived(sample),
-                    None => unreachable!("the App rule leaves a sample where it took the tick"),
-                },
-                Err(error) => TickApps::Refused(error),
-            };
-            if !push(&source.identity, second, apps) {
-                return Ok(());
-            }
-            self.pending = None;
-        }
-
-        Ok(())
-    }
-
     /// Follows the newest run the recording registers, from the oldest tick its ring holds,
     /// once that ring can be read. Until then the store follows the run it followed before. It
     /// looks at the registry once in `FOLLOW_STEPS` steps and otherwise answers what it found
@@ -292,9 +256,6 @@ impl Ring {
         read: impl FnOnce(&RingReader) -> std::io::Result<u64>,
     ) -> Result<bool, Failure> {
         if self.reload_required() {
-            return Ok(false);
-        }
-        if self.pending.is_some() {
             return Ok(false);
         }
         if self
@@ -407,13 +368,10 @@ impl Ring {
             .saturating_sub(source.reader.shape().slot_count)
             .saturating_add(1)
             .max(source.reader.publication_first());
-        let cursor = match &self.pending {
-            Some((second, _)) => second.publication,
-            None => source.native_pending.as_ref().map_or_else(
-                || source.reader.next_publication(),
-                |prepared| prepared.observation.stamp.publication,
-            ),
-        };
+        let cursor = source.native_pending.as_ref().map_or_else(
+            || source.reader.next_publication(),
+            |prepared| prepared.observation.stamp.publication,
+        );
         if cursor
             != checkpoint
                 .publication
@@ -498,8 +456,8 @@ impl Ring {
             }
         }
 
-        let mut source = Source::open(reader, identity, self.budget.as_ref())?;
-        source.accept(&mut self.terminal, self.budget.as_ref())?;
+        let mut source = Source::open(reader, identity, &self.budget)?;
+        source.accept(&mut self.terminal, &self.budget)?;
         self.source = Some(source);
         self.registered = true;
         Ok(())
@@ -536,7 +494,7 @@ impl Ring {
             thread::sleep(timeout);
             return Ok(());
         };
-        if self.pending.is_some() || source.native_pending.is_some() {
+        if source.native_pending.is_some() {
             thread::sleep(timeout);
             return Ok(());
         }
@@ -589,7 +547,7 @@ impl Source {
     fn accept(
         &mut self,
         terminal: &mut Option<super::recording::Terminal>,
-        budget: Option<&Arc<super::ByteBudget>>,
+        budget: &Arc<super::ByteBudget>,
     ) -> Result<(), Failure> {
         let Some(incoming) = terminal.as_ref() else {
             return Ok(());
@@ -605,13 +563,11 @@ impl Source {
         let machine = if incoming.machine_reservation.is_some() {
             None
         } else {
-            budget
-                .map(|budget| {
-                    budget
-                        .reserve(incoming.machine.heap_bytes())
-                        .ok_or(Failure::Budget)
-                })
-                .transpose()?
+            Some(
+                budget
+                    .reserve(incoming.machine.heap_bytes())
+                    .ok_or(Failure::Budget)?,
+            )
         };
         let frame_reservation = if incoming
             .process
@@ -620,16 +576,11 @@ impl Source {
         {
             None
         } else {
-            budget
-                .map(|budget| {
-                    incoming
-                        .process
-                        .as_ref()
-                        .map(|before| budget.reserve(before.bytes()).ok_or(Failure::Budget))
-                        .transpose()
-                })
+            incoming
+                .process
+                .as_ref()
+                .map(|before| budget.reserve(before.bytes()).ok_or(Failure::Budget))
                 .transpose()?
-                .flatten()
         };
         self.reader
             .seek_publication(next)
@@ -643,8 +594,7 @@ impl Source {
         self.shrink_terminal_workspace();
         if let Some(mut before) = terminal.process {
             let frame_reservation = before.take_reservation().or(frame_reservation);
-            let (endpoint, frame) = before.into_parts();
-            self.previous_endpoint = Some(endpoint);
+            let (_endpoint, frame) = before.into_parts();
             match frame_reservation {
                 Some(reservation) => {
                     self.native_frame = Some(OwnedFrame::from_reserved(frame, reservation));
@@ -660,16 +610,12 @@ impl Source {
     fn open(
         reader: RingReader,
         identity: RunIdentity,
-        budget: Option<&Arc<super::ByteBudget>>,
+        budget: &Arc<super::ByteBudget>,
     ) -> Result<Self, Failure> {
         let shape = reader.shape();
-        let native_workspace = budget
-            .map(|budget| {
-                let bytes = native_workspace::bytes(&shape).map_err(|_| Failure::TickShape)?
-                    + size_of::<Self>();
-                budget.reserve(bytes).ok_or(Failure::Budget)
-            })
-            .transpose()?;
+        let bytes =
+            native_workspace::bytes(&shape).map_err(|_| Failure::TickShape)? + size_of::<Self>();
+        let native_workspace = Some(budget.reserve(bytes).ok_or(Failure::Budget)?);
         let tick = persistence::tick_buffer(&shape).map_err(|_| Failure::TickShape)?;
 
         let processes = count(shape.process_capacity)?;
@@ -689,10 +635,7 @@ impl Source {
             event_identities: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             current,
             previous,
-            frame: None,
             previous_frame: None,
-            previous_endpoint: None,
-            sample: None,
             native_pending: None,
             process_names: None,
             native_frame: None,
@@ -855,95 +798,6 @@ impl Source {
         Ok(found)
     }
 
-    /// Runs the App rule on the tick just read, the ring's publication `publication`, with its
-    /// rates since the tick before it the rule took, and leaves its sample in `sample`, or says
-    /// why the rule refused the tick.
-    fn apps(&mut self, publication: u64) -> Result<(), String> {
-        if let Err(error) = self.apps_capture(publication) {
-            persistence::work::ingestion::record_publication(
-                self.identity,
-                publication,
-                persistence::work::ingestion::Kind::AttemptFailed,
-            );
-            self.sample = None;
-            self.previous_frame = None;
-            self.previous_endpoint = None;
-            return Err(error.to_string());
-        }
-
-        let frame = self.frame.as_deref().unwrap_or_else(|| unreachable!());
-        self.previous_endpoint = Some(Endpoint {
-            identity: self.identity,
-            stamp: *frame.stamp(),
-            run_tick: frame.run_tick(),
-            wall_ns: frame.wall_ns(),
-            usage_refused: frame.usage_refused,
-            usage_gone: frame.usage_gone,
-            events_first: self.tick.events.start,
-            events_end: self.tick.events.end,
-        });
-        mem::swap(&mut self.frame, &mut self.previous_frame);
-        Ok(())
-    }
-
-    /// The App rule's frame of the tick just read, with the programs its departed processes ran,
-    /// and the sample of that frame after the frame before it.
-    fn apps_capture(&mut self, publication: u64) -> persistence::Result<()> {
-        Frame::capture(
-            &Publication {
-                reader: &self.reader,
-                tick: &self.tick,
-                identities: &self.identities,
-                publication,
-            },
-            &mut self.frame,
-        )?;
-        self.apps_capture_events()?;
-
-        let numbered: Vec<NumberedEvent<'_>> = self
-            .events
-            .iter()
-            .map(|(number, tick, event)| NumberedEvent {
-                number: *number,
-                tick: *tick,
-                event,
-            })
-            .collect();
-        let Some(frame) = self.frame.as_deref_mut() else {
-            unreachable!("a frame the App rule took holds the tick");
-        };
-        frame.capture_exits(
-            &Publication {
-                reader: &self.reader,
-                tick: &self.tick,
-                identities: &self.identities,
-                publication,
-            },
-            &PublicationEvents {
-                events: &numbered,
-                identities: &self.event_identities,
-            },
-        )?;
-
-        let previous = self.previous_frame.as_deref().filter(|_| {
-            self.previous_endpoint.as_ref().is_some_and(|previous| {
-                frame
-                    .observation()
-                    .can_use_predecessor(&previous.observation())
-            })
-        });
-        Sample::capture(frame, previous, &mut self.sample)
-    }
-
-    /// Reads the events of the tick just read into `events`, with their identities where the
-    /// ring holds them. An event the ring no longer holds is left out.
-    fn apps_capture_events(&mut self) -> persistence::Result<()> {
-        match self.capture_events()? {
-            EventCapture::Ready => Ok(()),
-            EventCapture::TooMany => Err(Error::Bound("store tick events")),
-        }
-    }
-
     fn capture_events(&mut self) -> persistence::Result<EventCapture> {
         self.events.clear();
         self.event_identities.clear();
@@ -997,27 +851,6 @@ impl Source {
         }
 
         Err(Error::Bound("store tick events"))
-    }
-
-    /// The second of the tick just read, the ring's publication `publication`, with its rates
-    /// over the interval since the tick read before it.
-    fn second(&mut self, publication: u64) -> Option<MachineSecond> {
-        persistence::work::ingestion::record_publication(
-            self.identity,
-            publication,
-            persistence::work::ingestion::Kind::MachineReduction,
-        );
-        self.current.clear();
-        self.current.push_tick(publication, &self.tick);
-
-        let Some(reading) = readings(&self.current).next() else {
-            unreachable!("a minute holds the tick just pushed");
-        };
-        let previous = readings(&self.previous).next();
-        let second = MachineSecond::of(&reading, previous.as_ref());
-
-        mem::swap(&mut self.current, &mut self.previous);
-        second
     }
 }
 

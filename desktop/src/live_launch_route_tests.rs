@@ -478,8 +478,7 @@ impl OlderPages {
             crate::live_source::tests::SealedRecording::with_a_minute_past_the_store_hour();
         let budget = std::sync::Arc::new(viewer::store::ByteBudget::new(256 * 1024 * 1024));
         let store = viewer::store::Store::start_with_budget(&recording.root, budget).unwrap();
-        let live = Worker::start_from_store(recording.root.clone(), store.query_handle().unwrap())
-            .unwrap();
+        let live = Worker::start_from_store(recording.root.clone(), store.query_handle()).unwrap();
         let saved = Worker::start_recorded(recording.root.clone()).unwrap();
 
         Self {

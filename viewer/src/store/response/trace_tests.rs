@@ -122,7 +122,8 @@ fn retained_app_trace_matches_the_native_live_session() {
 #[test]
 fn missing_process_payloads_do_not_erase_independent_resident_history() {
     // Goal: payload admission failure remains explicit without erasing compact App facts.
-    // Method: exhaust payload admission at only the second native publication, then query it.
+    // Method: refuse the payload of only the second native publication for its budget, as an
+    // exhausted admission does, then query it.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
@@ -147,20 +148,18 @@ fn missing_process_payloads_do_not_erase_independent_resident_history() {
 
 fn missing_payload_context(fixture: &Fixture) -> Arc<QueryContext> {
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = Held::without_recording();
-    held.enable_payload(Arc::clone(&budget));
-    let mut ring = crate::store::ring::Ring::new(fixture.root.clone());
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, &budget);
     ring.follow().unwrap();
     ring.read(|run, second, apps| {
+        let crate::store::apps::TickApps::Loaded(apps) = apps else {
+            panic!("the store's read loads each tick's Apps");
+        };
         if second.publication == 2 {
-            let occupied = budget.reserve(budget.maximum() - budget.used()).unwrap();
-            let accepted = held.take(run, second, apps);
-            drop(occupied);
-
-            accepted
-        } else {
-            held.take(run, second, apps)
+            apps.processes = Err(crate::store::Missing::Budget);
         }
+
+        held.take(run, second, crate::store::apps::TickApps::Loaded(apps))
     })
     .unwrap();
 

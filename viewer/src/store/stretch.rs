@@ -195,8 +195,6 @@ impl Folding {
 #[derive(Debug)]
 pub(super) struct Folded {
     pub(super) apps: AppsStretch,
-    /// The publication of the newest of those seconds.
-    pub(super) publication: u64,
 }
 
 /// Each App's readings added up over the seconds of one stretch the store took in, what the App

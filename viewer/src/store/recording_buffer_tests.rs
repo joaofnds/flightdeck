@@ -1,20 +1,21 @@
-use super::{LoadBuffers, load_since};
+use super::{LoadBuffers, Owed, load_owed};
 use crate::live::identity_fixture::Fixture;
 use crate::store::apps::TickApps;
-use crate::store::{AppsSecond, MachineSecond};
 use collector::ring::RunIdentity;
 
 #[test]
 fn reloading_reuses_app_decode_storage_without_retaining_previous_rows() {
-    // Goal: repeated reconciliation reuses decoder capacity without keeping decoded rows alive.
-    // Method: load real App parts twice through oversized, seeded storage and compare fresh output.
+    // Goal: repeated adding up of owed Apps reuses decoder capacity without keeping decoded rows
+    // alive.
+    // Method: add up real App parts twice through oversized, seeded storage and compare fresh
+    // output.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
     fixture.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
     let expected = capture(&fixture, &mut LoadBuffers::default());
-    assert_eq!(expected.len(), 2);
-    assert!(!expected[1].2.apps.is_empty());
+    assert_eq!(expected.len(), 1);
+    assert!(expected[0].holds_apps);
     let mut buffers = LoadBuffers::default();
     buffers.apps[0].apps.reserve_exact(4_096);
     buffers.apps[0].keys.reserve_exact(8_192);
@@ -25,7 +26,7 @@ fn reloading_reuses_app_decode_storage_without_retaining_previous_rows() {
     for _ in 0..2 {
         assert_eq!(capture(&fixture, &mut buffers), expected);
         assert!(buffers.apps[0].samples.is_empty());
-        assert!(buffers.apps[0].samples.capacity() >= expected.len());
+        assert!(buffers.apps[0].samples.capacity() >= 2);
         assert!(buffers.apps[0].apps.is_empty());
         assert!(buffers.apps[0].keys.is_empty());
         assert_eq!(buffers.apps[0].apps.as_ptr(), rows);
@@ -37,7 +38,8 @@ fn reloading_reuses_app_decode_storage_without_retaining_previous_rows() {
 fn a_store_shows_the_rates_of_a_minutes_first_second_after_a_restart() {
     // Goal: a persister restarted between two minutes costs the store's route no App rate.
     // Method: seal run ticks 59 and 60 in two minutes in two recordings, through one derivation and
-    // through one for each minute, load them as a store does, and compare what each second holds.
+    // through one for each minute, add up their Apps as a store does, and compare what each
+    // second's stretch holds.
     let seconds_through = |derive: &dyn persistence::worker::Derive| {
         let mut fixture = Fixture::new();
         fixture.start_at_run_tick(59);
@@ -52,10 +54,9 @@ fn a_store_shows_the_rates_of_a_minutes_first_second_after_a_restart() {
     let restarted = seconds_through(&persistence::canonical::ready_fixture::Restarted);
 
     assert_eq!(restarted.len(), 2);
-    assert_eq!(restarted[1].2.elapsed_ns, Some(1_000_000_000));
-    assert_eq!(restarted[1].2.apps, stayed[1].2.apps);
-    assert_eq!(restarted[1].2.totals, stayed[1].2.totals);
-    assert_ne!(restarted[1].2.totals, restarted[0].2.totals);
+    assert_eq!(restarted[0].elapsed_ns, None);
+    assert_eq!(restarted[1].elapsed_ns, Some(1_000_000_000));
+    assert_eq!(rows_of(&restarted), rows_of(&stayed));
 }
 
 #[test]
@@ -71,11 +72,14 @@ fn decoder_storage_does_not_carry_rows_or_rates_between_recordings() {
     next.seal_minute_derived(0, &persistence::sealed_apps::SealedApps::default());
     let mut buffers = LoadBuffers::default();
 
-    for fixture in [&first, &next, &first] {
+    for (fixture, elapsed_ns) in [
+        (&first, Some(1_000_000_000)),
+        (&next, None),
+        (&first, Some(1_000_000_000)),
+    ] {
         let expected = capture(fixture, &mut LoadBuffers::default());
         assert_eq!(capture(fixture, &mut buffers), expected);
-        assert!(!expected[0].1.follows());
-        assert_eq!(expected[0].1.cpu_percent, None);
+        assert_eq!(expected[0].elapsed_ns, elapsed_ns);
     }
 }
 
@@ -101,9 +105,14 @@ fn a_refused_minute_cannot_leave_decoded_rows_in_reused_storage() {
     .unwrap();
     let mut callbacks = 0;
 
-    let failure = load_since(&fixture.root, None, &mut buffers, |_, _, _, _| {
-        callbacks += 1;
-    });
+    let failure = load_owed(
+        &fixture.root,
+        &owed_of(&fixture),
+        &mut buffers,
+        |_, _, _| {
+            callbacks += 1;
+        },
+    );
 
     assert_eq!(failure, Some(crate::store::Failure::Refused));
     assert_eq!(callbacks, 0);
@@ -119,17 +128,54 @@ fn a_refused_minute_cannot_leave_decoded_rows_in_reused_storage() {
     );
 }
 
-fn capture(
-    fixture: &Fixture,
-    buffers: &mut LoadBuffers,
-) -> Vec<(RunIdentity, MachineSecond, AppsSecond)> {
+/// What adding up the Apps of a stretch handed over, at the tick that holds it.
+#[derive(Debug, PartialEq)]
+struct Captured {
+    run: RunIdentity,
+    publication: u64,
+    holds_apps: bool,
+    elapsed_ns: Option<u64>,
+    /// The stretch's App rows, as `Debug` writes them out.
+    rows: String,
+}
+
+/// What adding up the Apps every sealed minute of `fixture` owes hands over, oldest first.
+fn capture(fixture: &Fixture, buffers: &mut LoadBuffers) -> Vec<Captured> {
     let mut captured = Vec::new();
-    let failure = load_since(&fixture.root, None, buffers, |_, run, second, apps| {
-        let TickApps::Loaded(apps) = apps else {
-            panic!("the fixture's App parts must decode");
-        };
-        captured.push((*run, second.clone(), std::mem::take(apps)));
-    });
+    let failure = load_owed(
+        &fixture.root,
+        &owed_of(fixture),
+        buffers,
+        |run, tick, apps| {
+            let TickApps::Folded(folded) = apps else {
+                return;
+            };
+            captured.push(Captured {
+                run: *run,
+                publication: tick.publication,
+                holds_apps: folded.apps.holds_apps(),
+                elapsed_ns: folded.apps.elapsed_ns(),
+                rows: format!("{:?}", folded.apps.apps()),
+            });
+        },
+    );
     assert_eq!(failure, None);
     captured
+}
+
+/// The interval and the App rows of each stretch of `captured`, which name no recording.
+fn rows_of(captured: &[Captured]) -> Vec<(Option<u64>, &str)> {
+    captured
+        .iter()
+        .map(|stretch| (stretch.elapsed_ns, stretch.rows.as_str()))
+        .collect()
+}
+
+/// The Apps of every sealed minute of `fixture`, which a load that took their ticks in without
+/// them owes the store's stretches.
+fn owed_of(fixture: &Fixture) -> Owed {
+    let mut found = Vec::new();
+    super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    Owed::all(found)
 }

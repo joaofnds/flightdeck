@@ -26,11 +26,10 @@ fn sealed_predecessor_at_tick(run_tick: u64) -> (Fixture, recording::Terminal) {
 
 fn observe_next(mut fixture: Fixture, mut ring: Ring) -> (MachineSecond, AppsSecond) {
     fixture.publish_with_usage(101, &usage(1));
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut observed = Vec::new();
     ring.read(|_, machine, apps| {
         let mut payload = AppsSecond::with_room();
-        payload.take(apps, None, Some(&budget));
+        payload.take(apps, None);
         observed.push((machine.clone(), payload));
         true
     })
@@ -221,12 +220,11 @@ fn an_overwritten_successor_does_not_resurrect_the_terminal_baseline() {
     let mut ring = Ring::new(fixture.root.clone());
     ring.accept(Some(terminal));
     ring.follow().unwrap();
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut observed = Vec::new();
 
     ring.read(|_, machine, apps| {
         let mut captured = AppsSecond::with_room();
-        captured.take(apps, None, Some(&budget));
+        captured.take(apps, None);
         observed.push((machine.clone(), captured));
         true
     })
@@ -253,7 +251,6 @@ fn assert_foreign_terminal(change: impl FnOnce(&mut collector::ring::RunIdentity
     let source = ring.source.as_ref().unwrap();
     assert!(source.previous.ticks.is_empty());
     assert!(source.previous_frame.is_none());
-    assert!(source.previous_endpoint.is_none());
     assert!(ring.terminal.is_none());
 }
 
@@ -309,7 +306,7 @@ fn a_refused_terminal_presentation_preserves_the_valid_input_predecessor() {
     let mut captured = Vec::new();
     let outcome = recording::load_payload(&fixture.root, &budget, &operation, |_, _, apps| {
         let mut second = AppsSecond::with_room();
-        second.take(apps, None, Some(&budget));
+        second.take(apps, None);
         captured.push(second);
     })
     .unwrap();
@@ -332,7 +329,7 @@ fn a_refused_terminal_presentation_preserves_the_valid_input_predecessor() {
 
     ring.read(|_, machine, apps| {
         let mut second = AppsSecond::with_room();
-        second.take(apps, None, Some(&budget));
+        second.take(apps, None);
         observed.push((machine.clone(), second));
         true
     })
@@ -379,7 +376,7 @@ fn cancellation_rejects_a_finished_report_before_installing_its_handoff() {
         &mut ring,
         Ok(()),
         &mailbox,
-        Some(&operation),
+        &operation,
         crate::store::Publication::Complete,
     );
 

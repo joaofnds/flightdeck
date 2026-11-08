@@ -1058,7 +1058,9 @@ fn earlier_store_stretch(
     at: usize,
 ) -> crate::store::MachineStretch {
     let store = crate::store::Store::start(&fixture.root).unwrap();
-    let view = crate::store::tests::view_where(&store, |view| view.seconds.len() == seconds);
+    let view = crate::store::tests::view_where(&store, |view| {
+        view.seconds.len() == seconds && view.stretches.len() > at
+    });
 
     *view.stretches[at].machine
 }
