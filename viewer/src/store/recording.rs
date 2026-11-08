@@ -257,15 +257,7 @@ fn load_payload_window_using(
     };
     let continuity = load_continuity(window, &found);
     found.reverse();
-    let (predecessor, minutes) = match continuity {
-        Continuity::Extend => {
-            let Some((predecessor, newer)) = found.split_first() else {
-                unreachable!("a continued load found the minute it continues from");
-            };
-            (Some(predecessor), newer)
-        }
-        Continuity::Replace => (None, found.as_slice()),
-    };
+    let (predecessor, minutes) = load_payload_minutes(continuity, &found);
     let mut admitted = true;
     let mut outcome = payload::load(
         root,
@@ -286,29 +278,50 @@ fn load_payload_window_using(
     // for one of that minute's seconds goes to the saved minutes, which say why it cannot be read.
     if matches!(outcome.left_out, None | Some(Failure::Refused)) {
         if admitted {
-            match catalog::revalidate(root, &checked) {
-                Ok(()) => {
-                    let mut checked = checked;
-                    if checked.decoded_is_whole
-                        && outcome.decoded_catalog.windows == checked.windows
-                    {
-                        checked.first_known_second = outcome.decoded_catalog.first_known_second;
-                        checked.last_known_second = outcome.decoded_catalog.last_known_second;
-                        checked.unknown_clock_ticks =
-                            Some(outcome.decoded_catalog.unknown_clock_ticks);
-                    }
-                    match continuity {
-                        Continuity::Replace => outcome.checked_catalog = Some(checked),
-                        Continuity::Extend => outcome.continued_catalog = Some(checked),
-                    }
-                }
-                Err(failure) => outcome.left_out = Some(failure),
-            }
+            load_payload_certify(root, checked, continuity, &mut outcome);
         }
     }
     operation.check()?;
 
     Ok(outcome)
+}
+
+/// The minute a load seeds its rates from, where it continues the store's seconds, and the
+/// minutes it hands over, of `found`, the minutes it found, oldest first.
+fn load_payload_minutes(continuity: Continuity, found: &[Found]) -> (Option<&Found>, &[Found]) {
+    match continuity {
+        Continuity::Extend => {
+            let Some((predecessor, newer)) = found.split_first() else {
+                unreachable!("a continued load found the minute it continues from");
+            };
+            (Some(predecessor), newer)
+        }
+        Continuity::Replace => (None, found),
+    }
+}
+
+/// Hands `outcome` the catalog `checked`, which the load found, where the recording is still the
+/// one it was found in, and the decoded clocks where the load decoded every minute it counts.
+fn load_payload_certify(
+    root: &Path,
+    mut checked: CheckedCatalog,
+    continuity: Continuity,
+    outcome: &mut Outcome,
+) {
+    if let Err(failure) = catalog::revalidate(root, &checked) {
+        outcome.left_out = Some(failure);
+        return;
+    }
+
+    if checked.decoded_is_whole && outcome.decoded_catalog.windows == checked.windows {
+        checked.first_known_second = outcome.decoded_catalog.first_known_second;
+        checked.last_known_second = outcome.decoded_catalog.last_known_second;
+        checked.unknown_clock_ticks = Some(outcome.decoded_catalog.unknown_clock_ticks);
+    }
+    match continuity {
+        Continuity::Replace => outcome.checked_catalog = Some(checked),
+        Continuity::Extend => outcome.continued_catalog = Some(checked),
+    }
 }
 
 /// Whether a load continues from `window.since`, which it does where the minutes it found, newest
