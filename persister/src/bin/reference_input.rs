@@ -8,6 +8,7 @@
 
 use std::fs::DirBuilder;
 use std::io;
+use std::ops::RangeInclusive;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,6 +32,7 @@ use collector::ring::{
     UsageAvailability, Writer,
 };
 use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading};
+use collector::tracker::{Event, Noticed};
 use persistence::retention::Period;
 
 const USAGE: &str =
@@ -60,6 +62,15 @@ const INCIDENT_OFFSETS: [u64; 10] = [10, 21, 32, 43, 54, 65, 76, 87, 98, 109];
 const INCIDENT_PROCESS: u64 = 0;
 /// How many times faster than usual the incident process spends CPU time and energy in one.
 const INCIDENT_FOLD: u64 = 20;
+/// The first process that takes new creations, so processes 0 and 1 never rotate and no
+/// incident loses its process.
+const ROTATING_FIRST: u64 = 2;
+/// The processes that take a new creation each second, as the contract's two a second.
+const ROTATIONS_PER_SECOND: u64 = 2;
+/// The seconds from one rotation of a process to its next.
+const ROTATION_ROUND_SECONDS: u64 = (PROCESSES - ROTATING_FIRST) / ROTATIONS_PER_SECOND;
+/// The identity of the first creation a rotation starts, after the input's first creations.
+const CREATION_ROTATED_FIRST: u64 = PROCESSES + 1;
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -152,7 +163,11 @@ const _: () = {
         position += 1;
     }
     assert!(INCIDENT_OFFSETS[INCIDENT_OFFSETS.len() - 1] < ZERO_SECOND);
-    assert!(INCIDENT_PROCESS < PROCESSES);
+    assert!(INCIDENT_PROCESS < ROTATING_FIRST);
+    // The rotating processes take their turns in whole pairs.
+    assert!((PROCESSES - ROTATING_FIRST).is_multiple_of(ROTATIONS_PER_SECOND));
+    // A round outlasts the missed tick, so the tick after it carries each process's exit once.
+    assert!(1 < ROTATION_ROUND_SECONDS);
     // Each CPU idles for what it does not spend, so no CPU's idle ticks fall below zero.
     assert!(CPUS < 85);
     // A third of the cores are super cores.
@@ -513,7 +528,7 @@ impl Machine {
             processes_refused: 0,
             processes_gone: 0,
             coalitions: &[],
-            events: &[],
+            events: &read.events,
             dropped: Dropped::default(),
         };
         let system = SystemPublication {
@@ -527,7 +542,7 @@ impl Machine {
             Some(&times),
             &IdentityPublication {
                 processes: &read.identities,
-                events: &[],
+                events: &read.event_identities,
             },
             &SupplementalReadings {
                 battery: Some(&read.battery),
@@ -544,6 +559,10 @@ impl Machine {
 struct Second {
     processes: Vec<Process>,
     identities: Vec<IdentityObservation>,
+    /// The exits and starts of the processes that rotated since the tick before.
+    events: Vec<Event>,
+    /// The identity each of `events` names.
+    event_identities: Vec<IdentityObservation>,
     cpus: Vec<CPUTicks>,
     gauges: Gauges,
     memory: Memory,
@@ -574,6 +593,14 @@ impl Second {
         } else {
             GAUGES_BASELINE
         };
+        // The tick after a missed tick carries the missed second's rotations too, as a collector
+        // publishes every event since its last tick.
+        let rotated_first = if offset == MISSED_SECOND + 1 {
+            second - 1
+        } else {
+            second.max(1)
+        };
+        let (events, event_identities) = publish_rotations(programs, rotated_first..=second)?;
         let thermal_pressure = match offset {
             THERMAL_FAIR_SECOND => THERMAL_MODERATE,
             THERMAL_SERIOUS_SECOND => THERMAL_HEAVY,
@@ -582,12 +609,21 @@ impl Second {
 
         Ok(Self {
             processes: (0..PROCESSES)
-                .map(|process| publish_process(process, valid, incidents))
+                .map(|process| publish_process(process, creation_at(process, second), second))
                 .collect::<Result<_, _>>()?,
             identities: (0..PROCESSES)
                 .zip(programs)
-                .map(|(process, program)| publish_identity(process, *program))
+                .map(|(process, program)| {
+                    publish_identity(
+                        process,
+                        creation_at(process, second).identity,
+                        UsageAvailability::Measured,
+                        *program,
+                    )
+                })
                 .collect::<Result<_, _>>()?,
+            events,
+            event_identities,
             cpus: (0..CPUS)
                 .map(|cpu| publish_cpu(cpu, second))
                 .collect::<Result<_, _>>()?,
@@ -647,34 +683,136 @@ fn incident_seconds(second: u64) -> u64 {
         + collector::u64_from_usize(incidents_in_period)
 }
 
-/// Process `process`'s readings after `valid` valid seconds, `incidents` of them incident
-/// seconds, as the contract gives them.
-fn publish_process(
-    process: u64,
-    valid: u64,
-    incidents: u64,
-) -> Result<Process, std::num::TryFromIntError> {
+/// One creation of a process: its identity, and the second it started in, `None` for the input's
+/// first creations, which started before it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Creation {
+    identity: u64,
+    started: Option<u64>,
+}
+
+/// The creation process `process` runs at `second`. The rotating processes take their turns in
+/// pairs, one pair a second from second 1, and each rotation starts the next creation identity.
+fn creation_at(process: u64, second: u64) -> Creation {
+    let first = Creation {
+        identity: process + 1,
+        started: None,
+    };
+    if process < ROTATING_FIRST {
+        return first;
+    }
+
+    let rotating = process - ROTATING_FIRST;
+    // The division floors, to the pair the process is in.
+    let turn_first = rotating / ROTATIONS_PER_SECOND + 1;
+    if second < turn_first {
+        return first;
+    }
+
+    // The division floors, to the pair's latest turn by `second`.
+    let started =
+        turn_first + (second - turn_first) / ROTATION_ROUND_SECONDS * ROTATION_ROUND_SECONDS;
+    Creation {
+        identity: CREATION_ROTATED_FIRST
+            + ROTATIONS_PER_SECOND * (started - 1)
+            + rotating % ROTATIONS_PER_SECOND,
+        started: Some(started),
+    }
+}
+
+/// The exits and starts of the processes that rotate in `seconds`, which run `programs`, with
+/// the identity each names. Each old creation's exit comes before its successor's start.
+fn publish_rotations(
+    programs: &[ProgramReference],
+    seconds: RangeInclusive<u64>,
+) -> Result<(Vec<Event>, Vec<IdentityObservation>), Box<dyn std::error::Error>> {
+    let mut events = Vec::new();
+    let mut identities = Vec::new();
+    for second in seconds {
+        let first = ROTATING_FIRST + ROTATIONS_PER_SECOND * ((second - 1) % ROTATION_ROUND_SECONDS);
+        for process in first..first + ROTATIONS_PER_SECOND {
+            let ended = creation_at(process, second - 1);
+            let started = creation_at(process, second);
+            assert_eq!(Some(second), started.started);
+            let pid = PID_FIRST + i32::try_from(process)?;
+            let program = programs[usize::try_from(process)?];
+
+            // The exit's endpoint is the old creation's counters in the second it exits, so its
+            // App loses no growth to the rotation.
+            events.push(Event::Exit {
+                pid,
+                last: Ok(publish_usage(process, ended, second)),
+                noticed: Noticed::OnExit,
+            });
+            identities.push(publish_identity(
+                process,
+                ended.identity,
+                UsageAvailability::Measured,
+                program,
+            )?);
+            events.push(Event::Start {
+                pid,
+                coalition: None,
+            });
+            identities.push(publish_identity(
+                process,
+                started.identity,
+                UsageAvailability::NotApplicable,
+                program,
+            )?);
+        }
+    }
+
+    Ok((events, identities))
+}
+
+/// Process `process`'s usage at `second` in its creation `creation`, as the contract gives it:
+/// a creation's CPU time starts at 2^53 + 1,000 ns for each creation before it, its other
+/// counters at zero, and each grows at the process's pace in the valid seconds since it started.
+fn publish_usage(process: u64, creation: Creation, second: u64) -> Usage {
+    let since_start = |count: fn(u64) -> u64| count(second) - creation.started.map_or(0, count);
+    let valid = since_start(valid_seconds);
+    let incidents = since_start(incident_seconds);
     // The incident process spends `INCIDENT_FOLD` seconds' CPU time and energy in each incident.
     let spending = valid + u64::from(process == INCIDENT_PROCESS) * (INCIDENT_FOLD - 1) * incidents;
+    // A first creation started a second before the input, and a rotated one half a second
+    // before the tick of the second it started in.
+    let awake_ns_at_start = match creation.started {
+        None => ORIGIN_CONTINUOUS_NS - NANOSECONDS_PER_SECOND,
+        Some(started) => {
+            ORIGIN_CONTINUOUS_NS + started * NANOSECONDS_PER_SECOND - NANOSECONDS_PER_SECOND / 2
+        }
+    };
 
+    Usage {
+        awake_ns_at_start,
+        user_ns: CPU_BASE_NS
+            + 1_000 * (creation.identity - 1)
+            + spending * 1_000_000 * (process % 8 + 1),
+        system_ns: 0,
+        energy_nj: spending * 1_000 * (process + 1),
+        instructions: 0,
+        super_instructions: 0,
+        cycles: 0,
+        idle_wakeups: 0,
+        interrupt_wakeups: 0,
+        pageins: 0,
+        resident_bytes: 1_048_576 * (process % APPS + 1),
+        footprint_bytes: 1_048_576 * (process % APPS + 1),
+        disk_read_bytes: valid * 4_096 * (process % 4 + 1),
+        disk_written_bytes: valid * 2_048 * (process % 4 + 1),
+    }
+}
+
+/// Process `process`'s readings at `second` in its creation `creation`.
+fn publish_process(
+    process: u64,
+    creation: Creation,
+    second: u64,
+) -> Result<Process, std::num::TryFromIntError> {
     Ok(Process {
         pid: PID_FIRST + i32::try_from(process)?,
-        usage: Usage {
-            awake_ns_at_start: ORIGIN_CONTINUOUS_NS - NANOSECONDS_PER_SECOND,
-            user_ns: CPU_BASE_NS + 1_000 * process + spending * 1_000_000 * (process % 8 + 1),
-            system_ns: 0,
-            energy_nj: spending * 1_000 * (process + 1),
-            instructions: 0,
-            super_instructions: 0,
-            cycles: 0,
-            idle_wakeups: 0,
-            interrupt_wakeups: 0,
-            pageins: 0,
-            resident_bytes: 1_048_576 * (process % APPS + 1),
-            footprint_bytes: 1_048_576 * (process % APPS + 1),
-            disk_read_bytes: valid * 4_096 * (process % 4 + 1),
-            disk_written_bytes: valid * 2_048 * (process % 4 + 1),
-        },
+        usage: publish_usage(process, creation, second),
         task: Task {
             threads: 1,
             faults: 0,
@@ -687,13 +825,13 @@ fn publish_process(
 
 fn publish_identity(
     process: u64,
+    creation: u64,
+    usage: UsageAvailability,
     program: ProgramReference,
 ) -> Result<IdentityObservation, std::num::TryFromIntError> {
-    let creation = process + 1;
-
     Ok(IdentityObservation {
         pid: PID_FIRST + i32::try_from(process)?,
-        usage: UsageAvailability::Measured,
+        usage,
         identity: ProcessIdentity::Measured {
             creation: ProcessCreation {
                 unique_id: creation,
@@ -953,6 +1091,26 @@ mod tests {
         let valid = [599, 600, 900, 902].map(valid_seconds);
 
         assert_eq!([597, 598, 897, 898], valid);
+    }
+
+    #[test]
+    fn rotates_each_process_once_a_round_from_its_pairs_turn() {
+        // Goal: each rotating process takes a new creation every 127 seconds from its pair's
+        // turn, the creations numbered in rotation order, and processes 0 and 1 never rotate.
+        // Method: read the creation identities on each side of process 2's first and second
+        // turns, at the last pair's first turn, and of process 1 late in the input.
+        let identities = [
+            (2, 0),
+            (2, 1),
+            (2, 127),
+            (2, 128),
+            (255, 126),
+            (255, 127),
+            (1, 3_599),
+        ]
+        .map(|(process, second)| creation_at(process, second).identity);
+
+        assert_eq!([3, 257, 257, 511, 256, 510, 2], identities);
     }
 
     #[test]

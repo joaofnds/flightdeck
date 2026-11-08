@@ -10,11 +10,13 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::OnceLock;
+    use std::sync::{Arc, OnceLock};
 
     use collector::disks::DiskSnapshot;
     use collector::machine::CPUTicks;
     use collector::recording::Registry;
+    use persistence::Manifest;
+    use persistence::resources::ByteBudget;
 
     use super::saved_windows;
 
@@ -223,6 +225,109 @@ mod tests {
         assert_eq!([Some(0), Some(1), Some(2), Some(0)], levels);
     }
 
+    #[test]
+    fn rotates_two_creations_each_second_each_exit_before_its_successors_start() {
+        // Goal: two processes a second take a new creation, from process 2 on, each publishing
+        // its old creation's exit before its new creation's start, and the new creations count
+        // from 257 in rotation order. Method: read the events seconds 1 and 2 publish.
+        let events = [1, 2].map(|second| input().events(second));
+
+        assert_eq!(
+            [
+                vec![
+                    exit(41_002, 3),
+                    start(41_002, 257),
+                    exit(41_003, 4),
+                    start(41_003, 258),
+                ],
+                vec![
+                    exit(41_004, 5),
+                    start(41_004, 259),
+                    exit(41_005, 6),
+                    start(41_005, 260),
+                ],
+            ],
+            events
+        );
+    }
+
+    #[test]
+    fn carries_the_missed_ticks_rotations_in_the_tick_after_it() {
+        // Goal: the processes that rotate in the missed second 301 still exit and start, and the
+        // tick after it, 302, publishes their events before its own. Method: read the events of
+        // second 302, where processes 94 and 95 rotated in 301 and 96 and 97 in 302, each pair
+        // 127 seconds after its previous rotation, in 174 and 175.
+        let events = input().events(302);
+
+        assert_eq!(
+            vec![
+                exit(41_094, 603),
+                start(41_094, 857),
+                exit(41_095, 604),
+                start(41_095, 858),
+                exit(41_096, 605),
+                start(41_096, 859),
+                exit(41_097, 606),
+                start(41_097, 860),
+            ],
+            events
+        );
+    }
+
+    #[test]
+    fn lists_a_rotated_process_under_its_new_creation() {
+        // Goal: the process rows follow a rotation to the new creation. Method: read process 2's
+        // creation at second 0 and at second 1, where it rotates.
+        let creations = [0, 1].map(|second| input().process_creation(41_002, second));
+
+        assert_eq!([3, 257], creations);
+    }
+
+    #[test]
+    fn starts_each_new_creation_at_a_base_of_its_own() {
+        // Goal: a new creation's counters start from its own base, never from its predecessor's,
+        // its CPU time at 2^53 + 1,000 ns for each creation before it and the rest at zero, and
+        // grow at its process's pace. Method: read process 2's counters at second 1, where its
+        // creation 257 starts, and at second 2.
+        let counters = [1, 2].map(|second| input().process_counters(41_002, second));
+
+        assert_eq!(
+            [
+                ProcessCounters {
+                    cpu_ns: (1 << 53) + 256_000,
+                    energy_nj: 0,
+                    disk_read_bytes: 0,
+                    disk_written_bytes: 0,
+                },
+                ProcessCounters {
+                    cpu_ns: (1 << 53) + 256_000 + 3_000_000,
+                    energy_nj: 3_000,
+                    disk_read_bytes: 12_288,
+                    disk_written_bytes: 6_144,
+                },
+            ],
+            counters
+        );
+    }
+
+    #[test]
+    fn ends_each_old_creation_at_its_counters_in_the_second_it_exits() {
+        // Goal: an exit's endpoint is the old creation's counters in the second it exits, so its
+        // App loses no growth to the rotation. Method: read the usage process 2's exit publishes
+        // in second 1, one valid second after the creation's reading at second 0.
+        let endpoint = input().exit_endpoint(41_002, 1);
+
+        assert_eq!(
+            ProcessCounters {
+                cpu_ns: (1 << 53) + 2_000 + 3_000_000,
+                energy_nj: 3_000,
+                disk_read_bytes: 12_288,
+                disk_written_bytes: 6_144,
+            },
+            endpoint
+        );
+    }
+
     /// The SMC's readings between the contract's special seconds.
     fn smc_baseline() -> Smc {
         Smc {
@@ -240,6 +345,22 @@ mod tests {
             energy_nj: 1_000 * (valid + 19 * incidents),
             disk_read_bytes: 4_096 * valid,
             disk_written_bytes: 2_048 * valid,
+        }
+    }
+
+    fn exit(pid: i32, creation: u64) -> SavedEvent {
+        SavedEvent {
+            kind: persistence::schema::event_kind::EXIT,
+            pid,
+            creation,
+        }
+    }
+
+    fn start(pid: i32, creation: u64) -> SavedEvent {
+        SavedEvent {
+            kind: persistence::schema::event_kind::START,
+            pid,
+            creation,
         }
     }
 
@@ -293,19 +414,59 @@ mod tests {
 
         /// The counters a process's saved row holds at `second` of the input.
         fn process_counters(&self, pid: i32, second: u64) -> ProcessCounters {
-            let row = self.saved_row(
+            process_counters_of(&self.saved_row(
                 second,
                 "processes",
-                "user_ns + system_ns, energy_nj, disk_read_bytes, disk_written_bytes",
+                PROCESS_COUNTERS,
                 &format!("pid = {pid}"),
+            ))
+        }
+
+        /// The creation of the process `pid` at `second` of the input.
+        fn process_creation(&self, pid: i32, second: u64) -> u64 {
+            cell(
+                &self.saved_row(
+                    second,
+                    "processes",
+                    "process_unique_id",
+                    &format!("pid = {pid}"),
+                ),
+                0,
+            )
+        }
+
+        /// The exits and starts `second` of the input publishes, in the order it publishes them.
+        fn events(&self, second: u64) -> Vec<SavedEvent> {
+            let rows = self.saved_rows(
+                second,
+                "events",
+                "kind, pid, process_unique_id",
+                "TRUE ORDER BY event",
             );
 
-            ProcessCounters {
-                cpu_ns: cell(&row, 0),
-                energy_nj: cell(&row, 1),
-                disk_read_bytes: cell(&row, 2),
-                disk_written_bytes: cell(&row, 3),
-            }
+            (0..rows.height())
+                .map(|row| {
+                    let row = persistence::engine::Row::new(&rows, row).unwrap();
+                    SavedEvent {
+                        kind: row.get(0).unwrap(),
+                        pid: row.get(1).unwrap(),
+                        creation: row.get(2).unwrap(),
+                    }
+                })
+                .collect()
+        }
+
+        /// The counters the exit of the process `pid` that `second` of the input publishes end at.
+        fn exit_endpoint(&self, pid: i32, second: u64) -> ProcessCounters {
+            process_counters_of(&self.saved_row(
+                second,
+                "events",
+                PROCESS_COUNTERS,
+                &format!(
+                    "pid = {pid} AND kind = {}",
+                    persistence::schema::event_kind::EXIT
+                ),
+            ))
         }
 
         /// How far the counters of the process `pid` grew over `second` of the input.
@@ -431,7 +592,8 @@ mod tests {
         /// Every identity the saved minutes give an interface or a disk.
         fn device_identities(&self) -> DeviceIdentities {
             let mut identities = DeviceIdentities::default();
-            for data in self.saved_minutes() {
+            for minute in self.saved_minutes() {
+                let data = self.directory.join(&minute.data_directory);
                 let interfaces = query(
                     &data.join("interfaces.parquet"),
                     "SELECT DISTINCT interface, name FROM saved",
@@ -480,9 +642,19 @@ mod tests {
             let tick = self
                 .saved_tick(second)
                 .unwrap_or_else(|| panic!("no saved minute holds second {second}"));
+            // A minute keeps its events in an indexed table of parts rather than in one file.
+            let saved = if table == "events" {
+                persistence::event_table::EventTable::open(&self.directory, &tick.minute)
+                    .unwrap()
+                    .into_lazy(&Arc::new(ByteBudget::new(EVENT_QUERY_BYTES)))
+                    .unwrap()
+            } else {
+                let data = self.directory.join(&tick.minute.data_directory);
+                persistence::engine::scan(&data.join(format!("{table}.parquet"))).unwrap()
+            };
 
-            query(
-                &tick.data.join(format!("{table}.parquet")),
+            query_frame(
+                saved,
                 &format!(
                     "SELECT {columns} FROM saved WHERE publication = {} AND {condition}",
                     tick.publication
@@ -494,16 +666,19 @@ mod tests {
         fn saved_tick(&self, second: u64) -> Option<SavedTick> {
             let wall_ns = ORIGIN_WALL_NS + second * NANOSECONDS_PER_SECOND;
             let mut found = None;
-            for data in self.saved_minutes() {
+            for minute in self.saved_minutes() {
                 let publications = query(
-                    &data.join("ticks.parquet"),
+                    &self
+                        .directory
+                        .join(&minute.data_directory)
+                        .join("ticks.parquet"),
                     &format!("SELECT publication FROM saved WHERE wall_ns = {wall_ns}"),
                 );
                 if publications.height() == 1 {
                     // A second is saved once, since the input's runs share no second.
                     assert!(found.is_none());
                     found = Some(SavedTick {
-                        data,
+                        minute,
                         publication: cell(&publications, 0),
                     });
                 }
@@ -512,17 +687,15 @@ mod tests {
             found
         }
 
-        /// The tables of each saved minute of every run.
-        fn saved_minutes(&self) -> Vec<PathBuf> {
+        /// The manifest of each saved minute of every run.
+        fn saved_minutes(&self) -> Vec<Manifest> {
             let registry = Registry::read(&self.directory).unwrap();
-            let mut minutes = Vec::new();
-            for run in &registry.runs {
-                for manifest in saved_windows::saved_manifests(&self.directory, &run.identity) {
-                    minutes.push(self.directory.join(&manifest.data_directory));
-                }
-            }
 
-            minutes
+            registry
+                .runs
+                .iter()
+                .flat_map(|run| saved_windows::saved_manifests(&self.directory, &run.identity))
+                .collect()
         }
     }
 
@@ -577,10 +750,36 @@ mod tests {
         disk_written_bytes: u64,
     }
 
-    /// A tick a saved minute holds: the minute's tables and the tick's publication in them.
+    /// An exit or a start an input's second publishes, with the creation it names.
+    #[derive(Debug, PartialEq)]
+    struct SavedEvent {
+        kind: u8,
+        pid: i32,
+        creation: u64,
+    }
+
+    /// A tick a saved minute holds: the minute and the tick's publication in its tables.
     struct SavedTick {
-        data: PathBuf,
+        minute: Manifest,
         publication: u64,
+    }
+
+    /// The bytes a query of one saved minute's events may hold, ample for the input's few
+    /// hundred events a minute.
+    const EVENT_QUERY_BYTES: usize = 1 << 28;
+
+    /// The columns of a process or event row that `process_counters_of` reads.
+    const PROCESS_COUNTERS: &str =
+        "user_ns + system_ns, energy_nj, disk_read_bytes, disk_written_bytes";
+
+    /// The counters of the one row of `row`, which holds the columns `PROCESS_COUNTERS` names.
+    fn process_counters_of(row: &polars::prelude::DataFrame) -> ProcessCounters {
+        ProcessCounters {
+            cpu_ns: cell(row, 0),
+            energy_nj: cell(row, 1),
+            disk_read_bytes: cell(row, 2),
+            disk_written_bytes: cell(row, 3),
+        }
     }
 
     fn generator() -> Command {
@@ -588,10 +787,13 @@ mod tests {
     }
 
     fn query(path: &Path, sql: &str) -> polars::prelude::DataFrame {
+        query_frame(persistence::engine::scan(path).unwrap(), sql)
+    }
+
+    /// The rows `sql` selects from `saved`, a saved table.
+    fn query_frame(saved: polars::prelude::LazyFrame, sql: &str) -> polars::prelude::DataFrame {
         let engine = persistence::engine::Engine::new();
-        engine
-            .register_lazy("saved", persistence::engine::scan(path).unwrap())
-            .unwrap();
+        engine.register_lazy("saved", saved).unwrap();
 
         engine.query(sql).unwrap()
     }
