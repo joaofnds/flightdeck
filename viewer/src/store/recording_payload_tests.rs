@@ -1,5 +1,5 @@
 use persistence::engine::AdmittedTable;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::{Cursor, Decoder, LoadInput, load_consume};
@@ -1503,6 +1503,44 @@ fn a_continued_load_takes_no_rates_from_a_predecessor_that_refuses_an_earlier_re
 }
 
 #[test]
+fn a_continued_load_takes_no_rates_from_a_predecessor_removed_while_it_is_read() {
+    // Goal: a return that continues from a minute removed while the return reads it, as retention
+    // may remove it, gives the minute after it no rates and says the minute it continues from was
+    // refused, although what the return read of that minute would rate it.
+    // Method: give publication 2 a process start, load after publication 3 and remove the ticks of
+    // the minute holding it once the load has taken in that minute's events, the last file it
+    // reads, then check publication 4's rates and what the load left out.
+    use std::os::unix::fs::MetadataExt;
+    let fixture = catch_up_fixture_starting_a_process_in_publication_2();
+    let manifest = publication_2_manifest(&fixture);
+    let ticks = fixture
+        .root
+        .join(&manifest.data_directory)
+        .join("ticks.parquet");
+    let events = std::fs::metadata(crate::live::saved_events(&fixture.root, &manifest))
+        .unwrap()
+        .ino();
+    let removed = AtomicBool::new(false);
+    let capture = |file: std::fs::File, budget: &Arc<ByteBudget>| {
+        let inode = file.metadata().unwrap().ino();
+        let input = AdmittedTable::from_file_budgeted(file, budget)?;
+        if inode == events && !removed.swap(true, Ordering::Relaxed) {
+            std::fs::remove_file(&ticks).unwrap();
+        }
+
+        Ok(input)
+    };
+
+    let (outcome, (machine, apps)) = loaded_after_using(&fixture, 3, &capture);
+
+    assert!(removed.load(Ordering::Relaxed));
+    assert!(!machine.follows());
+    assert_eq!(machine.cpu_percent, None);
+    assert_eq!(apps.elapsed_ns, None);
+    assert_eq!(outcome.left_out, Some(crate::store::Failure::Refused));
+}
+
+#[test]
 fn a_continued_load_counts_a_decoding_it_throws_away_as_discarded_work() {
     // Goal: where a return decodes a minute again because the minute before it refuses a reading
     // before its last, each publication of the minute has one ordinary App aggregation and one
@@ -1612,20 +1650,25 @@ fn publication_work(
     })
 }
 
-/// Replaces the processes of the minute of `catch_up_fixture` that holds publication 2 with a copy
-/// whose rows of publication 2 all name pid 7, which a reader refuses.
-fn name_one_process_twice_in_publication_2(fixture: &Fixture) {
-    use polars::prelude::{col, lit, when};
+/// The manifest of the minute of `catch_up_fixture` that holds publications 2 and 3.
+fn publication_2_manifest(fixture: &Fixture) -> persistence::Manifest {
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let minute = found
         .iter()
         .find(|minute| minute.publication_end == 4)
         .unwrap();
-    let manifest = persistence::read_committed(&fixture.root, &minute.marker).unwrap();
+
+    persistence::read_committed(&fixture.root, &minute.marker).unwrap()
+}
+
+/// Replaces the processes of the minute of `catch_up_fixture` that holds publication 2 with a copy
+/// whose rows of publication 2 all name pid 7, which a reader refuses.
+fn name_one_process_twice_in_publication_2(fixture: &Fixture) {
+    use polars::prelude::{col, lit, when};
     let processes = fixture
         .root
-        .join(manifest.data_directory)
+        .join(publication_2_manifest(fixture).data_directory)
         .join("processes.parquet");
     let mut damaged = persistence::engine::scan(&processes)
         .unwrap()
@@ -1660,6 +1703,19 @@ fn loaded_after(
     super::super::Outcome,
     (crate::store::MachineSecond, AppsSecond),
 ) {
+    loaded_after_using(fixture, publication, &AdmittedTable::from_file_budgeted)
+}
+
+/// The outcome of a load of `catch_up_fixture` that continues from `publication` and reads each
+/// file through `capture`, and the seconds of publication 4 it hands over.
+fn loaded_after_using(
+    fixture: &Fixture,
+    publication: u64,
+    capture: &crate::recording::InputCapture<'_>,
+) -> (
+    super::super::Outcome,
+    (crate::store::MachineSecond, AppsSecond),
+) {
     let newest = crate::store::Newest {
         run: fixture.writer.identity().unwrap(),
         publication,
@@ -1669,11 +1725,12 @@ fn loaded_after(
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut selected = None;
 
-    let outcome = super::super::load_payload_since(
+    let outcome = super::super::load_payload_window_using(
         &fixture.root,
         &budget,
         &operation,
-        Some(&newest),
+        capture,
+        &super::super::LoadWindow::all(Some(&newest)),
         |_, _, second, apps| {
             if second.publication == 4 {
                 let crate::store::apps::TickApps::Loaded(apps) = apps else {
@@ -1697,6 +1754,28 @@ fn catch_up_fixture() -> Fixture {
     fixture.seal_minute(0);
     fixture.skip_run_ticks(59);
     fixture.publish_with_system_rows(160);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_system_rows(219);
+    fixture.seal_minute(1);
+    fixture.publish_with_system_rows(220);
+    fixture.seal_minute(2);
+    fixture
+}
+
+/// `catch_up_fixture` with a process start in publication 2, so the minute holding publications 2
+/// and 3 saves events.
+fn catch_up_fixture_starting_a_process_in_publication_2() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_events(
+        160,
+        &[collector::tracker::Event::Start {
+            pid: 9,
+            coalition: Some(3),
+        }],
+    );
     fixture.skip_run_ticks(58);
     fixture.publish_with_system_rows(219);
     fixture.seal_minute(1);
