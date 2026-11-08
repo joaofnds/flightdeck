@@ -83,7 +83,8 @@ jobs:
       # runs the justfile's recipes with the just a contributor runs them with. The other jobs
       # repeat this step through its anchor. The hash of that version's macos-arm64 binary lets
       # the action check a mise restored from its cache without fetching the release's checksums
-      # from GitHub, so it changes with the version.
+      # from GitHub, so it changes with the version. With the hash set, the action also checks a
+      # fresh download only against it, once unpacked, in place of the release's signed checksums.
       - &install-just
         uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:

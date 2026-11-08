@@ -39,7 +39,9 @@ pub(super) fn find(
 /// `since`'s run is not the recording's newest run, or where the walk runs out of windows, reaches
 /// a minute whose clock is before the loaded hour of `window` or finds no minute holding `since`
 /// within `MINUTES_MAX` minutes. `find` stays the check, since it lists the loaded hour by clock
-/// and keeps only what retention holds, which a walk by publication does not see.
+/// and keeps only what retention holds, which a walk by publication does not see. Removal may take
+/// a walked minute that retention let go of while the load reads it, but the listing leaves that
+/// minute out, so it disagrees with the walk and the load hands over none of the walk's minutes.
 pub(super) fn walk(
     root: &Path,
     since: &crate::store::Newest,
