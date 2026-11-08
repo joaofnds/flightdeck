@@ -168,7 +168,7 @@ fn a_page_the_saved_minutes_answered_reads_them_again_a_second_later() {
         panic!("the saved minutes did not answer again");
     };
     assert!(started.elapsed() >= crate::live_source::RETRY_INTERVAL);
-    assert_ne!(next.selection["selected"]["publication"], 2);
+    assert_eq!(next.selection["selected"]["publication"], 65);
 }
 
 #[test]
