@@ -10,6 +10,8 @@ use std::sync::Arc;
 const CURSOR_BYTES: usize = 256 * 1024;
 /// The node opens one step spends at most before it returns `Continue`.
 const STEP_NODE_ATTEMPTS_MAX: u64 = 4096;
+/// The levels a walk holds at most, which covers the root and one for each of a key's 120 nibbles.
+const STACK_FRAMES_MAX: usize = 124;
 const DIRECT_ENTRIES: u64 = 16 * 124 + 128;
 const BOUNDARY_ENTRIES: u64 = 32 * 124 + 256;
 const _: () = {
@@ -235,8 +237,8 @@ pub struct CanonicalCursor<'root, 'state> {
     state: StateObservation<'root, 'state>,
     namespace: Namespace,
     range: SeekRange,
-    stack: Box<[Frame; 124]>,
-    depth: usize,
+    /// The frames from the root down to the node the walk is at, never empty.
+    stack: Vec<Frame>,
     leaf: [CanonicalKey; 128],
     leaf_count: usize,
     leaf_next: usize,
@@ -245,8 +247,9 @@ pub struct CanonicalCursor<'root, 'state> {
     query_entries: u64,
     _reservation: ByteReservation,
 }
-const _: () =
-    assert!(size_of::<[Frame; 124]>() + size_of::<[CanonicalKey; 128]>() + 4096 < CURSOR_BYTES);
+const _: () = assert!(
+    size_of::<[Frame; STACK_FRAMES_MAX]>() + size_of::<[CanonicalKey; 128]>() + 4096 < CURSOR_BYTES
+);
 impl<'root, 'state> CanonicalCursor<'root, 'state> {
     pub fn begin(
         root: &'root PrivateDirectory,
@@ -293,7 +296,14 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         );
         *work_out = work;
         let state = observed?.ok_or_else(retry)?;
-        Self::from_state(root, namespace, range, state, work, reservation)
+        Ok(Self::from_state(
+            root,
+            namespace,
+            range,
+            state,
+            work,
+            reservation,
+        ))
     }
     fn from_state(
         root: &'root PrivateDirectory,
@@ -302,17 +312,13 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         state: StateObservation<'root, 'state>,
         work: ReadWork,
         reservation: ByteReservation,
-    ) -> io::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             root,
             state,
             namespace,
             range,
-            stack: vec![Frame::EMPTY; 124]
-                .into_boxed_slice()
-                .try_into()
-                .map_err(|_| invalid())?,
-            depth: 0,
+            stack: vec![Frame::EMPTY],
             leaf: [CanonicalKey {
                 bytes: [0; 60],
                 length: 0,
@@ -323,14 +329,14 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
             work,
             query_entries: 0,
             _reservation: reservation,
-        })
+        }
     }
     pub(crate) fn reset(&mut self, namespace: Namespace, range: SeekRange) -> io::Result<()> {
         self.check_snapshot()?;
         self.namespace = namespace;
         self.range = range;
-        self.stack.fill(Frame::EMPTY);
-        self.depth = 0;
+        self.stack.truncate(1);
+        self.stack[0] = Frame::EMPTY;
         self.leaf_count = 0;
         self.leaf_next = 0;
         self.ended = false;
@@ -342,7 +348,7 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
     }
     #[must_use]
     pub fn current_locator(&self) -> NodeLocator {
-        let prefix = self.stack[self.depth].prefix;
+        let prefix = self.stack[self.depth()].prefix;
         NodeLocator {
             namespace: self.namespace,
             prefix: prefix.bytes,
@@ -428,8 +434,8 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
             if self.ended {
                 return Ok(ReadStep::End);
             }
-            if !self.stack[self.depth].loaded {
-                let required = collector::u64_from_usize(self.depth + 2 + 132);
+            if !self.stack[self.depth()].loaded {
+                let required = collector::u64_from_usize(self.depth() + 2 + 132);
                 if self.work.node_attempts - initial + required > limit
                     || self.work.entries - entries + 128 > BOUNDARY_ENTRIES
                 {
@@ -438,7 +444,8 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
                 self.load_node()?;
                 continue;
             }
-            let frame = &mut self.stack[self.depth];
+            let depth = self.depth();
+            let frame = &mut self.stack[depth];
             if frame.next < frame.count {
                 let index = match self.range.direction {
                     Direction::Forward => usize::from(frame.next),
@@ -447,22 +454,37 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
                 frame.next += 1;
                 let child = frame.children[index];
                 if intersects(&child, &self.range) {
-                    if self.depth + 1 >= 124 {
-                        return Err(invalid());
-                    }
-                    self.depth += 1;
-                    self.stack[self.depth] = Frame {
-                        prefix: child,
-                        ..Frame::EMPTY
-                    };
+                    self.descend(child)?;
                 }
-            } else if self.depth == 0 {
+            } else if depth == 0 {
                 self.ended = true;
             } else {
-                self.depth -= 1;
+                self.stack.pop();
             }
         }
         Ok(ReadStep::Continue)
+    }
+    /// Steps down into `child`. The stack doubles as it fills, up to `STACK_FRAMES_MAX` frames,
+    /// so a walk allocates the levels it descends and no more than its reservation covers.
+    fn descend(&mut self, child: Prefix) -> io::Result<()> {
+        let frames = self.stack.len();
+        if frames == STACK_FRAMES_MAX {
+            return Err(invalid());
+        }
+
+        if frames == self.stack.capacity() {
+            self.stack
+                .reserve_exact((frames * 2).min(STACK_FRAMES_MAX) - frames);
+        }
+        self.stack.push(Frame {
+            prefix: child,
+            ..Frame::EMPTY
+        });
+        Ok(())
+    }
+    /// The level of the node the walk is at, 0 at the root.
+    fn depth(&self) -> usize {
+        self.stack.len() - 1
     }
     fn load_node(&mut self) -> io::Result<()> {
         let directory = self.open_current()?;
@@ -496,9 +518,10 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         result?;
         children[..child_count].sort_unstable_by_key(|prefix| prefix.bytes);
         self.leaf[..leaf_count].sort_unstable();
-        self.stack[self.depth].children = children;
-        self.stack[self.depth].count = u8::try_from(child_count).map_err(|_| invalid())?;
-        self.stack[self.depth].loaded = true;
+        let depth = self.depth();
+        self.stack[depth].children = children;
+        self.stack[depth].count = u8::try_from(child_count).map_err(|_| invalid())?;
+        self.stack[depth].loaded = true;
         self.leaf_count = leaf_count;
         self.leaf_next = 0;
         Ok(())
@@ -507,7 +530,7 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         self.work.namespace_attempts += 1;
         self.work.node_attempts += 1;
         let mut directory = self.root.open_directory(self.namespace.name())?;
-        for depth in 1..=self.depth {
+        for depth in 1..=self.depth() {
             let parent = self.stack[depth - 1].prefix;
             let child = self.stack[depth].prefix;
             let name = hex(
@@ -561,7 +584,14 @@ impl<'root> CanonicalCursor<'root, 'static> {
         let mut work = ReadWork::default();
         let state = StateObservation::begin_owned(root, recording, &mut work.namespace_attempts)?
             .ok_or_else(retry)?;
-        Self::from_state(root, namespace, range, state, work, reservation)
+        Ok(Self::from_state(
+            root,
+            namespace,
+            range,
+            state,
+            work,
+            reservation,
+        ))
     }
 }
 fn intersects(prefix: &Prefix, range: &SeekRange) -> bool {

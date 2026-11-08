@@ -895,6 +895,48 @@ fn deepest_known_key_lookup_continues_under_the_original_snapshot() {
     assert!(found);
 }
 #[test]
+fn a_shallow_walk_allocates_only_the_levels_it_descends() {
+    // Goal: a cursor allocates the levels its walk descends rather than the full 120-nibble depth
+    // its reservation covers, since every listing of the saved minutes opens cursors.
+    // Method: walk a leaf of three keys one level down to its end, and compare the bytes the
+    // walk allocated with the working memory the cursor reserved.
+    let fixture = Fixture::new();
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    let leaf = root
+        .open_directory("ordinary")
+        .unwrap()
+        .create_directory("0")
+        .unwrap();
+    for origin in 1..=3 {
+        let key = CanonicalKey::source(Namespace::Ordinary, &fixture.run, origin).unwrap();
+        leaf.create_file(&key.file_name()).unwrap();
+    }
+    let memory = budget();
+    let mut state = [0; 256];
+
+    let (reserved, allocated) = crate::allocation_tests::observe(&memory, || {
+        let mut cursor = CanonicalCursor::begin(
+            &root,
+            fixture.run.recording,
+            Namespace::Ordinary,
+            SeekRange::source_tail(Namespace::Ordinary, &fixture.run).unwrap(),
+            &mut state,
+            &memory,
+        )
+        .unwrap();
+        let mut keys = Vec::with_capacity(4);
+        assert!(cursor.step_keys(&mut keys, 4).unwrap());
+        assert_eq!(keys.len(), 3);
+        memory.used()
+    });
+
+    assert!(
+        allocated.allocated_bytes < reserved / 8,
+        "allocated {} bytes of the {reserved} reserved",
+        allocated.allocated_bytes
+    );
+}
+#[test]
 fn leaf_128_and_sixteen_way_branch_have_bounded_exact_ranges() {
     // Goal: stable boundary shapes return independently expected source keys.
     // Method: fill one128-link leaf and a separate sixteen-child branch, then seek both directions.
