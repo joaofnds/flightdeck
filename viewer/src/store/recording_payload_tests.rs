@@ -60,8 +60,7 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
     assert_eq!(budget.used(), 0);
 }
 
-/// Steps `cursor` over `group`, whose hand-over needs no agreement, adding the publication of each
-/// second it hands over to `accepted`.
+/// Steps `cursor` over `group`, adding the publication of each second it hands over to `accepted`.
 fn cursor_step_publications(
     cursor: &mut Cursor,
     input: &LoadInput<'_>,
@@ -69,15 +68,9 @@ fn cursor_step_publications(
     accepted: &mut Vec<u64>,
 ) {
     cursor
-        .step(
-            input,
-            None,
-            group,
-            || true,
-            |_, second, _| {
-                accepted.push(second.publication);
-            },
-        )
+        .step(input, group, |_, second, _| {
+            accepted.push(second.publication);
+        })
         .unwrap();
 }
 
@@ -101,15 +94,9 @@ fn cursor_steps_preserve_the_first_live_successor() {
     let mut cursor = Cursor::new(found.len());
     let expected = one_pass_terminal(&fixture.root, &operation);
 
-    cursor
-        .step(&input, None, &found[0..=0], || true, |_, _, _| {})
-        .unwrap();
-    cursor
-        .step(&input, None, &found[1..=1], || true, |_, _, _| {})
-        .unwrap();
-    cursor
-        .step(&input, None, &found[2..=2], || true, |_, _, _| {})
-        .unwrap();
+    cursor.step(&input, &found[0..=0], |_, _, _| {}).unwrap();
+    cursor.step(&input, &found[1..=1], |_, _, _| {}).unwrap();
+    cursor.step(&input, &found[2..=2], |_, _, _| {}).unwrap();
     let actual = cursor.finish(&operation).unwrap().terminal.unwrap();
     fixture.publish_with_system_rows(221);
     let expected = terminal_successor(&fixture.root, expected);
@@ -139,9 +126,7 @@ fn cursor_refuses_a_terminal_handoff_before_all_minutes_are_consumed() {
         capture: &AdmittedTable::from_file_budgeted,
     };
     let mut cursor = Cursor::new(found.len());
-    cursor
-        .step(&input, None, &found[0..=0], || true, |_, _, _| {})
-        .unwrap();
+    cursor.step(&input, &found[0..=0], |_, _, _| {}).unwrap();
 
     let result = cursor.finish(&operation);
 
@@ -174,30 +159,18 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
     let mut cursor = Cursor::new(found.len());
     let mut retained = AppsSecond::with_room();
     cursor
-        .step(
-            &input,
-            None,
-            &found[0..=0],
-            || true,
-            |_, _, apps| {
-                retained.take(apps, None);
-            },
-        )
+        .step(&input, &found[0..=0], |_, _, apps| {
+            retained.take(apps, None);
+        })
         .unwrap();
     let reader = Arc::new(retained);
     let charge = crate::store::startup_tests::retained_app_charge(&reader);
     let mut accepted = 0;
     cancellation.cancel().unwrap();
 
-    let result = cursor.step(
-        &input,
-        None,
-        &found[1..=1],
-        || true,
-        |_, _, _| {
-            accepted += 1;
-        },
-    );
+    let result = cursor.step(&input, &found[1..=1], |_, _, _| {
+        accepted += 1;
+    });
     let finished = cursor.finish(&operation);
 
     assert_eq!(accepted, 0);
@@ -233,38 +206,20 @@ fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
     let mut accepted = Vec::new();
 
     cursor
-        .step(
-            &input,
-            None,
-            &found[0..=0],
-            || true,
-            |_, second, _| {
-                accepted.push((second.publication, second.follows()));
-            },
-        )
+        .step(&input, &found[0..=0], |_, second, _| {
+            accepted.push((second.publication, second.follows()));
+        })
         .unwrap();
     cursor
-        .step(
-            &input,
-            None,
-            &found[1..=1],
-            || true,
-            |_, second, _| {
-                accepted.push((second.publication, second.follows()));
-            },
-        )
+        .step(&input, &found[1..=1], |_, second, _| {
+            accepted.push((second.publication, second.follows()));
+        })
         .unwrap();
     assert_eq!(accepted, [(1, false)]);
     cursor
-        .step(
-            &input,
-            None,
-            &found[2..=2],
-            || true,
-            |_, second, _| {
-                accepted.push((second.publication, second.follows()));
-            },
-        )
+        .step(&input, &found[2..=2], |_, second, _| {
+            accepted.push((second.publication, second.follows()));
+        })
         .unwrap();
     let outcome = cursor.finish(&operation).unwrap();
 

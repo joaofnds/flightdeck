@@ -22,41 +22,73 @@ use persistence::engine::AdmissionRefusal;
 #[path = "recording_payload_tests.rs"]
 mod tests;
 
+/// The neighbouring minutes a load that continues the store's seconds decodes at once, a thread
+/// each, beside a thread that seeds the first from the predecessor. A load of the whole hour
+/// decodes one minute at a time.
+const GROUP_MINUTES_MAX: usize = 6;
+
 /// Hands `take` the seconds of `minutes`, oldest first, after seeding their rates from
 /// `predecessor`, the minute before them whose seconds the store holds, where the load
 /// continues the store's seconds. A load that continues them, which a returning window waits on,
-/// decodes up to `LOADERS_MAX` neighbouring minutes at once, each seeding its rates from the
+/// decodes up to `GROUP_MINUTES_MAX` neighbouring minutes at once, each seeding its rates from the
 /// minute before it. A load of the whole hour decodes one minute at a time, so it needs the memory
-/// of one minute however many it reads. Before it hands over its first second, `agrees` says
-/// whether it may, and where it may not, the load ends with none handed over.
+/// of one minute however many it reads.
 pub(super) fn load(
     input: &LoadInput<'_>,
     predecessor: Option<&Found>,
     minutes: &[Found],
-    agrees: impl FnOnce() -> bool,
-    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
-) -> persistence::Result<Option<super::Outcome>> {
+    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<super::Outcome> {
+    start(input, predecessor, minutes)?.finish(input, take)
+}
+
+/// A load whose first minutes are decoded and wait to be handed over.
+pub(super) struct Started<'minutes> {
+    cursor: Cursor,
+    first: Vec<persistence::Result<Decoded>>,
+    rest: std::slice::Chunks<'minutes, Found>,
+}
+
+/// Starts the load `load` makes of `minutes`, decoding the first of them and handing none over.
+pub(super) fn start<'minutes>(
+    input: &LoadInput<'_>,
+    predecessor: Option<&Found>,
+    minutes: &'minutes [Found],
+) -> persistence::Result<Started<'minutes>> {
     let mut cursor = Cursor::new(minutes.len());
     let group_minutes = match predecessor {
-        Some(_) => super::LOADERS_MAX,
+        Some(_) => GROUP_MINUTES_MAX,
         None => 1,
     };
-    let mut groups = minutes.chunks(group_minutes);
-    let Some(first) = groups.next() else {
-        if !agrees() {
-            return Ok(None);
-        }
-        return cursor.finish(input.operation).map(Some);
+    let mut rest = minutes.chunks(group_minutes);
+    let first = match rest.next() {
+        Some(group) => cursor.decode_group(input, predecessor, group)?,
+        None => Vec::new(),
     };
-    if !cursor.step(input, predecessor, first, agrees, &mut take)? {
-        return Ok(None);
-    }
-    for group in groups {
-        let handed = cursor.step(input, None, group, || true, &mut take)?;
-        assert!(handed);
-    }
 
-    cursor.finish(input.operation).map(Some)
+    Ok(Started {
+        cursor,
+        first,
+        rest,
+    })
+}
+
+impl Started<'_> {
+    /// Hands `take` the seconds of the minutes decoded, then decodes the others a group at a time
+    /// and hands over theirs.
+    pub(super) fn finish(
+        mut self,
+        input: &LoadInput<'_>,
+        mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    ) -> persistence::Result<super::Outcome> {
+        self.cursor
+            .hand_over(self.first, input.operation, &mut take)?;
+        for group in self.rest {
+            self.cursor.step(input, group, &mut take)?;
+        }
+
+        self.cursor.finish(input.operation)
+    }
 }
 
 /// Decodes `group`, neighbouring minutes oldest first, a thread a minute, or on this thread where
@@ -79,7 +111,7 @@ fn load_group(
     group: &[Found],
 ) -> Vec<persistence::Result<Decoded>> {
     assert!(!group.is_empty());
-    assert!(group.len() <= super::LOADERS_MAX);
+    assert!(group.len() <= GROUP_MINUTES_MAX);
     let mut carried = match predecessor {
         Some(_) => None,
         None => Some(carried),
@@ -281,7 +313,7 @@ fn load_group_reads<'input>(
     group: &[Found],
 ) -> Vec<Result<MinuteRead<'input>, Failure>> {
     let minutes: Vec<&Found> = predecessor.into_iter().chain(group).collect();
-    assert!(minutes.len() <= super::LOADERS_MAX + 1);
+    assert!(minutes.len() <= GROUP_MINUTES_MAX + 1);
     let predecessors = minutes.len() - group.len();
     let last = minutes.len() - 1;
     let read = |index: usize, found: &Found| {
@@ -423,19 +455,28 @@ impl Cursor {
         }
     }
 
-    /// Decodes `group`, the next neighbouring minutes oldest first, at once, and hands `take`
-    /// their seconds in order once `agrees`, asked after the decoding, says it may. Where
-    /// the load continues from `predecessor`, the minute before the first of them, whose seconds
-    /// the store holds, it seeds their rates from it and leaves its seconds unread. Gives whether
-    /// it handed them over.
+    /// Decodes `group`, the next neighbouring minutes oldest first, at once, going on from the
+    /// minute before them, and hands `take` their seconds in order.
     fn step(
+        &mut self,
+        input: &LoadInput<'_>,
+        group: &[Found],
+        take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    ) -> persistence::Result<()> {
+        let decoded = self.decode_group(input, None, group)?;
+        self.hand_over(decoded, input.operation, take)
+    }
+
+    /// Decodes `group`, the next neighbouring minutes oldest first, at once, and hands none of
+    /// their seconds over. Where the load continues from `predecessor`, the minute before the first
+    /// of them, whose seconds the store holds, it seeds their rates from it and leaves its seconds
+    /// unread.
+    fn decode_group(
         &mut self,
         input: &LoadInput<'_>,
         predecessor: Option<&Found>,
         group: &[Found],
-        agrees: impl FnOnce() -> bool,
-        mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
-    ) -> persistence::Result<bool> {
+    ) -> persistence::Result<Vec<persistence::Result<Decoded>>> {
         input.operation.check()?;
         if self.minute_count - self.next_minute_index < group.len() {
             return Err(persistence::Error::Bound("sealed payload cursor exhausted"));
@@ -444,21 +485,31 @@ impl Cursor {
             assert_eq!(self.next_minute_index, 0);
         }
 
+        Ok(load_group(
+            input,
+            mem::take(&mut self.decoder),
+            predecessor,
+            group,
+        ))
+    }
+
+    /// Hands `take` the seconds of `decoded`, the minutes `decode_group` decoded, in order.
+    fn hand_over(
+        &mut self,
+        decoded: Vec<persistence::Result<Decoded>>,
+        operation: &Operation,
+        mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    ) -> persistence::Result<()> {
         let mut decoded_catalog = super::DecodedCatalog::default();
-        let decoded = load_group(input, mem::take(&mut self.decoder), predecessor, group);
-        if !agrees() {
-            return Ok(false);
-        }
         for (index, decoded) in decoded.into_iter().enumerate() {
             let mut decoded = decoded?;
-            // Only the predecessor has no decoder in this load to say why it cannot be read.
-            if index == 0 && predecessor.is_some() {
-                if let Some(failure) = decoded.unseeded {
-                    self.left_out = Some(failure);
-                }
+            // Only the predecessor, which no decoder in this load decodes, leaves a minute unseeded.
+            if let Some(failure) = decoded.unseeded {
+                assert_eq!(index, 0);
+                self.left_out = Some(failure);
             }
             decoded_catalog.extend(&mem::take(&mut decoded.decoder.decoded_catalog));
-            if let Some(failure) = load_consume(decoded.completion, input.operation, &mut take)? {
+            if let Some(failure) = load_consume(decoded.completion, operation, &mut take)? {
                 self.left_out = Some(failure);
             }
             self.accept_minute();
@@ -466,7 +517,7 @@ impl Cursor {
         }
         self.decoder.decoded_catalog = decoded_catalog;
 
-        Ok(true)
+        Ok(())
     }
 
     pub(super) fn accept_minute(&mut self) {

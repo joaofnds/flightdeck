@@ -237,33 +237,37 @@ fn load_payload_window_using(
         capture,
     };
     let Some(since) = window.since.filter(|_| window.unread) else {
-        let (found, discovered) = load_payload_listed(root, window);
-        return load_payload_found(&input, window, found, discovered, take);
+        return load_payload_found(&input, window, load_payload_listed(root, window), take);
     };
 
     thread::scope(|scope| {
-        // A listing that cannot start beside the walk runs before it, as without one.
+        // Where the listing cannot start on a thread of its own, the load lists the hour first, as
+        // a load that continues nothing does.
         let Ok(finder) = load_payload_finder(scope, root, window) else {
-            let (found, discovered) = load_payload_listed(root, window);
-            return load_payload_found(&input, window, found, discovered, take);
+            return load_payload_found(&input, window, load_payload_listed(root, window), take);
         };
         // A walk that fails leaves the load to the listing, which says why the recording cannot be
-        // read.
+        // read, and a walk that found only the minute the load continues from leaves it nothing to
+        // decode while the listing runs.
         let walked = match catalog::walk(root, since, window) {
             Ok(Some(walked)) if walked.len() > 1 => Some(walked),
             Ok(_) | Err(_) => None,
         };
         let Some(walked) = walked else {
-            let (found, discovered) = load_payload_join(finder);
-            return load_payload_found(&input, window, found, discovered, take);
+            return load_payload_found(&input, window, load_payload_join(finder), take);
         };
 
         load_payload_walked(&input, window, finder, walked, take)
     })
 }
 
-/// What listing the loaded hour found, newest first, and of its catalog or why it could not.
-type Listed = (Vec<Found>, Result<CheckedCatalog, Failure>);
+/// What listing the loaded hour found.
+struct Listing {
+    /// The minutes it found, newest first.
+    found: Vec<Found>,
+    /// The catalog it read, or why it could not.
+    discovered: Result<CheckedCatalog, Failure>,
+}
 
 /// Loads `walked`, the minutes a walk back from the newest found newest first, while `finder`
 /// lists the loaded hour, which must find the same minutes before the load hands any second to
@@ -272,46 +276,30 @@ type Listed = (Vec<Found>, Result<CheckedCatalog, Failure>);
 fn load_payload_walked(
     input: &payload::LoadInput<'_>,
     window: &LoadWindow<'_>,
-    finder: thread::ScopedJoinHandle<'_, Listed>,
+    finder: thread::ScopedJoinHandle<'_, Listing>,
     mut walked: Vec<Found>,
     mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     walked.reverse();
     let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
-    let mut listed = None;
+    let started = payload::start(input, walked.first(), &walked[1..])?;
+    drop(tentative_scope);
+    let listing = load_payload_join(finder);
+    if !load_payload_agrees(window, &listing, &walked) {
+        tentative.discard();
+        drop(started);
+        return load_payload_found(input, window, listing, take);
+    }
+
+    tentative.keep();
     let mut admitted = true;
-
-    let loaded = payload::load(
-        input,
-        walked.first(),
-        &walked[1..],
-        || {
-            drop(tentative_scope);
-            let (found, discovered) = load_payload_join(finder);
-            let agrees = load_payload_agrees(window, &found, &discovered, &walked);
-            if agrees {
-                tentative.keep();
-            } else {
-                tentative.discard();
-            }
-            listed = Some((found, discovered));
-            agrees
-        },
-        |run, second, apps| {
-            if !load_payload_admitted(&apps) {
-                admitted = false;
-            }
-            take(Continuity::Extend, run, second, apps);
-        },
-    )?;
-
-    let Some((found, discovered)) = listed else {
-        unreachable!("a load that returns heard whether the listing agrees");
-    };
-    let Some(outcome) = loaded else {
-        return load_payload_found(input, window, found, discovered, take);
-    };
-    let Ok(checked) = discovered else {
+    let outcome = started.finish(input, |run, second, apps| {
+        if !load_payload_admitted(&apps) {
+            admitted = false;
+        }
+        take(Continuity::Extend, run, second, apps);
+    })?;
+    let Ok(checked) = listing.discovered else {
         unreachable!("a listing that agrees with the walk read the catalog");
     };
 
@@ -319,15 +307,15 @@ fn load_payload_walked(
 }
 
 /// What listing the loaded hour, as a load in `window` lists it, found.
-fn load_payload_listed(root: &Path, window: &LoadWindow<'_>) -> Listed {
+fn load_payload_listed(root: &Path, window: &LoadWindow<'_>) -> Listing {
     let mut found = Vec::with_capacity(MINUTES_MAX);
     let discovered = catalog::find(root, &mut found, window);
 
-    (found, discovered)
+    Listing { found, discovered }
 }
 
 /// What the listing of `finder` found, or its panic, which goes on in this thread.
-fn load_payload_join(finder: thread::ScopedJoinHandle<'_, Listed>) -> Listed {
+fn load_payload_join(finder: thread::ScopedJoinHandle<'_, Listing>) -> Listing {
     match finder.join() {
         Ok(listed) => listed,
         Err(panic) => panic::resume_unwind(panic),
@@ -339,7 +327,7 @@ fn load_payload_finder<'scope>(
     scope: &'scope thread::Scope<'scope, '_>,
     root: &'scope Path,
     window: &'scope LoadWindow<'_>,
-) -> io::Result<thread::ScopedJoinHandle<'scope, Listed>> {
+) -> io::Result<thread::ScopedJoinHandle<'scope, Listing>> {
     let observation = persistence::work::ingestion::inherit_current();
     thread::Builder::new()
         .name(String::from("flightdeck-finder"))
@@ -351,29 +339,25 @@ fn load_payload_finder<'scope>(
         })
 }
 
-/// Whether the listing, which found `found` newest first and `discovered` of the catalog, found
-/// what a walk found as `walked`, oldest first.
-fn load_payload_agrees(
-    window: &LoadWindow<'_>,
-    found: &[Found],
-    discovered: &Result<CheckedCatalog, Failure>,
-    walked: &[Found],
-) -> bool {
-    discovered.is_ok()
-        && load_continuity(window, found) == Continuity::Extend
-        && found.iter().rev().eq(walked)
+/// Whether `listing` read the catalog and found what a walk found as `walked`, oldest first.
+fn load_payload_agrees(window: &LoadWindow<'_>, listing: &Listing, walked: &[Found]) -> bool {
+    listing.discovered.is_ok()
+        && load_continuity(window, &listing.found) == Continuity::Extend
+        && listing.found.iter().rev().eq(walked)
 }
 
-/// Loads `found`, the minutes the listing of the loaded hour found newest first, which
-/// `discovered` says it found or why it could not.
+/// Loads the minutes `listing` found in the loaded hour, or says why it could not list them.
 fn load_payload_found(
     input: &payload::LoadInput<'_>,
     window: &LoadWindow<'_>,
-    mut found: Vec<Found>,
-    discovered: Result<CheckedCatalog, Failure>,
+    listing: Listing,
     mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     input.operation.check()?;
+    let Listing {
+        mut found,
+        discovered,
+    } = listing;
     let checked = match discovered {
         Ok(checked) => checked,
         Err(failure) => {
@@ -390,21 +374,12 @@ fn load_payload_found(
     found.reverse();
     let (predecessor, minutes) = load_payload_minutes(continuity, &found);
     let mut admitted = true;
-    let loaded = payload::load(
-        input,
-        predecessor,
-        minutes,
-        || true,
-        |run, second, apps| {
-            if !load_payload_admitted(&apps) {
-                admitted = false;
-            }
-            take(continuity, run, second, apps);
-        },
-    )?;
-    let Some(outcome) = loaded else {
-        unreachable!("a load that needs no agreement hands its seconds over");
-    };
+    let outcome = payload::load(input, predecessor, minutes, |run, second, apps| {
+        if !load_payload_admitted(&apps) {
+            admitted = false;
+        }
+        take(continuity, run, second, apps);
+    })?;
 
     load_payload_certified(input, checked, continuity, admitted, outcome)
 }
