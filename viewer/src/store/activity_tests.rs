@@ -179,6 +179,37 @@ fn dropping_a_paused_store_wakes_and_reaps_its_thread() {
     destructor.join().unwrap();
 }
 
+#[test]
+fn a_store_paused_while_it_starts_answers_a_query() {
+    // Goal: a page that asks a Store paused before it has started hears an answer, as it does
+    // from a Store paused once started, rather than waiting out its whole bound for none.
+    // Method: start a store on a folder the collector has made no recording in yet, so it stays
+    // starting, pause it, ask it for the newest second, and wait for an answer.
+    let fixture = Fixture::new();
+    let store = Store::start(&fixture.root.join("not-yet-recorded")).unwrap();
+    store.set_active(false);
+    wait_until_paused(&store);
+    let handle = store.query_handle();
+
+    handle
+        .submit(super::QueryRequest {
+            epoch: 0,
+            source: None,
+            selection: super::QuerySelection::FollowLatest,
+        })
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..10_000 {
+        if handle.answered() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the paused store never answered");
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(handle.answered());
+}
+
 pub(super) fn wait_until_paused(store: &Store) {
     let deadline = Instant::now() + Duration::from_secs(2);
     for _ in 0..2_000 {

@@ -1106,6 +1106,9 @@ fn startup_staged_turn(
 ) -> Result<bool, recording::staged::Failure> {
     use recording::staged::{Advance, Failure as StartupFailure};
     if !shared.active.load(Ordering::Acquire) {
+        // A Store paused while it starts answers each query as it does once started, or a page
+        // that asks before the window shows again waits out its whole bound.
+        run_queries(held, ring, &shared.queries);
         shared.paused.store(true, Ordering::Release);
         thread::park();
         shared.paused.store(false, Ordering::Release);

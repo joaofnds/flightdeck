@@ -485,7 +485,8 @@ fn a_missed_tick_resets_process_rates_in_both_adapters() {
 #[test]
 fn an_exhausted_ingestion_budget_accepts_no_partial_observation() {
     // Goal: an over-budget observation never publishes partial machine or process facts.
-    // Method: queue a query with no admitted bytes and observe the public paused boundary.
+    // Method: queue a query with no admitted bytes, pause the Store while it starts, and check
+    // that it answers only that it needs a load and publishes nothing.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     let budget = Arc::new(super::ByteBudget::new(0));
@@ -511,7 +512,10 @@ fn an_exhausted_ingestion_budget_accepts_no_partial_observation() {
 
     assert!(store.is_paused());
     assert!(handle.pending());
-    assert!(handle.take().is_none());
+    assert!(matches!(
+        handle.take().unwrap().outcome,
+        super::QueryOutcome::NeedsLoad(super::QueryNeedsLoad::UncheckedCoverage)
+    ));
     assert!(store.take().is_none());
     assert_eq!(budget.used(), 0);
 }
