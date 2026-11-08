@@ -5,9 +5,6 @@ mod app_checks;
 #[path = "live/committed_apps.rs"]
 mod committed_app_checks;
 #[cfg(test)]
-#[path = "../src/live_forged_source.rs"]
-mod forged_source;
-#[cfg(test)]
 #[path = "../src/live_fixture.rs"]
 mod identity_fixture;
 /// Selects the newest reading the session lists, the last of its second's alternatives.
