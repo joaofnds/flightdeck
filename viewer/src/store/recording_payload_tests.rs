@@ -1481,6 +1481,28 @@ fn a_continued_load_takes_no_rates_from_a_minute_that_refuses_an_earlier_reading
 }
 
 #[test]
+fn a_continued_load_takes_no_rates_from_a_predecessor_that_refuses_an_earlier_reading() {
+    // Goal: a return that continues from a minute refusing a reading before its last gives the
+    // minute after it no rates and says the minute it continues from was refused, as when the
+    // minutes are decoded in turn, although that minute's last reading alone would rate it.
+    // Method: seal a fourth minute, name the process twice in publication 2, load after
+    // publication 3, so the two minutes after its minute decode at once, and check publication
+    // 4's rates and what the load left out.
+    let mut fixture = catch_up_fixture();
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(280);
+    fixture.seal_minute(3);
+    name_one_process_twice_in_publication_2(&fixture);
+
+    let (outcome, (machine, apps)) = loaded_after(&fixture, 3);
+
+    assert!(!machine.follows());
+    assert_eq!(machine.cpu_percent, None);
+    assert_eq!(apps.elapsed_ns, None);
+    assert_eq!(outcome.left_out, Some(crate::store::Failure::Refused));
+}
+
+#[test]
 fn a_continued_load_counts_a_decoding_it_throws_away_as_discarded_work() {
     // Goal: where a return decodes a minute again because the minute before it refuses a reading
     // before its last, each publication of the minute has one ordinary App aggregation and one
@@ -1626,6 +1648,18 @@ fn publication_4_loaded_after(
     fixture: &Fixture,
     publication: u64,
 ) -> (crate::store::MachineSecond, AppsSecond) {
+    loaded_after(fixture, publication).1
+}
+
+/// The outcome of a load of `catch_up_fixture` that continues from `publication`, and the
+/// seconds of publication 4 it hands over.
+fn loaded_after(
+    fixture: &Fixture,
+    publication: u64,
+) -> (
+    super::super::Outcome,
+    (crate::store::MachineSecond, AppsSecond),
+) {
     let newest = crate::store::Newest {
         run: fixture.writer.identity().unwrap(),
         publication,
@@ -1635,7 +1669,7 @@ fn publication_4_loaded_after(
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut selected = None;
 
-    super::super::load_payload_since(
+    let outcome = super::super::load_payload_since(
         &fixture.root,
         &budget,
         &operation,
@@ -1654,7 +1688,7 @@ fn publication_4_loaded_after(
     )
     .unwrap();
 
-    selected.unwrap()
+    (outcome, selected.unwrap())
 }
 
 fn catch_up_fixture() -> Fixture {

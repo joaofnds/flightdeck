@@ -395,7 +395,8 @@ fn a_resume_beyond_ring_retention_reads_the_minute_it_continues_from_as_predeces
     // Goal: what a return reads of the minute it continues from is classed apart from the
     // ingestion of new readings.
     // Method: trace a return past the ring's retention and list the purpose of each event of
-    // the minute holding publication 2.
+    // the minute holding publication 2, which reading it records, and of publication 2 itself,
+    // which replaying its frames records.
     use persistence::work::ingestion::{Key, Purpose};
     let traced = traced_return_past_the_ring();
     let minute = Key::Minute {
@@ -403,16 +404,24 @@ fn a_resume_beyond_ring_retention_reads_the_minute_it_continues_from_as_predeces
         first: 2,
         end: 3,
     };
+    let publication = Key::Publication {
+        run: traced.run,
+        publication: 2,
+    };
 
-    let purposes: Vec<_> = traced
-        .events
-        .iter()
-        .filter(|event| event.key == minute)
-        .map(|event| event.purpose)
-        .collect();
+    let [read, replayed] = [minute, publication].map(|key| {
+        traced
+            .events
+            .iter()
+            .filter(|event| event.key == key)
+            .map(|event| event.purpose)
+            .collect::<Vec<_>>()
+    });
 
-    assert!(!purposes.is_empty());
-    assert_eq!(purposes, vec![Purpose::Predecessor; purposes.len()]);
+    assert!(!read.is_empty());
+    assert_eq!(read, vec![Purpose::Predecessor; read.len()]);
+    assert!(!replayed.is_empty());
+    assert_eq!(replayed, vec![Purpose::Predecessor; replayed.len()]);
 }
 
 /// What a store holding two sealed minutes records while it returns past the ring's retention,
