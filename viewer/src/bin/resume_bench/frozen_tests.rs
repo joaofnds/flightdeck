@@ -97,7 +97,8 @@ fn retries_a_failed_eligible_seal_before_completing_replay() {
 #[test]
 fn follows_native_publication_order_after_wall_rollback_with_future_saved_points() {
     // Goal: frozen input expectations follow native order and clip future wall-clock readings.
-    // Method: keep a later-clock sealed window, roll the live clock back, and compare the caller.
+    // Method: keep a later-clock sealed window, roll the live clock back, and read the
+    // expectation's observations.
     let mut source = Fixture::new();
     source.populate();
     for (publication, second) in [(1901, 1000), (1902, 900), (1903, 900)] {
@@ -115,13 +116,22 @@ fn follows_native_publication_order_after_wall_rollback_with_future_saved_points
 
     assert_eq!(expected["selected"]["publication"], 1903);
     assert_eq!(expected["selected"]["wall_ns"], 900_000_000_000_u64);
-    assert!(
-        expected["observations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|point| point["wall_ns"].as_u64().unwrap() < 901_000_000_000)
-    );
+    let observed: Vec<(u64, u64)> = expected["observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|point| {
+            (
+                point["publication"].as_u64().unwrap(),
+                point["wall_ns"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let kept: Vec<(u64, u64)> = (1..=60)
+        .map(|publication| (publication, publication * 1_000_000_000))
+        .chain([(1902, 900_000_000_000), (1903, 900_000_000_000)])
+        .collect();
+    assert_eq!(observed, kept);
 }
 
 #[test]
