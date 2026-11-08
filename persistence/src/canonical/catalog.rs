@@ -27,7 +27,7 @@ const _: () = assert!(PAGE_READINGS_MAX < LOOKUP_STEPS_MAX);
 
 /// The windows one clock range may touch. A window holds at least one reading of its range, so this
 /// is more than an hour of a window for every second of it from a run started every minute.
-const RANGE_WINDOWS_MAX: usize = 4096;
+pub const RANGE_WINDOWS_MAX: usize = 4096;
 /// The pages one clock range reads, more than a second's readings of every window it may touch.
 const RANGE_PAGES_MAX: usize = 1 << 12;
 /// How many names one search for a damaged window's readings walks.

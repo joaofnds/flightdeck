@@ -426,6 +426,24 @@ fn exactly_full_discovery_succeeds_when_the_next_window_is_outside_the_period() 
 }
 
 #[test]
+fn a_minute_read_in_two_parts_of_the_loaded_hour_is_found_once() {
+    // Goal: a load that lists the loaded hour in parts finds a minute once where its readings fall
+    // in two parts. Method: save one minute whose clock jumps 2,000 seconds, half the loaded hour,
+    // between its first and last readings.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(10_000, &[]);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_events(12_000, &[]);
+    fixture.seal_minute(0);
+    let mut found = Vec::new();
+
+    let result = super::find(&fixture.root, &mut found, None);
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(found.len(), 1);
+}
+
+#[test]
 fn payload_discovery_keeps_in_range_history_behind_an_old_clock_marker() {
     // Goal: an older wall time cannot hide a still-relevant earlier publication.
     // Method: seal a clock rollback between two in-range windows and read the payload adapter.

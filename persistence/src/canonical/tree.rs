@@ -6,6 +6,8 @@ use collector::ring::{Identity, RunIdentity};
 use std::io;
 use std::sync::Arc;
 
+/// The working memory one cursor reserves while it is open.
+pub const CURSOR_BYTES: usize = 256 * 1024;
 const DIRECT_ENTRIES: u64 = 16 * 124 + 128;
 const BOUNDARY_ENTRIES: u64 = 32 * 124 + 256;
 const _: () = {
@@ -242,7 +244,7 @@ pub struct CanonicalCursor<'root, 'state> {
     _reservation: ByteReservation,
 }
 const _: () =
-    assert!(size_of::<[Frame; 124]>() + size_of::<[CanonicalKey; 128]>() + 4096 < 256 * 1024);
+    assert!(size_of::<[Frame; 124]>() + size_of::<[CanonicalKey; 128]>() + 4096 < CURSOR_BYTES);
 impl<'root, 'state> CanonicalCursor<'root, 'state> {
     pub fn begin(
         root: &'root PrivateDirectory,
@@ -278,7 +280,7 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
             return Err(invalid());
         }
         let reservation = budget
-            .reserve(256 * 1024)
+            .reserve(CURSOR_BYTES)
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
         let mut work = ReadWork::default();
         let observed = StateObservation::begin_counted(
@@ -523,7 +525,7 @@ impl<'root> CanonicalCursor<'root, 'static> {
             return Err(invalid());
         }
         let reservation = budget
-            .reserve(256 * 1024)
+            .reserve(CURSOR_BYTES)
             .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))?;
         let mut work = ReadWork::default();
         let state = StateObservation::begin_owned(root, recording, &mut work.namespace_attempts)?
