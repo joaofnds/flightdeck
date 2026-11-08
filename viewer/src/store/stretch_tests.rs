@@ -461,7 +461,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete()
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let mut held = Held::without_recording();
     launch(&fixture, &mut held);
-    assert!(held.covers_hour);
+    assert!(held.resumes_from_newest);
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
 
@@ -473,7 +473,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete()
     );
 
     assert_eq!(held.left_out, Some(super::Failure::Refused));
-    assert!(held.covers_hour);
+    assert!(held.resumes_from_newest);
 }
 
 #[test]

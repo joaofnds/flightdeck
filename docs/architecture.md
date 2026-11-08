@@ -189,7 +189,9 @@ flowchart TD
     Eligible -->|no| Worker[Restore through page worker]
     Eligible -->|yes| Covered{Loaded hour held and unread publications retained?}
     Covered -->|yes| Delta[Keep cached history and predecessors; read bounded ring delta]
-    Covered -->|no| Reload[Read minutes sealed since the newest whole held minute and reconcile ring]
+    Covered -->|no| LeftOut{Held hour leaves a minute out?}
+    LeftOut -->|yes| Hour
+    LeftOut -->|no| Reload[Read minutes sealed since the newest whole held minute and reconcile ring]
     Delta --> Lost{Publication overwritten during read?}
     Lost -->|yes| Hour[Read the loaded hour's sealed minutes again and reconcile ring]
     Lost -->|no| Complete[Publish complete replacement View]
@@ -200,14 +202,16 @@ flowchart TD
 
 Checkpoint reuse requires the same recording and registered ring identity, a
 contiguous unread cursor still inside ring retention, and every saved second of the loaded
-hour, the newest 3,600 s of readings, held. The Store holds that hour whatever range is
+hour, the newest 3,600 s of readings, held, apart from the seconds of a minute that refused
+to load, which a reused checkpoint does not read again. The Store holds that hour whatever range is
 selected, so a range switch leaves its readings as they are. An expired checkpoint reads
 the newest sealed minute the Store holds whole, to seed rates, and every minute the
 recording sealed after it. Where the Store holds no whole sealed minute of that run, it
 loads the whole hour again. During restoration the Store withholds partial Views until
 it reaches the current endpoint, or reports a failure. Missing or refused readings
 remain explicit gaps in the replacement. While the held hour leaves a minute out, each
-restoration reads the whole hour again, so a minute that becomes readable fills it.
+restoration the checkpoint does not cover reads the whole hour again, so a minute that
+becomes readable fills it then.
 
 Coverage is checked again through consumption. If the writer overwrites an unread
 publication after checkpoint admission, the Store withholds the incomplete View,

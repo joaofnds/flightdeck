@@ -423,9 +423,9 @@ struct Held {
     checked_catalog: Option<recording::CheckedCatalog>,
     source_generation: u64,
     source_status: Option<ring::Status>,
-    /// Whether the store holds every second the loaded hour's minutes gave, so a refresh may go on
-    /// from its newest second, as `covers_hour_leaving_out` says.
-    covers_hour: bool,
+    /// Whether a refresh may go on from the store's newest second rather than read the hour again,
+    /// as `resumes_from_newest_leaving_out` says.
+    resumes_from_newest: bool,
     ring_complete: bool,
     full_detail_evicted_through_ns: Option<u64>,
     payload_budget: Arc<ByteBudget>,
@@ -544,7 +544,7 @@ impl Held {
             checked_catalog: None,
             source_generation: 0,
             source_status: None,
-            covers_hour: false,
+            resumes_from_newest: false,
             ring_complete: false,
             full_detail_evicted_through_ns: None,
             payload_budget: budget,
@@ -585,7 +585,7 @@ impl Held {
         self.sampled
             .release(|sample| *sample = SampledSecond::empty());
         self.newest = None;
-        self.covers_hour = false;
+        self.resumes_from_newest = false;
         self.ring_complete = false;
         self.full_detail_evicted_through_ns = None;
         self.unpublished = true;
@@ -938,15 +938,16 @@ fn run_owed_add(
 
     if left_out.is_some() {
         held.left_out = left_out;
-        held.covers_hour &= covers_hour_leaving_out(left_out);
+        held.resumes_from_newest &= resumes_from_newest_leaving_out(left_out);
     }
     held.unpublished = true;
 }
 
-/// Whether a store whose load left `left_out` out still holds every second the loaded hour gives.
-/// A minute that refused is damaged and refuses again at every read, so reading the hour again
-/// gives nothing more. A refusal that may clear, as a budget refusal may, leaves the hour to read.
-fn covers_hour_leaving_out(left_out: Option<Failure>) -> bool {
+/// Whether a store whose load left `left_out` out may go on from its newest second. A refused
+/// minute stays left out until the hour is read again, after a ring overrun or a restart, rather
+/// than at every show. Any other failure, which may clear as a budget refusal does, leaves the
+/// hour to read.
+fn resumes_from_newest_leaving_out(left_out: Option<Failure>) -> bool {
     matches!(left_out, None | Some(Failure::Refused))
 }
 
@@ -1337,7 +1338,7 @@ fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
         }
     }
     held.checked_catalog = None;
-    held.covers_hour = false;
+    held.resumes_from_newest = false;
     held.ring_complete = false;
     shared.catch_up.store(true, Ordering::Release);
     true
@@ -1383,7 +1384,7 @@ fn refresh(
 ) -> persistence::Result<bool> {
     drop(shared.mailbox.take());
     held.unpublished = true;
-    if held.covers_hour {
+    if held.resumes_from_newest {
         if let Some(checkpoint) = &held.newest {
             match ring.covers(checkpoint) {
                 Ok(true) => return Ok(true),
@@ -1459,7 +1460,7 @@ fn refresh_load(
     }
     if accepted {
         coverage::accept_catalog(held, checked_catalog)?;
-        held.covers_hour = covers_hour_leaving_out(left_out);
+        held.resumes_from_newest = resumes_from_newest_leaving_out(left_out);
         refresh_load_finish(held, ring, next_ring, loaded);
     }
     Ok(accepted)
