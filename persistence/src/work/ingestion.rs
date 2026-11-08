@@ -23,6 +23,9 @@ pub enum Purpose {
     Predecessor,
     /// A read of saved minutes for what the live Store does not hold.
     History,
+    /// Work whose result was thrown away before publication, as a decoding begun from a seed
+    /// that a later check refused.
+    Discarded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +108,8 @@ struct Context {
     purpose: Purpose,
     key: Option<Key>,
     table: Option<&'static str>,
+    /// Where events go until their `Tentative` is settled, in place of the trace.
+    tentative: Option<Arc<Mutex<State>>>,
 }
 
 thread_local! {
@@ -117,6 +122,11 @@ pub struct Scope {
     previous: Option<Arc<Context>>,
     thread: PhantomData<Rc<()>>,
 }
+
+/// The events of work whose result may yet be thrown away. They reach the trace as recorded
+/// once kept, and as `Purpose::Discarded` once discarded or dropped unkept.
+#[must_use]
+pub struct Tentative(Option<(Arc<Shared>, Arc<Mutex<State>>)>);
 
 impl Trace {
     #[must_use]
@@ -140,6 +150,7 @@ impl Trace {
             purpose: Purpose::Ordinary,
             key: None,
             table: None,
+            tentative: None,
         })))
     }
 
@@ -209,6 +220,66 @@ pub fn purpose(purpose: Purpose) -> Scope {
     change(|context| context.purpose = purpose)
 }
 
+/// Keeps every event this thread and the threads it enrols record, until the returned scope ends,
+/// from the trace until the returned `Tentative` is settled.
+pub fn tentative() -> (Scope, Tentative) {
+    let mut context = ACTIVE.with(|active| active.borrow().clone());
+    let mut tentative = Tentative(None);
+    if let Some(context) = &mut context {
+        assert!(context.tentative.is_none());
+        let events = Arc::new(Mutex::new(State {
+            events: Vec::new(),
+            overflowed: false,
+        }));
+        tentative = Tentative(Some((Arc::clone(&context.shared), Arc::clone(&events))));
+        Arc::make_mut(context).tentative = Some(events);
+    }
+
+    (enter(context), tentative)
+}
+
+impl Tentative {
+    /// Hands the trace the events as they were recorded.
+    pub fn keep(mut self) {
+        self.settle(true);
+    }
+
+    /// Hands the trace the events as discarded work.
+    pub fn discard(mut self) {
+        self.settle(false);
+    }
+
+    fn settle(&mut self, kept: bool) {
+        let Some((shared, events)) = self.0.take() else {
+            return;
+        };
+        let events = events.lock().unwrap_or_else(|_| {
+            unreachable!("a tentative lock is held only while pushing or copying bounded events")
+        });
+        let mut state = shared.state.lock().unwrap_or_else(|_| {
+            unreachable!("a trace lock is held only while copying bounded events")
+        });
+
+        if events.overflowed {
+            state.overflowed = true;
+        }
+        for event in &events.events {
+            let purpose = if kept {
+                event.purpose
+            } else {
+                Purpose::Discarded
+            };
+            push(&mut state, Event { purpose, ..*event });
+        }
+    }
+}
+
+impl Drop for Tentative {
+    fn drop(&mut self) {
+        self.settle(false);
+    }
+}
+
 fn change(update: impl FnOnce(&mut Context)) -> Scope {
     let mut context = ACTIVE.with(|active| active.borrow().clone());
     if let Some(context) = &mut context {
@@ -261,22 +332,33 @@ fn record_inner(key: Option<Key>, kind: Kind, bytes: u64) {
             return;
         }
 
-        let mut state = context.shared.state.lock().unwrap_or_else(|_| {
-            unreachable!("a trace lock is held only while copying bounded events")
-        });
-        if state.events.len() == EVENTS_MAX {
-            state.overflowed = true;
-            return;
-        }
-        state.events.push(Event {
+        let event = Event {
             producer: context.producer,
             purpose: context.purpose,
             key,
             kind,
             table: context.table,
             bytes,
+        };
+        let state = match &context.tentative {
+            Some(tentative) => tentative,
+            None => &context.shared.state,
+        };
+        let mut state = state.lock().unwrap_or_else(|_| {
+            unreachable!("a trace lock is held only while copying bounded events")
         });
+        push(&mut state, event);
     });
+}
+
+/// Adds `event` to `state`, which marks itself overflowed rather than grow past `EVENTS_MAX`.
+fn push(state: &mut State, event: Event) {
+    if state.events.len() == EVENTS_MAX {
+        state.overflowed = true;
+        return;
+    }
+
+    state.events.push(event);
 }
 
 #[must_use]

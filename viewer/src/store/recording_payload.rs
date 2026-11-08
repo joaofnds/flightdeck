@@ -113,7 +113,10 @@ fn load_group(
                     _ => None,
                 };
                 let decoder = load_group_spawn(scope, "flightdeck-decoder", move || {
-                    load_group_guess(input, carried, before, found, read)
+                    let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
+                    let guessed = load_group_guess(input, carried, before, found, read);
+                    drop(tentative_scope);
+                    (tentative, guessed)
                 });
                 (seeder, decoder)
             })
@@ -123,20 +126,26 @@ fn load_group(
             .into_iter()
             .enumerate()
             .map(|(index, (seeder, decoder))| {
-                let guessed = match decoder {
-                    Ok(handle) => load_group_join(handle),
-                    Err(error) => return Ok(Decoded::unstarted(&error)),
-                };
-                let full = match seeder {
-                    None => return guessed.map(|(_, decoded)| decoded),
-                    Some(Ok(handle)) => load_group_join(handle),
-                    Some(Err(error)) => return Ok(Decoded::unstarted(&error)),
-                };
-                load_group_checked(input, guessed, full, &group[index], &reads[index + offset])
+                load_group_settled(
+                    input,
+                    seeder,
+                    decoder,
+                    &group[index],
+                    &reads[index + offset],
+                )
             })
             .collect()
     })
 }
+
+/// What the thread seeding a minute from the whole minute before it gives.
+type Seeding = persistence::Result<(Decoder, Option<Failure>)>;
+
+/// What the thread decoding a minute from a guessed seed gives, and the work it recorded.
+type Guessing = (
+    persistence::work::ingestion::Tentative,
+    persistence::Result<(SeedKey, Decoded)>,
+);
 
 /// Decodes `found`, which `read` read, with `carried`, the decoder of the minute before it, or
 /// with a decoder seeded from only the last frame of `before`, that minute and its read, and
@@ -202,21 +211,37 @@ fn load_group_last_frame(read: &Result<MinuteRead<'_>, Failure>) -> usize {
         .map_or(0, |read| read.processes.endpoints.len().saturating_sub(1))
 }
 
-/// The decoding of `found`, which `read` read: `guessed`, decoded from a seed of only the last
-/// frame of the minute before it, where `full`, the decoder seeded from all that minute's frames,
-/// holds the same seed, and otherwise a decoding from `full`.
-fn load_group_checked(
+/// The decoding of `found`, which `read` read: the one `decoder` began from a seed of only the
+/// last frame of the minute before it, where `seeder`, seeding from all that minute's frames,
+/// gives the same seed or there is no `seeder`, and otherwise a decoding from the seed of
+/// `seeder`. The work of a decoding thrown away counts as discarded.
+fn load_group_settled(
     input: &LoadInput<'_>,
-    guessed: persistence::Result<(SeedKey, Decoded)>,
-    full: persistence::Result<(Decoder, Option<Failure>)>,
+    seeder: Option<std::io::Result<thread::ScopedJoinHandle<'_, Seeding>>>,
+    decoder: std::io::Result<thread::ScopedJoinHandle<'_, Guessing>>,
     found: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
 ) -> persistence::Result<Decoded> {
+    let (tentative, guessed) = match decoder {
+        Ok(handle) => load_group_join(handle),
+        Err(error) => return Ok(Decoded::unstarted(&error)),
+    };
+    let full = match seeder {
+        None => {
+            tentative.keep();
+            return guessed.map(|(_, decoded)| decoded);
+        }
+        Some(Ok(handle)) => load_group_join(handle),
+        Some(Err(error)) => return Ok(Decoded::unstarted(&error)),
+    };
+
     let (whole, unseeded) = full?;
     let (seed, guess) = guessed?;
     if seed == whole.seed_key() {
+        tentative.keep();
         return Ok(Decoded { unseeded, ..guess });
     }
+    tentative.discard();
 
     load_group_decode(input, whole, unseeded, found, read)
 }

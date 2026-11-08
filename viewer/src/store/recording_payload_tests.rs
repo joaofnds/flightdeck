@@ -1489,6 +1489,57 @@ fn a_continued_load_takes_no_rates_from_a_minute_that_refuses_an_earlier_reading
     assert_eq!(apps.elapsed_ns, None);
 }
 
+#[test]
+fn a_continued_load_counts_a_decoding_it_throws_away_as_discarded_work() {
+    // Goal: where a return decodes a minute again because the minute before it refuses a reading
+    // before its last, each publication of the minute has one ordinary App aggregation and one
+    // ordinary machine reduction, as P07.1 counts them, and the thrown-away decoding's count as
+    // discarded.
+    // Method: name the process twice in publication 2, load after publication 1 under a trace,
+    // and count publication 4's aggregations and reductions as ordinary and as discarded work.
+    use persistence::work::ingestion::Purpose;
+    let fixture = catch_up_fixture();
+    name_one_process_twice_in_publication_2(&fixture);
+    let trace = persistence::work::ingestion::Trace::new(
+        collector::recording::read_identity(&fixture.root).unwrap(),
+    );
+
+    let scope = trace.enter();
+    publication_4_loaded_after(&fixture, 1);
+    drop(scope);
+
+    assert_eq!(
+        [Purpose::Ordinary, Purpose::Discarded]
+            .map(|purpose| publication_4_work(&fixture, &trace, purpose)),
+        [[1, 1], [1, 1]]
+    );
+}
+
+/// How many App aggregations and machine reductions of publication 4 of `catch_up_fixture`
+/// `trace` holds under `purpose`.
+fn publication_4_work(
+    fixture: &Fixture,
+    trace: &persistence::work::ingestion::Trace,
+    purpose: persistence::work::ingestion::Purpose,
+) -> [usize; 2] {
+    use persistence::work::ingestion::{Key, Kind};
+    let key = Key::Publication {
+        run: fixture.writer.identity().unwrap(),
+        publication: 4,
+    };
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+
+    [Kind::AppDerivation, Kind::MachineReduction].map(|kind| {
+        events
+            .iter()
+            .filter(|event| event.key == key)
+            .filter(|event| event.purpose == purpose)
+            .filter(|event| event.kind == kind)
+            .count()
+    })
+}
+
 /// Replaces the processes of the minute of `catch_up_fixture` that holds publication 2 with a copy
 /// whose rows of publication 2 all name pid 7, which a reader refuses.
 fn name_one_process_twice_in_publication_2(fixture: &Fixture) {

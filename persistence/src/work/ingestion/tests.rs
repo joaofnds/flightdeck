@@ -136,3 +136,120 @@ fn exposes_unattributed_work_and_rejects_foreign_recording_subjects() {
     );
     drop(scope);
 }
+
+#[test]
+fn hands_the_trace_kept_tentative_work_as_recorded_and_only_once_kept() {
+    // Goal: work whose result may yet be thrown away counts only once its result is kept, as it
+    // was recorded, including the work of the threads it enrols.
+    // Method: record a raw derivation in a tentative scope and one in an enrolled child, record
+    // after the scope ends, then compare the trace before and after keeping.
+    let trace = Trace::new(RUN.recording);
+    let scope = trace.enter();
+    let (tentative_scope, tentative) = tentative();
+    let raw = purpose(Purpose::Raw);
+    record_publication(RUN, 1, Kind::AppDerivation);
+    let inherited = inherit_current();
+    std::thread::spawn(move || {
+        let scope = inherited.enter();
+        record_publication(RUN, 2, Kind::AppDerivation);
+        drop(scope);
+    })
+    .join()
+    .unwrap();
+    drop(raw);
+    drop(tentative_scope);
+    record_publication(RUN, 3, Kind::RingRead);
+    let unsettled = events(&trace);
+
+    tentative.keep();
+
+    assert_eq!(unsettled.len(), 1);
+    let publication = |publication| Key::Publication {
+        run: RUN,
+        publication,
+    };
+    let settled: Vec<_> = events(&trace)
+        .iter()
+        .map(|event| (event.key, event.purpose))
+        .collect();
+    assert_eq!(
+        settled,
+        [
+            (publication(3), Purpose::Ordinary),
+            (publication(1), Purpose::Raw),
+            (publication(2), Purpose::Raw),
+        ]
+    );
+    drop(scope);
+}
+
+#[test]
+fn hands_the_trace_discarded_tentative_work_as_discarded() {
+    // Goal: work whose result is thrown away is told apart from the work whose result is kept.
+    // Method: record a derivation in a tentative scope and discard it.
+    let trace = Trace::new(RUN.recording);
+    let scope = trace.enter();
+    let (tentative_scope, tentative) = tentative();
+    record_publication(RUN, 1, Kind::AppDerivation);
+    drop(tentative_scope);
+
+    tentative.discard();
+
+    let captured = events(&trace);
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].purpose, Purpose::Discarded);
+    drop(scope);
+}
+
+#[test]
+fn hands_the_trace_tentative_work_dropped_unkept_as_discarded() {
+    // Goal: a path that never settles tentative work, such as an error, cannot count it as kept.
+    // Method: record a derivation in a tentative scope and drop the tentative work unsettled.
+    let trace = Trace::new(RUN.recording);
+    let scope = trace.enter();
+    let (tentative_scope, tentative) = tentative();
+    record_publication(RUN, 1, Kind::AppDerivation);
+    drop(tentative_scope);
+
+    drop(tentative);
+
+    let captured = events(&trace);
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].purpose, Purpose::Discarded);
+    drop(scope);
+}
+
+#[test]
+fn refuses_a_truncated_observation_when_tentative_work_exhausts_event_capacity() {
+    // Goal: tentative work cannot shorten the event list a work-count invariant is certified from.
+    // Method: record one event more than the trace holds in a tentative scope, then keep it.
+    let trace = Trace::new(RUN.recording);
+    let scope = trace.enter();
+    let (tentative_scope, tentative) = tentative();
+    for _event in 0..=EVENTS_MAX {
+        record_publication(RUN, 1, Kind::RingRead);
+    }
+    drop(tentative_scope);
+
+    tentative.keep();
+
+    let mut output = Vec::new();
+    assert_eq!(
+        trace.snapshot(&mut output),
+        Err("ingestion trace capacity exhausted")
+    );
+    drop(scope);
+}
+
+#[test]
+fn records_nothing_tentatively_outside_a_trace() {
+    // Goal: production work, which no trace observes, holds no events back.
+    // Method: open a tentative scope with no trace active and record into it.
+    let (tentative_scope, tentative) = tentative();
+
+    record_publication(RUN, 1, Kind::AppDerivation);
+
+    assert!(!is_active());
+    drop(tentative_scope);
+    tentative.keep();
+}
