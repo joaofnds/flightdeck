@@ -20,8 +20,6 @@ mod frozen;
 const WAIT_MAX: Duration = Duration::from_secs(120);
 const POLL: Duration = Duration::from_millis(1);
 const POLLS_MAX: u32 = 120_000;
-/// The byte budget the app gives its Store, `STORE_BYTES_MAX` in `desktop/src/live_source.rs`.
-const STORE_BYTES_MAX: usize = 1024 * 1024 * 1024;
 
 fn main() -> ExitCode {
     match run() {
@@ -89,7 +87,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let before = meter.read()?;
     let started = Instant::now();
-    let store = Store::start_with_payload(&options.recording, STORE_BYTES_MAX)?;
+    let store = Store::start_with_payload(&options.recording, viewer::store::BYTES_MAX)?;
     let mut view = wait_view(&store)?;
     meter.report("startup", 0, started, &before, &view)?;
     let first = u32::from(options.gated);

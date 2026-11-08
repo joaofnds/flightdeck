@@ -124,7 +124,7 @@ impl Ring {
     /// it gives it.
     #[cfg(test)]
     pub(super) fn new(root: PathBuf) -> Self {
-        Self::with_budget(root, Arc::new(super::ByteBudget::new(1024 * 1024 * 1024)))
+        Self::with_budget(root, Arc::new(super::ByteBudget::new(super::BYTES_MAX)))
     }
 
     /// Hands `push` the run, the second and the Apps of each tick the ring published since the

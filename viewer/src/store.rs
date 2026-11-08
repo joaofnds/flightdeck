@@ -131,6 +131,13 @@ const _: () = {
     assert!(STRETCHES_MAX * 10 >= 3_660);
 };
 
+/// What the app's Store may hold of readings and of the responses the window shows. The hour of a
+/// Mac with 918 processes reached 283 MB as it loaded, a held View keeps a span apart from the one
+/// the Store goes on filling, and the window's two contexts come on top, so this leaves room for
+/// more than three times those processes. The older tail a page's selection carries is charged to
+/// no budget, since it comes from the saved minutes through the page's own session.
+pub const BYTES_MAX: usize = 1024 * 1024 * 1024;
+
 /// The Views the store writes: the one in the mailbox, the one the main thread draws, the one
 /// it takes in place of that, and one to write.
 const VIEWS_MAX: usize = 4;
@@ -253,10 +260,10 @@ struct Shared {
 }
 
 impl Store {
-    /// Starts the store thread over the recording at `root`.
+    /// Starts the store thread over the recording at `root`, with the app's budget.
     #[cfg(test)]
     pub(crate) fn start(root: &Path) -> io::Result<Self> {
-        Self::start_with_payload(root, 1024 * 1024 * 1024)
+        Self::start_with_payload(root, BYTES_MAX)
     }
 
     /// Starts a store of full process and App payloads with an explicit retained-byte budget.
@@ -481,7 +488,7 @@ impl Held {
     /// A store with no recording behind it, where no retention period applies.
     #[cfg(test)]
     fn without_recording() -> Self {
-        Self::without_recording_with_payload(Arc::new(ByteBudget::new(1024 * 1024 * 1024)))
+        Self::without_recording_with_payload(Arc::new(ByteBudget::new(BYTES_MAX)))
     }
 
     /// As `without_recording`, for a store that holds samples under `budget`.

@@ -18,20 +18,13 @@ mod store_reader;
 pub use store_reader::ownership::{Part, PartsWindow, RanksWindow};
 pub use store_reader::presentation::Presentation;
 
-/// What the Store may hold of readings and of the responses the window shows. The hour of a Mac
-/// with 918 processes reached 283 MB as it loaded, a held View keeps a span apart from the one the
-/// Store goes on filling, and the window's two contexts come on top, so this leaves room for more
-/// than three times those processes. The older tail a page's selection carries is charged to no
-/// budget, since it comes from the saved minutes through the page's own session.
-pub const STORE_BYTES_MAX: usize = 1024 * 1024 * 1024;
-
 /// Starts a live window's Store over `root`, and the handle a `Worker` reads it through.
 pub fn store_start(
     root: &Path,
 ) -> std::io::Result<(viewer::store::Store, viewer::store::QueryHandle)> {
     let store = viewer::store::Store::start_with_budget(
         root,
-        Arc::new(viewer::store::ByteBudget::new(STORE_BYTES_MAX)),
+        Arc::new(viewer::store::ByteBudget::new(viewer::store::BYTES_MAX)),
     )?;
     let handle = store.query_handle();
 

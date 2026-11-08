@@ -339,8 +339,7 @@ impl LiveRecording {
 
     /// Starts a Store over this recording with the app's byte budget.
     pub(crate) fn start_store(&self) -> viewer::store::Store {
-        viewer::store::Store::start_with_payload(&self.root, crate::live_source::STORE_BYTES_MAX)
-            .unwrap()
+        viewer::store::Store::start_with_payload(&self.root, viewer::store::BYTES_MAX).unwrap()
     }
 
     pub(crate) fn with_process_capacity(process_capacity: u64) -> Self {
