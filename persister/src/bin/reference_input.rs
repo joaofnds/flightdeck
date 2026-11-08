@@ -8,7 +8,7 @@
 
 use std::fs::DirBuilder;
 use std::io;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -79,6 +79,8 @@ const RECORDING_IDENTITY: Identity = Identity([0x9e37_79b9_7f4a_7c15, 0xbf58_476
 const BOOT_IDENTITY: Identity = Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6c_dd1d]);
 /// The first primary run's identity.
 const RUN_FIRST_IDENTITY: Identity = Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]);
+/// The second primary run's identity.
+const RUN_SECOND_IDENTITY: Identity = Identity([0xe703_7ed1_a0b4_28db, 0x8ebc_6af0_9c88_c6e3]);
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -176,6 +178,8 @@ const _: () = {
     }
     assert!(INCIDENT_OFFSETS[INCIDENT_OFFSETS.len() - 1] < ZERO_SECOND);
     assert!(INCIDENT_PROCESS < ROTATING_FIRST);
+    // Each primary run holds a saved minute at least.
+    assert!(0 < run_split(SECONDS_MIN));
     // The non-UTF-8 name rotates, so its exits and starts name it too.
     assert!(ROTATING_FIRST <= NON_UTF8_PROCESS);
     assert!(NON_UTF8_PROCESS < PROCESSES);
@@ -278,80 +282,128 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
         lock_path: directory.join("ring.lock"),
         name_prefix: format!("/fdri{}", std::process::id()),
     };
-    let started = Registration::start_with_system_as(
-        directory,
-        &place,
-        RUN_SHAPE,
-        DictionaryCapacity {
-            entries: 65_536,
-            arena_bytes: 64 * 1024 * 1024,
-        },
-        ORIGIN_CONTINUOUS_NS,
-        FixedRun {
-            run: RUN_FIRST_IDENTITY,
-            boot: BOOT_IDENTITY,
-        },
-    )?;
-    let (mut writer, registered) = started.into_parts();
-    registered?;
-    let run = writer.identity().ok_or("the run has no identity")?;
-    // The worker starts once the run is registered, since a worker that finds no run exits.
-    let worker = generate_worker(directory, control.authority())?;
+    let split = run_split(seconds);
 
-    let mut machine = Machine::start(&mut writer)?;
-    let mut paced = Paced {
-        control: &control,
-        run: run.run,
-        worker: &worker,
-        saved_end: writer.publication_newest() + 1,
-        heartbeat_ns: 0,
-    };
-    let last_minute_first = generate_seconds(&mut writer, &mut machine, &mut paced, seconds)?;
-    paced.wait_for_saved(last_minute_first)?;
+    let mut first = Run::start(directory, &place, &control, RUN_FIRST_IDENTITY, 0)?;
+    first.publish(0..split)?;
+    first.finish()?;
+
+    let mut second = Run::start(directory, &place, &control, RUN_SECOND_IDENTITY, split)?;
+    let last_minute_first = second.publish(split..seconds)?;
+    second.paced.wait_for_saved(last_minute_first)?;
     // A pass that finds nothing to save ends in the worker's pause, so the process ends with the
     // worker asleep rather than part way through a save.
-    paced.wait_for_pass()?;
+    second.paced.wait_for_pass()?;
 
     println!(
-        "reference_input directory={} seconds={seconds} ring={} run={} saved_end={} \
+        "reference_input directory={} seconds={seconds} split={split} ring={} saved_end={} \
         publication_newest={}",
         directory.display(),
-        writer.name(),
-        collector::recording::identity_text(run.run),
-        paced.saved_end,
-        writer.publication_newest(),
+        second.writer.name(),
+        second.paced.saved_end,
+        second.writer.publication_newest(),
     );
-    // The process ends with the run live and the minute it ends in in its ring, as a recording
-    // stands while its collector and persister run.
+    // The process ends with the second run live and the minute it ends in in its ring, as a
+    // recording stands while its collector and persister run.
     Ok(())
 }
 
-/// Publishes the input's `seconds`, waiting on the worker wherever the ring would otherwise
-/// overwrite a publication it has yet to save, and returns the first publication of the minute
-/// the input ends in.
-fn generate_seconds(
-    writer: &mut Writer,
-    machine: &mut Machine,
-    paced: &mut Paced<'_>,
-    seconds: u64,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut last_minute_first = None;
-    for second in 0..seconds {
-        // A missed tick publishes nothing, so its second has no readings.
-        if second % PERIOD_SECONDS == MISSED_SECOND {
-            continue;
-        }
+/// The second the second primary run starts at: half the input's `seconds`, the divisions
+/// flooring it to the minute boundary before, so no minute spans the two runs.
+const fn run_split(seconds: u64) -> u64 {
+    seconds / 2 / SECONDS_PER_MINUTE * SECONDS_PER_MINUTE
+}
 
-        let publication = writer.publication_newest() + 1;
-        paced.wait_for_room(publication)?;
-        // Both divisions floor, to the minute a second falls in.
-        if second / SECONDS_PER_MINUTE == (seconds - 1) / SECONDS_PER_MINUTE {
-            last_minute_first.get_or_insert(publication);
-        }
-        machine.publish(writer, second)?;
+/// One primary run as the generator publishes it: its writer, the generated Mac its ring names,
+/// and its worker's progress.
+struct Run<'a> {
+    writer: Writer,
+    machine: Machine,
+    paced: Paced<'a>,
+}
+
+impl<'a> Run<'a> {
+    /// Registers the run `identity` of the recording `directory` at the ring place `place`, to
+    /// start at the input's second `first`, and starts its worker, which reports to `control`.
+    fn start(
+        directory: &Path,
+        place: &Place,
+        control: &'a Control,
+        identity: Identity,
+        first: u64,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let started = Registration::start_with_system_as(
+            directory,
+            place,
+            RUN_SHAPE,
+            DictionaryCapacity {
+                entries: 65_536,
+                arena_bytes: 64 * 1024 * 1024,
+            },
+            ORIGIN_CONTINUOUS_NS + first * NANOSECONDS_PER_SECOND,
+            FixedRun {
+                run: identity,
+                boot: BOOT_IDENTITY,
+            },
+        )?;
+        let (mut writer, registered) = started.into_parts();
+        registered?;
+        // The worker starts once the run is registered, since a worker that finds no run exits.
+        let worker = generate_worker(directory, control.authority())?;
+        let machine = Machine::start(&mut writer, first)?;
+        let saved_end = writer.publication_newest() + 1;
+
+        Ok(Self {
+            writer,
+            machine,
+            paced: Paced {
+                control,
+                run: identity,
+                worker,
+                saved_end,
+                heartbeat_ns: 0,
+            },
+        })
     }
 
-    last_minute_first.ok_or_else(|| "no last minute".into())
+    /// Publishes the input's `seconds`, waiting on the worker wherever the ring would otherwise
+    /// overwrite a publication it has yet to save, and returns the first publication of the
+    /// minute they end in.
+    fn publish(&mut self, seconds: Range<u64>) -> Result<u64, Box<dyn std::error::Error>> {
+        let mut last_minute_first = None;
+        for second in seconds.clone() {
+            // A missed tick publishes nothing, so its second has no readings.
+            if second % PERIOD_SECONDS == MISSED_SECOND {
+                continue;
+            }
+
+            let publication = self.writer.publication_newest() + 1;
+            self.paced.wait_for_room(publication)?;
+            // Both divisions floor, to the minute a second falls in.
+            if second / SECONDS_PER_MINUTE == (seconds.end - 1) / SECONDS_PER_MINUTE {
+                last_minute_first.get_or_insert(publication);
+            }
+            self.machine.publish(&mut self.writer, second)?;
+        }
+
+        last_minute_first.ok_or_else(|| "no last minute".into())
+    }
+
+    /// Ends the run as a collector that stops in order ends it, and waits for its worker to save
+    /// and retire it and exit, which the worker does once every registered run is retired.
+    fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.writer.finish();
+        self.paced.wait_for_exit()?;
+
+        match self.paced.worker.join() {
+            Ok(Ok(persistence::worker::Outcome::Complete)) => Ok(()),
+            Ok(Ok(persistence::worker::Outcome::Owned)) => {
+                Err("another worker owned the recording".into())
+            }
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => Err("the seal worker panicked".into()),
+        }
+    }
 }
 
 /// Seals the recording on a thread of its own, as the persister does in a process of its own,
@@ -409,7 +461,7 @@ const RUN_SHAPE: Shape = Shape {
 struct Paced<'a> {
     control: &'a Control,
     run: Identity,
-    worker: &'a JoinHandle<persistence::Result<persistence::worker::Outcome>>,
+    worker: JoinHandle<persistence::Result<persistence::worker::Outcome>>,
     /// The publication after the newest the worker has saved of the run.
     saved_end: u64,
     /// When the worker's newest report was made.
@@ -438,6 +490,18 @@ impl Paced<'_> {
         }
 
         Err(format!("the worker saved no minute in {SEAL_WAIT_MAX:?}").into())
+    }
+
+    /// Waits for the worker to exit.
+    fn wait_for_exit(&self) -> Result<(), Box<dyn std::error::Error>> {
+        for _poll in 0..SEAL_WAIT_MAX.as_millis() / SEAL_POLL.as_millis() {
+            if self.worker.is_finished() {
+                return Ok(());
+            }
+            std::thread::sleep(SEAL_POLL);
+        }
+
+        Err(format!("the worker did not finish the run in {SEAL_WAIT_MAX:?}").into())
     }
 
     /// Waits for the worker's next report.
@@ -478,6 +542,8 @@ impl Paced<'_> {
 /// The generated Mac: its processes in increasing pid order, the programs they run, and what
 /// it is, which no second changes.
 struct Machine {
+    /// The input's second the run starts at, its tick 0.
+    run_first: u64,
     programs: Vec<ProgramReference>,
     facts: MachineFacts,
     /// Each process's GPU time, which the contract does not name, so it reads zero.
@@ -485,7 +551,9 @@ struct Machine {
 }
 
 impl Machine {
-    fn start(writer: &mut Writer) -> Result<Self, Box<dyn std::error::Error>> {
+    /// The generated Mac as the run that starts at the input's second `run_first` and
+    /// publishes through `writer` reads it.
+    fn start(writer: &mut Writer, run_first: u64) -> Result<Self, Box<dyn std::error::Error>> {
         // The ring has room for each device the generated Mac has, and for no other.
         assert_eq!(RUN_SHAPE.interface_capacity, u64::from(INTERFACES));
         assert_eq!(
@@ -507,6 +575,7 @@ impl Machine {
         }
 
         Ok(Self {
+            run_first,
             programs,
             facts: start_facts()?,
             process_gpu_ns: vec![Some(0); usize::try_from(PROCESSES)?],
@@ -523,7 +592,7 @@ impl Machine {
             continuous_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
             awake_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
         };
-        let read = Second::read(&self.programs, second, times.continuous_ns)?;
+        let read = Second::read(&self.programs, self.run_first, second, times.continuous_ns)?;
         let smc = if second % PERIOD_SECONDS == SMC_UNAVAILABLE_SECOND {
             None
         } else {
@@ -536,7 +605,8 @@ impl Machine {
             })
         };
         let readings = Readings {
-            run_tick: second,
+            // A collector counts its run's ticks from its warm-up tick, tick 0.
+            run_tick: second - self.run_first,
             cpus: &read.cpus,
             memory: &read.memory,
             interfaces: &read.interfaces,
@@ -599,9 +669,10 @@ struct Second {
 
 impl Second {
     /// The readings of `second`, whose continuous clock is `continuous_ns`, of processes that
-    /// run `programs`.
+    /// run `programs`, in the run that starts at `run_first`.
     fn read(
         programs: &[ProgramReference],
+        run_first: u64,
         second: u64,
         continuous_ns: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -616,13 +687,15 @@ impl Second {
             GAUGES_BASELINE
         };
         // The tick after a missed tick carries the missed second's rotations too, as a collector
-        // publishes every event since its last tick.
+        // publishes every event since its last tick. A run's first tick carries none, since a
+        // collector's first scan finds its processes already running.
         let rotated_first = if offset == MISSED_SECOND + 1 {
             second - 1
         } else {
-            second.max(1)
+            second
         };
-        let (events, event_identities) = publish_rotations(programs, rotated_first..=second)?;
+        let (events, event_identities) =
+            publish_rotations(programs, rotated_first.max(run_first + 1)..=second)?;
         let thermal_pressure = match offset {
             THERMAL_FAIR_SECOND => THERMAL_MODERATE,
             THERMAL_SERIOUS_SECOND => THERMAL_HEAVY,
@@ -1146,6 +1219,16 @@ mod tests {
         .map(|(process, second)| creation_at(process, second).identity);
 
         assert_eq!([3, 257, 257, 511, 256, 510, 2], identities);
+    }
+
+    #[test]
+    fn splits_each_input_at_the_minute_boundary_before_its_middle() {
+        // Goal: the second run starts at half the input on a minute boundary, the contract's 1,800
+        // for its hour. Method: split the shortest input, one of an odd number of minutes, and
+        // the hour.
+        let splits = [SECONDS_MIN, 3_540, SECONDS_MAX].map(run_split);
+
+        assert_eq!([180, 1_740, 1_800], splits);
     }
 
     #[test]

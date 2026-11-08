@@ -349,12 +349,13 @@ mod tests {
 
     #[test]
     fn names_the_recording_its_run_and_its_boot_with_fixed_identities() {
-        // Goal: the recording, its run and the run's boot carry the generator's fixed opaque
+        // Goal: the recording, its runs and their boot carry the generator's fixed opaque
         // identities, never random ones or this Mac's boot session, so every generation names
         // them alike. Method: read the recording's identity and the run identities its registry
         // lists.
         let input = input();
         let recording = Identity([0x9e37_79b9_7f4a_7c15, 0xbf58_476d_1ce4_e5b9]);
+        let boot = Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6c_dd1d]);
         let runs: Vec<RunIdentity> = Registry::read(&input.directory)
             .unwrap()
             .runs
@@ -365,15 +366,80 @@ mod tests {
         assert_eq!(
             (
                 recording,
-                vec![RunIdentity {
-                    recording,
-                    run: Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]),
-                    boot: Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6c_dd1d]),
-                }],
+                vec![
+                    RunIdentity {
+                        recording,
+                        run: Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]),
+                        boot,
+                    },
+                    RunIdentity {
+                        recording,
+                        run: Identity([0xe703_7ed1_a0b4_28db, 0x8ebc_6af0_9c88_c6e3]),
+                        boot,
+                    },
+                ],
             ),
             (
                 collector::recording::read_identity(&input.directory).unwrap(),
                 runs
+            )
+        );
+    }
+
+    #[test]
+    fn splits_the_input_into_two_runs_at_its_middle_minute() {
+        // Goal: the input is two consecutive runs split at half its duration on a minute
+        // boundary, second 180 of its 370, so each saved minute belongs to one run. Method: read
+        // the first and last second each run's saved minutes hold, the second run's last saved
+        // minute ending at 359 since the minute the input ends in stays in the ring.
+        let seconds = input().saved_seconds_by_run();
+
+        assert_eq!(vec![(0, 179), (180, 359)], seconds);
+    }
+
+    #[test]
+    fn numbers_each_runs_ticks_from_its_own_start() {
+        // Goal: each run counts its ticks from 0 at its own start, as a collector's warm-up tick
+        // is its tick 0. Method: read the run tick of the first run's last second and of the
+        // second run's first two.
+        let input = input();
+        let ticks = [179, 180, 181]
+            .map(|second| cell::<u64>(&input.saved_rows(second, "ticks", "run_tick", "TRUE"), 0));
+
+        assert_eq!([179, 0, 1], ticks);
+    }
+
+    #[test]
+    fn ends_the_first_run_in_order_and_leaves_the_second_live() {
+        // Goal: the first run ends as a collector that stops in order ends it, so the worker
+        // saves and retires it, while the second stays live as a running collector's does.
+        // Method: read whether the registry counts each run retired.
+        let input = input();
+        let registry = Registry::read(&input.directory).unwrap();
+        let retired: Vec<bool> = registry
+            .runs
+            .iter()
+            .map(|run| {
+                Registry::completed(&input.directory, &run.identity, &run.ring_name).unwrap()
+            })
+            .collect();
+
+        assert_eq!(vec![true, false], retired);
+    }
+
+    #[test]
+    fn publishes_no_exit_or_start_in_the_second_runs_first_tick() {
+        // Goal: the second run's first tick reports no exit or start, as a collector's first tick
+        // knows no process before it, and lists the creations the pair rotating in that second
+        // started. Method: read second 180's events, and process 106's creation at 179 and 180,
+        // 361 from its rotation at 53 and 615 from its rotation at 180.
+        let input = input();
+
+        assert_eq!(
+            (Vec::<SavedEvent>::new(), [361, 615]),
+            (
+                input.events(180),
+                [179, 180].map(|second| input.process_creation(41_106, second))
             )
         );
     }
@@ -750,6 +816,38 @@ mod tests {
             }
 
             found
+        }
+
+        /// The first and last second each run's saved minutes hold, in the registry's order.
+        fn saved_seconds_by_run(&self) -> Vec<(u64, u64)> {
+            let registry = Registry::read(&self.directory).unwrap();
+
+            registry
+                .runs
+                .iter()
+                .map(|run| {
+                    let walls: Vec<(u64, u64)> =
+                        saved_windows::saved_manifests(&self.directory, &run.identity)
+                            .iter()
+                            .map(|minute| {
+                                let walls = query(
+                                    &self
+                                        .directory
+                                        .join(&minute.data_directory)
+                                        .join("ticks.parquet"),
+                                    "SELECT MIN(wall_ns), MAX(wall_ns) FROM saved",
+                                );
+                                (cell(&walls, 0), cell(&walls, 1))
+                            })
+                            .collect();
+                    let second = |wall_ns: u64| (wall_ns - ORIGIN_WALL_NS) / NANOSECONDS_PER_SECOND;
+
+                    (
+                        second(walls.iter().map(|walls| walls.0).min().unwrap()),
+                        second(walls.iter().map(|walls| walls.1).max().unwrap()),
+                    )
+                })
+                .collect()
         }
 
         /// The manifest of each saved minute of every run.
