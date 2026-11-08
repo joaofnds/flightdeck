@@ -649,6 +649,28 @@ fn lapped_ring_store(damaged: Option<u64>) -> (Fixture, Store, super::QueryHandl
     (fixture, store, handle)
 }
 
+/// A store over two saved minutes of one run, the first of them damaged, and a newer run that laps
+/// its ring before it seals a minute.
+fn next_run_lapped_store() -> (Fixture, Fixture, Store, super::QueryHandle) {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(160);
+    fixture.seal_minute(1);
+    empty_ticks_file(&fixture, 0);
+    let mut next = Fixture::new_mode(false, 2, Some(&fixture));
+    for second in 1000..1020 {
+        next.publish_with_system_rows(second);
+    }
+    let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
+    let store = Store::start_with_budget(&fixture.root, budget).unwrap();
+    until_caught_up(&store);
+    let handle = store.query_handle();
+
+    (fixture, next, store, handle)
+}
+
 #[test]
 fn a_ring_that_lost_seconds_after_the_newest_saved_minute_answers_no_page() {
     // Goal: a Store whose ring lost seconds the saved minutes do not hold answers no page over
@@ -669,6 +691,22 @@ fn a_damaged_older_minute_does_not_excuse_a_ring_that_lost_seconds() {
     // on from the newest, so the Store answers no page over seconds its ring lost.
     // Method: damage the older of two saved minutes and lap the ring before the Store starts.
     let (_fixture, _store, handle) = lapped_ring_store(Some(0));
+
+    let reply = latest_reply(&handle);
+
+    assert!(
+        matches!(reply, super::QueryOutcome::NeedsLoad(_)),
+        "{reply:?}"
+    );
+}
+
+#[test]
+fn a_damaged_minute_of_an_earlier_run_does_not_excuse_a_new_runs_ring_that_lost_seconds() {
+    // Goal: a run that has sealed no minute has only its ring to prove it holds every reading, so
+    // a damaged minute of an earlier run leaves the Store answering no page over seconds the ring
+    // lost. Method: damage the earlier run's first minute and lap the newer run's ring before the
+    // Store starts.
+    let (_fixture, _next, _store, handle) = next_run_lapped_store();
 
     let reply = latest_reply(&handle);
 

@@ -26,6 +26,7 @@ fn an_empty_completed_catalog_keeps_checked_absence_without_inventing_a_clock() 
         Some(super::CheckedCatalog {
             recording: fixture.writer.identity().unwrap().recording,
             newest_run: fixture.writer.identity(),
+            newest_run_sealed: false,
             first_ns: None,
             windows: 0,
             first_known_second: None,

@@ -66,6 +66,24 @@ fn find_order(found: &mut Vec<Found>, runs: &[RunIdentity], window: &LoadWindow<
     }
 }
 
+/// The newest saved window of the newest run that saved one.
+fn find_windows_newest(
+    catalog: &Catalog,
+    runs: &[RunIdentity],
+) -> Result<Option<Manifest>, Failure> {
+    for run in runs.iter().rev() {
+        let newest = catalog_retry(|| {
+            Ok(catalog.window_at_or_before(run, u64::MAX, &mut ReadWork::default())?)
+        })
+        .map_err(find_failure)?;
+        if newest.is_some() {
+            return Ok(newest);
+        }
+    }
+
+    Ok(None)
+}
+
 /// The clock range comes from the newest saved window, and only the windows of that range are read.
 fn find_windows(
     root: &Path,
@@ -88,15 +106,11 @@ fn find_windows(
             }
         }
     }
-    let mut newest = None;
-    for run in runs.iter().rev() {
-        newest = lookup(&mut || {
-            Ok(catalog.window_at_or_before(run, u64::MAX, &mut ReadWork::default())?)
-        })?;
-        if newest.is_some() {
-            break;
-        }
-    }
+    let newest = find_windows_newest(catalog, runs)?;
+    let newest_run_sealed = newest.as_ref().is_some_and(|manifest| {
+        runs.last()
+            .is_some_and(|run| run.run == manifest.identity.run.run)
+    });
     let ends = find_windows_ends(root, catalog)?;
     let newest_ns = match newest {
         Some(manifest) => manifest.wall_ns.map(|wall| wall.max),
@@ -124,6 +138,7 @@ fn find_windows(
     Ok(CheckedCatalog {
         recording,
         newest_run: runs.last().copied(),
+        newest_run_sealed,
         first_ns,
         windows: u32::try_from(minutes.len())
             .map_err(|_| Failure::Commits(io::ErrorKind::InvalidData))?,

@@ -64,6 +64,8 @@ pub(super) enum Continuity {
 pub(super) struct CheckedCatalog {
     pub recording: Identity,
     pub newest_run: Option<RunIdentity>,
+    /// Whether `newest_run` has sealed a minute, whose last reading its ring follows on from.
+    pub newest_run_sealed: bool,
     pub first_ns: Option<u64>,
     pub windows: u32,
     pub first_known_second: Option<u64>,

@@ -39,11 +39,12 @@ pub(super) fn checked(held: &Held, ring: &mut Ring) -> Result<Option<CheckedCove
     if source_changed(held, ring) {
         return Ok(None);
     }
-    // A load that left the newest minute out has no saved reading to prove the ring begins from,
-    // and it already says what it lacks. A ring that follows on from a saved minute proves it,
-    // whatever older minute the load left out.
-    let requires_ring =
-        catalog.newest_run.is_some() && (held.left_out.is_none() || ring.follows_saved());
+    // A load that left out the newest run's sealed minute has no saved reading to prove the ring
+    // begins from, and it already says what it lacks. Whatever older minute the load left out, a
+    // ring that follows on from a saved minute proves where it begins, and so does the ring of a
+    // run that has sealed no minute, which begins at its run's first reading or loses seconds.
+    let requires_ring = catalog.newest_run.is_some()
+        && (held.left_out.is_none() || ring.follows_saved() || !catalog.newest_run_sealed);
     if requires_ring {
         if !ring.complete(&catalog.recording) {
             return Ok(None);
