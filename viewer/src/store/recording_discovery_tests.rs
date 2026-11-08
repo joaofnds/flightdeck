@@ -237,7 +237,7 @@ fn an_unread_checkpoint_load_does_not_certify_skipped_old_windows() {
         &budget,
         &operation,
         Some(&since),
-        |_, second, _| publications.push(second.publication),
+        |_, _, second, _| publications.push(second.publication),
     )
     .unwrap();
 
@@ -504,7 +504,7 @@ fn payload_discovery_refuses_an_unknown_checkpoint_run() {
         &budget,
         &operation,
         Some(&since),
-        |_, _, _| accepted += 1,
+        |_, _, _, _| accepted += 1,
     )
     .unwrap();
 

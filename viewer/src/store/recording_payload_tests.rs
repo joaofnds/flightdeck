@@ -1437,7 +1437,7 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
         &budget,
         &operation,
         Some(&newest),
-        |_, second, apps| {
+        |_, _, second, apps| {
             if second.publication == 4 {
                 let crate::store::apps::TickApps::Loaded(apps) = apps else {
                     panic!("the fixture supplies complete process payloads");

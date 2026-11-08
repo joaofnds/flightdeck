@@ -45,7 +45,17 @@ pub(super) struct Outcome {
     pub left_out: Option<Failure>,
     pub terminal: Option<Terminal>,
     pub checked_catalog: Option<CheckedCatalog>,
+    /// The catalog of a load that continued the store's seconds, which decoded none of the older
+    /// minutes and so checks the catalog only for a store that holds them already.
+    pub continued_catalog: Option<CheckedCatalog>,
     pub decoded_catalog: DecodedCatalog,
+}
+
+/// Whether the seconds a load hands over continue those the store holds or replace them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Continuity {
+    Replace,
+    Extend,
 }
 
 /// Source discovery checked all catalog windows at or beyond this actual pruning floor.
@@ -164,7 +174,7 @@ pub(super) fn load_payload_using(
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
     capture: &crate::recording::InputCapture<'_>,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     load_payload_window_using(
         root,
@@ -172,17 +182,20 @@ pub(super) fn load_payload_using(
         operation,
         capture,
         &LoadWindow::all(None),
-        take,
+        |_, run, second, apps| take(run, second, apps),
     )
 }
 
-#[cfg(test)]
+/// Decodes the minutes sealed after `since`, after the newest minute that holds `since`'s run no
+/// further than `since`, which seeds the rates of the minute after it. Where the loaded hour
+/// holds no such minute, it decodes the whole hour, and `take` hears that its seconds replace
+/// the store's.
 pub(super) fn load_payload_since(
     root: &Path,
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
     since: Option<&super::Newest>,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     load_payload_window_using(
         root,
@@ -200,7 +213,7 @@ pub(super) fn load_payload_hour(
     budget: &Arc<super::ByteBudget>,
     operation: &crate::cancellation::Operation,
     since: Option<&super::Newest>,
-    take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     load_payload_window_using(
         root,
@@ -212,7 +225,7 @@ pub(super) fn load_payload_hour(
             seconds: LOADED_SECONDS,
             unread: false,
         },
-        take,
+        |_, run, second, apps| take(run, second, apps),
     )
 }
 
@@ -222,7 +235,7 @@ fn load_payload_window_using(
     operation: &crate::cancellation::Operation,
     capture: &crate::recording::InputCapture<'_>,
     window: &LoadWindow<'_>,
-    mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+    mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     operation.check()?;
     let mut found = Vec::with_capacity(MINUTES_MAX);
@@ -235,17 +248,14 @@ fn load_payload_window_using(
                 left_out: Some(failure),
                 terminal: None,
                 checked_catalog: None,
+                continued_catalog: None,
                 decoded_catalog: DecodedCatalog::default(),
             });
         }
     };
+    let continuity = load_continuity(window, &found);
     found.reverse();
     let mut admitted = true;
-    if window.unread {
-        if window.since.is_some() {
-            admitted = false;
-        }
-    }
     let mut outcome = payload::load(
         root,
         &found,
@@ -256,7 +266,7 @@ fn load_payload_window_using(
             if !load_payload_admitted(&apps) {
                 admitted = false;
             }
-            take(run, second, apps);
+            take(continuity, run, second, apps);
         },
     )?;
     operation.check()?;
@@ -275,7 +285,10 @@ fn load_payload_window_using(
                         checked.unknown_clock_ticks =
                             Some(outcome.decoded_catalog.unknown_clock_ticks);
                     }
-                    outcome.checked_catalog = Some(checked);
+                    match continuity {
+                        Continuity::Replace => outcome.checked_catalog = Some(checked),
+                        Continuity::Extend => outcome.continued_catalog = Some(checked),
+                    }
                 }
                 Err(failure) => outcome.left_out = Some(failure),
             }
@@ -284,6 +297,20 @@ fn load_payload_window_using(
     operation.check()?;
 
     Ok(outcome)
+}
+
+/// Whether a load continues from `window.since`, which it does where the minutes it found, newest
+/// first, reach back to the newest one holding `since`'s run no further than `since`.
+fn load_continuity(window: &LoadWindow<'_>, found: &[Found]) -> Continuity {
+    if window.unread {
+        if let Some(since) = window.since {
+            if find_predecessor(found, since).is_some() {
+                return Continuity::Extend;
+            }
+        }
+    }
+
+    Continuity::Replace
 }
 
 fn load_payload_admitted(apps: &TickApps<'_>) -> bool {

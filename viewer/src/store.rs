@@ -1378,9 +1378,11 @@ fn refresh(
     refresh_load(root, held, ring, shared, operation)
 }
 
-/// Reads the loaded hour's sealed minutes again, so the Apps they saved replace the live ones, and
-/// follows a new ring from the newest of them. Losing the place in the ring alone leaves the held
-/// minutes as they are.
+/// Takes in what the recording sealed after the newest second the store holds, and follows a new
+/// ring from the newest sealed minute. An hour that left a sealed minute out reads every minute
+/// again, so the refused one is retried, as does a store whose ring overran while it followed it,
+/// which holds seconds past readings it never took, and a store whose newest second the loaded
+/// hour no longer holds.
 fn refresh_load(
     root: &Path,
     held: &mut Held,
@@ -1390,26 +1392,43 @@ fn refresh_load(
 ) -> persistence::Result<bool> {
     let budget = Arc::clone(&held.payload_budget);
     let since = held.newest;
+    let reads_hour = held.left_out.is_some() || ring.reload_required();
     let mut accepted = true;
     let mut loaded = false;
     let mut checked_catalog = None;
     let mut next_ring = make_ring(root, &budget);
-    let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
+    let mut take = |continuity, run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
         if !shared.active.load(Ordering::Acquire) {
             accepted = false;
         }
         if accepted {
             if !loaded {
-                held.reset();
+                if continuity == recording::Continuity::Replace {
+                    held.reset();
+                }
                 loaded = true;
             }
             accepted = held.take(run, second, apps);
         }
     };
-    let outcome = recording::load_payload_hour(root, &budget, operation, since.as_ref(), take)?;
+    let outcome = if reads_hour {
+        recording::load_payload_hour(
+            root,
+            &budget,
+            operation,
+            since.as_ref(),
+            |run, second, apps| {
+                take(recording::Continuity::Replace, run, second, apps);
+            },
+        )?
+    } else {
+        recording::load_payload_since(root, &budget, operation, since.as_ref(), &mut take)?
+    };
     if accepted {
         next_ring.accept(outcome.terminal);
-        checked_catalog = outcome.checked_catalog;
+        // A continued load decoded none of the minutes the store took in before, which the store
+        // holds, as it holds the seconds it follows from a ring past its catalog.
+        checked_catalog = outcome.checked_catalog.or(outcome.continued_catalog);
     }
     let left_out = outcome.left_out;
     if held.left_out != left_out {

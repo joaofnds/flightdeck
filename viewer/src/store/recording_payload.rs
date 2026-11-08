@@ -120,6 +120,7 @@ impl Cursor {
             left_out: self.left_out,
             terminal: self.decoder.terminal(),
             checked_catalog: None,
+            continued_catalog: None,
             decoded_catalog,
         })
     }

@@ -363,6 +363,7 @@ fn cancellation_rejects_a_finished_report_before_installing_its_handoff() {
         left_out: None,
         terminal: Some(terminal),
         checked_catalog: None,
+        continued_catalog: None,
         decoded_catalog: recording::DecodedCatalog::default(),
     };
     let mut held = crate::store::Held::without_recording();

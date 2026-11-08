@@ -290,6 +290,71 @@ fn a_resume_retries_refused_history_until_it_is_recovered() {
 }
 
 /// Spoils a minute's saved readings without changing discovery of its committed marker.
+#[test]
+fn a_resume_beyond_ring_retention_reads_only_the_minutes_sealed_since_its_newest_second() {
+    // Goal: a return keeps the held hour and reads only what the recording sealed while hidden.
+    // Method: hold two sealed minutes, hide, seal nine more whose publications overrun the
+    // fixture's eight-slot ring, take the oldest offline, show.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(100, &[]);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_events(160, &[]);
+    fixture.seal_minute(1);
+    let store = Store::start(&fixture.root).unwrap();
+    drop(view_where(&store, |view| seconds_of(view) == [100, 160]));
+    store.set_active(false);
+    super::activity_tests::wait_until_paused(&store);
+    for minute in 2..=10 {
+        fixture.skip_run_ticks(59);
+        fixture.publish_with_events(100 + minute * 60, &[]);
+        fixture.seal_minute(minute);
+    }
+    take_minute_offline(&fixture, 0);
+
+    store.set_active(true);
+    let resumed = view_where(&store, |_| true);
+
+    assert_eq!(
+        seconds_of(&resumed),
+        (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
+    );
+    assert_eq!(resumed.failure, None);
+    assert_eq!(resumed.left_out, None);
+}
+
+#[test]
+fn a_refused_predecessor_does_not_discard_accepted_history() {
+    // Goal: a refused checkpoint minute is distinct from one outside the loaded hour.
+    // Method: retain two minutes, refuse the newer one, then catch up nine more minutes whose
+    // publications overrun the fixture's eight-slot ring.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(100, &[]);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_events(160, &[]);
+    fixture.seal_minute(1);
+    let store = Store::start(&fixture.root).unwrap();
+    drop(view_where(&store, |view| seconds_of(view) == [100, 160]));
+    store.set_active(false);
+    super::activity_tests::wait_until_paused(&store);
+    take_minute_offline(&fixture, 1);
+    for minute in 2..=10 {
+        fixture.skip_run_ticks(59);
+        fixture.publish_with_events(100 + minute * 60, &[]);
+        fixture.seal_minute(minute);
+    }
+
+    store.set_active(true);
+    let resumed = view_where(&store, |_| true);
+
+    assert_eq!(resumed.left_out, Some(super::Failure::Refused));
+    assert_eq!(
+        seconds_of(&resumed),
+        (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
+    );
+}
+
 fn take_minute_offline(fixture: &Fixture, minute: u64) {
     let ticks = minute_ticks(fixture, minute);
     std::fs::remove_file(&ticks).unwrap();
