@@ -454,14 +454,12 @@ fn a_launch_adds_up_the_apps_it_owes_while_a_view_holds_every_stretch_the_store_
 #[test]
 fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete() {
     // Goal: a store that cannot read the Apps of a minute it owes its stretches says that it
-    // holds less of the hour than the recording sealed, and still goes on from its newest second,
-    // since reading the hour again would refuse the minute again. Method: seal a few ticks of run
-    // minutes 0, 1 and 21, launch a store, empty minute 0's ticks table, then add up the Apps the
-    // store owes.
+    // holds less of the hour than the recording sealed. Method: seal a few ticks of run minutes
+    // 0, 1 and 21, launch a store, empty minute 0's ticks table, then add up the Apps the store
+    // owes.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let mut held = Held::without_recording();
     launch(&fixture, &mut held);
-    assert!(held.resumes_from_newest);
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
 
@@ -473,7 +471,38 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete()
     );
 
     assert_eq!(held.left_out, Some(super::Failure::Refused));
-    assert!(held.resumes_from_newest);
+}
+
+#[test]
+fn a_launch_that_cannot_read_a_minute_it_owes_apps_goes_on_from_its_newest_second_when_shown() {
+    // Goal: a store that cannot read the Apps of a minute it owes its stretches reads no saved
+    // minute when it shows again over a ring that still holds its newest second, since reading
+    // the hour again would refuse the minute again. Method: seal a few ticks of run minutes 0, 1
+    // and 21, launch a store, empty minute 0's ticks table, add up the Apps the store owes, take
+    // the saved minutes offline, then show the store again.
+    let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
+    let mut held = Held::without_recording();
+    let mut ring = launch(&fixture, &mut held);
+    let owed = held.owed.take().unwrap();
+    super::tests::empty_ticks_file(&fixture, 0);
+    super::run_owed_add(
+        &fixture.root,
+        &mut held,
+        &owed,
+        &mut recording::LoadBuffers::default(),
+    );
+    let launched = published(&mut held);
+    std::fs::rename(fixture.root.join("data"), fixture.root.join("offline_data")).unwrap();
+    let shared = super::Shared::starting();
+    let operation = Arc::clone(&shared.cancellation).operation(0).unwrap();
+
+    super::refresh(&fixture.root, &mut held, &mut ring, &shared, &operation).unwrap();
+
+    let shown = published(&mut held);
+    assert_eq!(launched.left_out, Some(super::Failure::Refused));
+    assert_eq!(shown.left_out, launched.left_out);
+    assert_eq!(shown.failure, None);
+    assert_eq!(shown.seconds.first(), launched.seconds.first());
 }
 
 #[test]
@@ -888,22 +917,14 @@ fn load_into(held: &mut Held, fixture: &Fixture) {
 
 /// Starts a store on `fixture`'s recording in `held`, as a window's Store starts, which leaves
 /// the Apps of the recording's sealed minutes owed to its stretches.
-fn launch(fixture: &Fixture, held: &mut Held) {
-    use std::sync::atomic::AtomicBool;
-    let shared = super::Shared {
-        queries: crate::store::query::Queries::new(),
-        mailbox: Mailbox::new(),
-        stop: AtomicBool::new(false),
-        active: AtomicBool::new(true),
-        catch_up: AtomicBool::new(false),
-        catching_up: AtomicBool::new(true),
-        paused: AtomicBool::new(false),
-        cancellation: Arc::new(crate::cancellation::Cancellation::default()),
-    };
+fn launch(fixture: &Fixture, held: &mut Held) -> super::Ring {
+    let shared = super::Shared::starting();
     let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     let operation = Arc::clone(&shared.cancellation).operation(0).unwrap();
 
     super::startup_staged(&fixture.root, held, &mut ring, &shared, &operation).unwrap();
+
+    ring
 }
 
 /// Asserts that a store that launches on `fixture`'s recording, then adds up the Apps it owes

@@ -305,6 +305,19 @@ fn store_parked_behind_the_ring() -> (
     viewer::store::Store,
     viewer::store::QueryHandle,
 ) {
+    let (mut recording, store, handle) = store_over_a_sealed_minute();
+    Harness::ready_context(&handle);
+    park_behind_the_ring(&mut recording, &store);
+
+    (recording, store, handle)
+}
+
+/// A Store started over one sealed minute of two readings, which it holds once it answers.
+fn store_over_a_sealed_minute() -> (
+    LiveRecording,
+    viewer::store::Store,
+    viewer::store::QueryHandle,
+) {
     let mut recording = LiveRecording::new();
     recording.publish_resources();
     recording.publish_resources();
@@ -315,12 +328,15 @@ fn store_parked_behind_the_ring() -> (
     )
     .unwrap();
     let handle = store.query_handle();
-    Harness::ready_context(&handle);
-    store.set_active(false);
-    Harness::wait_until_paused(&store);
-    recording.publish_resources();
 
     (recording, store, handle)
+}
+
+/// Pauses the Store and publishes a reading it does not take, so that it answers not yet.
+fn park_behind_the_ring(recording: &mut LiveRecording, store: &viewer::store::Store) {
+    store.set_active(false);
+    Harness::wait_until_paused(store);
+    recording.publish_resources();
 }
 
 #[test]
@@ -441,31 +457,23 @@ fn a_page_showing_its_readings_waits_as_many_steps_for_a_store_that_keeps_saying
     // Method: show a page from the real Store, park the Store behind the ring, so that it answers
     // every query with not yet, let it answer each step's query, and count the steps until the
     // saved minutes answer.
-    let mut recording = LiveRecording::new();
-    recording.publish_resources();
-    recording.publish_resources();
-    seal_recording(&recording, 0);
-    let store = viewer::store::Store::start_with_budget(
-        &recording.root,
-        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
-    )
-    .unwrap();
-    let handle = store.query_handle();
+    let (mut recording, store, handle) = store_over_a_sealed_minute();
     let mut adapter = Adapter::on_root(handle.clone(), &recording.root);
     adapter.command.request = request("network");
     assert!(matches!(
         adapter.update_within(Duration::from_secs(10)),
         Update::Ready(_)
     ));
-    store.set_active(false);
-    Harness::wait_until_paused(&store);
-    recording.publish_resources();
+    park_behind_the_ring(&mut recording, &store);
 
     for _ in 0..super::super::STORE_WAITS_MAX {
         assert!(adapter_step_answered(&mut adapter, &handle).is_none());
     }
 
-    assert!(adapter.read().is_some());
+    let Some(Update::Ready(saved)) = adapter.read() else {
+        panic!("the saved minutes did not answer");
+    };
+    assert_eq!(saved.selection["selected"]["publication"], 2);
 }
 
 /// Steps the reader, then lets the Store answer what that step asked, as the worker's pause would.

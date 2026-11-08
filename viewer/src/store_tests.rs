@@ -893,7 +893,7 @@ fn latest_reply(handle: &super::QueryHandle) -> super::QueryOutcome {
     next_reply(handle)
 }
 
-fn next_reply(handle: &super::QueryHandle) -> super::QueryOutcome {
+pub(super) fn next_reply(handle: &super::QueryHandle) -> super::QueryOutcome {
     let deadline = Instant::now() + Duration::from_secs(10);
     for _ in 0..1000 {
         if let Some(reply) = handle.take() {

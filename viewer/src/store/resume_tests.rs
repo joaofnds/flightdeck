@@ -243,8 +243,8 @@ fn a_resume_across_a_collector_restart_holds_what_a_fresh_store_holds() {
 fn a_refused_minute_is_read_again_with_the_next_read_of_the_hour() {
     // Goal: a successful suffix cannot permanently skip an unreadable older minute, which the
     // Store's next read of the hour tries again.
-    // Method: refuse the first sealed minute, show the store again, restore the minute, overrun
-    // the ring while hidden, and show the same store once more.
+    // Method: refuse the first sealed minute, hide the store, restore the minute, overrun the
+    // ring while hidden, and show the same store again.
     use std::os::unix::fs::PermissionsExt;
     let mut fixture = Fixture::new();
     for minute in 0..3 {
@@ -267,13 +267,6 @@ fn a_refused_minute_is_read_again_with_the_next_read_of_the_hour() {
             .is_some_and(|second| second.publication == 12)
     });
     assert_eq!(initial.left_out, Some(super::Failure::Refused));
-    store.set_active(false);
-    super::activity_tests::wait_until_paused(&store);
-
-    store.set_active(true);
-    let still_refused = view_where(&store, |_| true);
-
-    assert_eq!(still_refused.left_out, Some(super::Failure::Refused));
     store.set_active(false);
     super::activity_tests::wait_until_paused(&store);
     std::fs::write(&ticks, original).unwrap();

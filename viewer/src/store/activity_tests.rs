@@ -2,7 +2,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::Store;
-use super::tests::{assert_app_facts_equal, view_where};
+use super::tests::{assert_app_facts_equal, next_reply, view_where};
 use crate::live::identity_fixture::Fixture;
 
 #[test]
@@ -181,10 +181,11 @@ fn dropping_a_paused_store_wakes_and_reaps_its_thread() {
 
 #[test]
 fn a_store_paused_while_it_starts_answers_a_query() {
-    // Goal: a page that asks a Store paused before it has started hears an answer, as it does
-    // from a Store paused once started, rather than waiting out its whole bound for none.
+    // Goal: a page that asks a Store paused before it has started hears that the saved minutes
+    // must answer it, as it does from a Store paused once started, rather than waiting out its
+    // whole bound for no answer or hearing that the recording failed.
     // Method: start a store on a folder the collector has made no recording in yet, so it stays
-    // starting, pause it, ask it for the newest second, and wait for an answer.
+    // starting, pause it, ask it for the newest second, and read its answer.
     let fixture = Fixture::new();
     let store = Store::start(&fixture.root.join("not-yet-recorded")).unwrap();
     store.set_active(false);
@@ -199,15 +200,10 @@ fn a_store_paused_while_it_starts_answers_a_query() {
         })
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    for _ in 0..10_000 {
-        if handle.answered() {
-            break;
-        }
-        assert!(Instant::now() < deadline, "the paused store never answered");
-        thread::sleep(Duration::from_millis(1));
-    }
-    assert!(handle.answered());
+    assert!(matches!(
+        next_reply(&handle),
+        super::QueryOutcome::NeedsLoad(super::QueryNeedsLoad::UncheckedCoverage)
+    ));
 }
 
 pub(super) fn wait_until_paused(store: &Store) {
