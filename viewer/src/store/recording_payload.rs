@@ -1,7 +1,9 @@
 //! The Store's complete process decoder, sharing the recorded App rule and predecessor.
 use std::mem;
+use std::panic;
 use std::path::Path;
 use std::sync::Arc;
+use std::thread;
 
 use collector::ring::RunIdentity;
 
@@ -22,7 +24,10 @@ mod tests;
 
 /// Hands `take` the seconds of `minutes`, oldest first, after seeding their rates from
 /// `predecessor`, the minute before them whose seconds the store holds, where the load
-/// continues the store's seconds.
+/// continues the store's seconds. A load that continues them, which a returning window waits on,
+/// decodes up to `LOADERS_MAX` neighbouring minutes at once, each seeding its rates from the
+/// minute before it. A load of the whole hour decodes one minute at a time, so it needs the memory
+/// of one minute however many it reads.
 pub(super) fn load(
     root: &Path,
     predecessor: Option<&Found>,
@@ -39,14 +44,149 @@ pub(super) fn load(
         capture,
     };
     let mut cursor = Cursor::new(minutes.len());
-    if let Some(found) = predecessor {
-        cursor.seed(&input, found)?;
-    }
-    for found in minutes {
-        cursor.step(&input, found, &mut take)?;
+    let group_minutes = match predecessor {
+        Some(_) => super::LOADERS_MAX,
+        None => 1,
+    };
+    let mut before = predecessor;
+    for group in minutes.chunks(group_minutes) {
+        cursor.step(&input, before.take(), group, &mut take)?;
     }
 
     cursor.finish(operation)
+}
+
+/// Decodes `group`, neighbouring minutes oldest first, a thread a minute, or on this thread where
+/// it holds one. The first goes on from `carried`, the decoder of the minute before it, or where
+/// the load continues from `predecessor`, seeds its own decoder from it. Each other first seeds its
+/// own decoder from the minute before it, which another thread decodes. Each result is a minute's
+/// decoder, its seconds and why its decoder could not be seeded, in the order of `group`.
+fn load_group(
+    input: &LoadInput<'_>,
+    carried: Decoder,
+    predecessor: Option<&Found>,
+    group: &[Found],
+) -> Vec<persistence::Result<Decoded>> {
+    assert!(!group.is_empty());
+    assert!(group.len() <= super::LOADERS_MAX);
+    let carried = match predecessor {
+        Some(_) => None,
+        None => Some(carried),
+    };
+    if let [found] = group {
+        return vec![load_group_decode(input, carried, predecessor, found)];
+    }
+
+    let mut carried = carried;
+    thread::scope(|scope| {
+        let decoders: Vec<_> = group
+            .iter()
+            .enumerate()
+            .map(|(index, found)| {
+                let decoder = carried.take();
+                let before = match index.checked_sub(1) {
+                    Some(before) => Some(&group[before]),
+                    None => predecessor,
+                };
+                let observation = persistence::work::ingestion::inherit_current();
+                thread::Builder::new()
+                    .name(String::from("flightdeck-decoder"))
+                    .spawn_scoped(scope, move || {
+                        let observation = observation.enter();
+                        let result = load_group_decode(input, decoder, before, found);
+                        drop(observation);
+                        result
+                    })
+            })
+            .collect();
+
+        decoders
+            .into_iter()
+            .map(|decoder| match decoder {
+                Ok(handle) => match handle.join() {
+                    Ok(decoded) => decoded,
+                    Err(panic) => panic::resume_unwind(panic),
+                },
+                Err(error) => Ok(Decoded {
+                    decoder: Decoder::default(),
+                    completion: Batch {
+                        seconds: Vec::new(),
+                        left_out: Some(Failure::Loader(error.kind())),
+                    },
+                    unseeded: None,
+                }),
+            })
+            .collect()
+    })
+}
+
+/// What decoding one minute of a group gives.
+struct Decoded {
+    /// The decoder after the minute, which rates the minute after it.
+    decoder: Decoder,
+    completion: Batch,
+    /// Why the decoder could not be seeded from the minute before it, where it could not. That
+    /// minute's first second then has no rates.
+    unseeded: Option<Refused>,
+}
+
+/// Decodes `found` with `decoder`, the decoder of the minute before it, or where another thread
+/// decodes that minute or the store holds its seconds, with a decoder seeded from `before`, that
+/// minute.
+fn load_group_decode(
+    input: &LoadInput<'_>,
+    decoder: Option<Decoder>,
+    before: Option<&Found>,
+    found: &Found,
+) -> persistence::Result<Decoded> {
+    let (mut decoder, unseeded) = match (decoder, before) {
+        (Some(decoder), _) => (decoder, None),
+        (None, Some(before)) => load_group_seed(input, before)?,
+        (None, None) => unreachable!("a minute after the first of a group has one before it"),
+    };
+    input.operation.check()?;
+
+    let completion = decoder.decode(
+        input.root,
+        found,
+        input.budget,
+        input.operation,
+        input.capture,
+    );
+    Ok(Decoded {
+        decoder,
+        completion,
+        unseeded,
+    })
+}
+
+/// A decoder holding what rates the minute after `before`, as the decoder of `before` holds after
+/// decoding it, without the catalog of `before`, which that decoder counts, and why it could not
+/// read `before`, where it could not.
+fn load_group_seed(
+    input: &LoadInput<'_>,
+    before: &Found,
+) -> persistence::Result<(Decoder, Option<Refused>)> {
+    let _purpose =
+        persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
+    input.operation.check()?;
+    let mut decoder = Decoder::default();
+
+    let seeded = decoder.seed(
+        input.root,
+        before,
+        input.budget,
+        input.operation,
+        input.capture,
+    );
+    if seeded.is_err() {
+        assert!(decoder.predecessor.is_none());
+        assert!(decoder.previous_run.is_none());
+    }
+    input.operation.check()?;
+
+    decoder.decoded_catalog = super::DecodedCatalog::default();
+    Ok((decoder, seeded.err()))
 }
 
 pub(super) struct Cursor {
@@ -75,54 +215,43 @@ impl Cursor {
         }
     }
 
-    /// Seeds the rates of the first minute the load hands over from `found`, the minute before
-    /// it. The predecessor's own seconds stay unread, since the store holds them.
-    fn seed(&mut self, input: &LoadInput<'_>, found: &Found) -> persistence::Result<()> {
-        let _purpose = persistence::work::ingestion::purpose(
-            persistence::work::ingestion::Purpose::Predecessor,
-        );
-        input.operation.check()?;
-        assert_eq!(self.next_minute_index, 0);
-
-        let seeded = self.decoder.seed(
-            input.root,
-            found,
-            input.budget,
-            input.operation,
-            input.capture,
-        );
-        if let Err(refused) = seeded {
-            self.left_out = Some(load_refusal(&refused));
-        }
-        input.operation.check()?;
-
-        Ok(())
-    }
-
+    /// Decodes `group`, the next neighbouring minutes oldest first, at once, and hands `take`
+    /// their seconds in order. Where the load continues from `predecessor`, the minute before the
+    /// first of them, whose seconds the store holds, it seeds their rates from it and leaves its
+    /// seconds unread.
     fn step(
         &mut self,
         input: &LoadInput<'_>,
-        found: &Found,
-        take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
+        predecessor: Option<&Found>,
+        group: &[Found],
+        mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
     ) -> persistence::Result<()> {
         input.operation.check()?;
-        if self.next_minute_index == self.minute_count {
+        if self.minute_count - self.next_minute_index < group.len() {
             return Err(persistence::Error::Bound("sealed payload cursor exhausted"));
         }
-
-        assert!(self.next_minute_index < self.minute_count);
-
-        let completion = self.decoder.decode(
-            input.root,
-            found,
-            input.budget,
-            input.operation,
-            input.capture,
-        );
-        if let Some(failure) = load_consume(completion, input.operation, take)? {
-            self.left_out = Some(failure);
+        if predecessor.is_some() {
+            assert_eq!(self.next_minute_index, 0);
         }
-        self.accept_minute();
+
+        let mut decoded_catalog = super::DecodedCatalog::default();
+        let decoded = load_group(input, mem::take(&mut self.decoder), predecessor, group);
+        for (index, decoded) in decoded.into_iter().enumerate() {
+            let mut decoded = decoded?;
+            // Only the predecessor has no decoder in this load to say why it cannot be read.
+            if index == 0 && predecessor.is_some() {
+                if let Some(refused) = &decoded.unseeded {
+                    self.left_out = Some(load_refusal(refused));
+                }
+            }
+            decoded_catalog.extend(&mem::take(&mut decoded.decoder.decoded_catalog));
+            if let Some(failure) = load_consume(decoded.completion, input.operation, &mut take)? {
+                self.left_out = Some(failure);
+            }
+            self.accept_minute();
+            self.decoder = decoded.decoder;
+        }
+        self.decoder.decoded_catalog = decoded_catalog;
 
         Ok(())
     }

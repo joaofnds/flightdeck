@@ -27,21 +27,21 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
     let mut accepted = Vec::new();
 
     cursor
-        .step(&input, &found[0], |_, second, _| {
+        .step(&input, None, &found[0..=0], |_, second, _| {
             accepted.push(second.publication);
         })
         .unwrap();
     assert_eq!(accepted, [1]);
     assert_eq!(budget.used(), 0);
     cursor
-        .step(&input, &found[1], |_, second, _| {
+        .step(&input, None, &found[1..=1], |_, second, _| {
             accepted.push(second.publication);
         })
         .unwrap();
     assert_eq!(accepted, [1, 2, 3]);
     assert_eq!(budget.used(), 0);
     cursor
-        .step(&input, &found[2], |_, second, _| {
+        .step(&input, None, &found[2..=2], |_, second, _| {
             accepted.push(second.publication);
         })
         .unwrap();
@@ -92,9 +92,15 @@ fn cursor_steps_preserve_the_first_live_successor() {
     let mut cursor = Cursor::new(found.len());
     let expected = one_pass_terminal(&fixture.root, &operation);
 
-    cursor.step(&input, &found[0], |_, _, _| {}).unwrap();
-    cursor.step(&input, &found[1], |_, _, _| {}).unwrap();
-    cursor.step(&input, &found[2], |_, _, _| {}).unwrap();
+    cursor
+        .step(&input, None, &found[0..=0], |_, _, _| {})
+        .unwrap();
+    cursor
+        .step(&input, None, &found[1..=1], |_, _, _| {})
+        .unwrap();
+    cursor
+        .step(&input, None, &found[2..=2], |_, _, _| {})
+        .unwrap();
     let actual = cursor.finish(&operation).unwrap().terminal.unwrap();
     fixture.publish_with_system_rows(221);
     let expected = terminal_successor(&fixture.root, expected);
@@ -124,7 +130,9 @@ fn cursor_refuses_a_terminal_handoff_before_all_minutes_are_consumed() {
         capture: &AdmittedTable::from_file_budgeted,
     };
     let mut cursor = Cursor::new(found.len());
-    cursor.step(&input, &found[0], |_, _, _| {}).unwrap();
+    cursor
+        .step(&input, None, &found[0..=0], |_, _, _| {})
+        .unwrap();
 
     let result = cursor.finish(&operation);
 
@@ -157,7 +165,7 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
     let mut cursor = Cursor::new(found.len());
     let mut retained = AppsSecond::with_room();
     cursor
-        .step(&input, &found[0], |_, _, apps| {
+        .step(&input, None, &found[0..=0], |_, _, apps| {
             retained.take(apps, None);
         })
         .unwrap();
@@ -166,7 +174,7 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
     let mut accepted = 0;
     cancellation.cancel().unwrap();
 
-    let result = cursor.step(&input, &found[1], |_, _, _| {
+    let result = cursor.step(&input, None, &found[1..=1], |_, _, _| {
         accepted += 1;
     });
     let finished = cursor.finish(&operation);
@@ -204,18 +212,18 @@ fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
     let mut accepted = Vec::new();
 
     cursor
-        .step(&input, &found[0], |_, second, _| {
+        .step(&input, None, &found[0..=0], |_, second, _| {
             accepted.push((second.publication, second.follows()));
         })
         .unwrap();
     cursor
-        .step(&input, &found[1], |_, second, _| {
+        .step(&input, None, &found[1..=1], |_, second, _| {
             accepted.push((second.publication, second.follows()));
         })
         .unwrap();
     assert_eq!(accepted, [(1, false)]);
     cursor
-        .step(&input, &found[2], |_, second, _| {
+        .step(&input, None, &found[2..=2], |_, second, _| {
             accepted.push((second.publication, second.follows()));
         })
         .unwrap();
@@ -1423,9 +1431,56 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
     // Goal: removing old decode work cannot erase the first new observation's predecessor.
     // Method: load after publication 3 and check publication 4's real machine and process rates.
     let fixture = catch_up_fixture();
+
+    let (machine, apps) = publication_4_loaded_after(&fixture, 3);
+
+    assert!(machine.follows());
+    assert_eq!(machine.cpu_percent, Some(50.0));
+    assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
+    assert_eq!(
+        apps.processes
+            .as_ref()
+            .unwrap()
+            .previous
+            .unwrap()
+            .publication,
+        3
+    );
+}
+
+#[test]
+fn a_continued_load_rates_a_minute_decoded_beside_the_minute_before_it() {
+    // Goal: a minute a return decodes at once with the minute before it takes its first second's
+    // rates from that minute's last reading, as when the two are decoded in turn.
+    // Method: load after publication 1, so the two minutes after it decode at once, and check
+    // publication 4's real machine and process rates against publication 3, the reading before it.
+    let fixture = catch_up_fixture();
+
+    let (machine, apps) = publication_4_loaded_after(&fixture, 1);
+
+    assert!(machine.follows());
+    assert_eq!(machine.cpu_percent, Some(50.0));
+    assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
+    assert_eq!(
+        apps.processes
+            .as_ref()
+            .unwrap()
+            .previous
+            .unwrap()
+            .publication,
+        3
+    );
+}
+
+/// The seconds of publication 4 of `catch_up_fixture`, as a load that continues from
+/// `publication` hands them over.
+fn publication_4_loaded_after(
+    fixture: &Fixture,
+    publication: u64,
+) -> (crate::store::MachineSecond, AppsSecond) {
     let newest = crate::store::Newest {
         run: fixture.writer.identity().unwrap(),
-        publication: 3,
+        publication,
         segment: 0,
     };
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
@@ -1451,19 +1506,7 @@ fn incremental_catch_up_preserves_rates_at_the_new_minute_boundary() {
     )
     .unwrap();
 
-    let (machine, apps) = selected.unwrap();
-    assert!(machine.follows());
-    assert_eq!(machine.cpu_percent, Some(50.0));
-    assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
-    assert_eq!(
-        apps.processes
-            .as_ref()
-            .unwrap()
-            .previous
-            .unwrap()
-            .publication,
-        3
-    );
+    selected.unwrap()
 }
 
 fn catch_up_fixture() -> Fixture {

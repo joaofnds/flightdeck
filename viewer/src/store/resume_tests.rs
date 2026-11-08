@@ -362,7 +362,9 @@ fn a_refused_predecessor_does_not_discard_accepted_history() {
 fn a_resume_beyond_ring_retention_reduces_only_the_publications_it_takes_in() {
     // Goal: the minute a return continues from, whose seconds the store holds, costs no second
     // machine reduction, so each publication keeps one.
-    // Method: trace a return past the ring's retention and list each reduction.
+    // Method: trace a return past the ring's retention and count each publication's ordinary
+    // reductions. The return decodes its minutes at once, so the trace holds them in no fixed
+    // order.
     use persistence::work::ingestion::{Key, Kind, Purpose};
     let traced = traced_return_past_the_ring();
 
@@ -373,15 +375,15 @@ fn a_resume_beyond_ring_retention_reduces_only_the_publications_it_takes_in() {
         .map(|event| (event.key, event.purpose))
         .collect();
 
-    assert_eq!(
-        reduced,
-        (3..=11)
-            .map(|publication| {
-                let run = traced.run;
-                (Key::Publication { run, publication }, Purpose::Ordinary)
-            })
-            .collect::<Vec<_>>()
-    );
+    let ordinary_reductions: Vec<_> = (3..=11)
+        .map(|publication| {
+            let run = traced.run;
+            let expected = (Key::Publication { run, publication }, Purpose::Ordinary);
+            reduced.iter().filter(|event| **event == expected).count()
+        })
+        .collect();
+    assert_eq!(reduced.len(), 9);
+    assert_eq!(ordinary_reductions, [1; 9]);
     assert_eq!(
         traced.seconds,
         (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
