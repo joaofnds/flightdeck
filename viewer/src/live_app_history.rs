@@ -1,4 +1,4 @@
-//! Compact App facts retained independently of the bounded raw process cache.
+//! Compact App facts a session retains for its App histories.
 use std::cell::RefCell;
 
 use crate::apps::{self, AppKey};

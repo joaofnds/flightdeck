@@ -1,4 +1,4 @@
-//! Complete bounded catalog discovery for the opt-in process-payload adapter.
+//! Complete bounded catalog discovery for the Store's loads of sealed minutes.
 
 use std::collections::BTreeMap;
 use std::io;

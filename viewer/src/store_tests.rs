@@ -2252,7 +2252,6 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     }
 }
 
-/// Whether the newest second `view` holds is at whole wall second `wall_second`.
 /// What a page draws of one second's Apps.
 type Drawn<'second> = (
     &'second super::AppRows,
@@ -2277,6 +2276,7 @@ fn drawn(apps: &[Arc<super::AppsSecond>]) -> Vec<Drawn<'_>> {
         .collect()
 }
 
+/// Whether the newest second `view` holds is at whole wall second `wall_second`.
 fn held_through(view: &View, wall_second: u64) -> bool {
     view.seconds
         .last()

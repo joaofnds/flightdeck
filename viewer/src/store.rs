@@ -887,8 +887,8 @@ fn run_owed(
     held.publish(mailbox);
 }
 
-/// Adds the Apps of the minutes `owed` holds that are older than the live span to the stretches
-/// that hold those minutes' seconds, as a load of the whole hour adds them up.
+/// Adds the Apps of the minutes `owed` holds to the stretches that hold those minutes' seconds,
+/// as a load of the whole hour adds them up.
 fn run_owed_add(
     root: &Path,
     held: &mut Held,
@@ -995,7 +995,7 @@ fn startup_accept(
     Ok(())
 }
 
-/// A Store with a budget uses the same producer while yielding between finite source steps.
+/// Loads the sealed hour in finite source steps, yielding between them, as every Store starts.
 fn startup_staged(
     root: &Path,
     held: &mut Held,

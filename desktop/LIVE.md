@@ -7,7 +7,7 @@ Current build and launch commands are in [README.md](README.md).
 ## Current app
 
 The client opens live and sealed recordings through the shared reader. It supports
-exact observation selection, paged raw/process/App data, logical-CPU histories,
+exact observation selection, paged process/App data, logical-CPU histories,
 Memory quantities and pressure, Energy/SoC/fan histories, GPU, Network, Storage,
 Battery, Computer and Self-monitoring.
 The [README](README.md) gives the self-contained bundle build and launch commands.
@@ -350,8 +350,8 @@ needs a longer profile before interpreting the prototype's steady-state cost.
 
 ## Historical parity and limits
 
-Live mode implements Overview, CPU & processes, Apps, Memory, GPU, Energy, Network,
-Computer and Self-monitoring. Memory categories stack only on Overview; dedicated
+Live mode implements Overview, CPU & processes, Apps, Memory, GPU, Energy, Storage,
+Network, Battery, Computer and Self-monitoring. Memory categories stack only on Overview; dedicated
 memory charts keep them independent. Energy series remain independent. Network
 sends plot below zero. The schematic uses recorded CPU/GPU activity, installed RAM
 and validated fan channels, with unavailable sensors labeled explicitly.

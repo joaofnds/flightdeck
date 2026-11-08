@@ -1,4 +1,4 @@
-//! The opt-in complete process decoder, sharing the recorded App rule and predecessor.
+//! The Store's complete process decoder, sharing the recorded App rule and predecessor.
 use std::mem;
 use std::path::Path;
 use std::sync::Arc;

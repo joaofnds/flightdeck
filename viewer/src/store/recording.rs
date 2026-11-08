@@ -151,7 +151,7 @@ impl Terminal {
     }
 }
 
-/// Decodes and consumes the opt-in payload prefix one minute at a time under caller cancellation.
+/// Decodes and consumes the payload prefix one minute at a time under caller cancellation.
 #[cfg(test)]
 pub(super) fn load_payload(
     root: &Path,

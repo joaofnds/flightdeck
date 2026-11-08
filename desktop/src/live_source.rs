@@ -196,12 +196,13 @@ struct Mailbox {
     /// The window reading through the worker closed, so the worker drops its page and reads
     /// nothing until the next window asks for one.
     rest: bool,
-    /// The worker reads no page, so a request has nothing of its to cancel.
+    /// The worker reads no page, so a request has nothing of its own to cancel.
     resting: bool,
     pause_end: PauseEnd,
 }
 
-/// What ends the worker's pause besides its time, a request, a rest and a stop.
+/// What ends the worker's pause other than a request, a rest and a stop: its time running out,
+/// or an answer from the Store.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PauseEnd {
     Time,
@@ -373,12 +374,13 @@ impl Worker {
         })
     }
 
-    /// The recording this worker reads.
+    /// Whether this worker holds a Store of its own.
     #[cfg(test)]
     pub(crate) fn runs_its_own_store(&self) -> bool {
         self.store.is_some()
     }
 
+    /// The recording this worker reads.
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }

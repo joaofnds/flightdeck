@@ -270,8 +270,6 @@ fn every_page_of_a_second_older_than_the_store_holds_shows_what_the_saved_route_
     }
 }
 
-/// Refuses any reading of the ring by the worker, whatever it was made for: one made for a page's
-/// older tail still takes in what the Store took in.
 /// What the reader did under the purpose of reading saved minutes.
 fn saved_reads(events: &[Event]) -> usize {
     events
@@ -281,6 +279,8 @@ fn saved_reads(events: &[Event]) -> usize {
         .count()
 }
 
+/// Refuses any reading of the ring by the worker, whatever it was made for: one made for a page's
+/// older tail still takes in what the Store took in.
 pub(super) fn assert_worker_took_in_nothing(events: &[Event]) {
     for kind in [
         Kind::MachineReduction,
@@ -380,8 +380,6 @@ impl Pages {
     }
 }
 
-/// Two saved minutes further apart than the Store's span, read through a Store's worker and through
-/// a saved recording's reader.
 #[test]
 fn inspecting_a_second_the_stores_context_leaves_out_reads_the_saved_minutes() {
     // Goal: an inspected second older than the Store's context, as a chart's older tail offers,
@@ -460,6 +458,8 @@ fn a_page_reads_its_older_tail_only_as_history() {
     assert_eq!(saved_reads(&events), reader().count());
 }
 
+/// Two saved minutes further apart than the Store's span, read through a Store's worker and through
+/// a saved recording's reader.
 struct OlderPages {
     live: Worker,
     saved: Worker,

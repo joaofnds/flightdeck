@@ -225,9 +225,9 @@ Restoring live Overview keeps the selected range and reconciles to the newest en
 before publishing a complete replacement. A covered checkpoint reuses cached history and
 reads the retained ring delta. Otherwise the Store reads the minutes sealed after the newest
 second it holds and follows the ring from the newest of them. It reads the hour's sealed
-minutes again, replacing what it held, where the hour left a minute out, where the hour no
-longer holds a minute of that second's run, or where the ring overran while the Store read
-it, which leaves the Store holding seconds past ones it never took. Overview waits for
+minutes again, replacing what it held, where the hour left a minute out, where the Store
+holds no whole sealed minute of that second's run, or where the ring overran while it read
+the ring, which leaves the Store holding seconds past ones it never took. Overview waits for
 the Store instead of starting a duplicate page query.
 While Overview draws from a View the worker rests, and a hover over a second the View holds
 reads it there. The Memory, CPU, Energy, Storage and GPU pages draw their chart by App from

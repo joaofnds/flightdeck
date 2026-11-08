@@ -491,8 +491,7 @@ pub(super) fn read(
     }
 }
 
-/// Answers from the saved recording, through a session that reads no ring, since the Store alone
-/// takes in the live Mac's readings.
+/// Answers from the saved recording, since the Store alone takes in the live Mac's readings.
 fn read_saved(
     reader: &mut Reader,
     root: &std::path::Path,

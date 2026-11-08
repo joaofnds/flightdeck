@@ -32,7 +32,7 @@ mod process_groups;
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const CONTEXT_BYTES_MAX: usize = 8 * 1024 * 1024;
-/// How far a context moves before a session that reads no ring lists the saved minutes again.
+/// How far a context moves before a session lists the saved minutes again.
 const SAVED_LISTING_SECONDS: u64 = 60;
 pub struct LiveSession {
     root: PathBuf,

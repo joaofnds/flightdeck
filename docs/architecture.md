@@ -121,8 +121,9 @@ generations prevent an old answer replacing a newer selection.
 
 ```mermaid
 flowchart TD
-    Sources[Saved recording and live ring] --> Store[Store ingestion thread]
-    Sources --> Worker[Page query worker]
+    Saved[Saved recording] --> Store[Store ingestion thread]
+    Ring[Live ring] --> Store
+    Saved --> Worker[Page query worker]
     Store --> View[Immutable View]
     View --> Overview[Live Overview]
     View --> AppCharts[Charts by App of the Memory, CPU, Energy, Storage and GPU pages]
@@ -137,8 +138,8 @@ the worker has answered them, the Memory, CPU, Energy, Storage and GPU pages dra
 chart by App from the newest View no older than the worker's readings, since the worker's
 App histories stop 960 s back and the View holds every App's ten-second sums for the
 loaded hour. Their other charts, and every chart of the other pages, come from the
-worker. A hidden window parks the Store, and so do a selected second and a saved
-recording shown in a live window. Bootstrap, incomplete histories and unavailable Store
+worker. A hidden window parks the Store, and so does a saved recording shown in a live
+window, while a selected or held second leaves it taking in the live Mac. Bootstrap, incomplete histories and unavailable Store
 data retain the page-worker path.
 
 A held second is a second of the live Mac that the page holds after a click on a chart,
@@ -147,9 +148,8 @@ range dragged on a chart. The page keeps the last second of the window it showed
 the charts keep their window, and the newest View it took, so a range picked while held
 redraws the charts by App from that View without reading the recording. Each read it asks
 of the worker meanwhile is the page whose context ends at that last second, or the held
-second's own reading. Letting go drops the View, since the Store stops taking seconds once
-a View it handed out holds its spare buffers, and the page shows what it drew from the View
-until the Store's next View.
+second's own reading. Letting go drops the View, which frees its buffers, and the page shows
+what it drew from the View until the Store's next View.
 
 The native timer normally takes completed work every 250 ms. While a restoration
 or another reply is pending, the live window's scheduling also polls promptly for
@@ -191,9 +191,10 @@ flowchart TD
     Covered -->|yes| Delta[Keep cached history and predecessors; read bounded ring delta]
     Covered -->|no| Reload[Read minutes sealed since the newest whole held minute and reconcile ring]
     Delta --> Lost{Publication overwritten during read?}
-    Lost -->|yes| Reload
+    Lost -->|yes| Hour[Read the loaded hour's sealed minutes again and reconcile ring]
     Lost -->|no| Complete[Publish complete replacement View]
     Reload --> Complete
+    Hour --> Complete
     Complete --> Live[Draw current selected range and continue live]
 ```
 
@@ -206,11 +207,12 @@ recording sealed after it. Where the Store holds no whole sealed minute of that 
 loads the whole hour again. During restoration the Store withholds partial Views until
 it reaches the current endpoint, or reports a failure. Missing or refused readings
 remain explicit gaps in the replacement. While the held hour leaves a minute out, each
-expired checkpoint reads the whole hour again, so a minute that becomes readable fills it.
+restoration reads the whole hour again, so a minute that becomes readable fills it.
 
 Coverage is checked again through consumption. If the writer overwrites an unread
 publication after checkpoint admission, the Store withholds the incomplete View,
-invalidates coverage and switches to reading the sealed minutes. Checking coverage
+invalidates coverage and reads the loaded hour's sealed minutes again, since the seconds it
+took after the overwritten one would otherwise stand past a gap. Checking coverage
 only before reading would silently omit a reading still recoverable from disk.
 
 Overview waits for that replacement instead of submitting a duplicate full-period
@@ -226,10 +228,10 @@ about half an hour that costs about what reloading the whole hour does, as the
 [measurements](window-resume-performance.md) show.
 The independent page worker stays idle when the Store supplies Overview.
 
-Catching up still needs predecessor data to derive correct first-successor rates.
-The terminal decoder validates the saved predecessor minute, including refused
-observations, and retains its terminal raw predecessor without constructing App
-presentation objects. Dropping validation would change which later rates are valid.
+Catching up still needs predecessor data to derive correct first-successor rates, so
+the load decodes the newest sealed minute the Store holds whole along with the minutes
+after it, and takes in only the seconds it does not hold. Starting at the first new
+minute would change which of its rates are valid.
 
 The [window-resume performance report](window-resume-performance.md) contains the
 profiles, before/after measurements, memory tradeoff and reproduction protocol.
