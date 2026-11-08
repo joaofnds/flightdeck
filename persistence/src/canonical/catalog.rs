@@ -250,15 +250,16 @@ impl Catalog {
             return Ok(page);
         };
         let mut cursor = self.known_cursor(range)?;
-        for _reading in 0..PAGE_READINGS_MAX {
-            let Some(key) = catalog_found(&mut cursor)? else {
-                work.add(cursor.work());
-                return Ok(page);
-            };
+        // One key past the page says whether another page follows it.
+        let mut keys = Vec::with_capacity(PAGE_READINGS_MAX + 1);
+        catalog_found_keys(&mut cursor, &mut keys, PAGE_READINGS_MAX + 1)?;
+        for key in keys.iter().take(PAGE_READINGS_MAX) {
             page.readings
-                .push(KnownReading::from_key(self.recording, &key)?);
+                .push(KnownReading::from_key(self.recording, key)?);
         }
-        page.next = catalog_found(&mut cursor)?.and(page.readings.last().copied());
+        if keys.len() > PAGE_READINGS_MAX {
+            page.next = page.readings.last().copied();
+        }
         work.add(cursor.work());
 
         Ok(page)
@@ -828,6 +829,25 @@ fn catalog_found(cursor: &mut CanonicalCursor<'_, 'static>) -> io::Result<Option
             ReadStep::Found(key) => return Ok(Some(key)),
             ReadStep::End => return Ok(None),
             ReadStep::Continue => {}
+        }
+    }
+
+    Err(invalid())
+}
+
+/// Appends to `keys` the keys `cursor` finds, up to `keys_max` in all, in no more steps than
+/// `catalog_found` takes to find as many one at a time.
+fn catalog_found_keys(
+    cursor: &mut CanonicalCursor<'_, 'static>,
+    keys: &mut Vec<CanonicalKey>,
+    keys_max: usize,
+) -> io::Result<()> {
+    for _step in 0..LOOKUP_STEPS_MAX * keys_max {
+        if keys.len() == keys_max {
+            return Ok(());
+        }
+        if cursor.step_keys(keys, keys_max)? {
+            return Ok(());
         }
     }
 

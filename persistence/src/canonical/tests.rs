@@ -748,6 +748,99 @@ fn reader_snapshot_expires_after_a_real_namespace_state_replacement() {
     assert_eq!(cursor.step().unwrap_err().kind(), io::ErrorKind::WouldBlock);
 }
 #[test]
+fn a_step_of_many_keys_expires_after_a_real_namespace_state_replacement() {
+    // Goal: keys handed over together cannot outlive the snapshot they came from, though the leaf
+    // that holds them was read before it changed.
+    // Method: take one key of a leaf of three in a step of many, replace Quiet with a fresh inode,
+    // then ask the same cursor for the rest.
+    let fixture = Fixture::new();
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    let leaf = root
+        .open_directory("ordinary")
+        .unwrap()
+        .create_directory("0")
+        .unwrap();
+    for origin in 1..=3 {
+        let key = CanonicalKey::source(Namespace::Ordinary, &fixture.run, origin).unwrap();
+        leaf.create_file(&key.file_name()).unwrap();
+    }
+    let memory = budget();
+    let mut state = [0; 256];
+    let mut cursor = CanonicalCursor::begin(
+        &root,
+        fixture.run.recording,
+        Namespace::Ordinary,
+        SeekRange::source_tail(Namespace::Ordinary, &fixture.run).unwrap(),
+        &mut state,
+        &memory,
+    )
+    .unwrap();
+    let mut keys = Vec::new();
+    assert!(!cursor.step_keys(&mut keys, 1).unwrap());
+    let mut replacement = [0; 256];
+    bootstrap::codec::encode_state(
+        fixture.run.recording,
+        &bootstrap::codec::NamespaceState::Quiet { sequence: 1 },
+        &mut replacement,
+    )
+    .unwrap();
+    private::atomic_write_in(&root, "namespace-state", &replacement).unwrap();
+
+    let refused = cursor.step_keys(&mut keys, 3);
+
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+}
+#[test]
+fn a_step_of_many_keys_spends_no_more_than_a_step_of_one() {
+    // Goal: handing over keys together cannot lift the bound on the work of one step.
+    // Method: put two keys at the full 120-nibble depth on separate routes, so the walk goes on
+    // reading after it finds the first, and take both in steps of many keys.
+    let fixture = Fixture::new();
+    let first = CanonicalKey::from_bytes(Namespace::Known, &[0x22; 60]).unwrap();
+    let last = CanonicalKey::from_bytes(Namespace::Known, &[0x33; 60]).unwrap();
+    for (digit, key) in [("2", first), ("3", last)] {
+        let mut leaf = fixture.root.join("observations-known");
+        for _ in 0..120 {
+            leaf.push(digit);
+            private::create_private_dir(&leaf).unwrap();
+        }
+        private::open_private_file(&leaf.join(key.file_name()), true).unwrap();
+    }
+    let root = PrivateDirectory::open(&fixture.root).unwrap();
+    let memory = budget();
+    let mut state = [0; 256];
+    let mut cursor = CanonicalCursor::begin(
+        &root,
+        fixture.run.recording,
+        Namespace::Known,
+        SeekRange {
+            first,
+            last,
+            direction: Direction::Forward,
+        },
+        &mut state,
+        &memory,
+    )
+    .unwrap();
+
+    let mut keys = Vec::new();
+    let mut nodes_spent = Vec::new();
+    for _step in 0..16 {
+        let before = cursor.work().node_attempts;
+        let ended = cursor.step_keys(&mut keys, 3).unwrap();
+        nodes_spent.push(cursor.work().node_attempts - before);
+        if ended {
+            break;
+        }
+    }
+
+    assert_eq!(keys, [first, last]);
+    assert!(
+        nodes_spent.iter().all(|&nodes| nodes <= 4096),
+        "{nodes_spent:?}"
+    );
+}
+#[test]
 fn deepest_known_key_lookup_continues_under_the_original_snapshot() {
     // Goal: traversal handles the full120-nibble shape without retaining ancestor descriptors.
     // Method: install single-digit wrappers and assert bounded passes across the reopen budget.

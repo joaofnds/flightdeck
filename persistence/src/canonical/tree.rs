@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 /// The working memory one cursor reserves while it is open.
 pub const CURSOR_BYTES: usize = 256 * 1024;
+/// The node opens one step spends at most before it returns `Continue`.
+const STEP_NODE_ATTEMPTS_MAX: u64 = 4096;
 const DIRECT_ENTRIES: u64 = 16 * 124 + 128;
 const BOUNDARY_ENTRIES: u64 = 32 * 124 + 256;
 const _: () = {
@@ -363,11 +365,38 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
     }
     /// Each call is one pass; continuation retains this exact snapshot and traversal stack.
     pub fn step(&mut self) -> io::Result<ReadStep> {
-        self.next_limited(4096)
+        self.next_limited(STEP_NODE_ATTEMPTS_MAX)
     }
     pub(crate) fn next_limited(&mut self, limit: u64) -> io::Result<ReadStep> {
+        let start = self.work;
+        self.walk_checked(|cursor| cursor.next_inner(limit, &start))
+    }
+    /// Appends to `keys` the keys one step finds, up to `keys_max` in all, checking the snapshot
+    /// once before them and once after rather than around each, since the keys of a leaf already
+    /// read cost no read of their own. Returns whether the range holds no further key. The step
+    /// spends no more than `step` may, so it may return before `keys` holds `keys_max` keys.
+    pub(crate) fn step_keys(
+        &mut self,
+        keys: &mut Vec<CanonicalKey>,
+        keys_max: usize,
+    ) -> io::Result<bool> {
+        assert!(keys.len() < keys_max);
+        let start = self.work;
+        self.walk_checked(|cursor| {
+            for _key in keys.len()..keys_max {
+                match cursor.next_inner(STEP_NODE_ATTEMPTS_MAX, &start)? {
+                    ReadStep::Found(key) => keys.push(key),
+                    ReadStep::Continue => return Ok(false),
+                    ReadStep::End => return Ok(true),
+                }
+            }
+            Ok(false)
+        })
+    }
+    /// Runs `walk` between two checks of the snapshot, which a step's result depends on.
+    fn walk_checked<T>(&mut self, walk: impl FnOnce(&mut Self) -> io::Result<T>) -> io::Result<T> {
         self.check_snapshot()?;
-        let result = self.next_inner(limit);
+        let result = walk(self);
         // This check also dominates apparent corruption and absence from the walk.
         self.check_snapshot()?;
         if result.is_ok()
@@ -378,9 +407,11 @@ impl<'root, 'state> CanonicalCursor<'root, 'state> {
         }
         result
     }
-    fn next_inner(&mut self, limit: u64) -> io::Result<ReadStep> {
-        let initial = self.work.node_attempts;
-        let entries = self.work.entries;
+    /// Walks on to the next key, spending no more than `limit` node opens and the boundary's
+    /// entries since `start`, the work when the step began.
+    fn next_inner(&mut self, limit: u64, start: &ReadWork) -> io::Result<ReadStep> {
+        let initial = start.node_attempts;
+        let entries = start.entries;
         for _ in 0..4096 {
             if self.leaf_next < self.leaf_count {
                 let index = match self.range.direction {

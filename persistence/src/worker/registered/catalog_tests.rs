@@ -141,6 +141,25 @@ fn a_full_page_continues_after_its_last_reading() {
     assert_eq!(read, expected.iter().collect::<Vec<_>>());
 }
 
+#[test]
+fn a_full_page_checks_the_namespace_less_often_than_it_holds_readings() {
+    // Goal: a page checks the namespace once a pass over it rather than once a reading, so listing
+    // an hour of readings costs the leaves that hold them.
+    // Method: read a full page of hand-made links and count the namespace opens it made.
+    let recording = Recording::new();
+    let readings: Vec<_> = (0..u64::try_from(PAGE_READINGS_MAX + 1).unwrap())
+        .map(|index| catalog_tests_reading(&recording, 5_000_000_000 + index, index + 1))
+        .collect();
+    catalog_tests_link_known(&recording, &readings);
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+    let mut work = ReadWork::default();
+
+    let page = catalog.known_page(0, u64::MAX, None, &mut work).unwrap();
+
+    assert_eq!(page.readings, readings[..PAGE_READINGS_MAX]);
+    assert!(work.namespace_attempts < u64::try_from(PAGE_READINGS_MAX).unwrap());
+}
+
 /// Links each reading into the known namespace in the writer's grammar.
 fn catalog_tests_link_known(recording: &Recording, readings: &[KnownReading]) {
     let keys: Vec<CanonicalKey> = readings
