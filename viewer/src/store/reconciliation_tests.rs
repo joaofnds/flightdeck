@@ -86,7 +86,8 @@ fn a_matching_sealed_prefix_qualifies_an_initially_wrapped_ring() {
 #[test]
 fn an_overwrite_after_attachment_stays_unqualified_at_the_newest_cursor() {
     // Goal: catching up cannot erase a publication gap discovered after the handoff was checked.
-    // Method: overwrite terminal plus one after attaching, then advance the same reader again.
+    // Method: overwrite the publication after the one the started Store took last, then advance
+    // the same reader again.
     let mut fixture = Fixture::new();
     fixture.publish_with_events(10_000, &[]);
     fixture.seal_minute(0);
@@ -100,7 +101,7 @@ fn an_overwrite_after_attachment_stays_unqualified_at_the_newest_cursor() {
     let mut ring = super::make_ring(&fixture.root, &held.payload_budget);
     super::startup(&fixture.root, &mut held, &mut ring, &operation).unwrap();
     ring.follow().unwrap();
-    for second in 10_002..10_010 {
+    for second in 10_002..10_011 {
         fixture.publish_with_events(second, &[]);
     }
 
@@ -112,8 +113,8 @@ fn an_overwrite_after_attachment_stays_unqualified_at_the_newest_cursor() {
         .iter()
         .map(|second| second.publication)
         .collect();
-    assert_eq!(publications, [1, 3, 4, 5, 6, 7, 8, 9, 10]);
-    fixture.publish_with_events(10_010, &[]);
+    assert_eq!(publications, [1, 2, 4, 5, 6, 7, 8, 9, 10, 11]);
+    fixture.publish_with_events(10_011, &[]);
     let later = stepped_view(&mut held, &mut ring, &operation);
     assert!(!later.ring_complete);
     assert!(!initial.ring_complete);

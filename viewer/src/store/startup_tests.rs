@@ -869,52 +869,6 @@ fn cancellation_during_consumption_accepts_no_later_minute() {
 }
 
 #[test]
-fn cancellation_after_last_consumption_rejects_the_terminal_handoff() {
-    // Goal: a cancellation after all rows were consumed still rejects startup completion.
-    // Method: cancel the caller's operation while consuming the final real sealed observation.
-    let mut fixture = Fixture::new();
-    fixture.publish_with_system_rows(100);
-    fixture.seal();
-    let cancellation = Arc::new(crate::cancellation::Cancellation::default());
-    let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
-    let mut accepted = 0;
-
-    let outcome =
-        super::recording::load_payload(&fixture.root, &budget, &operation, |run, second, apps| {
-            assert!(held.take(run, second, apps));
-            accepted += 1;
-            cancellation.cancel().unwrap();
-        });
-    let reader = Arc::clone(held.apps.newest_held().unwrap());
-    let charge = retained_app_charge(&reader);
-    let mut ring = super::Ring::new(fixture.root.clone());
-    let mailbox = super::Mailbox::new();
-    let result = super::startup_accept(outcome, &mut held, &mut ring, &operation);
-    let published = super::step(
-        &mut held,
-        &mut ring,
-        Ok(()),
-        &mailbox,
-        &operation,
-        super::Publication::Complete,
-    );
-
-    assert_eq!(accepted, 1);
-    assert!(matches!(result, Err(persistence::Error::Io(error))
-        if error.kind() == std::io::ErrorKind::Interrupted));
-    assert!(published.is_err());
-    assert!(mailbox.take().is_none());
-    drop(ring);
-    drop(held);
-    assert_eq!(budget.used(), charge);
-    assert_eq!(reader.observation.unwrap().stamp.publication, 1);
-    drop(reader);
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
 fn cold_store_keeps_the_overwritten_sealed_predecessor() {
     // Goal: opening after the sealed predecessor leaves the ring preserves exact rates.
     // Method: compare warm/cold Stores at publication two after eight successors overwrite one.

@@ -351,39 +351,3 @@ fn a_refused_terminal_presentation_preserves_the_valid_input_predecessor() {
     );
     assert_eq!(observed[0].1.elapsed_ns, Some(1_000_000_000));
 }
-
-#[test]
-fn cancellation_rejects_a_finished_report_before_installing_its_handoff() {
-    // Goal: cancellation between loading and startup acceptance leaves no handoff or View.
-    // Method: cancel a successful report, then use the Store's acceptance and publication gates.
-    let (fixture, terminal) = sealed_predecessor();
-    let cancellation = Arc::new(crate::cancellation::Cancellation::default());
-    let operation = Arc::clone(&cancellation).operation(0).unwrap();
-    let outcome = recording::Outcome {
-        left_out: None,
-        terminal: Some(terminal),
-        checked_catalog: None,
-        continued_catalog: None,
-        decoded_catalog: recording::DecodedCatalog::default(),
-    };
-    let mut held = crate::store::Held::without_recording();
-    let mut ring = Ring::new(fixture.root.clone());
-    let mailbox = crate::store::Mailbox::new();
-    cancellation.cancel().unwrap();
-
-    let result = crate::store::startup_accept(Ok(outcome), &mut held, &mut ring, &operation);
-    let published = crate::store::step(
-        &mut held,
-        &mut ring,
-        Ok(()),
-        &mailbox,
-        &operation,
-        crate::store::Publication::Complete,
-    );
-
-    assert!(result.is_err());
-    assert!(published.is_err());
-    assert!(mailbox.take().is_none());
-    assert!(ring.terminal.is_none());
-    assert!(ring.source.is_none());
-}

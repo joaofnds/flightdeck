@@ -958,8 +958,8 @@ impl OwedWalk {
     }
 }
 
-/// Loads the sealed hour in one pass and follows the ring from its newest minute, as a test sets
-/// up the store a window starts through `startup_staged`.
+/// Starts `held` and `ring` on `root` as a window's Store starts, for a test that steps the Store
+/// itself after.
 #[cfg(test)]
 fn startup(
     root: &Path,
@@ -967,32 +967,18 @@ fn startup(
     ring: &mut Ring,
     operation: &Operation,
 ) -> persistence::Result<()> {
-    let budget = Arc::clone(&held.payload_budget);
-    let take = |run: &RunIdentity, second: &MachineSecond, apps: TickApps<'_>| {
-        assert!(held.take(run, second, apps));
+    let shared = Shared {
+        queries: query::Queries::new(),
+        mailbox: Mailbox::new(),
+        stop: AtomicBool::new(false),
+        active: AtomicBool::new(true),
+        catch_up: AtomicBool::new(false),
+        catching_up: AtomicBool::new(true),
+        paused: AtomicBool::new(false),
+        cancellation: Arc::new(Cancellation::default()),
     };
-    let outcome = recording::load_payload(root, &budget, operation, take);
 
-    startup_accept(outcome, held, ring, operation)
-}
-
-#[cfg(test)]
-fn startup_accept(
-    outcome: persistence::Result<recording::Outcome>,
-    held: &mut Held,
-    ring: &mut Ring,
-    operation: &Operation,
-) -> persistence::Result<()> {
-    let outcome = outcome?;
-    operation.check()?;
-    coverage::accept_catalog(held, outcome.checked_catalog)?;
-    held.left_out = outcome.left_out;
-    if held.left_out.is_none() {
-        held.covers_hour = true;
-    }
-    ring.accept(outcome.terminal);
-
-    Ok(())
+    startup_staged(root, held, ring, &shared, operation)
 }
 
 /// Loads the sealed hour in finite source steps, yielding between them, as every Store starts.
