@@ -261,6 +261,33 @@ fn a_second_whose_detail_the_store_let_go_reads_the_saved_minutes_at_once() {
 }
 
 #[test]
+fn a_page_the_store_published_lists_the_saved_minutes_again_once_it_falls_to_them() {
+    // Goal: a later step keeps only a listing the saved minutes made for its page, so a page the
+    // Store published finds a minute saved after the session last listed. Method: leave a page
+    // the Store published with part of it still to read, and take the listing its next saved
+    // step reads.
+    let (_recording, _store, handle) = store_parked_behind_the_ring();
+    let mut store = super::super::StoreReader::new(handle);
+    store.published = 1;
+    let reader = crate::live_source::Reader {
+        session: None,
+        store: Some(store),
+        last_catalog: None,
+        last_generation: 1,
+        last_route: String::from("overview"),
+        pending: Some(crate::live_source::Pending {
+            generation: 1,
+            histories: crate::live_source::Histories::Defer,
+        }),
+        retry_after: Instant::now(),
+    };
+
+    let listing = crate::live_source::reader_snapshot_listing(&reader, 1);
+
+    assert_eq!(listing, crate::live_source::Listing::Fresh);
+}
+
+#[test]
 fn a_second_the_store_holds_no_reading_of_reads_the_saved_minutes_at_once() {
     // Goal: waiting cannot bring a reading the Store does not hold, so the page does not wait.
     // Method: answer the reader directly, which leaves it no reason to step again.

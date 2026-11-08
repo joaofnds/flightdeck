@@ -1007,12 +1007,21 @@ enum Listing {
     Kept,
 }
 
+/// A later step keeps only a listing the saved minutes made for its page. A page the Store
+/// published listed nothing, so its step on the saved minutes lists them again.
 fn reader_snapshot_listing(reader: &Reader, generation: u64) -> Listing {
-    if reader_pending(reader, generation) {
-        Listing::Kept
-    } else {
-        Listing::Fresh
+    if !reader_pending(reader, generation) {
+        return Listing::Fresh;
     }
+    let store_published = reader
+        .store
+        .as_ref()
+        .is_some_and(|store| store.published(generation));
+    if store_published {
+        return Listing::Fresh;
+    }
+
+    Listing::Kept
 }
 
 fn reader_snapshot_arrivals(command: &Command) -> Arrivals {

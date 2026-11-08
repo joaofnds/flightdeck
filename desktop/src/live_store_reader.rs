@@ -85,6 +85,11 @@ impl StoreReader {
         Some(&self.handle)
     }
 
+    /// Whether the Store published a page of `generation`.
+    pub(super) fn published(&self, generation: u64) -> bool {
+        self.published == generation
+    }
+
     /// Whether the page's next step goes on with no wait, to the rest of a page the saved minutes
     /// answered, since a query of that page's ends the pause when answered.
     pub(super) fn reads_on(&self) -> bool {
