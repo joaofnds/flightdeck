@@ -614,20 +614,6 @@ impl Decoder {
         self.previous_run = Some(run);
     }
 
-    #[cfg(test)]
-    fn decode(
-        &mut self,
-        root: &Path,
-        found: &Found,
-        budget: &Arc<ByteBudget>,
-        operation: &Operation,
-        capture: &crate::recording::InputCapture<'_>,
-    ) -> Batch {
-        let read = read_minute(root, found, budget, operation, capture)
-            .map_err(|refused| load_refusal(&refused));
-        self.decode_read(found, &read, budget, operation)
-    }
-
     /// Decodes `found`, which `read` read.
     fn decode_read(
         &mut self,
@@ -712,21 +698,6 @@ fn load_refusal(refused: &Refused) -> Failure {
         Refused::Input(AdmissionRefusal::Budget) => Failure::Budget,
         _ => Failure::Refused,
     }
-}
-
-#[cfg(test)]
-fn load_minute(
-    root: &Path,
-    found: &Found,
-    decoder: &mut Decoder,
-    budget: &Arc<ByteBudget>,
-    operation: &Operation,
-    capture: &crate::recording::InputCapture<'_>,
-) -> Result<(MachineMinute, Vec<AppsSecond>), Refused> {
-    let read = read_minute(root, found, budget, operation, capture)?;
-    let apps = load_minute_apps(&read, decoder, budget, operation)?;
-
-    Ok((read.machine, apps))
 }
 
 /// The Apps of each second of `read`, which `decoder` replays.
@@ -834,27 +805,6 @@ pub(super) fn load_minute_payload(
         }
         Err(missing) => Err(missing),
     };
-}
-
-#[cfg(test)]
-fn load_minute_visit(
-    root: &Path,
-    found: &Found,
-    decoder: &mut Decoder,
-    budget: &Arc<ByteBudget>,
-    operation: &Operation,
-    capture: &crate::recording::InputCapture<'_>,
-    consume: impl FnMut(
-        &crate::live_apps::committed::Endpoint,
-        persistence::Result<&crate::live_app_response::Sample>,
-        &persistence::Losses,
-        usize,
-    ) -> persistence::Result<()>,
-) -> Result<MachineMinute, Refused> {
-    let read = read_minute(root, found, budget, operation, capture)?;
-    load_minute_visit_read(&read, decoder, operation, consume)?;
-
-    Ok(read.machine)
 }
 
 /// Replays the process frames of `read` into `decoder`, handing `consume` each second's sample,

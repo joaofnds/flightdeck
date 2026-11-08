@@ -462,7 +462,7 @@ fn actual_minute_loader_reuses_capture_for_both_exact_sibling_consumers() {
     let mut replay_decoder = Decoder::default();
     let captures = AtomicU64::new(0);
 
-    let (machine, apps) = super::load_minute(
+    let (machine, apps) = load_minute(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -611,7 +611,7 @@ fn payload_loader_rejects_a_consumed_nonprivate_table_with_an_unchanged_commitme
     let mut replay_decoder = Decoder::default();
     let mut consumed = Vec::new();
 
-    let result = super::load_minute_visit(
+    let result = load_minute_visit(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -654,7 +654,7 @@ fn payload_loader_refuses_shared_input_budget_without_legacy_retry() {
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut replay_decoder = Decoder::default();
 
-    let result = super::load_minute(
+    let result = load_minute(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -884,7 +884,7 @@ fn terminal_projection_keeps_only_the_last_raw_tick_and_all_its_tables() {
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let mut decoder = Decoder::default();
-    let (mut machine, _) = super::load_minute(
+    let (mut machine, _) = load_minute(
         &fixture.root,
         &found[0],
         &mut decoder,
@@ -958,7 +958,7 @@ fn actual_minute_loader_keeps_original_events_after_private_path_replacement() {
     let events_captures = AtomicU64::new(0);
     let captures = Mutex::new(Vec::new());
 
-    let (machine, apps) = super::load_minute(
+    let (machine, apps) = load_minute(
         source.root,
         &found[0],
         &mut replay_decoder,
@@ -1271,7 +1271,7 @@ fn events_capture_budget_denial_remains_typed_without_legacy_retry() {
     let attempts = AtomicU64::new(0);
     let mut replay_decoder = Decoder::default();
 
-    let result = super::load_minute(
+    let result = load_minute(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -1319,7 +1319,7 @@ fn cancellation_after_real_events_capture_discards_the_input_and_all_results() {
     );
     let scope = trace.enter();
 
-    let result = super::load_minute(
+    let result = load_minute(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -1369,7 +1369,7 @@ fn final_validation_rejects_consumed_events_made_nonprivate() {
     let mut replay_decoder = Decoder::default();
     let mut consumed = Vec::new();
 
-    let result = super::load_minute_visit(
+    let result = load_minute_visit(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -1688,7 +1688,7 @@ fn a_sealed_name_namespace_from_another_budget_refuses_without_transferring_char
     let mut replay_decoder = Decoder::default();
     let mut calls = 0;
 
-    super::load_minute_visit(
+    load_minute_visit(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -1735,7 +1735,7 @@ fn a_sealed_index_admission_refusal_preserves_apps_and_the_next_exact_interval()
     let mut names = None;
     let mut seconds = Vec::new();
 
-    super::load_minute_visit(
+    load_minute_visit(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -1892,7 +1892,7 @@ fn a_full_minute_shares_captured_names_between_its_exact_observations() {
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let mut replay_decoder = Decoder::default();
 
-    let (machine, seconds) = super::load_minute(
+    let (machine, seconds) = load_minute(
         &fixture.root,
         &found[0],
         &mut replay_decoder,
@@ -2342,4 +2342,58 @@ fn publications_loaded_after(
     drop(scope);
 
     handed
+}
+
+impl Decoder {
+    /// Reads `found` and decodes it, as a load of one minute at a time does.
+    fn decode(
+        &mut self,
+        root: &std::path::Path,
+        found: &super::Found,
+        budget: &Arc<ByteBudget>,
+        operation: &crate::cancellation::Operation,
+        capture: &crate::recording::InputCapture<'_>,
+    ) -> super::Batch {
+        let read = super::read_minute(root, found, budget, operation, capture)
+            .map_err(|refused| super::load_refusal(&refused));
+        self.decode_read(found, &read, budget, operation)
+    }
+}
+
+/// Reads `found` and gives its machine readings and the Apps of each of its seconds, which
+/// `decoder` replays.
+fn load_minute(
+    root: &std::path::Path,
+    found: &super::Found,
+    decoder: &mut Decoder,
+    budget: &Arc<ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    capture: &crate::recording::InputCapture<'_>,
+) -> Result<(super::MachineMinute, Vec<AppsSecond>), super::Refused> {
+    let read = super::read_minute(root, found, budget, operation, capture)?;
+    let apps = super::load_minute_apps(&read, decoder, budget, operation)?;
+
+    Ok((read.machine, apps))
+}
+
+/// Reads `found` and replays its process frames into `decoder`, handing `consume` each second's
+/// sample, and gives its machine readings.
+fn load_minute_visit(
+    root: &std::path::Path,
+    found: &super::Found,
+    decoder: &mut Decoder,
+    budget: &Arc<ByteBudget>,
+    operation: &crate::cancellation::Operation,
+    capture: &crate::recording::InputCapture<'_>,
+    consume: impl FnMut(
+        &crate::live_apps::committed::Endpoint,
+        persistence::Result<&crate::live_app_response::Sample>,
+        &persistence::Losses,
+        usize,
+    ) -> persistence::Result<()>,
+) -> Result<super::MachineMinute, super::Refused> {
+    let read = super::read_minute(root, found, budget, operation, capture)?;
+    super::load_minute_visit_read(&read, decoder, operation, consume)?;
+
+    Ok(read.machine)
 }
