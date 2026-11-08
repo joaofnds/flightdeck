@@ -346,7 +346,6 @@ fn a_store_continuation_with_no_reply_uses_the_nonzero_polling_cadence() {
     let mut command = Command {
         generation: 1,
         epoch: 0,
-        mode: crate::live_source_mode::SourceMode::Live,
         request: request("memory"),
         context: Context::Select,
     };

@@ -147,7 +147,6 @@ fn measures_complete_worker_routes_on_one_frozen_native_recording() {
 
 fn measure_route(root: &Path, route: &str, expected: &Value) {
     let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.command.request.route = route.to_owned();
     let selection = std::env::var_os("FLIGHTDECK_ITEM1_SELECTION")
         .map_or_else(|| "follow".into(), |value| value.into_string().unwrap());

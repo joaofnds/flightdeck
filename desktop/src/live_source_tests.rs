@@ -533,7 +533,6 @@ fn a_handed_over_reader_leaves_its_session_where_it_is() {
     // the reader as the worker does.
     let recording = SealedRecording::with_an_older_minute();
     let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
     reader.read_at(&recording.root).unwrap().unwrap();
     let _kept = reader.hand_over();
     recording.seal_older_minute(3000);
@@ -639,13 +638,8 @@ fn a_window_automatically_reads_the_next_batch_when_its_step_run_ends() {
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
     )
     .unwrap();
-    let mut worker = Worker::start_reader(
-        recording.root.clone(),
-        crate::live_source_mode::SourceMode::Live,
-        Some(store.query_handle()),
-        1,
-    )
-    .unwrap();
+    let mut worker =
+        Worker::start_reader(recording.root.clone(), Some(store.query_handle()), 1).unwrap();
     let first =
         SealedRecording::read_through(&mut worker, SealedRecording::request(), Worker::request)
             .unwrap();
@@ -868,7 +862,6 @@ impl SnapshotReader {
         super::Command {
             generation: 1,
             epoch: 0,
-            mode: crate::live_source_mode::SourceMode::Recorded,
             request: SealedRecording::request(),
             context: super::Context::Select,
         }

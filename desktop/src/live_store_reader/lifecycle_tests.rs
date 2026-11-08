@@ -808,7 +808,6 @@ impl Adapter {
             command: crate::live_source::Command {
                 generation: 1,
                 epoch: 0,
-                mode: crate::live_source_mode::SourceMode::Live,
                 request: request("memory"),
                 context: crate::live_source::Context::Select,
             },

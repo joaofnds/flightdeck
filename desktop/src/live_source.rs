@@ -205,7 +205,6 @@ enum PauseEnd {
 struct Command {
     generation: u64,
     epoch: u64,
-    mode: SourceMode,
     request: Request,
     context: Context,
 }
@@ -303,7 +302,7 @@ impl Worker {
     }
 
     pub fn start_recorded(root: PathBuf) -> std::io::Result<Self> {
-        Self::start_reader(root, SourceMode::Recorded, None, WORKER_STEPS_MAX)
+        Self::start_reader(root, None, WORKER_STEPS_MAX)
     }
 
     /// Starts the source-free live client over the canonical Store's independent query handle.
@@ -311,7 +310,7 @@ impl Worker {
         root: PathBuf,
         handle: viewer::store::QueryHandle,
     ) -> std::io::Result<Self> {
-        Self::start_reader(root, SourceMode::Live, Some(handle), WORKER_STEPS_MAX)
+        Self::start_reader(root, Some(handle), WORKER_STEPS_MAX)
     }
 
     pub fn mode(&self) -> SourceMode {
@@ -334,13 +333,19 @@ impl Worker {
         self.thread.as_ref().map(|thread| thread.thread().id())
     }
 
+    /// Starts a reader of the live Mac through `store`, or of a recording the user opened where
+    /// there is none.
     fn start_reader(
         root: PathBuf,
-        mode: SourceMode,
         store: Option<viewer::store::QueryHandle>,
         steps_max: u64,
     ) -> std::io::Result<Self> {
         assert!(steps_max > 0);
+        let mode = if store.is_some() {
+            SourceMode::Live
+        } else {
+            SourceMode::Recorded
+        };
         let shared = Arc::new(Shared::new());
         if let Some(handle) = &store {
             worker_answer_wakes(&shared, handle);
@@ -426,7 +431,6 @@ impl Worker {
         mailbox.request = Some(Command {
             generation,
             epoch: self.shared.cancellation.epoch(),
-            mode: self.mode,
             request,
             context,
         });
@@ -860,7 +864,7 @@ fn reader_snapshot(
 ) -> Result<Option<Box<Snapshot>>, String> {
     let started = Instant::now();
     let published = reader_published(reader, command.generation);
-    if reader_snapshot_finished(command, published) {
+    if reader_snapshot_finished(reader, command, published) {
         return Ok(None);
     }
     if command.request.route == "computer" {
@@ -905,12 +909,15 @@ fn reader_snapshot(
     Ok(Some(snapshot))
 }
 
-fn reader_snapshot_finished(command: &Command, published: bool) -> bool {
+/// Whether a published page is answered for good. A recording the user opened, which a reader
+/// with no Store reads, saves nothing more, while a live page the Store left to the saved minutes
+/// reads them again as the recording saves more.
+fn reader_snapshot_finished(reader: &Reader, command: &Command, published: bool) -> bool {
     if !published {
         return false;
     }
 
-    if command.mode == SourceMode::Recorded {
+    if reader.store.is_none() {
         return true;
     }
 
