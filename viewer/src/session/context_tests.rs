@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use super::{ContextRange, NS, Session, context_reader_count};
+use crate::allocation_tests::observe;
 use crate::live::identity_fixture::Fixture;
 use crate::metrics;
 
@@ -139,6 +140,26 @@ fn select_reads_no_minute_again_for_the_context_it_read_last() {
 
     assert_eq!(session.source_reads.get(), reads);
     assert_eq!(again, first);
+}
+
+#[test]
+fn select_copies_the_trends_of_the_context_it_read_last_once() {
+    // Goal: selecting a second again copies the trends of the context it keeps into its
+    // response once, since the trends of a held second's context are most of what a select of
+    // it allocates.
+    // Method: select a second of seven sealed minutes, count the allocations one copy of its
+    // trends makes, then count the allocations of selecting the second again.
+    let fixture = sealed_minutes();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let trends = session.select(SECOND_FIRST + 3, 0).unwrap()["trends"].take();
+    let (_copied, copy) = observe(|| trends.clone());
+
+    let (_again, again) = observe(|| session.select(SECOND_FIRST + 3, 0).unwrap());
+
+    assert!(
+        again < 2 * copy,
+        "{again} allocations against {copy} for one copy of the trends"
+    );
 }
 
 #[test]

@@ -429,12 +429,13 @@ impl Session {
             .iter()
             .map(|value| value.json(&self.windows))
             .collect();
-        Ok(
-            json!({"second": selection.second, "context_last_second": selection.context_last_second,
+        let mut response = json!({"second": selection.second,
+            "context_last_second": selection.context_last_second,
             "selected": self.selected.as_ref().map(|value| value.json(&self.windows)),
-            "alternatives": alternative_identities,
-            "summary": summary, "trends": points, "context_seconds": 900}),
-        )
+            "alternatives": alternative_identities, "summary": summary, "context_seconds": 900});
+        // `json!` serializes what it is given into a new copy, so the trends move in apart.
+        response["trends"] = Value::Array(points);
+        Ok(response)
     }
 
     /// The context of `range`, read from the sealed windows unless the last select read it. A
