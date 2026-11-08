@@ -1554,6 +1554,64 @@ fn a_continued_load_counts_a_decoding_it_throws_away_as_discarded_work() {
     );
 }
 
+#[test]
+fn a_grouped_minute_takes_no_rates_from_a_minute_before_it_whose_decoding_ended_without_them() {
+    // Goal: a minute a return decodes at once with the minute before it takes no rates where that
+    // minute's decoding ended with none, as where the budget refuses its machine readings or its
+    // thread never started, although that minute's last reading alone would rate it.
+    // Method: decode publication 4's minute from a seed of the last frame of the minute before it,
+    // settle that decoding against the decoder a minute left out leaves, and check that
+    // publication 4 has no rates.
+    let fixture = catch_up_fixture();
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let input = LoadInput {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+        capture: &AdmittedTable::from_file_budgeted,
+    };
+    let found = oldest_first(&fixture);
+    let [before_read, read] = [&found[1], &found[2]].map(|minute| {
+        super::read_minute(input.root, minute, &budget, &operation, input.capture)
+            .map_err(|refused| super::load_refusal(&refused))
+    });
+    let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
+    let guessed = super::load_group_guess(
+        &input,
+        None,
+        Some((&found[1], &before_read)),
+        &found[2],
+        &read,
+    );
+    drop(tentative_scope);
+
+    let decoded = super::load_group_settled(
+        &input,
+        &mut Decoder::default(),
+        None,
+        (tentative, guessed),
+        &found[2],
+        &read,
+    )
+    .unwrap();
+
+    let [second] = decoded.completion.seconds.as_slice() else {
+        panic!("publication 4's minute holds one second");
+    };
+    assert_eq!(second.second.publication, 4);
+    assert!(!second.second.follows());
+    assert_eq!(second.second.cpu_percent, None);
+}
+
+/// The minutes of `fixture`, oldest first.
+fn oldest_first(fixture: &Fixture) -> Vec<super::super::Found> {
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+    found.reverse();
+    found
+}
+
 /// How many App aggregations and machine reductions of `publication` of `fixture`'s run `trace`
 /// holds under `purpose`.
 fn publication_work(

@@ -61,16 +61,17 @@ pub(super) fn load(
 
 /// Decodes `group`, neighbouring minutes oldest first, a thread a minute, or on this thread where
 /// it holds one. The first goes on from `carried`, the decoder of the minute before it, or where
-/// the load continues from `predecessor`, seeds its own decoder from it. Each other first seeds its
-/// own decoder from the minute before it, which another thread decodes. Each minute is read once,
+/// the load continues from `predecessor`, seeds its own decoder from it. Each minute is read once,
 /// so a decoder seeds from the read that the decoder of the minute before it decodes. Each result
 /// is a minute's decoder, its seconds and why its decoder could not be seeded, in the order of
-/// `group`.
+/// `group`, up to the first error, which ends the load.
 ///
-/// Where there are several, a thread decoding a seeded minute seeds from only the last frame of
-/// the minute before it, which rates its first second, while another thread seeds from all of
-/// that minute's frames, since an earlier frame can refuse the minute. A decoding whose seed the
-/// whole minute does not agree with is done again.
+/// Where there are several, a thread decoding a minute that goes on from no decoder seeds from
+/// only the last frame of the minute before it, which rates its first second. Its decoding counts
+/// once the decoder that minute ended with, or for the first minute a seed of all the
+/// predecessor's frames, since an earlier frame can refuse the minute, holds the same seed. A
+/// decoding that began from another seed is done again from that decoder, as a load of one minute
+/// at a time decodes it.
 fn load_group(
     input: &LoadInput<'_>,
     carried: Decoder,
@@ -100,6 +101,11 @@ fn load_group(
     }
 
     thread::scope(|scope| {
+        let seeder = predecessor.map(|predecessor| {
+            load_group_spawn(scope, "flightdeck-seeder", || {
+                load_group_seed(input, predecessor, &reads[0], 0)
+            })
+        });
         let decoders: Vec<_> = group
             .iter()
             .enumerate()
@@ -107,42 +113,70 @@ fn load_group(
                 let carried = carried.take();
                 let before = before_of(index);
                 let read = &reads[index + offset];
-                let seeder = match (&carried, before) {
-                    (None, Some((before, before_read))) => {
-                        Some(load_group_spawn(scope, "flightdeck-seeder", move || {
-                            load_group_seed(input, before, before_read, 0)
-                        }))
-                    }
-                    _ => None,
-                };
-                let decoder = load_group_spawn(scope, "flightdeck-decoder", move || {
+                load_group_spawn(scope, "flightdeck-decoder", move || {
                     let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
                     let guessed = load_group_guess(input, carried, before, found, read);
                     drop(tentative_scope);
                     (tentative, guessed)
-                });
-                (seeder, decoder)
+                })
             })
             .collect();
 
-        decoders
-            .into_iter()
-            .enumerate()
-            .map(|(index, (seeder, decoder))| {
-                load_group_settled(
-                    input,
-                    seeder,
-                    decoder,
-                    &group[index],
-                    &reads[index + offset],
-                )
-            })
-            .collect()
+        let whole = seeder.map(|seeder| seeder.map(load_group_join));
+        load_group_settled_minutes(input, group, &reads[offset..], whole, decoders)
     })
 }
 
-/// What the thread seeding a minute from the whole minute before it gives.
+/// What the thread seeding a minute from all the frames of the predecessor gives.
 type Seeding = persistence::Result<(Decoder, Option<Failure>)>;
+
+/// The decodings `decoders` give of `group`, which `reads` read, each settled in order against the
+/// decoder the minute before it ended with, or the first against `whole`, the seed of all the
+/// predecessor's frames, where the load continues from one, up to the first error.
+fn load_group_settled_minutes(
+    input: &LoadInput<'_>,
+    group: &[Found],
+    reads: &[Result<MinuteRead<'_>, Failure>],
+    mut whole: Option<std::io::Result<Seeding>>,
+    decoders: Vec<std::io::Result<thread::ScopedJoinHandle<'_, Guessing>>>,
+) -> Vec<persistence::Result<Decoded>> {
+    assert_eq!(decoders.len(), group.len());
+    assert_eq!(reads.len(), group.len());
+    let mut settled: Vec<persistence::Result<Decoded>> = Vec::with_capacity(group.len());
+    for ((found, read), decoder) in group.iter().zip(reads).zip(decoders) {
+        let guessed = match decoder {
+            Ok(handle) => load_group_join(handle),
+            Err(error) => {
+                settled.push(Ok(Decoded::unstarted(&error)));
+                continue;
+            }
+        };
+        let decoded = match (settled.last_mut(), whole.take()) {
+            (Some(Ok(before)), _) => {
+                load_group_settled(input, &mut before.decoder, None, guessed, found, read)
+            }
+            (Some(Err(_)), _) => unreachable!("an error ends the load"),
+            // The first minute went on from the decoder of the minute before it.
+            (None, None) => {
+                let (tentative, guessed) = guessed;
+                tentative.keep();
+                guessed.map(|(_, decoded)| decoded)
+            }
+            (None, Some(Ok(Ok((mut seeded, unseeded))))) => {
+                load_group_settled(input, &mut seeded, unseeded, guessed, found, read)
+            }
+            (None, Some(Ok(Err(error)))) => Err(error),
+            (None, Some(Err(error))) => Ok(Decoded::unstarted(&error)),
+        };
+        let ends = decoded.is_err();
+        settled.push(decoded);
+        if ends {
+            break;
+        }
+    }
+
+    settled
+}
 
 /// What the thread decoding a minute from a guessed seed gives, and the work it recorded.
 type Guessing = (
@@ -214,39 +248,28 @@ fn load_group_last_frame(read: &Result<MinuteRead<'_>, Failure>) -> usize {
         .map_or(0, |read| read.processes.endpoints.len().saturating_sub(1))
 }
 
-/// The decoding of `found`, which `read` read: the one `decoder` began from a seed of only the
-/// last frame of the minute before it, where `seeder`, seeding from all that minute's frames,
-/// gives the same seed or there is no `seeder`, and otherwise a decoding from the seed of
-/// `seeder`. The work of a decoding thrown away counts as discarded.
+/// The decoding of `found`, which `read` read: `guessed`, which began from a seed of only the last
+/// frame of the minute before it, where `before`, the decoder that minute ended with, holds the
+/// same seed, and otherwise a decoding from `before`, which it takes, with `unseeded`, why
+/// `before` could not be seeded, where it could not. The work of a decoding thrown away counts as
+/// discarded.
 fn load_group_settled(
     input: &LoadInput<'_>,
-    seeder: Option<std::io::Result<thread::ScopedJoinHandle<'_, Seeding>>>,
-    decoder: std::io::Result<thread::ScopedJoinHandle<'_, Guessing>>,
+    before: &mut Decoder,
+    unseeded: Option<Failure>,
+    guessed: Guessing,
     found: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
 ) -> persistence::Result<Decoded> {
-    let (tentative, guessed) = match decoder {
-        Ok(handle) => load_group_join(handle),
-        Err(error) => return Ok(Decoded::unstarted(&error)),
-    };
-    let full = match seeder {
-        None => {
-            tentative.keep();
-            return guessed.map(|(_, decoded)| decoded);
-        }
-        Some(Ok(handle)) => load_group_join(handle),
-        Some(Err(error)) => return Ok(Decoded::unstarted(&error)),
-    };
-
-    let (whole, unseeded) = full?;
+    let (tentative, guessed) = guessed;
     let (seed, guess) = guessed?;
-    if seed == whole.seed_key() {
+    if seed == before.seed_key() {
         tentative.keep();
         return Ok(Decoded { unseeded, ..guess });
     }
     tentative.discard();
 
-    load_group_decode(input, whole, unseeded, found, read)
+    load_group_decode(input, mem::take(before), unseeded, found, read)
 }
 
 /// Reads `predecessor`, where the load continues from it, and then the minutes of `group`, a
