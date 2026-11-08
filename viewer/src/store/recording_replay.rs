@@ -97,29 +97,16 @@ impl Decoder {
         *next += 1;
     }
 
-    /// Replays `processes`, a minute's process frames, from the frame at `first`, deriving no
-    /// Apps, so that the last of them gives the first second of the minute after it its App rates.
+    /// Replays `processes`, a minute's process frames, from the frame at `first_frame_index`,
+    /// deriving no Apps, so that the last of them gives the first second of the minute after it its
+    /// App rates.
     pub(super) fn visit_predecessor(
         &mut self,
         processes: &ProcessBatch,
-        first: usize,
+        first_frame_index: usize,
         operation: &Operation,
     ) -> Result<(), Refused> {
-        operation.check()?;
-        let mut next = first;
-        let result = self.replay(
-            processes,
-            &mut Input {
-                next: &mut next,
-                operation,
-                budget: None,
-            },
-            &mut Predecessor,
-        );
-        if result.is_err() {
-            self.predecessor = None;
-        }
-        result
+        self.visit(processes, first_frame_index, operation, &mut Predecessor)
     }
 
     pub(super) fn visit_samples<F>(
@@ -131,33 +118,34 @@ impl Decoder {
     where
         F: FnMut(&Endpoint, persistence::Result<&Sample>, usize) -> persistence::Result<()>,
     {
-        let result = self.visit_samples_replay(processes, operation, consume);
+        self.visit(processes, 0, operation, &mut Visitor { consume })
+    }
+
+    /// Replays `processes` into `target` from the frame at `first_frame_index`, and forgets the
+    /// predecessor where the replay is refused.
+    fn visit<T: Target<Error = Refused>>(
+        &mut self,
+        processes: &ProcessBatch,
+        first_frame_index: usize,
+        operation: &Operation,
+        target: &mut T,
+    ) -> Result<(), Refused> {
+        let mut next = first_frame_index;
+        let result = operation.check().map_err(Refused::from).and_then(|()| {
+            self.replay(
+                processes,
+                &mut Input {
+                    next: &mut next,
+                    operation,
+                    budget: None,
+                },
+                target,
+            )
+        });
         if result.is_err() {
             self.predecessor = None;
         }
         result
-    }
-
-    fn visit_samples_replay<F>(
-        &mut self,
-        processes: &ProcessBatch,
-        operation: &Operation,
-        consume: F,
-    ) -> Result<(), Refused>
-    where
-        F: FnMut(&Endpoint, persistence::Result<&Sample>, usize) -> persistence::Result<()>,
-    {
-        operation.check()?;
-        let mut next = 0;
-        self.replay(
-            processes,
-            &mut Input {
-                next: &mut next,
-                operation,
-                budget: None,
-            },
-            &mut Visitor { consume },
-        )
     }
 }
 

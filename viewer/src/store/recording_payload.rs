@@ -45,7 +45,7 @@ pub(super) fn load(
 /// A load whose first minutes are decoded and wait to be handed over.
 pub(super) struct Started<'minutes> {
     cursor: Cursor,
-    first: Vec<persistence::Result<Decoded>>,
+    first: Vec<persistence::Result<DecodedMinute>>,
     rest: std::slice::Chunks<'minutes, Found>,
 }
 
@@ -109,7 +109,7 @@ fn load_group(
     carried: Decoder,
     predecessor: Option<&Found>,
     group: &[Found],
-) -> Vec<persistence::Result<Decoded>> {
+) -> Vec<persistence::Result<DecodedMinute>> {
     assert!(!group.is_empty());
     assert!(group.len() <= GROUP_MINUTES_MAX);
     let mut carried = match predecessor {
@@ -160,7 +160,7 @@ fn load_group(
 }
 
 /// What the thread seeding a minute from all the frames of the predecessor gives.
-type Seeding = persistence::Result<(Decoder, Option<Failure>)>;
+type Seed = persistence::Result<(Decoder, Option<Failure>)>;
 
 /// The decodings `decoders` give of `group`, which `reads` read, each settled in order against the
 /// decoder the minute before it ended with, or the first against `whole`, the seed of all the
@@ -169,17 +169,17 @@ fn load_group_settled_minutes(
     input: &LoadInput<'_>,
     group: &[Found],
     reads: &[Result<MinuteRead<'_>, Failure>],
-    mut whole: Option<std::io::Result<Seeding>>,
-    decoders: Vec<std::io::Result<thread::ScopedJoinHandle<'_, Guessing>>>,
-) -> Vec<persistence::Result<Decoded>> {
+    mut whole: Option<std::io::Result<Seed>>,
+    decoders: Vec<std::io::Result<thread::ScopedJoinHandle<'_, Guess>>>,
+) -> Vec<persistence::Result<DecodedMinute>> {
     assert_eq!(decoders.len(), group.len());
     assert_eq!(reads.len(), group.len());
-    let mut settled: Vec<persistence::Result<Decoded>> = Vec::with_capacity(group.len());
+    let mut settled: Vec<persistence::Result<DecodedMinute>> = Vec::with_capacity(group.len());
     for ((found, read), decoder) in group.iter().zip(reads).zip(decoders) {
         let guessed = match decoder {
             Ok(handle) => load_group_join(handle),
             Err(error) => {
-                settled.push(Ok(Decoded::unstarted(&error)));
+                settled.push(Ok(DecodedMinute::unstarted(&error)));
                 continue;
             }
         };
@@ -198,7 +198,7 @@ fn load_group_settled_minutes(
                 load_group_settled(input, &mut seeded, unseeded, guessed, found, read)
             }
             (None, Some(Ok(Err(error)))) => Err(error),
-            (None, Some(Err(error))) => Ok(Decoded::unstarted(&error)),
+            (None, Some(Err(error))) => Ok(DecodedMinute::unstarted(&error)),
         };
         let ends = decoded.is_err();
         settled.push(decoded);
@@ -211,9 +211,9 @@ fn load_group_settled_minutes(
 }
 
 /// What the thread decoding a minute from a guessed seed gives, and the work it recorded.
-type Guessing = (
+type Guess = (
     persistence::work::ingestion::Tentative,
-    persistence::Result<(SeedKey, Decoded)>,
+    persistence::Result<(SeedKey, DecodedMinute)>,
 );
 
 /// Decodes `found`, which `read` read, with `carried`, the decoder of the minute before it, or
@@ -225,26 +225,28 @@ fn load_group_guess(
     before: Option<(&Found, &Result<MinuteRead<'_>, Failure>)>,
     found: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
-) -> persistence::Result<(SeedKey, Decoded)> {
-    let last = before.map_or(0, |(_, before_read)| load_group_last_frame(before_read));
-    let (decoder, unseeded) = load_group_seeded(input, carried, before, last)?;
+) -> persistence::Result<(SeedKey, DecodedMinute)> {
+    let last_frame_index = before.map_or(0, |(_, before_read)| {
+        load_group_last_frame_index(before_read)
+    });
+    let (decoder, unseeded) = load_group_seeded(input, carried, before, last_frame_index)?;
     let seed = decoder.seed_key();
 
     load_group_decode(input, decoder, unseeded, found, read).map(|decoded| (seed, decoded))
 }
 
 /// `carried`, the decoder of the minute before the one it decodes, or a decoder seeded from the
-/// frames of `before`, that minute and its read, from the one at `first`, and why it could not be
-/// seeded, where it could not.
+/// frames of `before`, that minute and its read, from the one at `first_frame_index`, and why it
+/// could not be seeded, where it could not.
 fn load_group_seeded(
     input: &LoadInput<'_>,
     carried: Option<Decoder>,
     before: Option<(&Found, &Result<MinuteRead<'_>, Failure>)>,
-    first: usize,
+    first_frame_index: usize,
 ) -> persistence::Result<(Decoder, Option<Failure>)> {
     match (carried, before) {
         (Some(decoder), _) => Ok((decoder, None)),
-        (None, Some((before, read))) => load_group_seed(input, before, read, first),
+        (None, Some((before, read))) => load_group_seed(input, before, read, first_frame_index),
         (None, None) => unreachable!("a minute with none before it in the load has a decoder"),
     }
 }
@@ -275,7 +277,7 @@ fn load_group_join<T>(handle: thread::ScopedJoinHandle<'_, T>) -> T {
 }
 
 /// The index of the last process frame `read` holds, the one that rates the minute after it.
-fn load_group_last_frame(read: &Result<MinuteRead<'_>, Failure>) -> usize {
+fn load_group_last_frame_index(read: &Result<MinuteRead<'_>, Failure>) -> usize {
     read.as_ref()
         .map_or(0, |read| read.processes.endpoints.len().saturating_sub(1))
 }
@@ -289,15 +291,15 @@ fn load_group_settled(
     input: &LoadInput<'_>,
     before: &mut Decoder,
     unseeded: Option<Failure>,
-    guessed: Guessing,
+    guessed: Guess,
     found: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
-) -> persistence::Result<Decoded> {
+) -> persistence::Result<DecodedMinute> {
     let (tentative, guessed) = guessed;
     let (seed, guess) = guessed?;
     if seed == before.seed_key() {
         tentative.keep();
-        return Ok(Decoded { unseeded, ..guess });
+        return Ok(DecodedMinute { unseeded, ..guess });
     }
     tentative.discard();
 
@@ -315,7 +317,7 @@ fn load_group_reads<'input>(
     let minutes: Vec<&Found> = predecessor.into_iter().chain(group).collect();
     assert!(minutes.len() <= GROUP_MINUTES_MAX + 1);
     let predecessors = minutes.len() - group.len();
-    let last = minutes.len() - 1;
+    let last_index = minutes.len() - 1;
     let read = |index: usize, found: &Found| {
         let _purpose = (index < predecessors).then(|| {
             persistence::work::ingestion::purpose(
@@ -329,7 +331,7 @@ fn load_group_reads<'input>(
             input.operation,
             input.capture,
         );
-        if index < last {
+        if index < last_index {
             read = read.and_then(|read| read.check(input.operation).map(|()| read));
         }
         read.map_err(|refused| load_refusal(&refused))
@@ -359,7 +361,7 @@ fn load_group_reads<'input>(
 }
 
 /// What decoding one minute of a group gives.
-struct Decoded {
+struct DecodedMinute {
     /// The decoder after the minute, which rates the minute after it.
     decoder: Decoder,
     completion: Batch,
@@ -368,7 +370,7 @@ struct Decoded {
     unseeded: Option<Failure>,
 }
 
-impl Decoded {
+impl DecodedMinute {
     /// What a minute gives whose thread `error` kept from starting: none of its seconds.
     fn unstarted(error: &std::io::Error) -> Self {
         Self {
@@ -391,11 +393,11 @@ fn load_group_decode(
     unseeded: Option<Failure>,
     found: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
-) -> persistence::Result<Decoded> {
+) -> persistence::Result<DecodedMinute> {
     input.operation.check()?;
 
     let completion = decoder.decode_read(found, read, input.budget, input.operation);
-    Ok(Decoded {
+    Ok(DecodedMinute {
         decoder,
         completion,
         unseeded,
@@ -405,19 +407,19 @@ fn load_group_decode(
 /// A decoder holding what rates the minute after `before`, which `read` read, as the decoder of
 /// `before` holds after decoding it, without the catalog of `before`, which that decoder counts,
 /// and why it could not take in `before`, where it could not. It replays the frames of `before`
-/// from the one at `first`, so a seed from a later frame than the first is a guess.
+/// from the one at `first_frame_index`, so a seed from a later frame than the first is a guess.
 fn load_group_seed(
     input: &LoadInput<'_>,
     before: &Found,
     read: &Result<MinuteRead<'_>, Failure>,
-    first: usize,
+    first_frame_index: usize,
 ) -> persistence::Result<(Decoder, Option<Failure>)> {
     let _purpose =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
     input.operation.check()?;
     let mut decoder = Decoder::default();
 
-    let seeded = decoder.seed(before, read, first, input.operation);
+    let seeded = decoder.seed(before, read, first_frame_index, input.operation);
     if seeded.is_err() {
         assert!(decoder.predecessor.is_none());
         assert!(decoder.previous_run.is_none());
@@ -476,7 +478,7 @@ impl Cursor {
         input: &LoadInput<'_>,
         predecessor: Option<&Found>,
         group: &[Found],
-    ) -> persistence::Result<Vec<persistence::Result<Decoded>>> {
+    ) -> persistence::Result<Vec<persistence::Result<DecodedMinute>>> {
         input.operation.check()?;
         if self.minute_count - self.next_minute_index < group.len() {
             return Err(persistence::Error::Bound("sealed payload cursor exhausted"));
@@ -496,7 +498,7 @@ impl Cursor {
     /// Hands `take` the seconds of `decoded`, the minutes `decode_group` decoded, in order.
     fn hand_over(
         &mut self,
-        decoded: Vec<persistence::Result<Decoded>>,
+        decoded: Vec<persistence::Result<DecodedMinute>>,
         operation: &Operation,
         mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
     ) -> persistence::Result<()> {
@@ -700,17 +702,17 @@ impl Decoder {
 
     /// Takes in of `found`, which `read` read, only its machine readings and the last of its
     /// process frames, which give the first second of the minute after it its rates, replaying
-    /// its frames from the one at `first`, and leaves its seconds unread.
+    /// its frames from the one at `first_frame_index`, and leaves its seconds unread.
     fn seed(
         &mut self,
         found: &Found,
         read: &Result<MinuteRead<'_>, Failure>,
-        first: usize,
+        first_frame_index: usize,
         operation: &Operation,
     ) -> Result<(), Failure> {
         let visited = match read {
             Ok(read) => self
-                .visit_predecessor(&read.processes, first, operation)
+                .visit_predecessor(&read.processes, first_frame_index, operation)
                 .map(|()| read)
                 .map_err(|refused| load_refusal(&refused)),
             Err(failure) => Err(*failure),
