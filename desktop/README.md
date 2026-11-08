@@ -223,9 +223,9 @@ uses bounded buffers and publishes immutable Views. Ingestion parks while the wi
 hidden, a second is selected or held, or a saved recording is shown. Restoring live
 Overview keeps the selected range and reconciles to the newest endpoint before publishing
 a complete replacement. A covered checkpoint reuses cached history and reads the retained
-ring delta; an expired checkpoint reads the minutes sealed since the newest whole minute
-the Store holds, and loads the hour again where it holds no whole minute of that run. An
-overwrite during the delta read forces that reload before publication. Overview waits for
+ring delta. Otherwise the Store reads the hour's sealed minutes again, so the Apps they saved
+replace the live ones, and follows the ring from the newest of them. An overwrite during the
+delta read forces that reload before publication. Overview waits for
 the Store instead of starting a duplicate page query.
 While Overview draws from a View the worker rests, and a hover over a second the View holds
 reads it there. The Memory, CPU, Energy, Storage and GPU pages draw their chart by App from
