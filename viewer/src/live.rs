@@ -140,16 +140,28 @@ impl LiveSession {
         catalog
     }
 
+    /// Selects `second` with the context around it, after listing the saved minutes again where
+    /// the recording saved one since the session last listed them.
     pub fn select(&mut self, second: u64, alternative: usize) -> Result<Value> {
+        self.selected = None;
+        self.operation.check()?;
+        if self.select_refresh_due()? {
+            self.refresh_history()?;
+        }
+
+        self.select_listed(second, alternative)
+    }
+
+    /// Selects `second` with the context around it from the minutes the session lists, for a
+    /// later step of a page a `select` began, so the context keeps the end that step read while
+    /// the recording saves a newer minute.
+    pub fn select_listed(&mut self, second: u64, alternative: usize) -> Result<Value> {
         self.selected = None;
         self.operation.check()?;
         second
             .checked_add(1)
             .and_then(|end| end.checked_mul(NANOSECONDS_PER_SECOND))
             .ok_or(Error::Bound("selection time"))?;
-        if self.select_refresh_due()? {
-            self.refresh_history()?;
-        }
         let selection = ContextSelection::of(second, self.newest_second());
         let saved = match &mut self.history {
             Some(history) => {

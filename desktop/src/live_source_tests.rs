@@ -563,20 +563,21 @@ fn a_fresh_replacement_reader_waits_for_a_request_without_opening_live_data() {
 #[test]
 fn a_chosen_reading_keeps_its_context_while_deferred_work_finishes() {
     // Goal: finishing a held request keeps the endpoint captured by its first snapshot.
-    // Method: publish a newer ring tick between Overview's initial snapshot and ranking step.
-    let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
-    recording.publish();
+    // Method: hold the newest saved second, save a newer minute between Overview's initial
+    // snapshot and the step that finishes its App histories, and compare the two.
+    let recording = SealedRecording::with_an_older_minute();
     let mut reader = SnapshotReader::new();
-    reader.command.mode = crate::live_source_mode::SourceMode::Live;
-    reader.command.request.second = Some(recording.last_second());
+    reader.command.request.second = Some(2200);
     let first = reader.read_at(&recording.root).unwrap().unwrap();
-    assert_eq!(first.selection["context_last_second"], 1000);
+    assert!(first.histories_pending);
+    assert_eq!(first.selection["context_last_second"], 2200);
 
-    recording.publish();
+    recording.seal_older_minute(2300);
     let completed = reader.read_at(&recording.root).unwrap().unwrap();
 
+    assert!(!completed.histories_pending);
     assert_eq!(completed.selection["selected"], first.selection["selected"]);
-    assert_eq!(completed.selection["context_last_second"], 1000);
+    assert_eq!(completed.selection["context_last_second"], 2200);
 }
 
 #[test]

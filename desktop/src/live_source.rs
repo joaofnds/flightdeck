@@ -872,6 +872,7 @@ fn reader_snapshot(
         kept_tail_only,
     } = reader_snapshot_plan(reader, &command.request.route);
     let arrivals = reader_snapshot_arrivals(command);
+    let listing = reader_snapshot_listing(reader, command.generation);
     let session = reader_snapshot_session(&mut reader.session, root, command, shared, arrivals)?;
     let catalog = session.catalog();
     if published {
@@ -879,7 +880,7 @@ fn reader_snapshot(
             return Ok(None);
         }
     }
-    let mut selection = reader_selection(session, &command.request, command.context)?;
+    let mut selection = reader_selection(session, &command.request, command.context, listing)?;
     let tail_pending = reader_earlier(session, &command.request, kept_tail_only, &mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
     if early {
@@ -986,6 +987,25 @@ enum Arrivals {
     List,
     /// It reads from what it already knows, as a step that keeps its endpoint does.
     Leave,
+}
+
+/// How a step of a page selects its chosen second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Listing {
+    /// The page's first step lists the minutes saved since the session last did, so a new
+    /// selection's context reaches them.
+    Fresh,
+    /// A later step reads from the minutes the first one listed, so the context keeps the end
+    /// the page first showed while the recording saves a newer minute.
+    Kept,
+}
+
+fn reader_snapshot_listing(reader: &Reader, generation: u64) -> Listing {
+    if reader_pending(reader, generation) {
+        Listing::Kept
+    } else {
+        Listing::Fresh
+    }
 }
 
 fn reader_snapshot_arrivals(command: &Command) -> Arrivals {
@@ -1163,7 +1183,7 @@ fn reader_computer_held(
     request: &Request,
     second: u64,
 ) -> Result<Value, String> {
-    let held = reader_selection_second(session, request, second)?;
+    let held = reader_selection_second(session, request, second, Listing::Fresh)?;
     if held["selected"].is_null() {
         return reader_latest(session);
     }
@@ -1175,6 +1195,7 @@ fn reader_selection(
     session: &mut LiveSession,
     request: &Request,
     context: Context,
+    listing: Listing,
 ) -> Result<Value, String> {
     if matches!(request.route.as_str(), "computer" | "self") {
         return Ok(Value::Null);
@@ -1183,7 +1204,7 @@ fn reader_selection(
         return reader_selection_kept(session, request);
     }
     match request.second {
-        Some(second) => reader_selection_second(session, request, second),
+        Some(second) => reader_selection_second(session, request, second, listing),
         None => reader_latest(session),
     }
 }
@@ -1193,16 +1214,19 @@ fn reader_selection_second(
     session: &mut LiveSession,
     request: &Request,
     second: u64,
+    listing: Listing,
 ) -> Result<Value, String> {
-    let selection = session
-        .select(second, 0)
-        .map_err(|error| error.to_string())?;
+    let selection = match listing {
+        Listing::Fresh => session.select(second, 0),
+        Listing::Kept => session.select_listed(second, 0),
+    }
+    .map_err(|error| error.to_string())?;
     let Some(identity) = &request.identity else {
         return Ok(selection);
     };
     let index = selection_alternative(&selection, identity)?;
     let exact = session
-        .select(second, index)
+        .select_listed(second, index)
         .map_err(|error| error.to_string())?;
     identity_validate(&exact["selected"], identity)?;
 
