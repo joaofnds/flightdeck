@@ -8,12 +8,13 @@ use serde_json::{Value, json};
 
 use super::native::Origin;
 use super::response::{JSON_BYTES_MAX, json_charge};
-use super::{QueryContext, QuerySecond, Response};
+use super::{ByteReservation, QueryContext, QuerySecond, Response};
 use crate::Cancellation;
 use crate::live_app_response::Observation;
 use crate::session::ContextRange;
 
-/// The selection's summary point and the alternatives at its second.
+/// Room for the selection's summary point and the alternatives at its second, which also holds
+/// the chart's next point while it is built, before it is charged.
 const POINT_BYTES_MAX: usize = 8 * 1024 * 1024;
 /// The chart's points take what one JSON value may hold beside the summary and alternatives,
 /// since a selection is built as one.
@@ -116,7 +117,7 @@ impl QueryContext {
         let selected = self
             .inspect(observation)
             .map_err(|_| Error::Bound("selected observation"))?;
-        let reservation = self.reserve_response(CONTEXT_BYTES_MAX + POINT_BYTES_MAX)?;
+        let mut reservation = self.reserve_response(POINT_BYTES_MAX)?;
         let selected_identity = identity(observation, selected.apps().metadata.origin);
         if keep_context {
             let mut summary = point(selected);
@@ -133,7 +134,7 @@ impl QueryContext {
         if *observation != self.selected().observation {
             return Err(Error::Bound("selection context owner"));
         }
-        let mut trends = self.trends(&operation)?;
+        let mut trends = self.trends(&mut reservation, &operation)?;
         crate::metrics::context_segments(&mut trends)?;
         let summary = trends
             .iter()
@@ -159,7 +160,13 @@ impl QueryContext {
         )
     }
 
-    fn trends(&self, operation: &crate::cancellation::Operation) -> Result<Vec<Value>> {
+    /// The chart's points, each charged to `reservation` once built, so a chart takes room for
+    /// the points it holds rather than for the most it may hold.
+    fn trends(
+        &self,
+        reservation: &mut ByteReservation,
+        operation: &crate::cancellation::Operation,
+    ) -> Result<Vec<Value>> {
         let range = if self.followed() {
             ContextRange::charted_ending_at(self.context_last_second())?
         } else {
@@ -169,8 +176,9 @@ impl QueryContext {
                 ContextRange::ending_at(self.context_last_second())?
             }
         };
+        let mut bytes = self.seconds().len() * size_of::<Value>();
+        trends_charge(reservation, bytes)?;
         let mut points = Vec::with_capacity(self.seconds().len());
-        let mut bytes = points.capacity() * size_of::<Value>();
         for second in self.seconds() {
             operation.check()?;
             if second
@@ -179,18 +187,28 @@ impl QueryContext {
                 .is_some_and(|wall| (range.first_ns..range.end_ns).contains(&wall))
             {
                 let value = point(second);
+                let charge = json_charge(&value)?;
                 bytes = bytes
-                    .checked_add(json_charge(&value)?)
+                    .checked_add(charge)
                     .ok_or(Error::Bound("context presentation bytes"))?;
                 if bytes > CONTEXT_BYTES_MAX {
                     return Err(Error::Bound("context presentation bytes"));
                 }
+                trends_charge(reservation, charge)?;
                 points.push(value);
             }
         }
 
         Ok(points)
     }
+}
+
+fn trends_charge(reservation: &mut ByteReservation, bytes: usize) -> Result<()> {
+    if !reservation.grow(bytes) {
+        return Err(Error::Bound("Store presentation admission bytes"));
+    }
+
+    Ok(())
 }
 
 pub(super) fn identity(observation: &Observation, origin: Origin) -> Value {

@@ -33,22 +33,30 @@ impl ByteBudget {
 
     /// Returns no owner when the full allocation cannot fit; it never reserves a prefix.
     pub fn reserve(self: &Arc<Self>, bytes: usize) -> Option<ByteReservation> {
-        match self
+        if !self.charge(bytes) {
+            return None;
+        }
+
+        Some(ByteReservation {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+
+    /// Whether `bytes` fit beside what is reserved, in which case they are now reserved too.
+    fn charge(&self, bytes: usize) -> bool {
+        let charged = self
             .used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes)
                     .filter(|total| *total <= self.maximum)
-            }) {
-            Ok(before) => {
-                self.used_peak.fetch_max(before + bytes, Ordering::Relaxed);
+            });
+        let Ok(before) = charged else {
+            return false;
+        };
 
-                Some(ByteReservation {
-                    budget: Arc::clone(self),
-                    bytes,
-                })
-            }
-            Err(_) => None,
-        }
+        self.used_peak.fetch_max(before + bytes, Ordering::Relaxed);
+        true
     }
 
     #[must_use]
@@ -71,6 +79,19 @@ impl ByteBudget {
 }
 
 impl ByteReservation {
+    /// Adds `bytes` to this owner when the whole of them fit, as `ByteBudget::reserve` would, so
+    /// an allocation built a piece at a time is charged before each piece stays. It never grows by
+    /// a prefix.
+    #[must_use]
+    pub fn grow(&mut self, bytes: usize) -> bool {
+        if !self.budget.charge(bytes) {
+            return false;
+        }
+
+        self.bytes += bytes;
+        true
+    }
+
     /// Returns unused preflight room while the actual allocation keeps its owner.
     pub fn shrink_to(&mut self, bytes: usize) {
         assert!(bytes <= self.bytes);

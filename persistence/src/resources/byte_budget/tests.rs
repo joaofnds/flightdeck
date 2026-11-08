@@ -26,6 +26,25 @@ fn releases_unused_capacity_without_detaching_the_remaining_owner() {
 }
 
 #[test]
+fn grows_an_owner_only_by_room_that_fits() {
+    // Goal: an owner charged as its allocation grows never takes more than the budget holds.
+    // Method: grow one owner to the limit, refuse one byte more, then release it whole.
+    let budget = Arc::new(ByteBudget::new(100));
+    let mut reservation = budget.reserve(60).unwrap();
+
+    let grown = reservation.grow(40);
+    let refused = reservation.grow(1);
+
+    assert!(grown);
+    assert!(!refused);
+    assert_eq!(reservation.bytes(), 100);
+    assert_eq!(budget.used(), 100);
+    assert_eq!(budget.used_peak(), 100);
+    drop(reservation);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
 fn permits_an_unchanged_or_empty_reservation_without_releasing_twice() {
     // Goal: no-op and full release preserve accounting through the owner's later drop.
     // Method: shrink one owner to its current charge and then to zero.
