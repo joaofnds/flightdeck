@@ -8,16 +8,20 @@ mod saved_windows;
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
+    use std::fs::DirBuilder;
+    use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Arc, OnceLock};
 
     use collector::disks::DiskSnapshot;
     use collector::machine::CPUTicks;
+    use collector::recording::private::PrivateDirectory;
     use collector::recording::{Registry, identity_text};
     use collector::ring::{Identity, RunIdentity};
     use persistence::Manifest;
     use persistence::resources::ByteBudget;
+    use persistence::retention::Period;
 
     use super::saved_windows;
 
@@ -36,6 +40,11 @@ mod tests {
     const RUN_OBSERVATIONS: Identity = Identity([0x2d35_8dcc_aa6c_78a5, 0x8bb8_4b93_962e_acc9]);
     /// The first period's incident seconds, one at each position of a ten-second bucket.
     const INCIDENT_SECONDS: [u64; 10] = [10, 21, 32, 43, 54, 65, 76, 87, 98, 109];
+    /// The contract's retention period for range tests, 31 days.
+    const RETENTION_SECONDS: u64 = 31 * 86_400;
+    /// A file standing in for readings already in a directory the generator is pointed at.
+    const EXISTING_NAME: &str = "readings";
+    const EXISTING_BYTES: &[u8] = b"readings the generator must leave alone";
 
     #[test]
     fn saves_process_zero_cpu_time_above_two_to_the_fifty_third_exactly() {
@@ -508,6 +517,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keeps_its_readings_for_a_retention_period_of_31_days() {
+        // Goal: the input keeps its readings for the 31 days the contract gives range tests,
+        // rather than the default day. Method: read the generated recording's retention period
+        // through the setting the persister and the readers read.
+        let root = PrivateDirectory::open(&input().directory).unwrap();
+
+        assert_eq!(RETENTION_SECONDS, Period::read(&root).unwrap().seconds());
+    }
+
+    #[test]
+    fn refuses_a_directory_that_exists_and_changes_nothing_in_it() {
+        // Goal: the generator never adds readings to a recording, the user's included. Method:
+        // run it on a directory that holds one file, with the mode 0700 a recording's directory
+        // has, so the recording's own refusal of any other mode does not stop it first, then
+        // list the directory and read the file.
+        let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("reference_input_existing");
+        remove_directory_if_present(&directory);
+        DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        std::fs::write(directory.join(EXISTING_NAME), EXISTING_BYTES).unwrap();
+
+        let generated = generator()
+            .arg("--directory")
+            .arg(&directory)
+            .args(["--seconds", &SECONDS.to_string()])
+            .status()
+            .unwrap();
+
+        assert!(!generated.success());
+        assert_eq!(vec![EXISTING_NAME.to_owned()], directory_names(&directory));
+        assert_eq!(
+            EXISTING_BYTES,
+            std::fs::read(directory.join(EXISTING_NAME)).unwrap()
+        );
+    }
+
     /// The SMC's readings between the contract's special seconds.
     fn smc_baseline() -> Smc {
         Smc {
@@ -615,12 +660,7 @@ mod tests {
     impl Input {
         fn generate() -> Self {
             let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("reference_input");
-            // A run that failed left its recording, which the generator refuses to add to.
-            match std::fs::remove_dir_all(&directory) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => panic!("{error}"),
-            }
+            remove_directory_if_present(&directory);
 
             let generated = generator()
                 .arg("--directory")
@@ -1167,6 +1207,24 @@ mod tests {
 
     fn generator() -> Command {
         Command::new(env!("CARGO_BIN_EXE_reference_input"))
+    }
+
+    /// Removes what an earlier run of the tests left, which the generator refuses to add to.
+    fn remove_directory_if_present(directory: &Path) {
+        match std::fs::remove_dir_all(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    fn directory_names(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
     }
 
     fn query(path: &Path, sql: &str) -> polars::prelude::DataFrame {
