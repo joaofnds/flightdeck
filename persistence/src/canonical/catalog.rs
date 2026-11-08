@@ -252,7 +252,7 @@ impl Catalog {
         let mut cursor = self.known_cursor(range)?;
         // One key past the page says whether another page follows it.
         let mut keys = Vec::with_capacity(PAGE_READINGS_MAX + 1);
-        catalog_found_keys(&mut cursor, &mut keys, PAGE_READINGS_MAX + 1)?;
+        known_page_keys(&mut cursor, &mut keys, PAGE_READINGS_MAX + 1)?;
         for key in keys.iter().take(PAGE_READINGS_MAX) {
             page.readings
                 .push(KnownReading::from_key(self.recording, key)?);
@@ -835,23 +835,32 @@ fn catalog_found(cursor: &mut CanonicalCursor<'_, 'static>) -> io::Result<Option
     Err(invalid())
 }
 
-/// Appends to `keys` the keys `cursor` finds, up to `keys_max` in all, in no more steps than
-/// `catalog_found` takes to find as many one at a time.
-fn catalog_found_keys(
+/// Appends to `keys` the keys `cursor` finds, up to `keys_max` in all. Like `catalog_found`, it
+/// refuses a namespace that takes `LOOKUP_STEPS_MAX` steps without finding a key.
+fn known_page_keys(
     cursor: &mut CanonicalCursor<'_, 'static>,
     keys: &mut Vec<CanonicalKey>,
     keys_max: usize,
 ) -> io::Result<()> {
+    assert!(keys.len() < keys_max);
+    let mut steps_without_key = 0;
+    // Each key takes at most `LOOKUP_STEPS_MAX` steps, the one that finds it included.
     for _step in 0..LOOKUP_STEPS_MAX * keys_max {
-        if keys.len() == keys_max {
+        let held = keys.len();
+        if cursor.step_keys(keys, keys_max)? || keys.len() == keys_max {
             return Ok(());
         }
-        if cursor.step_keys(keys, keys_max)? {
-            return Ok(());
+        if keys.len() == held {
+            steps_without_key += 1;
+        } else {
+            steps_without_key = 0;
+        }
+        if steps_without_key == LOOKUP_STEPS_MAX {
+            return Err(invalid());
         }
     }
 
-    Err(invalid())
+    unreachable!("a key that takes LOOKUP_STEPS_MAX steps is refused")
 }
 
 /// The namespace range of a page, none when nothing can follow `after` or the range is empty.
