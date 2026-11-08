@@ -24,6 +24,7 @@ mod tests {
     const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
     const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
     const PROCESS_ZERO_PID: i32 = 41_000;
+    const GIB: u64 = 1 << 30;
 
     #[test]
     fn saves_process_zero_cpu_time_above_two_to_the_fifty_third_exactly() {
@@ -104,6 +105,35 @@ mod tests {
         assert_eq!(
             (4, 4),
             (identities.interfaces.len(), identities.disks.len())
+        );
+    }
+
+    #[test]
+    fn reads_each_gauge_as_exactly_zero_in_the_zero_second() {
+        // Goal: second 300 reads each gauge the contract names as exactly zero, where the second
+        // before it reads the gauge's baseline. The ring keeps a CPU or GPU temperature of 0 C for
+        // a sensor the SMC does not list, as `collector::smc::usable_celsius` says, so those two
+        // zeros read absent. Method: read the gauges at seconds 299 and 300.
+        let gauges = [299, 300].map(|second| input().gauges(second));
+
+        assert_eq!(
+            [
+                Gauges {
+                    gpu_active_ns: 100_000_000,
+                    power_watts: Some(5.0),
+                    fan_rpm: vec![1_200.0, 1_300.0],
+                    temperatures_celsius: [Some(35.0), Some(36.0), Some(37.0)],
+                    memory_used_bytes: 8 * GIB,
+                },
+                Gauges {
+                    gpu_active_ns: 0,
+                    power_watts: Some(0.0),
+                    fan_rpm: vec![0.0, 0.0],
+                    temperatures_celsius: [Some(0.0), None, None],
+                    memory_used_bytes: 0,
+                },
+            ],
+            gauges
         );
     }
 
@@ -231,6 +261,49 @@ mod tests {
             }
         }
 
+        /// The gauges the contract names, as `second` of the input reads them.
+        fn gauges(&self, second: u64) -> Gauges {
+            let gpu_active_ns = |second| -> u64 {
+                cell(
+                    &self.saved_rows(second, "gpu_states", "SUM(active_ns)", "TRUE"),
+                    0,
+                )
+            };
+            let ticks = self.saved_row(
+                second,
+                "ticks",
+                "power_watts, soc_celsius, cpu_celsius, gpu_celsius",
+                "TRUE",
+            );
+            let fans = self.saved_rows(second, "fans", "rpm", "TRUE ORDER BY fan");
+            let memory = self.saved_row(
+                second,
+                "memory",
+                "anonymous_bytes - purgeable_bytes + wired_bytes + compressed_bytes",
+                "TRUE",
+            );
+
+            Gauges {
+                gpu_active_ns: gpu_active_ns(second) - gpu_active_ns(second - 1),
+                power_watts: cell(&ticks, 0),
+                fan_rpm: (0..fans.height())
+                    .map(|row| {
+                        persistence::engine::Row::new(&fans, row)
+                            .unwrap()
+                            .get(0)
+                            .unwrap()
+                    })
+                    .collect(),
+                temperatures_celsius: [1, 2, 3].map(|column| {
+                    persistence::engine::Row::new(&ticks, 0)
+                        .unwrap()
+                        .get(column)
+                        .unwrap()
+                }),
+                memory_used_bytes: cell(&memory, 0),
+            }
+        }
+
         /// Every identity the saved minutes give an interface or a disk.
         fn device_identities(&self) -> DeviceIdentities {
             let mut identities = DeviceIdentities::default();
@@ -344,6 +417,18 @@ mod tests {
         memory_pressure: Option<u8>,
         load: bool,
         system: bool,
+    }
+
+    /// The gauges the contract names: the GPU's active time over the second before, the power,
+    /// the fans, the chip's, the CPU's and the GPU's temperatures, and the machine memory, as
+    /// the memory chart adds it up.
+    #[derive(Debug, PartialEq)]
+    struct Gauges {
+        gpu_active_ns: u64,
+        power_watts: Option<f32>,
+        fan_rpm: Vec<f32>,
+        temperatures_celsius: [Option<f32>; 3],
+        memory_used_bytes: u64,
     }
 
     /// Each interface's index and name, and each disk's driver and media identities.

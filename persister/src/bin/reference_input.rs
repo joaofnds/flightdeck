@@ -80,14 +80,20 @@ const GPU_STATE_ACTIVE_NS_PER_SECOND: u64 = 50_000_000;
 const GPU_ENERGY_NJ_PER_SECOND: u64 = 500_000_000;
 const GIB: u64 = 1 << 30;
 const MEMORY_TOTAL_BYTES: u64 = 24 * GIB;
-/// The contract's baseline machine memory, the app, wired and compressed memory added up.
-const MEMORY_USED_BYTES: u64 = 8 * GIB;
-const MEMORY_WIRED_BYTES: u64 = GIB;
-const MEMORY_COMPRESSED_BYTES: u64 = GIB;
-/// The contract's baseline power, fans and temperatures, the chip's, the CPU's and the GPU's.
-const POWER_WATTS: f32 = 5.0;
-const FAN_RPM: [f32; 2] = [1_200.0, 1_300.0];
-const TEMPERATURES_CELSIUS: [f32; 3] = [35.0, 36.0, 37.0];
+/// The contract's baseline gauges.
+const GAUGES_BASELINE: Gauges = Gauges {
+    power_watts: 5.0,
+    fan_rpm: [1_200.0, 1_300.0],
+    temperatures_celsius: [35.0, 36.0, 37.0],
+    memory_used_bytes: 8 * GIB,
+};
+/// The gauges of each period's zero second.
+const GAUGES_ZERO: Gauges = Gauges {
+    power_watts: 0.0,
+    fan_rpm: [0.0; 2],
+    temperatures_celsius: [0.0; 3],
+    memory_used_bytes: 0,
+};
 const LOAD_AVERAGE: [f64; 3] = [2.0, 1.5, 1.0];
 /// The thermal pressure macOS publishes as nominal.
 const THERMAL_NOMINAL: u8 = 0;
@@ -109,8 +115,9 @@ const _: () = {
     assert!(DISKS <= DISKS_MAX);
     // The GPU's states add up to the contract's 10%.
     assert!(2 * GPU_STATE_ACTIVE_NS_PER_SECOND == NANOSECONDS_PER_SECOND / 10);
-    assert!(MEMORY_WIRED_BYTES + MEMORY_COMPRESSED_BYTES < MEMORY_USED_BYTES);
-    assert!(MEMORY_USED_BYTES < MEMORY_TOTAL_BYTES);
+    // The memory chart's parts of the machine memory are exact.
+    assert!(GAUGES_BASELINE.memory_used_bytes.is_multiple_of(8));
+    assert!(GAUGES_BASELINE.memory_used_bytes < MEMORY_TOTAL_BYTES);
 };
 
 fn main() -> ExitCode {
@@ -398,7 +405,7 @@ impl Machine {
         assert_eq!(RUN_SHAPE.interface_capacity, u64::from(INTERFACES));
         assert_eq!(
             RUN_SHAPE.fan_capacity,
-            collector::u64_from_usize(FAN_RPM.len())
+            collector::u64_from_usize(GAUGES_BASELINE.fan_rpm.len())
         );
         assert_eq!(
             RUN_SHAPE.state_capacity,
@@ -443,11 +450,11 @@ impl Machine {
                 cores: &read.cores,
             }),
             smc: Some(SmcReadings {
-                power_watts: POWER_WATTS,
-                soc_celsius: TEMPERATURES_CELSIUS[0],
-                cpu_celsius: Some(TEMPERATURES_CELSIUS[1]),
-                gpu_celsius: Some(TEMPERATURES_CELSIUS[2]),
-                fan_rpm: &FAN_RPM,
+                power_watts: read.gauges.power_watts,
+                soc_celsius: read.gauges.temperatures_celsius[0],
+                cpu_celsius: Some(read.gauges.temperatures_celsius[1]),
+                gpu_celsius: Some(read.gauges.temperatures_celsius[2]),
+                fan_rpm: &read.gauges.fan_rpm,
             }),
             processes: &read.processes,
             processes_refused: 0,
@@ -485,6 +492,7 @@ struct Second {
     processes: Vec<Process>,
     identities: Vec<IdentityObservation>,
     cpus: Vec<CPUTicks>,
+    gauges: Gauges,
     memory: Memory,
     interfaces: Vec<Interface>,
     gpu_energy_nj: u64,
@@ -504,6 +512,11 @@ impl Second {
         continuous_ns: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let valid = valid_seconds(second);
+        let gauges = if second % PERIOD_SECONDS == ZERO_SECOND {
+            GAUGES_ZERO
+        } else {
+            GAUGES_BASELINE
+        };
 
         Ok(Self {
             processes: (0..PROCESSES)
@@ -516,7 +529,8 @@ impl Second {
             cpus: (0..CPUS)
                 .map(|cpu| publish_cpu(cpu, second))
                 .collect::<Result<_, _>>()?,
-            memory: publish_memory(MEMORY_USED_BYTES),
+            gauges,
+            memory: publish_memory(gauges.memory_used_bytes),
             interfaces: (0..INTERFACES)
                 .map(|interface| publish_interface(interface, valid))
                 .collect::<Result<_, _>>()?,
@@ -528,6 +542,18 @@ impl Second {
             system: publish_system(),
         })
     }
+}
+
+/// The gauges the contract names but the GPU's, which its counters give, as the generated Mac
+/// reads them in one second.
+#[derive(Clone, Copy)]
+struct Gauges {
+    power_watts: f32,
+    fan_rpm: [f32; 2],
+    /// The chip's, the CPU's and the GPU's.
+    temperatures_celsius: [f32; 3],
+    /// The app, wired and compressed memory added up, as the memory chart stacks them.
+    memory_used_bytes: u64,
 }
 
 /// The contract's valid seconds from 1 to `second`, every second but each period's zero second
@@ -618,17 +644,19 @@ fn publish_core(core: u64, valid: u64) -> States {
     ])
 }
 
-/// The memory of a Mac that uses `used_bytes`, which the memory chart stacks as app, wired and
-/// compressed memory.
+/// The memory of a Mac that uses `used_bytes`, which the memory chart stacks as app memory,
+/// three quarters of it, and wired and compressed memory, an eighth each.
 fn publish_memory(used_bytes: u64) -> Memory {
-    let app_bytes = used_bytes - MEMORY_WIRED_BYTES - MEMORY_COMPRESSED_BYTES;
+    assert!(used_bytes.is_multiple_of(8));
+    let eighth_bytes = used_bytes / 8;
+    let app_bytes = 6 * eighth_bytes;
 
     Memory {
         total_bytes: MEMORY_TOTAL_BYTES,
         free_bytes: MEMORY_TOTAL_BYTES - used_bytes,
         active_bytes: app_bytes,
-        wired_bytes: MEMORY_WIRED_BYTES,
-        compressed_bytes: MEMORY_COMPRESSED_BYTES,
+        wired_bytes: eighth_bytes,
+        compressed_bytes: eighth_bytes,
         anonymous_bytes: app_bytes,
         pressure: Pressure::Normal,
         ..Memory::default()
