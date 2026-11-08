@@ -467,10 +467,32 @@ impl Newest {
         }
     }
 
-    /// Whether a store whose newest second is `self` took `second` of run `run` in already, as a
-    /// second of the same run no newer than it.
+    /// Whether a store whose newest second is `self` took `second` of run `run` in already.
     fn holds(&self, run: &RunIdentity, second: &MachineSecond) -> bool {
-        if self.run != *run {
+        Published::of(&self.run, self.publication).holds(&Published::of(run, second.publication))
+    }
+}
+
+/// A second by the run that published it and its publication in that run.
+#[derive(Clone, Copy)]
+struct Published {
+    run: RunIdentity,
+    publication: u64,
+}
+
+impl Published {
+    fn of(run: &RunIdentity, publication: u64) -> Self {
+        Self {
+            run: *run,
+            publication,
+        }
+    }
+
+    /// Whether a store whose newest second is `self` took `second` in already, as a second of the
+    /// same run no newer than it. Every walk through the seconds a store took in asks this, so
+    /// it skips the seconds the store skipped.
+    fn holds(&self, second: &Self) -> bool {
+        if self.run != second.run {
             return false;
         }
 
@@ -910,7 +932,7 @@ fn run_owed_add(
             return;
         };
         if let TickApps::Folded(folded) = apps {
-            stretches.add_owed(&start.run, start.publication, &folded.apps);
+            stretches.add_owed(&start.first.run, start.first.publication, &folded.apps);
         }
     });
 
@@ -931,32 +953,29 @@ fn covers_hour_leaving_out(left_out: Option<Failure>) -> bool {
 /// Where a walk through the seconds a launch handed over stands, as the store took them in.
 #[derive(Default)]
 struct OwedWalk {
-    /// The run and publication of the newest second the store took in.
-    newest: Option<(RunIdentity, u64)>,
+    /// The newest second the store took in.
+    newest: Option<Published>,
     /// The first second of the stretch the store took that second into.
     start: Option<StretchStart>,
 }
 
-/// The first second the store took into a stretch, by its run and its publication.
+/// The first second the store took into a stretch.
 #[derive(Clone, Copy)]
 struct StretchStart {
     stretch: u64,
-    run: RunIdentity,
-    publication: u64,
+    first: Published,
 }
 
 impl OwedWalk {
     /// The first second of the stretch the store took the second of `tick` of run `run` into,
-    /// or `None` where it held that second already and took it in no second time, as a second of
-    /// the same run no newer than the newest it took in.
+    /// or `None` where it held that second already and took it in no second time.
     fn step(&mut self, run: &RunIdentity, tick: &recording::OwedTick) -> Option<StretchStart> {
-        if self.newest.is_some_and(|(newest_run, publication)| {
-            newest_run == *run && tick.publication <= publication
-        }) {
+        let second = Published::of(run, tick.publication);
+        if self.newest.is_some_and(|newest| newest.holds(&second)) {
             return None;
         }
 
-        self.newest = Some((*run, tick.publication));
+        self.newest = Some(second);
         let stretch = stretch_of_wall_ns(tick.wall_ns);
         if let Some(start) = self.start {
             if start.stretch == stretch {
@@ -965,8 +984,7 @@ impl OwedWalk {
         }
         let start = StretchStart {
             stretch,
-            run: *run,
-            publication: tick.publication,
+            first: second,
         };
         self.start = Some(start);
         Some(start)
