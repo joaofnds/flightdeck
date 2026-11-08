@@ -535,7 +535,7 @@ fn restoring_a_pin_finishes_its_histories_on_its_own_second() {
     recording.publish_resources();
     let mut pinned = request("memory");
     pinned.second = Some(second);
-    adapter.submit(pinned, crate::live_source::Context::Restore);
+    adapter.submit(pinned, crate::live_source::Context::Select);
 
     let restored = adapter.finished_within(Duration::from_secs(10));
 

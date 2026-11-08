@@ -222,7 +222,6 @@ struct Command {
 enum Context {
     Select,
     Keep,
-    Restore,
 }
 
 struct Reader {
@@ -390,7 +389,7 @@ impl Worker {
 
     pub(crate) fn restore(&mut self, request: Request) -> Result<u64, String> {
         assert!(request.second.is_some());
-        self.submit(request, Context::Restore)
+        self.submit(request, Context::Select)
     }
 
     /// Reads the observation `request` names at its second alone, keeping the context the last
