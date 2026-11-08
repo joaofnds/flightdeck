@@ -89,6 +89,10 @@ const CPUS: u64 = 18;
 const CPU_BASE_NS: u64 = 1 << 53;
 const PROGRAM_NAME_BYTES: usize = 32;
 const PROGRAM_PATH_BYTES: usize = 96;
+/// The process whose program name is the contract's one non-UTF-8 identity.
+const NON_UTF8_PROCESS: u64 = PROCESSES - 1;
+/// A byte that neither starts nor continues a UTF-8 character.
+const NON_UTF8_BYTE: u8 = 0xFF;
 /// macOS counts a hundred CPU ticks a second.
 const NANOSECONDS_PER_TICK: u64 = 10_000_000;
 const INTERFACES: u16 = 4;
@@ -164,6 +168,9 @@ const _: () = {
     }
     assert!(INCIDENT_OFFSETS[INCIDENT_OFFSETS.len() - 1] < ZERO_SECOND);
     assert!(INCIDENT_PROCESS < ROTATING_FIRST);
+    // The non-UTF-8 name rotates, so its exits and starts name it too.
+    assert!(ROTATING_FIRST <= NON_UTF8_PROCESS);
+    assert!(NON_UTF8_PROCESS < PROCESSES);
     // The rotating processes take their turns in whole pairs.
     assert!((PROCESSES - ROTATING_FIRST).is_multiple_of(ROTATIONS_PER_SECOND));
     // A round outlasts the missed tick, so the tick after it carries each process's exit once.
@@ -1011,16 +1018,13 @@ fn start_program(
     writer: &mut Writer,
     process: u64,
 ) -> Result<ProgramReference, Box<dyn std::error::Error>> {
-    let name = fixed(
-        &format!("reference-process-{process:03}"),
-        PROGRAM_NAME_BYTES,
-    )?;
+    let name = program_name(process)?;
     let path = fixed_path(process % APPS)?;
     let mut reference = None;
     writer
         .intern_program(
             &ProgramBytes {
-                executable_name: name.as_bytes(),
+                executable_name: &name,
                 app_path: Some(path.as_bytes()),
             },
             &mut reference,
@@ -1028,6 +1032,22 @@ fn start_program(
         .map_err(|availability| format!("program {process}: {availability:?}"))?;
 
     reference.ok_or_else(|| format!("program {process} was not interned").into())
+}
+
+/// The name of process `process`'s program, `PROGRAM_NAME_BYTES` long. The last byte of
+/// `NON_UTF8_PROCESS`'s is `NON_UTF8_BYTE`, so each reader of a name meets bytes that are not
+/// text, which the ring and the saved tables keep as bytes.
+fn program_name(process: u64) -> Result<Vec<u8>, String> {
+    let mut name = fixed(
+        &format!("reference-process-{process:03}"),
+        PROGRAM_NAME_BYTES,
+    )?
+    .into_bytes();
+    if process == NON_UTF8_PROCESS {
+        name[PROGRAM_NAME_BYTES - 1] = NON_UTF8_BYTE;
+    }
+
+    Ok(name)
 }
 
 /// `text` padded with dots to `length` bytes.
@@ -1126,12 +1146,26 @@ mod tests {
     #[test]
     fn names_each_program_in_the_contracts_lengths() {
         // Goal: each name and path has the length the contract fixes. Method: build the longest
-        // App number's path and a process's name.
+        // App number's path and the names of the first process and of the non-UTF-8 one.
         let lengths = (
-            fixed("reference-process-255", PROGRAM_NAME_BYTES).map(|name| name.len()),
+            program_name(0).map(|name| name.len()),
+            program_name(NON_UTF8_PROCESS).map(|name| name.len()),
             fixed_path(APPS - 1).map(|path| path.len()),
         );
 
-        assert_eq!((Ok(32), Ok(96)), lengths);
+        assert_eq!((Ok(32), Ok(32), Ok(96)), lengths);
+    }
+
+    #[test]
+    fn names_only_one_program_in_bytes_that_are_not_utf8() {
+        // Goal: exactly one process's program name is not UTF-8, so every other name stays the
+        // contract's ASCII. Method: collect the processes whose names do not decode.
+        let processes: Vec<u64> = (0..PROCESSES)
+            .filter(|process| {
+                program_name(*process).is_ok_and(|name| String::from_utf8(name).is_err())
+            })
+            .collect();
+
+        assert_eq!(vec![NON_UTF8_PROCESS], processes);
     }
 }

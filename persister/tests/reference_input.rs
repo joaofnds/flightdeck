@@ -328,6 +328,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keeps_the_last_processs_program_name_that_is_not_utf8_in_every_row_naming_it() {
+        // Goal: one program name holds a byte no UTF-8 text holds, the contract's non-UTF-8
+        // identity, and each saved row naming its process keeps the exact bytes. Method: read
+        // process 255's name in its process row at second 0, and in its exit and start at
+        // second 127, its first rotation.
+        let input = input();
+        let name = b"reference-process-255..........\xff".to_vec();
+
+        assert_eq!(
+            (vec![name.clone()], vec![name.clone(), name]),
+            (
+                input.program_names(0, "processes", "pid = 41255"),
+                input.program_names(127, "events", "pid = 41255 ORDER BY event"),
+            )
+        );
+    }
+
     /// The SMC's readings between the contract's special seconds.
     fn smc_baseline() -> Smc {
         Smc {
@@ -433,6 +451,21 @@ mod tests {
                 ),
                 0,
             )
+        }
+
+        /// The program names of the rows of `table` that `condition` picks at `second` of the
+        /// input.
+        fn program_names(&self, second: u64, table: &str, condition: &str) -> Vec<Vec<u8>> {
+            let rows = self.saved_rows(second, table, "executable_name", condition);
+
+            (0..rows.height())
+                .map(|row| {
+                    persistence::engine::Row::new(&rows, row)
+                        .unwrap()
+                        .get(0)
+                        .unwrap()
+                })
+                .collect()
         }
 
         /// The exits and starts `second` of the input publishes, in the order it publishes them.
