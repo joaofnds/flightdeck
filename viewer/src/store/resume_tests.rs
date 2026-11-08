@@ -240,9 +240,11 @@ fn a_resume_across_a_collector_restart_holds_what_a_fresh_store_holds() {
 }
 
 #[test]
-fn a_resume_retries_refused_history_until_it_is_recovered() {
-    // Goal: a successful suffix cannot hide or permanently skip an unreadable older minute.
-    // Method: refuse the first sealed minute, resume, restore it, and resume the same store.
+fn a_refused_minute_is_read_again_with_the_next_read_of_the_hour() {
+    // Goal: a successful suffix cannot permanently skip an unreadable older minute, which the
+    // Store's next read of the hour tries again.
+    // Method: refuse the first sealed minute, show the store again, restore the minute, overrun
+    // the ring while hidden, and show the same store once more.
     use std::os::unix::fs::PermissionsExt;
     let mut fixture = Fixture::new();
     for minute in 0..3 {
@@ -277,15 +279,24 @@ fn a_resume_retries_refused_history_until_it_is_recovered() {
     std::fs::write(&ticks, original).unwrap();
     // The recording opens only files of the owner-only mode it writes, which the rewrite lost.
     std::fs::set_permissions(&ticks, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // More publications than the fixture's eight-slot ring holds, so the show reads the hour.
+    for second in 230..240 {
+        fixture.publish_with_events(second, &[]);
+    }
+    let newest = |view: &super::View| {
+        view.seconds
+            .last()
+            .is_some_and(|second| second.wall_ns == 239_000_000_000)
+    };
 
     store.set_active(true);
-    let recovered = view_where(&store, |_| true);
+    let recovered = view_where(&store, newest);
 
     let fresh = Store::start(&fixture.root).unwrap();
     assert_eq!(recovered.left_out, None);
     assert_eq!(
         seconds_of(&recovered),
-        seconds_of(&view_where(&fresh, |_| true))
+        seconds_of(&view_where(&fresh, newest))
     );
 }
 

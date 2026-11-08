@@ -423,7 +423,8 @@ struct Held {
     checked_catalog: Option<recording::CheckedCatalog>,
     source_generation: u64,
     source_status: Option<ring::Status>,
-    /// Whether the store holds every second the recording sealed in the loaded hour.
+    /// Whether the store holds every second the loaded hour's minutes gave, so a refresh may go on
+    /// from its newest second, as `covers_hour_leaving_out` says.
     covers_hour: bool,
     ring_complete: bool,
     full_detail_evicted_through_ns: Option<u64>,
@@ -915,9 +916,16 @@ fn run_owed_add(
 
     if left_out.is_some() {
         held.left_out = left_out;
-        held.covers_hour = false;
+        held.covers_hour &= covers_hour_leaving_out(left_out);
     }
     held.unpublished = true;
+}
+
+/// Whether a store whose load left `left_out` out still holds every second the loaded hour gives.
+/// A minute that refused is damaged and refuses again at every read, so reading the hour again
+/// gives nothing more. A refusal that may clear, as a budget refusal may, leaves the hour to read.
+fn covers_hour_leaving_out(left_out: Option<Failure>) -> bool {
+    matches!(left_out, None | Some(Failure::Refused))
 }
 
 /// Where a walk through the seconds a launch handed over stands, as the store took them in.
@@ -1430,7 +1438,7 @@ fn refresh_load(
     }
     if accepted {
         coverage::accept_catalog(held, checked_catalog)?;
-        held.covers_hour = left_out.is_none();
+        held.covers_hour = covers_hour_leaving_out(left_out);
         refresh_load_finish(held, ring, next_ring, loaded);
     }
     Ok(accepted)

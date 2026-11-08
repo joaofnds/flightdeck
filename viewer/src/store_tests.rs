@@ -594,6 +594,33 @@ fn a_damaged_newest_saved_minute_leaves_the_live_mac_to_show() {
     assert!(!context.retains_second(160));
 }
 
+#[test]
+fn a_store_shown_again_over_a_damaged_minute_reads_no_saved_minute() {
+    // Goal: a minute the Store left out costs no read of the hour each time the window shows.
+    // Method: damage the older of two saved minutes, start the Store, hide it, take the saved
+    // minutes offline, publish a second, then show it.
+    let (mut fixture, store, _handle) = damaged_minute_store(0);
+    let started = view_where(&store, |view| {
+        view.left_out.is_some() && view.seconds.last().unwrap().wall_ns == 227_000_000_000
+    });
+    let left_out = started.left_out;
+    drop(started);
+    store.set_active(false);
+    super::activity_tests::wait_until_paused(&store);
+    fs::rename(fixture.root.join("data"), fixture.root.join("offline_data")).unwrap();
+    fixture.publish_with_system_rows(228);
+
+    store.set_active(true);
+    let resumed = view_where(&store, |view| {
+        view.seconds.last().unwrap().wall_ns == 228_000_000_000
+    });
+
+    assert_eq!(left_out, Some(Failure::Refused));
+    assert_eq!(resumed.left_out, left_out);
+    assert_eq!(resumed.failure, None);
+    assert_eq!(resumed.seconds.first().unwrap().wall_ns, 160_000_000_000);
+}
+
 /// Two saved minutes and twenty seconds after them, which lap the fixture's eight-slot ring, so a
 /// Store's ring cannot follow on from the newest saved minute, with `damaged` of them damaged.
 fn lapped_ring_store(damaged: Option<u64>) -> (Fixture, Store, super::QueryHandle) {

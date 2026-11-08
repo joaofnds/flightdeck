@@ -454,9 +454,10 @@ fn a_launch_adds_up_the_apps_it_owes_while_a_view_holds_every_stretch_the_store_
 #[test]
 fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete() {
     // Goal: a store that cannot read the Apps of a minute it owes its stretches says that it
-    // holds less of the hour than the recording sealed. Method: seal a few ticks of run minutes
-    // 0, 1 and 21, launch a store, empty minute 0's ticks table, then add up the Apps the store
-    // owes.
+    // holds less of the hour than the recording sealed, and still goes on from its newest second,
+    // since reading the hour again would refuse the minute again. Method: seal a few ticks of run
+    // minutes 0, 1 and 21, launch a store, empty minute 0's ticks table, then add up the Apps the
+    // store owes.
     let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
     let mut held = Held::without_recording();
     launch(&fixture, &mut held);
@@ -472,7 +473,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete()
     );
 
     assert_eq!(held.left_out, Some(super::Failure::Refused));
-    assert!(!held.covers_hour);
+    assert!(held.covers_hour);
 }
 
 #[test]
