@@ -81,11 +81,14 @@ jobs:
           cache-on-failure: true
       # Installs only just, at the version and the checksum mise.toml and mise.lock pin, so CI
       # runs the justfile's recipes with the just a contributor runs them with. The other jobs
-      # repeat this step through its anchor.
+      # repeat this step through its anchor. The hash of that version's macos-arm64 binary lets
+      # the action check a mise restored from its cache without fetching the release's checksums
+      # from GitHub, so it changes with the version.
       - &install-just
         uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: 2026.10.3
+          sha256: 0999bd4943523ccdbd149b5ad4080281536801b3f6406ac4495699bd0310969c
           install_args: just
           cache_save: ${{ github.ref == 'refs/heads/main' }}
       - run: >-
