@@ -259,6 +259,22 @@ struct Shared {
     cancellation: Arc<Cancellation>,
 }
 
+impl Shared {
+    /// The state every Store starts in, active and catching up.
+    fn starting() -> Self {
+        Self {
+            mailbox: Mailbox::new(),
+            queries: query::Queries::new(),
+            stop: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+            catch_up: AtomicBool::new(false),
+            catching_up: AtomicBool::new(true),
+            paused: AtomicBool::new(false),
+            cancellation: Arc::new(Cancellation::default()),
+        }
+    }
+}
+
 impl Store {
     /// Starts the store thread over the recording at `root`, with the app's budget.
     #[cfg(test)]
@@ -273,16 +289,7 @@ impl Store {
 
     /// Shares reservations with the caller's loader inputs, decoded work and retained results.
     pub fn start_with_budget(root: &Path, budget: Arc<ByteBudget>) -> io::Result<Self> {
-        let shared = Arc::new(Shared {
-            mailbox: Mailbox::new(),
-            queries: query::Queries::new(),
-            stop: AtomicBool::new(false),
-            active: AtomicBool::new(true),
-            catch_up: AtomicBool::new(false),
-            catching_up: AtomicBool::new(true),
-            paused: AtomicBool::new(false),
-            cancellation: Arc::new(Cancellation::default()),
-        });
+        let shared = Arc::new(Shared::starting());
         let root = root.to_owned();
         let mut held = Held::new(root.clone(), budget);
         let operation = Arc::clone(&shared.cancellation)
@@ -1001,18 +1008,13 @@ fn startup(
     ring: &mut Ring,
     operation: &Operation,
 ) -> persistence::Result<()> {
-    let shared = Shared {
-        queries: query::Queries::new(),
-        mailbox: Mailbox::new(),
-        stop: AtomicBool::new(false),
-        active: AtomicBool::new(true),
-        catch_up: AtomicBool::new(false),
-        catching_up: AtomicBool::new(true),
-        paused: AtomicBool::new(false),
-        cancellation: Arc::new(Cancellation::default()),
-    };
+    let shared = Shared::starting();
 
-    startup_staged(root, held, ring, &shared, operation)
+    startup_staged(root, held, ring, &shared, operation)?;
+    // A window's Store loads the hour a startup left to its catch-up, which this one never does.
+    assert!(!shared.catch_up.load(Ordering::Acquire));
+
+    Ok(())
 }
 
 /// Loads the sealed hour in finite source steps, yielding between them, as every Store starts.

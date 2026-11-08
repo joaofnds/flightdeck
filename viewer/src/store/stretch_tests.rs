@@ -854,7 +854,7 @@ fn seal_minutes(fixture: &mut Fixture, mut run_tick: u64, minutes: &[(u64, Range
 
 /// A store over `fixture`'s recording that starts as the app's does.
 fn store_with_budget(fixture: &Fixture) -> super::Store {
-    let budget = Arc::new(super::ByteBudget::new(1 << 30));
+    let budget = Arc::new(super::ByteBudget::new(super::BYTES_MAX));
 
     super::Store::start_with_budget(&fixture.root, budget).unwrap()
 }
