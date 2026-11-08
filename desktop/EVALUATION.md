@@ -182,8 +182,7 @@ observation, with explicit unavailable values and restored selection on exit.
 Recorded sources retain reader-session App histories while avoiding idle polling;
 navigation and Refresh still query the existing reader. Automatic live attachment
 reports a stopped or stalled producer through Retry without acquiring shutdown
-ownership. An explicit Live control follows the opened recording by listing the minutes
-it saves, through the same reader.
+ownership. An explicit Live control picks up the minutes saved since.
 Self-monitoring labels the producer and selected positions separately;
 its live catalog can advance while the inspected observation remains paused.
 

@@ -300,7 +300,6 @@ fn a_refused_minute_is_read_again_with_the_next_read_of_the_hour() {
     );
 }
 
-/// Spoils a minute's saved readings without changing discovery of its committed marker.
 #[test]
 fn a_resume_beyond_ring_retention_reads_only_the_minutes_sealed_since_its_newest_second() {
     // Goal: a return keeps the held hour and reads only what the recording sealed while hidden.
@@ -366,6 +365,7 @@ fn a_refused_predecessor_does_not_discard_accepted_history() {
     );
 }
 
+/// Spoils a minute's saved readings without changing discovery of its committed marker.
 fn take_minute_offline(fixture: &Fixture, minute: u64) {
     let ticks = minute_ticks(fixture, minute);
     std::fs::remove_file(&ticks).unwrap();

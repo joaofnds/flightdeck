@@ -909,9 +909,9 @@ fn reader_snapshot(
     Ok(Some(snapshot))
 }
 
-/// Whether a published page is answered for good. A recording the user opened, which a reader
-/// with no Store reads, saves nothing more, while a live page the Store left to the saved minutes
-/// reads them again as the recording saves more.
+/// Whether a published page is answered for good. A reader with no Store, which reads a recording
+/// the user opened, reads it again only for the next command, while a live page the Store left to
+/// the saved minutes reads them again as the recording saves more.
 fn reader_snapshot_finished(reader: &Reader, command: &Command, published: bool) -> bool {
     if !published {
         return false;
