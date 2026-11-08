@@ -7,14 +7,14 @@ mod saved_windows;
 // Clippy lets a test unwrap only inside a module marked as a test's.
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Arc, OnceLock};
 
     use collector::disks::DiskSnapshot;
     use collector::machine::CPUTicks;
-    use collector::recording::Registry;
+    use collector::recording::{Registry, identity_text};
     use collector::ring::{Identity, RunIdentity};
     use persistence::Manifest;
     use persistence::resources::ByteBudget;
@@ -480,6 +480,34 @@ mod tests {
         assert_eq!(BTreeSet::from([(0, 0, false)]), losses);
     }
 
+    #[test]
+    fn lists_in_its_expected_events_every_exit_and_start_the_saved_minutes_hold() {
+        // Goal: the expected events the generator prints for an input name each exit and start
+        // its runs publish, by run, the second whose tick publishes it, pid and creation. The
+        // saved minutes hold exactly those of the ticks they save, and the rest fall in the
+        // seconds 360 to 369 of the minute the ring holds. Method: print the expected events of
+        // 370 seconds and split them by whether a saved minute holds their tick, then read every
+        // saved event of the three runs in the order the runs published them.
+        let input = input();
+        let ticks = input.saved_ticks();
+        let (expected, unsaved): (Vec<TickEvent>, Vec<TickEvent>) = expected_events()
+            .into_iter()
+            .partition(|event| ticks.contains(&(event.run.clone(), event.second)));
+
+        let saved = input.saved_events();
+
+        assert_eq!(expected, saved);
+        assert_eq!(
+            (360..370)
+                .map(|second| (identity_text(RUN_SECOND).to_string(), second))
+                .collect::<BTreeSet<_>>(),
+            unsaved
+                .iter()
+                .map(|event| (event.run.clone(), event.second))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
     /// The SMC's readings between the contract's special seconds.
     fn smc_baseline() -> Smc {
         Smc {
@@ -506,6 +534,44 @@ mod tests {
             recording: RECORDING,
             run,
             boot: BOOT,
+        }
+    }
+
+    /// The exits and starts the generator expects the 370-second input to publish, as it prints
+    /// them.
+    fn expected_events() -> Vec<TickEvent> {
+        let printed = generator()
+            .args(["--expected-events", "--seconds", &SECONDS.to_string()])
+            .output()
+            .unwrap();
+        assert!(printed.status.success());
+        let text = String::from_utf8(printed.stdout).unwrap();
+        let mut lines = text.lines();
+        assert_eq!(Some("run\tsecond\tevent\tpid\tcreation"), lines.next());
+
+        lines
+            .map(|line| {
+                let fields: Vec<&str> = line.split('\t').collect();
+                let [run, second, event, pid, creation] = fields.as_slice() else {
+                    panic!("an expected event of five fields, not {line}");
+                };
+                TickEvent {
+                    run: (*run).to_owned(),
+                    second: second.parse().unwrap(),
+                    event: (*event).to_owned(),
+                    pid: pid.parse().unwrap(),
+                    creation: creation.parse().unwrap(),
+                }
+            })
+            .collect()
+    }
+
+    /// The name the expected events give a saved event of the kind `kind`.
+    fn event_name(kind: u8) -> String {
+        match kind {
+            persistence::schema::event_kind::EXIT => "exit".to_owned(),
+            persistence::schema::event_kind::START => "start".to_owned(),
+            _ => panic!("the input publishes no event of kind {kind}"),
         }
     }
 
@@ -916,6 +982,82 @@ mod tests {
             clocks
         }
 
+        /// Each tick the three runs' saved minutes hold, by the run's identity text and the
+        /// tick's second.
+        fn saved_ticks(&self) -> BTreeSet<(String, u64)> {
+            let mut ticks = BTreeSet::new();
+            for run in [RUN_OBSERVATIONS, RUN_FIRST, RUN_SECOND] {
+                for minute in saved_windows::saved_manifests(&self.directory, &run_identity(run)) {
+                    for second in self.tick_seconds(&minute).into_values() {
+                        ticks.insert((identity_text(run).to_string(), second));
+                    }
+                }
+            }
+
+            ticks
+        }
+
+        /// The exits and starts the three runs' saved minutes hold, in the order the runs
+        /// published them, each with its run and the second whose tick published it.
+        fn saved_events(&self) -> Vec<TickEvent> {
+            let mut events = Vec::new();
+            for run in [RUN_OBSERVATIONS, RUN_FIRST, RUN_SECOND] {
+                for minute in saved_windows::saved_manifests(&self.directory, &run_identity(run)) {
+                    let seconds = self.tick_seconds(&minute);
+                    let saved =
+                        persistence::event_table::EventTable::open(&self.directory, &minute)
+                            .unwrap()
+                            .into_lazy(&Arc::new(ByteBudget::new(EVENT_QUERY_BYTES)))
+                            .unwrap();
+                    let rows = query_frame(
+                        saved,
+                        "SELECT event, publication, kind, pid, process_unique_id FROM saved",
+                    );
+                    for index in 0..rows.height() {
+                        let row = persistence::engine::Row::new(&rows, index).unwrap();
+                        let publication: u64 = row.get(1).unwrap();
+                        let event: u64 = row.get(0).unwrap();
+                        events.push((
+                            event,
+                            TickEvent {
+                                run: identity_text(run).to_string(),
+                                second: seconds[&publication],
+                                event: event_name(row.get(2).unwrap()),
+                                pid: row.get(3).unwrap(),
+                                creation: row.get(4).unwrap(),
+                            },
+                        ));
+                    }
+                }
+            }
+            // The runs share one ring place, so their events are numbered in publication order.
+            events.sort_unstable_by_key(|(event, _)| *event);
+
+            events.into_iter().map(|(_, event)| event).collect()
+        }
+
+        /// The input's second of each tick the saved minute `minute` holds, by publication.
+        fn tick_seconds(&self, minute: &Manifest) -> BTreeMap<u64, u64> {
+            let ticks = query(
+                &self
+                    .directory
+                    .join(&minute.data_directory)
+                    .join("ticks.parquet"),
+                "SELECT publication, wall_ns FROM saved",
+            );
+
+            (0..ticks.height())
+                .map(|index| {
+                    let row = persistence::engine::Row::new(&ticks, index).unwrap();
+                    let wall_ns: u64 = row.get(1).unwrap();
+                    (
+                        row.get(0).unwrap(),
+                        (wall_ns - ORIGIN_WALL_NS) / NANOSECONDS_PER_SECOND,
+                    )
+                })
+                .collect()
+        }
+
         /// The manifest of each saved minute of every run.
         fn saved_minutes(&self) -> Vec<Manifest> {
             let registry = Registry::read(&self.directory).unwrap();
@@ -983,6 +1125,18 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct SavedEvent {
         kind: u8,
+        pid: i32,
+        creation: u64,
+    }
+
+    /// An exit or a start of the input, as the expected events list it: the identity text of the
+    /// run that publishes it, the second whose tick publishes it, `exit` or `start`, the pid and
+    /// the creation it names.
+    #[derive(Debug, PartialEq)]
+    struct TickEvent {
+        run: String,
+        second: u64,
+        event: String,
         pid: i32,
         creation: u64,
     }

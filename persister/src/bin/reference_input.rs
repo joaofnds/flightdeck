@@ -7,7 +7,7 @@
 //! ends in still in its ring, which stays registered for readers until `--unlink` removes it.
 
 use std::fs::DirBuilder;
-use std::io;
+use std::io::{self, Write};
 use std::ops::{Range, RangeInclusive};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -35,8 +35,8 @@ use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading}
 use collector::tracker::{Event, Noticed};
 use persistence::retention::Period;
 
-const USAGE: &str =
-    "usage: reference_input --directory PATH --seconds N | reference_input --unlink PATH";
+const USAGE: &str = "usage: reference_input --directory PATH --seconds N | reference_input \
+    --expected-events --seconds N | reference_input --unlink PATH";
 /// The contract's input lasts an hour.
 const SECONDS_MAX: u64 = 3_600;
 /// The shortest input whose saved minutes hold seconds 300 to 306, each special, since the
@@ -239,6 +239,7 @@ fn main() -> ExitCode {
 
     let done = match &command {
         Command::Generate { directory, seconds } => generate(directory, *seconds),
+        Command::ExpectedEvents { seconds } => print_expected_events(*seconds),
         Command::Unlink { directory } => unlink(directory),
     };
     match done {
@@ -253,6 +254,7 @@ fn main() -> ExitCode {
 #[derive(Debug, PartialEq)]
 enum Command {
     Generate { directory: PathBuf, seconds: u64 },
+    ExpectedEvents { seconds: u64 },
     Unlink { directory: PathBuf },
 }
 
@@ -261,6 +263,11 @@ fn command_from(words: &[String]) -> Result<Command, String> {
         [unlink, directory] if unlink == "--unlink" => Ok(Command::Unlink {
             directory: PathBuf::from(directory),
         }),
+        [expected, flag, value] if expected == "--expected-events" && flag == "--seconds" => {
+            Ok(Command::ExpectedEvents {
+                seconds: command_from_seconds(value)?,
+            })
+        }
         [first, first_value, second, second_value] => {
             let mut directory = None;
             let mut seconds = None;
@@ -307,39 +314,28 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
         lock_path: directory.join("ring.lock"),
         name_prefix: format!("/fdri{}", std::process::id()),
     };
-    let split = run_split(seconds);
+    let [observations, first, (plan, last_seconds)] = runs(seconds);
 
-    // The three-observation run goes first, so the second primary run's registration evicts it
-    // rather than the first primary run from the registry of two, which then lists the primary
-    // runs.
-    let mut observations = Run::start(directory, &place, &control, &OBSERVATIONS_RUN)?;
-    observations.publish(OBSERVATIONS_SECONDS)?;
-    observations.finish()?;
+    // Each run but the last ends as a collector that stops in order ends it, before the next
+    // registers.
+    for (plan, run_seconds) in [observations, first] {
+        let mut run = Run::start(directory, &place, &control, &plan)?;
+        run.publish(run_seconds)?;
+        run.finish()?;
+    }
 
-    let mut first = Run::start(directory, &place, &control, &FIRST_RUN)?;
-    first.publish(0..split)?;
-    first.finish()?;
-
-    let mut second = Run::start(
-        directory,
-        &place,
-        &control,
-        &RunPlan {
-            identity: RUN_SECOND_IDENTITY,
-            first: split,
-            later_ns: 0,
-        },
-    )?;
-    let last_minute_first = second.publish(split..seconds)?;
+    let mut second = Run::start(directory, &place, &control, &plan)?;
+    let last_minute_first = second.publish(last_seconds)?;
     second.paced.wait_for_saved(last_minute_first)?;
     // A pass that finds nothing to save ends in the worker's pause, so the process ends with the
     // worker asleep rather than part way through a save.
     second.paced.wait_for_pass()?;
 
     println!(
-        "reference_input directory={} seconds={seconds} split={split} ring={} saved_end={} \
+        "reference_input directory={} seconds={seconds} split={} ring={} saved_end={} \
         publication_newest={}",
         directory.display(),
+        plan.first,
         second.writer.name(),
         second.paced.saved_end,
         second.writer.publication_newest(),
@@ -347,6 +343,86 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
     // The process ends with the second run live and the minute it ends in in its ring, as a
     // recording stands while its collector and persister run.
     Ok(())
+}
+
+/// Prints each exit and start the input of `seconds` publishes, by the identity of the run that
+/// publishes it, the second whose tick publishes it, `exit` or `start`, the pid and the creation
+/// it names, as lines of tab-separated fields under a header.
+fn print_expected_events(seconds: u64) -> Result<(), Box<dyn std::error::Error>> {
+    let mut out = io::BufWriter::new(io::stdout().lock());
+    writeln!(out, "run\tsecond\tevent\tpid\tcreation")?;
+    for (run, run_seconds) in runs(seconds) {
+        for second in ticked(run_seconds) {
+            print_expected_events_tick(&mut out, &run, second)?;
+        }
+    }
+    out.flush()?;
+
+    Ok(())
+}
+
+/// Prints the exits and starts the tick of `second` in the run `run` publishes.
+fn print_expected_events_tick(
+    out: &mut impl Write,
+    run: &RunPlan,
+    second: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run_text = collector::recording::identity_text(run.identity);
+    for rotation in rotations(rotated_seconds(run, second)) {
+        let pid = PID_FIRST + i32::try_from(rotation.process)?;
+        writeln!(
+            out,
+            "{run_text}\t{second}\texit\t{pid}\t{}",
+            rotation.ended.identity
+        )?;
+        writeln!(
+            out,
+            "{run_text}\t{second}\tstart\t{pid}\t{}",
+            rotation.started.identity
+        )?;
+    }
+
+    Ok(())
+}
+
+/// The input's runs for `seconds`, each with the seconds it reads, in the order the generator
+/// publishes them. The three-observation run goes first, so the second primary run's
+/// registration evicts it rather than the first primary run from the registry of two, which then
+/// lists the primary runs.
+fn runs(seconds: u64) -> [(RunPlan, Range<u64>); 3] {
+    let split = run_split(seconds);
+
+    [
+        (OBSERVATIONS_RUN, OBSERVATIONS_SECONDS),
+        (FIRST_RUN, 0..split),
+        (
+            RunPlan {
+                identity: RUN_SECOND_IDENTITY,
+                first: split,
+                later_ns: 0,
+            },
+            split..seconds,
+        ),
+    ]
+}
+
+/// The seconds of `seconds` whose tick is not missed, since a missed tick publishes nothing.
+fn ticked(seconds: Range<u64>) -> impl Iterator<Item = u64> {
+    seconds.filter(|second| second % PERIOD_SECONDS != MISSED_SECOND)
+}
+
+/// The seconds whose rotations the tick of `second` in the run `run` publishes. The tick after a
+/// missed tick carries the missed second's rotations too, as a collector publishes every event
+/// since its last tick. A run's first tick carries none, since a collector's first scan finds
+/// its processes already running.
+fn rotated_seconds(run: &RunPlan, second: u64) -> RangeInclusive<u64> {
+    let rotated_first = if second % PERIOD_SECONDS == MISSED_SECOND + 1 {
+        second - 1
+    } else {
+        second
+    };
+
+    rotated_first.max(run.first + 1)..=second
 }
 
 /// The second the second primary run starts at: half the input's `seconds`, the divisions
@@ -421,12 +497,7 @@ impl<'a> Run<'a> {
     /// minute they end in.
     fn publish(&mut self, seconds: Range<u64>) -> Result<u64, Box<dyn std::error::Error>> {
         let mut last_minute_first = None;
-        for second in seconds.clone() {
-            // A missed tick publishes nothing, so its second has no readings.
-            if second % PERIOD_SECONDS == MISSED_SECOND {
-                continue;
-            }
-
+        for second in ticked(seconds.clone()) {
             let publication = self.writer.publication_newest() + 1;
             self.paced.wait_for_room(publication)?;
             // Both divisions floor, to the minute a second falls in.
@@ -737,16 +808,7 @@ impl Second {
         } else {
             GAUGES_BASELINE
         };
-        // The tick after a missed tick carries the missed second's rotations too, as a collector
-        // publishes every event since its last tick. A run's first tick carries none, since a
-        // collector's first scan finds its processes already running.
-        let rotated_first = if offset == MISSED_SECOND + 1 {
-            second - 1
-        } else {
-            second
-        };
-        let (events, event_identities) =
-            publish_rotations(programs, rotated_first.max(run.first + 1)..=second)?;
+        let (events, event_identities) = publish_rotations(programs, rotated_seconds(run, second))?;
         let thermal_pressure = match offset {
             THERMAL_FAIR_SECOND => THERMAL_MODERATE,
             THERMAL_SERIOUS_SECOND => THERMAL_HEAVY,
@@ -866,6 +928,34 @@ fn creation_at(process: u64, second: u64) -> Creation {
     }
 }
 
+/// One process taking a new creation in `second`: the creation that exits and its successor.
+struct Rotation {
+    second: u64,
+    process: u64,
+    ended: Creation,
+    started: Creation,
+}
+
+/// The rotations of `seconds`, in the order a tick publishes them.
+fn rotations(seconds: RangeInclusive<u64>) -> Vec<Rotation> {
+    let mut rotations = Vec::new();
+    for second in seconds {
+        let first = ROTATING_FIRST + ROTATIONS_PER_SECOND * ((second - 1) % ROTATION_ROUND_SECONDS);
+        for process in first..first + ROTATIONS_PER_SECOND {
+            let started = creation_at(process, second);
+            assert_eq!(Some(second), started.started);
+            rotations.push(Rotation {
+                second,
+                process,
+                ended: creation_at(process, second - 1),
+                started,
+            });
+        }
+    }
+
+    rotations
+}
+
 /// The exits and starts of the processes that rotate in `seconds`, which run `programs`, with
 /// the identity each names. Each old creation's exit comes before its successor's start.
 fn publish_rotations(
@@ -874,39 +964,37 @@ fn publish_rotations(
 ) -> Result<(Vec<Event>, Vec<IdentityObservation>), Box<dyn std::error::Error>> {
     let mut events = Vec::new();
     let mut identities = Vec::new();
-    for second in seconds {
-        let first = ROTATING_FIRST + ROTATIONS_PER_SECOND * ((second - 1) % ROTATION_ROUND_SECONDS);
-        for process in first..first + ROTATIONS_PER_SECOND {
-            let ended = creation_at(process, second - 1);
-            let started = creation_at(process, second);
-            assert_eq!(Some(second), started.started);
-            let pid = PID_FIRST + i32::try_from(process)?;
-            let program = programs[usize::try_from(process)?];
+    for rotation in rotations(seconds) {
+        let pid = PID_FIRST + i32::try_from(rotation.process)?;
+        let program = programs[usize::try_from(rotation.process)?];
 
-            // The exit's endpoint is the old creation's counters in the second it exits, so its
-            // App loses no growth to the rotation.
-            events.push(Event::Exit {
-                pid,
-                last: Ok(publish_usage(process, ended, second)),
-                noticed: Noticed::OnExit,
-            });
-            identities.push(publish_identity(
-                process,
-                ended.identity,
-                UsageAvailability::Measured,
-                program,
-            )?);
-            events.push(Event::Start {
-                pid,
-                coalition: None,
-            });
-            identities.push(publish_identity(
-                process,
-                started.identity,
-                UsageAvailability::NotApplicable,
-                program,
-            )?);
-        }
+        // The exit's endpoint is the old creation's counters in the second it exits, so its App
+        // loses no growth to the rotation.
+        events.push(Event::Exit {
+            pid,
+            last: Ok(publish_usage(
+                rotation.process,
+                rotation.ended,
+                rotation.second,
+            )),
+            noticed: Noticed::OnExit,
+        });
+        identities.push(publish_identity(
+            rotation.process,
+            rotation.ended.identity,
+            UsageAvailability::Measured,
+            program,
+        )?);
+        events.push(Event::Start {
+            pid,
+            coalition: None,
+        });
+        identities.push(publish_identity(
+            rotation.process,
+            rotation.started.identity,
+            UsageAvailability::NotApplicable,
+            program,
+        )?);
     }
 
     Ok((events, identities))
