@@ -67,6 +67,14 @@ pub struct StartedRecording {
     announcement: Option<io::Error>,
 }
 
+/// A run's identity and its boot's, which a generator names in place of a random run identity
+/// and this Mac's boot session.
+#[derive(Clone, Copy, Debug)]
+pub struct FixedRun {
+    pub run: Identity,
+    pub boot: Identity,
+}
+
 #[derive(Clone, Copy)]
 enum RingLayout {
     Observed,
@@ -110,6 +118,7 @@ impl Registration {
             shape,
             RingLayout::Disks(capacity),
             start_continuous_ns,
+            None,
         )
     }
 
@@ -121,6 +130,38 @@ impl Registration {
         shape: Shape,
         capacity: crate::ring::DictionaryCapacity,
         start_continuous_ns: u64,
+    ) -> io::Result<StartedRecording> {
+        Self::start_with_system_named(root, place, shape, capacity, start_continuous_ns, None)
+    }
+
+    /// Starts as `start_with_system` does, naming the run and its boot `fixed_run`, for a
+    /// generator whose input fixes them. A collector's runs keep a random identity and this
+    /// Mac's boot session.
+    pub fn start_with_system_as(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        capacity: crate::ring::DictionaryCapacity,
+        start_continuous_ns: u64,
+        fixed_run: FixedRun,
+    ) -> io::Result<StartedRecording> {
+        Self::start_with_system_named(
+            root,
+            place,
+            shape,
+            capacity,
+            start_continuous_ns,
+            Some(fixed_run),
+        )
+    }
+
+    fn start_with_system_named(
+        root: &Path,
+        place: &Place,
+        shape: Shape,
+        capacity: crate::ring::DictionaryCapacity,
+        start_continuous_ns: u64,
+        fixed_run: Option<FixedRun>,
     ) -> io::Result<StartedRecording> {
         let size_bytes = Writer::system_size_bytes(shape, capacity)?;
         if size_bytes > 1024 * 1024 * 1024 {
@@ -136,6 +177,7 @@ impl Registration {
             shape,
             RingLayout::System(capacity),
             start_continuous_ns,
+            fixed_run,
         )
     }
 
@@ -163,6 +205,7 @@ impl Registration {
             shape,
             RingLayout::Identity(capacity),
             start_continuous_ns,
+            None,
         )
     }
 
@@ -190,6 +233,7 @@ impl Registration {
             shape,
             RingLayout::Battery(capacity),
             start_continuous_ns,
+            None,
         )
     }
 
@@ -206,15 +250,19 @@ impl Registration {
             shape,
             RingLayout::Observed,
             start_continuous_ns,
+            None,
         )
     }
 
+    /// Registers a run named `fixed_run`, or at random and in this Mac's boot session where it
+    /// is `None`, and starts its writer.
     fn start_inner(
         root: &Path,
         place: &Place,
         shape: Shape,
         layout: RingLayout,
         start_continuous_ns: u64,
+        fixed_run: Option<FixedRun>,
     ) -> io::Result<StartedRecording> {
         let preflight = match check_writer(root) {
             Ok(()) => None,
@@ -248,7 +296,7 @@ impl Registration {
             }
         };
 
-        let registration = match Self::prepare(root, place) {
+        let registration = match Self::prepare(root, place, fixed_run) {
             Ok(registration) => registration,
             Err(error) => {
                 return Self::start_unregistered(
@@ -341,14 +389,21 @@ impl Registration {
         })
     }
 
-    fn prepare(root: &Path, place: &Place) -> io::Result<Self> {
+    fn prepare(root: &Path, place: &Place, fixed_run: Option<FixedRun>) -> io::Result<Self> {
         create_private_dir(root)?;
         let lock = FileLock::wait_short(&root.join("registration.lock"))?;
         let recording = recording_identity(root, &lock)?;
         let mut registry = Registry::read(root)?;
         registry.capture_previous(root, place, recording)?;
         registry.write(root)?;
-        let identity = new_run_identity(recording)?;
+        let identity = match fixed_run {
+            None => new_run_identity(recording)?,
+            Some(FixedRun { run, boot }) => RunIdentity {
+                recording,
+                run,
+                boot,
+            },
+        };
         let registration = Self {
             root: root.to_path_buf(),
             identity,
@@ -405,6 +460,21 @@ pub fn check_writer(root: &Path) -> io::Result<()> {
 pub fn recording_identity(root: &Path, registration: &FileLock) -> io::Result<Identity> {
     let directory = private::PrivateDirectory::open(root)?;
     bootstrap::initialize(&directory, registration, &mut [0; 4097])
+}
+
+/// Sets up the root `root` as the recording `identity` rather than a random one, for a
+/// generator whose input fixes the recording's identity. Refuses a root a writer already named
+/// otherwise, leaving it as it was.
+pub fn initialize_as(root: &Path, identity: Identity) -> io::Result<()> {
+    create_private_dir(root)?;
+    let lock = FileLock::wait_short(&root.join("registration.lock"))?;
+    let directory = private::PrivateDirectory::open(root)?;
+    let named = bootstrap::initialize_as(&directory, &lock, &mut [0; 4097], identity)?;
+    if named == identity {
+        Ok(())
+    } else {
+        Err(io::Error::from(io::ErrorKind::AlreadyExists))
+    }
 }
 
 pub fn random_identity() -> io::Result<Identity> {
@@ -535,6 +605,36 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(0, valid);
         assert_eq!(0, refused);
+    }
+
+    #[test]
+    fn names_a_fresh_root_as_asked_and_refuses_one_named_otherwise() {
+        // Goal: a generator names a fresh recording with its fixed identity, and a recording a
+        // writer already named keeps that name. Method: name one fresh root, then ask to name a
+        // root that a writer set up at random, and read both identities back.
+        let base =
+            std::env::temp_dir().join(format!("flightdeck-identity-named-{}", std::process::id()));
+        let fresh = base.join("fresh");
+        let named = base.join("named");
+        create_private_dir(&base).unwrap();
+        let random = {
+            create_private_dir(&named).unwrap();
+            let lock = FileLock::wait_short(&named.join("registration.lock")).unwrap();
+            recording_identity(&named, &lock).unwrap()
+        };
+
+        let outcomes = (
+            initialize_as(&fresh, Identity([1, 2])).map_err(|error| error.kind()),
+            initialize_as(&named, Identity([1, 2])).map_err(|error| error.kind()),
+        );
+        let identities = (
+            read_identity(&fresh).unwrap(),
+            read_identity(&named).unwrap(),
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+        assert_eq!((Ok(()), Err(io::ErrorKind::AlreadyExists)), outcomes);
+        assert_eq!((Identity([1, 2]), random), identities);
     }
 
     #[test]

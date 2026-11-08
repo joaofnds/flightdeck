@@ -152,6 +152,28 @@ pub fn initialize(
     registration: &FileLock,
     scratch: &mut [u8; 4097],
 ) -> io::Result<Identity> {
+    initialize_with(root, registration, scratch, random_identity)
+}
+
+/// Creates the recording as `initialize` does, naming a fresh root `identity` rather than a
+/// random identity, for a generator whose input fixes the recording's identity. A root a writer
+/// already named keeps its identity, which this returns.
+pub fn initialize_as(
+    root: &PrivateDirectory,
+    registration: &FileLock,
+    scratch: &mut [u8; 4097],
+    identity: Identity,
+) -> io::Result<Identity> {
+    initialize_with(root, registration, scratch, || Ok(identity))
+}
+
+/// The work of `initialize`, which names a fresh root `fresh_identity`.
+fn initialize_with(
+    root: &PrivateDirectory,
+    registration: &FileLock,
+    scratch: &mut [u8; 4097],
+    fresh_identity: impl FnOnce() -> io::Result<Identity>,
+) -> io::Result<Identity> {
     let classification = classify_settled(root, scratch)?;
     match classification {
         Classification::Unsupported => return Err(io::Error::from(io::ErrorKind::Unsupported)),
@@ -172,7 +194,7 @@ pub fn initialize(
 
         Classification::Initializing(identity) => identity,
         Classification::Fresh => {
-            let identity = random_identity()?;
+            let identity = fresh_identity()?;
             remove_pending(root)?;
             let length = encode_initial("bootstrap", identity, scratch)?;
             private::atomic_write_in(root, "bootstrap", &scratch[..length])?;

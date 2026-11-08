@@ -24,7 +24,7 @@ use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::processes::{Process, Task, Usage};
 use collector::recording::control::{Control, Failure, Role, State};
 use collector::recording::private::PrivateDirectory;
-use collector::recording::{Registration, Registry};
+use collector::recording::{FixedRun, Registration, Registry};
 use collector::ring::{
     DictionaryCapacity, Dropped, IOReportReadings, Identity, IdentityObservation,
     IdentityPublication, ObservationTimes, Place, ProcessCreation, ProcessIdentity, ProgramBytes,
@@ -71,6 +71,14 @@ const ROTATIONS_PER_SECOND: u64 = 2;
 const ROTATION_ROUND_SECONDS: u64 = (PROCESSES - ROTATING_FIRST) / ROTATIONS_PER_SECOND;
 /// The identity of the first creation a rotation starts, after the input's first creations.
 const CREATION_ROTATED_FIRST: u64 = PROCESSES + 1;
+/// The recording's identity. This and the other identities are arbitrary constants, the fixed
+/// opaque identities the contract gives the recording, each run and the boot, so every
+/// generation names them alike.
+const RECORDING_IDENTITY: Identity = Identity([0x9e37_79b9_7f4a_7c15, 0xbf58_476d_1ce4_e5b9]);
+/// The one boot session every run of the input reads in.
+const BOOT_IDENTITY: Identity = Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6c_dd1d]);
+/// The first primary run's identity.
+const RUN_FIRST_IDENTITY: Identity = Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]);
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -257,6 +265,9 @@ fn command_from_seconds(value: &str) -> Result<u64, String> {
 fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Error>> {
     persistence::engine::initialize_process()?;
     DirBuilder::new().mode(0o700).create(directory)?;
+    // The recording takes its fixed identity before the store opens it, since the first to set a
+    // recording up names it.
+    collector::recording::initialize_as(directory, RECORDING_IDENTITY)?;
     drop(persistence::Store::open(directory)?);
     let period = Period::from_seconds(RETENTION_SECONDS).ok_or("retention period")?;
     period.write(&PrivateDirectory::open(directory)?)?;
@@ -267,7 +278,7 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
         lock_path: directory.join("ring.lock"),
         name_prefix: format!("/fdri{}", std::process::id()),
     };
-    let started = Registration::start_with_system(
+    let started = Registration::start_with_system_as(
         directory,
         &place,
         RUN_SHAPE,
@@ -276,6 +287,10 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
             arena_bytes: 64 * 1024 * 1024,
         },
         ORIGIN_CONTINUOUS_NS,
+        FixedRun {
+            run: RUN_FIRST_IDENTITY,
+            boot: BOOT_IDENTITY,
+        },
     )?;
     let (mut writer, registered) = started.into_parts();
     registered?;

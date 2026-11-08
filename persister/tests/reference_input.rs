@@ -15,6 +15,7 @@ mod tests {
     use collector::disks::DiskSnapshot;
     use collector::machine::CPUTicks;
     use collector::recording::Registry;
+    use collector::ring::{Identity, RunIdentity};
     use persistence::Manifest;
     use persistence::resources::ByteBudget;
 
@@ -342,6 +343,37 @@ mod tests {
             (
                 input.program_names(0, "processes", "pid = 41255"),
                 input.program_names(127, "events", "pid = 41255 ORDER BY event"),
+            )
+        );
+    }
+
+    #[test]
+    fn names_the_recording_its_run_and_its_boot_with_fixed_identities() {
+        // Goal: the recording, its run and the run's boot carry the generator's fixed opaque
+        // identities, never random ones or this Mac's boot session, so every generation names
+        // them alike. Method: read the recording's identity and the run identities its registry
+        // lists.
+        let input = input();
+        let recording = Identity([0x9e37_79b9_7f4a_7c15, 0xbf58_476d_1ce4_e5b9]);
+        let runs: Vec<RunIdentity> = Registry::read(&input.directory)
+            .unwrap()
+            .runs
+            .iter()
+            .map(|run| run.identity)
+            .collect();
+
+        assert_eq!(
+            (
+                recording,
+                vec![RunIdentity {
+                    recording,
+                    run: Identity([0xd6e8_feb8_6659_fd93, 0xa076_1d64_78bd_642f]),
+                    boot: Identity([0x94d0_49bb_1331_11eb, 0x2545_f491_4f6c_dd1d]),
+                }],
+            ),
+            (
+                collector::recording::read_identity(&input.directory).unwrap(),
+                runs
             )
         );
     }
