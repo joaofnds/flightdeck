@@ -25,6 +25,12 @@ use super::{Command, Context, Histories, Presentation, Reader, Shared, Snapshot,
 /// Past them the saved minutes answer, or the limit on contexts says so, since a Store that cannot
 /// prove what it holds or has no recording to read would otherwise hold the page for ever.
 const STORE_WAITS_MAX: u32 = 40;
+const _: () = assert!(
+    super::POLL_INTERVAL
+        .saturating_mul(STORE_WAITS_MAX)
+        .as_millis()
+        == 10_000
+);
 
 /// What one step of the reader found.
 enum Answer {
@@ -217,7 +223,7 @@ impl StoreReader {
                 })
                 .map_err(|error| format!("Store kept query: {error:?}"))?;
             self.pending = Some((command.generation, token));
-            return Ok(Answer::Waiting);
+            return Ok(self.asked());
         }
 
         let Some(reply) = self.handle.take() else {
@@ -251,7 +257,7 @@ impl StoreReader {
                 self.context = None;
             }
             self.snapshot_query_submit(command, selection)?;
-            return Ok(Answer::Waiting);
+            return Ok(self.asked());
         }
         let Some(reply) = self.handle.take() else {
             return Ok(self.waited());
@@ -304,9 +310,19 @@ impl StoreReader {
         Ok(Answer::Ready(snapshot))
     }
 
-    /// What a step that has no answer from the Store does: it waits, up to the bound. A step that
-    /// asks the Store always waits and counts nothing, since the answer ends the pause after it,
-    /// and that answer may be the one that says why the page cannot be read.
+    /// What a step that asks the Store does. While the page shows nothing yet, the answer ends the
+    /// pause after it, so the step counts nothing, and that answer may be the one that says why
+    /// the page cannot be read. A page that shows its readings waits out the step for the answer,
+    /// so the step counts toward the bound and the wait lasts as long as the first page's.
+    fn asked(&mut self) -> Answer {
+        if self.answer_awaited().is_some() {
+            return Answer::Waiting;
+        }
+
+        self.waited()
+    }
+
+    /// What a step that has no answer from the Store does: it waits, up to the bound.
     fn waited(&mut self) -> Answer {
         if self.store_waits < STORE_WAITS_MAX {
             self.store_waits += 1;

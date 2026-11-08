@@ -408,6 +408,53 @@ fn a_store_that_never_answers_holds_the_page_for_every_step_of_the_wait() {
 }
 
 #[test]
+fn a_page_showing_its_readings_waits_as_many_steps_for_a_store_that_keeps_saying_not_yet() {
+    // Goal: the wait lasts as many steps for a page that shows its readings as for one waiting for
+    // its first, although the Store's answer ends no pause of the first, so asking costs it a step.
+    // Method: show a page from the real Store, park the Store behind the ring, so that it answers
+    // every query with not yet, let it answer each step's query, and count the steps until the
+    // saved minutes answer.
+    let mut recording = LiveRecording::new();
+    recording.publish_resources();
+    recording.publish_resources();
+    seal_recording(&recording, 0);
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle();
+    let mut adapter = Adapter::on_root(handle.clone(), &recording.root);
+    adapter.command.request = request("network");
+    assert!(matches!(
+        adapter.update_within(Duration::from_secs(10)),
+        Update::Ready(_)
+    ));
+    store.set_active(false);
+    Harness::wait_until_paused(&store);
+    recording.publish_resources();
+
+    for _ in 0..super::super::STORE_WAITS_MAX {
+        assert!(adapter_step_answered(&mut adapter, &handle).is_none());
+    }
+
+    assert!(adapter.read().is_some());
+}
+
+/// Steps the reader, then lets the Store answer what that step asked, as the worker's pause would.
+fn adapter_step_answered(
+    adapter: &mut Adapter,
+    handle: &viewer::store::QueryHandle,
+) -> Option<Update> {
+    let update = adapter.read();
+    if adapter.reader.store.as_ref().unwrap().pending.is_some() {
+        wait_until_answered(handle);
+    }
+
+    update
+}
+
+#[test]
 fn a_page_asking_for_its_first_reading_ends_the_stores_wait_on_the_ring() {
     // Goal: a new page does not wait out the 100 ms the Store waits for the next reading.
     // Method: publish nothing, so that only the page can end that wait, and take the quickest of
