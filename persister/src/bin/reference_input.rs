@@ -14,16 +14,23 @@ use std::process::ExitCode;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use collector::machine::{CPUTicks, Memory};
+use collector::battery::BatteryReading;
+use collector::disks::{DISKS_MAX, DiskReading, DiskSnapshot, NAME_BYTES, ScanState};
+use collector::gpu_memory::GpuMemoryReading;
+use collector::interfaces::{IFNAMSIZ, Interface, Name};
+use collector::ioreport::States;
+use collector::machine::{CPUTicks, Memory, Pressure};
 use collector::processes::{Process, Task, Usage};
 use collector::recording::control::{Control, Failure, Role, State};
 use collector::recording::private::PrivateDirectory;
 use collector::recording::{Registration, Registry};
 use collector::ring::{
-    DictionaryCapacity, Dropped, Identity, IdentityObservation, IdentityPublication,
-    ObservationTimes, Place, ProcessCreation, ProcessIdentity, ProgramBytes, ProgramReference,
-    Readings, Shape, SupplementalReadings, UsageAvailability, Writer,
+    DictionaryCapacity, Dropped, IOReportReadings, Identity, IdentityObservation,
+    IdentityPublication, ObservationTimes, Place, ProcessCreation, ProcessIdentity, ProgramBytes,
+    ProgramReference, Readings, Shape, SmcReadings, SupplementalReadings, SystemPublication,
+    UsageAvailability, Writer,
 };
+use collector::system::{FactText, MachineFacts, PerformanceLevel, SystemReading};
 use persistence::retention::Period;
 
 const USAGE: &str =
@@ -59,6 +66,31 @@ const CPUS: u64 = 18;
 const CPU_BASE_NS: u64 = 1 << 53;
 const PROGRAM_NAME_BYTES: usize = 32;
 const PROGRAM_PATH_BYTES: usize = 96;
+/// macOS counts a hundred CPU ticks a second.
+const NANOSECONDS_PER_TICK: u64 = 10_000_000;
+const INTERFACES: u16 = 4;
+const DISKS: usize = 4;
+const DISK_DRIVER_ID_FIRST: u64 = 0x1_0000;
+const DISK_MEDIA_ID_FIRST: u64 = 0x2_0000;
+/// The GPU's active states and each core's, as many as the ring has room for.
+const GPU_STATES: usize = 2;
+const CORE_STATES: usize = 2;
+/// The contract's baseline GPU, 10% active, half of it in each state.
+const GPU_STATE_ACTIVE_NS_PER_SECOND: u64 = 50_000_000;
+const GPU_ENERGY_NJ_PER_SECOND: u64 = 500_000_000;
+const GIB: u64 = 1 << 30;
+const MEMORY_TOTAL_BYTES: u64 = 24 * GIB;
+/// The contract's baseline machine memory, the app, wired and compressed memory added up.
+const MEMORY_USED_BYTES: u64 = 8 * GIB;
+const MEMORY_WIRED_BYTES: u64 = GIB;
+const MEMORY_COMPRESSED_BYTES: u64 = GIB;
+/// The contract's baseline power, fans and temperatures, the chip's, the CPU's and the GPU's.
+const POWER_WATTS: f32 = 5.0;
+const FAN_RPM: [f32; 2] = [1_200.0, 1_300.0];
+const TEMPERATURES_CELSIUS: [f32; 3] = [35.0, 36.0, 37.0];
+const LOAD_AVERAGE: [f64; 3] = [2.0, 1.5, 1.0];
+/// The thermal pressure macOS publishes as nominal.
+const THERMAL_NOMINAL: u8 = 0;
 /// How long the generator waits for the worker to save a minute before it gives up.
 const SEAL_WAIT_MAX: Duration = Duration::from_mins(2);
 const SEAL_POLL: Duration = Duration::from_millis(10);
@@ -72,6 +104,13 @@ const _: () = {
     assert!(ZERO_SECOND != MISSED_SECOND);
     // Each CPU idles for what it does not spend, so no CPU's idle ticks fall below zero.
     assert!(CPUS < 85);
+    // A third of the cores are super cores.
+    assert!(CPUS.is_multiple_of(3));
+    assert!(DISKS <= DISKS_MAX);
+    // The GPU's states add up to the contract's 10%.
+    assert!(2 * GPU_STATE_ACTIVE_NS_PER_SECOND == NANOSECONDS_PER_SECOND / 10);
+    assert!(MEMORY_WIRED_BYTES + MEMORY_COMPRESSED_BYTES < MEMORY_USED_BYTES);
+    assert!(MEMORY_USED_BYTES < MEMORY_TOTAL_BYTES);
 };
 
 fn main() -> ExitCode {
@@ -344,19 +383,42 @@ impl Paced<'_> {
     }
 }
 
-/// The generated Mac: its processes in increasing pid order, and the programs they run.
+/// The generated Mac: its processes in increasing pid order, the programs they run, and what
+/// it is, which no second changes.
 struct Machine {
     programs: Vec<ProgramReference>,
+    facts: MachineFacts,
+    /// Each process's GPU time, which the contract does not name, so it reads zero.
+    process_gpu_ns: Vec<Option<u64>>,
 }
 
 impl Machine {
     fn start(writer: &mut Writer) -> Result<Self, Box<dyn std::error::Error>> {
+        // The ring has room for each device the generated Mac has, and for no other.
+        assert_eq!(RUN_SHAPE.interface_capacity, u64::from(INTERFACES));
+        assert_eq!(
+            RUN_SHAPE.fan_capacity,
+            collector::u64_from_usize(FAN_RPM.len())
+        );
+        assert_eq!(
+            RUN_SHAPE.state_capacity,
+            collector::u64_from_usize(GPU_STATES)
+        );
+        assert_eq!(
+            RUN_SHAPE.state_capacity,
+            collector::u64_from_usize(CORE_STATES)
+        );
+
         let mut programs = Vec::new();
         for process in 0..PROCESSES {
             programs.push(start_program(writer, process)?);
         }
 
-        Ok(Self { programs })
+        Ok(Self {
+            programs,
+            facts: start_facts()?,
+            process_gpu_ns: vec![Some(0); usize::try_from(PROCESSES)?],
+        })
     }
 
     fn publish(
@@ -364,46 +426,107 @@ impl Machine {
         writer: &mut Writer,
         second: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let processes: Vec<Process> = (0..PROCESSES)
-            .map(|process| publish_process(process, second))
-            .collect::<Result<_, _>>()?;
-        let identities: Vec<IdentityObservation> = (0..PROCESSES)
-            .zip(&self.programs)
-            .map(|(process, program)| publish_identity(process, *program))
-            .collect::<Result<_, _>>()?;
-        let cpus: Vec<CPUTicks> = (0..CPUS)
-            .map(|cpu| publish_cpu(cpu, second))
-            .collect::<Result<_, _>>()?;
+        let times = ObservationTimes {
+            wall_ns: ORIGIN_WALL_NS + second * NANOSECONDS_PER_SECOND,
+            continuous_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
+            awake_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
+        };
+        let read = Second::read(&self.programs, second, times.continuous_ns)?;
         let readings = Readings {
             run_tick: second,
-            cpus: &cpus,
-            memory: &Memory::default(),
-            interfaces: &[],
-            ioreport: None,
-            smc: None,
-            processes: &processes,
+            cpus: &read.cpus,
+            memory: &read.memory,
+            interfaces: &read.interfaces,
+            ioreport: Some(IOReportReadings {
+                gpu_energy_nj: read.gpu_energy_nj,
+                gpu_active_ns: &read.gpu_active_ns,
+                cores: &read.cores,
+            }),
+            smc: Some(SmcReadings {
+                power_watts: POWER_WATTS,
+                soc_celsius: TEMPERATURES_CELSIUS[0],
+                cpu_celsius: Some(TEMPERATURES_CELSIUS[1]),
+                gpu_celsius: Some(TEMPERATURES_CELSIUS[2]),
+                fan_rpm: &FAN_RPM,
+            }),
+            processes: &read.processes,
             processes_refused: 0,
             processes_gone: 0,
             coalitions: &[],
             events: &[],
             dropped: Dropped::default(),
         };
-        let times = ObservationTimes {
-            wall_ns: ORIGIN_WALL_NS + second * NANOSECONDS_PER_SECOND,
-            continuous_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
-            awake_ns: ORIGIN_CONTINUOUS_NS + second * NANOSECONDS_PER_SECOND,
+        let system = SystemPublication {
+            reading: &read.system,
+            machine: &self.facts,
+            clock: None,
+            process_gpu_ns: &self.process_gpu_ns,
         };
         writer.publish_with_disks(
             &readings,
             Some(&times),
             &IdentityPublication {
-                processes: &identities,
+                processes: &read.identities,
                 events: &[],
             },
-            &SupplementalReadings::default(),
+            &SupplementalReadings {
+                battery: Some(&read.battery),
+                disks: Some(&read.disks),
+                system: Some(&system),
+            },
         )?;
 
         Ok(())
+    }
+}
+
+/// What the generated Mac reads in one second, for its publication to borrow.
+struct Second {
+    processes: Vec<Process>,
+    identities: Vec<IdentityObservation>,
+    cpus: Vec<CPUTicks>,
+    memory: Memory,
+    interfaces: Vec<Interface>,
+    gpu_energy_nj: u64,
+    gpu_active_ns: [u64; GPU_STATES],
+    cores: Vec<States>,
+    battery: BatteryReading,
+    disks: DiskSnapshot,
+    system: SystemReading,
+}
+
+impl Second {
+    /// The readings of `second`, whose continuous clock is `continuous_ns`, of processes that
+    /// run `programs`.
+    fn read(
+        programs: &[ProgramReference],
+        second: u64,
+        continuous_ns: u64,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let valid = valid_seconds(second);
+
+        Ok(Self {
+            processes: (0..PROCESSES)
+                .map(|process| publish_process(process, second))
+                .collect::<Result<_, _>>()?,
+            identities: (0..PROCESSES)
+                .zip(programs)
+                .map(|(process, program)| publish_identity(process, *program))
+                .collect::<Result<_, _>>()?,
+            cpus: (0..CPUS)
+                .map(|cpu| publish_cpu(cpu, second))
+                .collect::<Result<_, _>>()?,
+            memory: publish_memory(MEMORY_USED_BYTES),
+            interfaces: (0..INTERFACES)
+                .map(|interface| publish_interface(interface, valid))
+                .collect::<Result<_, _>>()?,
+            gpu_energy_nj: valid * GPU_ENERGY_NJ_PER_SECOND,
+            gpu_active_ns: [valid * GPU_STATE_ACTIVE_NS_PER_SECOND; GPU_STATES],
+            cores: (0..CPUS).map(|core| publish_core(core, valid)).collect(),
+            battery: publish_battery(continuous_ns),
+            disks: publish_disks(continuous_ns, valid)?,
+            system: publish_system(),
+        })
     }
 }
 
@@ -483,6 +606,150 @@ fn publish_cpu(cpu: u64, second: u64) -> Result<CPUTicks, std::num::TryFromIntEr
         system: valid * 5,
         nice: 0,
         idle: valid * (85 - cpu) + invalid * 100,
+    })
+}
+
+/// Core `core`'s time in its two active states after `valid` valid seconds, the user and
+/// system ticks `publish_cpu` gives its CPU, in nanoseconds.
+fn publish_core(core: u64, valid: u64) -> States {
+    States::with_active_ns(&[
+        valid * (10 + core) * NANOSECONDS_PER_TICK,
+        valid * 5 * NANOSECONDS_PER_TICK,
+    ])
+}
+
+/// The memory of a Mac that uses `used_bytes`, which the memory chart stacks as app, wired and
+/// compressed memory.
+fn publish_memory(used_bytes: u64) -> Memory {
+    let app_bytes = used_bytes - MEMORY_WIRED_BYTES - MEMORY_COMPRESSED_BYTES;
+
+    Memory {
+        total_bytes: MEMORY_TOTAL_BYTES,
+        free_bytes: MEMORY_TOTAL_BYTES - used_bytes,
+        active_bytes: app_bytes,
+        wired_bytes: MEMORY_WIRED_BYTES,
+        compressed_bytes: MEMORY_COMPRESSED_BYTES,
+        anonymous_bytes: app_bytes,
+        pressure: Pressure::Normal,
+        ..Memory::default()
+    }
+}
+
+/// Interface `interface`'s counters after `valid` valid seconds, under an index and a name of
+/// its own.
+fn publish_interface(interface: u16, valid: u64) -> Result<Interface, String> {
+    let text = format!("en{interface}");
+    let mut bytes = [0; IFNAMSIZ];
+    bytes[..text.len()].copy_from_slice(text.as_bytes());
+    let name = Name::from_bytes(bytes, text.len()).ok_or_else(|| format!("name {text}"))?;
+    let scale = u64::from(interface) + 1;
+
+    Ok(Interface {
+        index: interface + 1,
+        name,
+        received_bytes: valid * 100_000 * scale,
+        sent_bytes: valid * 20_000 * scale,
+        received_packets: valid * 100 * scale,
+        sent_packets: valid * 20 * scale,
+        receive_errors: 0,
+        send_errors: 0,
+        receive_drops: 0,
+    })
+}
+
+/// The battery, which reads the same each second, as a charged battery on power does.
+fn publish_battery(continuous_ns: u64) -> BatteryReading {
+    BatteryReading {
+        source_continuous_ns: continuous_ns,
+        charge_current: Some(100),
+        charge_maximum: Some(100),
+        full_charge_capacity: Some(4_500),
+        design_capacity: Some(5_000),
+        cycle_count: Some(100),
+        charging: Some(false),
+        external_power: Some(true),
+        voltage_mv: Some(13_000),
+        current_ma: Some(0),
+        adapter_watts: Some(96),
+    }
+}
+
+/// The disks' counters after `valid` valid seconds, each disk under identities of its own.
+fn publish_disks(
+    continuous_ns: u64,
+    valid: u64,
+) -> Result<DiskSnapshot, std::num::TryFromIntError> {
+    let mut records = [DiskReading::default(); DISKS_MAX];
+    for (disk, record) in records.iter_mut().take(DISKS).enumerate() {
+        let text = format!("disk{disk}");
+        let mut name = [0; NAME_BYTES];
+        name[..text.len()].copy_from_slice(text.as_bytes());
+        let disk = u64::try_from(disk)?;
+        let scale = disk + 1;
+        *record = DiskReading {
+            driver_id: DISK_DRIVER_ID_FIRST + disk,
+            media_id: DISK_MEDIA_ID_FIRST + disk,
+            name,
+            failed: false,
+            read_bytes: Some(valid * 65_536 * scale),
+            write_bytes: Some(valid * 32_768 * scale),
+            read_operations: Some(valid * 16 * scale),
+            write_operations: Some(valid * 8 * scale),
+            read_errors: Some(0),
+            write_errors: Some(0),
+            read_time_ns: Some(valid * 1_000_000 * scale),
+            write_time_ns: Some(valid * 500_000 * scale),
+        };
+    }
+
+    Ok(DiskSnapshot {
+        source_continuous_ns: continuous_ns,
+        state: ScanState::Complete,
+        count: DISKS,
+        records,
+    })
+}
+
+/// The system fields, which read the same each second.
+fn publish_system() -> SystemReading {
+    SystemReading {
+        load_average: Some(LOAD_AVERAGE),
+        open_files: Some(4_096),
+        open_files_limit: Some(122_880),
+        thermal_pressure: Some(THERMAL_NOMINAL),
+        gpu_memory: Some(GpuMemoryReading {
+            in_use_bytes: Some(GIB),
+            allocated_bytes: Some(2 * GIB),
+        }),
+        // One boot, whose continuous clock started at zero.
+        boot_wall_ns: Some(ORIGIN_WALL_NS - ORIGIN_CONTINUOUS_NS),
+    }
+}
+
+/// What the generated Mac is: a chip of `CPUS` cores in two clusters, its super cores a third
+/// of them.
+fn start_facts() -> Result<MachineFacts, Box<dyn std::error::Error>> {
+    let text = |bytes: &[u8]| FactText::new(bytes).ok_or("a fact's text");
+    let cpu_cores = u32::try_from(CPUS)?;
+    let super_cores = cpu_cores / 3; // exact, as the assertion below the constants checks
+
+    Ok(MachineFacts {
+        model: Some(text(b"Reference Mac")?),
+        chip: Some(text(b"Reference chip")?),
+        architecture: Some(text(b"arm64")?),
+        cpu_cores: Some(cpu_cores),
+        gpu_cores: Some(20),
+        memory_bytes: Some(MEMORY_TOTAL_BYTES),
+        levels: Some([
+            PerformanceLevel {
+                name: text(b"Super")?,
+                logical_cpus: super_cores,
+            },
+            PerformanceLevel {
+                name: text(b"Performance")?,
+                logical_cpus: cpu_cores - super_cores,
+            },
+        ]),
     })
 }
 
