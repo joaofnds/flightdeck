@@ -97,6 +97,32 @@ impl Decoder {
         *next += 1;
     }
 
+    /// Replays the process frames of `sealed` deriving no Apps, so that the last of them gives the
+    /// first second of the minute after it its App rates.
+    pub(super) fn visit_predecessor(
+        &mut self,
+        sealed: &ScopedSealedMinute<'_>,
+        operation: &Operation,
+    ) -> Result<(), Refused> {
+        operation.check()?;
+        let batch = crate::recording::processes::read_processes_batch(sealed)?;
+        operation.check()?;
+        let mut next = 0;
+        let result = self.replay(
+            &batch,
+            &mut Input {
+                next: &mut next,
+                operation,
+                budget: None,
+            },
+            &mut Predecessor,
+        );
+        if result.is_err() {
+            self.predecessor = None;
+        }
+        result
+    }
+
     pub(super) fn visit_samples<F>(
         &mut self,
         sealed: &ScopedSealedMinute<'_>,
@@ -178,6 +204,21 @@ fn replay_capture<'sample>(
         names_capacity,
         sample,
         before,
+    }
+}
+
+/// Keeps of each frame only what rates the frame after it, deriving no Apps.
+pub(in crate::store::recording) struct Predecessor;
+
+impl Target for Predecessor {
+    type Error = Refused;
+
+    fn derives(&self, _endpoint: &Endpoint) -> bool {
+        false
+    }
+
+    fn consume(&mut self, captured: Captured<'_>) -> Result<Progress, Refused> {
+        Ok(Progress::Accepted(captured.before))
     }
 }
 

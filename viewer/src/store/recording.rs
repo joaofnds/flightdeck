@@ -257,10 +257,20 @@ fn load_payload_window_using(
     };
     let continuity = load_continuity(window, &found);
     found.reverse();
+    let (predecessor, minutes) = match continuity {
+        Continuity::Extend => {
+            let Some((predecessor, newer)) = found.split_first() else {
+                unreachable!("a continued load found the minute it continues from");
+            };
+            (Some(predecessor), newer)
+        }
+        Continuity::Replace => (None, found.as_slice()),
+    };
     let mut admitted = true;
     let mut outcome = payload::load(
         root,
-        &found,
+        predecessor,
+        minutes,
         budget,
         operation,
         capture,

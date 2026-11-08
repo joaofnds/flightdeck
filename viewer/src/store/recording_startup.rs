@@ -355,7 +355,7 @@ impl Startup {
                 operation: input.operation,
                 budget: Some(input.budget),
             },
-            &mut Predecessor,
+            &mut payload::replay::Predecessor,
         )?;
         sealed.revalidate_full()?;
         Ok(self.cursor.decoder.predecessor.take())
@@ -524,20 +524,6 @@ fn machine_failure(error: crate::store::MachineCaptureError) -> Failure {
     match error {
         crate::store::MachineCaptureError::Admission(_) => Failure::Blocked,
         crate::store::MachineCaptureError::Projection(error) => error.into(),
-    }
-}
-
-struct Predecessor;
-
-impl ReplayTarget for Predecessor {
-    type Error = Failure;
-
-    fn derives(&self, _endpoint: &Endpoint) -> bool {
-        false
-    }
-
-    fn consume(&mut self, captured: Captured<'_>) -> Result<Progress, Failure> {
-        Ok(Progress::Accepted(captured.before))
     }
 }
 

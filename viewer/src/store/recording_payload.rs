@@ -20,8 +20,12 @@ use persistence::engine::AdmissionRefusal;
 #[path = "recording_payload_tests.rs"]
 mod tests;
 
+/// Hands `take` the seconds of `minutes`, oldest first, after seeding their rates from
+/// `predecessor`, the minute before them whose seconds the store holds, where the load
+/// continues the store's seconds.
 pub(super) fn load(
     root: &Path,
+    predecessor: Option<&Found>,
     minutes: &[Found],
     budget: &Arc<ByteBudget>,
     operation: &Operation,
@@ -35,6 +39,9 @@ pub(super) fn load(
         capture,
     };
     let mut cursor = Cursor::new(minutes.len());
+    if let Some(found) = predecessor {
+        cursor.seed(&input, found)?;
+    }
     for found in minutes {
         cursor.step(&input, found, &mut take)?;
     }
@@ -66,6 +73,30 @@ impl Cursor {
             decoder: Decoder::default(),
             left_out: None,
         }
+    }
+
+    /// Seeds the rates of the first minute the load hands over from `found`, the minute before
+    /// it. The predecessor's own seconds stay unread, since the store holds them.
+    fn seed(&mut self, input: &LoadInput<'_>, found: &Found) -> persistence::Result<()> {
+        let _purpose = persistence::work::ingestion::purpose(
+            persistence::work::ingestion::Purpose::Predecessor,
+        );
+        input.operation.check()?;
+        assert_eq!(self.next_minute_index, 0);
+
+        let seeded = self.decoder.seed(
+            input.root,
+            found,
+            input.budget,
+            input.operation,
+            input.capture,
+        );
+        if let Err(refused) = seeded {
+            self.left_out = Some(load_refusal(&refused));
+        }
+        input.operation.check()?;
+
+        Ok(())
     }
 
     fn step(
@@ -209,10 +240,7 @@ impl Decoder {
         let (machine, mut apps) = match loaded {
             Ok(loaded) => loaded,
             Err(refused) => {
-                batch.left_out = Some(match refused {
-                    Refused::Input(AdmissionRefusal::Budget) => Failure::Budget,
-                    _ => Failure::Refused,
-                });
+                batch.left_out = Some(load_refusal(&refused));
                 self.predecessor = None;
                 self.previous_run = None;
                 return batch;
@@ -235,6 +263,47 @@ impl Decoder {
         self.accept_machine(found.run, machine, &decoded, None);
 
         batch
+    }
+
+    /// Takes in of `found` only its machine readings and the last of its process frames, which
+    /// give the first second of the minute after it its rates, and leaves its seconds unread.
+    fn seed(
+        &mut self,
+        root: &Path,
+        found: &Found,
+        budget: &Arc<ByteBudget>,
+        operation: &Operation,
+        capture: &crate::recording::InputCapture<'_>,
+    ) -> Result<(), Refused> {
+        let visited = load_minute_with(
+            root,
+            found,
+            self,
+            budget,
+            operation,
+            capture,
+            |decoder, sealed| decoder.visit_predecessor(sealed, operation),
+        );
+        match visited {
+            Ok(machine) => {
+                let decoded = decoded_of(&machine);
+                self.accept_machine(found.run, machine, &decoded, None);
+                Ok(())
+            }
+            Err(refused) => {
+                self.predecessor = None;
+                self.previous_run = None;
+                Err(refused)
+            }
+        }
+    }
+}
+
+/// What a load leaves out for a minute it could not read.
+fn load_refusal(refused: &Refused) -> Failure {
+    match refused {
+        Refused::Input(AdmissionRefusal::Budget) => Failure::Budget,
+        _ => Failure::Refused,
     }
 }
 
@@ -363,15 +432,39 @@ fn load_minute_visit(
         usize,
     ) -> persistence::Result<()>,
 ) -> Result<MachineMinute, Refused> {
+    load_minute_with(
+        root,
+        found,
+        decoder,
+        budget,
+        operation,
+        capture,
+        |decoder, sealed| {
+            decoder.visit_samples(sealed, operation, |endpoint, sample, count| {
+                consume(endpoint, sample, sealed.losses(), count)
+            })
+        },
+    )
+}
+
+/// Opens `found`, reads its machine readings, lets `visit` replay its process frames into
+/// `decoder`, and checks the minute was not replaced while it was read.
+fn load_minute_with(
+    root: &Path,
+    found: &Found,
+    decoder: &mut Decoder,
+    budget: &Arc<ByteBudget>,
+    operation: &Operation,
+    capture: &crate::recording::InputCapture<'_>,
+    visit: impl FnOnce(&mut Decoder, &ScopedSealedMinute<'_>) -> Result<(), Refused>,
+) -> Result<MachineMinute, Refused> {
     operation.check()?;
     let sealed = open_minute(root, found, budget, operation, capture)?;
     let mut machine = MachineMinute::default();
     read_machine(&sealed, &mut machine)?;
     operation.check()?;
 
-    decoder.visit_samples(&sealed, operation, |endpoint, sample, count| {
-        consume(endpoint, sample, sealed.losses(), count)
-    })?;
+    visit(decoder, &sealed)?;
     operation.check()?;
 
     sealed.revalidate_full()?;
@@ -438,12 +531,7 @@ pub(super) fn project_machine<'reading>(
     budget: &Arc<ByteBudget>,
     mut take: impl FnMut(MachineSecond),
 ) -> Result<super::DecodedCatalog, crate::store::MachineCaptureError> {
-    let mut decoded = super::DecodedCatalog {
-        windows: 1,
-        ..super::DecodedCatalog::default()
-    };
     for reading in readings(machine) {
-        decoded.observe(reading.tick.wall_ns);
         persistence::work::ingestion::record_publication(
             found.run,
             reading.tick.publication,
@@ -464,5 +552,17 @@ pub(super) fn project_machine<'reading>(
         }
         before = Some(reading);
     }
-    Ok(decoded)
+    Ok(decoded_of(machine))
+}
+
+/// What the catalog learns from decoding `machine`, one sealed minute.
+fn decoded_of(machine: &MachineMinute) -> super::DecodedCatalog {
+    let mut decoded = super::DecodedCatalog {
+        windows: 1,
+        ..super::DecodedCatalog::default()
+    };
+    for reading in readings(machine) {
+        decoded.observe(reading.tick.wall_ns);
+    }
+    decoded
 }

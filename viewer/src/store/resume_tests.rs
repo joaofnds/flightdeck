@@ -358,6 +358,143 @@ fn a_refused_predecessor_does_not_discard_accepted_history() {
     );
 }
 
+#[test]
+fn a_resume_beyond_ring_retention_reduces_only_the_publications_it_takes_in() {
+    // Goal: the minute a return continues from, whose seconds the store holds, costs no second
+    // machine reduction, so each publication keeps one.
+    // Method: trace a return past the ring's retention and list each reduction.
+    use persistence::work::ingestion::{Key, Kind, Purpose};
+    let traced = traced_return_past_the_ring();
+
+    let reduced: Vec<_> = traced
+        .events
+        .iter()
+        .filter(|event| event.kind == Kind::MachineReduction)
+        .map(|event| (event.key, event.purpose))
+        .collect();
+
+    assert_eq!(
+        reduced,
+        (3..=11)
+            .map(|publication| {
+                let run = traced.run;
+                (Key::Publication { run, publication }, Purpose::Ordinary)
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        traced.seconds,
+        (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_resume_beyond_ring_retention_reads_the_minute_it_continues_from_as_predecessor_work() {
+    // Goal: what a return reads of the minute it continues from is classed apart from the
+    // ingestion of new readings.
+    // Method: trace a return past the ring's retention and list the purpose of each event of
+    // the minute holding publication 2.
+    use persistence::work::ingestion::{Key, Purpose};
+    let traced = traced_return_past_the_ring();
+    let minute = Key::Minute {
+        run: traced.run,
+        first: 2,
+        end: 3,
+    };
+
+    let purposes: Vec<_> = traced
+        .events
+        .iter()
+        .filter(|event| event.key == minute)
+        .map(|event| event.purpose)
+        .collect();
+
+    assert!(!purposes.is_empty());
+    assert_eq!(purposes, vec![Purpose::Predecessor; purposes.len()]);
+}
+
+/// What a store holding two sealed minutes records while it returns past the ring's retention,
+/// nine minutes later, and the seconds it then holds.
+struct TracedReturn {
+    run: collector::ring::RunIdentity,
+    events: Vec<persistence::work::ingestion::Event>,
+    seconds: Vec<u64>,
+}
+
+/// Holds two sealed minutes, seals nine more whose publications overrun the fixture's eight-slot
+/// ring, then traces the return's refresh and the steps after it.
+fn traced_return_past_the_ring() -> TracedReturn {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_events(100, &[]);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_events(160, &[]);
+    fixture.seal_minute(1);
+    let (mut held, mut ring) = reconciliation_held(&fixture);
+    for minute in 2..=10 {
+        fixture.skip_run_ticks(59);
+        fixture.publish_with_events(100 + minute * 60, &[]);
+        fixture.seal_minute(minute);
+    }
+    let shared = reconciliation_shared();
+    let operation = std::sync::Arc::new(crate::cancellation::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let run = fixture.writer.identity().unwrap();
+    let trace = persistence::work::ingestion::Trace::new(run.recording);
+
+    let scope = trace.enter();
+    assert!(super::refresh(&fixture.root, &mut held, &mut ring, &shared, &operation).unwrap());
+    for _ in 0..3 {
+        reconciliation_step(&mut held, &mut ring, &shared);
+    }
+    drop(scope);
+
+    let mut events = Vec::new();
+    trace.snapshot(&mut events).unwrap();
+    TracedReturn {
+        run,
+        events,
+        seconds: seconds_of(&shared.mailbox.take().unwrap()),
+    }
+}
+
+#[test]
+fn a_resume_beyond_ring_retention_gives_the_reading_after_its_predecessor_a_fresh_stores_rates() {
+    // Goal: the minute a return continues from still gives the first reading after it its
+    // machine and App rates.
+    // Method: hold one sealed reading, hide, seal the eight readings after it in the next
+    // minute and eight more in the minute after, which overrun the fixture's eight-slot ring,
+    // show, and compare the first reading after the held one with what a fresh store holds.
+    let mut fixture = Fixture::new();
+    fixture.start_at_run_tick(59);
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    let store = Store::start(&fixture.root).unwrap();
+    drop(view_where(&store, |view| seconds_of(view) == [100]));
+    store.set_active(false);
+    super::activity_tests::wait_until_paused(&store);
+    for second in 101..=108 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_minute(1);
+    fixture.skip_run_ticks(52);
+    for second in 109..=116 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_minute(2);
+
+    store.set_active(true);
+    let resumed = view_where(&store, |_| true);
+
+    let fresh = Store::start(&fixture.root).unwrap();
+    let expected = view_where(&fresh, |view| seconds_of(view) == seconds_of(&resumed));
+    assert_eq!(seconds_of(&resumed), (100..=116).collect::<Vec<_>>());
+    assert!(expected.seconds[1].follows());
+    assert_eq!(resumed.seconds[1], expected.seconds[1]);
+    assert_eq!(resumed.apps[1], expected.apps[1]);
+}
+
 /// Spoils a minute's saved readings without changing discovery of its committed marker.
 fn take_minute_offline(fixture: &Fixture, minute: u64) {
     let ticks = minute_ticks(fixture, minute);

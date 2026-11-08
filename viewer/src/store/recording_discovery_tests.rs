@@ -242,7 +242,7 @@ fn an_unread_checkpoint_load_does_not_certify_skipped_old_windows() {
     )
     .unwrap();
 
-    assert_eq!(publications, [2, 3]);
+    assert_eq!(publications, [3]);
     assert_eq!(outcome.left_out, None);
     assert_eq!(outcome.checked_catalog, None);
 }
