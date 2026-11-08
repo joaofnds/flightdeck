@@ -27,33 +27,36 @@ mod tests;
 /// continues the store's seconds. A load that continues them, which a returning window waits on,
 /// decodes up to `LOADERS_MAX` neighbouring minutes at once, each seeding its rates from the
 /// minute before it. A load of the whole hour decodes one minute at a time, so it needs the memory
-/// of one minute however many it reads.
+/// of one minute however many it reads. Before it hands over its first second, `agrees` says
+/// whether it may, and where it may not, the load ends with none handed over.
 pub(super) fn load(
-    root: &Path,
+    input: &LoadInput<'_>,
     predecessor: Option<&Found>,
     minutes: &[Found],
-    budget: &Arc<ByteBudget>,
-    operation: &Operation,
-    capture: &crate::recording::InputCapture<'_>,
+    agrees: impl FnOnce() -> bool,
     mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
-) -> persistence::Result<super::Outcome> {
-    let input = LoadInput {
-        root,
-        budget,
-        operation,
-        capture,
-    };
+) -> persistence::Result<Option<super::Outcome>> {
     let mut cursor = Cursor::new(minutes.len());
     let group_minutes = match predecessor {
         Some(_) => super::LOADERS_MAX,
         None => 1,
     };
-    let mut before = predecessor;
-    for group in minutes.chunks(group_minutes) {
-        cursor.step(&input, before.take(), group, &mut take)?;
+    let mut groups = minutes.chunks(group_minutes);
+    let Some(first) = groups.next() else {
+        if !agrees() {
+            return Ok(None);
+        }
+        return cursor.finish(input.operation).map(Some);
+    };
+    if !cursor.step(input, predecessor, first, agrees, &mut take)? {
+        return Ok(None);
+    }
+    for group in groups {
+        let handed = cursor.step(input, None, group, || true, &mut take)?;
+        assert!(handed);
     }
 
-    cursor.finish(operation)
+    cursor.finish(input.operation).map(Some)
 }
 
 /// Decodes `group`, neighbouring minutes oldest first, a thread a minute, or on this thread where
@@ -377,11 +380,12 @@ pub(super) struct Cursor {
     left_out: Option<Failure>,
 }
 
-struct LoadInput<'a> {
-    root: &'a Path,
-    budget: &'a Arc<ByteBudget>,
-    operation: &'a Operation,
-    capture: &'a crate::recording::InputCapture<'a>,
+/// What a load needs to read the recording.
+pub(super) struct LoadInput<'a> {
+    pub(super) root: &'a Path,
+    pub(super) budget: &'a Arc<ByteBudget>,
+    pub(super) operation: &'a Operation,
+    pub(super) capture: &'a crate::recording::InputCapture<'a>,
 }
 
 impl Cursor {
@@ -397,16 +401,18 @@ impl Cursor {
     }
 
     /// Decodes `group`, the next neighbouring minutes oldest first, at once, and hands `take`
-    /// their seconds in order. Where the load continues from `predecessor`, the minute before the
-    /// first of them, whose seconds the store holds, it seeds their rates from it and leaves its
-    /// seconds unread.
+    /// their seconds in order once `agrees`, asked after the decoding, says it may. Where
+    /// the load continues from `predecessor`, the minute before the first of them, whose seconds
+    /// the store holds, it seeds their rates from it and leaves its seconds unread. Gives whether
+    /// it handed them over.
     fn step(
         &mut self,
         input: &LoadInput<'_>,
         predecessor: Option<&Found>,
         group: &[Found],
+        agrees: impl FnOnce() -> bool,
         mut take: impl FnMut(&RunIdentity, &MachineSecond, TickApps<'_>),
-    ) -> persistence::Result<()> {
+    ) -> persistence::Result<bool> {
         input.operation.check()?;
         if self.minute_count - self.next_minute_index < group.len() {
             return Err(persistence::Error::Bound("sealed payload cursor exhausted"));
@@ -417,6 +423,9 @@ impl Cursor {
 
         let mut decoded_catalog = super::DecodedCatalog::default();
         let decoded = load_group(input, mem::take(&mut self.decoder), predecessor, group);
+        if !agrees() {
+            return Ok(false);
+        }
         for (index, decoded) in decoded.into_iter().enumerate() {
             let mut decoded = decoded?;
             // Only the predecessor has no decoder in this load to say why it cannot be read.
@@ -434,7 +443,7 @@ impl Cursor {
         }
         self.decoder.decoded_catalog = decoded_catalog;
 
-        Ok(())
+        Ok(true)
     }
 
     pub(super) fn accept_minute(&mut self) {

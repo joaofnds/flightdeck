@@ -237,12 +237,153 @@ fn load_payload_window_using(
     operation: &crate::cancellation::Operation,
     capture: &crate::recording::InputCapture<'_>,
     window: &LoadWindow<'_>,
-    mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
+    take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
 ) -> persistence::Result<Outcome> {
     operation.check()?;
+    let input = payload::LoadInput {
+        root,
+        budget,
+        operation,
+        capture,
+    };
+    let Some(since) = window.since.filter(|_| window.unread) else {
+        let (found, discovered) = load_payload_listed(root, window);
+        return load_payload_found(&input, window, found, discovered, take);
+    };
+
+    thread::scope(|scope| {
+        // A listing that cannot start beside the walk runs before it, as without one.
+        let Ok(finder) = load_payload_finder(scope, root, window) else {
+            let (found, discovered) = load_payload_listed(root, window);
+            return load_payload_found(&input, window, found, discovered, take);
+        };
+        // A walk that fails leaves the load to the listing, which says why the recording cannot be
+        // read.
+        let walked = match catalog::walk(root, since, window) {
+            Ok(Some(walked)) if walked.len() > 1 => Some(walked),
+            Ok(_) | Err(_) => None,
+        };
+        let Some(walked) = walked else {
+            let (found, discovered) = load_payload_join(finder);
+            return load_payload_found(&input, window, found, discovered, take);
+        };
+
+        load_payload_walked(&input, window, finder, walked, take)
+    })
+}
+
+/// What listing the loaded hour found, newest first, and of its catalog or why it could not.
+type Listed = (Vec<Found>, Result<CheckedCatalog, Failure>);
+
+/// Loads `walked`, the minutes a walk back from the newest found newest first, while `finder`
+/// lists the loaded hour, which must find the same minutes before the load hands any second to
+/// `take`. Where the listing found other minutes, the work of the load it refused counts as
+/// discarded, and the minutes the listing found load instead.
+fn load_payload_walked(
+    input: &payload::LoadInput<'_>,
+    window: &LoadWindow<'_>,
+    finder: thread::ScopedJoinHandle<'_, Listed>,
+    mut walked: Vec<Found>,
+    mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
+    walked.reverse();
+    let (tentative_scope, tentative) = persistence::work::ingestion::tentative();
+    let mut listed = None;
+    let mut admitted = true;
+
+    let loaded = payload::load(
+        input,
+        walked.first(),
+        &walked[1..],
+        || {
+            drop(tentative_scope);
+            let (found, discovered) = load_payload_join(finder);
+            let agrees = load_payload_agrees(window, &found, &discovered, &walked);
+            if agrees {
+                tentative.keep();
+            } else {
+                tentative.discard();
+            }
+            listed = Some((found, discovered));
+            agrees
+        },
+        |run, second, apps| {
+            if !load_payload_admitted(&apps) {
+                admitted = false;
+            }
+            take(Continuity::Extend, run, second, apps);
+        },
+    )?;
+
+    let Some((found, discovered)) = listed else {
+        unreachable!("a load that returns heard whether the listing agrees");
+    };
+    let Some(outcome) = loaded else {
+        return load_payload_found(input, window, found, discovered, take);
+    };
+    let Ok(checked) = discovered else {
+        unreachable!("a listing that agrees with the walk read the catalog");
+    };
+
+    load_payload_certified(input, checked, Continuity::Extend, admitted, outcome)
+}
+
+/// What listing the loaded hour, as a load in `window` lists it, found.
+fn load_payload_listed(root: &Path, window: &LoadWindow<'_>) -> Listed {
     let mut found = Vec::with_capacity(MINUTES_MAX);
     let discovered = catalog::find(root, &mut found, window);
-    operation.check()?;
+
+    (found, discovered)
+}
+
+/// What the listing of `finder` found, or its panic, which goes on in this thread.
+fn load_payload_join(finder: thread::ScopedJoinHandle<'_, Listed>) -> Listed {
+    match finder.join() {
+        Ok(listed) => listed,
+        Err(panic) => panic::resume_unwind(panic),
+    }
+}
+
+/// Lists the loaded hour on a thread of `scope`, as a load in `window` lists it.
+fn load_payload_finder<'scope>(
+    scope: &'scope thread::Scope<'scope, '_>,
+    root: &'scope Path,
+    window: &'scope LoadWindow<'_>,
+) -> io::Result<thread::ScopedJoinHandle<'scope, Listed>> {
+    let observation = persistence::work::ingestion::inherit_current();
+    thread::Builder::new()
+        .name(String::from("flightdeck-finder"))
+        .spawn_scoped(scope, move || {
+            let observation = observation.enter();
+            let listed = load_payload_listed(root, window);
+            drop(observation);
+            listed
+        })
+}
+
+/// Whether the listing, which found `found` newest first and `discovered` of the catalog, found
+/// what a walk found as `walked`, oldest first.
+fn load_payload_agrees(
+    window: &LoadWindow<'_>,
+    found: &[Found],
+    discovered: &Result<CheckedCatalog, Failure>,
+    walked: &[Found],
+) -> bool {
+    discovered.is_ok()
+        && load_continuity(window, found) == Continuity::Extend
+        && found.iter().rev().eq(walked)
+}
+
+/// Loads `found`, the minutes the listing of the loaded hour found newest first, which
+/// `discovered` says it found or why it could not.
+fn load_payload_found(
+    input: &payload::LoadInput<'_>,
+    window: &LoadWindow<'_>,
+    mut found: Vec<Found>,
+    discovered: Result<CheckedCatalog, Failure>,
+    mut take: impl FnMut(Continuity, &RunIdentity, &MachineSecond, TickApps<'_>),
+) -> persistence::Result<Outcome> {
+    input.operation.check()?;
     let checked = match discovered {
         Ok(checked) => checked,
         Err(failure) => {
@@ -259,13 +400,11 @@ fn load_payload_window_using(
     found.reverse();
     let (predecessor, minutes) = load_payload_minutes(continuity, &found);
     let mut admitted = true;
-    let mut outcome = payload::load(
-        root,
+    let loaded = payload::load(
+        input,
         predecessor,
         minutes,
-        budget,
-        operation,
-        capture,
+        || true,
         |run, second, apps| {
             if !load_payload_admitted(&apps) {
                 admitted = false;
@@ -273,15 +412,31 @@ fn load_payload_window_using(
             take(continuity, run, second, apps);
         },
     )?;
-    operation.check()?;
+    let Some(outcome) = loaded else {
+        unreachable!("a load that needs no agreement hands its seconds over");
+    };
+
+    load_payload_certified(input, checked, continuity, admitted, outcome)
+}
+
+/// `outcome` with the catalog `checked` the load found, where its minutes read well enough and
+/// the store `admitted` every second.
+fn load_payload_certified(
+    input: &payload::LoadInput<'_>,
+    checked: CheckedCatalog,
+    continuity: Continuity,
+    admitted: bool,
+    mut outcome: Outcome,
+) -> persistence::Result<Outcome> {
+    input.operation.check()?;
     // The catalog still says what the recording holds beside a minute that read badly, and a query
     // for one of that minute's seconds goes to the saved minutes, which say why it cannot be read.
     if matches!(outcome.left_out, None | Some(Failure::Refused)) {
         if admitted {
-            load_payload_certify(root, checked, continuity, &mut outcome);
+            load_payload_certify(input.root, checked, continuity, &mut outcome);
         }
     }
-    operation.check()?;
+    input.operation.check()?;
 
     Ok(outcome)
 }
@@ -374,6 +529,7 @@ impl<'a> LoadWindow<'a> {
 
 /// A sealed minute of the loaded hour, by its run, its marker and the newest wall time of its
 /// ticks.
+#[derive(PartialEq)]
 struct Found {
     run: RunIdentity,
     marker: PathBuf,
@@ -382,6 +538,7 @@ struct Found {
     previous_source: Option<BoundaryKey>,
 }
 
+#[derive(PartialEq)]
 struct BoundaryKey {
     run: RunIdentity,
     marker: PathBuf,

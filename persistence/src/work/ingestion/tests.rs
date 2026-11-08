@@ -242,6 +242,63 @@ fn refuses_a_truncated_observation_when_tentative_work_exhausts_event_capacity()
 }
 
 #[test]
+fn hands_work_kept_inside_tentative_work_to_the_work_around_it() {
+    // Goal: tentative work begun inside other tentative work counts only as the outer work
+    // settles, so a guess kept inside a load the listing refuses still counts as discarded.
+    // Method: record a derivation in a tentative scope nested in another, keep the inner work,
+    // then discard the outer work.
+    let trace = Trace::new(RUN.recording);
+    let scope = trace.enter();
+    let (outer_scope, outer) = tentative();
+    let (inner_scope, inner) = tentative();
+    record_publication(RUN, 1, Kind::AppDerivation);
+    drop(inner_scope);
+    inner.keep();
+    drop(outer_scope);
+
+    outer.discard();
+
+    let purposes: Vec<_> = events(&trace).iter().map(|event| event.purpose).collect();
+    assert_eq!(purposes, [Purpose::Discarded]);
+    drop(scope);
+}
+
+#[test]
+fn hands_the_trace_work_discarded_inside_kept_tentative_work_as_discarded() {
+    // Goal: work thrown away inside tentative work whose own result is kept stays discarded.
+    // Method: record a derivation in a tentative scope and another in a scope nested in it,
+    // discard the inner work, then keep the outer work.
+    let trace = Trace::new(RUN.recording);
+    let scope = trace.enter();
+    let (outer_scope, outer) = tentative();
+    record_publication(RUN, 1, Kind::AppDerivation);
+    let (inner_scope, inner) = tentative();
+    record_publication(RUN, 2, Kind::AppDerivation);
+    drop(inner_scope);
+    inner.discard();
+    drop(outer_scope);
+
+    outer.keep();
+
+    let settled: Vec<_> = events(&trace)
+        .iter()
+        .map(|event| (event.key, event.purpose))
+        .collect();
+    let publication = |publication| Key::Publication {
+        run: RUN,
+        publication,
+    };
+    assert_eq!(
+        settled,
+        [
+            (publication(1), Purpose::Ordinary),
+            (publication(2), Purpose::Discarded),
+        ]
+    );
+    drop(scope);
+}
+
+#[test]
 fn records_nothing_tentatively_outside_a_trace() {
     // Goal: production work, which no trace observes, holds no events back.
     // Method: open a tentative scope with no trace active and record into it.

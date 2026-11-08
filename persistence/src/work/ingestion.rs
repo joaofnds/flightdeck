@@ -123,10 +123,30 @@ pub struct Scope {
     thread: PhantomData<Rc<()>>,
 }
 
-/// The events of work whose result may yet be thrown away. They reach the trace as recorded
-/// once kept, and as `Purpose::Discarded` once discarded or dropped unkept.
+/// The events of work whose result may yet be thrown away. They reach the trace, or the tentative
+/// work around them, as recorded once kept, and as `Purpose::Discarded` once discarded or dropped
+/// unkept.
 #[must_use]
-pub struct Tentative(Option<(Arc<Shared>, Arc<Mutex<State>>)>);
+pub struct Tentative(Option<(Sink, Arc<Mutex<State>>)>);
+
+/// Where settled tentative events go.
+enum Sink {
+    Trace(Arc<Shared>),
+    Tentative(Arc<Mutex<State>>),
+}
+
+impl Sink {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        let state = match self {
+            Self::Trace(shared) => &shared.state,
+            Self::Tentative(events) => events,
+        };
+
+        state.lock().unwrap_or_else(|_| {
+            unreachable!("a trace lock is held only while pushing or copying bounded events")
+        })
+    }
+}
 
 impl Trace {
     #[must_use]
@@ -226,12 +246,15 @@ pub fn tentative() -> (Scope, Tentative) {
     let mut context = ACTIVE.with(|active| active.borrow().clone());
     let mut tentative = Tentative(None);
     if let Some(context) = &mut context {
-        assert!(context.tentative.is_none());
+        let sink = match &context.tentative {
+            Some(around) => Sink::Tentative(Arc::clone(around)),
+            None => Sink::Trace(Arc::clone(&context.shared)),
+        };
         let events = Arc::new(Mutex::new(State {
             events: Vec::new(),
             overflowed: false,
         }));
-        tentative = Tentative(Some((Arc::clone(&context.shared), Arc::clone(&events))));
+        tentative = Tentative(Some((sink, Arc::clone(&events))));
         Arc::make_mut(context).tentative = Some(events);
     }
 
@@ -250,15 +273,12 @@ impl Tentative {
     }
 
     fn settle(&mut self, kept: bool) {
-        let Some((shared, events)) = self.0.take() else {
+        let Some((sink, tentative)) = self.0.take() else {
             return;
         };
-        let events = events.lock().unwrap_or_else(|_| {
-            unreachable!("a tentative lock is held only while pushing or copying bounded events")
-        });
-        let mut state = shared.state.lock().unwrap_or_else(|_| {
-            unreachable!("a trace lock is held only while copying bounded events")
-        });
+        let tentative = Sink::Tentative(tentative);
+        let events = tentative.lock();
+        let mut state = sink.lock();
 
         if events.overflowed {
             state.overflowed = true;

@@ -36,6 +36,62 @@ pub(super) fn find(
     find_windows(root, recording, &runs, &catalog, found, window)
 }
 
+/// The minutes a load continuing from `since` reads, newest first down to the one holding `since`,
+/// found by walking back from the newest window of `since`'s run one lookup a minute. None where
+/// `since`'s run is not the recording's newest run, or the walk meets a gap, a minute whose clock
+/// is before the loaded hour of `window` or no minute holding `since` within `MINUTES_MAX`
+/// minutes. `find` stays the check, since it lists the loaded hour by clock and keeps only what
+/// retention holds, which a walk by publication does not see.
+pub(super) fn walk(
+    root: &Path,
+    since: &crate::store::Newest,
+    window: &LoadWindow<'_>,
+) -> Result<Option<Vec<Found>>, Failure> {
+    let recording = read_identity(root).map_err(|error| Failure::Recording(error.kind()))?;
+    if since.run.recording != recording {
+        return Ok(None);
+    }
+    let runs = find_runs(root, recording)?;
+    if runs.last() != Some(&since.run) {
+        return Ok(None);
+    }
+    let catalog = super::find_window_catalog(root)?;
+    let lookup = |publication: u64| {
+        catalog_retry(|| {
+            Ok(catalog.window_at_or_before(&since.run, publication, &mut ReadWork::default())?)
+        })
+        .map_err(find_failure)
+    };
+
+    let mut walked = Vec::with_capacity(MINUTES_MAX);
+    let mut next = lookup(u64::MAX)?;
+    let first_ns = next.as_ref().and_then(|newest| newest.wall_ns).map(|wall| {
+        wall.max
+            .saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000)
+    });
+    while walked.len() < MINUTES_MAX {
+        let Some(manifest) = next.take() else {
+            return Ok(None);
+        };
+        if let (Some(first_ns), Some(wall)) = (first_ns, manifest.wall_ns) {
+            if wall.max < first_ns {
+                return Ok(None);
+            }
+        }
+        let previous = match manifest.publication_first.checked_sub(1) {
+            Some(before) => lookup(before)?,
+            None => None,
+        };
+        walked.push(find_found(root, &runs, &manifest, previous.as_ref()));
+        if manifest.publication_end.saturating_sub(1) <= since.publication {
+            return Ok(Some(walked));
+        }
+        next = previous;
+    }
+
+    Ok(None)
+}
+
 /// Orders `found` newest first by run and keeps what a load continuing from `window.since` reads.
 /// The registry holds only the newest runs. The runs it let go of are older, and the clock of each
 /// one's first minute places them, since a run's identity is random and a load keeps the seconds
@@ -296,10 +352,6 @@ fn find_windows_range(
         if found.len() == MINUTES_MAX {
             return Err(Failure::Commits(io::ErrorKind::InvalidData));
         }
-        let run = match runs.iter().find(|run| run.run == manifest.identity.run.run) {
-            Some(run) => *run,
-            None => manifest.identity.run,
-        };
         let previous = match manifest.publication_first.checked_sub(1) {
             Some(before) => catalog_retry(|| {
                 Ok(catalog.window_at_or_before(
@@ -311,20 +363,35 @@ fn find_windows_range(
             .map_err(find_failure)?,
             None => None,
         };
-        found.push(Found {
-            run,
-            marker: persistence::commitment_path(root, manifest),
-            wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
-            publication_end: manifest.publication_end,
-            previous_source: previous.map(|previous| super::BoundaryKey {
-                run: previous.identity.run,
-                marker: persistence::commitment_path(root, &previous),
-                publication_end: previous.publication_end,
-            }),
-        });
+        found.push(find_found(root, runs, manifest, previous.as_ref()));
     }
 
     Ok(())
+}
+
+/// The minute of `manifest`, whose window before it in its run is `previous`, where it has one.
+fn find_found(
+    root: &Path,
+    runs: &[RunIdentity],
+    manifest: &Manifest,
+    previous: Option<&Manifest>,
+) -> Found {
+    let run = match runs.iter().find(|run| run.run == manifest.identity.run.run) {
+        Some(run) => *run,
+        None => manifest.identity.run,
+    };
+
+    Found {
+        run,
+        marker: persistence::commitment_path(root, manifest),
+        wall_ns_max: manifest.wall_ns.map(|wall| wall.max),
+        publication_end: manifest.publication_end,
+        previous_source: previous.map(|previous| super::BoundaryKey {
+            run: previous.identity.run,
+            marker: persistence::commitment_path(root, previous),
+            publication_end: previous.publication_end,
+        }),
+    }
 }
 
 pub(super) fn revalidate(root: &Path, checked: &CheckedCatalog) -> Result<(), Failure> {

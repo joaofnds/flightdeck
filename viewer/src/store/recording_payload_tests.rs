@@ -26,25 +26,13 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
     let mut cursor = Cursor::new(found.len());
     let mut accepted = Vec::new();
 
-    cursor
-        .step(&input, None, &found[0..=0], |_, second, _| {
-            accepted.push(second.publication);
-        })
-        .unwrap();
+    cursor_step_publications(&mut cursor, &input, &found[0..=0], &mut accepted);
     assert_eq!(accepted, [1]);
     assert_eq!(budget.used(), 0);
-    cursor
-        .step(&input, None, &found[1..=1], |_, second, _| {
-            accepted.push(second.publication);
-        })
-        .unwrap();
+    cursor_step_publications(&mut cursor, &input, &found[1..=1], &mut accepted);
     assert_eq!(accepted, [1, 2, 3]);
     assert_eq!(budget.used(), 0);
-    cursor
-        .step(&input, None, &found[2..=2], |_, second, _| {
-            accepted.push(second.publication);
-        })
-        .unwrap();
+    cursor_step_publications(&mut cursor, &input, &found[2..=2], &mut accepted);
     let outcome = cursor.finish(&operation).unwrap();
     let expected = one_pass_terminal(&fixture.root, &operation);
 
@@ -72,6 +60,27 @@ fn cursor_steps_consume_one_minute_and_preserve_the_exact_terminal() {
     assert_eq!(budget.used(), 0);
 }
 
+/// Steps `cursor` over `group`, whose hand-over needs no agreement, adding the publication of each
+/// second it hands over to `accepted`.
+fn cursor_step_publications(
+    cursor: &mut Cursor,
+    input: &LoadInput<'_>,
+    group: &[super::super::Found],
+    accepted: &mut Vec<u64>,
+) {
+    cursor
+        .step(
+            input,
+            None,
+            group,
+            || true,
+            |_, second, _| {
+                accepted.push(second.publication);
+            },
+        )
+        .unwrap();
+}
+
 #[test]
 fn cursor_steps_preserve_the_first_live_successor() {
     // Goal: pausing at minute boundaries preserves the first live machine and process rates.
@@ -93,13 +102,13 @@ fn cursor_steps_preserve_the_first_live_successor() {
     let expected = one_pass_terminal(&fixture.root, &operation);
 
     cursor
-        .step(&input, None, &found[0..=0], |_, _, _| {})
+        .step(&input, None, &found[0..=0], || true, |_, _, _| {})
         .unwrap();
     cursor
-        .step(&input, None, &found[1..=1], |_, _, _| {})
+        .step(&input, None, &found[1..=1], || true, |_, _, _| {})
         .unwrap();
     cursor
-        .step(&input, None, &found[2..=2], |_, _, _| {})
+        .step(&input, None, &found[2..=2], || true, |_, _, _| {})
         .unwrap();
     let actual = cursor.finish(&operation).unwrap().terminal.unwrap();
     fixture.publish_with_system_rows(221);
@@ -131,7 +140,7 @@ fn cursor_refuses_a_terminal_handoff_before_all_minutes_are_consumed() {
     };
     let mut cursor = Cursor::new(found.len());
     cursor
-        .step(&input, None, &found[0..=0], |_, _, _| {})
+        .step(&input, None, &found[0..=0], || true, |_, _, _| {})
         .unwrap();
 
     let result = cursor.finish(&operation);
@@ -165,18 +174,30 @@ fn cancellation_between_cursor_steps_releases_owners_but_preserves_a_reader() {
     let mut cursor = Cursor::new(found.len());
     let mut retained = AppsSecond::with_room();
     cursor
-        .step(&input, None, &found[0..=0], |_, _, apps| {
-            retained.take(apps, None);
-        })
+        .step(
+            &input,
+            None,
+            &found[0..=0],
+            || true,
+            |_, _, apps| {
+                retained.take(apps, None);
+            },
+        )
         .unwrap();
     let reader = Arc::new(retained);
     let charge = crate::store::startup_tests::retained_app_charge(&reader);
     let mut accepted = 0;
     cancellation.cancel().unwrap();
 
-    let result = cursor.step(&input, None, &found[1..=1], |_, _, _| {
-        accepted += 1;
-    });
+    let result = cursor.step(
+        &input,
+        None,
+        &found[1..=1],
+        || true,
+        |_, _, _| {
+            accepted += 1;
+        },
+    );
     let finished = cursor.finish(&operation);
 
     assert_eq!(accepted, 0);
@@ -212,20 +233,38 @@ fn cursor_continues_after_a_refused_minute_without_reusing_its_predecessor() {
     let mut accepted = Vec::new();
 
     cursor
-        .step(&input, None, &found[0..=0], |_, second, _| {
-            accepted.push((second.publication, second.follows()));
-        })
+        .step(
+            &input,
+            None,
+            &found[0..=0],
+            || true,
+            |_, second, _| {
+                accepted.push((second.publication, second.follows()));
+            },
+        )
         .unwrap();
     cursor
-        .step(&input, None, &found[1..=1], |_, second, _| {
-            accepted.push((second.publication, second.follows()));
-        })
+        .step(
+            &input,
+            None,
+            &found[1..=1],
+            || true,
+            |_, second, _| {
+                accepted.push((second.publication, second.follows()));
+            },
+        )
         .unwrap();
     assert_eq!(accepted, [(1, false)]);
     cursor
-        .step(&input, None, &found[2..=2], |_, second, _| {
-            accepted.push((second.publication, second.follows()));
-        })
+        .step(
+            &input,
+            None,
+            &found[2..=2],
+            || true,
+            |_, second, _| {
+                accepted.push((second.publication, second.follows()));
+            },
+        )
         .unwrap();
     let outcome = cursor.finish(&operation).unwrap();
 
@@ -1510,22 +1549,23 @@ fn a_continued_load_counts_a_decoding_it_throws_away_as_discarded_work() {
 
     assert_eq!(
         [Purpose::Ordinary, Purpose::Discarded]
-            .map(|purpose| publication_4_work(&fixture, &trace, purpose)),
+            .map(|purpose| publication_work(&fixture, &trace, 4, purpose)),
         [[1, 1], [1, 1]]
     );
 }
 
-/// How many App aggregations and machine reductions of publication 4 of `catch_up_fixture`
-/// `trace` holds under `purpose`.
-fn publication_4_work(
+/// How many App aggregations and machine reductions of `publication` of `fixture`'s run `trace`
+/// holds under `purpose`.
+fn publication_work(
     fixture: &Fixture,
     trace: &persistence::work::ingestion::Trace,
+    publication: u64,
     purpose: persistence::work::ingestion::Purpose,
 ) -> [usize; 2] {
     use persistence::work::ingestion::{Key, Kind};
     let key = Key::Publication {
         run: fixture.writer.identity().unwrap(),
-        publication: 4,
+        publication,
     };
     let mut events = Vec::new();
     trace.snapshot(&mut events).unwrap();
@@ -2217,4 +2257,79 @@ fn assert_frame_retry_second(apps: &AppsSecond, expected: &FrameRetryExpected) {
     assert_eq!(disk.entries[0].app.bytes, b"/Apps/Current.app");
     assert_eq!(disk.entries[0].amount, 60);
     assert!((disk.entries[0].rate.unwrap() - 60.0).abs() <= f64::EPSILON * 60.0);
+}
+
+#[test]
+fn a_continued_load_replaces_the_stores_seconds_where_retention_let_go_of_its_predecessor() {
+    // Goal: a return whose walk back by publication reaches the minute it continues from hands
+    // over what the listing of the loaded hour finds, which leaves out a minute retention no
+    // longer holds and so replaces the store's seconds rather than continuing them.
+    // Method: seal three minutes, place the retention cutoff after the middle one, load after
+    // publication 1 and list each hand-over's continuity and publication.
+    use super::super::Continuity::Replace;
+    let fixture = retention_cut_fixture();
+
+    let handed = publications_loaded_after(&fixture, 1, None);
+
+    assert_eq!(handed, [(Replace, 2), (Replace, 3)]);
+}
+
+#[test]
+fn a_continued_load_counts_a_publication_once_where_the_listing_refuses_its_walk() {
+    // Goal: the work a load did on the minutes of a walk the listing refused counts as
+    // discarded, so a publication the load hands over counts one ordinary App aggregation.
+    // Method: seal three minutes, place the retention cutoff after the middle one, load after
+    // publication 1 under a trace, and count publication 3's ordinary App aggregations.
+    let fixture = retention_cut_fixture();
+    let trace = persistence::work::ingestion::Trace::new(
+        collector::recording::read_identity(&fixture.root).unwrap(),
+    );
+
+    publications_loaded_after(&fixture, 1, Some(&trace));
+
+    let ordinary = persistence::work::ingestion::Purpose::Ordinary;
+    assert_eq!(publication_work(&fixture, &trace, 3, ordinary), [1, 1]);
+}
+
+/// Three sealed minutes, a publication each, whose retention cutoff lies after the middle one.
+fn retention_cut_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    for minute in 0..3 {
+        fixture.publish_with_system_rows(20_000 + minute * 60);
+        fixture.seal_minute(minute);
+        fixture.skip_run_ticks(59);
+    }
+    crate::session::retention_tests::expire_before(&fixture.root, 100 * 1_000_000_000);
+
+    fixture
+}
+
+/// The continuity and publication of each second a load continuing from `publication` hands
+/// over, in order, under `trace` where there is one.
+fn publications_loaded_after(
+    fixture: &Fixture,
+    publication: u64,
+    trace: Option<&persistence::work::ingestion::Trace>,
+) -> Vec<(super::super::Continuity, u64)> {
+    let newest = crate::store::Newest {
+        run: fixture.writer.identity().unwrap(),
+        publication,
+        segment: 0,
+    };
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut handed = Vec::new();
+    let scope = trace.map(persistence::work::ingestion::Trace::enter);
+
+    super::super::load_payload_since(
+        &fixture.root,
+        &budget,
+        &operation,
+        Some(&newest),
+        |continuity, _, second, _| handed.push((continuity, second.publication)),
+    )
+    .unwrap();
+    drop(scope);
+
+    handed
 }
