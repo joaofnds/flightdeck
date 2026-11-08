@@ -78,6 +78,8 @@ struct Source {
     waker: Option<Arc<RingWaker>>,
     identity: RunIdentity,
     complete: bool,
+    /// Whether the ring follows on from the last reading of a saved minute.
+    follows_saved: bool,
     tick: Tick,
     /// The identities of the processes of the tick just read, where the ring holds them.
     identities: Vec<IdentityObservation>,
@@ -297,6 +299,14 @@ impl Ring {
         }
 
         source.complete
+    }
+
+    /// Whether the run's ring follows on from the last reading of a saved minute, so its
+    /// completeness proves it misses no reading the recording did not save.
+    pub(super) fn follows_saved(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.follows_saved)
     }
 
     #[cfg(test)]
@@ -589,6 +599,7 @@ impl Source {
             .take()
             .unwrap_or_else(|| unreachable!("admitted terminal"));
         self.complete = complete;
+        self.follows_saved = true;
         self.previous = terminal.machine;
         self.terminal_workspace = terminal.machine_reservation.take().or(machine);
         self.shrink_terminal_workspace();
@@ -635,6 +646,7 @@ impl Source {
             event_identities: Vec::with_capacity(EVENTS_PER_TICK_MAX),
             current,
             previous,
+            follows_saved: false,
             previous_frame: None,
             native_pending: None,
             process_names: None,

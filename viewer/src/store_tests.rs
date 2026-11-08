@@ -594,6 +594,59 @@ fn a_damaged_newest_saved_minute_leaves_the_live_mac_to_show() {
     assert!(!context.retains_second(160));
 }
 
+/// Two saved minutes and twenty seconds after them, which lap the fixture's eight-slot ring, so a
+/// Store's ring cannot follow on from the newest saved minute, with `damaged` of them damaged.
+fn lapped_ring_store(damaged: Option<u64>) -> (Fixture, Store, super::QueryHandle) {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(59);
+    fixture.publish_with_system_rows(160);
+    fixture.seal_minute(1);
+    fixture.skip_run_ticks(59);
+    for second in 220..240 {
+        fixture.publish_with_system_rows(second);
+    }
+    if let Some(minute) = damaged {
+        empty_ticks_file(&fixture, minute);
+    }
+    let budget = Arc::new(super::ByteBudget::new(256 * 1024 * 1024));
+    let store = Store::start_with_budget(&fixture.root, budget).unwrap();
+    until_caught_up(&store);
+    let handle = store.query_handle();
+
+    (fixture, store, handle)
+}
+
+#[test]
+fn a_ring_that_lost_seconds_after_the_newest_saved_minute_answers_no_page() {
+    // Goal: a Store whose ring lost seconds the saved minutes do not hold answers no page over
+    // them, so the page reads the saved minutes. Method: lap the ring before the Store starts.
+    let (_fixture, _store, handle) = lapped_ring_store(None);
+
+    let reply = latest_reply(&handle);
+
+    assert!(
+        matches!(reply, super::QueryOutcome::NeedsLoad(_)),
+        "{reply:?}"
+    );
+}
+
+#[test]
+fn a_damaged_older_minute_does_not_excuse_a_ring_that_lost_seconds() {
+    // Goal: a damaged minute older than the newest saved one leaves the ring to prove it follows
+    // on from the newest, so the Store answers no page over seconds its ring lost.
+    // Method: damage the older of two saved minutes and lap the ring before the Store starts.
+    let (_fixture, _store, handle) = lapped_ring_store(Some(0));
+
+    let reply = latest_reply(&handle);
+
+    assert!(
+        matches!(reply, super::QueryOutcome::NeedsLoad(_)),
+        "{reply:?}"
+    );
+}
+
 #[test]
 fn a_second_of_a_damaged_saved_minute_is_left_to_the_saved_minutes() {
     // Goal: the Store answers no second it left out, so the saved minutes say why it is unreadable.
