@@ -11,7 +11,7 @@ thread_local! {
     static REQUESTS: Cell<u64> = const { Cell::new(0) };
 }
 
-pub(super) fn observe<T>(work: impl FnOnce() -> T) -> (T, u64) {
+pub(crate) fn observe<T>(work: impl FnOnce() -> T) -> (T, u64) {
     REQUESTS.set(0);
     assert!(!ACTIVE.replace(true));
     let guard = Guard;

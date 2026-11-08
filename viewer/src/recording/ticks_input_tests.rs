@@ -13,11 +13,9 @@ use polars::prelude::{
 };
 
 use super::{MachineMinute, SealedMinute, SealedSource, read_machine};
+use crate::allocation_tests as allocation;
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
-
-#[path = "ticks_input_tests/allocation.rs"]
-mod allocation;
 
 #[test]
 fn captured_optional_columns_override_an_incomplete_replacement_schema() {

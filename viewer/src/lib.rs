@@ -1,4 +1,6 @@
 //! Viewer-only recording interpretation. No collector calls this allocating adapter.
+#[cfg(test)]
+mod allocation_tests;
 pub mod app_process_groups_history;
 pub mod apps;
 pub mod byte_budget;
