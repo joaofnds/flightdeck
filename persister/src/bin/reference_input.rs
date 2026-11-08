@@ -35,6 +35,12 @@ const SECONDS_MAX: u64 = 3_600;
 const SECONDS_MIN: u64 = 370;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const SECONDS_PER_MINUTE: u64 = 60;
+/// The contract repeats its incidents and special seconds every period.
+const PERIOD_SECONDS: u64 = 600;
+/// The second of each period that reads exactly zero, as `t mod 600 = 300` in the contract.
+const ZERO_SECOND: u64 = 300;
+/// The second of each period whose tick is missed, as `t mod 600 = 301` in the contract.
+const MISSED_SECOND: u64 = 301;
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -60,6 +66,10 @@ const SEAL_POLL: Duration = Duration::from_millis(10);
 const _: () = {
     assert!(SECONDS_MIN <= SECONDS_MAX);
     assert!(PROCESSES.is_multiple_of(APPS));
+    // Each period holds its zero second and its missed tick as two seconds of its own.
+    assert!(ZERO_SECOND < PERIOD_SECONDS);
+    assert!(MISSED_SECOND < PERIOD_SECONDS);
+    assert!(ZERO_SECOND != MISSED_SECOND);
     // Each CPU idles for what it does not spend, so no CPU's idle ticks fall below zero.
     assert!(CPUS < 85);
 };
@@ -165,17 +175,7 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
         saved_end: writer.publication_newest() + 1,
         heartbeat_ns: 0,
     };
-    let mut last_minute_first = None;
-    for second in 0..seconds {
-        let publication = writer.publication_newest() + 1;
-        paced.wait_for_room(publication)?;
-        // Both divisions floor, to the minute a second falls in.
-        if second / SECONDS_PER_MINUTE == (seconds - 1) / SECONDS_PER_MINUTE {
-            last_minute_first.get_or_insert(publication);
-        }
-        machine.publish(&mut writer, second)?;
-    }
-    let last_minute_first = last_minute_first.ok_or("no last minute")?;
+    let last_minute_first = generate_seconds(&mut writer, &mut machine, &mut paced, seconds)?;
     paced.wait_for_saved(last_minute_first)?;
     // A pass that finds nothing to save ends in the worker's pause, so the process ends with the
     // worker asleep rather than part way through a save.
@@ -193,6 +193,34 @@ fn generate(directory: &Path, seconds: u64) -> Result<(), Box<dyn std::error::Er
     // The process ends with the run live and the minute it ends in in its ring, as a recording
     // stands while its collector and persister run.
     Ok(())
+}
+
+/// Publishes the input's `seconds`, waiting on the worker wherever the ring would otherwise
+/// overwrite a publication it has yet to save, and returns the first publication of the minute
+/// the input ends in.
+fn generate_seconds(
+    writer: &mut Writer,
+    machine: &mut Machine,
+    paced: &mut Paced<'_>,
+    seconds: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let mut last_minute_first = None;
+    for second in 0..seconds {
+        // A missed tick publishes nothing, so its second has no readings.
+        if second % PERIOD_SECONDS == MISSED_SECOND {
+            continue;
+        }
+
+        let publication = writer.publication_newest() + 1;
+        paced.wait_for_room(publication)?;
+        // Both divisions floor, to the minute a second falls in.
+        if second / SECONDS_PER_MINUTE == (seconds - 1) / SECONDS_PER_MINUTE {
+            last_minute_first.get_or_insert(publication);
+        }
+        machine.publish(writer, second)?;
+    }
+
+    last_minute_first.ok_or_else(|| "no last minute".into())
 }
 
 /// Seals the recording on a thread of its own, as the persister does in a process of its own,
@@ -379,15 +407,29 @@ impl Machine {
     }
 }
 
+/// The contract's valid seconds from 1 to `second`, every second but each period's zero second
+/// and missed tick, which add to no counter.
+fn valid_seconds(second: u64) -> u64 {
+    // The division floors, to the periods that end by `second`.
+    let periods = second / PERIOD_SECONDS;
+    let offset = second % PERIOD_SECONDS;
+    let invalid =
+        2 * periods + u64::from(ZERO_SECOND <= offset) + u64::from(MISSED_SECOND <= offset);
+
+    second - invalid
+}
+
 /// Process `process`'s readings at `second`, as the contract gives them.
 fn publish_process(process: u64, second: u64) -> Result<Process, std::num::TryFromIntError> {
+    let valid = valid_seconds(second);
+
     Ok(Process {
         pid: PID_FIRST + i32::try_from(process)?,
         usage: Usage {
             awake_ns_at_start: ORIGIN_CONTINUOUS_NS - NANOSECONDS_PER_SECOND,
-            user_ns: CPU_BASE_NS + 1_000 * process + second * 1_000_000 * (process % 8 + 1),
+            user_ns: CPU_BASE_NS + 1_000 * process + valid * 1_000_000 * (process % 8 + 1),
             system_ns: 0,
-            energy_nj: second * 1_000 * (process + 1),
+            energy_nj: valid * 1_000 * (process + 1),
             instructions: 0,
             super_instructions: 0,
             cycles: 0,
@@ -396,8 +438,8 @@ fn publish_process(process: u64, second: u64) -> Result<Process, std::num::TryFr
             pageins: 0,
             resident_bytes: 1_048_576 * (process % APPS + 1),
             footprint_bytes: 1_048_576 * (process % APPS + 1),
-            disk_read_bytes: second * 4_096 * (process % 4 + 1),
-            disk_written_bytes: second * 2_048 * (process % 4 + 1),
+            disk_read_bytes: valid * 4_096 * (process % 4 + 1),
+            disk_written_bytes: valid * 2_048 * (process % 4 + 1),
         },
         task: Task {
             threads: 1,
@@ -428,16 +470,19 @@ fn publish_identity(
     })
 }
 
-/// CPU `cpu`'s ticks at `second`, a hundred a second as macOS counts them.
+/// CPU `cpu`'s ticks at `second`, a hundred a second as macOS counts them, all of them idle in
+/// a second that is not valid, since the generated Mac does no work in a second its processes
+/// do none.
 fn publish_cpu(cpu: u64, second: u64) -> Result<CPUTicks, std::num::TryFromIntError> {
     let cpu = u32::try_from(cpu)?;
-    let second = u32::try_from(second)?;
+    let valid = u32::try_from(valid_seconds(second))?;
+    let invalid = u32::try_from(second)? - valid;
 
     Ok(CPUTicks {
-        user: second * (10 + cpu),
-        system: second * 5,
+        user: valid * (10 + cpu),
+        system: valid * 5,
         nice: 0,
-        idle: second * (85 - cpu),
+        idle: valid * (85 - cpu) + invalid * 100,
     })
 }
 
@@ -517,6 +562,16 @@ mod tests {
         let command = command_from(&words("--directory /tmp/input --seconds 3601"));
 
         assert!(command.is_err());
+    }
+
+    #[test]
+    fn leaves_out_two_seconds_of_each_period_from_the_valid_seconds() {
+        // Goal: every period's zero second and missed tick add to no counter, past the first
+        // period too. Method: count the valid seconds on each side of the second period's start
+        // and of its two special seconds.
+        let valid = [599, 600, 900, 902].map(valid_seconds);
+
+        assert_eq!([597, 598, 897, 898], valid);
     }
 
     #[test]

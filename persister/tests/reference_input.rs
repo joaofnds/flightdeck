@@ -11,6 +11,7 @@ mod tests {
     use std::process::Command;
     use std::sync::OnceLock;
 
+    use collector::machine::CPUTicks;
     use collector::recording::Registry;
 
     use super::saved_windows;
@@ -26,9 +27,67 @@ mod tests {
     fn saves_process_zero_cpu_time_above_two_to_the_fifty_third_exactly() {
         // Goal: the input's CPU counters stay exact above 2^53 through the ring and the seal.
         // Method: read process 0's CPU time at second 1 from its saved minute.
-        let cpu_ns = input().cpu_ns(PROCESS_ZERO_PID, 1);
+        let cpu_ns = input().process_counters(PROCESS_ZERO_PID, 1).cpu_ns;
 
         assert_eq!((1 << 53) + 1_000_000, cpu_ns);
+    }
+
+    #[test]
+    fn saves_no_reading_at_the_missed_tick() {
+        // Goal: second 301 is a missed tick, which leaves no readings, rather than readings of
+        // zero. Method: look for the saved tick of each second from 300 to 302.
+        let saved = [300, 301, 302].map(|second| input().saved_tick(second).is_some());
+
+        assert_eq!([true, false, true], saved);
+    }
+
+    #[test]
+    fn advances_no_process_counter_at_the_zero_second_or_the_missed_tick() {
+        // Goal: neither second 300, which reads zero, nor the missed tick 301 adds to a
+        // process's counters. Method: read process 0's counters at seconds 299, 300 and 302,
+        // which follow 299, 299 and 300 of the contract's valid seconds.
+        let counters =
+            [299, 300, 302].map(|second| input().process_counters(PROCESS_ZERO_PID, second));
+
+        assert_eq!([299, 299, 300].map(process_zero_counters), counters);
+    }
+
+    #[test]
+    fn idles_each_core_through_the_zero_second_and_the_missed_tick() {
+        // Goal: a core works only in the contract's valid seconds, and idles a hundred ticks in
+        // each other second. Method: read core 0's ticks at seconds 299, 300 and 302, which
+        // follow 299, 299 and 300 valid seconds and none, one and two others.
+        let ticks = [299, 300, 302].map(|second| input().cpu_ticks(0, second));
+
+        assert_eq!(
+            [
+                core_zero_ticks(299, 0),
+                core_zero_ticks(299, 1),
+                core_zero_ticks(300, 2)
+            ],
+            ticks
+        );
+    }
+
+    /// Process 0's counters after `valid` valid seconds, as the contract gives them for process
+    /// index 0.
+    fn process_zero_counters(valid: u64) -> ProcessCounters {
+        ProcessCounters {
+            cpu_ns: (1 << 53) + 1_000_000 * valid,
+            energy_nj: 1_000 * valid,
+            disk_read_bytes: 4_096 * valid,
+            disk_written_bytes: 2_048 * valid,
+        }
+    }
+
+    /// Core 0's ticks after `valid` valid seconds and `invalid` others.
+    fn core_zero_ticks(valid: u32, invalid: u32) -> CPUTicks {
+        CPUTicks {
+            user: 10 * valid,
+            system: 5 * valid,
+            nice: 0,
+            idle: 85 * valid + 100 * invalid,
+        }
     }
 
     /// The input every test reads, generated once. Its rings are unlinked as soon as it is
@@ -69,10 +128,68 @@ mod tests {
             Self { directory }
         }
 
-        /// The CPU time a process's saved row holds at `second` of the input.
-        fn cpu_ns(&self, pid: i32, second: u64) -> u64 {
+        /// The counters a process's saved row holds at `second` of the input.
+        fn process_counters(&self, pid: i32, second: u64) -> ProcessCounters {
+            let row = self.saved_row(
+                second,
+                "processes",
+                "user_ns + system_ns, energy_nj, disk_read_bytes, disk_written_bytes",
+                &format!("pid = {pid}"),
+            );
+
+            ProcessCounters {
+                cpu_ns: cell(&row, 0),
+                energy_nj: cell(&row, 1),
+                disk_read_bytes: cell(&row, 2),
+                disk_written_bytes: cell(&row, 3),
+            }
+        }
+
+        /// The ticks a CPU's saved row holds at `second` of the input.
+        fn cpu_ticks(&self, cpu: u32, second: u64) -> CPUTicks {
+            let row = self.saved_row(
+                second,
+                "cpus",
+                "user_ticks, system_ticks, nice_ticks, idle_ticks",
+                &format!("cpu = {cpu}"),
+            );
+
+            CPUTicks {
+                user: cell(&row, 0),
+                system: cell(&row, 1),
+                nice: cell(&row, 2),
+                idle: cell(&row, 3),
+            }
+        }
+
+        /// The one row of `table` that `condition` picks at `second` of the input, as `columns`.
+        fn saved_row(
+            &self,
+            second: u64,
+            table: &str,
+            columns: &str,
+            condition: &str,
+        ) -> polars::prelude::DataFrame {
+            let tick = self
+                .saved_tick(second)
+                .unwrap_or_else(|| panic!("no saved minute holds second {second}"));
+            let rows = query(
+                &tick.data.join(format!("{table}.parquet")),
+                &format!(
+                    "SELECT {columns} FROM saved WHERE publication = {} AND {condition}",
+                    tick.publication
+                ),
+            );
+
+            assert_eq!(1, rows.height());
+            rows
+        }
+
+        /// The saved tick of `second` of the input, where a saved minute holds one.
+        fn saved_tick(&self, second: u64) -> Option<SavedTick> {
             let wall_ns = ORIGIN_WALL_NS + second * NANOSECONDS_PER_SECOND;
             let registry = Registry::read(&self.directory).unwrap();
+            let mut found = None;
             for run in &registry.runs {
                 for manifest in saved_windows::saved_manifests(&self.directory, &run.identity) {
                     let data = self.directory.join(&manifest.data_directory);
@@ -81,22 +198,33 @@ mod tests {
                         &format!("SELECT publication FROM saved WHERE wall_ns = {wall_ns}"),
                     );
                     if publications.height() == 1 {
-                        let publication: u64 = cell(&publications, 0);
-                        let processes = query(
-                            &data.join("processes.parquet"),
-                            &format!(
-                                "SELECT user_ns + system_ns FROM saved \
-                                WHERE publication = {publication} AND pid = {pid}"
-                            ),
-                        );
-                        assert_eq!(1, processes.height());
-                        return cell(&processes, 0);
+                        // A second is saved once, since the input's runs share no second.
+                        assert!(found.is_none());
+                        found = Some(SavedTick {
+                            data,
+                            publication: cell(&publications, 0),
+                        });
                     }
                 }
             }
 
-            panic!("no saved minute holds second {second}");
+            found
         }
+    }
+
+    /// A process's counters, its CPU time the sum of its user and system time.
+    #[derive(Debug, PartialEq)]
+    struct ProcessCounters {
+        cpu_ns: u64,
+        energy_nj: u64,
+        disk_read_bytes: u64,
+        disk_written_bytes: u64,
+    }
+
+    /// A tick a saved minute holds: the minute's tables and the tick's publication in them.
+    struct SavedTick {
+        data: PathBuf,
+        publication: u64,
     }
 
     fn generator() -> Command {
