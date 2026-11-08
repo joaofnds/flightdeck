@@ -14,8 +14,7 @@ pub use metadata::{
     CanonicalLoss, CanonicalMetadata, EndpointEvidence, Lifecycle, RawBase, RawChild,
 };
 pub use tree::{
-    CURSOR_BYTES, CanonicalCursor, CanonicalKey, Direction, Namespace, NodeLocator, ReadStep,
-    ReadWork, SeekRange,
+    CanonicalCursor, CanonicalKey, Direction, Namespace, NodeLocator, ReadStep, ReadWork, SeekRange,
 };
 
 #[cfg(test)]

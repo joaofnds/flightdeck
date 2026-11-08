@@ -1011,4 +1011,4 @@ fn find_predecessor(found: &[Found], since: &super::Newest) -> Option<usize> {
 }
 
 /// The working memory of a load's catalog lookups, each of which reserves its cursor's.
-pub(super) const CATALOG_BYTES_MAX: usize = 1024 * 1024;
+const CATALOG_BYTES_MAX: usize = 1024 * 1024;

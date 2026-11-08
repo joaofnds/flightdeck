@@ -7,7 +7,7 @@ use std::io;
 use std::sync::Arc;
 
 /// The working memory one cursor reserves while it is open.
-pub const CURSOR_BYTES: usize = 256 * 1024;
+const CURSOR_BYTES: usize = 256 * 1024;
 /// The node opens one step spends at most before it returns `Continue`.
 const STEP_NODE_ATTEMPTS_MAX: u64 = 4096;
 const DIRECT_ENTRIES: u64 = 16 * 124 + 128;

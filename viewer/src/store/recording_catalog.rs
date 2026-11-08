@@ -2,18 +2,16 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::panic;
 use std::path::Path;
-use std::thread;
 
 use collector::recording::{Registry, RegistryBuffer, read_identity};
 use collector::ring::{Identity, RunIdentity};
-use persistence::canonical::catalog::{Catalog, RANGE_WINDOWS_MAX};
-use persistence::canonical::{CURSOR_BYTES, ReadWork};
+use persistence::canonical::ReadWork;
+use persistence::canonical::catalog::Catalog;
 use persistence::retention::Retained;
 use persistence::{Error, Manifest};
 
-use super::{CATALOG_BYTES_MAX, CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_predecessor};
+use super::{CheckedCatalog, Found, LoadWindow, MINUTES_MAX, find_predecessor};
 use crate::session::registered::{catalog_retry, first_retained_ns};
 use crate::session::{LEAD_IN_SECONDS, LOADED_SECONDS};
 use crate::store::Failure;
@@ -176,15 +174,10 @@ fn find_windows(
     };
     let first_ns = newest_ns
         .map(|newest| newest.saturating_sub((window.seconds + LEAD_IN_SECONDS) * 1_000_000_000));
-    let mut minutes = match (first_ns, ends) {
-        (Some(first_ns), Some((_first, newest_ns))) => {
-            find_windows_listed(catalog, first_ns, newest_ns)?
-        }
-        _ => catalog_retry(|| {
-            catalog.windows_in(first_ns.unwrap_or(0), u64::MAX, &mut ReadWork::default())
-        })
-        .map_err(find_failure)?,
-    };
+    let mut minutes = catalog_retry(|| {
+        catalog.windows_in(first_ns.unwrap_or(0), u64::MAX, &mut ReadWork::default())
+    })
+    .map_err(find_failure)?;
     let unknown_clock_ticks =
         catalog_retry(|| Ok(catalog.unknown_count_within_page(&mut ReadWork::default())?))
             .map_err(find_failure)?;
@@ -211,91 +204,6 @@ fn find_windows(
         // With no clock to start from, the range took in every window the recording holds.
         decoded_is_whole: first_ns.is_none(),
     })
-}
-
-/// The threads that list the loaded hour's windows at once. Each holds one cursor at a time.
-const LISTERS_MAX: usize = 4;
-const _: () = assert!(LISTERS_MAX * CURSOR_BYTES <= CATALOG_BYTES_MAX);
-
-/// The windows holding a reading from `first_ns` on, in the order of their first reading, as
-/// `Catalog::windows_in` lists them. Each reading costs a cursor step that checks the namespace
-/// twice, and an hour holds thousands of readings, so each lister lists an equal share of the clock
-/// up to `newest_ns`, the last share every later reading too. A window whose readings cross the end
-/// of a share is kept where it was first listed.
-fn find_windows_listed(
-    catalog: &Catalog,
-    first_ns: u64,
-    newest_ns: u64,
-) -> Result<Vec<Manifest>, Failure> {
-    let shares = find_windows_listed_shares(first_ns, newest_ns);
-    let listed = thread::scope(|scope| {
-        let listers: Vec<_> = shares
-            .iter()
-            .map(|&(share_first_ns, share_end_ns)| {
-                let observation = persistence::work::ingestion::inherit_current();
-                thread::Builder::new()
-                    .name(String::from("flightdeck-lister"))
-                    .spawn_scoped(scope, move || {
-                        let observation = observation.enter();
-                        let windows = catalog_retry(|| {
-                            catalog.windows_in(
-                                share_first_ns,
-                                share_end_ns,
-                                &mut ReadWork::default(),
-                            )
-                        });
-                        drop(observation);
-                        windows
-                    })
-            })
-            .collect();
-        listers
-            .into_iter()
-            .map(|lister| match lister {
-                Ok(handle) => match handle.join() {
-                    Ok(windows) => windows.map_err(find_failure),
-                    Err(panic) => panic::resume_unwind(panic),
-                },
-                Err(error) => Err(Failure::Loader(error.kind())),
-            })
-            .collect::<Vec<_>>()
-    });
-
-    let mut windows: Vec<Manifest> = Vec::new();
-    for share in listed {
-        for manifest in share? {
-            let listed_before = windows.iter().any(|listed| {
-                listed.identity.run == manifest.identity.run
-                    && listed.publication_first == manifest.publication_first
-            });
-            if !listed_before {
-                if windows.len() == RANGE_WINDOWS_MAX {
-                    return Err(find_failure(Error::Bound("catalog range windows")));
-                }
-                windows.push(manifest);
-            }
-        }
-    }
-    Ok(windows)
-}
-
-/// The clock ranges, from `first_ns` on, that the listers of `find_windows_listed` read, oldest
-/// first. Each but the last ends where the next begins, and the last reaches every clock.
-fn find_windows_listed_shares(first_ns: u64, newest_ns: u64) -> Vec<(u64, u64)> {
-    let span_ns = newest_ns.saturating_sub(first_ns).saturating_add(1);
-    let share_ns = span_ns
-        .div_ceil(u64::try_from(LISTERS_MAX).unwrap_or_else(|_| unreachable!("lister count")));
-    let mut shares = Vec::with_capacity(LISTERS_MAX);
-    let mut share_first_ns = first_ns;
-    for _share in 1..LISTERS_MAX {
-        let share_end_ns = share_first_ns.saturating_add(share_ns);
-        shares.push((share_first_ns, share_end_ns));
-        share_first_ns = share_end_ns;
-    }
-    shares.push((share_first_ns, u64::MAX));
-
-    assert_eq!(shares.len(), LISTERS_MAX);
-    shares
 }
 
 /// The minutes that may hold a second to show, and the minute just before each, whose last tick
