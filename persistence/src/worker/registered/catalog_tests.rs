@@ -142,10 +142,31 @@ fn a_full_page_continues_after_its_last_reading() {
 }
 
 #[test]
+fn a_page_ending_at_the_last_known_reading_names_no_next_page() {
+    // Goal: a page that happens to hold the last reading of the range ends the listing, so a
+    // reader never asks for a page that cannot exist.
+    // Method: link exactly a page of readings and read it.
+    let recording = Recording::new();
+    let expected: Vec<_> = (0..u64::try_from(PAGE_READINGS_MAX).unwrap())
+        .map(|index| catalog_tests_reading(&recording, 5_000_000_000 + index, index + 1))
+        .collect();
+    catalog_tests_link_known(&recording, &expected);
+    let catalog = Catalog::open(&recording.root, &catalog_tests_budget()).unwrap();
+
+    let page = catalog
+        .known_page(0, u64::MAX, None, &mut ReadWork::default())
+        .unwrap();
+
+    assert_eq!(page.readings, expected);
+    assert_eq!(page.next, None);
+}
+
+#[test]
 fn a_full_page_checks_the_namespace_less_often_than_it_holds_readings() {
     // Goal: a page checks the namespace once a pass over it rather than once a reading, so listing
     // an hour of readings costs the leaves that hold them.
-    // Method: read a full page of hand-made links and count the namespace opens it made.
+    // Method: read a full page of hand-made links and count the namespace checks it made, which
+    // are its namespace attempts less the node opens that also count as attempts.
     let recording = Recording::new();
     let readings: Vec<_> = (0..u64::try_from(PAGE_READINGS_MAX + 1).unwrap())
         .map(|index| catalog_tests_reading(&recording, 5_000_000_000 + index, index + 1))
@@ -157,7 +178,9 @@ fn a_full_page_checks_the_namespace_less_often_than_it_holds_readings() {
     let page = catalog.known_page(0, u64::MAX, None, &mut work).unwrap();
 
     assert_eq!(page.readings, readings[..PAGE_READINGS_MAX]);
-    assert!(work.namespace_attempts < u64::try_from(PAGE_READINGS_MAX).unwrap());
+    assert!(
+        work.namespace_attempts - work.node_attempts < u64::try_from(PAGE_READINGS_MAX).unwrap()
+    );
 }
 
 /// Links each reading into the known namespace in the writer's grammar.
