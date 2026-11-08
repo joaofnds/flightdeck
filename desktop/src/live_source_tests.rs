@@ -69,6 +69,22 @@ fn a_chart_request_carries_the_older_tail_and_a_hover_request_does_not() {
 }
 
 #[test]
+fn a_computer_request_goes_without_the_older_tail() {
+    // Goal: the Computer page, which draws no chart, reads none of the saved readings older than
+    // the full-detail context that a chart's request reads. Method: ask for the tail on Computer
+    // over a recording with a minute sealed long before its newest second.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut request = SealedRecording::request();
+    request.route = "computer".into();
+    request.earlier = crate::live_source::Earlier::Load;
+
+    let snapshot = recording.read(request).unwrap();
+
+    assert!(!snapshot.selection["selected"].is_null());
+    assert!(snapshot.selection.get("earlier_trends").is_none());
+}
+
+#[test]
 fn reader_diagnostics_returns_catalog_without_reading_a_selected_gap() {
     // Goal: diagnostics remains available without projecting a historical selection or trends.
     // Method: use a real sealed store while the committed inspection points into a gap.

@@ -849,10 +849,12 @@ fn route_shows_no_reading(route: &str) -> bool {
     route == "self"
 }
 
-/// Whether the read goes without the older tail of a page's selection.
+/// Whether the read goes without the older tail of a page's selection. The Computer page draws no
+/// chart, so nothing on it reads the tail.
 fn reader_earlier_skips(request: &Request) -> bool {
     request.earlier == Earlier::Skip
         || request.route == "apps"
+        || request.route == "computer"
         || route_shows_no_reading(&request.route)
 }
 
