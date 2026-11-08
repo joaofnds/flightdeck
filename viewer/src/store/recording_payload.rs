@@ -479,7 +479,8 @@ impl Cursor {
         let mut decoded_catalog = super::DecodedCatalog::default();
         for (index, decoded) in decoded.into_iter().enumerate() {
             let mut decoded = decoded?;
-            // Only the predecessor, which no decoder in this load decodes, leaves a minute unseeded.
+            // Only the predecessor, which no decoder in this load decodes, leaves a minute
+            // unseeded.
             if let Some(failure) = decoded.unseeded {
                 assert_eq!(index, 0);
                 self.left_out = Some(failure);
