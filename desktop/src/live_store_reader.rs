@@ -306,7 +306,7 @@ impl StoreReader {
                     })
                     .map_err(|error| format!("Store exact query: {error:?}"))?;
                 self.pending = Some((command.generation, token));
-                return Ok(Answer::Waiting);
+                return Ok(self.asked());
             }
         }
         let snapshot = payload::snapshot(&context, command, shared, None)?;
