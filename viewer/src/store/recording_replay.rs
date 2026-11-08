@@ -8,7 +8,7 @@ use crate::live_app_response::Sample;
 use crate::live_apps::committed::{Endpoint, PlacedFrame, Placement, PlacementError};
 use crate::live_apps::{AggregateError, Frame};
 use crate::recording::processes::ProcessBatch;
-use crate::recording::{Before, Refused, ScopedSealedMinute};
+use crate::recording::{Before, Refused};
 
 pub(in crate::store::recording) trait Target {
     type Error: From<Refused>;
@@ -97,19 +97,17 @@ impl Decoder {
         *next += 1;
     }
 
-    /// Replays the process frames of `sealed` deriving no Apps, so that the last of them gives the
-    /// first second of the minute after it its App rates.
+    /// Replays `processes`, a minute's process frames, deriving no Apps, so that the last of them
+    /// gives the first second of the minute after it its App rates.
     pub(super) fn visit_predecessor(
         &mut self,
-        sealed: &ScopedSealedMinute<'_>,
+        processes: &ProcessBatch,
         operation: &Operation,
     ) -> Result<(), Refused> {
         operation.check()?;
-        let batch = crate::recording::processes::read_processes_batch(sealed)?;
-        operation.check()?;
         let mut next = 0;
         let result = self.replay(
-            &batch,
+            processes,
             &mut Input {
                 next: &mut next,
                 operation,
@@ -125,14 +123,14 @@ impl Decoder {
 
     pub(super) fn visit_samples<F>(
         &mut self,
-        sealed: &ScopedSealedMinute<'_>,
+        processes: &ProcessBatch,
         operation: &Operation,
         consume: F,
     ) -> Result<(), Refused>
     where
         F: FnMut(&Endpoint, persistence::Result<&Sample>, usize) -> persistence::Result<()>,
     {
-        let result = self.visit_samples_replay(sealed, operation, consume);
+        let result = self.visit_samples_replay(processes, operation, consume);
         if result.is_err() {
             self.predecessor = None;
         }
@@ -141,7 +139,7 @@ impl Decoder {
 
     fn visit_samples_replay<F>(
         &mut self,
-        sealed: &ScopedSealedMinute<'_>,
+        processes: &ProcessBatch,
         operation: &Operation,
         consume: F,
     ) -> Result<(), Refused>
@@ -149,11 +147,9 @@ impl Decoder {
         F: FnMut(&Endpoint, persistence::Result<&Sample>, usize) -> persistence::Result<()>,
     {
         operation.check()?;
-        let batch = crate::recording::processes::read_processes_batch(sealed)?;
-        operation.check()?;
         let mut next = 0;
         self.replay(
-            &batch,
+            processes,
             &mut Input {
                 next: &mut next,
                 operation,

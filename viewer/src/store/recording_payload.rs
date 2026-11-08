@@ -59,8 +59,10 @@ pub(super) fn load(
 /// Decodes `group`, neighbouring minutes oldest first, a thread a minute, or on this thread where
 /// it holds one. The first goes on from `carried`, the decoder of the minute before it, or where
 /// the load continues from `predecessor`, seeds its own decoder from it. Each other first seeds its
-/// own decoder from the minute before it, which another thread decodes. Each result is a minute's
-/// decoder, its seconds and why its decoder could not be seeded, in the order of `group`.
+/// own decoder from the minute before it, which another thread decodes. Each minute is read once,
+/// so a decoder seeds from the read that the decoder of the minute before it decodes. Each result
+/// is a minute's decoder, its seconds and why its decoder could not be seeded, in the order of
+/// `group`.
 fn load_group(
     input: &LoadInput<'_>,
     carried: Decoder,
@@ -69,31 +71,43 @@ fn load_group(
 ) -> Vec<persistence::Result<Decoded>> {
     assert!(!group.is_empty());
     assert!(group.len() <= super::LOADERS_MAX);
-    let carried = match predecessor {
+    let mut carried = match predecessor {
         Some(_) => None,
         None => Some(carried),
     };
+    let reads = load_group_reads(input, predecessor, group);
+    // The predecessor's read, where there is one, comes before the reads of `group`.
+    let offset = usize::from(predecessor.is_some());
+    assert_eq!(reads.len(), group.len() + offset);
+    let before_of = |index: usize| match (index.checked_sub(1), predecessor) {
+        (Some(before), _) => Some((&group[before], &reads[before + offset])),
+        (None, Some(predecessor)) => Some((predecessor, &reads[0])),
+        (None, None) => None,
+    };
     if let [found] = group {
-        return vec![load_group_decode(input, carried, predecessor, found)];
+        return vec![load_group_decode(
+            input,
+            carried,
+            before_of(0),
+            found,
+            &reads[offset],
+        )];
     }
 
-    let mut carried = carried;
     thread::scope(|scope| {
         let decoders: Vec<_> = group
             .iter()
             .enumerate()
             .map(|(index, found)| {
                 let decoder = carried.take();
-                let before = match index.checked_sub(1) {
-                    Some(before) => Some(&group[before]),
-                    None => predecessor,
-                };
+                let before = before_of(index);
+                let read = &reads[index + offset];
                 let observation = persistence::work::ingestion::inherit_current();
                 thread::Builder::new()
                     .name(String::from("flightdeck-decoder"))
                     .spawn_scoped(scope, move || {
                         let observation = observation.enter();
-                        let result = load_group_decode(input, decoder, before, found);
+                        let result = load_group_decode(input, decoder, before, found, read);
                         drop(observation);
                         result
                     })
@@ -120,6 +134,71 @@ fn load_group(
     })
 }
 
+/// Reads `predecessor`, where the load continues from it, and then the minutes of `group`, a
+/// thread a minute where there are several. A decoder seeds from each of them but the last of
+/// `group`, so each of those is checked once read, as a decoder checks its own once it decoded it.
+fn load_group_reads<'input>(
+    input: &LoadInput<'input>,
+    predecessor: Option<&Found>,
+    group: &[Found],
+) -> Vec<Result<MinuteRead<'input>, Failure>> {
+    let minutes: Vec<&Found> = predecessor.into_iter().chain(group).collect();
+    assert!(minutes.len() <= super::LOADERS_MAX + 1);
+    let predecessors = minutes.len() - group.len();
+    let last = minutes.len() - 1;
+    let read = |index: usize, found: &Found| {
+        let _purpose = (index < predecessors).then(|| {
+            persistence::work::ingestion::purpose(
+                persistence::work::ingestion::Purpose::Predecessor,
+            )
+        });
+        let mut read = read_minute(
+            input.root,
+            found,
+            input.budget,
+            input.operation,
+            input.capture,
+        );
+        if index < last {
+            read = read.and_then(|read| read.check(input.operation).map(|()| read));
+        }
+        read.map_err(|refused| load_refusal(&refused))
+    };
+    if let [found] = minutes.as_slice() {
+        return vec![read(0, found)];
+    }
+
+    thread::scope(|scope| {
+        let readers: Vec<_> = minutes
+            .iter()
+            .enumerate()
+            .map(|(index, found)| {
+                let read = &read;
+                let observation = persistence::work::ingestion::inherit_current();
+                thread::Builder::new()
+                    .name(String::from("flightdeck-reader"))
+                    .spawn_scoped(scope, move || {
+                        let observation = observation.enter();
+                        let result = read(index, found);
+                        drop(observation);
+                        result
+                    })
+            })
+            .collect();
+
+        readers
+            .into_iter()
+            .map(|reader| match reader {
+                Ok(handle) => match handle.join() {
+                    Ok(read) => read,
+                    Err(panic) => panic::resume_unwind(panic),
+                },
+                Err(error) => Err(Failure::Loader(error.kind())),
+            })
+            .collect()
+    })
+}
+
 /// What decoding one minute of a group gives.
 struct Decoded {
     /// The decoder after the minute, which rates the minute after it.
@@ -127,32 +206,27 @@ struct Decoded {
     completion: Batch,
     /// Why the decoder could not be seeded from the minute before it, where it could not. That
     /// minute's first second then has no rates.
-    unseeded: Option<Refused>,
+    unseeded: Option<Failure>,
 }
 
-/// Decodes `found` with `decoder`, the decoder of the minute before it, or where another thread
-/// decodes that minute or the store holds its seconds, with a decoder seeded from `before`, that
-/// minute.
+/// Decodes `found`, which `read` read, with `decoder`, the decoder of the minute before it, or
+/// where another thread decodes that minute or the store holds its seconds, with a decoder seeded
+/// from `before`, that minute and its read.
 fn load_group_decode(
     input: &LoadInput<'_>,
     decoder: Option<Decoder>,
-    before: Option<&Found>,
+    before: Option<(&Found, &Result<MinuteRead<'_>, Failure>)>,
     found: &Found,
+    read: &Result<MinuteRead<'_>, Failure>,
 ) -> persistence::Result<Decoded> {
     let (mut decoder, unseeded) = match (decoder, before) {
         (Some(decoder), _) => (decoder, None),
-        (None, Some(before)) => load_group_seed(input, before)?,
+        (None, Some((before, read))) => load_group_seed(input, before, read)?,
         (None, None) => unreachable!("a minute after the first of a group has one before it"),
     };
     input.operation.check()?;
 
-    let completion = decoder.decode(
-        input.root,
-        found,
-        input.budget,
-        input.operation,
-        input.capture,
-    );
+    let completion = decoder.decode_read(found, read, input.budget, input.operation);
     Ok(Decoded {
         decoder,
         completion,
@@ -160,25 +234,20 @@ fn load_group_decode(
     })
 }
 
-/// A decoder holding what rates the minute after `before`, as the decoder of `before` holds after
-/// decoding it, without the catalog of `before`, which that decoder counts, and why it could not
-/// read `before`, where it could not.
+/// A decoder holding what rates the minute after `before`, which `read` read, as the decoder of
+/// `before` holds after decoding it, without the catalog of `before`, which that decoder counts,
+/// and why it could not take in `before`, where it could not.
 fn load_group_seed(
     input: &LoadInput<'_>,
     before: &Found,
-) -> persistence::Result<(Decoder, Option<Refused>)> {
+    read: &Result<MinuteRead<'_>, Failure>,
+) -> persistence::Result<(Decoder, Option<Failure>)> {
     let _purpose =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::Predecessor);
     input.operation.check()?;
     let mut decoder = Decoder::default();
 
-    let seeded = decoder.seed(
-        input.root,
-        before,
-        input.budget,
-        input.operation,
-        input.capture,
-    );
+    let seeded = decoder.seed(before, read, input.operation);
     if seeded.is_err() {
         assert!(decoder.predecessor.is_none());
         assert!(decoder.previous_run.is_none());
@@ -240,8 +309,8 @@ impl Cursor {
             let mut decoded = decoded?;
             // Only the predecessor has no decoder in this load to say why it cannot be read.
             if index == 0 && predecessor.is_some() {
-                if let Some(refused) = &decoded.unseeded {
-                    self.left_out = Some(load_refusal(refused));
+                if let Some(failure) = decoded.unseeded {
+                    self.left_out = Some(failure);
                 }
             }
             decoded_catalog.extend(&mem::take(&mut decoded.decoder.decoded_catalog));
@@ -353,6 +422,7 @@ impl Decoder {
         self.previous_run = Some(run);
     }
 
+    #[cfg(test)]
     fn decode(
         &mut self,
         root: &Path,
@@ -361,21 +431,39 @@ impl Decoder {
         operation: &Operation,
         capture: &crate::recording::InputCapture<'_>,
     ) -> Batch {
+        let read = read_minute(root, found, budget, operation, capture)
+            .map_err(|refused| load_refusal(&refused));
+        self.decode_read(found, &read, budget, operation)
+    }
+
+    /// Decodes `found`, which `read` read.
+    fn decode_read(
+        &mut self,
+        found: &Found,
+        read: &Result<MinuteRead<'_>, Failure>,
+        budget: &Arc<ByteBudget>,
+        operation: &Operation,
+    ) -> Batch {
         let mut batch = Batch {
             seconds: Vec::with_capacity(TICKS_PER_MINUTE),
             left_out: None,
         };
-        let loaded = load_minute(root, found, self, budget, operation, capture);
-        let (machine, mut apps) = match loaded {
+        let loaded = match read {
+            Ok(read) => load_minute_apps(read, self, budget, operation)
+                .map(|apps| (read, apps))
+                .map_err(|refused| load_refusal(&refused)),
+            Err(failure) => Err(*failure),
+        };
+        let (read, mut apps) = match loaded {
             Ok(loaded) => loaded,
-            Err(refused) => {
-                batch.left_out = Some(load_refusal(&refused));
+            Err(failure) => {
+                batch.left_out = Some(failure);
                 self.predecessor = None;
                 self.previous_run = None;
                 return batch;
             }
         };
-        let decoded = match self.project_machine(found, &machine, budget, |second| {
+        let decoded = match self.project_machine(found, &read.machine, budget, |second| {
             project_machine_apps(found.run, second, &mut apps, &mut batch.seconds);
         }) {
             Ok(decoded) => decoded,
@@ -389,40 +477,37 @@ impl Decoder {
                 return batch;
             }
         };
-        self.accept_machine(found.run, machine, &decoded, None);
+        self.accept_machine(found.run, read.machine.clone(), &decoded, None);
 
         batch
     }
 
-    /// Takes in of `found` only its machine readings and the last of its process frames, which
-    /// give the first second of the minute after it its rates, and leaves its seconds unread.
+    /// Takes in of `found`, which `read` read, only its machine readings and the last of its
+    /// process frames, which give the first second of the minute after it its rates, and leaves
+    /// its seconds unread.
     fn seed(
         &mut self,
-        root: &Path,
         found: &Found,
-        budget: &Arc<ByteBudget>,
+        read: &Result<MinuteRead<'_>, Failure>,
         operation: &Operation,
-        capture: &crate::recording::InputCapture<'_>,
-    ) -> Result<(), Refused> {
-        let visited = load_minute_with(
-            root,
-            found,
-            self,
-            budget,
-            operation,
-            capture,
-            |decoder, sealed| decoder.visit_predecessor(sealed, operation),
-        );
+    ) -> Result<(), Failure> {
+        let visited = match read {
+            Ok(read) => self
+                .visit_predecessor(&read.processes, operation)
+                .map(|()| read)
+                .map_err(|refused| load_refusal(&refused)),
+            Err(failure) => Err(*failure),
+        };
         match visited {
-            Ok(machine) => {
-                let decoded = decoded_of(&machine);
-                self.accept_machine(found.run, machine, &decoded, None);
+            Ok(read) => {
+                let decoded = decoded_of(&read.machine);
+                self.accept_machine(found.run, read.machine.clone(), &decoded, None);
                 Ok(())
             }
-            Err(refused) => {
+            Err(failure) => {
                 self.predecessor = None;
                 self.previous_run = None;
-                Err(refused)
+                Err(failure)
             }
         }
     }
@@ -436,6 +521,7 @@ fn load_refusal(refused: &Refused) -> Failure {
     }
 }
 
+#[cfg(test)]
 fn load_minute(
     root: &Path,
     found: &Found,
@@ -444,15 +530,25 @@ fn load_minute(
     operation: &Operation,
     capture: &crate::recording::InputCapture<'_>,
 ) -> Result<(MachineMinute, Vec<AppsSecond>), Refused> {
+    let read = read_minute(root, found, budget, operation, capture)?;
+    let apps = load_minute_apps(&read, decoder, budget, operation)?;
+
+    Ok((read.machine, apps))
+}
+
+/// The Apps of each second of `read`, which `decoder` replays.
+fn load_minute_apps(
+    read: &MinuteRead<'_>,
+    decoder: &mut Decoder,
+    budget: &Arc<ByteBudget>,
+    operation: &Operation,
+) -> Result<Vec<AppsSecond>, Refused> {
     let mut apps = Vec::with_capacity(crate::live_apps::committed::ENDPOINTS_MAX);
     let mut names = None;
-    let machine = load_minute_visit(
-        root,
-        found,
+    load_minute_visit_read(
+        read,
         decoder,
-        budget,
         operation,
-        capture,
         |endpoint, sample, losses, count| {
             let mut second = AppsSecond::default();
             load_minute_rows(&sample, apps.last(), budget, &mut second);
@@ -469,7 +565,7 @@ fn load_minute(
         },
     )?;
 
-    Ok((machine, apps))
+    Ok(apps)
 }
 
 pub(super) fn load_minute_rows(
@@ -547,6 +643,7 @@ pub(super) fn load_minute_payload(
     };
 }
 
+#[cfg(test)]
 fn load_minute_visit(
     root: &Path,
     found: &Found,
@@ -554,52 +651,80 @@ fn load_minute_visit(
     budget: &Arc<ByteBudget>,
     operation: &Operation,
     capture: &crate::recording::InputCapture<'_>,
-    mut consume: impl FnMut(
+    consume: impl FnMut(
         &crate::live_apps::committed::Endpoint,
         persistence::Result<&crate::live_app_response::Sample>,
         &persistence::Losses,
         usize,
     ) -> persistence::Result<()>,
 ) -> Result<MachineMinute, Refused> {
-    load_minute_with(
-        root,
-        found,
-        decoder,
-        budget,
-        operation,
-        capture,
-        |decoder, sealed| {
-            decoder.visit_samples(sealed, operation, |endpoint, sample, count| {
-                consume(endpoint, sample, sealed.losses(), count)
-            })
-        },
-    )
+    let read = read_minute(root, found, budget, operation, capture)?;
+    load_minute_visit_read(&read, decoder, operation, consume)?;
+
+    Ok(read.machine)
 }
 
-/// Opens `found`, reads its machine readings, lets `visit` replay its process frames into
-/// `decoder`, and checks the minute was not replaced while it was read.
-fn load_minute_with(
+/// Replays the process frames of `read` into `decoder`, handing `consume` each second's sample,
+/// and checks the minute was not replaced while it was read and replayed.
+fn load_minute_visit_read(
+    read: &MinuteRead<'_>,
+    decoder: &mut Decoder,
+    operation: &Operation,
+    mut consume: impl FnMut(
+        &crate::live_apps::committed::Endpoint,
+        persistence::Result<&crate::live_app_response::Sample>,
+        &persistence::Losses,
+        usize,
+    ) -> persistence::Result<()>,
+) -> Result<(), Refused> {
+    decoder.visit_samples(&read.processes, operation, |endpoint, sample, count| {
+        consume(endpoint, sample, read.sealed.losses(), count)
+    })?;
+    operation.check()?;
+
+    read.check(operation)
+}
+
+/// A sealed minute as a load reads it, its machine readings and its process frames, before any of
+/// them is decoded.
+struct MinuteRead<'input> {
+    sealed: ScopedSealedMinute<'input>,
+    machine: MachineMinute,
+    processes: crate::recording::processes::ProcessBatch,
+}
+
+impl MinuteRead<'_> {
+    /// Checks the minute was not replaced since it was opened.
+    fn check(&self, operation: &Operation) -> Result<(), Refused> {
+        self.sealed.revalidate_full()?;
+        operation.check()?;
+
+        Ok(())
+    }
+}
+
+/// Opens `found` and reads its machine readings and its process frames.
+fn read_minute<'input>(
     root: &Path,
     found: &Found,
-    decoder: &mut Decoder,
-    budget: &Arc<ByteBudget>,
-    operation: &Operation,
-    capture: &crate::recording::InputCapture<'_>,
-    visit: impl FnOnce(&mut Decoder, &ScopedSealedMinute<'_>) -> Result<(), Refused>,
-) -> Result<MachineMinute, Refused> {
+    budget: &'input Arc<ByteBudget>,
+    operation: &'input Operation,
+    capture: &'input crate::recording::InputCapture<'input>,
+) -> Result<MinuteRead<'input>, Refused> {
     operation.check()?;
     let sealed = open_minute(root, found, budget, operation, capture)?;
     let mut machine = MachineMinute::default();
     read_machine(&sealed, &mut machine)?;
     operation.check()?;
 
-    visit(decoder, &sealed)?;
+    let processes = crate::recording::processes::read_processes_batch(&sealed)?;
     operation.check()?;
 
-    sealed.revalidate_full()?;
-    operation.check()?;
-
-    Ok(machine)
+    Ok(MinuteRead {
+        sealed,
+        machine,
+        processes,
+    })
 }
 
 pub(super) fn open_minute<'input>(

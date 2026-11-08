@@ -100,7 +100,7 @@ const INTERFACE_COUNTERS: [&str; 7] = [
 
 /// One minute's machine readings in publication order, as the collector took them, with no
 /// rate computed. The caller owns it and reuses it from minute to minute.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MachineMinute {
     pub ticks: Vec<TickRow>,
     /// Each tick's CPUs, in publication order and then CPU order.
