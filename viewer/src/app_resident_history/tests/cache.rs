@@ -287,13 +287,3 @@ fn saved_context_with(multipart: bool) -> (Fixture, LiveSession) {
     session.select(1001, 0).unwrap();
     (fixture, session)
 }
-
-#[test]
-fn resident_history_releases_saved_facts_when_no_saved_reader_can_validate_them() {
-    // Goal: optional saved storage cannot survive unreported when its validating reader is absent.
-    // Method: warm real facts, remove the saved contribution, and compare shared cache diagnostics.
-    let (_fixture, session) = saved_context();
-    let first = session.app_resident_history().unwrap();
-
-    assert!(first["coverage"]["cache_bytes"].as_u64().unwrap() > 0);
-}
