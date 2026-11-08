@@ -123,25 +123,15 @@ pub(super) struct Terminal {
 }
 
 impl Terminal {
+    /// The terminal of `run` from `machine`, the last tick a decoder kept, where it kept one.
     fn from_minute(
         run: RunIdentity,
-        mut machine: MachineMinute,
+        machine: MachineMinute,
         process: Option<crate::recording::Before>,
     ) -> Option<Self> {
-        let publication = machine.ticks.last()?.publication;
-        machine.ticks.retain(|row| row.publication == publication);
-        machine.cpus.retain(|row| row.publication == publication);
-        machine.memory.retain(|row| row.publication == publication);
-        machine
-            .interfaces
-            .retain(|row| row.publication == publication);
-        machine
-            .gpu_states
-            .retain(|row| row.publication == publication);
-        machine
-            .core_states
-            .retain(|row| row.publication == publication);
-        machine.fans.retain(|row| row.publication == publication);
+        if machine.ticks.is_empty() {
+            return None;
+        }
         assert_eq!(machine.ticks.len(), 1);
 
         Some(Self {

@@ -100,7 +100,7 @@ const INTERFACE_COUNTERS: [&str; 7] = [
 
 /// One minute's machine readings in publication order, as the collector took them, with no
 /// rate computed. The caller owns it and reuses it from minute to minute.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct MachineMinute {
     pub ticks: Vec<TickRow>,
     /// Each tick's CPUs, in publication order and then CPU order.
@@ -228,6 +228,42 @@ impl MachineMinute {
         self.gpu_states.clear();
         self.core_states.clear();
         self.fans.clear();
+    }
+
+    /// Replaces these readings with those of the last tick of `minute`, in the room these hold.
+    pub fn keep_last_tick_of(&mut self, minute: &MachineMinute) {
+        self.clear();
+        let Some(last) = minute.ticks.last() else {
+            return;
+        };
+
+        let publication = last.publication;
+        self.ticks.push(last.clone());
+        let of_last = |row_publication: u64| row_publication == publication;
+        self.cpus
+            .extend(minute.cpus.iter().filter(|row| of_last(row.publication)));
+        self.memory
+            .extend(minute.memory.iter().filter(|row| of_last(row.publication)));
+        self.interfaces.extend(
+            minute
+                .interfaces
+                .iter()
+                .filter(|row| of_last(row.publication)),
+        );
+        self.gpu_states.extend(
+            minute
+                .gpu_states
+                .iter()
+                .filter(|row| of_last(row.publication)),
+        );
+        self.core_states.extend(
+            minute
+                .core_states
+                .iter()
+                .filter(|row| of_last(row.publication)),
+        );
+        self.fans
+            .extend(minute.fans.iter().filter(|row| of_last(row.publication)));
     }
 
     /// Appends the machine readings of `tick`, the ring's publication `publication`, as the

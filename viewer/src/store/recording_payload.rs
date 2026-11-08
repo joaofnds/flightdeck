@@ -572,15 +572,17 @@ impl Decoder {
         project_machine(found, machine, before, budget, take)
     }
 
+    /// Takes in `machine`, the machine readings of a minute of `run` that `decoded` describes,
+    /// keeping its last tick, the one that rates the minute after it.
     pub(super) fn accept_machine(
         &mut self,
         run: RunIdentity,
-        machine: MachineMinute,
+        machine: &MachineMinute,
         decoded: &super::DecodedCatalog,
         reservation: Option<ByteReservation>,
     ) {
         self.decoded_catalog.extend(decoded);
-        self.previous = machine;
+        self.previous.keep_last_tick_of(machine);
         self.machine_reservation = reservation;
         self.previous_run = Some(run);
     }
@@ -640,7 +642,7 @@ impl Decoder {
                 return batch;
             }
         };
-        self.accept_machine(found.run, read.machine.clone(), &decoded, None);
+        self.accept_machine(found.run, &read.machine, &decoded, None);
 
         batch
     }
@@ -665,7 +667,7 @@ impl Decoder {
         match visited {
             Ok(read) => {
                 let decoded = decoded_of(&read.machine);
-                self.accept_machine(found.run, read.machine.clone(), &decoded, None);
+                self.accept_machine(found.run, &read.machine, &decoded, None);
                 Ok(())
             }
             Err(failure) => {

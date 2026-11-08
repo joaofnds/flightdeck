@@ -929,39 +929,36 @@ fn terminal_projection_keeps_only_the_last_raw_tick_and_all_its_tables() {
     let mut found = Vec::new();
     super::super::find(&fixture.root, &mut found, None).unwrap();
     let mut decoder = Decoder::default();
-    drop(decoder.decode(
+    let (mut machine, _) = super::load_minute(
         &fixture.root,
         &found[0],
+        &mut decoder,
         &budget,
         &operation,
         &AdmittedTable::from_file_budgeted,
-    ));
-    decoder.previous.ticks[1].wall_ns = None;
+    )
+    .unwrap();
+    machine.ticks[1].wall_ns = None;
     for publication in 1..=2 {
-        decoder
-            .previous
-            .gpu_states
-            .push(crate::recording::GpuStateRow {
-                publication,
-                state: 0,
-                active_ns: publication,
-            });
-        decoder
-            .previous
-            .core_states
-            .push(crate::recording::CoreStateRow {
-                publication,
-                core: 0,
-                state: 0,
-                active_ns: publication,
-                frequency_khz: Some(1),
-            });
-        decoder.previous.fans.push(crate::recording::FanRow {
+        machine.gpu_states.push(crate::recording::GpuStateRow {
+            publication,
+            state: 0,
+            active_ns: publication,
+        });
+        machine.core_states.push(crate::recording::CoreStateRow {
+            publication,
+            core: 0,
+            state: 0,
+            active_ns: publication,
+            frequency_khz: Some(1),
+        });
+        machine.fans.push(crate::recording::FanRow {
             publication,
             fan: 0,
             rpm: 1.0,
         });
     }
+    decoder.accept_machine(found[0].run, &machine, &super::decoded_of(&machine), None);
 
     let terminal = decoder.terminal().unwrap();
 

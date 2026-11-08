@@ -258,7 +258,7 @@ impl Startup {
         }
         self.cursor.decoder.accept_machine(
             minute.found.run,
-            machine,
+            &machine,
             &decoded,
             Some(machine_reservation),
         );
