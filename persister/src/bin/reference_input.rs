@@ -54,6 +54,12 @@ const SMC_UNAVAILABLE_SECOND: u64 = 302;
 /// 303 and 306 of the contract's transitions.
 const THERMAL_FAIR_SECOND: u64 = 304;
 const THERMAL_SERIOUS_SECOND: u64 = 305;
+/// The offsets of each period's incident seconds, one at each position of a ten-second bucket.
+const INCIDENT_OFFSETS: [u64; 10] = [10, 21, 32, 43, 54, 65, 76, 87, 98, 109];
+/// The process of the lowest mean-ranked App whose CPU time and energy rise in an incident.
+const INCIDENT_PROCESS: u64 = 0;
+/// How many times faster than usual the incident process spends CPU time and energy in one.
+const INCIDENT_FOLD: u64 = 20;
 /// The contract's origin, 1,800,000,000 seconds after the epoch.
 const ORIGIN_WALL_NS: u64 = 1_800_000_000 * NANOSECONDS_PER_SECOND;
 /// The continuous and awake clocks at the first second, past the uptime of any Mac, since a
@@ -81,8 +87,9 @@ const DISK_MEDIA_ID_FIRST: u64 = 0x2_0000;
 /// The GPU's active states and each core's, as many as the ring has room for.
 const GPU_STATES: usize = 2;
 const CORE_STATES: usize = 2;
-/// The contract's baseline GPU, 10% active, half of it in each state.
+/// The contract's baseline GPU, 10% active, and its peak, 90%, half of each in each state.
 const GPU_STATE_ACTIVE_NS_PER_SECOND: u64 = 50_000_000;
+const GPU_STATE_ACTIVE_NS_PER_INCIDENT_SECOND: u64 = 450_000_000;
 const GPU_ENERGY_NJ_PER_SECOND: u64 = 500_000_000;
 const GIB: u64 = 1 << 30;
 const MEMORY_TOTAL_BYTES: u64 = 24 * GIB;
@@ -92,6 +99,13 @@ const GAUGES_BASELINE: Gauges = Gauges {
     fan_rpm: [1_200.0, 1_300.0],
     temperatures_celsius: [35.0, 36.0, 37.0],
     memory_used_bytes: 8 * GIB,
+};
+/// The contract's peak gauges, which each incident second reads.
+const GAUGES_PEAK: Gauges = Gauges {
+    power_watts: 40.0,
+    fan_rpm: [4_000.0, 4_100.0],
+    temperatures_celsius: [80.0, 81.0, 82.0],
+    memory_used_bytes: 12 * GIB,
 };
 /// The gauges of each period's zero second.
 const GAUGES_ZERO: Gauges = Gauges {
@@ -125,6 +139,20 @@ const _: () = {
     assert!(SMC_UNAVAILABLE_SECOND + 1 < THERMAL_FAIR_SECOND);
     assert!(THERMAL_FAIR_SECOND + 1 == THERMAL_SERIOUS_SECOND);
     assert!(THERMAL_SERIOUS_SECOND + 1 < PERIOD_SECONDS);
+    // The incidents take the ten positions of a ten-second bucket in order, each a valid second
+    // before the other special seconds.
+    let mut incident = 0;
+    let mut position: u64 = 0;
+    while incident < INCIDENT_OFFSETS.len() {
+        assert!(INCIDENT_OFFSETS[incident] % 10 == position);
+        if 0 < incident {
+            assert!(INCIDENT_OFFSETS[incident - 1] < INCIDENT_OFFSETS[incident]);
+        }
+        incident += 1;
+        position += 1;
+    }
+    assert!(INCIDENT_OFFSETS[INCIDENT_OFFSETS.len() - 1] < ZERO_SECOND);
+    assert!(INCIDENT_PROCESS < PROCESSES);
     // Each CPU idles for what it does not spend, so no CPU's idle ticks fall below zero.
     assert!(CPUS < 85);
     // A third of the cores are super cores.
@@ -132,9 +160,12 @@ const _: () = {
     assert!(DISKS <= DISKS_MAX);
     // The GPU's states add up to the contract's 10%.
     assert!(2 * GPU_STATE_ACTIVE_NS_PER_SECOND == NANOSECONDS_PER_SECOND / 10);
+    assert!(2 * GPU_STATE_ACTIVE_NS_PER_INCIDENT_SECOND == 9 * NANOSECONDS_PER_SECOND / 10);
     // The memory chart's parts of the machine memory are exact.
     assert!(GAUGES_BASELINE.memory_used_bytes.is_multiple_of(8));
     assert!(GAUGES_BASELINE.memory_used_bytes < MEMORY_TOTAL_BYTES);
+    assert!(GAUGES_PEAK.memory_used_bytes.is_multiple_of(8));
+    assert!(GAUGES_PEAK.memory_used_bytes < MEMORY_TOTAL_BYTES);
 };
 
 fn main() -> ExitCode {
@@ -534,12 +565,16 @@ impl Second {
         continuous_ns: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let valid = valid_seconds(second);
-        let gauges = if second % PERIOD_SECONDS == ZERO_SECOND {
+        let incidents = incident_seconds(second);
+        let offset = second % PERIOD_SECONDS;
+        let gauges = if offset == ZERO_SECOND {
             GAUGES_ZERO
+        } else if INCIDENT_OFFSETS.contains(&offset) {
+            GAUGES_PEAK
         } else {
             GAUGES_BASELINE
         };
-        let thermal_pressure = match second % PERIOD_SECONDS {
+        let thermal_pressure = match offset {
             THERMAL_FAIR_SECOND => THERMAL_MODERATE,
             THERMAL_SERIOUS_SECOND => THERMAL_HEAVY,
             _ => THERMAL_NOMINAL,
@@ -547,7 +582,7 @@ impl Second {
 
         Ok(Self {
             processes: (0..PROCESSES)
-                .map(|process| publish_process(process, second))
+                .map(|process| publish_process(process, valid, incidents))
                 .collect::<Result<_, _>>()?,
             identities: (0..PROCESSES)
                 .zip(programs)
@@ -562,7 +597,10 @@ impl Second {
                 .map(|interface| publish_interface(interface, valid))
                 .collect::<Result<_, _>>()?,
             gpu_energy_nj: valid * GPU_ENERGY_NJ_PER_SECOND,
-            gpu_active_ns: [valid * GPU_STATE_ACTIVE_NS_PER_SECOND; GPU_STATES],
+            gpu_active_ns: [valid * GPU_STATE_ACTIVE_NS_PER_SECOND
+                + incidents
+                    * (GPU_STATE_ACTIVE_NS_PER_INCIDENT_SECOND - GPU_STATE_ACTIVE_NS_PER_SECOND);
+                GPU_STATES],
             cores: (0..CPUS).map(|core| publish_core(core, valid)).collect(),
             battery: publish_battery(continuous_ns),
             disks: publish_disks(continuous_ns, valid)?,
@@ -595,17 +633,37 @@ fn valid_seconds(second: u64) -> u64 {
     second - invalid
 }
 
-/// Process `process`'s readings at `second`, as the contract gives them.
-fn publish_process(process: u64, second: u64) -> Result<Process, std::num::TryFromIntError> {
-    let valid = valid_seconds(second);
+/// The contract's incident seconds from 1 to `second`.
+fn incident_seconds(second: u64) -> u64 {
+    // The division floors, to the periods that end by `second`.
+    let periods = second / PERIOD_SECONDS;
+    let offset = second % PERIOD_SECONDS;
+    let incidents_in_period = INCIDENT_OFFSETS
+        .iter()
+        .filter(|incident| **incident <= offset)
+        .count();
+
+    collector::u64_from_usize(INCIDENT_OFFSETS.len()) * periods
+        + collector::u64_from_usize(incidents_in_period)
+}
+
+/// Process `process`'s readings after `valid` valid seconds, `incidents` of them incident
+/// seconds, as the contract gives them.
+fn publish_process(
+    process: u64,
+    valid: u64,
+    incidents: u64,
+) -> Result<Process, std::num::TryFromIntError> {
+    // The incident process spends `INCIDENT_FOLD` seconds' CPU time and energy in each incident.
+    let spending = valid + u64::from(process == INCIDENT_PROCESS) * (INCIDENT_FOLD - 1) * incidents;
 
     Ok(Process {
         pid: PID_FIRST + i32::try_from(process)?,
         usage: Usage {
             awake_ns_at_start: ORIGIN_CONTINUOUS_NS - NANOSECONDS_PER_SECOND,
-            user_ns: CPU_BASE_NS + 1_000 * process + valid * 1_000_000 * (process % 8 + 1),
+            user_ns: CPU_BASE_NS + 1_000 * process + spending * 1_000_000 * (process % 8 + 1),
             system_ns: 0,
-            energy_nj: valid * 1_000 * (process + 1),
+            energy_nj: spending * 1_000 * (process + 1),
             instructions: 0,
             super_instructions: 0,
             cycles: 0,
@@ -895,6 +953,16 @@ mod tests {
         let valid = [599, 600, 900, 902].map(valid_seconds);
 
         assert_eq!([597, 598, 897, 898], valid);
+    }
+
+    #[test]
+    fn counts_ten_incident_seconds_in_each_period() {
+        // Goal: every period holds the contract's ten incidents, past the first period too.
+        // Method: count the incident seconds on each side of the first incident of the first
+        // and the second period, and at the end of each.
+        let incidents = [9, 10, 599, 609, 610, 1_199].map(incident_seconds);
+
+        assert_eq!([0, 1, 10, 10, 11, 20], incidents);
     }
 
     #[test]

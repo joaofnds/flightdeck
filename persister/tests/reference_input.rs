@@ -25,6 +25,8 @@ mod tests {
     const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
     const PROCESS_ZERO_PID: i32 = 41_000;
     const GIB: u64 = 1 << 30;
+    /// The first period's incident seconds, one at each position of a ten-second bucket.
+    const INCIDENT_SECONDS: [u64; 10] = [10, 21, 32, 43, 54, 65, 76, 87, 98, 109];
 
     #[test]
     fn saves_process_zero_cpu_time_above_two_to_the_fifty_third_exactly() {
@@ -48,11 +50,66 @@ mod tests {
     fn advances_no_process_counter_at_the_zero_second_or_the_missed_tick() {
         // Goal: neither second 300, which reads zero, nor the missed tick 301 adds to a
         // process's counters. Method: read process 0's counters at seconds 299, 300 and 302,
-        // which follow 299, 299 and 300 of the contract's valid seconds.
+        // which follow 299, 299 and 300 of the contract's valid seconds, ten of them incidents.
         let counters =
             [299, 300, 302].map(|second| input().process_counters(PROCESS_ZERO_PID, second));
 
-        assert_eq!([299, 299, 300].map(process_zero_counters), counters);
+        assert_eq!(
+            [(299, 10), (299, 10), (300, 10)]
+                .map(|(valid, incidents)| process_zero_counters(valid, incidents)),
+            counters
+        );
+    }
+
+    #[test]
+    fn grows_process_zero_cpu_and_energy_twentyfold_in_each_incident_second() {
+        // Goal: process 0, the incident process, spends twenty times its CPU time and energy in
+        // each incident second, and its disk counters keep their pace. Method: read its growth
+        // over each of the first period's incident seconds and over the second after each.
+        let growth = INCIDENT_SECONDS.map(|second| {
+            [second, second + 1].map(|second| input().process_growth(PROCESS_ZERO_PID, second))
+        });
+
+        assert_eq!(
+            [[
+                ProcessCounters {
+                    cpu_ns: 20_000_000,
+                    energy_nj: 20_000,
+                    disk_read_bytes: 4_096,
+                    disk_written_bytes: 2_048,
+                },
+                ProcessCounters {
+                    cpu_ns: 1_000_000,
+                    energy_nj: 1_000,
+                    disk_read_bytes: 4_096,
+                    disk_written_bytes: 2_048,
+                },
+            ]; 10],
+            growth
+        );
+    }
+
+    #[test]
+    fn reads_every_gauge_at_its_peak_in_each_incident_second() {
+        // Goal: each incident second reads every gauge the contract names at its peak. Method:
+        // read the gauges in each of the first period's incident seconds.
+        let gauges = INCIDENT_SECONDS.map(|second| input().gauges(second));
+
+        assert_eq!(
+            vec![
+                Gauges {
+                    gpu_active_ns: 900_000_000,
+                    smc: Smc {
+                        power_watts: Some(40.0),
+                        fan_rpm: vec![4_000.0, 4_100.0],
+                        temperatures_celsius: [Some(80.0), Some(81.0), Some(82.0)],
+                    },
+                    memory_used_bytes: 12 * GIB,
+                };
+                10
+            ],
+            gauges.to_vec()
+        );
     }
 
     #[test]
@@ -175,12 +232,12 @@ mod tests {
         }
     }
 
-    /// Process 0's counters after `valid` valid seconds, as the contract gives them for process
-    /// index 0.
-    fn process_zero_counters(valid: u64) -> ProcessCounters {
+    /// Process 0's counters after `valid` valid seconds, `incidents` of them incident seconds,
+    /// as the contract gives them for process index 0.
+    fn process_zero_counters(valid: u64, incidents: u64) -> ProcessCounters {
         ProcessCounters {
-            cpu_ns: (1 << 53) + 1_000_000 * valid,
-            energy_nj: 1_000 * valid,
+            cpu_ns: (1 << 53) + 1_000_000 * (valid + 19 * incidents),
+            energy_nj: 1_000 * (valid + 19 * incidents),
             disk_read_bytes: 4_096 * valid,
             disk_written_bytes: 2_048 * valid,
         }
@@ -248,6 +305,19 @@ mod tests {
                 energy_nj: cell(&row, 1),
                 disk_read_bytes: cell(&row, 2),
                 disk_written_bytes: cell(&row, 3),
+            }
+        }
+
+        /// How far the counters of the process `pid` grew over `second` of the input.
+        fn process_growth(&self, pid: i32, second: u64) -> ProcessCounters {
+            let before = self.process_counters(pid, second - 1);
+            let after = self.process_counters(pid, second);
+
+            ProcessCounters {
+                cpu_ns: after.cpu_ns - before.cpu_ns,
+                energy_nj: after.energy_nj - before.energy_nj,
+                disk_read_bytes: after.disk_read_bytes - before.disk_read_bytes,
+                disk_written_bytes: after.disk_written_bytes - before.disk_written_bytes,
             }
         }
 
@@ -475,7 +545,7 @@ mod tests {
 
     /// The gauges the contract names: the GPU's active time over the second before, the SMC's
     /// gauges, and the machine memory, as the memory chart adds it up.
-    #[derive(Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq)]
     struct Gauges {
         gpu_active_ns: u64,
         smc: Smc,
@@ -484,7 +554,7 @@ mod tests {
 
     /// The gauges the SMC reads: the power, the fans, and the chip's, the CPU's and the GPU's
     /// temperatures.
-    #[derive(Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq)]
     struct Smc {
         power_watts: Option<f32>,
         fan_rpm: Vec<f32>,
@@ -499,7 +569,7 @@ mod tests {
     }
 
     /// A process's counters, its CPU time the sum of its user and system time.
-    #[derive(Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     struct ProcessCounters {
         cpu_ns: u64,
         energy_nj: u64,
