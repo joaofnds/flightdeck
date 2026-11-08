@@ -305,7 +305,7 @@ fn a_hidden_overview_drawn_from_the_store_leaves_its_reader_idle(cx: &mut TestAp
 
 #[gpui::test]
 fn a_hidden_page_drawn_from_its_readings_leaves_its_reader_idle(cx: &mut TestAppContext) {
-    // Goal: hiding a page stops background ingestion even when its readings use the legacy reader.
+    // Goal: hiding a page stops background ingestion even when saved minutes give its readings.
     // Method: hide a page without a store View and step the resting reader over unopened input.
     let mut window = VisibilityHarness::open(cx);
     let recording = SealedRecording::new();

@@ -8,8 +8,9 @@ use crate::live_app_response::KeyKind;
 mod named;
 
 #[test]
-fn retains_selected_group_rates_and_exact_bytes_across_sealing() {
-    // Publish large cumulative counters, then compare the group interval before and after sealing.
+fn retains_selected_group_rates_and_exact_bytes_in_a_saved_window() {
+    // Goal: a saved window keeps a group's rates and the exact bytes of large counters.
+    // Method: publish large cumulative counters, seal them, and read the group with a new reader.
     let mut fixture = Fixture::new();
     fixture.set_clock_intervals(2_000_000_000, 100_000_000);
     let mut usage = usage();
@@ -42,11 +43,11 @@ fn retains_selected_group_rates_and_exact_bytes_across_sealing() {
 }
 
 #[test]
-fn keeps_a_group_apart_from_the_other_executables_of_its_app_across_sealing() {
+fn keeps_a_group_apart_from_the_other_executables_of_its_app_in_a_window_s_parts() {
     // Goal: a group's history from the parts a sealed window keeps counts only the processes
-    // of its App that run the group's executable, as the live history does.
-    // Method: publish an App running two executables, seal the window with its Apps' parts,
-    // and compare the history of one executable's group before and after sealing.
+    // of its App that run the group's executable, as its history from the window's rows does.
+    // Method: publish an App running two executables, read one executable's group from the
+    // window sealed without its Apps' parts, then seal it with them and read the group again.
     let mut fixture = Fixture::new();
     let rows = [
         named::member(7, b"worker", b"/A.app", usage()),
@@ -58,7 +59,7 @@ fn keeps_a_group_apart_from_the_other_executables_of_its_app_across_sealing() {
     named::publish(&mut fixture, 2, &rows);
     fixture.seal();
     session.list_saved().unwrap();
-    let live = worker(&mut session);
+    let from_rows = worker(&mut session);
     drop(session);
     fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
     collector::recording::Registry {
@@ -69,10 +70,10 @@ fn keeps_a_group_apart_from_the_other_executables_of_its_app_across_sealing() {
     .unwrap();
     let mut reopened = LiveSession::open(&fixture.root).unwrap();
 
-    let saved = worker(&mut reopened);
+    let from_parts = worker(&mut reopened);
 
-    assert_eq!(live["points"][1]["members"], 1);
-    assert_eq!(saved["points"], live["points"]);
+    assert_eq!(from_rows["points"][1]["members"], 1);
+    assert_eq!(from_parts["points"], from_rows["points"]);
 }
 
 fn worker(session: &mut LiveSession) -> Value {
