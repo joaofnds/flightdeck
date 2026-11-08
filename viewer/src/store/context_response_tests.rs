@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use crate::allocation_tests::observe;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{APPS_PAGE_ROWS_MAX, Page};
 use crate::store::{ByteBudget, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Store};
@@ -87,6 +88,20 @@ fn an_apps_page_lists_every_app_one_second_holds() {
         response["apps"].as_array().unwrap().len()
     );
     assert_eq!(response["page"]["next_offset"], Value::Null);
+}
+
+#[test]
+fn a_response_object_takes_its_chart_without_copying_it() {
+    // Goal: a selection's chart reaches its response without a second copy of every point.
+    // Method: count the allocations of one object over a chart of one point and of 1,000.
+    let point = json!({"cpu_percent": 1.0, "run": "1"});
+    let short = Value::Array(vec![point.clone()]);
+    let long = Value::Array(vec![point; 1000]);
+
+    let (_short, short_requests) = observe(|| super::object([("trends", short)]));
+    let (_long, long_requests) = observe(|| super::object([("trends", long)]));
+
+    assert_eq!(long_requests, short_requests);
 }
 
 fn retained(fixture: &Fixture) -> Arc<QueryContext> {

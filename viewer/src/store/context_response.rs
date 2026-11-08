@@ -4,7 +4,7 @@ use std::sync::Arc;
 use collector::recording::{identity_text, parse_identity};
 use collector::ring::Identity;
 use persistence::{Error, Result};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::native::Origin;
 use super::response::{JSON_BYTES_MAX, json_charge};
@@ -153,10 +153,16 @@ impl QueryContext {
 
         Response::json(
             reservation,
-            json!({"second":self.selected_second(),
-            "context_last_second":self.context_last_second(),"selected":selected_identity,
-            "alternatives":alternatives,
-            "summary":summary,"trends":trends,"context_seconds":900,"context_error":null}),
+            object([
+                ("second", json!(self.selected_second())),
+                ("context_last_second", json!(self.context_last_second())),
+                ("selected", selected_identity),
+                ("alternatives", Value::Array(alternatives)),
+                ("summary", summary),
+                ("trends", Value::Array(trends)),
+                ("context_seconds", json!(900)),
+                ("context_error", Value::Null),
+            ]),
         )
     }
 
@@ -201,6 +207,17 @@ impl QueryContext {
 
         Ok(points)
     }
+}
+
+/// A JSON object of `entries` in their order, which takes each value where `json!` would copy it
+/// through `Serialize`, since a selection's chart is the largest value a Store response holds.
+fn object<const COUNT: usize>(entries: [(&str, Value); COUNT]) -> Value {
+    let mut object = Map::with_capacity(COUNT);
+    for (key, value) in entries {
+        object.insert(key.to_owned(), value);
+    }
+
+    Value::Object(object)
 }
 
 fn trends_charge(reservation: &mut ByteReservation, bytes: usize) -> Result<()> {
