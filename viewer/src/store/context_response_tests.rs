@@ -1,40 +1,37 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{APPS_PAGE_ROWS_MAX, Page};
 use crate::store::{ByteBudget, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Store};
 use crate::{Cancellation, LiveSession};
 
 #[test]
-fn a_native_selection_matches_legacy_measurements_after_its_source_is_gone() {
-    // Goal: the GUI compatibility response contains exactly the original selected facts.
-    // Method: freeze real LiveSession output, then remove every producer before formatting.
+fn a_native_selection_matches_the_saved_minute_after_its_source_is_gone() {
+    // Goal: the Store's selection response contains exactly the saved minute's selected facts.
+    // Method: read the saved minute's selection, then remove every producer before formatting.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
     let context = retained(&fixture);
     fixture.seal();
-    let mut legacy = LiveSession::open(&fixture.root).unwrap();
-    let expected = crate::live::select_newest(&mut legacy);
-    drop(legacy);
+    let mut saved = LiveSession::open(&fixture.root).unwrap();
+    let mut expected = crate::live::select_newest(&mut saved);
+    drop(saved);
     drop(fixture);
 
-    let actual = context
+    let mut actual = context
         .selection(&Arc::new(Cancellation::default()), 0)
-        .unwrap();
+        .unwrap()
+        .clone();
 
-    assert_eq!(actual["second"], expected["second"]);
-    assert_eq!(
-        actual["context_last_second"],
-        expected["context_last_second"]
-    );
-    assert_eq!(actual["summary"], expected["summary"]);
-    assert_eq!(actual["trends"], expected["trends"]);
-    assert_eq!(
-        actual["selected"]["publication"],
-        expected["selected"]["publication"]
-    );
+    let context_error = actual.as_object_mut().unwrap().remove("context_error");
+    losses_comparable(&mut actual);
+    losses_comparable(&mut expected);
+    assert_eq!(context_error, Some(Value::Null));
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -89,7 +86,7 @@ fn an_apps_page_lists_every_app_one_second_holds() {
         response["page"]["total"],
         response["apps"].as_array().unwrap().len()
     );
-    assert_eq!(response["page"]["next_offset"], serde_json::Value::Null);
+    assert_eq!(response["page"]["next_offset"], Value::Null);
 }
 
 fn retained(fixture: &Fixture) -> Arc<QueryContext> {
@@ -124,4 +121,25 @@ fn retained_with_budget(fixture: &Fixture, budget: &Arc<ByteBudget>) -> Arc<Quer
     }
 
     panic!("query bound exhausted");
+}
+
+/// Names a source's losses alike on both routes, since a saved minute reports the losses of its
+/// window and the Store those of the reader that took its readings.
+pub(in crate::store) fn losses_comparable(value: &mut Value) {
+    let mut values = vec![value];
+    while let Some(value) = values.pop() {
+        match value {
+            Value::Object(fields) => {
+                if fields.contains_key("window_losses") || fields.contains_key("reader_losses") {
+                    let window = fields.remove("window_losses").unwrap_or(Value::Null);
+                    let reader = fields.remove("reader_losses").unwrap_or(Value::Null);
+                    let losses = if window.is_null() { reader } else { window };
+                    fields.insert("losses".to_owned(), losses);
+                }
+                values.extend(fields.values_mut());
+            }
+            Value::Array(items) => values.extend(items.iter_mut()),
+            _ => {}
+        }
+    }
 }

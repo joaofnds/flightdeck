@@ -18,7 +18,7 @@ const POINT_BYTES_MAX: usize = 8 * 1024 * 1024;
 
 #[cfg(test)]
 #[path = "context_response_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 impl QueryContext {
     #[must_use]

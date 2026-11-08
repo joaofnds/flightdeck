@@ -2,25 +2,26 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::live::identity_fixture::Fixture;
+use crate::store::context_response::tests::losses_comparable;
 use crate::store::{ByteBudget, QueryContext, QueryOutcome, QueryRequest, QuerySelection, Store};
 use crate::{Cancellation, LiveSession};
 
 #[test]
-fn native_cpu_presentations_match_legacy_after_their_source_is_gone() {
+fn native_cpu_presentations_match_the_saved_minutes_after_their_source_is_gone() {
     // Goal: CPU detail and history preserve the exact accepted measurements and identities.
-    // Method: freeze legacy output, then release every source before formatting Store intervals.
+    // Method: read the saved minutes' CPU output, then drop every source before the Store answers.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
     fixture.seal();
-    let mut legacy = LiveSession::open(&fixture.root).unwrap();
+    let mut saved = LiveSession::open(&fixture.root).unwrap();
     fixture.seal();
-    legacy.list_saved().unwrap();
-    crate::live::select_newest(&mut legacy);
-    let detail = legacy.cpu_detail().unwrap();
-    let history = legacy.cpu_history(0).unwrap();
+    saved.list_saved().unwrap();
+    crate::live::select_newest(&mut saved);
+    let detail = saved.cpu_detail().unwrap();
+    let history = saved.cpu_history(0).unwrap();
     let context = retained(&fixture);
-    drop(legacy);
+    drop(saved);
     drop(fixture);
     let cancellation = Arc::new(Cancellation::default());
 
@@ -52,30 +53,24 @@ fn cpu_detail_rejects_a_changed_selected_clock() {
 #[test]
 fn cpu_detail_preserves_a_predecessor_above_the_displayed_wall_range() {
     // Goal: clock rollback preserves the true previous identity without inventing a rate.
-    // Method: follow a lower-wall publication and compare detail with the legacy native reader.
+    // Method: follow a lower-wall publication and compare detail with the saved minute's.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(10_000);
     fixture.publish_with_system_rows(100);
     let context = retained(&fixture);
     fixture.seal();
-    let mut legacy = LiveSession::open(&fixture.root).unwrap();
-    legacy.select(100, 0).unwrap();
-    let expected = legacy.cpu_detail().unwrap();
+    let mut saved = LiveSession::open(&fixture.root).unwrap();
+    saved.select(100, 0).unwrap();
+    let mut expected = saved.cpu_detail().unwrap();
 
-    let actual = context
+    let mut actual = context
         .cpu_detail(&Arc::new(Cancellation::default()), 0)
-        .unwrap();
+        .unwrap()
+        .clone();
 
-    assert_eq!(actual["cpus"], expected["cpus"]);
-    assert_eq!(actual["interval_available"], expected["interval_available"]);
-    assert_eq!(
-        actual["observation"]["publication"],
-        expected["observation"]["publication"]
-    );
-    assert_eq!(
-        actual["previous_observation"]["publication"],
-        expected["previous_observation"]["publication"]
-    );
+    losses_comparable(&mut actual);
+    losses_comparable(&mut expected);
+    assert_eq!(actual, expected);
 }
 
 fn retained(fixture: &Fixture) -> Arc<QueryContext> {
