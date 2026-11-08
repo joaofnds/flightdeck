@@ -299,14 +299,32 @@ fn hands_the_trace_work_discarded_inside_kept_tentative_work_as_discarded() {
 }
 
 #[test]
-fn records_nothing_tentatively_outside_a_trace() {
-    // Goal: production work, which no trace observes, holds no events back.
-    // Method: open a tentative scope with no trace active and record into it.
+fn refuses_a_truncated_observation_when_kept_tentative_work_fills_the_rest_of_the_trace() {
+    // Goal: tentative work kept into a trace that already holds events can neither grow the trace
+    // past its capacity nor shorten the event list a work-count invariant is certified from.
+    // Method: record half the trace's capacity directly, keep tentative work that records the
+    // other half and one event more, then take a snapshot.
+    let trace = Trace::new(RUN.recording);
+    let scope = trace.enter();
+    for _event in 0..EVENTS_MAX / 2 {
+        record_publication(RUN, 1, Kind::RingRead);
+    }
     let (tentative_scope, tentative) = tentative();
-
-    record_publication(RUN, 1, Kind::AppDerivation);
-
-    assert!(!is_active());
+    for _event in 0..=EVENTS_MAX / 2 {
+        record_publication(RUN, 2, Kind::RingRead);
+    }
     drop(tentative_scope);
+
     tentative.keep();
+
+    let mut output = Vec::new();
+    assert_eq!(
+        trace.snapshot(&mut output),
+        Err("ingestion trace capacity exhausted")
+    );
+    assert_eq!(
+        trace.shared.state.lock().unwrap().events.capacity(),
+        EVENTS_MAX
+    );
+    drop(scope);
 }

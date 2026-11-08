@@ -137,15 +137,18 @@ enum Sink {
 
 impl Sink {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        let state = match self {
-            Self::Trace(shared) => &shared.state,
-            Self::Tentative(events) => events,
-        };
-
-        state.lock().unwrap_or_else(|_| {
-            unreachable!("a trace lock is held only while pushing or copying bounded events")
-        })
+        match self {
+            Self::Trace(shared) => lock_events(&shared.state),
+            Self::Tentative(events) => lock_events(events),
+        }
     }
+}
+
+/// Locks `state`, which a thread holds only to push or copy bounded events.
+fn lock_events(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(|_| {
+        unreachable!("a trace lock is held only while pushing or copying bounded events")
+    })
 }
 
 impl Trace {
@@ -192,9 +195,7 @@ impl Trace {
 
     #[must_use]
     pub fn capacity_bytes(&self) -> usize {
-        let state = self.shared.state.lock().unwrap_or_else(|_| {
-            unreachable!("a trace lock is held only while copying bounded events")
-        });
+        let state = lock_events(&self.shared.state);
 
         2 * size_of::<usize>() + size_of::<Shared>() + state.events.capacity() * size_of::<Event>()
     }
@@ -262,12 +263,13 @@ pub fn tentative() -> (Scope, Tentative) {
 }
 
 impl Tentative {
-    /// Hands the trace the events as they were recorded.
+    /// Hands the events as they were recorded to the trace, or to the tentative work around this
+    /// one.
     pub fn keep(mut self) {
         self.settle(true);
     }
 
-    /// Hands the trace the events as discarded work.
+    /// Hands the events as discarded work to the trace, or to the tentative work around this one.
     pub fn discard(mut self) {
         self.settle(false);
     }
@@ -276,8 +278,7 @@ impl Tentative {
         let Some((sink, tentative)) = self.0.take() else {
             return;
         };
-        let tentative = Sink::Tentative(tentative);
-        let events = tentative.lock();
+        let events = lock_events(&tentative);
         let mut state = sink.lock();
 
         if events.overflowed {
@@ -364,9 +365,7 @@ fn record_inner(key: Option<Key>, kind: Kind, bytes: u64) {
             Some(tentative) => tentative,
             None => &context.shared.state,
         };
-        let mut state = state.lock().unwrap_or_else(|_| {
-            unreachable!("a trace lock is held only while copying bounded events")
-        });
+        let mut state = lock_events(state);
         push(&mut state, event);
     });
 }
