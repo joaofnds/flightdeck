@@ -366,6 +366,33 @@ fn a_launch_adds_up_the_apps_it_owes_once_the_main_thread_takes_its_first_view()
 }
 
 #[test]
+fn a_launch_adds_up_the_apps_it_owes_only_once_the_main_thread_takes_the_newest_view() {
+    // Goal: a store that took in seconds after its first View, as a return does when the store
+    // is shown again before the pass ran, hands them over before it reads the Apps its launch
+    // owes, so the pass never holds back a return's View. Method: launch a store, let the main
+    // thread take its first View, mark the store as holding seconds no View holds, as a
+    // return's load does, and run the pass before and after that View is handed over and taken.
+    let fixture = recording_of(&[(0, 55..60), (1, 0..5), (21, 0..5)]);
+    let mut held = Held::without_recording();
+    launch(&fixture, &mut held);
+    let mailbox = Mailbox::new();
+    held.publish(&mailbox);
+    assert!(mailbox.take().is_some());
+    held.unpublished = true;
+    let mut buffers = recording::LoadBuffers::default();
+
+    super::run_owed(&fixture.root, &mut held, &mailbox, &mut buffers);
+    assert!(held.owed.is_some());
+    assert!(mailbox.take().is_none());
+    held.publish(&mailbox);
+    assert!(mailbox.take().is_some());
+    super::run_owed(&fixture.root, &mut held, &mailbox, &mut buffers);
+
+    assert!(held.owed.is_none());
+    assert!(!mailbox.take().unwrap().stretches.is_empty());
+}
+
+#[test]
 fn a_launch_adds_up_the_apps_it_owes_a_stretch_across_two_minutes() {
     // Goal: once a store that started reads the Apps of the minutes older than the live span,
     // each stretch holds what a load of the whole hour holds. Method: seal a few ticks of run

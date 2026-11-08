@@ -899,18 +899,22 @@ fn expire_place(second: &MachineSecond) -> Option<(Identity, u64)> {
     Some((Identity(second.boot), second.continuous_ns?))
 }
 
-/// Adds up the Apps a launch owes the store's stretches once the main thread has taken the
-/// store's first View, and hands over a View that holds them.
+/// Adds up the Apps a launch owes the store's stretches once the main thread has taken a View
+/// of all the store holds, and hands over a View that holds them.
 fn run_owed(
     root: &Path,
     held: &mut Held,
     mailbox: &Mailbox<View>,
     load_buffers: &mut recording::LoadBuffers,
 ) {
-    // A launch hands over its first View before it adds up the Apps it owes its stretches, and
-    // waits for the main thread to take it, since the pass's loaders would take the cores the
-    // window's first frame needs.
+    // The store hands over a View of all it holds before it adds up the Apps a launch owes its
+    // stretches, and waits for the main thread to take it, since the pass's loaders would take
+    // the cores the window's next frame needs. That View is the launch's first, or a return's
+    // where the store was hidden before the pass ran.
     if held.version == 0 {
+        return;
+    }
+    if held.unpublished {
         return;
     }
     if mailbox.pending() {
