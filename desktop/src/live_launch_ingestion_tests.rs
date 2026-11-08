@@ -284,11 +284,13 @@ fn request(route: &str) -> Request {
 }
 
 /// How many times `producer` did `kind` of work on `publication`, leaving out reads of saved
-/// minutes for what the Store does not hold, which take in no publication.
+/// minutes for what the Store does not hold, which take in no publication, and decoding thrown
+/// away before publication, which a load of several minutes does again from another seed.
 fn count(events: &[Event], producer: Producer, kind: Kind, publication: u64) -> usize {
     events
         .iter()
         .filter(|event| event.purpose != persistence::work::ingestion::Purpose::History)
+        .filter(|event| event.purpose != persistence::work::ingestion::Purpose::Discarded)
         .filter(|event| event.producer == producer)
         .filter(|event| event.kind == kind)
         .filter(|event| match event.key {
