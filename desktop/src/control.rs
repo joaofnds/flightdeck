@@ -184,19 +184,8 @@ async fn respond(
         .ok()?;
         return resume_frame(before, dashboard, cx).await;
     }
-    if words.first() == Some(&"profile-navigate") {
-        let begun = cx
-            .update(|_, cx| profile_navigate(&words, dashboard, cx))
-            .ok()?;
-        return match begun {
-            Ok(before) => resume_frame(before, dashboard, cx).await,
-            Err(error) => Some(failure(&error)),
-        };
-    }
-    if words.first() == Some(&"profile-range") {
-        let begun = cx
-            .update(|_, cx| profile_range(&words, dashboard, cx))
-            .ok()?;
+    if let Some(begin) = respond_measured(&words) {
+        let begun = cx.update(|_, cx| begin(&words, dashboard, cx)).ok()?;
         return match begun {
             Ok(before) => resume_frame(before, dashboard, cx).await,
             Err(error) => Some(failure(&error)),
@@ -229,6 +218,20 @@ async fn respond(
         Ok(value) => json!({"ok": true, "result": value}).to_string(),
         Err(error) => failure(&error),
     })
+}
+
+/// Starts the measurement epoch of a measured command that changes the page while the window
+/// shows, and answers the epoch count before it.
+type MeasuredBegin = fn(&[&str], &Entity<LiveDashboard>, &mut App) -> Result<u64, String>;
+
+/// How the measured command `words` names starts its epoch, for every measured command but
+/// profile-cycle, which hides the window and waits for the pause first.
+fn respond_measured(words: &[&str]) -> Option<MeasuredBegin> {
+    match words.first().copied() {
+        Some("profile-navigate") => Some(profile_navigate),
+        Some("profile-range") => Some(profile_range),
+        _ => None,
+    }
 }
 
 /// Minimizes the window, whose next show starts a measurement epoch, and answers the epoch
