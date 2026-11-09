@@ -44,6 +44,8 @@ const ACCESSIBILITY_NODES_MAX: usize = 65_536;
 /// The answer to a measured command sent before `profile-resume`, whose epoch would never
 /// begin.
 const MEASUREMENTS_OFF: &str = "resume measurements are off; send profile-resume first";
+/// The answer to `profile-hold` where the page draws no chart of the live Mac to click on.
+const HOLD_UNCHARTED: &str = "profile-hold holds a second of the live Mac's charts";
 
 pub struct Command {
     line: String,
@@ -230,6 +232,7 @@ fn respond_measured(words: &[&str]) -> Option<MeasuredBegin> {
     match words.first().copied() {
         Some("profile-navigate") => Some(profile_navigate),
         Some("profile-range") => Some(profile_range),
+        Some("profile-hold") => Some(profile_hold),
         _ => None,
     }
 }
@@ -280,6 +283,36 @@ fn profile_range(
         let before = dashboard.resume_begin_switch();
 
         dashboard.set_range(range, cx);
+        before
+    }))
+}
+
+/// Starts a measurement epoch and holds the second, as a click on a chart of the live Mac does,
+/// and answers the epoch count before it. A second past the charts' window is refused, since no
+/// click on a chart picks one.
+fn profile_hold(
+    words: &[&str],
+    dashboard: &Entity<LiveDashboard>,
+    cx: &mut App,
+) -> Result<u64, String> {
+    let second = word(words, 1)?
+        .parse::<u64>()
+        .map_err(|error| error.to_string())?;
+    profile_enabled(dashboard.read(cx))?;
+    let last = dashboard
+        .read(cx)
+        .live_window_last()
+        .ok_or(HOLD_UNCHARTED)?;
+    if last < second {
+        return Err(format!(
+            "second {second} lies past the charts' last second {last}"
+        ));
+    }
+
+    Ok(dashboard.update(cx, |dashboard, cx| {
+        let before = dashboard.resume_begin_hold();
+
+        dashboard.pin_second(second, cx);
         before
     }))
 }
@@ -471,6 +504,7 @@ const HELP: &[&str] = &[
     "profile-cycle",
     "profile-navigate ROUTE",
     "profile-range MINUTES",
+    "profile-hold SECOND",
     "profile-resume",
     "range MINUTES",
     "state",

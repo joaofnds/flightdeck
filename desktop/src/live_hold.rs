@@ -62,7 +62,7 @@ impl LiveDashboard {
     /// The last second of the window the charts are drawn in, which a hold keeps, where the page
     /// shows readings of the live Mac, its own or, before the worker's first reading, the store's
     /// View's.
-    pub(super) fn live_window_last(&self) -> Option<u64> {
+    pub(crate) fn live_window_last(&self) -> Option<u64> {
         if self.worker.mode() != crate::live_source_mode::SourceMode::Live {
             return None;
         }
@@ -268,6 +268,12 @@ impl LiveDashboard {
         self.preview
             .as_ref()
             .or(self.hold.as_ref().map(|hold| &hold.reading))
+    }
+
+    /// The held second's reading, while the page holds a second of the live Mac.
+    #[cfg(feature = "automation")]
+    pub(crate) fn held_reading(&self) -> Option<&Preview> {
+        self.hold.as_ref().map(|hold| &hold.reading)
     }
 
     /// Whether the page holds a second of the live Mac.

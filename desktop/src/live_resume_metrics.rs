@@ -45,6 +45,8 @@ enum FreshCause {
     Reading,
     /// The switch itself, which redraws the readings the page holds, as a picked range does.
     Switch,
+    /// The held second's answered reading, as after a pick on a chart of the live Mac.
+    Hold,
 }
 
 impl ResumeMetrics {
@@ -134,7 +136,7 @@ impl ResumeMetrics {
             "footprint_peak_bytes":footprint.lifetime_bytes_max,
             "worker_requests":dashboard.requests - started.requests,
             "store_version":dashboard.store_version, "second":dashboard.second,
-            "route":dashboard.route,
+            "route":dashboard.route, "hold_failure":dashboard.hold_failure,
             "scope":"Visibility or navigation through CPU frame completion; excludes GPU display",
         });
         self.started = None;
@@ -148,6 +150,8 @@ struct Frame {
     store_version: Option<u64>,
     second: Option<u64>,
     route: String,
+    /// Why the read of the held second failed, which leaves the frame without its reading.
+    hold_failure: Option<String>,
 }
 
 impl LiveDashboard {
@@ -162,6 +166,13 @@ impl LiveDashboard {
     /// the readings the page already holds, and answers the epoch count before it.
     pub(crate) fn resume_begin_switch(&mut self) -> u64 {
         self.resume_begin(None, FreshCause::Switch)
+    }
+
+    /// Starts a measurement epoch for a second about to be held, whose frame is fresh once the
+    /// hold has that second's complete reading or its read failed, and answers the epoch count
+    /// before it.
+    pub(crate) fn resume_begin_hold(&mut self) -> u64 {
+        self.resume_begin(None, FreshCause::Hold)
     }
 
     fn resume_begin(&mut self, store_version: Option<u64>, fresh_cause: FreshCause) -> u64 {
@@ -203,6 +214,9 @@ impl LiveDashboard {
                     store_version: dashboard.resume_store_version(),
                     second: dashboard.shown_second(),
                     route: dashboard.request.route.clone(),
+                    hold_failure: dashboard
+                        .held_reading()
+                        .and_then(|reading| reading.failure.clone()),
                 };
                 if let Err(error) = dashboard.resume_metrics.finish(&frame) {
                     eprintln!("Resume measurement finish: {error}");
@@ -219,6 +233,9 @@ impl LiveDashboard {
         };
         if started.fresh_cause == FreshCause::Switch {
             return true;
+        }
+        if started.fresh_cause == FreshCause::Hold {
+            return self.held_reading().is_some_and(|reading| reading.complete);
         }
         if self.request.second.is_none() {
             if self.request.route == "overview" {
@@ -253,9 +270,11 @@ impl LiveDashboard {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{AppContext, Entity, TestAppContext};
+
     use super::{Checkpoint, Frame, FreshCause, ResumeMetrics};
     use crate::live_dashboard::LiveDashboard;
-    use crate::live_source::Worker;
+    use crate::live_source::{Update, Worker};
     use crate::live_store_fixtures::reading_at;
     use crate::live_store_page_fixtures::readings;
 
@@ -288,6 +307,7 @@ mod tests {
             store_version: None,
             second: Some(100),
             route: "overview".into(),
+            hold_failure: None,
         });
 
         assert!(result.is_err());
@@ -318,11 +338,45 @@ mod tests {
                 store_version: None,
                 second: Some(100),
                 route: "overview".into(),
+                hold_failure: None,
             })
             .unwrap();
 
         assert!(metrics.started.is_some());
         assert!(metrics.after(first).is_none());
+    }
+
+    #[test]
+    fn a_sample_names_why_the_held_seconds_read_failed() {
+        // Goal: a hold whose read failed reports the failure with its timing, so a run counts
+        // it as a failed input and not as a frame that showed the second.
+        // Method: finish the epoch profile-hold begins with a frame whose held reading failed,
+        // then read the sample.
+        let mut metrics = ResumeMetrics::default();
+        assert!(metrics.enable());
+        let previous = metrics.count();
+        metrics.begin(&Checkpoint {
+            generation: 1,
+            store_version: None,
+            requests: 1,
+            fresh_cause: FreshCause::Hold,
+        });
+
+        metrics
+            .finish(&Frame {
+                epoch: metrics.count(),
+                requests: 1,
+                store_version: None,
+                second: Some(100),
+                route: "cpu".into(),
+                hold_failure: Some("the second's minute is gone".into()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            metrics.after(previous).unwrap()["sample"]["hold_failure"],
+            "the second's minute is gone"
+        );
     }
 
     #[test]
@@ -350,6 +404,54 @@ mod tests {
         dashboard.resume_begin_reading();
 
         assert!(!dashboard.resume_frame_ready());
+    }
+
+    #[gpui::test]
+    fn a_held_second_waits_for_its_own_reading(cx: &mut TestAppContext) {
+        // Goal: profile-hold's frame is not fresh while the reader still reads the held second,
+        // since that frame shows the second without what only its own reading holds.
+        // Method: the CPU page following the newest second holds a second its readings name, as
+        // a click on its chart does, then the readiness of the next frame.
+        let dashboard = cx.new(|_| page("cpu"));
+
+        hold(&dashboard, 9_999, cx);
+
+        assert!(dashboard.read_with(cx, |dashboard, _| dashboard.hold_read_pending()));
+        assert!(!dashboard.read_with(cx, |dashboard, _| dashboard.resume_frame_ready()));
+    }
+
+    #[gpui::test]
+    fn a_held_second_is_fresh_once_the_reader_answers_its_read(cx: &mut TestAppContext) {
+        // Goal: profile-hold's frame is fresh once the reader answers the held second's read,
+        // failed or not, and the failure stays with the held reading for the sample to name.
+        // Method: the CPU page holds a second its readings name, the reader answers the hold's
+        // read with a failure, then the readiness of the next frame.
+        let dashboard = cx.new(|_| page("cpu"));
+        hold(&dashboard, 9_999, cx);
+
+        dashboard.update(cx, |dashboard, _| {
+            let generation = dashboard.held_read_generation().unwrap();
+            let message = "the second's minute is gone".to_owned();
+            assert!(dashboard.take_update(Update::Failed {
+                generation,
+                message
+            }));
+        });
+
+        assert!(dashboard.read_with(cx, |dashboard, _| dashboard.resume_frame_ready()));
+        assert_eq!(
+            dashboard.read_with(cx, |dashboard, _| dashboard.held_reading()?.failure.clone()),
+            Some("the second's minute is gone".to_owned())
+        );
+    }
+
+    /// Begins profile-hold's epoch and holds `second` on `dashboard`, as profile-hold does.
+    fn hold(dashboard: &Entity<LiveDashboard>, second: u64, cx: &mut TestAppContext) {
+        dashboard.update(cx, |dashboard, cx| {
+            assert!(dashboard.resume_metrics.enable());
+            dashboard.resume_begin_hold();
+            dashboard.pin_second(second, cx);
+        });
     }
 
     /// The page `route` showing the worker's readings, following the newest second.

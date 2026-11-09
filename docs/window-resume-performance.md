@@ -345,16 +345,15 @@ flightdeck-control --socket SOCKET --command 'navigate cpu'
 flightdeck-control --socket SOCKET --command 'profile-navigate overview'
 ```
 
-Send `profile-resume` before the timed commands: `profile-navigate` and `profile-range`
-time nothing until it has enabled the measurements, and otherwise fail after 5 s with
-"fresh resume frame did not arrive". Wait until `state` reports complete histories and no
-pending reply before the first timed command. With the CPU page showing, send `advance`
-to the fixture owner, then wait until `state` reports the fixture's endpoint as
-`selected_second` and the Store active, unpaused and not pending before
+Send `profile-resume` before the timed commands: `profile-navigate`, `profile-range` and
+`profile-hold` time nothing until it has enabled the measurements, and otherwise fail
+after 5 s with "fresh resume frame did not arrive". Wait until `state` reports complete
+histories and no pending reply before the first timed command. With the CPU page showing,
+send `advance` to the fixture owner, then wait until `state` reports the fixture's
+endpoint as `selected_second` and the Store active, unpaused and not pending before
 `profile-navigate`. The Store already reads active before the advance, so that state alone
-does not show it has read what the fixture revealed. Keep the window uncovered
-throughout, since a window macOS reports as not visible parks the Store and draws no
-frames to time.
+does not show it has read what the fixture revealed. Keep the window uncovered throughout,
+since a window macOS reports as not visible parks the Store and draws no frames to time.
 
 `profile-navigate ROUTE` opens the route as a sidebar click does and returns the first
 CPU frame after it that draws the Store's View on live Overview, or that follows the page
@@ -362,7 +361,11 @@ reader's next reply on any other page. `profile-range MINUTES` picks the range a
 range picker does and returns the first frame after it, on every page and with a second
 held, since the switch redraws the readings the page holds and asks the page reader for
 nothing. A sample whose `worker_requests` is zero and whose `store_version` equals the
-previous sample's read nothing for that switch.
+previous sample's read nothing for that switch. `profile-hold SECOND` holds the second
+as a click on a chart of the live Mac does and returns the first frame after the hold has
+that second's complete reading, or after its read failed, which the sample's
+`hold_failure` then names. It refuses a second past the last second the charts draw,
+which no click picks, and a page that draws no chart of the live Mac.
 
 For stack profiling, attach `/usr/bin/sample PID 3 1 -mayDie -file OUTPUT` while a
 separate control client runs repeated cycles. Use those samples for attribution, not

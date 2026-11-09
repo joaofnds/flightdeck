@@ -2,7 +2,7 @@ use std::sync::mpsc;
 
 use gpui::{Entity, TestAppContext, VisualTestContext, WindowOptions};
 
-use super::{Command, MEASUREMENTS_OFF, POLL, failure, install};
+use super::{Command, HOLD_UNCHARTED, MEASUREMENTS_OFF, POLL, failure, install};
 use crate::live_dashboard::LiveDashboard;
 use crate::live_source::Worker;
 
@@ -36,6 +36,10 @@ measured_command_case!(
     profile_range_answers_that_measurements_are_off,
     "profile-range 15"
 );
+measured_command_case!(
+    profile_hold_answers_that_measurements_are_off,
+    "profile-hold 100"
+);
 
 #[gpui::test]
 fn a_measured_command_after_profile_resume_waits_for_its_frame(cx: &mut TestAppContext) {
@@ -48,6 +52,40 @@ fn a_measured_command_after_profile_resume_waits_for_its_frame(cx: &mut TestAppC
     let reply = harness.driver.send("profile-range 15");
 
     assert_eq!(reply, None);
+    harness.teardown();
+}
+
+#[gpui::test]
+fn profile_hold_refuses_a_second_past_the_last_second_the_charts_draw(cx: &mut TestAppContext) {
+    // Goal: profile-hold times only a second a click on a chart could pick, since a hold past
+    // the charts' window is one no person makes. Method: draw the live Mac's readings up to
+    // second 10,000, then send profile-hold for the second after it.
+    let mut harness = ControlHarness::setup(cx);
+    harness.driver.send("profile-resume");
+    harness.driver.draw_readings_to(10_000);
+
+    let reply = harness.driver.send("profile-hold 10001");
+
+    assert_eq!(
+        reply,
+        Some(failure(
+            "second 10001 lies past the charts' last second 10000"
+        ))
+    );
+    harness.teardown();
+}
+
+#[gpui::test]
+fn profile_hold_refuses_a_page_that_draws_no_charts_of_the_live_mac(cx: &mut TestAppContext) {
+    // Goal: profile-hold answers at once where no chart of the live Mac is drawn to click on,
+    // rather than timing a selection of a saved second. Method: send profile-hold to a window
+    // whose reader has read nothing.
+    let mut harness = ControlHarness::setup(cx);
+    harness.driver.send("profile-resume");
+
+    let reply = harness.driver.send("profile-hold 100");
+
+    assert_eq!(reply, Some(failure(HOLD_UNCHARTED)));
     harness.teardown();
 }
 
@@ -103,6 +141,20 @@ struct ControlDriver {
 }
 
 impl ControlDriver {
+    /// Hands the window the live Mac's readings of the two seconds up to `last_second`, as the
+    /// reader answers the page.
+    fn draw_readings_to(&mut self, last_second: u64) {
+        self.view.update(&mut self.context, |dashboard, cx| {
+            dashboard.accept(crate::live_store_page_fixtures::readings(&[
+                crate::live_store_fixtures::reading_at(last_second - 1, 0),
+                crate::live_store_fixtures::reading_at(last_second, 0),
+            ]));
+            assert!(dashboard.error.is_none());
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
     /// Sends `line` as the socket does, then answers the window's reply once the window has
     /// taken the command, or none while the command still waits.
     fn send(&mut self, line: &str) -> Option<String> {
