@@ -342,6 +342,11 @@ impl LiveRecording {
         viewer::store::Store::start_with_payload(&self.root, viewer::store::BYTES_MAX).unwrap()
     }
 
+    /// The lock file that names the ring, which another reader opens as the persister does.
+    pub(crate) fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
     pub(crate) fn with_process_capacity(process_capacity: u64) -> Self {
         let root = unique_root("live");
         let place = Place::for_user(root.file_name().unwrap().to_str().unwrap()).unwrap();

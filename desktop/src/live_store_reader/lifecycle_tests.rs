@@ -513,8 +513,9 @@ fn a_page_asking_for_its_first_reading_ends_the_stores_wait_on_the_ring() {
 fn a_page_following_the_mac_leaves_the_store_to_its_wait_on_the_ring() {
     // Goal: a followed page's refreshes do not wake the Store, since that wake reaches every reader
     // of the ring, the persister too, at the rate the page asks.
-    // Method: publish nothing, and take the slowest of a few refreshes, since one slow answer shows
-    // the wait ran, however a busy machine moved the rest.
+    // Method: publish nothing, wait on the ring as the persister does through a few refreshes, and
+    // see that wait outlast them. Only a wake ends it before its bound, and a busy machine moves
+    // its end only later, as it moves the refreshes.
     let (recording, _store, handle) = store_answering();
     let mut adapter = Adapter::on_root(handle.clone(), &recording.root);
     adapter.command.request = request("network");
@@ -522,13 +523,14 @@ fn a_page_following_the_mac_leaves_the_store_to_its_wait_on_the_ring() {
         adapter.update_within(Duration::from_secs(10)),
         Update::Ready(_)
     ));
+    let bystander = Bystander::waiting(recording.lock_path());
 
-    let slowest = (0..5)
-        .map(|_| adapter_time_to_answer(&mut adapter, &handle))
-        .max()
-        .unwrap();
+    for _refresh in 0..5 {
+        adapter_refreshed(&mut adapter, &handle);
+    }
+    let refreshed = Instant::now();
 
-    assert!(slowest >= WAIT_ON_THE_RING_HALF);
+    assert!(bystander.wait_ended() > refreshed);
 }
 
 const WAIT_ON_THE_RING_HALF: Duration = Duration::from_millis(50);
@@ -544,6 +546,67 @@ fn adapter_time_to_answer(adapter: &mut Adapter, handle: &viewer::store::QueryHa
     adapter.read();
 
     answered
+}
+
+/// Asks for the page again and reads the Store's answer.
+fn adapter_refreshed(adapter: &mut Adapter, handle: &viewer::store::QueryHandle) {
+    assert!(adapter.read().is_none());
+    wait_until_answered(handle);
+    adapter.read();
+}
+
+/// Another reader of the ring, which waits as the persister does for a publication that never
+/// comes, so that only a wake ends its wait.
+struct Bystander {
+    waker: collector::ring::RingWaker,
+    ended: std::sync::mpsc::Receiver<Instant>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Bystander {
+    fn waiting(lock_path: &std::path::Path) -> Self {
+        let waker = collector::ring::RingReader::open(lock_path)
+            .unwrap()
+            .waker()
+            .unwrap();
+        let lock_path = lock_path.to_owned();
+        let (waiting, waits) = std::sync::mpsc::sync_channel(1);
+        let (ending, ended) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::spawn(move || {
+            let mut reader = collector::ring::RingReader::open(&lock_path).unwrap();
+            let next = reader.publication_newest().unwrap() + 1;
+            reader.seek_publication(next).unwrap();
+            waiting.send(()).unwrap();
+            reader.wait(Duration::from_secs(60)).unwrap();
+            ending.send(Instant::now()).unwrap();
+        });
+        waits.recv().unwrap();
+
+        Self {
+            waker,
+            ended,
+            thread,
+        }
+    }
+
+    /// When the wait ended, waking it now where it still runs.
+    fn wait_ended(self) -> Instant {
+        for _attempt in 0..6_000 {
+            self.waker.wake().unwrap();
+            match self.ended.recv_timeout(Duration::from_millis(5)) {
+                Ok(ended) => {
+                    self.thread.join().unwrap();
+                    return ended;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.thread.join().unwrap();
+                    panic!("the other reader stopped without its wait ending");
+                }
+            }
+        }
+        panic!("the other reader's wait never ended");
+    }
 }
 
 #[test]
