@@ -343,6 +343,53 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_older_tail_at_once_where_the_minutes_it_lacks_take_one_read() {
+        // Goal: a page shows the older tail with its first readings where the minutes it lacks
+        // read at once, six at a time, as following the newest second needs a minute about once
+        // a minute, and leaves a longer read to a later step.
+        // Method: read the tail of eight sealed minutes up to the first, then ask the same
+        // session at once for the tail that reaches all eight and for the one that reaches the
+        // seventh, as the newest second moves on.
+        let first = 200_000;
+        // The tail of a context ending here stops before second first + 40 and so before the
+        // second minute, and each minute later reaches one minute further.
+        let first_minute = first + 40 + viewer::CHARTED_SECONDS - 1;
+        let recording = older_minutes(first, 8, first_minute + 420);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        session.earlier_context(first_minute).unwrap();
+        let seventh = LiveSession::open(&recording.root)
+            .unwrap()
+            .earlier_context(first_minute + 360)
+            .unwrap();
+
+        let eighth_at_once = session.earlier_context_at_once(first_minute + 420).unwrap();
+        let seventh_at_once = session.earlier_context_at_once(first_minute + 360).unwrap();
+
+        assert_eq!(eighth_at_once, None);
+        assert_eq!(seventh["earlier_trends"].as_array().unwrap().len(), 7);
+        assert_eq!(seventh_at_once, Some(seventh));
+    }
+
+    /// A recording of `count` sealed minutes a minute apart from `first_second`, each with
+    /// readings in its first four seconds, and a sealed minute with a reading at `newest_second`.
+    fn older_minutes(first_second: u64, count: u64, newest_second: u64) -> Recording {
+        let mut recording = Recording::new();
+        for minute in 0..count {
+            recording.elapsed = 60 * minute;
+            let start = first_second + 60 * minute;
+            for second in start..start + 4 {
+                recording.publish(second);
+            }
+            recording.seal_window(minute);
+        }
+        recording.elapsed = newest_second - first_second;
+        recording.publish(newest_second);
+        recording.seal_window(recording.elapsed / 60);
+
+        recording
+    }
+
+    #[test]
     fn has_no_older_tail_while_the_recording_is_younger_than_the_full_detail_context() {
         // Goal: a young recording needs no older tail. Method: ask for it with one sealed minute.
         let mut recording = Recording::new();

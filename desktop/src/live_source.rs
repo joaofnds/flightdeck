@@ -875,7 +875,7 @@ fn reader_snapshot(
     let Plan {
         mut histories,
         early,
-        kept_tail_only,
+        tail_at_once,
     } = reader_snapshot_plan(reader, &command.request.route);
     let arrivals = reader_snapshot_arrivals(command);
     let listing = reader_snapshot_listing(reader, command.generation);
@@ -887,7 +887,7 @@ fn reader_snapshot(
         }
     }
     let mut selection = reader_selection(session, &command.request, command.context, listing)?;
-    let tail_pending = reader_earlier(session, &command.request, kept_tail_only, &mut selection);
+    let tail_pending = reader_earlier(session, &command.request, tail_at_once, &mut selection);
     let mut snapshot = reader_snapshot_new(command.generation, catalog, selection);
     if early {
         histories = reader_snapshot_histories(session, &snapshot);
@@ -936,16 +936,17 @@ struct Plan {
     /// Whether the step asks the session if the App histories it leaves would replay a saved
     /// minute, and reads them with its first readings where they would not.
     early: bool,
-    /// Whether the step takes only an older tail its session keeps.
-    kept_tail_only: bool,
+    /// Whether the step takes only an older tail its session reads at once.
+    tail_at_once: bool,
 }
 
 /// What this step of the page `route` reads. A newly opened page publishes its readings first,
-/// since replaying its App histories from saved minutes, or reading an older tail its session
-/// does not keep, can take seconds. A page whose App histories read the parts its saved minutes
-/// keep reads them with its first readings where they replay no saved minute, and the others
-/// read them next, whatever request of the page comes next. An older tail it has to read comes
-/// after them, since its charts draw the tail only over a range longer than their full detail.
+/// since replaying its App histories from saved minutes, or reading more of an older tail than
+/// one batch of saved minutes, can take seconds. A page whose App histories read the parts its
+/// saved minutes keep reads them with its first readings where they replay no saved minute, and
+/// the others read them next, whatever request of the page comes next. An older tail it has to
+/// read comes after them, since its charts draw the tail only over a range longer than their
+/// full detail.
 fn reader_snapshot_plan(reader: &Reader, route: &str) -> Plan {
     let opened = reader.last_route != route;
     let histories_due = reader
@@ -963,7 +964,7 @@ fn reader_snapshot_plan(reader: &Reader, route: &str) -> Plan {
     Plan {
         histories,
         early,
-        kept_tail_only: opened || histories_due,
+        tail_at_once: opened || histories_due,
     }
 }
 
@@ -1271,13 +1272,13 @@ fn reader_selection_kept(session: &mut LiveSession, request: &Request) -> Result
 
 /// Adds the saved readings older than the selection's full-detail context, which the charts of
 /// a longer range draw, and returns whether the page still waits for them. A step with
-/// `kept_tail_only` takes only a tail its session keeps, and leaves one it would read from saved
-/// minutes to a later step. A failed read leaves the charts at their full-detail context and
-/// says why beside it.
+/// `tail_at_once` takes only a tail its session keeps or reads in one batch of saved minutes,
+/// and leaves a longer read to a later step. A failed read leaves the charts at their full-detail
+/// context and says why beside it.
 fn reader_earlier(
     session: &mut LiveSession,
     request: &Request,
-    kept_tail_only: bool,
+    tail_at_once: bool,
     selection: &mut Value,
 ) -> bool {
     if reader_earlier_skips(request) {
@@ -1289,8 +1290,8 @@ fn reader_earlier(
     let Some(fields) = selection.as_object_mut() else {
         return false;
     };
-    let tail = if kept_tail_only {
-        session.earlier_context_kept(last)
+    let tail = if tail_at_once {
+        session.earlier_context_at_once(last)
     } else {
         session.earlier_context(last).map(Some)
     };

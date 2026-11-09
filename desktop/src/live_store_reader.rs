@@ -569,17 +569,18 @@ fn read_earlier(
     if super::reader_earlier_skips(&command.request) {
         return false;
     }
-    // A page's first step reads what the saved minutes keep, and its next step reads the rest.
+    // A page's first step takes the older tail where its session reads it at once, and its next
+    // step reads the rest.
     let tail_pending = reader
         .store
         .as_ref()
         .is_some_and(|store| store.tail_pending);
     let plan = super::reader_snapshot_plan(reader, &command.request.route);
-    let kept_tail_only = plan.kept_tail_only && !tail_pending;
+    let tail_at_once = plan.tail_at_once && !tail_pending;
     let selection = std::mem::replace(&mut snapshot.selection, Presentation::Legacy(Value::Null));
     let mut pending = false;
     snapshot.selection = selection.edited(|selection| {
-        pending = read_earlier_selection(reader, root, command, shared, kept_tail_only, selection);
+        pending = read_earlier_selection(reader, root, command, shared, tail_at_once, selection);
     });
     if let Some(store) = &mut reader.store {
         store.tail_pending = pending;
@@ -593,7 +594,7 @@ pub(super) fn read_earlier_selection(
     root: &std::path::Path,
     command: &Command,
     shared: &Shared,
-    kept_tail_only: bool,
+    tail_at_once: bool,
     selection: &mut Value,
 ) -> bool {
     let scope =
@@ -615,7 +616,7 @@ pub(super) fn read_earlier_selection(
         Ok(session)
     });
     let pending = match session {
-        Ok(session) => super::reader_earlier(session, &command.request, kept_tail_only, selection),
+        Ok(session) => super::reader_earlier(session, &command.request, tail_at_once, selection),
         Err(message) => {
             if let Some(fields) = selection.as_object_mut() {
                 fields.insert("earlier_error".into(), message.into());

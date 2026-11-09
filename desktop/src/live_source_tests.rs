@@ -338,10 +338,10 @@ fn a_second_saved_after_the_last_list_opens_once_saved() {
 #[test]
 fn a_page_that_reads_its_app_histories_early_reads_an_older_tail_next() {
     // Goal: an opened page whose first readings brought its App histories reads an older tail
-    // its session does not keep straight after them.
-    // Method: open Overview over a recording whose minutes keep their parts and one of which
-    // was sealed long before its newest second, one step at a time.
-    let recording = SealedRecording::with_an_older_kept_minute();
+    // longer than its session reads at once straight after them.
+    // Method: open Overview over a recording whose minutes keep their parts and more of which
+    // were sealed before its full detail than its session reads at once, one step at a time.
+    let recording = SealedRecording::with_a_long_older_kept_tail();
     let mut reader = SnapshotReader::new();
     reader.command.request.earlier = crate::live_source::Earlier::Load;
 
@@ -358,7 +358,7 @@ fn a_page_that_reads_its_app_histories_early_reads_an_older_tail_next() {
     assert_eq!(pause, Duration::ZERO);
     assert!(!second.histories_pending);
     let tail = second.selection["earlier_trends"].as_array().unwrap();
-    assert_eq!(tail.len(), 1);
+    assert_eq!(tail.len(), 8);
 }
 
 #[test]
@@ -391,11 +391,11 @@ fn a_newly_opened_page_reads_its_app_histories_without_a_pause() {
 
 #[test]
 fn a_newly_opened_page_publishes_its_readings_before_an_older_tail_it_has_to_read() {
-    // Goal: an opened page shows its readings without waiting for an older tail its session
-    // would read from saved minutes, and the worker reads that tail straight after.
-    // Method: read the Network page, which has no App histories, over a recording with a minute
-    // sealed long before its newest second, one step at a time.
-    let recording = SealedRecording::with_an_older_minute();
+    // Goal: an opened page shows its readings without waiting for an older tail longer than its
+    // session reads at once, and the worker reads that tail straight after.
+    // Method: read the Network page, which has no App histories, over a recording with more
+    // minutes sealed before its full detail than its session reads at once, one step at a time.
+    let recording = SealedRecording::with_a_long_older_tail();
     let mut reader = SnapshotReader::new();
     reader.command.request.route = "network".into();
     reader.command.request.earlier = crate::live_source::Earlier::Load;
@@ -412,16 +412,16 @@ fn a_newly_opened_page_publishes_its_readings_before_an_older_tail_it_has_to_rea
     assert_eq!(pause, Duration::ZERO);
     assert!(!second.histories_pending);
     let tail = second.selection["earlier_trends"].as_array().unwrap();
-    assert_eq!(tail.len(), 1);
+    assert_eq!(tail.len(), 8);
 }
 
 #[test]
 fn a_newly_opened_page_publishes_its_app_histories_before_an_older_tail_it_has_to_read() {
     // Goal: an opened page fills its App charts without waiting for an older tail its charts
     // draw only over a longer range, and the worker reads that tail straight after.
-    // Method: read Overview over a recording with a minute sealed long before its newest
-    // second, one step at a time.
-    let recording = SealedRecording::with_an_older_minute();
+    // Method: read Overview over a recording with more minutes sealed before its full detail
+    // than its session reads at once, one step at a time.
+    let recording = SealedRecording::with_a_long_older_tail();
     let mut reader = SnapshotReader::new();
     reader.command.request.earlier = crate::live_source::Earlier::Load;
     reader.read(&recording).unwrap().unwrap();
@@ -441,7 +441,7 @@ fn a_newly_opened_page_publishes_its_app_histories_before_an_older_tail_it_has_t
     assert!(overview_ready(&tail));
     assert_eq!(
         tail.selection["earlier_trends"].as_array().unwrap().len(),
-        1
+        8
     );
     assert!(!tail.histories_pending);
 }
@@ -450,9 +450,10 @@ fn a_newly_opened_page_publishes_its_app_histories_before_an_older_tail_it_has_t
 fn a_new_request_of_a_page_still_reads_its_app_histories_before_an_older_tail_it_has_to_read() {
     // Goal: a page asked for again before its App histories arrive, as a window that settles
     // its size at launch asks, still fills its App charts before reading the older tail.
-    // Method: read Overview once over a recording with a minute sealed long before its newest
-    // second, ask for it again under a new generation, and read one step at a time.
-    let recording = SealedRecording::with_an_older_minute();
+    // Method: read Overview once over a recording with more minutes sealed before its full
+    // detail than its session reads at once, ask for it again under a new generation, and read
+    // one step at a time.
+    let recording = SealedRecording::with_a_long_older_tail();
     let mut reader = SnapshotReader::new();
     reader.command.request.earlier = crate::live_source::Earlier::Load;
     reader.read(&recording).unwrap().unwrap();
@@ -469,7 +470,7 @@ fn a_new_request_of_a_page_still_reads_its_app_histories_before_an_older_tail_it
     assert!(histories.histories_pending);
     assert_eq!(
         tail.selection["earlier_trends"].as_array().unwrap().len(),
-        1
+        8
     );
     assert!(!tail.histories_pending);
 }
@@ -520,6 +521,29 @@ fn a_newly_opened_page_brings_the_older_tail_its_session_keeps_with_its_readings
 
     let tail = opened.selection["earlier_trends"].as_array().unwrap();
     assert_eq!(tail.len(), 1);
+}
+
+#[test]
+fn a_newly_opened_page_reads_with_its_readings_a_minute_its_older_tail_newly_reaches() {
+    // Goal: a page opened while the reader follows the newest second shows the older tail with
+    // its first readings where its session lacks only a minute of it, as the tail of the newest
+    // second reaches a new minute about once a minute.
+    // Method: read the Network page to the end, save another older minute, then open the Battery
+    // page at the same newest second.
+    let recording = SealedRecording::with_an_older_minute();
+    let mut reader = SnapshotReader::new();
+    reader.command.request.route = "network".into();
+    reader.command.request.earlier = crate::live_source::Earlier::Load;
+    reader.read_complete(&recording);
+    recording.seal_older_minute(1100);
+    reader.command.generation += 1;
+    reader.command.request.route = "battery".into();
+
+    let opened = reader.read(&recording).unwrap().unwrap();
+
+    assert!(!opened.histories_pending);
+    let tail = opened.selection["earlier_trends"].as_array().unwrap();
+    assert_eq!(tail.len(), 2);
 }
 
 #[test]
@@ -1167,6 +1191,23 @@ impl SealedRecording {
         Self::older_minute(&persistence::sealed_apps::SealedApps::default(), 2200)
     }
 
+    /// The recording of `with_an_older_minute` with seven more minutes saved before its full
+    /// detail, each of a run of its own, more than a session reads of an older tail at once.
+    fn with_a_long_older_tail() -> Self {
+        let recording = Self::with_an_older_minute();
+        recording.seal_older_minutes(&Underived);
+        recording
+    }
+
+    /// The recording of `with_a_long_older_tail`, sealed with the App parts and ranks of each of
+    /// its observations.
+    pub(crate) fn with_a_long_older_kept_tail() -> Self {
+        let derive = persistence::sealed_apps::SealedApps::default();
+        let recording = Self::older_minute(&derive, 2200);
+        recording.seal_older_minutes(&derive);
+        recording
+    }
+
     /// Readings at second 1000 and two at a second two hours on, further apart than the Store
     /// reads, sealed with the App parts and ranks of each of its observations.
     pub(crate) fn with_a_minute_past_the_store_hour() -> Self {
@@ -1194,6 +1235,25 @@ impl SealedRecording {
         drop(store);
 
         recording
+    }
+
+    /// Saves seven minutes to the recording of `with_an_older_minute`, each of a run of its own,
+    /// whose one reading lies 20 seconds after the one before, from second 1100.
+    fn seal_older_minutes(&self, derive: &dyn persistence::worker::Derive) {
+        let store = persistence::Store::open(&self.root).unwrap();
+        for run in 0..7 {
+            let identity = persistence::WindowIdentity {
+                run: collector::ring::RunIdentity {
+                    recording: store.recording(),
+                    run: collector::ring::Identity([7 + run, 8]),
+                    boot: collector::ring::Identity([3, 4]),
+                },
+                window: 0,
+            };
+            let mut window = Self::window(identity);
+            Self::append(&mut window, 1, 1100 + 20 * run);
+            Self::commit_derived(&self.root, &window, derive);
+        }
     }
 
     /// Saves a minute of another run to the recording of `with_an_older_minute`, whose one

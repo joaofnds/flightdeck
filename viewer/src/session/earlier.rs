@@ -252,7 +252,8 @@ impl KeptTail {
             if !batch.iter().any(|(window, _)| *window == step.window) {
                 // Holds one batch at a time, so the fill holds no more minutes than a context.
                 batch.clear();
-                batch = history.earlier_batch(&self.fill_batch(history, &needed))?;
+                batch =
+                    history.earlier_batch(&self.fill_batch(history, &needed, CONTEXT_READERS))?;
             }
             let Some(read) = batch.iter().position(|(window, _)| *window == step.window) else {
                 unreachable!("the older tail's batch misses the minute it reads next");
@@ -288,12 +289,25 @@ impl KeptTail {
         count
     }
 
+    /// Whether the fill of `range` lists no minutes again and reads the minutes it lacks in one
+    /// batch, which takes about as long as one of them, since each reads on a thread of its own.
+    pub(crate) fn fills_in_one_batch(&self, history: &Session, range: TailRange) -> Result<bool> {
+        if !history.span_holds(range.context_last_second())? {
+            return Ok(false);
+        }
+        let retained = history.reader().retained();
+        let needed = history.earlier_needed(range, &retained);
+        let batch = self.fill_batch(history, &needed, CONTEXT_READERS + 1);
+
+        Ok(batch.len() <= CONTEXT_READERS)
+    }
+
     /// The minutes the fill reads together: the minutes the steps `next` gives would read, in
-    /// their order, up to `CONTEXT_READERS`, as the tail stands before the first of them.
-    fn fill_batch(&self, history: &Session, needed: &[usize]) -> Vec<usize> {
-        let mut windows = Vec::with_capacity(CONTEXT_READERS);
+    /// their order, up to `most`, as the tail stands before the first of them.
+    fn fill_batch(&self, history: &Session, needed: &[usize], most: usize) -> Vec<usize> {
+        let mut windows = Vec::with_capacity(most);
         for &window in needed {
-            if windows.len() == CONTEXT_READERS {
+            if windows.len() == most {
                 break;
             }
 
@@ -302,9 +316,9 @@ impl KeptTail {
                 continue;
             }
             if let Holder::Unread(before) = holder {
-                fill_batch_push(&mut windows, before);
+                fill_batch_push(&mut windows, before, most);
             }
-            fill_batch_push(&mut windows, window);
+            fill_batch_push(&mut windows, window, most);
         }
 
         windows
@@ -724,10 +738,9 @@ fn earlier_minute_reach(
     );
 }
 
-/// Adds `window` to the minutes a batch reads, once, while it holds fewer than
-/// `CONTEXT_READERS`.
-fn fill_batch_push(windows: &mut Vec<usize>, window: usize) {
-    if windows.len() < CONTEXT_READERS {
+/// Adds `window` to the minutes a batch reads, once, while it holds fewer than `most`.
+fn fill_batch_push(windows: &mut Vec<usize>, window: usize, most: usize) {
+    if windows.len() < most {
         if !windows.contains(&window) {
             windows.push(window);
         }

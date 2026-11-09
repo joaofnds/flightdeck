@@ -233,6 +233,25 @@ impl LiveSession {
             .ok_or(Error::Bound("older tail"))
     }
 
+    /// The older tail `earlier_context` gives for `context_last_second`, where the minutes it
+    /// keeps answer it or the minutes it lacks read in one batch, as the tail of the newest
+    /// second needs about once a minute, and `None` where answering would read more or list the
+    /// saved minutes again.
+    pub fn earlier_context_at_once(&mut self, context_last_second: u64) -> Result<Option<Value>> {
+        if let Some(tail) = self.earlier_context_kept(context_last_second)? {
+            return Ok(Some(tail));
+        }
+        let Some(history) = &self.history else {
+            unreachable!("A session without saved history answers its older tail at once");
+        };
+        let range = TailRange::of_context(context_last_second);
+        if !self.earlier.fills_in_one_batch(history, range)? {
+            return Ok(None);
+        }
+
+        self.earlier_context(context_last_second).map(Some)
+    }
+
     /// The older tail `earlier_context` gives for `context_last_second`, when the minutes it
     /// keeps answer it, and `None` when answering would read saved history.
     pub fn earlier_context_kept(&self, context_last_second: u64) -> Result<Option<Value>> {
