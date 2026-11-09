@@ -672,15 +672,7 @@ fn a_page_the_saved_minutes_answer_reads_the_rest_at_once() {
     // Method: hold a second past the Store's hour, one step at a time, and read the pause after the
     // step that showed the page, then the pause while the Store is asked again.
     let recording = crate::live_source::tests::SealedRecording::with_a_minute_past_the_store_hour();
-    let store = viewer::store::Store::start_with_budget(
-        &recording.root,
-        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
-    )
-    .unwrap();
-    let handle = store.query_handle();
-    wait_until_complete(&handle);
-    let mut adapter = Adapter::on_root(handle, &recording.root);
-    adapter.command.request = request("overview");
+    let (_store, mut adapter) = complete_store_page(&recording, "overview");
     adapter.command.request.second = Some(1000);
     assert!(matches!(
         adapter.update_within(Duration::from_secs(10)),
@@ -770,15 +762,7 @@ fn a_newly_opened_page_shows_before_the_step_that_read_it_lists_the_saved_minute
     // the page's, save another older minute, open another page through the worker's step, and
     // read what the step published and how many minutes the session lists.
     let recording = crate::live_source::tests::SealedRecording::with_an_older_kept_minute();
-    let store = viewer::store::Store::start_with_budget(
-        &recording.root,
-        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
-    )
-    .unwrap();
-    let handle = store.query_handle();
-    wait_until_complete(&handle);
-    let mut adapter = Adapter::on_root(handle, &recording.root);
-    adapter.command.request = request("network");
+    let (_store, mut adapter) = complete_store_page(&recording, "network");
     adapter.command.request.earlier = crate::live_source::Earlier::Load;
     adapter.worker_step_published();
     adapter.session().list_saved_for(1000).unwrap();
@@ -802,15 +786,7 @@ fn the_apps_page_reads_no_older_tail() {
     // Method: open it on a Store over minutes one of which lies before its full detail, and read it
     // to its end.
     let recording = crate::live_source::tests::SealedRecording::with_an_older_kept_minute();
-    let store = viewer::store::Store::start_with_budget(
-        &recording.root,
-        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
-    )
-    .unwrap();
-    let handle = store.query_handle();
-    wait_until_complete(&handle);
-    let mut adapter = Adapter::on_root(handle, &recording.root);
-    adapter.command.request = request("apps");
+    let (_store, mut adapter) = complete_store_page(&recording, "apps");
     adapter.command.request.earlier = crate::live_source::Earlier::Load;
 
     let page = adapter.finished_within(Duration::from_secs(10));
@@ -865,6 +841,17 @@ fn network_page_over_a_long_older_tail() -> (
     Adapter,
 ) {
     let recording = crate::live_source::tests::SealedRecording::with_a_long_older_kept_tail();
+    let (store, mut adapter) = complete_store_page(&recording, "network");
+    adapter.command.request.earlier = crate::live_source::Earlier::Load;
+
+    (recording, store, adapter)
+}
+
+/// A page of `route` on a Store that holds all it will hold of `recording`.
+fn complete_store_page(
+    recording: &crate::live_source::tests::SealedRecording,
+    route: &str,
+) -> (viewer::store::Store, Adapter) {
     let store = viewer::store::Store::start_with_budget(
         &recording.root,
         Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
@@ -873,10 +860,9 @@ fn network_page_over_a_long_older_tail() -> (
     let handle = store.query_handle();
     wait_until_complete(&handle);
     let mut adapter = Adapter::on_root(handle, &recording.root);
-    adapter.command.request = request("network");
-    adapter.command.request.earlier = crate::live_source::Earlier::Load;
+    adapter.command.request = request(route);
 
-    (recording, store, adapter)
+    (store, adapter)
 }
 
 fn latest_query() -> viewer::store::QueryRequest {
