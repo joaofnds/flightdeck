@@ -289,7 +289,8 @@ fn profile_range(
 
 /// Starts a measurement epoch and holds the second, as a click on a chart of the live Mac does,
 /// and answers the epoch count before it. A second past the charts' window is refused, since no
-/// click on a chart picks one.
+/// click on a chart picks one, and so is any hold before the app follows the live Mac and has
+/// read one of its seconds.
 fn profile_hold(
     words: &[&str],
     dashboard: &Entity<LiveDashboard>,

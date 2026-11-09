@@ -365,7 +365,8 @@ previous sample's read nothing for that switch. `profile-hold SECOND` holds the 
 as a click on a chart of the live Mac does and returns the first frame after the hold has
 that second's complete reading, or after its read failed, which the sample's
 `hold_failure` then names. It refuses a second past the last second the charts draw,
-which no click picks, and a page that draws no chart of the live Mac.
+which no click picks, and any hold while the app follows no live Mac or has read none of
+its seconds yet, on whichever page is open.
 
 For stack profiling, attach `/usr/bin/sample PID 3 1 -mayDie -file OUTPUT` while a
 separate control client runs repeated cycles. Use those samples for attribution, not
