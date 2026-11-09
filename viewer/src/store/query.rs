@@ -352,13 +352,9 @@ fn build(
     if !current() {
         return None;
     }
-    if let Some(failure) = refusal(held) {
-        return Some(QueryOutcome::Unavailable(QueryUnavailable::SourceFailure(
-            failure,
-        )));
-    }
-    let Some(coverage) = coverage else {
-        return Some(QueryOutcome::NeedsLoad(QueryNeedsLoad::UncheckedCoverage));
+    let coverage = match build_coverage(held, coverage) {
+        Ok(coverage) => coverage,
+        Err(outcome) => return Some(outcome),
     };
     if let Err(outcome) = build_available(held, coverage, request) {
         return Some(outcome);
@@ -504,10 +500,26 @@ fn refusal(held: &Held) -> Option<Failure> {
         .or(held.left_out.filter(|_| held.newest.is_none()))
 }
 
-/// Whether the Store would answer a query only that it has not checked what it holds, as `build`
-/// does where it refuses no query and has no coverage.
+/// The checked coverage a query is answered from, or the Store's first answer when it refuses
+/// every query or has not checked what it holds.
+fn build_coverage<'coverage>(
+    held: &Held,
+    coverage: Option<&'coverage CheckedCoverage>,
+) -> Result<&'coverage CheckedCoverage, QueryOutcome> {
+    if let Some(failure) = refusal(held) {
+        return Err(QueryOutcome::Unavailable(QueryUnavailable::SourceFailure(
+            failure,
+        )));
+    }
+    coverage.ok_or(QueryOutcome::NeedsLoad(QueryNeedsLoad::UncheckedCoverage))
+}
+
+/// Whether the Store would answer a query only that it has not checked what it holds.
 pub(super) fn unchecked(held: &Held, coverage: Option<&CheckedCoverage>) -> bool {
-    refusal(held).is_none() && coverage.is_none()
+    matches!(
+        build_coverage(held, coverage),
+        Err(QueryOutcome::NeedsLoad(QueryNeedsLoad::UncheckedCoverage))
+    )
 }
 
 fn build_selected(
