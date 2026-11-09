@@ -353,17 +353,21 @@ mod tests {
         let first = 200_000;
         // The tail of a context ending here stops before second first + 40 and so before the
         // second minute, and each minute later reaches one minute further.
-        let first_minute = first + 40 + viewer::CHARTED_SECONDS - 1;
-        let recording = older_minutes(first, 8, first_minute + 420);
+        let context_last_second = first + 40 + viewer::CHARTED_SECONDS - 1;
+        let recording = older_minutes(first, 8, context_last_second + 420);
         let mut session = LiveSession::open(&recording.root).unwrap();
-        session.earlier_context(first_minute).unwrap();
+        session.earlier_context(context_last_second).unwrap();
         let seventh = LiveSession::open(&recording.root)
             .unwrap()
-            .earlier_context(first_minute + 360)
+            .earlier_context(context_last_second + 360)
             .unwrap();
 
-        let eighth_at_once = session.earlier_context_at_once(first_minute + 420).unwrap();
-        let seventh_at_once = session.earlier_context_at_once(first_minute + 360).unwrap();
+        let eighth_at_once = session
+            .earlier_context_at_once(context_last_second + 420)
+            .unwrap();
+        let seventh_at_once = session
+            .earlier_context_at_once(context_last_second + 360)
+            .unwrap();
 
         assert_eq!(eighth_at_once, None);
         assert_eq!(seventh["earlier_trends"].as_array().unwrap().len(), 7);
@@ -379,13 +383,13 @@ mod tests {
         // at once for the tail that reaches the second, of a context further on than the span it
         // loaded reaches.
         let first = 200_000;
-        let first_minute = first + 40 + viewer::CHARTED_SECONDS - 1;
-        let recording = older_minutes(first, 2, first_minute + 1000);
+        let context_last_second = first + 40 + viewer::CHARTED_SECONDS - 1;
+        let recording = older_minutes(first, 2, context_last_second + 1000);
         let mut session = LiveSession::open(&recording.root).unwrap();
-        session.earlier_context(first_minute).unwrap();
+        session.earlier_context(context_last_second).unwrap();
 
         let past_the_span = session
-            .earlier_context_at_once(first_minute + 1000)
+            .earlier_context_at_once(context_last_second + 1000)
             .unwrap();
 
         assert_eq!(past_the_span, None);
@@ -405,6 +409,7 @@ mod tests {
         }
         recording.elapsed = newest_second - first_second;
         recording.publish(newest_second);
+        // The division floors, to the minute that holds the newest reading.
         recording.seal_window(recording.elapsed / 60);
 
         recording
