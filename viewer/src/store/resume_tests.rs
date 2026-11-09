@@ -298,6 +298,54 @@ fn a_resume_beyond_ring_retention_reads_only_the_minutes_sealed_since_its_newest
     // Goal: a return keeps the held hour and reads only what the recording sealed while hidden.
     // Method: hold two sealed minutes, hide, seal nine more whose publications overrun the
     // fixture's eight-slot ring, take the oldest offline, show.
+    let (fixture, store) = hidden_past_the_ring();
+    take_minute_offline(&fixture, 0);
+
+    store.set_active(true);
+    let resumed = view_where(&store, |_| true);
+
+    assert_eq!(
+        seconds_of(&resumed),
+        (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
+    );
+    assert_eq!(resumed.failure, None);
+    assert_eq!(resumed.left_out, None);
+}
+
+#[test]
+fn a_query_asked_as_a_return_past_the_ring_begins_hears_the_hour_the_store_caught_up_to() {
+    // Goal: a page that asks as the window returns past the ring hears the readings the Store
+    // caught up to, rather than that it has not yet checked what it holds, which leaves the page
+    // to ask again only at its next poll.
+    // Method: hold two sealed minutes, hide, seal nine more whose publications overrun the
+    // fixture's eight-slot ring and publish three after them, which the Store takes in a step
+    // after it reads the sealed minutes, show, ask for the newest reading at once and read the
+    // answer.
+    let (mut fixture, store) = hidden_past_the_ring();
+    for second in 701..=703 {
+        fixture.publish_with_events(second, &[]);
+    }
+    let handle = store.query_handle();
+
+    store.set_active(true);
+    handle
+        .submit(super::QueryRequest {
+            epoch: 0,
+            source: None,
+            selection: super::QuerySelection::FollowLatest,
+        })
+        .unwrap();
+    let outcome = super::tests::next_reply(&handle);
+
+    let super::QueryOutcome::Ready(context) = outcome else {
+        panic!("the Store answered {outcome:?}");
+    };
+    assert_eq!(context.selected_second(), 703);
+}
+
+/// A Store that held two sealed minutes and was hidden while nine more were sealed, whose
+/// publications overrun the fixture's eight-slot ring.
+fn hidden_past_the_ring() -> (Fixture, Store) {
     let mut fixture = Fixture::new();
     fixture.publish_with_events(100, &[]);
     fixture.seal_minute(0);
@@ -313,17 +361,8 @@ fn a_resume_beyond_ring_retention_reads_only_the_minutes_sealed_since_its_newest
         fixture.publish_with_events(100 + minute * 60, &[]);
         fixture.seal_minute(minute);
     }
-    take_minute_offline(&fixture, 0);
 
-    store.set_active(true);
-    let resumed = view_where(&store, |_| true);
-
-    assert_eq!(
-        seconds_of(&resumed),
-        (0..=10).map(|minute| 100 + minute * 60).collect::<Vec<_>>()
-    );
-    assert_eq!(resumed.failure, None);
-    assert_eq!(resumed.left_out, None);
+    (fixture, store)
 }
 
 #[test]

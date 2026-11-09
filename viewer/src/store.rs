@@ -1293,7 +1293,7 @@ fn run(
         }
         // After the step, since a query that came with a new reading in the ring would otherwise
         // be told the Store has not caught up, and ask again a poll later.
-        run_answers(held, ring, shared);
+        run_serve(held, ring, shared);
         if run_retry(held, ring, shared) {
             waited = Ok(());
             continue;
@@ -1318,20 +1318,37 @@ fn run_wait(ring: &Ring, shared: &Shared) -> Result<(), Failure> {
     ring.wait(WAIT)
 }
 
+/// Answers the queries after a step but one the Store could only tell that it has not checked
+/// what it holds, which waits while the Store catches up, for the step that does.
+fn run_serve(held: &mut Held, ring: &mut Ring, shared: &Shared) {
+    let checked = run_queries_checked(held, ring);
+    if checked.is_some() || held.failure.is_some() || !shared.catching_up.load(Ordering::Acquire) {
+        shared
+            .queries
+            .serve(held, checked.as_ref(), &held.payload_budget);
+    }
+}
+
 fn run_answers(held: &mut Held, ring: &mut Ring, shared: &Shared) {
     run_queries(held, ring, &shared.queries);
 }
 
 fn run_queries(held: &mut Held, ring: &mut Ring, queries: &query::Queries) {
-    let checked = match coverage::checked(held, ring) {
+    let checked = run_queries_checked(held, ring);
+    queries.serve(held, checked.as_ref(), &held.payload_budget);
+}
+
+/// The coverage the Store answers a query from, or none where it cannot prove what it holds, as
+/// when the check of its ring fails, which it then holds as its failure.
+fn run_queries_checked(held: &mut Held, ring: &mut Ring) -> Option<query::CheckedCoverage> {
+    match coverage::checked(held, ring) {
         Ok(checked) => checked,
         Err(failure) => {
             held.failure = Some(failure);
             held.unpublished = true;
             None
         }
-    };
-    queries.serve(held, checked.as_ref(), &held.payload_budget);
+    }
 }
 
 fn run_retry(held: &mut Held, ring: &Ring, shared: &Shared) -> bool {
