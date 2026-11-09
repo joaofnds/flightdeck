@@ -37,7 +37,7 @@ use persistence::retention::Period;
 
 const USAGE: &str = "usage: reference_input --directory PATH --seconds N | reference_input \
     --expected-events --seconds N | reference_input --unlink PATH";
-/// The contract's input lasts an hour.
+/// The longest input made, W10's hour, the shortest of the contract's durations.
 const SECONDS_MAX: u64 = 3_600;
 /// The shortest input whose saved minutes hold seconds 300 to 306, each special, since the
 /// minute an input ends in stays in its ring.
