@@ -351,9 +351,10 @@ fn a_query_asked_as_a_return_over_a_lapped_ring_hears_the_step_that_catches_up()
     // catch-up, even where its ring lost readings so that it can say only that it has not checked
     // what it holds, rather than after the Store's wait on a ring that publishes nothing.
     // Method: hold two sealed minutes, hide, seal nine more, then five times publish twelve
-    // readings, which lap the fixture's eight-slot ring, show, ask at once, time the answer and
-    // hide, and take the quickest. A wait costs every answer most of `WAIT`, however fast the
-    // machine, and one quick answer shows it ended, however busy the machine is for the others.
+    // readings, which lap the fixture's eight-slot ring, show, ask at once, take the View the Store
+    // hands over only once its catch-up ends, time the answer from it and hide, and take the
+    // quickest. A wait costs every answer most of `WAIT` past that View, however fast the machine,
+    // while the catch-up's own work, which a slow machine stretches past `WAIT`, comes before it.
     let (mut fixture, store) = hidden_past_the_ring();
     let handle = store.query_handle();
 
@@ -363,7 +364,6 @@ fn a_query_asked_as_a_return_over_a_lapped_ring_hears_the_step_that_catches_up()
                 fixture.publish_with_events(second, &[]);
             }
             store.set_active(true);
-            let started = Instant::now();
             handle
                 .submit(super::QueryRequest {
                     epoch: 0,
@@ -372,8 +372,10 @@ fn a_query_asked_as_a_return_over_a_lapped_ring_hears_the_step_that_catches_up()
                 })
                 .unwrap();
             handle.wake_store();
+            drop(view_where(&store, |_| true));
+            let caught_up = Instant::now();
             let outcome = super::tests::next_reply(&handle);
-            let elapsed = started.elapsed();
+            let elapsed = caught_up.elapsed();
             store.set_active(false);
             super::activity_tests::wait_until_paused(&store);
             assert!(
