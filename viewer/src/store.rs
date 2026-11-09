@@ -1318,15 +1318,18 @@ fn run_wait(ring: &Ring, shared: &Shared) -> Result<(), Failure> {
     ring.wait(WAIT)
 }
 
-/// Answers the queries after a step but one the Store could only tell that it has not checked
-/// what it holds, which waits while the Store catches up, for the step that does.
+/// Answers the queries after a step but one the Store would answer only that it has not checked
+/// what it holds, with no coverage and nothing to refuse, which waits while the Store catches up,
+/// for the step that ends the catch-up to answer.
 fn run_serve(held: &mut Held, ring: &mut Ring, shared: &Shared) {
     let checked = run_queries_checked(held, ring);
-    if checked.is_some() || held.failure.is_some() || !shared.catching_up.load(Ordering::Acquire) {
-        shared
-            .queries
-            .serve(held, checked.as_ref(), &held.payload_budget);
+    if shared.catching_up.load(Ordering::Acquire) && query::unchecked(held, checked.as_ref()) {
+        return;
     }
+
+    shared
+        .queries
+        .serve(held, checked.as_ref(), &held.payload_budget);
 }
 
 fn run_answers(held: &mut Held, ring: &mut Ring, shared: &Shared) {
@@ -1394,6 +1397,9 @@ fn run_ready(held: &mut Held, ring: &mut Ring, shared: &Shared) {
     }
     if !shared.catching_up.load(Ordering::Acquire) {
         ring.finish_resume();
+        // Here rather than after the wait on the ring, which publishes nothing when the ring lost
+        // readings, so that a query kept for the catch-up hears its end at once.
+        run_answers(held, ring, shared);
     }
 }
 

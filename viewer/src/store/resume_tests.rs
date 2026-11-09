@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use super::tests::view_where;
 use super::{MachineSecond, Mailbox, Publication, Store};
 use crate::live::identity_fixture::Fixture;
@@ -343,8 +345,54 @@ fn a_query_asked_as_a_return_past_the_ring_begins_hears_the_hour_the_store_caugh
     assert_eq!(context.selected_second(), 703);
 }
 
+#[test]
+fn a_query_asked_as_a_return_over_a_lapped_ring_hears_the_step_that_catches_up() {
+    // Goal: a page that asks as the window returns hears the Store from the step that ends its
+    // catch-up, even where its ring lost readings so that it can say only that it has not checked
+    // what it holds, rather than after the Store's wait on a ring that publishes nothing.
+    // Method: hold two sealed minutes, hide, seal nine more, then five times publish twelve
+    // readings, which lap the fixture's eight-slot ring, show, ask at once, time the answer and
+    // hide, and take the quickest. A wait costs every answer most of `WAIT`, however fast the
+    // machine, and one quick answer shows it ended, however busy the machine is for the others.
+    let (mut fixture, store) = hidden_past_the_ring();
+    let handle = store.query_handle();
+
+    let quickest = (0_u64..5)
+        .map(|attempt| {
+            for second in 701 + 12 * attempt..713 + 12 * attempt {
+                fixture.publish_with_events(second, &[]);
+            }
+            store.set_active(true);
+            let started = Instant::now();
+            handle
+                .submit(super::QueryRequest {
+                    epoch: 0,
+                    source: None,
+                    selection: super::QuerySelection::FollowLatest,
+                })
+                .unwrap();
+            handle.wake_store();
+            let outcome = super::tests::next_reply(&handle);
+            let elapsed = started.elapsed();
+            store.set_active(false);
+            super::activity_tests::wait_until_paused(&store);
+            assert!(
+                matches!(
+                    outcome,
+                    super::QueryOutcome::NeedsLoad(super::QueryNeedsLoad::UncheckedCoverage)
+                ),
+                "{outcome:?}"
+            );
+            elapsed
+        })
+        .min()
+        .unwrap();
+
+    assert!(quickest < super::WAIT / 2, "{quickest:?}");
+}
+
 /// A Store that held two sealed minutes and was hidden while nine more were sealed, whose
-/// publications overrun the fixture's eight-slot ring.
+/// publications overrun the fixture's eight-slot ring. The newest sealed reading is second 700.
 fn hidden_past_the_ring() -> (Fixture, Store) {
     let mut fixture = Fixture::new();
     fixture.publish_with_events(100, &[]);

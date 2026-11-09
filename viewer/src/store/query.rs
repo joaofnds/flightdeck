@@ -504,6 +504,12 @@ fn refusal(held: &Held) -> Option<Failure> {
         .or(held.left_out.filter(|_| held.newest.is_none()))
 }
 
+/// Whether the Store would answer a query only that it has not checked what it holds, as `build`
+/// does where it refuses no query and has no coverage.
+pub(super) fn unchecked(held: &Held, coverage: Option<&CheckedCoverage>) -> bool {
+    refusal(held).is_none() && coverage.is_none()
+}
+
 fn build_selected(
     held: &Held,
     newest: &Observation,
