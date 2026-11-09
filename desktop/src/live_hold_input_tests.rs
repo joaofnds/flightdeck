@@ -216,6 +216,25 @@ fn a_hover_while_the_held_second_is_read_sends_no_read_of_its_own(cx: &mut TestA
 }
 
 #[gpui::test]
+fn the_page_awaits_the_held_second_s_read_until_its_reply(cx: &mut TestAppContext) {
+    // Goal: the app polls the worker quickly while the held second's read is out, so the held
+    // second shows as soon as the reader answers rather than at the next tick a quarter second
+    // later. Method: hover and click 800 seconds before the newest on the CPU page's chart by
+    // App before the hover reads, so the hold reads its second, then whether the page awaits a
+    // reply while that read is out and once it is answered.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+
+    assert!(harness.driver.awaiting_reply());
+    harness.driver.answer_held_read();
+    assert!(!harness.driver.awaiting_reply());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_page_takes_no_reply_to_the_request_out_at_the_click(cx: &mut TestAppContext) {
     // Goal: the page takes no reply to a request it sent before the click, as the reader
     // publishes the live Mac's newer seconds under it, whose readings would replace the held
@@ -3237,6 +3256,12 @@ impl InputDriver {
         self.view.read_with(&self.context, |dashboard, _| {
             dashboard.worker.commands_sent()
         })
+    }
+
+    /// Whether the page polls the worker quickly for a reply it waits on.
+    fn awaiting_reply(&self) -> bool {
+        self.view
+            .read_with(&self.context, |dashboard, _| dashboard.awaiting_reply())
     }
 
     /// The second the window's last command asked the reader for.

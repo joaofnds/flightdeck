@@ -1003,6 +1003,9 @@ impl LiveDashboard {
                 return true;
             }
         }
+        if self.hold_read_pending() {
+            return true;
+        }
 
         self.preview_awaiting_reply()
     }
