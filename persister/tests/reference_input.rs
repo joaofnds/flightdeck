@@ -17,8 +17,8 @@ mod tests {
     use collector::disks::DiskSnapshot;
     use collector::machine::CPUTicks;
     use collector::recording::private::PrivateDirectory;
-    use collector::recording::{Registry, identity_text};
-    use collector::ring::{Identity, RunIdentity};
+    use collector::recording::{Registration, Registry, identity_text};
+    use collector::ring::{Identity, Place, RunIdentity, Shape};
     use persistence::Manifest;
     use persistence::resources::ByteBudget;
     use persistence::retention::Period;
@@ -551,6 +551,36 @@ mod tests {
             EXISTING_BYTES,
             std::fs::read(directory.join(EXISTING_NAME)).unwrap()
         );
+    }
+
+    #[test]
+    fn refuses_to_unlink_the_rings_of_a_recording_it_did_not_generate() {
+        // Goal: `--unlink` never takes a ring from a recording the generator did not make, the
+        // user's included. Method: start a run in a recording of its own identity, as a
+        // collector does, ask the generator to unlink its rings, then open the run's ring.
+        let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("reference_input_other");
+        remove_directory_if_present(&directory);
+        drop(persistence::Store::open(&directory).unwrap());
+        let place = Place {
+            lock_path: directory.join("ring.lock"),
+            name_prefix: format!("/fdu{}", std::process::id()),
+        };
+        let (writer, registered) = Registration::start(&directory, &place, small_shape(), 0)
+            .unwrap()
+            .into_parts();
+        registered.unwrap();
+
+        let unlinked = generator()
+            .arg("--unlink")
+            .arg(&directory)
+            .status()
+            .unwrap();
+        let opened = collector::ring::Reader::open(&place.lock_path);
+
+        let cleaned = collector::ring::unlink_generation(writer.name());
+        assert!(!unlinked.success());
+        assert!(opened.is_ok());
+        cleaned.unwrap();
     }
 
     /// The SMC's readings between the contract's special seconds.
@@ -1207,6 +1237,21 @@ mod tests {
 
     fn generator() -> Command {
         Command::new(env!("CARGO_BIN_EXE_reference_input"))
+    }
+
+    /// The smallest ring a run can start with, for a test that needs a run but no readings.
+    fn small_shape() -> Shape {
+        Shape {
+            slot_count: 120,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 120,
+        }
     }
 
     /// Removes what an earlier run of the tests left, which the generator refuses to add to.

@@ -548,9 +548,13 @@ fn generate_worker(
 }
 
 /// Unlinks the rings of the runs `directory` registers, which outlive the generator otherwise.
+/// It refuses a recording the generator did not make, whose rings may be a collector's.
 fn unlink(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // A path that names no directory refuses here, rather than reading as a recording of no run.
     drop(PrivateDirectory::open(directory)?);
+    if collector::recording::read_identity(directory)? != RECORDING_IDENTITY {
+        return Err("refusing a recording the generator did not make".into());
+    }
     let registry = Registry::read(directory)?;
     for run in &registry.runs {
         match collector::ring::unlink_generation(&run.ring_name) {
