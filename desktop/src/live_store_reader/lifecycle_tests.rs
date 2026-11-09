@@ -858,7 +858,7 @@ fn store_answering() -> (
 }
 
 /// The Network page, which has no App histories, opened with its older tail on a Store that holds
-/// all it will hold of a recording whose one older minute lies before the page's full detail.
+/// all it will hold of a recording whose eight older minutes lie before the page's full detail.
 fn network_page_over_a_long_older_tail() -> (
     crate::live_source::tests::SealedRecording,
     viewer::store::Store,

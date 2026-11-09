@@ -370,6 +370,27 @@ mod tests {
         assert_eq!(seventh_at_once, Some(seventh));
     }
 
+    #[test]
+    fn leaves_to_a_later_step_an_older_tail_past_the_span_its_session_loaded() {
+        // Goal: a page's first step reads no older tail whose context lies past the saved
+        // minutes its session loaded, however few minutes it lacks, since loading them walks the
+        // recording's catalog.
+        // Method: read the tail of two sealed minutes up to the first, then ask the same session
+        // at once for the tail that reaches the second, of a context further on than the span it
+        // loaded reaches.
+        let first = 200_000;
+        let first_minute = first + 40 + viewer::CHARTED_SECONDS - 1;
+        let recording = older_minutes(first, 2, first_minute + 1000);
+        let mut session = LiveSession::open(&recording.root).unwrap();
+        session.earlier_context(first_minute).unwrap();
+
+        let past_the_span = session
+            .earlier_context_at_once(first_minute + 1000)
+            .unwrap();
+
+        assert_eq!(past_the_span, None);
+    }
+
     /// A recording of `count` sealed minutes a minute apart from `first_second`, each with
     /// readings in its first four seconds, and a sealed minute with a reading at `newest_second`.
     fn older_minutes(first_second: u64, count: u64, newest_second: u64) -> Recording {

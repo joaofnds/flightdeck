@@ -290,13 +290,14 @@ impl KeptTail {
     }
 
     /// Whether the fill of `range` lists no minutes again and reads the minutes it lacks in one
-    /// batch, which takes about as long as one of them, since each reads on a thread of its own.
+    /// batch, whose minutes each read on a thread of their own.
     pub(crate) fn fills_in_one_batch(&self, history: &Session, range: TailRange) -> Result<bool> {
         if !history.span_holds(range.context_last_second())? {
             return Ok(false);
         }
         let retained = history.reader().retained();
         let needed = history.earlier_needed(range, &retained);
+        // One minute more than a batch holds tells a fill of one batch from a fill of more.
         let batch = self.fill_batch(history, &needed, CONTEXT_READERS + 1);
 
         Ok(batch.len() <= CONTEXT_READERS)
