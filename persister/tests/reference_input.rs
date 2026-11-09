@@ -49,6 +49,8 @@ mod tests {
     #[test]
     fn saves_process_zero_cpu_time_above_two_to_the_fifty_third_exactly() {
         // Goal: the input's CPU counters stay exact above 2^53 through the ring and the seal.
+        // Every counter the contract fixes is even, and an f64 holds each even integer below
+        // 2^54, so this catches truncation or an f32 on the way, not an f64.
         // Method: read process 0's CPU time at second 1 from its saved minute.
         let cpu_ns = input().process_counters(PROCESS_ZERO_PID, 1).cpu_ns;
 
