@@ -762,6 +762,41 @@ fn a_page_reads_the_older_tail_it_left_before_the_window_takes_its_readings() {
 }
 
 #[test]
+fn a_newly_opened_page_shows_before_the_step_that_read_it_lists_the_saved_minutes() {
+    // Goal: a newly opened page the Store answers shows without the listing of the saved minutes
+    // its session owes, which reopens the recording, and the worker's step that published the
+    // page lists them before the next step.
+    // Method: open a page through the worker's step, have its session list for a second far from
+    // the page's, save another older minute, open another page through the worker's step, and
+    // read what the step published and how many minutes the session lists.
+    let recording = crate::live_source::tests::SealedRecording::with_an_older_kept_minute();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("network");
+    adapter.command.request.earlier = crate::live_source::Earlier::Load;
+    adapter.worker_step_published();
+    adapter.session().list_saved_for(1000).unwrap();
+    let listed = adapter.session_windows();
+    recording.seal_older_minute(1100);
+    adapter.command.generation += 1;
+    adapter.command.request.route = "battery".into();
+
+    let Update::Ready(opened) = adapter.worker_step_published() else {
+        panic!("the page failed");
+    };
+
+    let tail = opened.selection["earlier_trends"].as_array().unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(adapter.session_windows(), listed + 1);
+}
+
+#[test]
 fn the_apps_page_reads_no_older_tail() {
     // Goal: the Apps page, whose charts draw no older tail, costs no read of one.
     // Method: open it on a Store over minutes one of which lies before its full detail, and read it
@@ -924,6 +959,43 @@ impl Adapter {
             &mut self.command,
             &self.shared,
         )
+    }
+
+    /// What the worker's steps publish first, stepping as the worker does with a page to read.
+    fn worker_step_published(&mut self) -> Update {
+        self.shared.mailbox.lock().unwrap().generation = self.command.generation;
+        for _ in 0..1_000 {
+            let mut command = Some(std::mem::replace(&mut self.command, Self::placeholder()));
+            crate::live_source::worker_step(
+                &self.root,
+                &self.shared,
+                &mut self.reader,
+                &mut command,
+            );
+            self.command = command.unwrap();
+            if let Some(update) = self.shared.mailbox.lock().unwrap().output.take() {
+                return update;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the worker published nothing");
+    }
+
+    fn placeholder() -> crate::live_source::Command {
+        crate::live_source::Command {
+            generation: 0,
+            epoch: 0,
+            request: request("memory"),
+            context: crate::live_source::Context::Select,
+        }
+    }
+
+    fn session(&mut self) -> &mut viewer::LiveSession {
+        self.reader.session.as_mut().unwrap()
+    }
+
+    fn session_windows(&mut self) -> u64 {
+        self.session().catalog()["windows"].as_u64().unwrap()
     }
 
     /// The first thing the reader publishes, stepping with no pause, so a test of its bounded wait

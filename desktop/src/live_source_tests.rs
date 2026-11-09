@@ -547,27 +547,6 @@ fn a_newly_opened_page_reads_with_its_readings_a_minute_its_older_tail_newly_rea
 }
 
 #[test]
-fn a_newly_opened_page_takes_its_older_tail_before_the_saved_minutes_are_listed_again() {
-    // Goal: a page the Store answers shows without the listing of the saved minutes its session
-    // owes once its context has moved a minute, which reopens the recording, and the worker lists
-    // them once that step is over, so the next page's tail reaches a minute saved meanwhile.
-    // Method: take a page's older tail, save another older minute, take a newly opened page's
-    // tail a minute later, finish the worker's step, and take the next newly opened page's tail.
-    let recording = SealedRecording::with_an_older_minute();
-    let mut reader = SnapshotReader::new();
-    reader.command.request.earlier = crate::live_source::Earlier::Load;
-    reader.earlier(&recording, 2200);
-    recording.seal_older_minute(1100);
-
-    let opened = reader.earlier_at_once(&recording, 2260);
-    reader.step_resting(&recording.root);
-    let next = reader.earlier_at_once(&recording, 2261);
-
-    assert_eq!(opened["earlier_trends"].as_array().unwrap().len(), 1);
-    assert_eq!(next["earlier_trends"].as_array().unwrap().len(), 2);
-}
-
-#[test]
 fn a_handed_over_reader_reads_the_next_windows_page_as_newly_opened() {
     // Goal: a window opened over a kept reader shows its readings before its App histories, as
     // it would over a new reader, whatever page the closed window showed last.
@@ -966,27 +945,6 @@ impl SnapshotReader {
         selection
     }
 
-    /// What a newly opened page's first step adds to a selection whose context ends at
-    /// `last_second`.
-    fn earlier_at_once(
-        &mut self,
-        recording: &SealedRecording,
-        last_second: u64,
-    ) -> serde_json::Value {
-        let mut selection = json!({"context_last_second": last_second});
-        let pending = super::store_reader::read_earlier_selection(
-            &mut self.reader,
-            &recording.root,
-            &self.command,
-            &self.shared,
-            true,
-            &mut selection,
-        );
-        assert!(!pending);
-
-        selection
-    }
-
     fn read_at(&mut self, root: &std::path::Path) -> Result<Option<Box<super::Snapshot>>, String> {
         super::reader_snapshot(&mut self.reader, root, &mut self.command, &self.shared)
     }
@@ -1301,7 +1259,7 @@ impl SealedRecording {
 
     /// Saves a minute of another run to the recording of `with_an_older_minute`, whose one
     /// reading lies at `second`.
-    fn seal_older_minute(&self, second: u64) {
+    pub(crate) fn seal_older_minute(&self, second: u64) {
         let store = persistence::Store::open(&self.root).unwrap();
         let identity = persistence::WindowIdentity {
             run: collector::ring::RunIdentity {

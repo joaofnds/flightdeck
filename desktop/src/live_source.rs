@@ -697,7 +697,7 @@ fn worker_step(
     command: &mut Option<Command>,
 ) -> Duration {
     let pause = worker_step_read(root, shared, reader, command);
-    store_reader::list_deferred(reader);
+    worker_step_list(reader);
 
     pause
 }
@@ -727,6 +727,26 @@ fn worker_step_read(
     } else {
         POLL_INTERVAL
     }
+}
+
+/// Lists the saved minutes a step left until it was over, where its context has moved far enough
+/// since the session last listed them, as a read of the page's history.
+fn worker_step_list(reader: &mut Reader) {
+    let Some(last) = reader.deferred_listing.take() else {
+        return;
+    };
+    let Some(session) = &mut reader.session else {
+        return;
+    };
+    let scope =
+        persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::History);
+
+    match session.list_saved_for(last) {
+        Ok(()) => {}
+        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(error) => eprintln!("flightdeck saved minutes unlisted: {error}"),
+    }
+    drop(scope);
 }
 
 /// How long the worker waits before its next step. A page whose readings were just published
@@ -823,7 +843,6 @@ fn worker_publish(shared: &Shared, generation: u64, output: Update) {
 /// shows its readings before its App histories.
 fn reader_rest(reader: &mut Reader) {
     reader.last_route.clear();
-    reader.deferred_listing = None;
     if let Some(store) = &mut reader.store {
         store.rest();
     }

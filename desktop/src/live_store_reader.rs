@@ -637,23 +637,6 @@ pub(super) fn read_earlier_selection(
     pending
 }
 
-/// Lists the saved minutes a step left until it was over, where its context has moved far enough
-/// since the session last listed them.
-pub(super) fn list_deferred(reader: &mut Reader) {
-    let Some(last) = reader.deferred_listing.take() else {
-        return;
-    };
-    let Some(session) = &mut reader.session else {
-        return;
-    };
-
-    match session.list_saved_for(last) {
-        Ok(()) => {}
-        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
-        Err(error) => eprintln!("flightdeck saved minutes unlisted: {error}"),
-    }
-}
-
 impl Drop for StoreReader {
     fn drop(&mut self) {
         match self.handle.cancel() {
