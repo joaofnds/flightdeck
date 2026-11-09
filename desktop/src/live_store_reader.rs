@@ -599,6 +599,13 @@ pub(super) fn read_earlier_selection(
 ) -> bool {
     let scope =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::History);
+    let last = crate::live_projection::context_last_second(selection);
+    // Listing the saved minutes reopens the recording, which took 50 to 90 ms on an hour of them,
+    // so a newly opened page shows with the minutes its session listed and the worker lists them
+    // once the step is over.
+    if tail_at_once {
+        reader.deferred_listing = last;
+    }
     let session = read_saved_open(reader, root, command, shared).and_then(|()| {
         let session = super::reader_snapshot_session(
             &mut reader.session,
@@ -607,7 +614,7 @@ pub(super) fn read_earlier_selection(
             shared,
             super::Arrivals::Leave,
         )?;
-        if let Some(last) = crate::live_projection::context_last_second(selection) {
+        if let Some(last) = last.filter(|_| !tail_at_once) {
             session
                 .list_saved_for(last)
                 .map_err(|error| error.to_string())?;
@@ -628,6 +635,23 @@ pub(super) fn read_earlier_selection(
     drop(scope);
 
     pending
+}
+
+/// Lists the saved minutes a step left until it was over, where its context has moved far enough
+/// since the session last listed them.
+pub(super) fn list_deferred(reader: &mut Reader) {
+    let Some(last) = reader.deferred_listing.take() else {
+        return;
+    };
+    let Some(session) = &mut reader.session else {
+        return;
+    };
+
+    match session.list_saved_for(last) {
+        Ok(()) => {}
+        Err(persistence::Error::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(error) => eprintln!("flightdeck saved minutes unlisted: {error}"),
+    }
 }
 
 impl Drop for StoreReader {

@@ -226,6 +226,8 @@ struct Reader {
     last_route: String,
     /// What the last published snapshot left pending, which the worker reads at once.
     pending: Option<Pending>,
+    /// The end of the context whose listing of the saved minutes a step left until it was over.
+    deferred_listing: Option<u64>,
     retry_after: Instant,
 }
 
@@ -597,6 +599,7 @@ fn worker_run(
         last_generation: 0,
         last_route: String::new(),
         pending: None,
+        deferred_listing: None,
         retry_after: Instant::now(),
     };
     for _lease in 0..WORKER_LEASES_MAX {
@@ -686,8 +689,20 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
 }
 
 /// Reads the page the worker reads, if any, and returns how long the worker waits before its
-/// next step.
+/// next step. A listing of the saved minutes the step left comes after what it published.
 fn worker_step(
+    root: &std::path::Path,
+    shared: &Shared,
+    reader: &mut Reader,
+    command: &mut Option<Command>,
+) -> Duration {
+    let pause = worker_step_read(root, shared, reader, command);
+    store_reader::list_deferred(reader);
+
+    pause
+}
+
+fn worker_step_read(
     root: &std::path::Path,
     shared: &Shared,
     reader: &mut Reader,
@@ -808,6 +823,7 @@ fn worker_publish(shared: &Shared, generation: u64, output: Update) {
 /// shows its readings before its App histories.
 fn reader_rest(reader: &mut Reader) {
     reader.last_route.clear();
+    reader.deferred_listing = None;
     if let Some(store) = &mut reader.store {
         store.rest();
     }

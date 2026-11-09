@@ -279,6 +279,7 @@ fn a_page_the_store_published_lists_the_saved_minutes_again_once_it_falls_to_the
             generation: 1,
             histories: crate::live_source::Histories::Defer,
         }),
+        deferred_listing: None,
         retry_after: Instant::now(),
     };
 
@@ -903,6 +904,7 @@ impl Adapter {
                 last_generation: 0,
                 last_route: String::new(),
                 pending: None,
+                deferred_listing: None,
                 retry_after: Instant::now(),
             },
             command: crate::live_source::Command {
