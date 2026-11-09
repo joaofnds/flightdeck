@@ -319,9 +319,16 @@ impl LiveDashboard {
 
     /// Whether the reader still reads the held second, which a read of any other would cancel.
     pub(crate) fn hold_read_pending(&self) -> bool {
-        self.hold
-            .as_ref()
-            .is_some_and(|hold| hold.reading.generation.is_some() && !hold.reading.complete)
+        let Some(hold) = &self.hold else {
+            return false;
+        };
+        if hold.reading.complete {
+            return false;
+        }
+
+        hold.reading
+            .generation
+            .is_some_and(|generation| self.worker.owes(generation))
     }
 }
 

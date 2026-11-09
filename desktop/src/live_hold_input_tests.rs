@@ -235,6 +235,44 @@ fn the_page_awaits_the_held_second_s_read_until_its_reply(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn the_page_stops_awaiting_the_held_second_s_read_that_a_failed_page_read_cancelled(
+    cx: &mut TestAppContext,
+) {
+    // Goal: the page polls the worker quickly only while the reader can still answer the held
+    // second's read, so a page's read that cancels it and then fails leaves the page polling at
+    // its quarter-second tick. Method: hold a second whose read is out, as the test above does,
+    // switch to the Memory page, fail that page's read, then whether the page awaits a reply.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    assert_eq!(harness.driver.reader_asked_second(), Some(HELD));
+    harness.driver.navigate("memory");
+
+    harness.driver.fail_last_request();
+
+    assert!(!harness.driver.awaiting_reply());
+    harness.teardown();
+}
+
+#[gpui::test]
+fn the_page_stops_awaiting_the_held_second_s_read_once_the_reader_stops(cx: &mut TestAppContext) {
+    // Goal: a reader that stopped answers no read, so the page stops polling it quickly for the
+    // held second's. Method: hold a second whose read is out, as the tests above do, stop the
+    // reader, then whether the page awaits a reply.
+    let mut harness = InputHarness::open_route(cx, "cpu");
+    harness.driver.show_hour_at_fifteen_minutes();
+    harness.driver.hover_second_on("live-cpu-apps-plot", HELD);
+    harness.driver.click_second_on("live-cpu-apps-plot", HELD);
+    assert_eq!(harness.driver.reader_asked_second(), Some(HELD));
+
+    harness.driver.stop_reader();
+
+    assert!(!harness.driver.awaiting_reply());
+    harness.teardown();
+}
+
+#[gpui::test]
 fn the_page_takes_no_reply_to_the_request_out_at_the_click(cx: &mut TestAppContext) {
     // Goal: the page takes no reply to a request it sent before the click, as the reader
     // publishes the live Mac's newer seconds under it, whose readings would replace the held
@@ -3295,6 +3333,26 @@ impl InputDriver {
         let mut reply = readings(&[reading_at(HOUR_NEWEST - 1, 0), reading_at(HOUR_NEWEST, 0)]);
         reply.histories_pending = true;
         self.reply_to_last_request(reply);
+    }
+
+    /// Hands the page the reader's failure to read its last request.
+    fn fail_last_request(&mut self) {
+        let generation = self.reader_commands();
+        self.view.update(&mut self.context, |dashboard, cx| {
+            let failure = Update::Failed {
+                generation,
+                message: "Live reader failed".to_owned(),
+            };
+            assert!(dashboard.take_update(failure));
+            cx.notify();
+        });
+        self.context.run_until_parked();
+    }
+
+    /// Stops the window's reader, as one that exits stops.
+    fn stop_reader(&mut self) {
+        self.view
+            .update(&mut self.context, |dashboard, _| dashboard.worker.stop());
     }
 
     /// Hands the page `reply` as the reader's answer to its last request.

@@ -975,8 +975,9 @@ impl LiveDashboard {
             && !matches!(self.request.route.as_str(), "self" | "computer")
     }
 
-    /// Whether the worker still owes an answer to the last request, the page's or a hover's,
-    /// or the App histories the page's first readings left pending, which it reads at once.
+    /// Whether the worker still owes an answer to the last request, the page's, a hover's or the
+    /// held second's, or the App histories the page's first readings left pending, which it reads
+    /// at once.
     pub(crate) fn awaiting_reply(&self) -> bool {
         if self.reply_pending {
             return true;
@@ -989,8 +990,8 @@ impl LiveDashboard {
             return true;
         }
 
-        // A hidden window's reader rests, so the App histories or the hover its page waits on
-        // come only once the window shows again.
+        // A hidden window's reader rests, so the App histories, the hover or the held second its
+        // page waits on come only once the window shows again.
         if self.presence == Presence::Hidden {
             return false;
         }

@@ -443,6 +443,18 @@ impl Worker {
         Ok(generation)
     }
 
+    /// Whether the reader still owes the reply to the command of `generation`, which it does
+    /// while that command is the window's last, since a later one cancels it, and the reader runs.
+    pub(crate) fn owes(&self, generation: u64) -> bool {
+        if self.shared.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+
+        // A mailbox that cannot be locked publishes no reply, and `take` reports why.
+        self.mailbox()
+            .is_ok_and(|mailbox| mailbox.generation == generation)
+    }
+
     pub fn take(&mut self) -> Result<Option<Update>, String> {
         let mut mailbox = self.mailbox()?;
         let output = mailbox.output.take();
