@@ -90,10 +90,23 @@ impl StoreReader {
         self.published == generation
     }
 
-    /// Whether the page's next step goes on with no wait, to the rest of a page the saved minutes
-    /// answered, since a query of that page's ends the pause when answered.
+    /// Whether the page's next step goes on with no wait: to the rest of a page the saved minutes
+    /// answered, since a query of that page's ends the pause when answered, or to the older tail
+    /// of a page the Store answered whole, which this thread reads with nothing to wait for.
     pub(super) fn reads_on(&self) -> bool {
+        if self.tail_due().is_some() {
+            return true;
+        }
+
         self.published != self.generation && self.pending.is_none()
+    }
+
+    /// The context whose page reads the older tail it left at its next step, since the Store has
+    /// answered the rest of it.
+    fn tail_due(&self) -> Option<&Arc<QueryContext>> {
+        self.context
+            .as_ref()
+            .filter(|context| self.tail_pending && context.readiness() == QueryReadiness::Complete)
     }
 
     /// What the reader knows of the page it read, which a new page or a rest starts over.
@@ -129,12 +142,8 @@ impl StoreReader {
         if command.context == Context::Keep {
             return self.snapshot_kept(command, shared);
         }
-        if self.tail_pending {
-            if let Some(context) = &self.context {
-                if context.readiness() == QueryReadiness::Complete {
-                    return payload::snapshot(context, command, shared, None).map(Answer::Ready);
-                }
-            }
+        if let Some(context) = self.tail_due() {
+            return payload::snapshot(context, command, shared, None).map(Answer::Ready);
         }
         if let Some(context) = &self.context {
             if detached_context_answers(context, command)? {
@@ -146,12 +155,16 @@ impl StoreReader {
     }
 
     /// Whether what this request last published still answers it: a held second's whole context
-    /// on a page that reads that second, or a reading the window has not taken yet.
+    /// on a page that reads that second, or a reading the window has not taken yet, unless the page
+    /// reads the older tail it left next.
     fn snapshot_published_stands(
         &self,
         command: &Command,
         shared: &Shared,
     ) -> Result<bool, String> {
+        if self.tail_due().is_some() {
+            return Ok(false);
+        }
         let complete = self
             .context
             .as_ref()

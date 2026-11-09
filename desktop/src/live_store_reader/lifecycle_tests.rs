@@ -718,6 +718,47 @@ fn a_page_showing_its_readings_asks_the_store_for_the_rest_at_the_workers_pace()
 }
 
 #[test]
+fn a_page_the_store_answered_reads_the_older_tail_it_left_straight_after() {
+    // Goal: a newly opened page the Store answered whole, which left an older tail its session
+    // does not keep, has that tail read at once, since this thread reads it from the saved
+    // minutes and waits for nothing the Store says.
+    // Method: open the Network page on a Store over a minute sealed long before its newest
+    // second, one step at a time, and read the pause after the step that showed the page.
+    let (_recording, _store, mut adapter) = network_page_over_an_older_minute();
+    let Update::Ready(first) = adapter.update_within(Duration::from_secs(10)) else {
+        panic!("the page failed");
+    };
+    assert!(first.histories_pending);
+    assert!(first.selection.get("earlier_trends").is_none());
+
+    let pause = crate::live_source::worker_pause(&adapter.reader, &adapter.command);
+
+    assert_eq!(pause, Duration::ZERO);
+}
+
+#[test]
+fn a_page_reads_the_older_tail_it_left_before_the_window_takes_its_readings() {
+    // Goal: the step straight after a page's first part reads the older tail it left, although
+    // the window has not taken that first part yet, since the worker steps again at once.
+    // Method: open the Network page on a Store over a minute sealed long before its newest
+    // second, leave its first part in the mailbox as the worker publishes it, and step once more.
+    let (_recording, _store, mut adapter) = network_page_over_an_older_minute();
+    let first = adapter.update_within(Duration::from_secs(10));
+    adapter.shared.mailbox.lock().unwrap().output = Some(first);
+
+    let rest = adapter.read();
+
+    let Some(Update::Ready(rest)) = rest else {
+        panic!("the step left the older tail unread");
+    };
+    assert!(!rest.histories_pending);
+    assert_eq!(
+        rest.selection["earlier_trends"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[test]
 fn the_apps_page_reads_no_older_tail() {
     // Goal: the Apps page, whose charts draw no older tail, costs no read of one.
     // Method: open it on a Store over minutes one of which lies before its full detail, and read it
@@ -776,6 +817,28 @@ fn store_answering() -> (
     Harness::ready_context(&handle);
 
     (recording, store, handle)
+}
+
+/// The Network page, which has no App histories, opened with its older tail on a Store that holds
+/// all it will hold of a recording whose one older minute lies before the page's full detail.
+fn network_page_over_an_older_minute() -> (
+    crate::live_source::tests::SealedRecording,
+    viewer::store::Store,
+    Adapter,
+) {
+    let recording = crate::live_source::tests::SealedRecording::with_an_older_kept_minute();
+    let store = viewer::store::Store::start_with_budget(
+        &recording.root,
+        Arc::new(viewer::store::ByteBudget::new(128 * 1024 * 1024)),
+    )
+    .unwrap();
+    let handle = store.query_handle();
+    wait_until_complete(&handle);
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.command.request = request("network");
+    adapter.command.request.earlier = crate::live_source::Earlier::Load;
+
+    (recording, store, adapter)
 }
 
 fn latest_query() -> viewer::store::QueryRequest {
