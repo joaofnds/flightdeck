@@ -304,11 +304,11 @@ impl KeptTail {
     }
 
     /// The minutes the fill reads together: the minutes the steps `next` gives would read, in
-    /// their order, up to `most`, as the tail stands before the first of them.
-    fn fill_batch(&self, history: &Session, needed: &[usize], most: usize) -> Vec<usize> {
-        let mut windows = Vec::with_capacity(most);
+    /// their order, up to `windows_max`, as the tail stands before the first of them.
+    fn fill_batch(&self, history: &Session, needed: &[usize], windows_max: usize) -> Vec<usize> {
+        let mut windows = Vec::with_capacity(windows_max);
         for &window in needed {
-            if windows.len() == most {
+            if windows.len() == windows_max {
                 break;
             }
 
@@ -317,9 +317,9 @@ impl KeptTail {
                 continue;
             }
             if let Holder::Unread(before) = holder {
-                fill_batch_push(&mut windows, before, most);
+                fill_batch_push(&mut windows, before, windows_max);
             }
-            fill_batch_push(&mut windows, window, most);
+            fill_batch_push(&mut windows, window, windows_max);
         }
 
         windows
@@ -739,9 +739,9 @@ fn earlier_minute_reach(
     );
 }
 
-/// Adds `window` to the minutes a batch reads, once, while it holds fewer than `most`.
-fn fill_batch_push(windows: &mut Vec<usize>, window: usize, most: usize) {
-    if windows.len() < most {
+/// Adds `window` to the minutes a batch reads, once, while it holds fewer than `windows_max`.
+fn fill_batch_push(windows: &mut Vec<usize>, window: usize, windows_max: usize) {
+    if windows.len() < windows_max {
         if !windows.contains(&window) {
             windows.push(window);
         }

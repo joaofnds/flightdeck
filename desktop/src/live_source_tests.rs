@@ -869,7 +869,7 @@ impl SnapshotReader {
                 last_generation: 0,
                 last_route: String::new(),
                 pending: None,
-                deferred_listing: None,
+                deferred_listing_last_second: None,
                 retry_after: std::time::Instant::now(),
             },
             command: Self::command(),

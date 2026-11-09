@@ -600,11 +600,11 @@ pub(super) fn read_earlier_selection(
     let scope =
         persistence::work::ingestion::purpose(persistence::work::ingestion::Purpose::History);
     let last = crate::live_projection::context_last_second(selection);
-    // Listing the saved minutes reopens the recording, which took 50 to 90 ms on an hour of them,
+    // Listing the saved minutes reopens the recording, which took 42 to 90 ms on an hour of them,
     // so a newly opened page shows with the minutes its session listed and the worker lists them
     // once the step is over.
     if tail_at_once {
-        reader.deferred_listing = last;
+        reader.deferred_listing_last_second = last;
     }
     let session = read_saved_open(reader, root, command, shared).and_then(|()| {
         let session = super::reader_snapshot_session(
@@ -614,7 +614,7 @@ pub(super) fn read_earlier_selection(
             shared,
             super::Arrivals::Leave,
         )?;
-        if let Some(last) = last.filter(|_| !tail_at_once) {
+        if !tail_at_once && let Some(last) = last {
             session
                 .list_saved_for(last)
                 .map_err(|error| error.to_string())?;

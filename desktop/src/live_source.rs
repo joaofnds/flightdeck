@@ -224,10 +224,10 @@ struct Reader {
     last_generation: u64,
     /// The route of the last published snapshot, so a newly opened page is told apart.
     last_route: String,
-    /// What the last published snapshot left pending, which the worker reads at once.
+    /// What the last published snapshot left pending, which the worker reads with no pause.
     pending: Option<Pending>,
     /// The end of the context whose listing of the saved minutes a step left until it was over.
-    deferred_listing: Option<u64>,
+    deferred_listing_last_second: Option<u64>,
     retry_after: Instant,
 }
 
@@ -599,7 +599,7 @@ fn worker_run(
         last_generation: 0,
         last_route: String::new(),
         pending: None,
-        deferred_listing: None,
+        deferred_listing_last_second: None,
         retry_after: Instant::now(),
     };
     for _lease in 0..WORKER_LEASES_MAX {
@@ -732,7 +732,7 @@ fn worker_step_read(
 /// Lists the saved minutes a step left until it was over, where its context has moved far enough
 /// since the session last listed them, as a read of the page's history.
 fn worker_step_list(reader: &mut Reader) {
-    let Some(last) = reader.deferred_listing.take() else {
+    let Some(last) = reader.deferred_listing_last_second.take() else {
         return;
     };
     let Some(session) = &mut reader.session else {
@@ -750,8 +750,9 @@ fn worker_step_list(reader: &mut Reader) {
 }
 
 /// How long the worker waits before its next step. A page whose readings were just published
-/// with its App histories or its older tail pending has them read at once, since it shows them
-/// as being read. A page the Store published reads the rest at the worker's pace.
+/// with its App histories or its older tail pending has them read with no pause, since it shows
+/// them as being read. A page the Store published goes on with no pause only where
+/// `StoreReader::reads_on` says its next step can, and otherwise at the worker's pace.
 fn worker_pause(reader: &Reader, command: &Command) -> Duration {
     if reader.last_generation == command.generation {
         if reader_pending(reader, command.generation) {
@@ -765,8 +766,8 @@ fn worker_pause(reader: &Reader, command: &Command) -> Duration {
 }
 
 /// Pauses the worker for `pause`, or until a request, a rest or a stop arrives or the Store gives
-/// the `answer` a page waits for, so a page the reader asks for is read at once. With no answer
-/// awaited, what the Store says waits for the next step.
+/// the `answer` a page waits for, so a page the reader asks for is read with no pause. With no
+/// answer awaited, what the Store says waits for the next step.
 fn worker_pause_for(shared: &Shared, pause: Duration, answer: Option<&viewer::store::QueryHandle>) {
     match shared.mailbox.lock() {
         Ok(mut mailbox) => {
