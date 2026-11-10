@@ -19,9 +19,7 @@ use crate::store::{MachinePlace, reading_at, stretch_of_wall_second};
 /// The seconds of history the longest range a chart shows holds. The viewer loads
 /// `LEAD_IN_SECONDS` more before them.
 pub const LOADED_SECONDS: u64 = 3600;
-/// The seconds before the oldest second of a range whose readings the viewer also loads, so a
-/// chart's line runs in from the range's oldest edge rather than starting at the first reading
-/// inside it, as Grafana's query reaches a rate interval before its range.
+/// The seconds before the oldest second of a range whose readings the viewer also loads.
 pub const LEAD_IN_SECONDS: u64 = 60;
 /// The seconds of full detail the context holds, the 15 minutes of the shortest range.
 pub(crate) const DETAIL_SECONDS: u64 = 900;

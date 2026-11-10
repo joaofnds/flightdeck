@@ -107,13 +107,14 @@ separate groupings, so a coalition's totals are not an App's totals.
 
 **Point**: one reading as a line chart draws it, where the time the reading covers ends. A
 reading of a tick stands at the end of the second it was taken in, and a report the collector
-writes every few ticks stands at the second Flightdeck read it, the end of the seconds it covers.
-A chart draws each reading as it is and averages none together, so a point never moves once it
-is drawn. While the charts follow the newest second, each reading arrives at the right edge and
-then only scrolls left. A chart breaks its line where a reading is missing, such as at a missed
-tick. The older readings of a chart that reaches back more than sixteen minutes stand ten
-seconds apart, and each covers its ten seconds. Each older reading of a chart by App is the
-App's mean over the seconds of its ten that the recording holds, while a chart of the whole Mac
-keeps the first reading of those ten seconds and the highest reading of the ten, so a peak stays
-findable as it ages. A chart of states fills each second a reading covers, and the cell of an
-older reading shows the highest state of its ten seconds.
+writes every few ticks stands at the second Flightdeck read it, the end of the seconds it
+covers. A chart draws each reading of its newest sixteen minutes as it is and averages none
+together, so such a point never moves once it is drawn until it ages into the older readings.
+While the charts follow the newest second, each reading arrives at the right edge and then only
+scrolls left. A chart breaks its line where a reading is missing, such as at a missed tick. The
+older readings of a chart that reaches back more than sixteen minutes stand ten seconds apart,
+and each covers its ten seconds. Each older reading of a chart by App is the App's mean over the
+seconds of its ten that the recording holds, while a chart of the whole Mac keeps the first
+reading of those ten seconds and the highest reading of the ten, so a peak stays findable as it
+ages. A chart of states fills each second a reading covers, and the cell of an older reading
+shows the highest state of its ten seconds.
