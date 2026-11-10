@@ -158,6 +158,18 @@ impl FrozenRecording {
         Ok(())
     }
 
+    /// Reveals the next publication and seals each window the recording had sealed by it, as one
+    /// step of the paced replay does, for a parent that keeps its own clock.
+    pub fn replay_next(&self) -> io::Result<()> {
+        let previous = self
+            .replay
+            .get()
+            .ok_or_else(|| io::Error::other("reset replay first"))?;
+
+        self.replay_step(previous + 1)?;
+        self.files.replay_seal_eligible(previous + 1)
+    }
+
     pub fn replay_seal(&self, window: u64) -> io::Result<()> {
         let newest = self
             .replay
@@ -205,8 +217,7 @@ impl FrozenRecording {
             std::thread::sleep(
                 (started + elapsed).saturating_duration_since(std::time::Instant::now()),
             );
-            self.replay_step(publication)?;
-            self.files.replay_seal_eligible(publication)?;
+            self.replay_next()?;
             println!(
                 "{}",
                 serde_json::json!({"event": "replay_publication",

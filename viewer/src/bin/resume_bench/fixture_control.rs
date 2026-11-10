@@ -75,6 +75,9 @@ fn command(fixture: &FrozenRecording, line: &str) -> io::Result<()> {
     if let Some(window) = line.strip_prefix("replay-seal ") {
         return fixture.replay_seal(window.parse().map_err(io::Error::other)?);
     }
+    if line == "replay-next" {
+        return fixture.replay_next();
+    }
     if line == "replay-complete" {
         return fixture.replay_complete();
     }
@@ -86,6 +89,6 @@ fn command(fixture: &FrozenRecording, line: &str) -> io::Result<()> {
     }
 
     Err(io::Error::other(
-        "expected checkpoint, advance, replay-reset/step/seal/complete, export, quit",
+        "expected checkpoint, advance, replay-reset/step/next/seal/complete, export, quit",
     ))
 }

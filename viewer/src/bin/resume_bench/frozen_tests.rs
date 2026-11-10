@@ -200,6 +200,32 @@ fn completes_a_finite_paced_replay_and_exposes_its_seal_only_after_eligible_step
 }
 
 #[test]
+fn steps_one_publication_at_a_time_and_seals_each_window_at_its_paced_step() {
+    // Goal: a parent that keeps its own clock reveals one second at a time and sees each seal at
+    // the step the paced replay shows it. Method: step a reset fixture across window 30's end.
+    let mut source = Fixture::new();
+    source.populate();
+    let frozen = FrozenRecording::capture(&super::Directories {
+        source: &source.root,
+        target: &source.target,
+    })
+    .unwrap();
+    let registry = Registry::read(frozen.root()).unwrap();
+    let reader = RingReader::open_generation(&registry.runs[0].ring_name).unwrap();
+    let sealed = marker(frozen.root(), &source.root, &registry.runs[0].identity, 30);
+    frozen.replay_reset(1859).unwrap();
+
+    frozen.replay_next().unwrap();
+    assert_eq!(reader.publication_newest().unwrap(), 1859);
+    assert!(!sealed.exists());
+    frozen.replay_next().unwrap();
+
+    assert_eq!(reader.publication_newest().unwrap(), 1860);
+    assert!(sealed.exists());
+    assert!(!reader.completed());
+}
+
+#[test]
 fn replays_only_monotone_retained_publications_and_eligible_seals() {
     // Goal: running readers never see a future endpoint, event or seal during replay.
     // Method: reset a captured real ring, step its retained tail, and inspect native readers.
