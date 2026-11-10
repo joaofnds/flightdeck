@@ -32,11 +32,12 @@ use super::collection::QUICK_POLL_INTERVAL;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_timer::TICK_INTERVAL;
 
-/// P00's target for a warm show of the window and a retained hover, at p95.
+/// P00's target for a warm page, a warm show of the window and a retained hover, at p95.
 const TARGET_MS: f64 = 100.0;
-/// The first second the replayed cells keep hidden, as the app sessions did, which leaves 117
-/// of the hour's seconds to reveal.
+/// The first second the replayed cells keep hidden, as the app sessions did, which leaves
+/// `REPLAY_REVEALS` of the hour's seconds to reveal.
 const REPLAY_FIRST: u64 = 3480;
+const REPLAY_REVEALS: usize = 117;
 /// The seconds a return past the ring finds hidden, more than the ring keeps. Hiding 180 leaves
 /// the copy's newest reading at the end of a sealed minute, three minutes before the hour's last,
 /// so the window opens on readings the Store can read. The app sessions hid 150, which left
@@ -46,6 +47,14 @@ const REPLAY_FIRST: u64 = 3480;
 const RETURN_GAP: u64 = 180;
 const CYCLES: usize = 100;
 const RETURNS: usize = 10;
+/// Ten sessions of ten laps over every route, as the app sessions ran, so each route has
+/// P00's 100 inputs.
+const NAVIGATION_SESSIONS: usize = 10;
+const NAVIGATION_LAPS: usize = 10;
+const _: () = assert!(NAVIGATION_LAPS * crate::live_dashboard::ROUTES.len() <= REPLAY_REVEALS);
+/// A navigation's figure leaves out the wait for its frame, so it meets the target only with
+/// a frame to spare.
+const NAVIGATION_TARGET_MS: f64 = TARGET_MS - 8.3;
 /// The pointer's places on each hovered chart, 4 points apart along the row the app sessions
 /// swept, at its height.
 const HOVER_FIRST_X: f32 = 260.0;
@@ -185,6 +194,60 @@ fn a_return_past_the_ring_draws_the_newest_second() {
 
     let summary = samples.finish();
     assert_eq!(summary["failed"], 0);
+}
+
+#[test]
+#[ignore = "opt-in latency on W10's reference input; needs FLIGHTDECK_REFERENCE_*"]
+fn a_warm_page_draws_the_newest_second_within_the_target_on_every_route() {
+    // Goal: P00's warm page, each route opened from the one before it while the recording goes
+    // on, draws its fresh frame within 100 ms at p95, less the frame's wait the test leaves out.
+    // Method: ten sessions, each warming every route and ending on Self as the app sessions
+    // did, then ten laps over the routes in their order, revealing a second before each
+    // navigation and playing the page's tick once so it takes the second in, and timing each
+    // navigation to its fresh frame with the app's own measurement.
+    let _cell = CELLS.lock().unwrap();
+    let protocol = Protocol::read();
+    let mut samples = crate::live_dashboard::ROUTES
+        .map(|(route, _)| Samples::new(&protocol, format!("navigate-{route}")));
+
+    for _ in 0..NAVIGATION_SESSIONS {
+        let protocol = protocol.clone();
+        let shown = gpui::run_test_once(
+            0,
+            Box::new(move |dispatcher| {
+                let opening = Opening::Replay { cell: "navigate" };
+                let mut harness = ReferenceHarness::setup(&protocol, dispatcher, opening);
+                harness.warm();
+                harness.open_page("self");
+                let mut shown = Vec::with_capacity(NAVIGATION_LAPS);
+
+                for _ in 0..NAVIGATION_LAPS {
+                    let lap = crate::live_dashboard::ROUTES
+                        .map(|(route, _)| harness.navigate_after_revealing(route));
+                    shown.push(lap);
+                }
+
+                harness.teardown();
+                shown
+            }),
+        );
+        for lap in &shown {
+            for (route_samples, measurement) in samples.iter_mut().zip(lap) {
+                route_samples.push_resume(measurement.as_ref());
+            }
+        }
+    }
+
+    let summaries = samples.map(Samples::finish);
+    for summary in &summaries {
+        assert_eq!(summary["failed"], 0, "{summary}");
+    }
+    for summary in &summaries {
+        assert!(
+            summary["p95_ms"].as_f64().unwrap() <= NAVIGATION_TARGET_MS,
+            "{summary}"
+        );
+    }
 }
 
 /// The x of the pointer's `index`th place on a chart.
@@ -417,6 +480,34 @@ impl ReferenceHarness {
         Some(latest[latest.len() - added..].to_vec())
     }
 
+    /// Has the freezer reveal the next second, plays the page's tick once so the page takes it
+    /// in, opens `route` and answers the app's measurement of the navigation to its fresh
+    /// frame, or none where that frame never came.
+    fn navigate_after_revealing(&mut self, route: &str) -> Option<Value> {
+        self.freezer.command("replay-next");
+        let revealed = Instant::now();
+        self.run_until(INPUT_WAIT, |_| TICK_INTERVAL <= revealed.elapsed());
+        self.settle(INPUT_WAIT);
+
+        let before = self.dashboard.update(&mut self.window, |dashboard, cx| {
+            let before = dashboard.resume_begin_reading();
+            dashboard.navigate(route, cx);
+            before
+        });
+
+        let mut sample = None;
+        self.run_until(INPUT_WAIT, |harness| {
+            sample = harness
+                .dashboard
+                .read_with(&harness.window, |dashboard, _| {
+                    dashboard.resume_metrics.after(before)
+                });
+            sample.is_some()
+        });
+        self.settle(INPUT_WAIT);
+        sample
+    }
+
     fn leave_charts(&mut self) {
         self.window
             .simulate_mouse_move(point(px(40.0), px(40.0)), None, Modifiers::none());
@@ -624,7 +715,7 @@ fn next_after(fired: Instant, interval: Duration, now: Instant) -> Instant {
 
 /// One cell's samples, written to `<output>/<cell>.jsonl` as they come.
 struct Samples {
-    cell: &'static str,
+    cell: String,
     file: std::fs::File,
     summary: PathBuf,
     times_ms: Vec<f64>,
@@ -632,12 +723,13 @@ struct Samples {
 }
 
 impl Samples {
-    fn new(protocol: &Protocol, cell: &'static str) -> Self {
+    fn new(protocol: &Protocol, cell: impl Into<String>) -> Self {
+        let cell = cell.into();
         let file = std::fs::File::create_new(protocol.output.join(format!("{cell}.jsonl")));
         Self {
-            cell,
             file: file.unwrap(),
             summary: protocol.output.join(format!("{cell}-summary.json")),
+            cell,
             times_ms: Vec::with_capacity(HOVER_ROUTES.len() * HOVERS_PER_ROUTE),
             failed: 0,
         }
