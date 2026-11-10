@@ -50,6 +50,7 @@ mod live_tables;
 mod live_thermal_pressure;
 mod live_timer;
 mod live_views;
+mod live_wake;
 mod live_wheel;
 mod menu_bar;
 mod native_input;

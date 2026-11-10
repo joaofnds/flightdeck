@@ -232,17 +232,36 @@ impl<T> Span<T> {
 /// Where the store thread leaves its newest View for the main thread.
 pub struct Mailbox<V> {
     newest: Mutex<Option<Arc<V>>>,
+    /// What tells the main thread a View is waiting, so it takes the View as it arrives rather
+    /// than when it next looks.
+    waker: Mutex<Option<Waker>>,
 }
+
+/// A call that wakes the main thread, made from the thread that left a View.
+pub type Waker = Box<dyn Fn() + Send + Sync>;
 
 impl<V> Mailbox<V> {
     #[must_use]
     pub fn new() -> Self {
         Self {
             newest: Mutex::new(None),
+            waker: Mutex::new(None),
         }
     }
 
-    /// Leaves `view` for the main thread in place of any View it has not taken.
+    /// Wakes the main thread through `waker`, in place of any waker before it, each time a View
+    /// is left for it.
+    pub fn wake_with(&self, waker: Waker) {
+        let replaced = match self.waker.lock() {
+            Ok(mut current) => current.replace(waker),
+            Err(poisoned) => poisoned.into_inner().replace(waker),
+        };
+
+        drop(replaced);
+    }
+
+    /// Leaves `view` for the main thread in place of any View it has not taken, and wakes it
+    /// once the View can be taken.
     pub fn put(&self, view: Arc<V>) {
         let mut newest = match self.newest.lock() {
             Ok(newest) => newest,
@@ -252,6 +271,13 @@ impl<V> Mailbox<V> {
 
         drop(newest);
         drop(untaken);
+        let waker = match self.waker.lock() {
+            Ok(waker) => waker,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(waker) = waker.as_ref() {
+            waker();
+        }
     }
 
     /// Whether a View is waiting, including a handoff currently holding the mailbox lock.

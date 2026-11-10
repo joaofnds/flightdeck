@@ -10,8 +10,8 @@ use std::ptr;
 use std::rc::Rc;
 use std::time::Duration;
 
-/// How often the page's own timer ticks, the quarter-second tick every page takes its readings
-/// at.
+/// How often the page's own timer ticks, which takes the worker's answers and animates the page.
+/// The store wakes the page with each View it hands over, which the page takes then.
 pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct Timer {

@@ -1548,6 +1548,7 @@ pub(crate) use store_view::store_activity;
 pub(crate) use store_view::store_query_handle;
 #[cfg(all(test, feature = "automation"))]
 pub(crate) use store_view::uninstall_store;
+pub(crate) use store_view::wake_store_with;
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]

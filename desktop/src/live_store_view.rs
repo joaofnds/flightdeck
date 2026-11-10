@@ -70,6 +70,13 @@ pub(crate) fn uninstall_store(cx: &mut App) -> Store {
     cx.remove_global::<LiveStore>().0
 }
 
+/// Wakes the page through `waker` each time the app's store hands it a View, where it runs one.
+pub(crate) fn wake_store_with(waker: viewer::store::Waker, cx: &App) {
+    if let Some(store) = cx.try_global::<LiveStore>() {
+        store.0.wake_with(waker);
+    }
+}
+
 pub(super) fn store_pending(cx: &App) -> bool {
     cx.try_global::<LiveStore>()
         .is_some_and(|store| store.0.pending())

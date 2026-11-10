@@ -5,6 +5,7 @@ use gpui::{App, Context, Entity, Global, WeakEntity};
 use super::lifecycle::CollectorSession;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_timer::Timer;
+use crate::live_wake::Wake;
 
 #[cfg(test)]
 #[path = "collector_lifecycle_application_tests.rs"]
@@ -19,6 +20,9 @@ struct Collection {
     timer: Option<Timer>,
     /// Runs only while the worker owes an answer, and is suspended the rest of the time.
     quick_timer: Option<Timer>,
+    /// Runs the page's tick as the store hands it a View, so a reading reaches the charts as it
+    /// arrives. The timer goes on ticking for the page's animation, its notices and the worker.
+    wake: Option<Wake>,
 }
 
 impl Global for Collection {}
@@ -28,6 +32,7 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
         session,
         timer: None,
         quick_timer: None,
+        wake: None,
     });
     cx.on_app_quit(|cx| {
         let collection = cx.global_mut::<Collection>();
@@ -49,6 +54,13 @@ pub(super) fn start_timer(entity: &Entity<LiveDashboard>, cx: &mut App) -> Resul
     let application = cx.to_async();
     let quick_page = page.clone();
     let quick_application = application.clone();
+    let wake_page = page.clone();
+    let wake_application = application.clone();
+    let wake = Wake::start(move || {
+        wake_application.update(|cx| tick(&wake_page, cx));
+    })?;
+    let signal = wake.signal();
+    crate::live_dashboard::wake_store_with(Box::new(move || signal.signal()), cx);
     let timer = Timer::start(move || {
         application.update(|cx| tick(&page, cx));
     })?;
@@ -59,6 +71,7 @@ pub(super) fn start_timer(entity: &Entity<LiveDashboard>, cx: &mut App) -> Resul
     let collection = cx.global_mut::<Collection>();
     collection.timer = Some(timer);
     collection.quick_timer = Some(quick_timer);
+    collection.wake = Some(wake);
     // Every change that sends the worker a request notifies the page, so watching the page here
     // takes each answer within a frame, whichever change sent its request.
     cx.observe(entity, |dashboard, cx| {

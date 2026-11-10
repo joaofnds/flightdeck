@@ -248,3 +248,46 @@ fn views_taken_while_the_store_writes_never_change() {
 
     assert!(checked > 0);
 }
+
+#[test]
+fn the_main_thread_is_woken_with_a_view_it_can_take() {
+    // Goal: the store wakes the main thread when it leaves a View, rather than leave it to find
+    // the View when it next looks, and the View can be taken when the wake arrives. Method: wake
+    // a mailbox with a waker that takes the View, put two Views, and read what each wake took.
+    let mailbox = Arc::new(Mailbox::new());
+    let taken = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let weak = Arc::downgrade(&mailbox);
+    let woken = Arc::clone(&taken);
+    mailbox.wake_with(Box::new(move || {
+        let view = weak.upgrade().and_then(|mailbox| mailbox.take());
+        woken.lock().unwrap().push(view.as_deref().copied());
+    }));
+
+    mailbox.put(Arc::new(1));
+    mailbox.put(Arc::new(2));
+
+    assert_eq!(*taken.lock().unwrap(), vec![Some(1), Some(2)]);
+}
+
+#[test]
+fn a_new_waker_takes_the_place_of_the_last() {
+    // Goal: a window opened again is woken in place of the one it replaced, which no longer
+    // takes Views. Method: wake a mailbox with one waker and then another, put a View, and
+    // count each waker's wakes.
+    let mailbox = Mailbox::new();
+    let first = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let second = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter = Arc::clone(&first);
+    mailbox.wake_with(Box::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    let counter = Arc::clone(&second);
+    mailbox.wake_with(Box::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+
+    mailbox.put(Arc::new(1));
+
+    assert_eq!(first.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(second.load(std::sync::atomic::Ordering::Relaxed), 1);
+}

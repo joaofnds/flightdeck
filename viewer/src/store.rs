@@ -58,7 +58,7 @@ pub use attribution::{
     Attribution, AttributionReading, COHORT_MAX, Completeness, OtherReading, Resident,
     ResidentOther, Totals,
 };
-pub use buffers::{Buffers, Mailbox, Span};
+pub use buffers::{Buffers, Mailbox, Span, Waker};
 pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
 pub use machine_stretch::{Category, Gauge, MachinePlace, MachineStretch, Rate, pressure_level};
 pub use model::summary::{Mark, Reduction};
@@ -374,6 +374,12 @@ impl Store {
         }
 
         self.shared.mailbox.pending()
+    }
+
+    /// Wakes the main thread through `waker`, in place of any waker before it, each time the
+    /// store hands it a View.
+    pub fn wake_with(&self, waker: Waker) {
+        self.shared.mailbox.wake_with(waker);
     }
 
     /// The View the store handed over since the last take, or `None` when it handed over none
