@@ -128,6 +128,7 @@ pub struct LiveDashboard {
     pub(crate) reply_pending: bool,
     presence: Presence,
     store_pending: bool,
+    mailbox_watch: store_view::MailboxWatch,
     pub error: Option<String>,
     pub rows: Vec<Row>,
     pub expanded: Option<(String, usize)>,
@@ -377,6 +378,7 @@ impl LiveDashboard {
             reply_pending: false,
             presence: Presence::Shown,
             store_pending: false,
+            mailbox_watch: store_view::MailboxWatch::EveryTick,
             store_view: None,
             store_panels: store_view::StorePanels::default(),
             leaders: viewer::store::Leaders::new(),
@@ -554,6 +556,21 @@ impl LiveDashboard {
         }
     }
 
+    /// Looks for the store's View only after the store wakes the page, which it does each time
+    /// it leaves one, so the timer's ticks ask the store for nothing. The page looks at its next
+    /// tick all the same, since the store may have left a View before this.
+    pub(crate) fn wait_for_wakes(&mut self) {
+        self.mailbox_watch = store_view::MailboxWatch::FromWake { woken: true };
+    }
+
+    /// Marks that the store left a View, which the next tick takes.
+    pub(crate) fn mark_woken(&mut self) {
+        let store_view::MailboxWatch::FromWake { woken } = &mut self.mailbox_watch else {
+            unreachable!("only a page waiting for wakes is woken");
+        };
+        *woken = true;
+    }
+
     pub fn tick(&mut self, cx: &mut Context<Self>) {
         if self.settings.refresh_notice(cx) {
             cx.notify();
@@ -605,16 +622,21 @@ impl LiveDashboard {
     }
 
     /// Takes the store's newest View, but none while a second is held, which keeps the View its
-    /// charts were drawn from.
+    /// charts were drawn from, and none before a wake on a page waiting for one.
     fn tick_store_view(&mut self, cx: &mut Context<Self>) {
         if self.hold.is_some() {
             return;
         }
+        if !self.mailbox_watch.looks() {
+            return;
+        }
 
-        if let Some(view) = store_view::take_store_view(cx) {
-            if self.take_view(view) {
-                cx.notify();
-            }
+        let Some(view) = store_view::take_store_view(cx) else {
+            return;
+        };
+        self.mailbox_watch = self.mailbox_watch.after_view();
+        if self.take_view(view) {
+            cx.notify();
         }
     }
 

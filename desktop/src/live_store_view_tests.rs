@@ -1510,6 +1510,116 @@ fn a_resting_overview_polls_the_installed_store_until_its_view_arrives(
     cx.update(|cx| drop(cx.remove_global::<super::LiveStore>()));
 }
 
+mod when_the_store_wakes_the_page {
+    use super::*;
+    use gpui::AppContext;
+
+    #[gpui::test]
+    fn a_tick_before_the_wake_takes_no_view(cx: &mut gpui::TestAppContext) {
+        // Goal: a page the store wakes asks it for nothing at its timer's ticks, so the page
+        // looks for a View no more often than the store publishes. Method: a real store leaves a
+        // second View for a page waiting for wakes, and the page ticks without being woken.
+        let (mut recording, page) = page_waiting_for_wakes(cx);
+        recording.publish();
+        wait_for_a_view_left(cx);
+
+        for _ in 0..3 {
+            page.update(cx, LiveDashboard::tick);
+        }
+
+        assert_eq!(drawn_publication(cx, &page), Some(1));
+        cx.update(|cx| drop(cx.remove_global::<super::super::LiveStore>()));
+    }
+
+    #[gpui::test]
+    fn the_wake_takes_the_view_the_store_left(cx: &mut gpui::TestAppContext) {
+        // Goal: the wake that comes with a publication draws it at once. Method: a real store
+        // leaves a second View for a page waiting for wakes, which is then woken.
+        let (mut recording, page) = page_waiting_for_wakes(cx);
+        recording.publish();
+        wait_for_a_view_left(cx);
+
+        page.update(cx, |page, cx| {
+            page.mark_woken();
+            page.tick(cx);
+        });
+
+        assert_eq!(drawn_publication(cx, &page), Some(2));
+        cx.update(|cx| drop(cx.remove_global::<super::super::LiveStore>()));
+    }
+
+    #[gpui::test]
+    fn a_view_woken_for_during_a_hold_is_taken_at_the_first_tick_after_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Goal: a hold delays the View a wake announced only until the hold ends, not until the
+        // store's next publication. Method: a page waiting for wakes holds its newest second, is
+        // woken for a second View, lets go, and ticks.
+        let (mut recording, page) = page_waiting_for_wakes(cx);
+        let second = cx.update(|cx| page.read(cx).store_view_last_second().unwrap());
+        page.update(cx, |page, cx| page.pin_second(second, cx));
+        recording.publish();
+        wait_for_a_view_left(cx);
+        page.update(cx, |page, cx| {
+            page.mark_woken();
+            page.tick(cx);
+        });
+
+        page.update(cx, LiveDashboard::select);
+        page.update(cx, LiveDashboard::tick);
+
+        assert_eq!(drawn_publication(cx, &page), Some(2));
+        cx.update(|cx| drop(cx.remove_global::<super::super::LiveStore>()));
+    }
+
+    fn page_waiting_for_wakes(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        crate::live_dashboard::input_tests::source_mode::LiveRecording,
+        gpui::Entity<LiveDashboard>,
+    ) {
+        let mut recording = crate::live_dashboard::input_tests::source_mode::LiveRecording::new();
+        recording.publish();
+        let (store, handle) = crate::live_source::store_start(&recording.root).unwrap();
+        let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
+        cx.update(|cx| super::super::install_store(store, cx));
+        let page = cx.update(|cx| {
+            cx.new(|_| {
+                let mut page = LiveDashboard::new(worker, "overview".into(), None);
+                page.wait_for_wakes();
+                page
+            })
+        });
+        tick_until_settled(cx, &page, 1);
+        (recording, page)
+    }
+
+    fn wait_for_a_view_left(cx: &mut gpui::TestAppContext) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        for _ in 0..2_000 {
+            if cx.update(|cx| super::super::store_pending(cx)) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the store left no View"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the store left no View");
+    }
+
+    fn drawn_publication(
+        cx: &mut gpui::TestAppContext,
+        page: &gpui::Entity<LiveDashboard>,
+    ) -> Option<u64> {
+        cx.update(|cx| {
+            let view = page.read(cx).store_view.clone()?;
+            view.seconds.last().map(|second| second.publication)
+        })
+    }
+}
+
 /// The Store's next View newer than `version`, which it hands over whatever View a page keeps.
 fn newer_store_view(cx: &mut gpui::TestAppContext, version: u64) -> Arc<View> {
     for _attempt in 0..2_000 {

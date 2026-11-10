@@ -91,6 +91,32 @@ pub(super) fn store_installed(cx: &App) -> bool {
     cx.has_global::<LiveStore>()
 }
 
+/// When the page looks in the store's mailbox for a View.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum MailboxWatch {
+    /// At every tick, where nothing wakes the page when the store leaves a View.
+    EveryTick,
+    /// At each tick from the store's wake until a look takes a View. A look can find none while
+    /// the store catches up, which leaves its View with no further wake.
+    FromWake { woken: bool },
+}
+
+impl MailboxWatch {
+    pub(super) fn looks(self) -> bool {
+        match self {
+            Self::EveryTick => true,
+            Self::FromWake { woken } => woken,
+        }
+    }
+
+    pub(super) fn after_view(self) -> Self {
+        match self {
+            Self::EveryTick => Self::EveryTick,
+            Self::FromWake { .. } => Self::FromWake { woken: false },
+        }
+    }
+}
+
 /// The View the store handed over since the last take, or none where the app runs no store, as
 /// for a recording opened read-only.
 pub(super) fn take_store_view(cx: &App) -> Option<Arc<View>> {
