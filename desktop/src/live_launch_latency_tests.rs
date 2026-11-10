@@ -12,14 +12,21 @@
 //! cargo test --release --features automation --bin flightdeck latency_tests -- --ignored
 //! ```
 //!
-//! A figure leaves out the wait for the frame the app draws in, at most one display frame, and
-//! the GPU's work on that frame, since a test window draws as soon as the page changes. The
+//! A figure leaves out the wait for the frame the app draws in, at most one display frame, so
+//! each cell meets the target only with that frame to spare, and the GPU's work on that frame,
+//! since a test window draws as soon as the page changes. A hover's figure ends when the page
+//! holds the hovered second's readings, as the app's hover measurement does, before any frame.
+//! The window holds the dashboard the app builds, without the collection session, the hardware
+//! motion and the preferences the app's window adds, and the test's tick is the page's own
+//! tick, without the save of preferences, the session's tick and the refresh of
+//! Self-monitoring's reports that the app's tick adds, so the figures leave that work out. The
 //! inputs follow the app sessions, the earlier runs that timed these cells in the app itself on
-//! screen, so the figures of the two compare.
+//! screen, so the figures of the two compare, except the return's, whose gap differs.
 use std::io::{BufRead, BufReader, Read, Write};
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -32,10 +39,11 @@ use super::collection::QUICK_POLL_INTERVAL;
 use crate::live_dashboard::LiveDashboard;
 use crate::live_timer::TICK_INTERVAL;
 
-/// P00's target for a warm page, a warm show of the window and a retained hover, at p95.
-const TARGET_MS: f64 = 100.0;
+/// P00's target for a warm page, a warm show of the window and a retained hover, at p95, less
+/// the 120 Hz display frame a figure leaves out.
+const TARGET_MS: f64 = 100.0 - 8.3;
 /// The first second the replayed cells keep hidden, as the app sessions did, which leaves
-/// `REPLAY_REVEALS` of the hour's seconds to reveal.
+/// `REPLAY_REVEALS` of the hour's seconds to reveal, up to W10's newest publication.
 const REPLAY_FIRST: u64 = 3480;
 const REPLAY_REVEALS: usize = 117;
 /// The seconds a return past the ring finds hidden, more than the ring keeps. Hiding 180 leaves
@@ -46,24 +54,30 @@ const REPLAY_REVEALS: usize = 117;
 /// the opening was ever answered.
 const RETURN_GAP: u64 = 180;
 const CYCLES: usize = 100;
+const _: () = assert!(CYCLES <= REPLAY_REVEALS);
 const RETURNS: usize = 10;
 /// Ten sessions of ten laps over every route, as the app sessions ran, so each route has
 /// P00's 100 inputs.
 const NAVIGATION_SESSIONS: usize = 10;
 const NAVIGATION_LAPS: usize = 10;
 const _: () = assert!(NAVIGATION_LAPS * crate::live_dashboard::ROUTES.len() <= REPLAY_REVEALS);
-/// A navigation's figure leaves out the wait for its frame, so it meets the target only with
-/// a frame to spare.
-const NAVIGATION_TARGET_MS: f64 = TARGET_MS - 8.3;
 /// The pointer's places on each hovered chart, 4 points apart along the row the app sessions
 /// swept, at its height.
 const HOVER_FIRST_X: f32 = 260.0;
 const HOVER_STEP_X: f32 = 4.0;
 const HOVER_Y: f32 = 430.0;
+const HOVER_PLACES: usize = 100;
+/// P00's inputs for each hovered route, after its ten untimed hovers.
 const HOVERS_PER_ROUTE: usize = 100;
+const HOVERS_UNTIMED: usize = 10;
+/// A bound on the moves that gather a route's hovers, two sweeps of its places, since a move
+/// between two charts hovers nothing and a move may end one hover and start another.
+const HOVER_MOVES_MAX: usize = 2 * HOVER_PLACES;
 /// Pointer moves to each revealed second, as the app sessions moved the pointer every 0.15 s
 /// while the freezer revealed a second each second.
 const HOVERS_PER_REVEAL: usize = 7;
+const _: () =
+    assert!(HOVER_ROUTES.len() * HOVER_MOVES_MAX.div_ceil(HOVERS_PER_REVEAL) <= REPLAY_REVEALS);
 const HOVER_ROUTES: [&str; 3] = ["overview", "cpu", "memory"];
 /// The window's size in the app sessions.
 const WINDOW_WIDTH: f32 = 1280.0;
@@ -89,7 +103,7 @@ fn a_window_shown_again_draws_the_second_revealed_while_hidden_within_the_target
     // within 100 ms at p95. Method: replay the hour from its last two minutes, then a hundred
     // times hide the window, wait for the Store to park, reveal the next second and show the
     // window, timing each show to its fresh frame with the app's own measurement.
-    let _cell = CELLS.lock().unwrap();
+    let _cell = CELLS.lock().unwrap_or_else(PoisonError::into_inner);
     let protocol = Protocol::read();
     gpui::run_test_once(
         0,
@@ -100,8 +114,8 @@ fn a_window_shown_again_draws_the_second_revealed_while_hidden_within_the_target
             let mut samples = Samples::new(&protocol, "cycle");
 
             for _ in 0..CYCLES {
-                let shown = harness.show_after_revealing_while_hidden("replay-next");
-                samples.push_resume(shown.as_ref());
+                let shown = harness.show_after_revealing_while_hidden("replay-next", 1);
+                samples.push_shown(&shown);
             }
 
             let summary = samples.finish();
@@ -119,13 +133,14 @@ fn a_window_shown_again_draws_the_second_revealed_while_hidden_within_the_target
 #[ignore = "opt-in latency on W10's reference input; needs FLIGHTDECK_REFERENCE_*"]
 fn a_hover_of_a_retained_second_completes_within_the_target() {
     // Goal: P00's retained hover, the pointer moved across a chart of the hour on Overview, CPU
-    // and Memory, gives each hovered second's complete readings within 100 ms at p95.
-    // Method: replay the hour from its last two minutes, move the pointer a hundred times across
-    // each route's chart, revealing a second every seventh move, and time each hover to the
-    // hovered second's complete readings with the app's own measurement. Each move waits for
-    // the one before it to finish, where the app sessions moved every 0.15 s, which differs
-    // only for a hover slower than that.
-    let _cell = CELLS.lock().unwrap();
+    // and Memory, gives each hovered second's complete readings within 100 ms at p95 on each
+    // route. Method: replay the hour from its last two minutes, and on each route hover ten
+    // times untimed, then move the pointer across its charts until a hundred hovers are timed,
+    // revealing a second every seventh move, timing each hover to the hovered second's
+    // complete readings with the app's own measurement. Each move waits for the one before it
+    // to finish, where the app sessions moved every 0.15 s, which differs only for a hover
+    // slower than that.
+    let _cell = CELLS.lock().unwrap_or_else(PoisonError::into_inner);
     let protocol = Protocol::read();
     gpui::run_test_once(
         0,
@@ -133,31 +148,24 @@ fn a_hover_of_a_retained_second_completes_within_the_target() {
             let opening = Opening::Replay { cell: "hover" };
             let mut harness = ReferenceHarness::setup(&protocol, dispatcher, opening);
             harness.warm();
-            let mut samples = Samples::new(&protocol, "hover");
 
-            for route in HOVER_ROUTES {
-                harness.open_page(route);
-                for index in 0..HOVERS_PER_ROUTE {
-                    if index % HOVERS_PER_REVEAL == 0 {
-                        harness.freezer.command("replay-next");
-                    }
-                    match harness.hover(hover_x(index)) {
-                        Some(timings) => timings
-                            .iter()
-                            .for_each(|timing| samples.push_hover(Some(timing))),
-                        None => samples.push_hover(None),
-                    }
-                }
-                harness.leave_charts();
-            }
+            let summaries = HOVER_ROUTES.map(|route| {
+                let mut samples = Samples::new(&protocol, format!("hover-{route}"));
+                harness.hover_route(route, &mut samples);
+                samples.finish()
+            });
 
-            let summary = samples.finish();
             harness.teardown();
-            assert_eq!(summary["failed"], 0);
-            assert!(
-                summary["p95_ms"].as_f64().unwrap() <= TARGET_MS,
-                "{summary}"
-            );
+            for summary in &summaries {
+                assert_eq!(summary["inputs"], HOVERS_PER_ROUTE, "{summary}");
+                assert_eq!(summary["failed"], 0, "{summary}");
+            }
+            for summary in &summaries {
+                assert!(
+                    summary["p95_ms"].as_f64().unwrap() <= TARGET_MS,
+                    "{summary}"
+                );
+            }
         }),
     );
 }
@@ -169,8 +177,9 @@ fn a_return_past_the_ring_draws_the_newest_second() {
     // recording went on past what the ring keeps, timed to the frame that draws the newest
     // second and held to no target. Method: ten times, open a frozen copy with its newest
     // `RETURN_GAP` seconds hidden, warm every route, hide the window on Memory, wait for the
-    // Store to park, reveal the hidden seconds and show the window.
-    let _cell = CELLS.lock().unwrap();
+    // Store to park, reveal the hidden seconds and show the window, failing a show whose frame
+    // draws an older second.
+    let _cell = CELLS.lock().unwrap_or_else(PoisonError::into_inner);
     let protocol = Protocol::read();
     let mut samples = Samples::new(&protocol, "return");
 
@@ -184,12 +193,12 @@ fn a_return_past_the_ring_draws_the_newest_second() {
                 harness.warm();
                 harness.open_page("memory");
 
-                let shown = harness.show_after_revealing_while_hidden("advance");
+                let shown = harness.show_after_revealing_while_hidden("advance", RETURN_GAP);
                 harness.teardown();
                 shown
             }),
         );
-        samples.push_resume(shown.as_ref());
+        samples.push_shown(&shown);
     }
 
     let summary = samples.finish();
@@ -204,8 +213,9 @@ fn a_warm_page_draws_the_newest_second_within_the_target_on_every_route() {
     // Method: ten sessions, each warming every route and ending on Self as the app sessions
     // did, then ten laps over the routes in their order, revealing a second before each
     // navigation and playing the page's tick once so it takes the second in, and timing each
-    // navigation to its fresh frame with the app's own measurement.
-    let _cell = CELLS.lock().unwrap();
+    // navigation to its fresh frame with the app's own measurement, failing a frame that draws
+    // a second older than the newest the app held at the input.
+    let _cell = CELLS.lock().unwrap_or_else(PoisonError::into_inner);
     let protocol = Protocol::read();
     let mut samples = crate::live_dashboard::ROUTES
         .map(|(route, _)| Samples::new(&protocol, format!("navigate-{route}")));
@@ -232,8 +242,8 @@ fn a_warm_page_draws_the_newest_second_within_the_target_on_every_route() {
             }),
         );
         for lap in &shown {
-            for (route_samples, measurement) in samples.iter_mut().zip(lap) {
-                route_samples.push_resume(measurement.as_ref());
+            for (route_samples, shown) in samples.iter_mut().zip(lap) {
+                route_samples.push_shown(shown);
             }
         }
     }
@@ -244,7 +254,7 @@ fn a_warm_page_draws_the_newest_second_within_the_target_on_every_route() {
     }
     for summary in &summaries {
         assert!(
-            summary["p95_ms"].as_f64().unwrap() <= NAVIGATION_TARGET_MS,
+            summary["p95_ms"].as_f64().unwrap() <= TARGET_MS,
             "{summary}"
         );
     }
@@ -349,6 +359,8 @@ impl Freezer {
 
         let captured = freezer.reply();
         assert_eq!(captured["root"].as_str(), freezer.copy.to_str());
+        let newest = REPLAY_FIRST + u64::try_from(REPLAY_REVEALS).unwrap();
+        assert_eq!(captured["publication_newest"], newest, "not W10's hour");
         freezer
     }
 
@@ -399,7 +411,19 @@ struct ReferenceHarness {
     window: VisualTestContext,
     dashboard: Entity<LiveDashboard>,
     clock: AppClock,
+    /// The newest second the freezer has revealed, known once the window is warm.
+    newest_second: Option<u64>,
     freezer: Freezer,
+}
+
+/// The app's measurement of a show or a navigation, with the seconds its frame may draw, from
+/// the newest the app held at the input to the newest revealed, none on Self-monitoring,
+/// which shows no second of the recording, and how long the test waited for it, none past
+/// `INPUT_WAIT`.
+struct Shown {
+    measurement: Option<Value>,
+    seconds: Option<RangeInclusive<u64>>,
+    waited: Option<Duration>,
 }
 
 impl ReferenceHarness {
@@ -413,6 +437,7 @@ impl ReferenceHarness {
             window,
             dashboard,
             clock: AppClock::new(),
+            newest_second: None,
             freezer,
         };
 
@@ -444,12 +469,59 @@ impl ReferenceHarness {
             self.open_page(route);
         }
         self.open_page("overview");
-        for index in 0..HOVERS_PER_ROUTE {
+        for index in 0..HOVER_PLACES {
             assert!(
                 self.hover(hover_x(index)).is_some(),
                 "a warming hover was lost"
             );
         }
+        self.leave_charts();
+        let newest = self
+            .dashboard
+            .read_with(&self.window, |dashboard, _| dashboard.shown_second());
+        assert!(newest.is_some(), "Overview shows no second");
+        self.newest_second = newest;
+    }
+
+    /// Has the freezer carry out `command`, which reveals the next `seconds`, and answers the
+    /// newest second revealed.
+    fn reveal(&mut self, command: &str, seconds: u64) -> u64 {
+        self.freezer.command(command);
+        let newest = self.newest_second.unwrap() + seconds;
+        self.newest_second = Some(newest);
+        newest
+    }
+
+    /// Opens `route`, hovers it untimed, then moves the pointer across its charts, revealing a
+    /// second every `HOVERS_PER_REVEAL` moves, until `samples` holds `HOVERS_PER_ROUTE`
+    /// inputs.
+    fn hover_route(&mut self, route: &str, samples: &mut Samples) {
+        self.open_page(route);
+        for index in 0..HOVERS_UNTIMED {
+            assert!(
+                self.hover(hover_x(index)).is_some(),
+                "a warming hover was lost"
+            );
+        }
+
+        let mut moves = 0;
+        while samples.inputs() < HOVERS_PER_ROUTE {
+            assert!(moves < HOVER_MOVES_MAX, "{route}: {moves} moves");
+            if moves % HOVERS_PER_REVEAL == 0 {
+                self.reveal("replay-next", 1);
+            }
+            match self.hover(hover_x(moves % HOVER_PLACES)) {
+                Some(timings) => {
+                    let room = HOVERS_PER_ROUTE - samples.inputs();
+                    for timing in timings.iter().take(room) {
+                        samples.push_hover(Some(timing));
+                    }
+                }
+                None => samples.push_hover(None),
+            }
+            moves += 1;
+        }
+
         self.leave_charts();
     }
 
@@ -482,12 +554,18 @@ impl ReferenceHarness {
 
     /// Has the freezer reveal the next second, plays the page's tick once so the page takes it
     /// in, opens `route` and answers the app's measurement of the navigation to its fresh
-    /// frame, or none where that frame never came.
-    fn navigate_after_revealing(&mut self, route: &str) -> Option<Value> {
-        self.freezer.command("replay-next");
+    /// frame.
+    fn navigate_after_revealing(&mut self, route: &str) -> Shown {
+        let second = self.reveal("replay-next", 1);
         let revealed = Instant::now();
         self.run_until(INPUT_WAIT, |_| TICK_INTERVAL <= revealed.elapsed());
         self.settle(INPUT_WAIT);
+        // A Store still taking the second in holds only the one before it, which Overview,
+        // drawn from the Store, then draws.
+        let pending = self
+            .window
+            .update(|_, cx| crate::live_dashboard::store_activity(cx)["pending"] == true);
+        let held = if pending { second - 1 } else { second };
 
         let before = self.dashboard.update(&mut self.window, |dashboard, cx| {
             let before = dashboard.resume_begin_reading();
@@ -495,17 +573,21 @@ impl ReferenceHarness {
             before
         });
 
-        let mut sample = None;
-        self.run_until(INPUT_WAIT, |harness| {
-            sample = harness
+        let mut measurement = None;
+        let waited = self.run_until(INPUT_WAIT, |harness| {
+            measurement = harness
                 .dashboard
                 .read_with(&harness.window, |dashboard, _| {
                     dashboard.resume_metrics.after(before)
                 });
-            sample.is_some()
+            measurement.is_some()
         });
         self.settle(INPUT_WAIT);
-        sample
+        Shown {
+            measurement,
+            seconds: (route != "self").then_some(held..=second),
+            waited,
+        }
     }
 
     fn leave_charts(&mut self) {
@@ -514,10 +596,10 @@ impl ReferenceHarness {
         self.settle(INPUT_WAIT);
     }
 
-    /// Hides the window, waits for the Store to park, has the freezer `reveal` what the
+    /// Hides the window, waits for the Store to park, has the freezer `reveal` the `seconds` the
     /// recording took in meanwhile and shows the window, and answers the app's measurement of
-    /// the show to its fresh frame, or none where that frame never came.
-    fn show_after_revealing_while_hidden(&mut self, reveal: &str) -> Option<Value> {
+    /// the show to its fresh frame.
+    fn show_after_revealing_while_hidden(&mut self, reveal: &str, seconds: u64) -> Shown {
         self.window
             .simulate_visibility_change(WindowVisibility::Hidden);
         let parked = self.run_until(INPUT_WAIT, |harness| {
@@ -526,7 +608,7 @@ impl ReferenceHarness {
                 .update(|_, cx| crate::live_dashboard::store_activity(cx)["paused"] == true)
         });
         assert!(parked.is_some(), "the Store never parked");
-        self.freezer.command(reveal);
+        let second = self.reveal(reveal, seconds);
         let before = self.dashboard.read_with(&self.window, |dashboard, _| {
             dashboard.resume_metrics.count()
         });
@@ -535,17 +617,21 @@ impl ReferenceHarness {
             .simulate_visibility_change(WindowVisibility::Visible);
         self.window.update(|window, _| window.activate_window());
 
-        let mut sample = None;
-        self.run_until(INPUT_WAIT, |harness| {
-            sample = harness
+        let mut measurement = None;
+        let waited = self.run_until(INPUT_WAIT, |harness| {
+            measurement = harness
                 .dashboard
                 .read_with(&harness.window, |dashboard, _| {
                     dashboard.resume_metrics.after(before)
                 });
-            sample.is_some()
+            measurement.is_some()
         });
         self.settle(INPUT_WAIT);
-        sample
+        Shown {
+            measurement,
+            seconds: Some(second..=second),
+            waited,
+        }
     }
 
     /// Plays the app's clock until the page has the reading of its latest request and the
@@ -735,36 +821,62 @@ impl Samples {
         }
     }
 
-    /// Takes the app's measurement of a show, failed where none came or the held reading's read
-    /// failed.
-    fn push_resume(&mut self, measurement: Option<&Value>) {
-        let time_ms = measurement.and_then(|measurement| {
-            let sample = &measurement["sample"];
-            if sample["hold_failure"].is_null() {
-                sample["fresh_cpu_frame_upper_ms"].as_f64()
-            } else {
-                None
+    fn inputs(&self) -> usize {
+        self.times_ms.len()
+    }
+
+    /// Takes the app's measurement of a show or a navigation, failed where none came, where the
+    /// held reading's read failed or where the frame drew another second than `shown.second`.
+    fn push_shown(&mut self, shown: &Shown) {
+        let time_ms = match &shown.measurement {
+            None => Err("no fresh frame"),
+            Some(measurement) => {
+                let sample = &measurement["sample"];
+                if !sample["hold_failure"].is_null() {
+                    Err("the held reading's read failed")
+                } else if shown.seconds.as_ref().is_some_and(|seconds| {
+                    !sample["second"]
+                        .as_u64()
+                        .is_some_and(|second| seconds.contains(&second))
+                }) {
+                    Err("the frame drew another second")
+                } else {
+                    Ok(sample["fresh_cpu_frame_upper_ms"].as_f64().unwrap())
+                }
             }
+        };
+        let waited_ms = shown.waited.map(|waited| waited.as_secs_f64() * 1000.0);
+        let line = json!({
+            "measurement": shown.measurement, "seconds_expected": shown.seconds,
+            "waited_ms": waited_ms, "failure": time_ms.err(),
         });
-        self.push(time_ms, measurement.unwrap_or(&Value::Null));
+        self.push(time_ms, &line);
     }
 
-    /// Takes the app's timing of a hover, failed where its readings never came.
+    /// Takes the app's timing of a hover, failed where its readings never came or, with none,
+    /// where the page still waited past `INPUT_WAIT`.
     fn push_hover(&mut self, timing: Option<&Value>) {
-        let time_ms = timing.and_then(|timing| timing["complete_ms"].as_f64());
-        self.push(time_ms, timing.unwrap_or(&Value::Null));
+        let time_ms = match timing {
+            None => Err("the page still waited past the input's wait"),
+            Some(timing) => timing["complete_ms"]
+                .as_f64()
+                .ok_or("the hovered second's readings never came"),
+        };
+        let line = json!({"timing": timing, "failure": time_ms.err()});
+        self.push(time_ms, &line);
     }
 
-    fn push(&mut self, time_ms: Option<f64>, line: &Value) {
+    /// Writes `line` and counts a failed input as infinitely slow, as P00 ranks it.
+    fn push(&mut self, time_ms: Result<f64, &str>, line: &Value) {
         writeln!(self.file, "{line}").unwrap();
-        match time_ms {
-            Some(time_ms) => self.times_ms.push(time_ms),
-            None => self.failed += 1,
+        if time_ms.is_err() {
+            self.failed += 1;
         }
+        self.times_ms.push(time_ms.unwrap_or(f64::INFINITY));
     }
 
     /// Writes and answers the cell's p50, nearest-rank p95 and max, with its input count and
-    /// failures.
+    /// failures. A figure a failed input reaches is infinite, which JSON writes as null.
     fn finish(mut self) -> Value {
         assert!(!self.times_ms.is_empty());
         self.times_ms.sort_by(f64::total_cmp);
@@ -773,9 +885,8 @@ impl Samples {
             let rank = (percent * self.times_ms.len()).div_ceil(100);
             self.times_ms[rank.max(1) - 1]
         };
-        let timed = u64::try_from(self.times_ms.len()).unwrap();
         let summary = json!({
-            "cell": self.cell, "inputs": timed + self.failed,
+            "cell": self.cell, "inputs": self.times_ms.len(),
             "failed": self.failed, "p50_ms": nearest_rank(50), "p95_ms": nearest_rank(95),
             "max_ms": self.times_ms[self.times_ms.len() - 1],
             "scope": "the app's work in a test window; leaves out the frame's wait and GPU work",
