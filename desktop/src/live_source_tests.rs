@@ -1623,8 +1623,8 @@ fn refuses_superseded_results_after_accepting_a_new_request() {
 fn a_new_request_ends_the_pause_between_polls() {
     // Goal: opening a page does not wait out the worker's poll interval, since every page of
     // the app reads local files and should show at once. Method: pause a thread for a minute on
-    // the real mailbox, send a request, and wait up to ten seconds for the pause to end, which
-    // keeps the verdict independent of how busy the machine is.
+    // the real mailbox, see it wait, send a request, and wait up to ten seconds for the pause to
+    // end, which keeps the verdict independent of how busy the machine is.
     let mut worker = Worker {
         store: None,
         root: std::path::PathBuf::new(),
@@ -1632,13 +1632,24 @@ fn a_new_request_ends_the_pause_between_polls() {
         thread: None,
         mode: crate::live_source_mode::SourceMode::Live,
     };
+    // The pause sets this back to `Time` under the mailbox's lock and lets the lock go only by
+    // waiting, so finding `Time` again means the pause waits.
+    worker.shared.mailbox.lock().unwrap().pause_end = crate::live_source::PauseEnd::StoreAnswer;
     let (ended, ending) = std::sync::mpsc::channel();
     let shared = Arc::clone(&worker.shared);
     let pausing = std::thread::spawn(move || {
         worker_pause_for(&shared, Duration::from_secs(60), None);
         ended.send(()).unwrap();
     });
-    std::thread::sleep(Duration::from_millis(50));
+    let waiting = (0..2_000).any(|_| {
+        let waiting =
+            worker.shared.mailbox.lock().unwrap().pause_end == crate::live_source::PauseEnd::Time;
+        if !waiting {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        waiting
+    });
+    assert!(waiting, "the pause never began");
 
     worker.request(SealedRecording::request()).unwrap();
 
