@@ -101,6 +101,28 @@ fn the_event_after_the_last_sealed_observation_commits_without_an_extra_minute()
     assert_eq!(source.state.committed, 5);
 }
 
+#[test]
+fn the_publication_reported_saved_has_every_event_through_it_saved() {
+    // Goal: every event logged through the publication the persister reports saved is saved
+    // with it, since the collector's log lets go of the events of a publication reported saved.
+    // Method: seal a minute of three ticks that each log one event, so an event's number is its
+    // publication's, and compare the publication reported with where the saved events end.
+    let mut source = Scenario::new();
+    for tick in [0, 1, 2, 60] {
+        source.publish(tick);
+    }
+
+    assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+
+    let saved = source
+        .store
+        .saved_newest(&source.registered.identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.state.committed, 3);
+    assert_eq!(saved.events_end, source.state.committed + 1);
+}
+
 fn withhold_publication(source: &mut Scenario, published: u64, visible: u64) {
     let reader = RingReader::open_generation(source.ring.0.name()).unwrap();
     let snapshot = WritableSource::new(

@@ -189,22 +189,47 @@ overwrites only events of ticks the ring no longer holds, so a tick's events sta
 for as long as the ring holds the tick. A reader that reads a tick's events after the ring
 replaced the tick learns which of them it missed.
 
+The log is cut into segments of 1,024 records, and a table in the ring names the segment that
+holds each run of 1,024 event numbers. The writer starts the next run in the segment of the
+oldest run it holds once no tick the ring holds has an event there and the persister has
+saved that run's events. Each tick the collector reads the newest publication the persister
+reports saved in its health record (`architecture.md`), and takes the report only where it
+names this run and a tick the ring still holds. Otherwise the writer takes a segment it has not
+written, as it always does while it has written fewer than 16. So a burst takes the segments
+it needs, and while the persister is down or behind, the log keeps every event until its room
+is full, as a log that numbers its records round its room does. With its room full the writer
+starts the next run in the oldest run's segment whether or not the persister saved it, and a
+reader that asks for an event of that run learns that it missed it.
+
 The ring is sized when it is made for every process and coalition the collector's limits
 allow. Its exact size depends on those capacities and its format. On this M5 Pro on
 2026-10-30 a full ring measured 773,931,008 bytes of shared memory, about 738 MiB of virtual
 address space, against 1,025,589,248 bytes for a ring of 0.2.6, whose event log held
-120 × 16,384 records. The event log holds 655,360 records, which in the current identity
-layout reserve `655,360 × 24 × 8 = 125,829,120` bytes, or 120 MiB. That is above the 584,210
-events the busiest 121 ticks in a row held in this Mac's recording of 34,462,946 events over
-152 runs, measured on 2026-10-30, since the log holds the events of the 120 ticks in the ring
-while the writer logs the next tick's.
+120 × 16,384 records. The event log has room for 655,360 events. It reserves 641 segments,
+one more than those events fill, since the events of the ticks in the ring can start part-way
+into one segment and end part-way into another, and a table of two words a segment. In the
+current identity layout that is `641 × 1,024 × 24 × 8 + 641 × 2 × 8 = 126,035,984` bytes, or
+120 MiB, which is 206,864 bytes more than the ring measured above reserved. The room is above
+the 584,210 events the busiest 121 ticks in a row held in this Mac's recording of 34,462,946
+events over 152 runs, measured on 2026-10-30, since the log holds the events of the 120 ticks
+in the ring while the writer logs the next tick's.
 
-The event log advances around that whole region as events arrive, so long-running churn
-touches all of its backing. Virtual reservation, touched backing, resident memory, physical
-footprint and compressed or swapped pages are different quantities; touching every page does
-not prove they all remain resident together. The ring's name carries 60 random bits written
-only to the lock file, so another user cannot guess it (Security). The lock file also stops a
-second collector from writing the same ring.
+The writer writes a segment only when it needs one, because macOS charges the collector for
+every page of the ring it has written until it exits. A log that numbers its records round
+the whole of its room writes all of it in time, however few events a tick holds. With a ring
+of the collector's slots and event room and no process rows, on this M5 Pro on 2026-11-10,
+1,400,000 events at 100 a tick left the writer's physical footprint 127.2 MB above its start
+under that numbering and 4.5 MB above it with segments and each minute reported saved six
+ticks after it ended. A burst of 3,000 events a tick for 121 ticks then raised the segmented
+log's figure to 71.1 MB, where it stayed through another 1,400,000 quiet events: the log goes
+on using the segments its busiest 121 ticks in a row needed until the collector restarts.
+With no minute reported saved, the segmented log's figure was 127.4 MB, which is 212,992
+bytes above the numbered log's, for the one segment more and the table. Virtual reservation,
+touched backing, resident memory, physical footprint and compressed or swapped pages are
+different quantities; touching every page does not prove they all remain resident together.
+
+The ring's name carries 60 random bits written only to the lock file, so another user cannot
+guess it (Security). The lock file also stops a second collector from writing the same ring.
 
 ## The persister and the recording
 
@@ -612,11 +637,12 @@ exactly `2p`. Anything higher means the writer is writing or has already written
 publication there, so the reader drops the copy. Anything lower means the ring is broken. The
 writer never waits for a reader.
 
-**Event log.** The process events, each start, exec and exit, written in order into a circle of
-655,360 records beside the slots, which overwrites only events of ticks the ring no longer
-holds. A start is a pid a rescan found new, so a process started
-by `posix_spawn` or found already running has a start and no fork. Each record carries its own
-sequence word, read the same way as a slot's.
+**Event log.** The process events, each start, exec and exit, written in order into segments of
+1,024 records beside the slots, with room for 655,360 events. The writer reuses the segment of
+its oldest events once the persister has saved them or the room is full, and overwrites only
+events of ticks the ring no longer holds (The ring). A start is a pid a rescan found new, so a
+process started by `posix_spawn` or found already running has a start and no fork. Each record
+carries its own sequence word, read the same way as a slot's.
 
 **Wake.** Once a slot is written the collector calls `os_sync_wake_by_address_all` on a word of
 the ring, which wakes every reader waiting in `os_sync_wait_on_address_with_timeout` on that

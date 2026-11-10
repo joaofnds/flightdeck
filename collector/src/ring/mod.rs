@@ -12,6 +12,7 @@ mod battery;
 mod binding;
 mod disks;
 mod event;
+mod event_log;
 mod identity;
 mod layout;
 pub use binding::ObjectBinding;
@@ -188,6 +189,9 @@ pub struct Writer {
     /// a slot no tick has filled yet. Kept apart from the mapping, which another process can
     /// write, so the writer's assertions on it check only the writer's own work.
     slot_events_first: Vec<u64>,
+    /// Where the log keeps each span of events, none where it numbers its records round its
+    /// room.
+    event_placement: Option<event_log::Placement>,
     name: String,
     previous_generation: u64,
     dictionary: Option<identity::DictionaryIndex>,
@@ -653,11 +657,7 @@ impl Writer {
 
         Self::create_layout_dictionary(&layout, reference_owner, &mut dictionary);
 
-        let run_start_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(io::Error::other)?
-            .as_nanos();
-        let run_start_ns = u64::try_from(run_start_ns).map_err(io::Error::other)?;
+        let run_start_ns = create_layout_run_start_ns()?;
 
         let previous = create_previous(&place.name_prefix, &lock.0)?;
 
@@ -692,6 +692,10 @@ impl Writer {
         }
 
         let slot_events_first = vec![header.event_first; usize_from(layout.shape.slot_count)];
+        let event_placement = layout
+            .event_segments
+            .as_ref()
+            .map(|log| event_log::Placement::new(log, header.event_first));
 
         Ok(Self {
             _lock: lock,
@@ -701,6 +705,7 @@ impl Writer {
             publication: previous.publication_newest,
             event: previous.event_newest,
             slot_events_first,
+            event_placement,
             name: created.name,
             previous_generation: previous.generation,
             dictionary,
@@ -729,6 +734,36 @@ impl Writer {
         assert!(self.event < oldest_first + capacity);
 
         usize_from(oldest_first + capacity - 1 - self.event)
+    }
+
+    /// Takes a reader's report that it saved every publication through `publication` and their
+    /// events with them, so a segmented log may start a span where it kept events of those. A
+    /// report of a publication the ring does not hold tells the writer nothing, since another
+    /// program wrote the report and the writer no longer knows where that publication's events
+    /// ended. A log that numbers its records has no use for the report.
+    pub fn publications_saved(&mut self, publication: u64) {
+        let Some(placement) = &mut self.event_placement else {
+            return;
+        };
+        if publication == 0 {
+            return;
+        }
+
+        if publication > self.publication {
+            return;
+        }
+
+        if self.publication - publication >= self.layout.shape.slot_count {
+            return;
+        }
+
+        // The events of a tick end where those of the next begin.
+        let unsaved_first = if publication == self.publication {
+            self.event + 1
+        } else {
+            self.slot_events_first[self.layout.slot_index(publication + 1)]
+        };
+        placement.save(unsaved_first);
     }
 
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
@@ -763,7 +798,13 @@ impl Writer {
 
         let words = self.mapping.words();
         let events_first = self.event + 1;
-        self.event = publish_inner_events(words, &self.layout, self.event, readings, identities);
+        let logged = EventsLogged {
+            newest: self.event,
+            // The slot this publication replaces holds the oldest tick until its events are in.
+            held_first: self.slot_events_first[self.layout.slot_index(self.publication + 1)],
+            placement: self.event_placement.as_mut(),
+        };
+        self.event = publish_inner_events(words, &self.layout, logged, readings, identities);
         words[HEADER_EVENT_NEWEST].store(self.event, Ordering::Release);
 
         let publication = self.publication + 1;
@@ -838,19 +879,34 @@ impl Writer {
     }
 }
 
-/// Writes the events of `readings` to the log as the events after `newest`, and returns the
-/// number of the last one, or `newest` when there are none.
+/// Where the writer logs the events of one publication.
+struct EventsLogged<'writer> {
+    /// The newest event written before them.
+    newest: u64,
+    /// The first event of the oldest tick the ring holds while they are written.
+    held_first: u64,
+    placement: Option<&'writer mut event_log::Placement>,
+}
+
+/// Writes the events of `readings` to the log as the events after `logged.newest`, and returns
+/// the number of the last one, or `logged.newest` when there are none.
 fn publish_inner_events(
     words: &[AtomicU64],
     layout: &Layout,
-    newest: u64,
+    mut logged: EventsLogged,
     readings: &Readings,
     identities: Option<&IdentityPublication>,
 ) -> u64 {
-    let mut number = newest;
+    let mut number = logged.newest;
     for (index, event) in readings.events.iter().enumerate() {
         number += 1;
-        let record = &words[layout.event(number)];
+        let record = match (&layout.event_segments, logged.placement.as_deref_mut()) {
+            (Some(log), Some(placement)) => placement.place(words, log, number, logged.held_first),
+            (None, None) => layout.event(number),
+            // A writer makes its placement from its layout's segments.
+            _ => unreachable!("a segmented log without its placement, or the reverse"),
+        };
+        let record = &words[record];
         record[EVENT_SEQUENCE].store(2 * number - 1, Ordering::Relaxed);
         fence(Ordering::Release);
         store_event(&record[..layout::EVENT_WORDS], readings.run_tick, event);
@@ -982,12 +1038,13 @@ impl Opened {
         } else {
             None
         };
+        let events = Cursor::new(event_first, event_log::held(words, &layout, event_newest));
         Ok(Opened {
             immutable,
             name,
             publications: Cursor::new(first, layout.publications_held(newest)),
             run_start_ns,
-            events: Cursor::new(event_first, layout.events_held(event_newest)),
+            events,
             mapping,
             layout,
             reference_owner: next_reference_owner()?,
@@ -1101,12 +1158,19 @@ impl Opened {
     fn read_event(&mut self) -> io::Result<FoundEvent> {
         let words = self.mapping.words();
         let newest = read_newest(&words[HEADER_EVENT_NEWEST])?;
-        let number = match self.events.step(self.layout.events_held(newest)) {
+        let held = event_log::held(words, &self.layout, newest);
+        let number = match self.events.step(held) {
             Step::Nothing => return Ok(FoundEvent::Nothing),
             Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
             Step::Read(number) => number,
         };
-        let record = &words[self.layout.event(number)];
+        let Some(record) = event_log::locate(words, &self.layout, number)? else {
+            return Ok(FoundEvent::Missed {
+                first: number,
+                end: number + 1,
+            });
+        };
+        let record = &words[record];
         match read_finished(record, EVENT_SEQUENCE, number, || {
             load_event(&record[..layout::EVENT_WORDS])
         })? {
@@ -1137,6 +1201,15 @@ fn create_layout_mapping(
     store_supplemental_headers(mapping.words(), layout);
     mapping.words()[layout::HEADER_MAGIC].store(layout::MAGIC, Ordering::Release);
     Ok(mapping)
+}
+
+/// The wall time the run starts at, which the header keeps in nanoseconds.
+fn create_layout_run_start_ns() -> io::Result<u64> {
+    let run_start = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+
+    u64::try_from(run_start.as_nanos()).map_err(io::Error::other)
 }
 
 fn store_supplemental_headers(words: &[AtomicU64], layout: &Layout) {
@@ -1717,6 +1790,9 @@ mod tests {
 
 #[cfg(test)]
 mod battery_tests;
+
+#[cfg(test)]
+mod event_log_tests;
 
 #[cfg(test)]
 mod disks_tests;

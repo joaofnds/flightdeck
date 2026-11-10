@@ -643,9 +643,10 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
     }
     let initial = if super::layout::bound(version) {
         let extended = Mapping::new(&object, header_words, PROT_READ)?;
+        let log = super::layout::open_layout_log(extended.words(), version);
         let mut snapshot = [0; 44];
         for (index, value) in snapshot.iter_mut().enumerate() {
-            if !matches!(index, 4 | 7 | 29 | 34 | 35) {
+            if !super::binding::header_word_moves(index, log) {
                 *value = extended.words()[index].load(Ordering::Relaxed);
             }
         }

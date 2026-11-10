@@ -240,6 +240,8 @@ fn run_paced_health(
     Ok(reporter.transpose()?)
 }
 
+/// Reports the newest publication saved. The collector's log lets go of the events of a
+/// publication reported here, so every event logged through it is saved before it is reported.
 fn report_progress(
     health: &mut Option<collector::recording::control::Reporter>,
     recovery: &Recovery,

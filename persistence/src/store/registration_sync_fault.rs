@@ -811,9 +811,17 @@ fn inspect_source_header(words: &[std::sync::atomic::AtomicU64], profile: u8) {
         + value(14) * value(20)
         + value(15) * value(21)
         + if captured { value(14) * value(36) } else { 0 };
+    // A log cut into segments has one segment more than its events fill and a table of two
+    // words a segment, and names the events of a segment in word 38.
+    let events = if value(38) == 0 {
+        value(16) * value(22)
+    } else {
+        let segments = value(16).div_ceil(value(38)) + 1;
+        segments * value(38) * value(22) + segments * 2
+    };
     let mut tail = 44
         + value(8) * slot
-        + value(16) * value(22)
+        + events
         + if captured {
             value(32) * value(37) + value(33) / 8
         } else {

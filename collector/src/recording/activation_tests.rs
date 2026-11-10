@@ -189,8 +189,8 @@ fn plans_the_full_profile_below_the_existing_one_gibibyte_reader_limit() {
 
     let bytes = Writer::identity_size_bytes(shape, capacity).unwrap();
 
-    assert_eq!(bytes, 1_012_655_008);
-    assert_eq!(1024 * 1024 * 1024 - bytes, 61_086_816);
+    assert_eq!(bytes, 1_012_882_352);
+    assert_eq!(1024 * 1024 * 1024 - bytes, 60_859_472);
 }
 
 #[test]

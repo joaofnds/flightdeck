@@ -44,16 +44,19 @@ fn carries_optional_battery_with_the_original_tick_and_identity() {
     assert_eq!(borrowed.identity(), Some(fixture.identity));
     assert_eq!(borrowed.source_layout_version(), 6);
     assert_eq!(borrowed.run_start_continuous_ns(), Some(100));
-    assert_eq!(borrowed.mapped_size_bytes(), 2768);
+    assert_eq!(borrowed.mapped_size_bytes(), 3184);
     assert!(fixture.writer.battery_supported());
     assert!(borrowed.battery_supported());
+    // The battery leaves the header's words of the event log as the log set them: segments of
+    // the two events the fixture's log has room for, and the ring's first event the oldest.
+    let words = fixture.writer.mapping.words();
     assert_eq!(
-        fixture.writer.mapping.words()[38].load(Ordering::Relaxed),
-        0
+        words[layout::HEADER_EVENT_SEGMENT_EVENTS].load(Ordering::Relaxed),
+        2
     );
     assert_eq!(
-        fixture.writer.mapping.words()[39].load(Ordering::Relaxed),
-        0
+        words[layout::HEADER_EVENT_OLDEST].load(Ordering::Relaxed),
+        1
     );
 }
 
@@ -210,7 +213,7 @@ fn treats_page_rounded_original_v4_storage_as_no_battery_tail() {
     assert!(fixture.writer.layout.battery.is_none());
     assert!(!fixture.writer.battery_supported());
     assert!(!reader.battery_supported());
-    assert_eq!(reader.mapped_size_bytes(), 2544);
+    assert_eq!(reader.mapped_size_bytes(), 2960);
     assert_eq!(
         reader.read_into(&mut tick).unwrap(),
         Found::Publication {

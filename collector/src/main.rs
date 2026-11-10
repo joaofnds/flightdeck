@@ -226,6 +226,23 @@ fn run_control(
     }
 }
 
+/// The newest publication of the run `identity` names that the persister reports saved, or
+/// none where it reports another run or nothing this build can read, so that the ring's log
+/// keeps its events as it does with no persister.
+fn run_collect_saved(
+    control: &recording::control::Control,
+    identity: Option<collector::ring::RunIdentity>,
+) -> Option<u64> {
+    let identity = identity?;
+    // A record caught mid-write reads whole on a later tick, and one another build wrote is no
+    // report this build can trust, so either reports nothing.
+    let Ok(health) = control.read(recording::control::Role::Persister) else {
+        return None;
+    };
+
+    (health.run == identity.run).then_some(health.publication)
+}
+
 fn run_collect(
     options: &Options,
     owner: owner::Owner,
@@ -252,6 +269,9 @@ fn run_collect(
                     .map_or(collector::ring::Identity([0; 2]), |identity| identity.run),
                 run.ring.publication_newest(),
             )?;
+            if let Some(publication) = run_collect_saved(health.control(), run.ring.identity()) {
+                run.ring.publications_saved(publication);
+            }
             health.control().stopping()
         } else {
             false
@@ -1239,6 +1259,38 @@ mod tests {
             .unwrap();
         assert_eq!(current.publication, run.ring.publication_newest());
         assert!(current.publication > 1);
+    }
+
+    #[test]
+    fn takes_the_saved_publication_only_from_a_persister_of_the_same_run() {
+        // Goal: the collector tells its ring that events are saved only where the persister
+        // reports the ring's own run, so a persister still saving an earlier run lets go of none
+        // of this run's events.
+        // Method: report a saved publication for one run in the persister's record, and read it
+        // for that run, for another run and for a ring that names no run.
+        use collector::ring::{Identity, RunIdentity};
+        use recording::control::{Control, Reporter, Role as Worker, State};
+
+        let recording = TestRecording::new("savedrun");
+        recording::private::create_private_dir(&recording.root).unwrap();
+        let control = Control::create(&recording.root).unwrap();
+        let mut persister = Reporter::new(
+            Control::open_writable(&recording.root).unwrap(),
+            Worker::Persister,
+        )
+        .unwrap();
+        let run = |run| RunIdentity {
+            recording: Identity([1, 2]),
+            run: Identity(run),
+            boot: Identity([5, 6]),
+        };
+        persister
+            .update(State::Running, Identity([3, 4]), 61)
+            .unwrap();
+
+        assert_eq!(Some(61), run_collect_saved(&control, Some(run([3, 4]))));
+        assert_eq!(None, run_collect_saved(&control, Some(run([7, 8]))));
+        assert_eq!(None, run_collect_saved(&control, None));
     }
 
     #[test]

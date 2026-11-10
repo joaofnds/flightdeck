@@ -304,11 +304,8 @@ impl RingReader {
     ) -> io::Result<(FoundEvent, super::ProgramLengths)> {
         let words = self.opened.mapping.words();
         let newest = read_newest(&words[layout::HEADER_EVENT_NEWEST])?;
-        let number = match self
-            .opened
-            .events
-            .step(self.opened.layout.events_held(newest))
-        {
+        let held = super::event_log::held(words, &self.opened.layout, newest);
+        let number = match self.opened.events.step(held) {
             super::Step::Nothing => {
                 return Ok((FoundEvent::Nothing, super::ProgramLengths::default()));
             }
@@ -320,7 +317,16 @@ impl RingReader {
             }
             super::Step::Read(number) => number,
         };
-        let record = &words[self.opened.layout.event(number)];
+        let Some(record) = super::event_log::locate(words, &self.opened.layout, number)? else {
+            return Ok((
+                FoundEvent::Missed {
+                    first: number,
+                    end: number + 1,
+                },
+                super::ProgramLengths::default(),
+            ));
+        };
+        let record = &words[record];
         let loaded = super::read_finished(record, layout::EVENT_SEQUENCE, number, || {
             let (tick, event) = super::load_event(&record[..layout::EVENT_WORDS])?;
             match super::identity::load_event_identity(

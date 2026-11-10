@@ -10,6 +10,16 @@ pub struct ObjectBinding {
     pub publication_first: u64,
     pub event_first: u64,
 }
+/// Whether a ring's writer changes header word `index` as it writes, so the word is no
+/// evidence of which object a reader holds. A log cut into segments moves its oldest event on,
+/// as every log does its newest.
+pub(super) fn header_word_moves(index: usize, log: layout::EventLog) -> bool {
+    match index {
+        4 | 7 | 29 | 34 | 35 => true,
+        layout::HEADER_EVENT_OLDEST => log == layout::EventLog::Segmented,
+        _ => false,
+    }
+}
 pub(super) fn snapshot(words: &[AtomicU64], planned: &layout::Layout) -> io::Result<[u64; 64]> {
     if !layout::bound(planned.version) || words.len() < 44 {
         return Err(io::Error::from(io::ErrorKind::Unsupported));
@@ -17,9 +27,10 @@ pub(super) fn snapshot(words: &[AtomicU64], planned: &layout::Layout) -> io::Res
     if words[layout::HEADER_MAGIC].load(Ordering::Acquire) != layout::MAGIC {
         return Err(io::Error::from(io::ErrorKind::WouldBlock));
     }
+    let log = planned.event_log();
     let mut fields = [0; 64];
     for index in 0..44 {
-        if !matches!(index, 4 | 7 | 29 | 34 | 35) {
+        if !header_word_moves(index, log) {
             fields[index] = words[index].load(Ordering::Relaxed);
         }
     }

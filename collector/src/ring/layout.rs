@@ -6,6 +6,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::Shape;
+use super::event_log::Segments;
 use crate::u64_from_usize;
 
 /// Marks the start of a ring, so a reader never takes another object for one.
@@ -55,6 +56,13 @@ pub(super) const HEADER_RUN_START_CONTINUOUS_NS: usize = HEADER_COMPLETED + 1;
 pub(super) const HEADER_ORIGIN_STATE: usize = HEADER_RUN_START_CONTINUOUS_NS + 1;
 pub(super) const HEADER_WORDS: usize = HEADER_ORIGIN_STATE + 1;
 pub(super) const LAYOUT_VERSION_IDENTITY: u64 = 6;
+/// The events each segment of the log holds, in a ring of `LAYOUT_VERSION_IDENTITY` whose log
+/// is cut into segments, and zero in every other ring. A reader built before segments takes the
+/// word for reserved and refuses a ring that sets it, where it would otherwise look for each
+/// event in a record the writer never wrote.
+pub(super) const HEADER_EVENT_SEGMENT_EVENTS: usize = 38;
+/// The oldest event a segmented log holds, which its writer moves on as it lets go of a span.
+pub(super) const HEADER_EVENT_OLDEST: usize = 39;
 pub(super) const HEADER_WORDS_IDENTITY: usize = 44;
 pub(super) const HEADER_DICTIONARY_CAPACITY: usize = 32;
 pub(super) const HEADER_ARENA_CAPACITY: usize = 33;
@@ -161,6 +169,8 @@ pub(super) struct Layout {
     /// The event log's first word, from the ring's start.
     pub(super) events_start: usize,
     pub(super) event_words: usize,
+    /// How the log is cut into segments, none where it numbers its records round its room.
+    pub(super) event_segments: Option<Segments>,
     pub(super) process_identities: Section,
     pub(super) dictionary: Section,
     pub(super) arena_start: usize,
@@ -208,16 +218,41 @@ impl Layout {
                 entries: 0,
                 arena_bytes: 0,
             },
+            EventLog::Numbered,
         )
+    }
+
+    /// The identity layout of a collector built before the log was cut into segments, which
+    /// numbers the log's records round the whole of its room.
+    #[cfg(test)]
+    pub(super) fn identity_numbered(shape: Shape) -> Option<Self> {
+        let capacity = super::DictionaryCapacity::default();
+        Self::identity_log(shape, LAYOUT_VERSION_IDENTITY, capacity, EventLog::Numbered)
     }
 
     pub(super) fn identity(shape: Shape, capacity: super::DictionaryCapacity) -> Option<Self> {
         Self::identity_version(shape, LAYOUT_VERSION_IDENTITY, capacity)
     }
+    /// The layout a writer of `version` makes, which cuts the log into segments where the
+    /// version has a header word to say so.
     fn identity_version(
         shape: Shape,
         version: u64,
         capacity: super::DictionaryCapacity,
+    ) -> Option<Self> {
+        let log = if version == LAYOUT_VERSION_IDENTITY {
+            EventLog::Segmented
+        } else {
+            EventLog::Numbered
+        };
+        Self::identity_log(shape, version, capacity, log)
+    }
+
+    fn identity_log(
+        shape: Shape,
+        version: u64,
+        capacity: super::DictionaryCapacity,
+        log: EventLog,
     ) -> Option<Self> {
         if capacity.entries == 0 {
             return None;
@@ -239,7 +274,7 @@ impl Layout {
             return None;
         }
 
-        Self::planned(shape, version, capacity)
+        Self::planned(shape, version, capacity, log)
     }
 
     pub(super) fn identity_battery(
@@ -290,7 +325,12 @@ impl Layout {
         }
     }
 
-    fn planned(shape: Shape, version: u64, capacity: super::DictionaryCapacity) -> Option<Self> {
+    fn planned(
+        shape: Shape,
+        version: u64,
+        capacity: super::DictionaryCapacity,
+        log: EventLog,
+    ) -> Option<Self> {
         if !matches!(version, 2..=6) {
             return None;
         }
@@ -299,13 +339,7 @@ impl Layout {
             return None;
         }
 
-        let mut plan = SlotPlan {
-            end: if version == LAYOUT_VERSION_LEGACY {
-                SLOT_WALL_NS
-            } else {
-                SLOT_FIXED_WORDS + usize::from(captured(version))
-            },
-        };
+        let mut plan = SlotPlan::new(version);
         let cpus = plan.section(shape.cpu_capacity, CPU_WORDS);
         let interfaces = plan.section(shape.interface_capacity, INTERFACE_WORDS);
         let state_capacity = usize_from(shape.state_capacity);
@@ -322,17 +356,13 @@ impl Layout {
             },
             PROCESS_IDENTITY_WORDS,
         );
-        let mut widths = PlannedWords {
-            slot: plan.end,
-            header: HEADER_WORDS,
-            event: EVENT_WORDS,
-        };
-        planned_widths(version, &mut widths);
+        let widths = planned_widths(version, plan.end, shape.event_capacity, log);
         planned_size(shape, capacity, &widths)?;
 
         let events_start = widths.header + usize_from(shape.slot_count) * widths.slot;
+        let event_segments = log.segments(shape.event_capacity, events_start, widths.event);
         let dictionary = Section {
-            start: events_start + usize_from(shape.event_capacity) * widths.event,
+            start: events_start + usize::try_from(widths.events).ok()?,
             capacity: usize_from(capacity.entries),
             record_words: DESCRIPTOR_WORDS,
         };
@@ -353,6 +383,7 @@ impl Layout {
             coalitions,
             events_start,
             event_words: widths.event,
+            event_segments,
             process_identities,
             arena_start: dictionary.end(),
             dictionary,
@@ -401,9 +432,20 @@ impl Layout {
         }
     }
 
-    /// The words of the record that holds the event numbered `number`, from the ring's start.
+    /// How the log places its records.
+    pub(super) fn event_log(&self) -> EventLog {
+        if self.event_segments.is_some() {
+            EventLog::Segmented
+        } else {
+            EventLog::Numbered
+        }
+    }
+
+    /// The words of the record that holds the event numbered `number`, from the ring's start,
+    /// in a log that numbers its records round its room.
     pub(super) fn event(&self, number: u64) -> Range<usize> {
         assert!(number > 0);
+        assert!(self.event_segments.is_none());
 
         let index = usize_from((number - 1) % self.shape.event_capacity);
         let start = self.events_start + index * self.event_words;
@@ -430,12 +472,58 @@ struct PlannedWords {
     slot: usize,
     header: usize,
     event: usize,
+    /// The words of the event log, with its table where it is cut into segments.
+    events: u64,
 }
 
-fn planned_widths(version: u64, widths: &mut PlannedWords) {
-    widths.header = header_words(version);
-    if captured(version) {
-        widths.event = EVENT_WORDS_IDENTITY;
+/// How a ring's event log places its records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EventLog {
+    /// Each event in the record its number names, round the whole of the log's room.
+    Numbered,
+    /// In segments a table names, as `event_log` describes.
+    Segmented,
+}
+
+impl EventLog {
+    /// The segments of a log with room for `event_capacity` events of `record_words` each from
+    /// `records_start`, none where the log numbers its records.
+    fn segments(
+        self,
+        event_capacity: u64,
+        records_start: usize,
+        record_words: usize,
+    ) -> Option<Segments> {
+        match self {
+            Self::Segmented => Some(Segments::plan(event_capacity, records_start, record_words)),
+            Self::Numbered => None,
+        }
+    }
+}
+
+/// The widths of a ring of `version` whose slot takes `slot_words`, for a log with room for
+/// `event_capacity` events, which the caller has checked against `SHAPE_FIELD_MAX`.
+fn planned_widths(
+    version: u64,
+    slot_words: usize,
+    event_capacity: u64,
+    log: EventLog,
+) -> PlannedWords {
+    let event = if captured(version) {
+        EVENT_WORDS_IDENTITY
+    } else {
+        EVENT_WORDS
+    };
+    let events = match log.segments(event_capacity, 0, event) {
+        Some(segments) => u64_from_usize(segments.word_count()),
+        None => u64_from_usize(event) * event_capacity,
+    };
+
+    PlannedWords {
+        slot: slot_words,
+        header: header_words(version),
+        event,
+        events,
     }
 }
 
@@ -448,7 +536,7 @@ fn planned_size(
     let size_bytes = u64_from_usize(widths.slot)
         .checked_mul(shape.slot_count)?
         .checked_add(u64_from_usize(widths.header))?
-        .checked_add(u64_from_usize(widths.event).checked_mul(shape.event_capacity)?)?
+        .checked_add(widths.events)?
         .checked_add(
             capacity
                 .entries
@@ -493,6 +581,17 @@ struct SlotPlan {
 }
 
 impl SlotPlan {
+    /// A slot of `version` with the words every such slot starts with and no section yet.
+    fn new(version: u64) -> Self {
+        let end = if version == LAYOUT_VERSION_LEGACY {
+            SLOT_WALL_NS
+        } else {
+            SLOT_FIXED_WORDS + usize::from(captured(version))
+        };
+
+        Self { end }
+    }
+
     /// Lays out a section of `capacity` records of `record_words` each after the last.
     fn section(&mut self, capacity: u64, record_words: usize) -> Section {
         assert!(capacity <= SHAPE_FIELD_MAX);
@@ -562,6 +661,10 @@ pub(super) fn store_header(words: &[AtomicU64], layout: &Layout, header: &Header
             words[index].store(u64_from_usize(value), Ordering::Relaxed);
         }
     }
+    if let Some(log) = &layout.event_segments {
+        words[HEADER_EVENT_SEGMENT_EVENTS].store(log.segment_events(), Ordering::Relaxed);
+        words[HEADER_EVENT_OLDEST].store(header.event_first, Ordering::Relaxed);
+    }
     if bound(layout.version) {
         words[40].store(header.object_identity.0[0], Ordering::Relaxed);
         words[41].store(header.object_identity.0[1], Ordering::Relaxed);
@@ -603,6 +706,7 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
     open_layout_widths(header, version)?;
+    open_layout_segment_words(header, version)?;
 
     let shape = Shape {
         slot_count: load(HEADER_SLOT_COUNT),
@@ -616,13 +720,14 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
         event_capacity: load(HEADER_EVENT_CAPACITY),
     };
     let planned = if captured(version) {
-        Layout::identity_version(
+        Layout::identity_log(
             shape,
             version,
             super::DictionaryCapacity {
                 entries: load(HEADER_DICTIONARY_CAPACITY),
                 arena_bytes: load(HEADER_ARENA_CAPACITY),
             },
+            open_layout_log(header, version),
         )
     } else {
         Layout::versioned(shape, version)
@@ -633,6 +738,12 @@ pub(super) fn open_layout(header: &[AtomicU64], size_bytes: usize) -> io::Result
 
     if layout.size_bytes() > size_bytes {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+
+    if let Some(log) = &layout.event_segments {
+        if load(HEADER_EVENT_SEGMENT_EVENTS) != log.segment_events() {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
     }
 
     Ok(layout)
@@ -650,8 +761,6 @@ fn open_layout_widths(header: &[AtomicU64], version: u64) -> io::Result<()> {
             || load(HEADER_GENERATION) == 0
             || load(HEADER_PUBLICATION_FIRST) == 0
             || load(HEADER_EVENT_FIRST) == 0
-            || load(38) != 0
-            || load(39) != 0
         {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
@@ -678,8 +787,6 @@ fn open_layout_widths(header: &[AtomicU64], version: u64) -> io::Result<()> {
         let exact = [
             (HEADER_PROCESS_IDENTITY_WORDS, 6),
             (HEADER_DESCRIPTOR_WORDS, 4),
-            (38, 0),
-            (39, 0),
         ];
         for (index, value) in exact {
             if load(index) != value {
@@ -709,11 +816,44 @@ fn open_layout_widths(header: &[AtomicU64], version: u64) -> io::Result<()> {
     Ok(())
 }
 
+/// Refuses a header whose log is not cut into segments and which sets a word of the segments,
+/// as a reader built before segments does. `header` holds the version's header words.
+fn open_layout_segment_words(header: &[AtomicU64], version: u64) -> io::Result<()> {
+    if header_words(version) <= HEADER_EVENT_OLDEST {
+        return Ok(());
+    }
+
+    if open_layout_log(header, version) == EventLog::Segmented {
+        return Ok(());
+    }
+
+    for index in [HEADER_EVENT_SEGMENT_EVENTS, HEADER_EVENT_OLDEST] {
+        if header[index].load(Ordering::Relaxed) != 0 {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+    }
+
+    Ok(())
+}
+
 pub(super) const fn captured(version: u64) -> bool {
     matches!(version, 4 | 6)
 }
 pub(super) const fn bound(version: u64) -> bool {
     matches!(version, 5 | 6)
+}
+/// How the ring of `header` and `version` places its events, which a ring of the identity
+/// layout says in the word of its segments' size. `header` holds the version's header words.
+pub(super) fn open_layout_log(header: &[AtomicU64], version: u64) -> EventLog {
+    if version != LAYOUT_VERSION_IDENTITY {
+        return EventLog::Numbered;
+    }
+
+    if header[HEADER_EVENT_SEGMENT_EVENTS].load(Ordering::Relaxed) == 0 {
+        return EventLog::Numbered;
+    }
+
+    EventLog::Segmented
 }
 pub(super) const fn header_words(version: u64) -> usize {
     match version {
@@ -837,8 +977,47 @@ mod tests {
         refuses_unaligned_arena_capacity, HEADER_ARENA_CAPACITY, 33;
         refuses_used_arena_past_capacity, HEADER_ARENA_USED, 40;
         refuses_unaligned_used_arena, HEADER_ARENA_USED, 1;
-        refuses_first_identity_reserved_word, 38, 1;
-        refuses_second_identity_reserved_word, 39, 1;
+        refuses_segments_of_another_size, HEADER_EVENT_SEGMENT_EVENTS, 2;
+    }
+
+    /// The header of a ring of the identity layout as a collector before segments wrote it.
+    fn identity_numbered_header() -> (Layout, Vec<AtomicU64>) {
+        let (_, words) = identity_header();
+        let layout = Layout::identity_numbered(layout().shape).unwrap();
+        words[HEADER_DICTIONARY_CAPACITY].store(
+            u64_from_usize(layout.dictionary.capacity),
+            Ordering::Relaxed,
+        );
+        words[HEADER_ARENA_CAPACITY].store(u64_from_usize(layout.arena_bytes), Ordering::Relaxed);
+        words[HEADER_EVENT_SEGMENT_EVENTS].store(0, Ordering::Relaxed);
+        words[HEADER_EVENT_OLDEST].store(0, Ordering::Relaxed);
+        (layout, words)
+    }
+
+    #[test]
+    fn opens_an_identity_ring_whose_log_is_not_cut_into_segments() {
+        // Goal: a ring a collector before segments made still opens, with its events where
+        // their numbers put them.
+        // Method: open a header of the identity layout whose two segment words are zero.
+        let (layout, words) = identity_numbered_header();
+
+        let opened = open_layout(&words, layout.size_bytes()).unwrap();
+
+        assert!(opened.event_segments.is_none());
+        assert_eq!(layout.size_bytes(), opened.size_bytes());
+    }
+
+    #[test]
+    fn refuses_an_oldest_event_in_a_log_that_is_not_cut_into_segments() {
+        // Goal: a ring that names no segment size keeps the word of its oldest event zero, as
+        // a reader before segments requires of it.
+        // Method: name an oldest event in a header whose segment size is zero.
+        let (layout, words) = identity_numbered_header();
+        words[HEADER_EVENT_OLDEST].store(1, Ordering::Relaxed);
+
+        let result = open_layout(&words, layout.size_bytes());
+
+        assert_eq!(io::ErrorKind::InvalidData, result.unwrap_err().kind());
     }
 
     #[test]
@@ -875,7 +1054,9 @@ mod tests {
             Layout::identity(shape, super::super::DictionaryCapacity::default()).unwrap();
 
         assert_eq!(795_684_832, legacy.size_bytes());
-        assert_eq!(1_012_655_008, identity.size_bytes());
+        // The identity log is cut into 1,921 segments of 1,024 events, one more than its
+        // events fill, and its table has two words for each.
+        assert_eq!(1_012_882_352, identity.size_bytes());
         println!(
             "ring={} index={} observation={} reference={} reader_identity_scratch={}",
             identity.size_bytes(),
