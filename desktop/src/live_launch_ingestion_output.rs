@@ -105,7 +105,7 @@ pub(super) fn panel_value(panel: &crate::data::Panel) -> Value {
     json!({"data": panel,
         "window": panel.window.map(|window| json!({"first": window.first,
             "span": window.span})), "detail_first": panel.detail_first,
-        "reading_seconds": panel.reading_seconds, "sliding": panel.sliding,
+        "reading_seconds": panel.reading_seconds,
         "places": format!("{:?}", panel.places)})
 }
 

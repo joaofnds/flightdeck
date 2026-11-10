@@ -254,9 +254,8 @@ impl LiveDashboard {
             };
             panels.apps.extend(gpu.panel());
             panels.gpu = Some(gpu);
-            let sliding = self.panels_slide();
             for panel in &mut panels.apps {
-                super::zoom_panel(panel, window, sliding);
+                super::zoom_panel(panel, window);
             }
             self.store_panels = panels;
         }
@@ -361,9 +360,8 @@ impl LiveDashboard {
         crate::live_acceptance::prepare_overview_titles(&mut drawn.apps)?;
 
         if let Some(window) = self.view_window() {
-            let sliding = self.panels_slide();
             for panel in panels.iter_mut().chain(&mut drawn.apps) {
-                super::zoom_panel(panel, window, sliding);
+                super::zoom_panel(panel, window);
             }
         }
         let seconds = crate::live_projection::overview_seconds(view)?;

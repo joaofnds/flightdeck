@@ -441,7 +441,10 @@ fn chart_panel(
         // The prototype draws the Self charts as bare lines.
         fill: Some(0.0),
         caption: Some(definition.caption.into()),
-        help: Some(format!("{HELP} {}", crate::live_projection::LINE_MEAN_HELP)),
+        help: Some(format!(
+            "{HELP} {}",
+            crate::live_projection::LINE_POINT_HELP
+        )),
         source: None,
         quantities: None,
         states: None,
@@ -454,8 +457,6 @@ fn chart_panel(
             Group::Ticks => crate::self_reports::TICK_REPORT_SECONDS,
             Group::Minutes => crate::self_reports::MINUTE_REPORT_SECONDS,
         },
-        sliding: false,
-        chart_width: std::cell::Cell::new(None),
     }
 }
 

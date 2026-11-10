@@ -249,11 +249,10 @@ mod over_the_loaded_hour {
     }
 
     #[test]
-    fn sizes_its_buckets_for_the_older_parts_ten_seconds_as_the_machine_charts_do() {
-        // Goal: the chart's older points, ten seconds apart, fill the buckets the chart draws
-        // them in, so its line does not break into dots between them on a wide chart. Method: a
-        // View of the hour, and where the chart's full-detail seconds start beside where the
-        // machine CPU chart's do, which the chart sizes its buckets by.
+    fn marks_where_its_older_part_ends_as_the_machine_charts_do() {
+        // Goal: the chart's older points, ten seconds apart, each stand for their ten seconds, so
+        // its line does not break into dots between them. Method: a View of the hour, and where
+        // the chart's full-detail seconds start beside where the machine CPU chart's do.
         let (view, cohorts) = hour();
 
         let drawn = ResidentHistory::from_view(&view, &cohorts);

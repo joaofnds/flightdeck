@@ -19,7 +19,6 @@ const PLOTS_MAX: usize = 4096;
 /// frame of the fan animation, draws no chart again.
 pub(crate) struct Shown {
     panel: Rc<Panel>,
-    chart_width: Option<f32>,
     inspection: Inspection,
     hidden: Rc<Vec<String>>,
     time: Option<TimeWindow>,
@@ -33,7 +32,6 @@ impl Shown {
         time: Option<TimeWindow>,
     ) -> Self {
         Self {
-            chart_width: panel.chart_width.get(),
             inspection: charts::plot_inspection(&panel, inspection),
             panel,
             hidden,
@@ -43,21 +41,13 @@ impl Shown {
 
     /// Whether the plot of `self` looks as the plot of `other` does. Panels compare by address:
     /// the page builds a new panel for new readings, and `Rc::make_mut` copies a panel a plot
-    /// holds rather than changing it in place. The width of the card is the panel's one value
-    /// that changes in place, so each holds the width it was made with.
+    /// holds rather than changing it in place.
     fn same(&self, other: &Self) -> bool {
         if !Rc::ptr_eq(&self.panel, &other.panel) {
             return false;
         }
 
-        let looks = (self.chart_width, self.inspection, &self.hidden, self.time);
-        looks
-            == (
-                other.chart_width,
-                other.inspection,
-                &other.hidden,
-                other.time,
-            )
+        (self.inspection, &self.hidden, self.time) == (other.inspection, &other.hidden, other.time)
     }
 }
 
@@ -73,7 +63,6 @@ pub(crate) struct Plot {
 
 impl Render for Plot {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        assert_eq!(self.shown.panel.chart_width.get(), self.shown.chart_width);
         self.renders.set(self.renders.get() + 1);
 
         charts::plot_without_cursor(

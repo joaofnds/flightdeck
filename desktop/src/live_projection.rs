@@ -831,8 +831,8 @@ fn panel_extremes<O: Observations + ?Sized>(
 }
 
 /// What a line chart's points stand for, which its help says beside what it measures.
-pub(crate) const LINE_MEAN_HELP: &str = "Each point is the mean of the readings of its seconds, \
-    so a single high reading can lie well past its line.";
+pub(crate) const LINE_POINT_HELP: &str = "Each point is one reading, drawn where the time it \
+    covers ends, so the line passes through every reading it shows.";
 
 /// Where a chart with a Data table finds a line's peak, which its help says after what its points
 /// stand for.
@@ -863,7 +863,7 @@ fn panel<O: Observations + ?Sized>(
         fill: Some(specification.fill),
         caption: specification.caption.map(str::to_owned),
         help: Some(format!(
-            "{} {LINE_MEAN_HELP} {LINE_DATA_HELP}",
+            "{} {LINE_POINT_HELP} {LINE_DATA_HELP}",
             specification.help
         )),
         source: Some("Live recording".into()),
@@ -878,8 +878,6 @@ fn panel<O: Observations + ?Sized>(
         places: Some(Arc::clone(&coordinates.places)),
         detail_first: Some(coordinates.detail_first),
         reading_seconds: crate::charts::TICK_SECONDS,
-        sliding: false,
-        chart_width: std::cell::Cell::new(None),
     })
 }
 

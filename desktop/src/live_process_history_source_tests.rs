@@ -449,10 +449,7 @@ fn a_chart_of_process_groups_says_what_its_points_stand_for() {
     let presentation = crate::live_acceptance::Presentation::prepare(&request, snapshot).unwrap();
 
     let help = presentation.panels[0].help.as_ref().unwrap();
-    assert!(
-        help.contains("the mean of the readings of its seconds"),
-        "{help}"
-    );
+    assert!(help.contains("Each point is one reading"), "{help}");
 }
 
 #[test]

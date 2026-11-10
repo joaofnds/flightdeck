@@ -12,8 +12,7 @@ pub struct TimeWindow {
 
 impl TimeWindow {
     /// The seconds an App chart holds, ending at `last_second`: the 900 seconds of the
-    /// selection's context and the lead-in before them, whose readings the first points in
-    /// view average.
+    /// selection's context and the lead-in the viewer loads before them.
     #[must_use]
     pub fn charted(last_second: u64) -> Self {
         Self {

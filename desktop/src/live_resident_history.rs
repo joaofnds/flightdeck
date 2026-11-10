@@ -330,8 +330,6 @@ impl History {
             ),
             detail_first: self.detail_first,
             reading_seconds: crate::charts::TICK_SECONDS,
-            sliding: false,
-            chart_width: std::cell::Cell::new(None),
         }
     }
 

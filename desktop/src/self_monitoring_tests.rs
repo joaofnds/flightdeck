@@ -468,9 +468,6 @@ fn a_self_chart_says_what_its_points_stand_for_and_names_no_table_it_lacks() {
     let charts = charts(&reports, WINDOW, None);
 
     let help = charts[0].panel.help.as_ref().unwrap();
-    assert!(
-        help.contains("the mean of the readings of its seconds"),
-        "{help}"
-    );
+    assert!(help.contains("Each point is one reading"), "{help}");
     assert!(!help.contains("Data table"), "{help}");
 }

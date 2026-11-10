@@ -271,10 +271,6 @@ pub(crate) fn prepare_lines(
     mut paint: impl FnMut(&crate::data::Line, &[Option<(f32, f32)>], &Geometry<'_>),
 ) {
     let left = axis_scale(panel, inspection, hidden, "left");
-    let inspection = Inspection {
-        lower: curve_lower(panel, inspection),
-        ..inspection
-    };
     stacked_lines(panel, inspection, hidden, |line, values| {
         let scale = match &line.axis {
             Some(axis) => axis_scale(panel, inspection, hidden, axis),
@@ -288,8 +284,7 @@ pub(crate) fn prepare_lines(
             positions: panel.positions.as_deref(),
             segments: panel.segments.as_deref(),
             lower: inspection.lower,
-            buckets: panel_buckets(panel),
-            sliding: panel.sliding,
+            clock: panel_clock(panel),
         };
         paint(line, values, &geometry);
     });
@@ -331,37 +326,11 @@ fn stacked_lines(
     }
 }
 
-/// The index of the first reading the curves of `panel` draw from. A point of a chart with a
-/// clock averages the readings before it, so the first point in view draws from readings before
-/// the window's oldest edge where the panel holds them.
-fn curve_lower(panel: &Panel, inspection: Inspection) -> usize {
-    let Some(buckets) = panel_buckets(panel) else {
-        return inspection.lower;
-    };
-    let Some(positions) = panel.positions.as_deref() else {
-        return inspection.lower;
-    };
-
-    // Positions run in time order, so the readings before the first a point averages lead.
-    positions[..inspection.lower].partition_point(|position| {
-        buckets
-            .second_of(*position)
-            .is_none_or(|second| second < buckets.lead_first)
-    })
-}
-
-/// The buckets of a panel with a clock, sized for its card, or for an overview card until its
-/// card has been laid out.
-fn panel_buckets(panel: &Panel) -> Option<Buckets> {
-    let chart_width = panel.chart_width.get().unwrap_or(CHART_WIDTH_DEFAULT);
-    panel.window.map(|window| {
-        Buckets::of(
-            window,
-            panel.detail_first,
-            panel.reading_seconds,
-            chart_width,
-        )
-    })
+/// The clock of a panel whose readings stand on one, or `None` for a chart of readings in order.
+fn panel_clock(panel: &Panel) -> Option<ReadingClock> {
+    panel
+        .window
+        .map(|window| ReadingClock::of(window, panel.detail_first, panel.reading_seconds))
 }
 
 pub(crate) struct Geometry<'a> {
@@ -372,28 +341,24 @@ pub(crate) struct Geometry<'a> {
     pub(crate) positions: Option<&'a [f32]>,
     pub(crate) segments: Option<&'a [u64]>,
     pub(crate) lower: usize,
-    /// The stretches of the clock the readings are averaged over. A panel with no clock draws
-    /// each reading as its own bucket.
-    pub(crate) buckets: Option<Buckets>,
-    /// Whether readings still leave at the window's start and arrive at its end.
-    pub(crate) sliding: bool,
+    /// When each reading was taken, or `None` for a chart that draws its readings evenly apart.
+    pub(crate) clock: Option<ReadingClock>,
 }
 
 impl Geometry<'_> {
     /// Where the chart's readings fall on the clock, or `None` for a chart with no clock.
-    fn clock(&self) -> Option<Clock<'_>> {
-        Some(Clock {
-            buckets: self.buckets?,
+    fn clock(&self) -> Option<ClockedReadings<'_>> {
+        Some(ClockedReadings {
+            clock: self.clock?,
             positions: self.positions?,
             lower: self.lower,
-            sliding: self.sliding,
         })
     }
 
-    /// Where a curve's point for the window that ends at `second` sits at height `value`.
-    fn clock_point(&self, buckets: Buckets, second: u64, value: f32) -> gpui::Point<Pixels> {
+    /// Where a curve's point for the reading taken in `second` sits at height `value`.
+    fn clock_point(&self, clock: ReadingClock, second: u64, value: f32) -> gpui::Point<Pixels> {
         point(
-            self.bounds.origin.x + self.bounds.size.width * buckets.fraction(second),
+            self.bounds.origin.x + self.bounds.size.width * clock.fraction(clock.end(second)),
             self.y(value),
         )
     }
@@ -424,9 +389,9 @@ fn paint_line_runs(
     mut frame: Option<&mut CurveFrame<'_>>,
     window: &mut Window,
 ) {
-    // With a clock, the curves of a run break at each bucket with no readings of its own, which
-    // `run_curves` finds, so only a change of segment ends a run. Without one, a missing reading
-    // breaks the line.
+    // With a clock, the curves of a run break where a stretch of the clock holds no reading,
+    // which `run_curves` finds, so only a change of segment ends a run. Without one, a missing
+    // reading breaks the line.
     let clocked = geometry.clock().is_some();
     let present = |offset: usize| clocked || values[offset].is_some();
     for_each_run(
@@ -442,19 +407,18 @@ fn paint_line_runs(
     );
 }
 
-/// One unbroken curve, as its points in time order and, on a chart with a clock, the window
-/// mean each point stands for.
+/// One unbroken curve, as its points in time order and, on a chart with a clock, the reading
+/// each point stands for.
 #[derive(Debug)]
 struct Curve {
-    means: Vec<WindowMean>,
+    readings: Vec<CurveReading>,
     points: Vec<RunPoint>,
 }
 
-/// The unbroken curves through one run of readings. A chart with a clock draws a point at the
-/// end of each bucket that holds readings of its own, and breaks the curve at each bucket that
-/// holds none. The bucket the join of thinned and full-detail readings cuts holds readings the
-/// chart leaves out, so a still chart's curve runs past it. A sliding chart draws no window the
-/// join parts, so its curve breaks there. A chart with no clock draws each reading.
+/// The unbroken curves through one run of readings, a point for each reading. A chart with a
+/// clock draws each at the end of the stretch it covers, and breaks the curve where the next
+/// reading starts past that stretch, after a missed tick. A chart with no clock draws its
+/// readings evenly apart.
 fn run_curves(
     values: &[Option<(f32, f32)>],
     run: std::ops::Range<usize>,
@@ -473,22 +437,22 @@ fn run_curves(
             })
             .collect();
         return vec![Curve {
-            means: Vec::new(),
+            readings: Vec::new(),
             points,
         }];
     };
 
-    window_means(values, run, clock)
-        .chunk_by(|left, right| clock.buckets.joins(left.end, right.end))
-        .map(|means| Curve {
-            points: means
+    curve_readings(values, run, clock)
+        .chunk_by(|left, right| clock.clock.joins(left.second, right.second))
+        .map(|readings| Curve {
+            points: readings
                 .iter()
-                .map(|mean| RunPoint {
-                    top: geometry.clock_point(clock.buckets, mean.end, mean.top),
-                    bottom: geometry.clock_point(clock.buckets, mean.end, mean.bottom),
+                .map(|reading| RunPoint {
+                    top: geometry.clock_point(clock.clock, reading.second, reading.top),
+                    bottom: geometry.clock_point(clock.clock, reading.second, reading.bottom),
                 })
                 .collect(),
-            means: means.to_vec(),
+            readings: readings.to_vec(),
         })
         .collect()
 }
@@ -569,19 +533,19 @@ fn held_curve_paths(
 ) -> CurvePaths {
     assert!(curve.points.len() > 1);
     let look = CurveLook::of(line, panel);
-    let Curve { means, points } = curve;
+    let Curve { readings, points } = curve;
     let Some(frame) = frame else {
         return curve_paths(look, &points, geometry.bounds);
     };
-    // The points of a chart with no clock stand for readings, which no mean records.
+    // The points of a chart with no clock stand at no second, so no move finds them again.
     let Some(clock) = geometry.clock() else {
         return curve_paths(look, &points, geometry.bounds);
     };
-    assert_eq!(means.len(), points.len());
+    assert_eq!(readings.len(), points.len());
 
-    let window = clock.buckets.window;
+    let window = clock.clock.window;
     let shape = CurveShape {
-        means,
+        readings,
         look,
         scale: [geometry.minimum, geometry.maximum],
         size: geometry.bounds.size,
@@ -717,9 +681,9 @@ impl CurvePaths {
 const HELD_CURVES_MAX: usize = 256;
 
 /// The paths of the curves a plot painted last, each with the place it was tessellated for. The
-/// window of a following chart slides a second at a time while its buckets stay pinned to the
-/// clock, so most paints find each curve with the shape it had, standing a second's width
-/// further left, and move the paths held for it rather than tessellate them again.
+/// window of a following chart slides a second at a time while its points stay at their seconds,
+/// so a paint that finds a curve with the shape it had, standing a second's width further left,
+/// moves the paths held for it rather than tessellate them again.
 pub struct HeldCurves {
     curves: RefCell<Vec<HeldCurve>>,
     /// How many curves the plots sharing it have tessellated, which the page's reports give.
@@ -798,11 +762,11 @@ impl CurveFrame<'_> {
 }
 
 /// What a curve's paths depend on besides where its window starts and where its plot stands:
-/// the window means its points stand for, how it is drawn, its scale, the plot's size and the
+/// the readings its points stand for, how it is drawn, its scale, the plot's size and the
 /// seconds its window spans. Two curves of one shape differ only by a move.
 #[derive(PartialEq)]
 struct CurveShape {
-    means: Vec<WindowMean>,
+    readings: Vec<CurveReading>,
     look: CurveLook,
     scale: [f32; 2],
     size: gpui::Size<Pixels>,
@@ -830,126 +794,80 @@ impl CurvePlace {
     }
 }
 
-/// The seconds between two ticks, a full-detail reading apart, which Grafana calls the scrape
-/// interval and takes as the fewest seconds between two points of a curve. Thinned older readings
-/// stand one for each `viewer::EARLIER_STRIDE_SECONDS`.
+/// The seconds between two ticks, a full-detail reading apart. Thinned older readings stand one
+/// for each `viewer::EARLIER_STRIDE_SECONDS`.
 pub(crate) const TICK_SECONDS: u64 = 1;
-/// The fewest scrape intervals a point averages, the floor of Grafana's `$__rate_interval`.
-const WINDOW_SCRAPES_MIN: u64 = 4;
-/// The width a chart's buckets are sized for before its card is laid out, an overview card's in
-/// the 1320-pixel window.
-const CHART_WIDTH_DEFAULT: f32 = 360.0;
-/// The bucket lengths in seconds, each dividing an hour, so buckets start on round seconds.
-const BUCKET_SECONDS: [u64; 28] = [
-    1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 24, 30, 40, 45, 60, 75, 90, 120, 150, 180, 240, 300, 360,
-    450, 600, 900, 1200, 1800,
-];
 /// How far before the start of its second a reading's position may fall and still count in that
 /// second. A position is an f32 fraction of the window, whose rounding can put a reading taken
 /// on a whole second, as the self-monitoring reports are, a few microseconds before it, in some
-/// windows and not others, so it would hop between buckets as the window slides.
+/// windows and not others, so it would hop between seconds as the window slides.
 const SECOND_TOLERANCE: f64 = 0.001;
-const _: () = {
-    assert!(TICK_SECONDS < viewer::EARLIER_STRIDE_SECONDS);
-    assert!(viewer::EARLIER_STRIDE_SECONDS <= BUCKET_SECONDS[BUCKET_SECONDS.len() - 1]);
-    assert!(3600_u64.is_multiple_of(BUCKET_SECONDS[0]));
-    let mut index = 1;
-    while index < BUCKET_SECONDS.len() {
-        assert!(BUCKET_SECONDS[index - 1] < BUCKET_SECONDS[index]);
-        assert!(3600_u64.is_multiple_of(BUCKET_SECONDS[index]));
-        index += 1;
-    }
-};
+const _: () = assert!(TICK_SECONDS < viewer::EARLIER_STRIDE_SECONDS);
 
-/// The scrape interval of a chart of `window` whose readings come `reading_seconds` apart, or
-/// the stride of thinned readings when the window starts before `detail_first`, since a point's
-/// window shorter than four strides would hold too few of them and break the curve into dots.
-fn scrape_seconds(window: TimeWindow, detail_first: Option<u64>, reading_seconds: u64) -> u64 {
-    assert!(reading_seconds >= TICK_SECONDS);
-    if detail_first.is_some_and(|join| window.first < join) {
-        reading_seconds.max(viewer::EARLIER_STRIDE_SECONDS)
-    } else {
-        reading_seconds
-    }
-}
-
-/// The stretches of the clock a chart draws its curve on, as Grafana draws a panel: one point at
-/// the end of each bucket, the mean of the readings in the window of buckets before it, as
-/// Grafana draws a rate over `$__rate_interval` at each step. Buckets are pinned to multiples of
-/// their length on the clock, so a reading keeps its bucket as the window slides and a point
-/// never changes once drawn. A point stands in view from the window's oldest edge on, and its
-/// window may reach before that edge into the readings the panel holds there, as Grafana's query
-/// reaches a rate interval before its range. A bucket the join where full-detail readings follow
-/// thinned older ones cuts does not count.
+/// When a chart's readings were taken. Each reading is a point at the end of the stretch of the
+/// clock it covers, since only then is it whole. A point keeps its second as the window slides,
+/// so it is drawn once and then only moves left.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Buckets {
+pub(crate) struct ReadingClock {
     window: TimeWindow,
-    length_seconds: u64,
-    /// How many buckets each point averages.
-    per_point: u64,
-    /// The end of the first point in view, the first bucket end at or after the window's oldest
-    /// second.
-    first_end: u64,
-    /// The first second whose readings a point in view averages.
-    lead_first: u64,
-    /// The second after the last bucket whole inside the window and past its newest second.
-    drawn_end: u64,
+    spacing: Spacing,
     /// The first second of full-detail readings, before which readings are thinned.
     detail_first: Option<u64>,
 }
 
-impl Buckets {
-    /// The buckets of `window` in a card `chart_width` pixels wide, sized as Grafana sizes its
-    /// step: the shortest length of at least a scrape interval that leaves a pixel of card per
-    /// point, or the longest length when none does. Each point averages Grafana's
-    /// `$__rate_interval`, the longer of `WINDOW_SCRAPES_MIN` scrape intervals and a bucket and
-    /// a scrape interval, rounded up to whole buckets.
-    fn of(
-        window: TimeWindow,
-        detail_first: Option<u64>,
-        reading_seconds: u64,
-        chart_width: f32,
-    ) -> Self {
-        assert!(window.span > 0);
-        assert!(chart_width.is_finite());
-        assert!(chart_width >= 0.0);
-        let span = match u32::try_from(window.span) {
-            Ok(span) => f64::from(span),
-            Err(error) => panic!("a chart spans at most a few hours of seconds: {error}"),
-        };
-        let scrape_seconds = scrape_seconds(window, detail_first, reading_seconds);
-        let length_seconds = BUCKET_SECONDS
-            .into_iter()
-            .filter(|length| *length >= scrape_seconds)
-            .find(|length| {
-                let length = match u32::try_from(*length) {
-                    Ok(length) => f64::from(length),
-                    Err(error) => panic!("a bucket is at most an hour long: {error}"),
-                };
-                length * f64::from(chart_width) >= span
-            })
-            .unwrap_or(BUCKET_SECONDS[BUCKET_SECONDS.len() - 1]);
-        let window_seconds =
-            (WINDOW_SCRAPES_MIN * scrape_seconds).max(length_seconds + scrape_seconds);
-        let per_point = window_seconds.div_ceil(length_seconds);
-        assert!(per_point >= 2);
-        let first_end = window.first.div_ceil(length_seconds) * length_seconds;
-        let lead_first = first_end.saturating_sub(per_point * length_seconds);
-        // The window's newest second may still gain a reading from a tick that ran late, so a
-        // bucket waits for the second after it. The division floors, so a bucket the window's
-        // end cuts is not drawn.
-        let newest = window.first + window.span - 1;
-        let drawn_end = newest / length_seconds * length_seconds;
-        assert!(first_end <= drawn_end + length_seconds);
+/// How far apart a chart's full-detail readings stand, and which second of what it covers each
+/// names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Spacing {
+    /// A reading of each tick, which names the second it was taken in and covers it.
+    Ticks,
+    /// Reports the collector writes every `seconds`, each naming the second this app read it,
+    /// the end of the seconds it covers.
+    Reports { seconds: u64 },
+}
 
+impl ReadingClock {
+    fn of(window: TimeWindow, detail_first: Option<u64>, reading_seconds: u64) -> Self {
+        assert!(window.span > 0);
+        assert!(reading_seconds >= TICK_SECONDS);
+        let spacing = if reading_seconds == TICK_SECONDS {
+            Spacing::Ticks
+        } else {
+            assert!(detail_first.is_none(), "reports are never thinned");
+            Spacing::Reports {
+                seconds: reading_seconds,
+            }
+        };
         Self {
             window,
-            length_seconds,
-            per_point,
-            first_end,
-            lead_first,
-            drawn_end,
+            spacing,
             detail_first,
+        }
+    }
+
+    /// The seconds the reading taken in `second` covers.
+    fn stride(&self, second: u64) -> u64 {
+        match self.spacing {
+            Spacing::Reports { seconds } => seconds,
+            Spacing::Ticks if self.detail_first.is_some_and(|join| second < join) => {
+                viewer::EARLIER_STRIDE_SECONDS
+            }
+            Spacing::Ticks => TICK_SECONDS,
+        }
+    }
+
+    /// Where the point of the reading taken in `second` stands on the clock: the end of the
+    /// stretch it covers, or the first full-detail second where a thinned reading's stretch
+    /// reaches past it, so the curve never runs back in time.
+    fn end(&self, second: u64) -> u64 {
+        if let Spacing::Reports { .. } = self.spacing {
+            return second;
+        }
+
+        let end = second + self.stride(second);
+        match self.detail_first {
+            Some(join) if second < join => end.min(join),
+            _ => end,
         }
     }
 
@@ -981,71 +899,11 @@ impl Buckets {
         Some(self.window.first + seconds)
     }
 
-    /// The bucket index of a reading at `position` across the window, or `None` when no point in
-    /// view averages it, when the window's newest edge cuts its bucket, or when the join of thinned
-    /// and full-detail readings does, since such a bucket still loses or gains readings as the
-    /// window slides.
-    fn bucket_index(&self, position: f32) -> Option<u64> {
-        let second = self.second_of(position)?;
-        if second < self.lead_first {
-            return None;
-        }
-        if second >= self.drawn_end {
-            return None;
-        }
-        // Floors, so the index counts whole bucket lengths since the clock's zero.
-        let index = second / self.length_seconds;
-        if self.join_cuts(index * self.length_seconds) {
-            return None;
-        }
-        Some(index)
-    }
-
-    /// Whether the join of thinned and full-detail readings cuts the bucket from `start`, which
-    /// then holds readings of both kinds.
-    fn join_cuts(&self, start: u64) -> bool {
-        let Some(join) = self.detail_first else {
-            return false;
-        };
-        if start >= join {
-            return false;
-        }
-        join < start + self.length_seconds
-    }
-
-    /// The first bucket of the window of buckets a point averages, the point at the end of the
-    /// bucket `newest_bucket`.
-    fn window_first_bucket(&self, newest_bucket: u64) -> u64 {
-        (newest_bucket + 1).saturating_sub(self.per_point)
-    }
-
-    /// Whether the window of the point at the end of the bucket `newest_bucket` reaches across the
-    /// join of thinned and full-detail readings, holding buckets both before and from the first
-    /// bucket wholly of full-detail readings.
-    fn join_parts(&self, newest_bucket: u64) -> bool {
-        let Some(join) = self.detail_first else {
-            return false;
-        };
-        let detail_bucket_first = join.div_ceil(self.length_seconds);
-        if self.window_first_bucket(newest_bucket) >= detail_bucket_first {
-            return false;
-        }
-        detail_bucket_first <= newest_bucket
-    }
-
-    /// Whether a curve runs on from its point at the bucket end `left` to its next point, at
-    /// `right`: the two buckets are neighbours, or only the bucket the join of thinned and
-    /// full-detail readings cuts lies between them, which holds readings left out, not none.
+    /// Whether a curve runs on from the reading taken in `left` to the next, taken in `right`:
+    /// the next starts within the stretch `left` covers, so no tick between them was missed.
     fn joins(&self, left: u64, right: u64) -> bool {
-        assert!(left < right);
-        let gap = right - left;
-        if gap == self.length_seconds {
-            return true;
-        }
-        if gap != 2 * self.length_seconds {
-            return false;
-        }
-        self.join_cuts(left)
+        assert!(left <= right);
+        right - left <= self.stride(left)
     }
 }
 
@@ -1065,162 +923,43 @@ fn window_fraction(seconds: u64, span: u64) -> f32 {
     }
 }
 
-/// Where a chart's readings fall on the clock, which sets the windows its curve averages.
+/// Where a chart's readings fall on the clock.
 #[derive(Clone, Copy)]
-struct Clock<'a> {
-    buckets: Buckets,
+struct ClockedReadings<'a> {
+    clock: ReadingClock,
     /// Where each of the panel's readings sits across its window.
     positions: &'a [f32],
     /// The index in `positions` of the first reading in view.
     lower: usize,
-    /// Whether readings still leave at the window's start and arrive at its end.
-    sliding: bool,
 }
 
-/// One point of a curve: the mean of a line's readings in the window that ends at `end`, a
-/// second at the end of a bucket, at their top and at their base.
+/// One point of a curve: a line's reading taken in `second`, at its top and at its base.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct WindowMean {
-    end: u64,
+struct CurveReading {
+    second: u64,
     top: f32,
     bottom: f32,
 }
 
-/// The sums of one bucket's readings at their top and at their base.
-#[derive(Clone, Copy)]
-struct BucketTotal {
-    index: u64,
-    top: f32,
-    bottom: f32,
-    count: u16,
-}
-
-impl BucketTotal {
-    fn add(&mut self, top: f32, bottom: f32) {
-        self.top += top;
-        self.bottom += bottom;
-        self.count = match self.count.checked_add(1) {
-            Some(count) => count,
-            None => panic!("a bucket of at most half an hour holds a few readings a second"),
-        };
-    }
-}
-
-/// The point at the end of the newest bucket of `recent`, the mean of the readings in its window,
-/// or `None` when `recent` holds no bucket or the point stands before the window's oldest edge. A
-/// sliding chart names `sliding_whole_from`, the first bucket no slide of the window can still
-/// change, and draws no point whose window reaches before it or that the join of thinned and
-/// full-detail readings parts. A still chart names none.
-fn window_mean(
-    recent: &std::collections::VecDeque<BucketTotal>,
-    sliding_whole_from: Option<u64>,
-    buckets: Buckets,
-) -> Option<WindowMean> {
-    let newest = recent.back()?.index;
-    let end = (newest + 1) * buckets.length_seconds;
-    if end < buckets.first_end {
-        return None;
-    }
-    let start = buckets.window_first_bucket(newest);
-    if let Some(whole_from) = sliding_whole_from {
-        if start < whole_from {
-            return None;
-        }
-        if buckets.join_parts(newest) {
-            return None;
-        }
-    }
-
-    let (mut top, mut bottom, mut count) = (0.0_f32, 0.0_f32, 0_u16);
-    for bucket in recent {
-        assert!(bucket.index <= newest);
-        if bucket.index < start {
-            continue;
-        }
-        top += bucket.top;
-        bottom += bucket.bottom;
-        count = match count.checked_add(bucket.count) {
-            Some(count) => count,
-            None => panic!("a window of at most an hour holds a few readings a second"),
-        };
-    }
-    assert!(count > 0);
-
-    let count = f32::from(count);
-    Some(WindowMean {
-        end,
-        top: top / count,
-        bottom: bottom / count,
-    })
-}
-
-/// The points of one segment's readings, `run`, in time order: one at the end of each bucket
-/// that holds readings of its own, the mean of the readings in its window, so a bucket with none
-/// breaks the curve. A point whose window holds readings that left the chart, or reaches across
-/// the join of thinned and full-detail readings, is not drawn.
-///
-/// Readings before the first in view left a sliding window, so a run that starts there draws
-/// only windows whole inside the chart. A run that starts at a change of segment has no
-/// readings before it, so its first windows hold only its own.
-fn window_means(
+/// The readings of one segment's run, `run`, in time order, each with the second it was taken
+/// in. A reading taken before the clock's zero has no point.
+fn curve_readings(
     values: &[Option<(f32, f32)>],
     run: std::ops::Range<usize>,
-    clock: Clock<'_>,
-) -> Vec<WindowMean> {
-    let sliding_whole_from = first_whole_bucket(clock);
-    let Clock {
-        buckets,
-        positions,
-        lower,
-        ..
-    } = clock;
-    let capacity = match usize::try_from(buckets.per_point) {
-        Ok(capacity) => capacity,
-        Err(error) => panic!("a window holds a few buckets: {error}"),
-    };
-    let mut recent: std::collections::VecDeque<BucketTotal> =
-        std::collections::VecDeque::with_capacity(capacity);
-    let mut means = Vec::with_capacity(run.len() / 8 + 1);
-    for index in run {
-        let Some((top, bottom)) = values[index] else {
-            continue;
-        };
-        let Some(bucket) = buckets.bucket_index(positions[lower + index]) else {
-            continue;
-        };
-
-        if let Some(open) = recent.back_mut() {
-            if open.index == bucket {
-                open.add(top, bottom);
-                continue;
-            }
-        }
-        means.extend(window_mean(&recent, sliding_whole_from, buckets));
-        while recent
-            .front()
-            .is_some_and(|oldest| oldest.index + buckets.per_point <= bucket)
-        {
-            recent.pop_front();
-        }
-        recent.push_back(BucketTotal {
-            index: bucket,
+    clock: ClockedReadings<'_>,
+) -> Vec<CurveReading> {
+    run.filter_map(|index| {
+        let (top, bottom) = values[index]?;
+        let second = clock
+            .clock
+            .second_of(clock.positions[clock.lower + index])?;
+        Some(CurveReading {
+            second,
             top,
             bottom,
-            count: 1,
-        });
-    }
-    means.extend(window_mean(&recent, sliding_whole_from, buckets));
-    means
-}
-
-/// The first bucket a sliding chart's windows may reach, the one after its oldest reading's,
-/// since that reading may share its bucket with readings already gone. A still chart has none.
-fn first_whole_bucket(clock: Clock<'_>) -> Option<u64> {
-    if !clock.sliding {
-        return None;
-    }
-    let oldest = clock.buckets.second_of(clock.positions[0]);
-    Some(oldest.map_or(0, |second| second / clock.buckets.length_seconds + 1))
+        })
+    })
+    .collect()
 }
 
 /// Where a reading or a curve's point sits on the plot: the top of its line and the bottom of
@@ -1411,53 +1150,24 @@ pub fn axis_unit<'a>(panel: &'a Panel, axis: &str) -> &'a str {
         .unwrap_or(&panel.unit)
 }
 
-/// The range of the points the lines on `axis` draw, so the axis spans the curves, and a
-/// reading whose window is not drawn yet cannot rescale the points already drawn.
+/// The range of the readings the lines on `axis` draw, each of which is a point.
 fn axis_extent(panel: &Panel, inspection: Inspection, hidden: &[String], axis: &str) -> (f32, f32) {
     let floor = if axis == "left" {
         panel.minimum.unwrap_or(0.0).min(0.0)
     } else {
         0.0
     };
-    let inspection = Inspection {
-        lower: curve_lower(panel, inspection),
-        ..inspection
-    };
     let mut extent = (floor, 0.0_f32);
-    let mut widen = |top: f32, bottom: f32| {
-        extent = (extent.0.min(top).min(bottom), extent.1.max(top).max(bottom));
-    };
-    let clock = panel_buckets(panel)
-        .zip(panel.positions.as_deref())
-        .map(|(buckets, positions)| Clock {
-            buckets,
-            positions,
-            lower: inspection.lower,
-            sliding: panel.sliding,
-        });
     stacked_lines(panel, inspection, hidden, |line, values| {
         if line.axis.as_deref().unwrap_or("left") != axis {
             return;
         }
-        let Some(clock) = clock else {
-            for (top, bottom) in values.iter().flatten() {
-                widen(*top, *bottom);
-            }
-            return;
-        };
-
-        let segments = panel.segments.as_deref();
-        for_each_run(
-            values.len(),
-            segments,
-            inspection.lower,
-            |_| true,
-            |run| {
-                for mean in window_means(values, run, clock) {
-                    widen(mean.top, mean.bottom);
-                }
-            },
-        );
+        for (top, bottom) in values.iter().flatten() {
+            extent = (
+                extent.0.min(*top).min(*bottom),
+                extent.1.max(*top).max(*bottom),
+            );
+        }
     });
     extent
 }
@@ -1731,13 +1441,6 @@ mod live_edge_tests;
 mod live_tests {
     use super::*;
 
-    /// The width of an overview card in the 1320-pixel window.
-    const CARD_WIDTH: f32 = 360.0;
-
-    /// The width of a card that draws 15 minutes in ten-second buckets, whose round numbers the
-    /// tests of how a curve slides read most easily.
-    const TEN_SECOND_CARD: f32 = 90.0;
-
     #[test]
     fn the_focus_ring_is_drawn_inside_the_element_so_a_transparent_one_stays_unfilled() {
         // Goal: a focused control with no background of its own shows a ring and nothing else.
@@ -1858,7 +1561,7 @@ mod live_tests {
     fn shared_chart_domain_keeps_sent_traffic_negative_and_power_unstacked() {
         // Goal: chart rendering interprets projection metadata without summing independent power.
         // Method: calculate domains from one actual projection with directional and power data,
-        // read at 1020, so the three-second bucket of the reading at 1000 is whole and drawn.
+        // read at 1020.
         let selection = serde_json::json!({"second": 1020, "context_last_second": 1020,
             "selected": null, "trends": [{
             "run": "00000000000000010000000000000002",
@@ -1901,8 +1604,7 @@ mod live_tests {
     }
 
     /// The geometry of a 900-pixel chart of the 900 seconds from `first`, one pixel a second,
-    /// from 0 at its bottom to 100 at its top, whose readings in view start at `lower`, held
-    /// still.
+    /// from 0 at its bottom to 100 at its top, whose readings in view start at `lower`.
     fn live_geometry(first: u64, lower: usize, positions: &[f32]) -> Geometry<'_> {
         Geometry {
             bounds: Bounds::new(point(px(0.0), px(0.0)), size(px(900.0), px(100.0))),
@@ -1912,14 +1614,29 @@ mod live_tests {
             positions: Some(positions),
             segments: None,
             lower,
-            buckets: Some(Buckets::of(
+            clock: Some(ReadingClock::of(
                 TimeWindow { first, span: 900 },
                 None,
                 TICK_SECONDS,
-                TEN_SECOND_CARD,
             )),
-            sliding: false,
         }
+    }
+
+    /// The geometry of `live_geometry` over the `span` seconds from `first`, whose full-detail
+    /// readings start at `detail_first`.
+    fn spanned_geometry(
+        first: u64,
+        span: u16,
+        detail_first: Option<u64>,
+        positions: &[f32],
+    ) -> Geometry<'_> {
+        let mut geometry = live_geometry(first, 0, positions);
+        let window = TimeWindow {
+            first,
+            span: u64::from(span),
+        };
+        geometry.clock = Some(ReadingClock::of(window, detail_first, TICK_SECONDS));
+        geometry
     }
 
     /// Where readings 0.3 seconds into each second of a window of `span` seconds sit across it,
@@ -1934,16 +1651,9 @@ mod live_tests {
         tick_positions(900)
     }
 
-    /// A reading that turns from second to second, so the means of buckets differ.
+    /// A reading that turns from second to second.
     fn varying_reading(second: u64) -> f32 {
         f32::from(u16::try_from(second * 37 % 101).unwrap())
-    }
-
-    /// Varying readings in each second of the 900 from `first`.
-    fn varying_readings(first: u64) -> Vec<Option<(f32, f32)>> {
-        (first..first + 900)
-            .map(|second| Some((varying_reading(second), 0.0)))
-            .collect()
     }
 
     /// A one-line CPU chart of `values` across the 900 seconds from `first`.
@@ -1963,7 +1673,7 @@ mod live_tests {
         upper: 899,
     };
 
-    /// Each bucket mean as its place across the chart, its height, and the height of its base.
+    /// Each point as its place across the chart, its height, and the height of its base.
     fn places(points: &[RunPoint]) -> Vec<[f32; 3]> {
         points
             .iter()
@@ -2003,45 +1713,19 @@ mod live_tests {
         curves.remove(0).points
     }
 
-    /// The 900-second window from `first` of varying readings, following the newest second, in a
-    /// card `card_width` pixels wide.
-    fn sliding_curve(first: u64, card_width: f32) -> Vec<RunPoint> {
-        let positions = live_positions();
-        let mut geometry = live_geometry(first, 0, &positions);
-        geometry.sliding = true;
-        let window = TimeWindow { first, span: 900 };
-        geometry.buckets = Some(Buckets::of(window, None, TICK_SECONDS, card_width));
-
-        one_curve(&varying_readings(first), 0..900, &geometry)
-    }
-
-    /// The points that window draws, each with its place on an x axis pinned to the clock rather
-    /// than the window.
-    fn clock_places(first: u64, card_width: f32) -> Vec<[f32; 3]> {
-        let clock = f32::from(u16::try_from(first - 1000).unwrap());
-
-        places(&sliding_curve(first, card_width))
-            .into_iter()
-            .map(|[x, top, bottom]| [clock + x, top, bottom])
-            .collect()
-    }
-
     #[test]
-    fn a_point_in_ten_second_buckets_is_the_mean_of_the_two_before_it() {
-        // Goal: a chart in ten-second buckets draws, as Grafana draws a rate over
-        // `$__rate_interval` for one-second readings, a point at the end of every bucket, the
-        // mean of the readings of the eleven seconds before it rounded up to two whole buckets,
-        // over a base that is the mean of theirs.
-        // Method: in a still window from 1000, place twenty readings of 20 over a base of 0 in
-        // seconds 1100 to 1119 and twenty of 60 over a base of 10 in 1120 to 1139, and read the
-        // points on a chart one pixel a second and one pixel a unit. The curve ends with the
-        // last bucket that holds readings.
+    fn a_point_stands_at_the_end_of_its_readings_second_over_its_base() {
+        // Goal: each reading is a point of its own at the end of the second it was taken in,
+        // over its own base, with no mean of its neighbours.
+        // Method: in a window from 1000, place readings of 20 over a base of 0 in seconds 1100
+        // and 1101 and of 60 over a base of 10 in 1102 and 1103, and read the points on a chart
+        // one pixel a second and one pixel a unit.
         let positions = live_positions();
         let mut values = vec![None; 900];
-        for value in &mut values[100..120] {
+        for value in &mut values[100..102] {
             *value = Some((20.0, 0.0));
         }
-        for value in &mut values[120..140] {
+        for value in &mut values[102..104] {
             *value = Some((60.0, 10.0));
         }
 
@@ -2050,22 +1734,20 @@ mod live_tests {
         assert_places(
             &points,
             &[
-                [110.0, 80.0, 100.0],
-                [120.0, 80.0, 100.0],
-                [130.0, 60.0, 95.0],
-                [140.0, 40.0, 90.0],
+                [101.0, 80.0, 100.0],
+                [102.0, 80.0, 100.0],
+                [103.0, 40.0, 90.0],
+                [104.0, 40.0, 90.0],
             ],
         );
     }
 
     #[test]
-    fn a_curve_breaks_at_a_bucket_with_no_readings_of_its_own() {
-        // Goal: a chart breaks its line at any bucket with no readings of its own, so every
-        // missed reading the buckets can show stays visible, and missing readings inside a
-        // bucket that holds others leave the line whole.
-        // Method: in a still window from 1000 in ten-second buckets, leave five seconds without
-        // readings from 1140, inside the bucket from 1140, then ten, the whole bucket, between
-        // two stretches of readings, and count the curves each draws.
+    fn a_curve_breaks_where_a_tick_was_missed() {
+        // Goal: a missed tick leaves a second with no reading, which breaks the line, and a
+        // reading each second keeps it whole.
+        // Method: in a window from 1000, place readings in 1100 to 1139 and in the forty seconds
+        // after a gap of none or one second, and count the curves each draws.
         let positions = live_positions();
         let curves = |gap: usize| {
             let mut values = vec![None; 900];
@@ -2078,112 +1760,34 @@ mod live_tests {
             run_curves(&values, 0..900, &live_geometry(1000, 0, &positions)).len()
         };
 
-        assert_eq!([curves(5), curves(10)], [1, 2]);
+        assert_eq!([curves(0), curves(1)], [1, 2]);
     }
 
-    #[test]
-    fn a_point_beside_a_missed_tick_stays_the_mean_of_its_window() {
-        // Goal: the break a missed tick leaves changes no point around it, so the first point
-        // after the gap is still the mean of the readings its whole window holds, those before
-        // the gap included.
-        // Method: in a still window from 1000 on a card wide enough for one-second buckets, whose
-        // points each average four seconds, place readings of 20 in seconds 1090 to 1099, miss
-        // 1100, and place readings of 60 in 1101 to 1109. Read the end of the curve before the
-        // gap and the start of the one after it, on a chart one pixel a second and a unit.
-        let positions = live_positions();
-        let mut geometry = live_geometry(1000, 0, &positions);
-        let window = TimeWindow {
-            first: 1000,
-            span: 900,
-        };
-        geometry.buckets = Some(Buckets::of(window, None, TICK_SECONDS, 900.0));
-        let mut values = vec![None; 900];
-        for value in &mut values[90..100] {
-            *value = Some((20.0, 0.0));
-        }
-        for value in &mut values[101..110] {
-            *value = Some((60.0, 0.0));
-        }
-
-        let curves = run_curves(&values, 0..900, &geometry);
-
-        assert_eq!(curves.len(), 2, "{curves:?}");
-        assert_places(&curves[0].points[9..], &[[100.0, 80.0, 100.0]]);
-        assert_places(
-            &curves[1].points[..2],
-            &[[102.0, 66.67, 100.0], [103.0, 53.33, 100.0]],
-        );
-    }
-
-    #[test]
-    fn a_sliding_window_draws_points_whose_windows_hold_every_reading() {
-        // Goal: a point that would still lose readings to the window's oldest edge, or gain one
-        // from a late tick at its newest second, is not drawn, so no drawn point changes as
-        // readings come and go. Method: draw a following window from 1002 to 1901, whose whole
-        // buckets run from 1010 to 1899, and read its first and last points and their count:
-        // the first ends the window of two buckets from 1010.
-        let places = clock_places(1002, TEN_SECOND_CARD);
-
-        assert_eq!(places.len(), 88);
-        assert!((places[0][0] - 30.0).abs() < 0.01, "{:?}", places[0]);
-        assert!((places[87][0] - 900.0).abs() < 0.01, "{:?}", places[87]);
-    }
-
-    /// A following 15-minute chart from `first` whose panel also holds the `lead_in` seconds
-    /// before its oldest edge, with `reading` in each second, and its inspection of the newest.
-    fn led_panel(first: u64, lead_in: u16, reading: fn(u64) -> f32) -> (Panel, Inspection) {
-        let held = 900 + lead_in;
-        let positions: Vec<f32> = (0..held)
-            .map(|offset| (f32::from(offset) - f32::from(lead_in) + 0.3) / 900.0)
+    /// A one-line chart of a varying reading in each second from 1002 to `newest`, viewed in the
+    /// 900 seconds from `first`, from 0 to 100.
+    fn steady_panel(first: u64, newest: u64) -> (Panel, Inspection) {
+        let seconds = 1002..=newest;
+        let positions: Vec<f32> = seconds
+            .clone()
+            .map(|second| (f32::from(u16::try_from(second - first).unwrap()) + 0.3) / 900.0)
             .collect();
-        let values: Vec<Option<f32>> = (first - u64::from(lead_in)..first + 900)
-            .map(|second| Some(reading(second)))
+        let values: Vec<Option<f32>> = seconds
+            .map(|second| Some(varying_reading(second)))
             .collect();
+        let newest_index = values.len() - 1;
         let mut panel: Panel = serde_json::from_value(serde_json::json!({
             "id":"cpu", "title":"CPU", "unit":"%", "kind":"line",
             "positions": positions, "lines":[
                 {"name":"All cores", "color":"#5794f2", "values": values}]}))
         .unwrap();
         panel.window = Some(TimeWindow { first, span: 900 });
-        panel.sliding = true;
-        panel.chart_width.set(Some(TEN_SECOND_CARD));
-        let newest = usize::from(held) - 1;
+        panel.maximum = Some(100.0);
         let inspection = Inspection {
-            lower: usize::from(lead_in),
-            selected: newest,
-            upper: newest,
+            lower: 0,
+            selected: newest_index,
+            upper: newest_index,
         };
         (panel, inspection)
-    }
-
-    /// The curve a following 15-minute chart from `first` draws, whose panel also holds a
-    /// varying reading in each of the `lead_in` seconds before its oldest edge.
-    fn led_curve(first: u64, lead_in: u16) -> Vec<RunPoint> {
-        let (mut panel, inspection) = led_panel(first, lead_in, varying_reading);
-        panel.maximum = Some(100.0);
-        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(900.0), px(100.0)));
-
-        let mut curves = Vec::new();
-        prepare_lines(&panel, bounds, inspection, &[], |_, values, geometry| {
-            curves.extend(run_curves(values, 0..values.len(), geometry));
-        });
-
-        assert_eq!(curves.len(), 1);
-        curves.remove(0).points
-    }
-
-    #[test]
-    fn a_lead_in_before_the_oldest_edge_starts_the_curve_at_that_edge() {
-        // Goal: as in Grafana, whose query reaches back a rate interval before the range, the
-        // readings of the minute before a following chart complete the windows of its first
-        // points, so its curve starts at its oldest edge and still never changes once drawn.
-        // Method: draw a following window from 1000 to 1899 whose panel holds the 60 seconds
-        // before it, and read its first and last points and their count.
-        let points = led_curve(1000, 60);
-
-        assert_eq!(points.len(), 90);
-        assert!(f32::from(points[0].top.x).abs() < 0.01);
-        assert!((f32::from(points[89].top.x) - 890.0).abs() < 0.01);
     }
 
     /// A plot 900 pixels wide and 100 tall whose top left corner stands at `x` and `y`.
@@ -2191,11 +1795,10 @@ mod live_tests {
         Bounds::new(point(px(x), px(y)), size(px(900.0), px(100.0)))
     }
 
-    /// The paths of the one curve a following 15-minute chart from `first` paints on `plot`
-    /// through `held`, whose panel holds the minute before its oldest edge.
-    fn led_paths(first: u64, plot: Bounds<Pixels>, held: &HeldCurves) -> CurvePaths {
-        let (mut panel, inspection) = led_panel(first, 60, varying_reading);
-        panel.maximum = Some(100.0);
+    /// The paths of the one curve `steady_panel(first, newest)` paints on `plot` through
+    /// `held`.
+    fn held_paths(first: u64, newest: u64, plot: Bounds<Pixels>, held: &HeldCurves) -> CurvePaths {
+        let (panel, inspection) = steady_panel(first, newest);
 
         let mut paths = Vec::new();
         HeldCurves::hold(Some(held), |mut frame| {
@@ -2211,9 +1814,9 @@ mod live_tests {
         paths.remove(0)
     }
 
-    /// The paths a plot that holds no curves yet builds for `led_paths`.
-    fn built_led_paths(first: u64, plot: Bounds<Pixels>) -> CurvePaths {
-        led_paths(first, plot, &HeldCurves::new(Rc::new(Cell::new(0))))
+    /// The paths a plot that holds no curves yet builds for `held_paths`.
+    fn built_paths(first: u64, newest: u64, plot: Bounds<Pixels>) -> CurvePaths {
+        held_paths(first, newest, plot, &HeldCurves::new(Rc::new(Cell::new(0))))
     }
 
     fn assert_near(value: gpui::Point<Pixels>, expected: gpui::Point<Pixels>) {
@@ -2284,19 +1887,18 @@ mod live_tests {
     }
 
     #[test]
-    fn a_curve_whose_window_slid_past_still_buckets_is_moved_rather_than_built_again() {
-        // Goal: a plot painted again after its window slid a second, with no bucket closed or
-        // gone, draws its curve as a new build would without tessellating the curve again.
-        // Method: paint a following chart from 1001 and then from 1002 through one held set of
-        // curves, both with buckets from 1010 to 1900, and compare the second paint with a new
-        // build from 1002.
+    fn a_curve_whose_window_slid_with_no_new_reading_is_moved_rather_than_built_again() {
+        // Goal: a plot painted again after its window slid a second with no reading arriving or
+        // leaving draws its curve as a new build would, without tessellating it again.
+        // Method: paint the readings of 1002 to 1900 in the window from 1001 and then from 1002
+        // through one held set of curves, and compare the second paint with a new build.
         let builds = Rc::new(Cell::new(0));
         let held = HeldCurves::new(Rc::clone(&builds));
-        led_paths(1001, plot_at(0.0, 0.0), &held);
+        held_paths(1001, 1900, plot_at(0.0, 0.0), &held);
 
-        let moved = led_paths(1002, plot_at(0.0, 0.0), &held);
+        let moved = held_paths(1002, 1900, plot_at(0.0, 0.0), &held);
 
-        let built = built_led_paths(1002, plot_at(0.0, 0.0));
+        let built = built_paths(1002, 1900, plot_at(0.0, 0.0));
         assert_eq!(builds.get(), 1);
         assert_same_shapes(&moved, &built);
         assert_eq!(area_fill(&moved), area_fill(&built));
@@ -2306,123 +1908,49 @@ mod live_tests {
     fn a_curve_on_a_plot_laid_out_elsewhere_is_moved_with_its_plot() {
         // Goal: a plot the page lays out at another place, as a scroll does, draws its curve
         // there as a new build would, without tessellating the curve again. The fill fades by
-        // the height within the plot, so a move leaves it as it was. Method: paint a following
-        // chart from 1001 on a plot at the page's corner and then on one 20 pixels right and 30
-        // down through one held set of curves, and compare the second paint with a new build.
+        // the height within the plot, so a move leaves it as it was. Method: paint a chart on a
+        // plot at the page's corner and then on one 20 pixels right and 30 down through one held
+        // set of curves, and compare the second paint with a new build.
         let builds = Rc::new(Cell::new(0));
         let held = HeldCurves::new(Rc::clone(&builds));
-        led_paths(1001, plot_at(0.0, 0.0), &held);
+        held_paths(1001, 1900, plot_at(0.0, 0.0), &held);
 
-        let moved = led_paths(1001, plot_at(20.0, 30.0), &held);
+        let moved = held_paths(1001, 1900, plot_at(20.0, 30.0), &held);
 
         assert_eq!(builds.get(), 1);
-        assert_same_shapes(&moved, &built_led_paths(1001, plot_at(20.0, 30.0)));
+        assert_same_shapes(&moved, &built_paths(1001, 1900, plot_at(20.0, 30.0)));
     }
 
     #[test]
-    fn a_curve_whose_newest_bucket_closed_is_built_again() {
+    fn a_curve_that_gained_a_reading_is_built_again() {
         // Goal: a curve that gained a point is tessellated again, so no paint draws the curve it
-        // had. Method: paint a following chart from 1000, whose newest whole bucket ends at
-        // 1890, and then from 1001, whose newest ends at 1900, through one held set of curves,
-        // and compare the second paint with a new build from 1001.
+        // had. Method: paint the readings of 1002 to 1900 in the window from 1001 and then those
+        // to 1901 in the window from 1002 through one held set of curves, and compare the second
+        // paint with a new build.
         let builds = Rc::new(Cell::new(0));
         let held = HeldCurves::new(Rc::clone(&builds));
-        led_paths(1000, plot_at(0.0, 0.0), &held);
+        held_paths(1001, 1900, plot_at(0.0, 0.0), &held);
 
-        let painted = led_paths(1001, plot_at(0.0, 0.0), &held);
+        let painted = held_paths(1002, 1901, plot_at(0.0, 0.0), &held);
 
         assert_eq!(builds.get(), 2);
-        assert_same_shapes(&painted, &built_led_paths(1001, plot_at(0.0, 0.0)));
+        assert_same_shapes(&painted, &built_paths(1002, 1901, plot_at(0.0, 0.0)));
     }
 
     #[test]
     fn a_curve_on_a_taller_plot_is_built_again() {
         // Goal: a plot that changed its size draws its curve to the new size. Method: paint a
-        // following chart from 1001 on a plot 100 pixels tall and then on one 150 tall through
-        // one held set of curves, and count the curves built.
+        // chart on a plot 100 pixels tall and then on one 150 tall through one held set of
+        // curves, and count the curves built.
         let builds = Rc::new(Cell::new(0));
         let held = HeldCurves::new(Rc::clone(&builds));
-        led_paths(1001, plot_at(0.0, 0.0), &held);
+        held_paths(1001, 1900, plot_at(0.0, 0.0), &held);
         let mut taller = plot_at(0.0, 0.0);
         taller.size.height = px(150.0);
 
-        led_paths(1001, taller, &held);
+        held_paths(1001, 1900, taller, &held);
 
         assert_eq!(builds.get(), 2);
-    }
-
-    #[test]
-    fn the_value_axis_reaches_a_point_the_lead_in_raises() {
-        // Goal: the value axis spans the points drawn, so a first point whose window averages
-        // readings before the oldest edge stays inside the plot. Method: hold 90 in the minute
-        // before a following window from 1000 and 10 inside it, and read the axis's extent.
-        let (panel, inspection) =
-            led_panel(1000, 60, |second| if second < 1000 { 90.0 } else { 10.0 });
-
-        assert_eq!(axis_extent(&panel, inspection, &[], "left"), (0.0, 90.0));
-    }
-
-    #[test]
-    fn a_lead_in_starts_the_curve_at_the_first_bucket_end_in_view() {
-        // Goal: a point stands at the end of its bucket on the clock, so a window whose oldest
-        // edge falls inside a bucket starts its curve at that bucket's end, less than a step in.
-        // Method: draw a following window from 1003 with a 60-second lead-in, whose first bucket
-        // end in view is 1010, and read where its first point sits.
-        let points = led_curve(1003, 60);
-
-        assert!((f32::from(points[0].top.x) - 7.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn without_a_lead_in_the_first_point_waits_for_a_whole_window() {
-        // Goal: a following chart holding nothing before its oldest edge, whose oldest bucket
-        // still loses readings each second, draws no point whose window reaches that bucket.
-        // Method: draw a following window from 1003 with no lead-in, whose oldest bucket runs
-        // from 1000 to 1009, and read where its first point sits: the end of the window of two
-        // buckets from 1010.
-        let points = led_curve(1003, 0);
-
-        assert!((f32::from(points[0].top.x) - 27.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn the_newest_point_waits_for_the_second_after_its_window() {
-        // Goal: a tick that runs late can add a second reading to the newest second, so the
-        // point whose window ends with it is drawn only once a later second has readings, and
-        // then at once. Method: draw following windows whose newest seconds are 1899 and 1900,
-        // and read the last point of each.
-        let waiting = clock_places(1000, TEN_SECOND_CARD);
-        let drawn = clock_places(1001, TEN_SECOND_CARD);
-
-        assert!((waiting[waiting.len() - 1][0] - 890.0).abs() < 0.01);
-        assert!((drawn[drawn.len() - 1][0] - 900.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn a_drawn_point_stays_put_as_the_window_slides() {
-        // Goal: a point once drawn keeps its place and mean while readings arrive, and leaves
-        // the chart only at its oldest edge.
-        // Method: slide a following window one second at a time across seventy seconds, on
-        // cards that draw one-second, three-second and ten-second buckets, and check, for each
-        // two windows in a row, that the second draws every point of the first from the second's
-        // oldest on, and the first every point of the second to the first's newest.
-        for card_width in [900.0, CARD_WIDTH, TEN_SECOND_CARD] {
-            for first in 1000..1070 {
-                let before = clock_places(first, card_width);
-                let after = clock_places(first + 1, card_width);
-
-                let held = |place: &[f32; 3], places: &[[f32; 3]]| {
-                    places.iter().any(|other| same(place, other))
-                };
-                for place in before.iter().filter(|place| place[0] >= after[0][0]) {
-                    assert!(held(place, &after), "{place:?} of {first} changed");
-                }
-                let newest = before[before.len() - 1][0];
-                for place in after.iter().filter(|place| place[0] <= newest) {
-                    assert!(held(place, &before), "{place:?} of {} is new", first + 1);
-                }
-            }
-        }
     }
 
     #[test]
@@ -2495,209 +2023,123 @@ mod live_tests {
     }
 
     #[test]
-    fn a_still_view_draws_windows_to_its_oldest_edge() {
-        // Goal: a view that no longer follows the newest second gains and loses no readings, so
-        // a point whose window holds only part of a bucket is still drawn, from the first bucket
-        // end in view. Method: read the first and last points of a still window from 1002 to
-        // 1901 of readings in each second, and their count.
-        let positions = live_positions();
-
-        let points = one_curve(
-            &varying_readings(1002),
-            0..900,
-            &live_geometry(1002, 0, &positions),
-        );
-
-        assert_eq!(points.len(), 90);
-        assert!((f32::from(points[0].top.x) - 8.0).abs() < 0.01);
-        assert!((f32::from(points[89].top.x) - 898.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn a_reading_on_a_whole_second_keeps_its_bucket_as_the_window_slides() {
+    fn a_reading_on_a_whole_second_keeps_its_second_as_the_window_slides() {
         // Goal: a reading taken on or just after a whole second, whose f32 position rounds a
-        // hair either side of it, stays in the bucket of its own second in every window.
-        // Method: place readings 0 and 10 microseconds into second 4980, the first of a bucket,
-        // as the projection does, in each 900-second window that holds them, directly and
-        // through a zoom from an hour, and collect the buckets they fall in.
-        let mut buckets = std::collections::BTreeSet::new();
+        // hair either side of it, stays in its own second in every window.
+        // Method: place readings 0 and 10 microseconds into second 4980, as the projection does,
+        // in each 900-second window that holds them, directly and through a zoom from an hour,
+        // and collect the seconds they fall in.
+        let mut seconds = std::collections::BTreeSet::new();
         for fraction in [0.0, 0.000_01] {
             for first in 4081..=4980 {
                 let offset = f32::from(u16::try_from(4980 - first).unwrap());
                 let window = TimeWindow { first, span: 900 };
-                let buckets_of_window = Buckets::of(window, None, TICK_SECONDS, TEN_SECOND_CARD);
-                buckets.insert(buckets_of_window.bucket_index((offset + fraction) / 900.0));
+                let clock = ReadingClock::of(window, None, TICK_SECONDS);
+                seconds.insert(clock.second_of((offset + fraction) / 900.0));
 
                 // The zoom from an hour, in the arithmetic the range zoom uses.
                 let hour_position = (offset + 2700.0 + fraction) / 3600.0;
                 let zoomed = (hour_position * 3600.0 - 2700.0) / 900.0;
-                buckets.insert(buckets_of_window.bucket_index(zoomed));
+                seconds.insert(clock.second_of(zoomed));
             }
         }
 
-        assert_eq!(buckets, [None, Some(498)].into_iter().collect());
+        assert_eq!(seconds, [Some(4980)].into_iter().collect());
     }
 
-    /// The seconds of the first and last points of each curve of a 30-minute window from 1000 on
-    /// the 900-pixel plot, two seconds a pixel.
-    fn half_hour_ends(curves: &[Curve]) -> Vec<(f32, f32)> {
-        let seconds = |point: &RunPoint| 1000.0 + f32::from(point.top.x) * 2.0;
-        curves
-            .iter()
-            .map(|curve| curve.points.as_slice())
-            .map(|points| (seconds(&points[0]), seconds(&points[points.len() - 1])))
-            .collect()
-    }
-
-    #[test]
-    fn a_bucket_the_join_of_thinned_and_full_detail_readings_cuts_is_not_drawn() {
-        // Goal: a bucket holding both older readings, each standing for several seconds, and
-        // full-detail readings is not drawn, since the join moves a second each second.
-        // Method: in a 30-minute window from 1000 in ten-second buckets, put the join at 1905 and
-        // read the buckets of readings either side of the bucket it cuts.
-        let buckets = Buckets::of(
-            TimeWindow {
-                first: 1000,
-                span: 1800,
-            },
-            Some(1905),
-            TICK_SECONDS,
-            TEN_SECOND_CARD * 2.0,
-        );
-
-        let found: Vec<_> = [1899_u16, 1900, 1909, 1910]
-            .into_iter()
-            .map(|second| buckets.bucket_index((f32::from(second - 1000) + 0.3) / 1800.0))
-            .collect();
-
-        assert_eq!(found, vec![Some(189), None, None, Some(191)]);
-    }
-
-    /// The curves a following 30-minute window from 1000 in ten-second buckets draws through a
-    /// reading each second, with full detail from `join`.
-    fn sliding_half_hour_curves(join: u64) -> Vec<Curve> {
+    /// The curves a 30-minute window from 1000 draws on the 900-pixel plot, two seconds a pixel,
+    /// through a reading in each ten seconds before `join` and in each second after it, but none
+    /// in the ten seconds from `missed`.
+    fn half_hour_curves(join: u64, missed: Option<u64>) -> Vec<Curve> {
         let positions = tick_positions(1800);
-        let mut geometry = live_geometry(1000, 0, &positions);
-        geometry.sliding = true;
-        let window = TimeWindow {
-            first: 1000,
-            span: 1800,
-        };
-        geometry.buckets = Some(Buckets::of(
-            window,
-            Some(join),
-            TICK_SECONDS,
-            TEN_SECOND_CARD * 2.0,
-        ));
-        let values: Vec<_> = (1000..2800)
-            .map(|second| Some((varying_reading(second), 0.0)))
+        let geometry = spanned_geometry(1000, 1800, Some(join), &positions);
+        let values: Vec<_> = (1000..2800_u64)
+            .map(|second| {
+                let held = second >= join || second % 10 == 0;
+                let missing = missed.is_some_and(|from| (from..from + 10).contains(&second));
+                (held && !missing).then(|| (varying_reading(second), 0.0))
+            })
             .collect();
 
         run_curves(&values, 0..1800, &geometry)
     }
 
-    #[test]
-    fn no_window_across_the_join_is_drawn_while_the_window_slides() {
-        // Goal: a point whose window holds readings the moving join will still thin or cut is
-        // not drawn, so the curve beside the join does not change from second to second.
-        // Method: in a following 30-minute window with the join at 1905, read the points either
-        // side of the bucket the join cuts. The first window after it starts at the bucket after
-        // the cut one, so its point ends the window's four buckets later, at 1950.
-        let curves = sliding_half_hour_curves(1905);
-
-        let ends = half_hour_ends(&curves);
-        assert_eq!(ends, vec![(1050.0, 1900.0), (1950.0, 2790.0)]);
+    /// The seconds each point of `curve` stands at on the 30-minute plot.
+    fn half_hour_seconds(curve: &Curve) -> Vec<f32> {
+        curve
+            .points
+            .iter()
+            .map(|point| 1000.0 + f32::from(point.top.x) * 2.0)
+            .collect()
     }
 
     #[test]
-    fn no_window_across_a_join_on_a_bucket_start_is_drawn_while_the_window_slides() {
-        // Goal: a join on the first second of a bucket cuts no bucket, yet the curve breaks
-        // there as it does at a join that cuts one.
-        // Method: in a following 30-minute window with the join at 1900, a bucket's start, read
-        // the points either side of the join. The first window after it starts at the join's
-        // bucket, so its point ends the window's four buckets later, at 1940.
-        let curves = sliding_half_hour_curves(1900);
-
-        let ends = half_hour_ends(&curves);
-        assert_eq!(ends, vec![(1050.0, 1900.0), (1940.0, 2790.0)]);
-    }
-
-    #[test]
-    fn a_chart_of_thinned_readings_takes_their_stride_as_its_scrape_interval() {
+    fn a_curve_runs_on_from_thinned_readings_into_full_detail_and_never_back_in_time() {
         // Goal: a chart whose older part holds one reading in each ten seconds draws it as one
-        // unbroken curve, on a card wide enough for buckets shorter than that.
-        // Method: in a still 30-minute window from 1000 with the join at 1905, put a reading in
-        // the seventh second of each ten before the join and one each second after it, size
-        // the buckets for a card that would give three-second buckets, and read the curves.
-        let positions = tick_positions(1800);
-        let mut geometry = live_geometry(1000, 0, &positions);
-        let window = TimeWindow {
-            first: 1000,
-            span: 1800,
+        // unbroken curve into the readings of each second, each older reading at the end of its
+        // ten seconds, and the one whose ten seconds reach past the join at the join.
+        // Method: in a 30-minute window from 1000 with the join at 1905, read where the points
+        // of the readings of 1890, 1900 and 1905 stand, and check the points run forward.
+        let curves = half_hour_curves(1905, None);
+
+        assert_eq!(curves.len(), 1, "{curves:?}");
+        let seconds = half_hour_seconds(&curves[0]);
+        let at = |second: u64| {
+            let index = curves[0]
+                .readings
+                .iter()
+                .position(|reading| reading.second == second);
+            index.map(|index| seconds[index])
         };
-        geometry.buckets = Some(Buckets::of(window, Some(1905), TICK_SECONDS, 600.0));
-        let values: Vec<_> = (1000..2800_u64)
-            .map(|second| {
-                let held = second >= 1905 || second % 10 == 7;
-                held.then(|| (varying_reading(second), 0.0))
-            })
-            .collect();
-
-        let curves = run_curves(&values, 0..1800, &geometry);
-
-        let ends = half_hour_ends(&curves);
-        assert_eq!(ends, vec![(1010.0, 2790.0)]);
+        assert_eq!(
+            [at(1890), at(1900), at(1905)],
+            [Some(1900.0), Some(1905.0), Some(1906.0)]
+        );
+        assert!(
+            seconds.windows(2).all(|pair| pair[0] < pair[1]),
+            "{seconds:?}"
+        );
     }
 
     #[test]
-    fn a_chart_scrolled_through_its_readings_buckets_each_by_its_own_second() {
-        // Goal: a chart whose first reading in view is not its first reading still puts each
-        // reading in the bucket of the second it was taken in.
-        // Method: view the readings of a still window from 1000 from the 107th, place five
-        // readings in seconds 1107 to 1111, and read the points their windows draw.
+    fn a_missed_older_reading_breaks_the_curve() {
+        // Goal: an older reading the recording lacks breaks the line as a missed tick does.
+        // Method: in the 30-minute window from 1000 with the join at 1905, leave out the reading
+        // of the ten seconds from 1500, and count the curves.
+        assert_eq!(half_hour_curves(1905, Some(1500)).len(), 2);
+    }
+
+    #[test]
+    fn a_chart_scrolled_through_its_readings_stands_each_at_its_own_second() {
+        // Goal: a chart whose first reading in view is not its first reading still stands each
+        // reading at the second it was taken in.
+        // Method: view the readings of a window from 1000 from the 107th, place three readings
+        // in seconds 1107 to 1109, and read their points.
         let positions = live_positions();
-        let values: Vec<_> = [10.0, 20.0, 30.0, 40.0, 50.0]
+        let values: Vec<_> = [10.0, 20.0, 30.0]
             .into_iter()
             .map(|reading| Some((reading, 0.0)))
             .collect();
 
-        let points = one_curve(&values, 0..5, &live_geometry(1000, 107, &positions));
+        let points = one_curve(&values, 0..3, &live_geometry(1000, 107, &positions));
 
-        assert_places(&points, &[[110.0, 80.0, 100.0], [120.0, 70.0, 100.0]]);
-    }
-
-    #[test]
-    fn a_reading_before_the_window_counts_only_for_a_point_in_view() {
-        // Goal: a reading before the window's oldest edge falls in its own bucket when the window
-        // of the first point in view reaches it, and in none when no point in view averages it.
-        // Method: in a window from 1000 in ten-second buckets, whose first point ends at 1000
-        // and averages the twenty seconds from 980, read the buckets of readings half a second
-        // before the window, in second 980 and in second 979.
-        let buckets = Buckets::of(
-            TimeWindow {
-                first: 1000,
-                span: 900,
-            },
-            None,
-            TICK_SECONDS,
-            TEN_SECOND_CARD,
+        assert_places(
+            &points,
+            &[
+                [108.0, 90.0, 100.0],
+                [109.0, 80.0, 100.0],
+                [110.0, 70.0, 100.0],
+            ],
         );
-
-        let found: Vec<_> = [-0.5, -19.7, -20.7]
-            .into_iter()
-            .map(|offset: f32| buckets.bucket_index(offset / 900.0))
-            .collect();
-
-        assert_eq!(found, vec![Some(99), Some(98), None]);
     }
 
     #[test]
     fn a_panel_with_no_clock_draws_each_reading_on_its_own() {
         // Goal: a chart that knows no seconds draws its readings as they are.
-        // Method: draw three readings of a geometry with no buckets.
+        // Method: draw three readings of a geometry with no clock.
         let positions = [0.0, 0.5, 1.0];
         let mut geometry = live_geometry(1000, 0, &positions);
-        geometry.buckets = None;
+        geometry.clock = None;
         let values = [Some((10.0, 0.0)), Some((20.0, 0.0)), Some((30.0, 0.0))];
 
         let points = one_curve(&values, 0..3, &geometry);
@@ -2712,120 +2154,23 @@ mod live_tests {
         );
     }
 
-    /// The spacing of the points a 900-pixel plot of a reading in each second of the `span`
-    /// seconds from `first` draws, in a card `card_width` pixels wide whose full-detail readings
-    /// start at `detail_first`, and their count.
-    fn point_spacing(
-        first: u64,
-        span: u16,
-        detail_first: Option<u64>,
-        card_width: f32,
-    ) -> (usize, Vec<f32>) {
-        let positions = tick_positions(span);
-        let mut geometry = live_geometry(first, 0, &positions);
-        let window = TimeWindow {
-            first,
-            span: u64::from(span),
-        };
-        geometry.buckets = Some(Buckets::of(window, detail_first, TICK_SECONDS, card_width));
-        let values: Vec<_> = (first..first + u64::from(span))
-            .map(|second| Some((varying_reading(second), 0.0)))
-            .collect();
-
-        let points = one_curve(&values, 0..values.len(), &geometry);
-
-        let spacing = points
-            .windows(2)
-            .map(|pair| f32::from(pair[1].top.x) - f32::from(pair[0].top.x))
-            .collect();
-        (points.len(), spacing)
-    }
-
     #[test]
-    fn a_range_of_a_minute_draws_a_point_every_second() {
-        // Goal: a short range draws each second, as Grafana's step for one-second readings
-        // does, so its newest reading shows a second after it is taken. Method: draw a reading
-        // in each second of a 60-second window on a 900-pixel plot in an overview card and read
-        // the count and spacing of its points.
-        let (count, spacing) = point_spacing(1000, 60, None, CARD_WIDTH);
-
-        assert_eq!(count, 59);
-        for gap in spacing {
-            assert!((gap - 15.0).abs() < 0.01, "{gap}");
-        }
-    }
-
-    #[test]
-    fn a_range_after_the_thinned_readings_keeps_a_point_every_second() {
-        // Goal: only a chart that reaches back into the thinned older readings takes their
-        // stride as its scrape interval, so a short range of a live chart, whose older readings
-        // lie before it, still draws each second.
-        // Method: draw a 60-second window from 1000 with full detail from 940, and again with
-        // full detail from exactly 1000, and read the count and spacing of their points.
-        for detail_first in [940, 1000] {
-            let (count, spacing) = point_spacing(1000, 60, Some(detail_first), CARD_WIDTH);
-
-            assert_eq!(count, 59, "{detail_first}");
-            for gap in spacing {
-                assert!((gap - 15.0).abs() < 0.01, "{detail_first}: {gap}");
-            }
-        }
-    }
-
-    #[test]
-    fn a_point_in_one_second_buckets_is_the_mean_of_the_four_seconds_before_it() {
-        // Goal: a chart in one-second buckets draws, as Grafana draws a rate over
-        // `$__rate_interval` for one-second readings, a point at the end of every second, the
-        // mean of the readings of the four seconds before it.
-        // Method: in a still window from 1000 on a card wide enough for one-second buckets,
-        // place ten readings of 20 in seconds 1090 to 1099 and ten of 60 in 1100 to 1109, and
-        // read the points either side of the step on a chart one pixel a second and one pixel a
-        // unit.
-        let positions = live_positions();
-        let mut geometry = live_geometry(1000, 0, &positions);
-        let window = TimeWindow {
-            first: 1000,
-            span: 900,
-        };
-        geometry.buckets = Some(Buckets::of(window, None, TICK_SECONDS, 900.0));
-        let mut values = vec![None; 900];
-        for value in &mut values[90..100] {
-            *value = Some((20.0, 0.0));
-        }
-        for value in &mut values[100..110] {
-            *value = Some((60.0, 0.0));
-        }
-
-        let points = one_curve(&values, 0..900, &geometry);
-
-        assert_places(
-            &points[9..14],
-            &[
-                [100.0, 80.0, 100.0],
-                [101.0, 70.0, 100.0],
-                [102.0, 60.0, 100.0],
-                [103.0, 50.0, 100.0],
-                [104.0, 40.0, 100.0],
-            ],
-        );
-    }
-
-    #[test]
-    fn ten_second_reports_draw_one_unbroken_curve() {
+    fn ten_second_reports_draw_one_unbroken_curve_to_the_newest_report() {
         // Goal: a chart of reports the collector writes every ten ticks, as the Diagnostics
-        // charts are, takes their spacing as its scrape interval, so each point averages several
-        // reports and the curve does not break into dots between them.
-        // Method: place a report every ten seconds in a still 600-second window from 1000, size
-        // the buckets for a card before it is laid out, and count the curves.
-        let positions: Vec<f32> = (0..60_u16)
-            .map(|report| (f32::from(report) * 10.0 + 0.3) / 600.0)
+        // charts are, takes their spacing as the seconds each covers, so the curve does not
+        // break into dots between them, and each report stands at the second this app read it,
+        // the end of its ten seconds, so the newest report read this second is at the right
+        // edge. Method: read a report every ten seconds into a 600-second window from 1000 that
+        // ends at the newest, and read the curves and where the first and last points stand.
+        let positions: Vec<f32> = (1..=60_u16)
+            .map(|report| f32::from(report) * 10.0 / 600.0)
             .collect();
         let mut geometry = live_geometry(1000, 0, &positions);
         let window = TimeWindow {
             first: 1000,
             span: 600,
         };
-        geometry.buckets = Some(Buckets::of(window, None, 10, CHART_WIDTH_DEFAULT));
+        geometry.clock = Some(ReadingClock::of(window, None, 10));
         let values: Vec<_> = (0..60_u64)
             .map(|report| Some((varying_reading(report), 0.0)))
             .collect();
@@ -2833,141 +2178,26 @@ mod live_tests {
         let curves = run_curves(&values, 0..60, &geometry);
 
         assert_eq!(curves.len(), 1, "{curves:?}");
+        let xs: Vec<f32> = curves[0]
+            .points
+            .iter()
+            .map(|point| f32::from(point.top.x))
+            .collect();
+        assert_eq!(xs.len(), 60);
+        assert!((xs[0] - 15.0).abs() < 0.01, "{xs:?}");
+        assert!((xs[59] - 900.0).abs() < 0.01, "{xs:?}");
     }
 
     #[test]
-    fn a_range_of_fifteen_minutes_draws_a_point_every_three_seconds() {
-        // Goal: a 15-minute chart in an overview card draws a point for each pixel of the card at
-        // most, as Grafana sizes its step, at the shortest bucket length on the clock's list.
-        // Method: draw a reading in each second of a 900-second window from 1200 on a 900-pixel
-        // plot in an overview card, 2.5 seconds a pixel, and read the count and spacing of its
-        // points.
-        let (count, spacing) = point_spacing(1200, 900, None, CARD_WIDTH);
-
-        assert_eq!(count, 299);
-        for gap in spacing {
-            assert!((gap - 3.0).abs() < 0.01, "{gap}");
-        }
-    }
-
-    #[test]
-    fn a_narrower_card_spaces_the_points_of_an_hour_further_apart() {
-        // Goal: as Grafana sizes its step, a chart draws a point for each pixel of its card at
-        // most, so a wide card shows as much detail as the readings allow and a narrow one stays
-        // calm. Method: draw an hour in cards a quarter, a half, one and three overview cards
-        // wide, and read the count and spacing of points.
-        let widths = [
-            CARD_WIDTH / 4.0,
-            CARD_WIDTH / 2.0,
-            CARD_WIDTH,
-            CARD_WIDTH * 3.0,
-        ];
-
-        let drawn = widths.map(|width| point_spacing(3600, 3600, None, width));
-
-        let expected = [(89, 10.0), (179, 5.0), (359, 2.5), (899, 1.0)];
-        for ((count, spacing), (count_expected, gap_expected)) in drawn.into_iter().zip(expected) {
-            assert_eq!(count, count_expected);
-            for gap in spacing {
-                assert!((gap - gap_expected).abs() < 0.01, "{gap}");
-            }
-        }
-    }
-
-    #[test]
-    fn bucket_lengths_stop_at_a_second_and_at_half_an_hour() {
-        // Goal: a card wider than its readings draws each second, the collector's tick, and one
-        // too narrow for any length draws half an hour, never a length off the clock's list.
-        // Method: size the buckets of a 15-minute window for cards of no width, a tenth of a
-        // pixel and a million pixels.
-        let window = TimeWindow {
-            first: 1000,
-            span: 900,
-        };
-
-        let lengths = [0.0, 0.1, 1_000_000.0]
-            .map(|width| Buckets::of(window, None, TICK_SECONDS, width).length_seconds);
-
-        assert_eq!(lengths, [1800, 1800, 1]);
-    }
-
-    #[test]
-    fn a_card_exactly_a_pixel_a_point_keeps_the_shorter_bucket() {
-        // Goal: a card with exactly one pixel for each point keeps that length, so the length
-        // steps up only once points would outnumber pixels. Method: size the buckets of an hour
-        // for a card of 180 pixels, where 20 seconds is exactly a pixel a point, and for a card
-        // a pixel narrower.
-        let window = TimeWindow {
-            first: 1000,
-            span: 3600,
-        };
-
-        let lengths = [180.0, 179.0]
-            .map(|width| Buckets::of(window, None, TICK_SECONDS, width).length_seconds);
-
-        assert_eq!(lengths, [20, 24]);
-    }
-
-    #[test]
-    fn a_point_averages_grafanas_rate_interval_for_one_second_readings_in_whole_buckets() {
-        // Goal: each point averages the longer of four seconds and a bucket and a second, as
-        // Grafana's `$__rate_interval` reaches for a one-second scrape interval, in whole
-        // buckets. Method: size the buckets of 15 minutes for cards that give lengths of 1, 2,
-        // 3, 10 and 60 seconds, and read how many buckets each window holds.
-        let window = TimeWindow {
-            first: 1000,
-            span: 900,
-        };
-
-        let sized = [900.0, 450.0, 300.0, 90.0, 15.0].map(|width| {
-            let buckets = Buckets::of(window, None, TICK_SECONDS, width);
-            (buckets.length_seconds, buckets.per_point)
-        });
-
-        assert_eq!(sized, [(1, 4), (2, 2), (3, 2), (10, 2), (60, 2)]);
-    }
-
-    #[test]
-    fn a_panel_sizes_its_buckets_for_its_card_once_laid_out() {
-        // Goal: a chart draws buckets for the card it is laid out in, and for an overview card
-        // before its first layout. Method: read the bucket length of a 15-minute chart before
-        // layout and after it learns of a card 45 pixels wide.
-        let panel = live_panel(1000, &[]);
-        let before = panel_buckets(&panel).map(|buckets| buckets.length_seconds);
-
-        panel.chart_width.set(Some(45.0));
-        let after = panel_buckets(&panel).map(|buckets| buckets.length_seconds);
-
-        assert_eq!([before, after], [Some(3), Some(20)]);
-    }
-
-    #[test]
-    fn the_value_axis_spans_the_points_the_curve_draws() {
-        // Goal: the axis fits the curve through the window means, so a one-second spike that the
-        // mean flattens does not shrink the curve to the bottom of the chart.
-        // Method: put one reading of 90 among readings of 10 on an overview card, which raises
-        // the mean of each six-second window holding it to 10 + 80 / 6, and read the axis.
+    fn the_value_axis_spans_every_reading_in_view() {
+        // Goal: each reading is a point, so the axis reaches a one-second spike.
+        // Method: put one reading of 90 among readings of 10 and read the axis.
         let values: Vec<_> = (0..900)
             .map(|offset| Some(if offset == 500 { 90.0 } else { 10.0 }))
             .collect();
 
         let (_, maximum) = domain(&live_panel(1000, &values), LIVE_INSPECTION, &[]);
 
-        assert!(maximum >= 10.0 + 80.0 / 6.0, "{maximum}");
-        assert!(maximum < 90.0, "{maximum}");
-    }
-
-    #[test]
-    fn the_value_axis_ignores_a_reading_whose_bucket_is_not_drawn() {
-        // Goal: a reading in a bucket a window edge cuts cannot rescale the points drawn.
-        // Method: put readings of 90 in 1900 and 1901, the cut newest bucket of the window from
-        // 1002, and read the axis of a steady chart.
-        let values: Vec<_> = (0..900)
-            .map(|offset| Some(if offset >= 898 { 90.0 } else { 10.0 }))
-            .collect();
-
-        let (_, maximum) = domain(&live_panel(1002, &values), LIVE_INSPECTION, &[]);
-
-        assert!(maximum < 20.0, "{maximum}");
+        assert!(maximum >= 90.0, "{maximum}");
     }
 }

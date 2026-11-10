@@ -2265,7 +2265,7 @@ fn a_memory_peak_holds_through_its_tables_total(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_wider_window_keeps_a_lines_maximum(cx: &mut TestAppContext) {
-    // Goal: a chart's width sets its buckets, which change nothing a table holds.
+    // Goal: a chart's width changes nothing a table holds.
     // Method: a peak a store reduced, a window wider than the default, and the maximum held.
     let peak = HOUR_NEWEST - 1_081;
     let mut harness = InputHarness::open_route(cx, "overview");
@@ -2283,7 +2283,7 @@ fn a_wider_window_keeps_a_lines_maximum(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn a_narrower_window_keeps_a_lines_maximum(cx: &mut TestAppContext) {
-    // Goal: a chart's width sets its buckets, which change nothing a table holds.
+    // Goal: a chart's width changes nothing a table holds.
     // Method: a peak a store reduced, a window narrower than the default, and the maximum held.
     let peak = HOUR_NEWEST - 1_081;
     let mut harness = InputHarness::open_route(cx, "overview");

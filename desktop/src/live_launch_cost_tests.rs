@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use collector::clock::Timebase;
 use collector::processes::Usage;
 use gpui::{
-    Context, Entity, IntoElement, Render, VisualTestContext, Window, WindowOptions,
+    Context, Entity, IntoElement, Pixels, Render, VisualTestContext, Window, WindowOptions,
     WindowVisibility, div, prelude::*, px,
 };
 use num_traits::ToPrimitive;
@@ -142,6 +142,7 @@ fn single_chart_cost(harness: &mut ReferenceHarness, counters: &Counters, run: u
         .filter(|(drawn, next)| !Rc::ptr_eq(&drawn.0, &next.0))
         .count();
     let rebuilt = u64::try_from(rebuilt).unwrap();
+    let width = single_chart_width(harness, &drawn);
     single_chart_cost_park(harness);
 
     let window = harness
@@ -151,6 +152,7 @@ fn single_chart_cost(harness: &mut ReferenceHarness, counters: &Counters, run: u
             cx.open_window(WindowOptions::default(), |_, cx| {
                 cx.new(|_| ChartAlone {
                     plots: Plots::new(),
+                    width,
                     drawn: None,
                 })
             })
@@ -185,8 +187,7 @@ fn single_chart_cost(harness: &mut ReferenceHarness, counters: &Counters, run: u
 
 /// Opens `CHART_ROUTE` and takes `FOLLOWED` publications, answering its first chart's panel and
 /// look as the page drew each. The page builds a chart's panel again only when the chart
-/// changes, at the end of one of its buckets, so a publication may leave it as it was, and its
-/// plot then draws nothing.
+/// changes, so a publication may leave it as it was, and its plot then draws nothing.
 fn single_chart_cost_publications(harness: &mut ReferenceHarness) -> Vec<(Rc<Panel>, ChartLook)> {
     harness.open_page(CHART_ROUTE);
     let mut drawn = Vec::with_capacity(FOLLOWED);
@@ -208,6 +209,18 @@ fn single_chart_cost_publications(harness: &mut ReferenceHarness) -> Vec<(Rc<Pan
     drawn
 }
 
+/// How wide the page laid out the plot of the chart `drawn` holds.
+fn single_chart_width(harness: &mut ReferenceHarness, drawn: &[(Rc<Panel>, ChartLook)]) -> Pixels {
+    let (panel, _) = drawn.last().expect("the page drew the chart");
+    let selector: &'static str = Box::leak(format!("{}-plot", panel.id).into_boxed_str());
+    harness
+        .window
+        .debug_bounds(selector)
+        .expect("the page laid the chart out")
+        .size
+        .width
+}
+
 /// Hides the page's window and waits until the Store parks, so only the chart draws.
 fn single_chart_cost_park(harness: &mut ReferenceHarness) {
     harness
@@ -221,9 +234,10 @@ fn single_chart_cost_park(harness: &mut ReferenceHarness) {
     assert!(parked.is_some(), "the Store never parked");
 }
 
-/// A window that holds one chart's plot, as its page draws it, as wide as its card was.
+/// A window that holds one chart's plot, as its page draws it, as wide as the page laid it out.
 struct ChartAlone {
     plots: Plots,
+    width: Pixels,
     drawn: Option<(Rc<Panel>, ChartLook)>,
 }
 
@@ -233,10 +247,6 @@ impl Render for ChartAlone {
         let Some((panel, look)) = &self.drawn else {
             return div();
         };
-        let width = panel
-            .chart_width
-            .get()
-            .expect("the page laid the chart out");
         let shown = Shown::new(
             Rc::clone(panel),
             look.inspection,
@@ -244,7 +254,7 @@ impl Render for ChartAlone {
             look.time,
         );
         div()
-            .w(px(width))
+            .w(self.width)
             .h(px(PLOT_HEIGHT))
             .child(self.plots.plot(shown, cx).0)
     }

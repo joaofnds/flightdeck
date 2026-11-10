@@ -244,7 +244,7 @@ fn panels_panel(
             "Seven groups with highest known mean CPU over captured context; Other includes \
             every remaining captured named group. Unknown names are excluded and reported. \
             Missing readings remain gaps. Groups use executable bytes across PID lifetimes. {} {}",
-            crate::live_projection::LINE_MEAN_HELP,
+            crate::live_projection::LINE_POINT_HELP,
             crate::live_projection::LINE_DATA_HELP
         )),
         source: Some("Captured process intervals".into()),
@@ -262,8 +262,6 @@ fn panels_panel(
         places: Some(places.into()),
         detail_first: None,
         reading_seconds: crate::charts::TICK_SECONDS,
-        sliding: false,
-        chart_width: std::cell::Cell::new(None),
     })
 }
 

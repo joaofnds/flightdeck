@@ -95,18 +95,14 @@ pub fn toggle(open: Option<Picker>, pressed: Picker) -> Option<Picker> {
     }
 }
 
-/// Spreads `view` across `panel` where it is drawn against the clock, and tells it whether its
-/// readings still move on with the newest second.
-fn zoom_panel(panel: &mut Rc<Panel>, view: crate::chart_axes::TimeWindow, sliding: bool) {
+/// Spreads `view` across `panel` where it is drawn against the clock.
+fn zoom_panel(panel: &mut Rc<Panel>, view: crate::chart_axes::TimeWindow) {
     let Some(window) = panel.window else {
         return;
     };
 
     if window != view {
         crate::time_range::zoom(Rc::make_mut(panel), view);
-    }
-    if panel.sliding != sliding {
-        Rc::make_mut(panel).sliding = sliding;
     }
 }
 
@@ -161,9 +157,6 @@ pub struct LiveDashboard {
     pub(crate) preview_submissions: u64,
     pub(crate) hover_timings: crate::live_hover::timings::HoverTimings,
     pub(crate) row_heights:
-        Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
-    /// How wide each chart's card was last laid out, by panel id, which sizes its buckets.
-    pub(crate) chart_widths:
         Rc<std::cell::RefCell<std::collections::BTreeMap<String, gpui::Pixels>>>,
     /// The key and room of each row the page shows as a placeholder while a request replaces its
     /// readings, empty otherwise.
@@ -411,7 +404,6 @@ impl LiveDashboard {
             preview_submissions: 0,
             hover_timings: crate::live_hover::timings::HoverTimings::new(),
             row_heights: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
-            chart_widths: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
             placeholders: Vec::new(),
             header_height: Rc::new(std::cell::Cell::new(px(0.0))),
             viewport_size: gpui::size(px(0.0), px(0.0)),
@@ -1314,26 +1306,14 @@ impl LiveDashboard {
         })
     }
 
-    /// Spreads the view across every chart that is drawn against the clock, and tells each
-    /// whether its readings still move on with the newest second.
+    /// Spreads the view across every chart that is drawn against the clock.
     fn zoom_panels(&mut self) {
         let Some(view) = self.view_window() else {
             return;
         };
-        let sliding = self.panels_slide();
         for panel in &mut self.panels {
-            zoom_panel(panel, view, sliding);
+            zoom_panel(panel, view);
         }
-    }
-
-    /// Whether the charts' readings still move on with the newest second, as they do while the
-    /// page follows it over a range that slides.
-    fn panels_slide(&self) -> bool {
-        if self.request.second.is_some() {
-            return false;
-        }
-
-        self.range.slides()
     }
 
     /// Shows `range`, which a menu choice or a drag picked, without asking for another reading.

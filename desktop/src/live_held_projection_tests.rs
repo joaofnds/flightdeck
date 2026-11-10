@@ -383,7 +383,7 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
         let panels = overview_of_older(&older);
 
         let help = |id| panel_named(&panels, id).help.clone().unwrap();
-        assert!(help("live-cpu").contains("the mean of the readings of its seconds"));
+        assert!(help("live-cpu").contains("Each point is one reading"));
         assert!(help("live-cpu").contains("The Data table gives the highest reading it keeps"));
         assert!(help("live-memory-pressure").contains("shows the highest state among them"));
     }

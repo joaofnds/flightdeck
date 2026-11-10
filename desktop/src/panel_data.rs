@@ -32,34 +32,24 @@ pub struct Panel {
     pub states: Option<Vec<String>>,
     pub table_headings: Option<Vec<String>>,
     pub table_rows: Option<Vec<Vec<String>>>,
-    /// The wall-clock seconds the positions span, which pins the chart's display averaging to
-    /// the clock. A panel with none draws each reading on its own.
+    /// The wall-clock seconds the positions span, which puts each reading at its own second. A
+    /// panel with none draws each reading on its own.
     #[serde(skip)]
     pub window: Option<crate::chart_axes::TimeWindow>,
     /// The reading at each position, which holding a maximum of a reading on its own holds. A panel
     /// with none holds a maximum by its second alone.
     #[serde(skip)]
     pub places: Option<Arc<[MachinePlace]>>,
-    /// The first second of full-detail readings, before which each reading stands for several
-    /// seconds, so no average mixes the two.
+    /// The first second of full-detail readings, before which each reading stands for
+    /// `viewer::EARLIER_STRIDE_SECONDS`.
     #[serde(skip)]
     pub detail_first: Option<u64>,
     /// The seconds between two of the panel's readings where none is missed: a tick for the
-    /// readings of each tick, longer for reports the collector writes every few ticks. Readings
+    /// readings of each tick, longer for reports the collector writes every few ticks, each of
+    /// which names the second this app read it, the end of the seconds it covers. Readings
     /// before `detail_first` stand further apart.
     #[serde(skip, default = "tick_seconds")]
     pub reading_seconds: u64,
-    /// Whether readings still leave at the window's start and arrive at its end, as they do while
-    /// the view follows the newest second. The chart holds back the curve those readings would
-    /// still reshape.
-    #[serde(skip)]
-    pub sliding: bool,
-    /// How many pixels wide the chart's card was inside its border when last laid out, which
-    /// sets how long its buckets are, or `None` before the card is first laid out. The page writes
-    /// it as it draws the chart rather than giving the chart a copy, since hover knows a chart by
-    /// the panel it holds and not by its contents.
-    #[serde(skip)]
-    pub chart_width: std::cell::Cell<Option<f32>>,
 }
 
 /// The highest reading each value of a line stands for, where it names it.

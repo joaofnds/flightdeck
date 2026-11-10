@@ -96,26 +96,24 @@ grew between two ticks, its change divided by the time between them. An App's ra
 only from two ticks in a row of one collector run, so the first tick after a missed tick
 or a collector restart has none. A restart of the persister alone changes no rate.
 
-**Peak**: a reading that went well past the line a chart draws through its neighbours. A chart
-keeps the exact reading, so its Data table gives each line's highest reading and holds it, even
-where another run read the same wall second.
+**Peak**: a reading that went well past the readings beside it. A chart keeps the exact
+reading, so its Data table gives each line's highest reading and holds it, even where another
+run read the same wall second.
 
 **Resource coalition**: the group macOS puts a process in together with related
 processes. macOS keeps CPU time, energy, disk bytes and GPU time per coalition, and a
 process's CPU time stays in those totals after it exits. A coalition and an App are
 separate groupings, so a coalition's totals are not an App's totals.
 
-**Bucket**: a stretch of the clock, such as three seconds, at whose end a chart draws one point,
-the mean of the readings of that bucket and of the buckets just before it. A chart breaks its
-line at any bucket with no readings of its own, and each point beside the break stays the mean
-of its buckets. A chart of readings a second apart takes the shortest length, of at least one
-second, that leaves each bucket a pixel of the chart, so a wider chart or a shorter span draws
-shorter buckets, and each point covers at least four seconds and a second more than its bucket.
-A chart of states draws the highest state its readings reached.
-Buckets start at multiples of their length, so a point keeps its place as the chart scrolls.
-Readings further apart, such as the collector's ten-second reports or the older readings of a
-chart that reaches back more than sixteen minutes, which stand ten seconds apart, make buckets
-at least that long and points that cover at least four times that, so forty seconds for readings
-ten seconds apart. Each older reading of a chart by App is the App's mean over the seconds of its
-ten that the recording holds, while a chart of the whole Mac keeps the first of those seconds and the
-highest reading of the ten, so a peak the mean hides stays findable as it ages.
+**Point**: one reading as a line chart draws it, where the time the reading covers ends. A
+reading of a tick stands at the end of the second it was taken in, and a report the collector
+writes every few ticks stands at the second Flightdeck read it, the end of the seconds it covers.
+A chart draws each reading as it is and averages none together, so a point never moves once it
+is drawn. While the charts follow the newest second, each reading arrives at the right edge and
+then only scrolls left. A chart breaks its line where a reading is missing, such as at a missed
+tick. The older readings of a chart that reaches back more than sixteen minutes stand ten
+seconds apart, and each covers its ten seconds. Each older reading of a chart by App is the
+App's mean over the seconds of its ten that the recording holds, while a chart of the whole Mac
+keeps the first reading of those ten seconds and the highest reading of the ten, so a peak stays
+findable as it ages. A chart of states fills each second a reading covers, and the cell of an
+older reading shows the highest state of its ten seconds.

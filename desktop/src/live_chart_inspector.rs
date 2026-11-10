@@ -1016,8 +1016,8 @@ mod tests {
 
     #[test]
     fn a_peak_of_one_second_is_its_lines_maximum_at_every_offset() {
-        // Goal: a spike one second long stays in the table wherever a bucket boundary falls, and
-        // the table reads readings rather than buckets, so no offset loses it.
+        // Goal: a spike one second long is its line's maximum in the table at whatever second of
+        // a minute it falls.
         // Method: a steady line with one peak at each second of a minute, and read each summary.
         for peak in 0..60_usize {
             let mut values = vec![Some(10.0); 900];
