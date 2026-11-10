@@ -1724,6 +1724,10 @@ pub fn alpha(value: u32, opacity: f32) -> gpui::Rgba {
 }
 
 #[cfg(test)]
+#[path = "charts_live_edge_tests.rs"]
+mod live_edge_tests;
+
+#[cfg(test)]
 mod live_tests {
     use super::*;
 
