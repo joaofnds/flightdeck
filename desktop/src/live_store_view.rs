@@ -122,7 +122,35 @@ impl MailboxWatch {
 pub(super) fn take_store_view(cx: &App) -> Option<Arc<View>> {
     let store = cx.try_global::<LiveStore>()?;
 
-    store.0.take()
+    let view = store.0.take();
+    #[cfg(all(test, feature = "automation"))]
+    MAILBOX_LOOKS.with(|looks| looks.set(looks.get().after(view.is_some())));
+    view
+}
+
+#[cfg(all(test, feature = "automation"))]
+thread_local! {
+    /// What the page on this thread has asked the store's mailbox for, which a test reads.
+    pub(crate) static MAILBOX_LOOKS: std::cell::Cell<MailboxLooks> =
+        const { std::cell::Cell::new(MailboxLooks { looks: 0, views: 0 }) };
+}
+
+/// How often the page looked in the store's mailbox, and how many of those looks took a View.
+#[cfg(all(test, feature = "automation"))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MailboxLooks {
+    pub(crate) looks: u64,
+    pub(crate) views: u64,
+}
+
+#[cfg(all(test, feature = "automation"))]
+impl MailboxLooks {
+    fn after(self, took: bool) -> Self {
+        Self {
+            looks: self.looks + 1,
+            views: self.views + u64::from(took),
+        }
+    }
 }
 
 /// The App charts the page drew from its last View, which the charts of a newer View take the

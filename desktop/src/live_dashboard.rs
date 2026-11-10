@@ -1560,6 +1560,8 @@ impl LiveDashboard {
 mod hold;
 #[path = "live_store_view.rs"]
 mod store_view;
+#[cfg(all(test, feature = "automation"))]
+pub(crate) use store_view::{MAILBOX_LOOKS, MailboxLooks};
 
 pub use store_view::install_store;
 pub(crate) use store_view::set_store_active;

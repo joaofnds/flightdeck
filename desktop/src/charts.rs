@@ -401,6 +401,8 @@ fn paint_line_runs(
         present,
         |run| {
             for curve in run_curves(values, run, geometry) {
+                #[cfg(test)]
+                newest_drawn::remember(panel, line, &curve.points, geometry);
                 paint_curve(line, panel, curve, geometry, frame.as_deref_mut(), window);
             }
         },
@@ -1436,6 +1438,10 @@ pub fn alpha(value: u32, opacity: f32) -> gpui::Rgba {
 #[cfg(test)]
 #[path = "charts_live_edge_tests.rs"]
 mod live_edge_tests;
+
+#[cfg(test)]
+#[path = "charts_newest_drawn.rs"]
+pub(crate) mod newest_drawn;
 
 #[cfg(test)]
 mod live_tests {

@@ -26,6 +26,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -95,6 +96,9 @@ const FREEZER_REPLY_BYTES_MAX: u64 = 4096;
 
 #[path = "live_launch_cost_tests.rs"]
 mod cost_tests;
+
+#[path = "live_launch_burst_tests.rs"]
+mod burst_tests;
 
 /// Lets one cell run at a time, since two at once would time each other's work.
 static CELLS: Mutex<()> = Mutex::new(());
@@ -280,19 +284,7 @@ struct Protocol {
 
 impl Protocol {
     fn read() -> Self {
-        let profile = if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        };
-        assert_eq!(
-            profile, "release",
-            "time a release build, which the app ships"
-        );
-        for (option, count) in crate::APP_THREAD_COUNTS.environment() {
-            let value = std::env::var(option).ok();
-            assert_eq!(value.as_deref(), Some(count.as_str()), "{option}");
-        }
+        assert_timed_as_shipped();
         let output = PathBuf::from(std::env::var_os("FLIGHTDECK_REFERENCE_OUTPUT").unwrap());
         assert!(output.is_dir());
 
@@ -301,6 +293,24 @@ impl Protocol {
             freezer: PathBuf::from(std::env::var_os("FLIGHTDECK_REFERENCE_FREEZER").unwrap()),
             output,
         }
+    }
+}
+
+/// Refuses a run that times another build than the app ships, or other thread counts than it
+/// starts with.
+fn assert_timed_as_shipped() {
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    assert_eq!(
+        profile, "release",
+        "time a release build, which the app ships"
+    );
+    for (option, count) in crate::APP_THREAD_COUNTS.environment() {
+        let value = std::env::var(option).ok();
+        assert_eq!(value.as_deref(), Some(count.as_str()), "{option}");
     }
 }
 
@@ -435,11 +445,12 @@ impl ReferenceHarness {
         freezer.command(&opening.command());
         let text = Arc::new(gpui_apple::AppleTextSystem::new());
         let mut app = TestAppContext::build_with_text_system(dispatcher, Some("latency"), text);
-        let (dashboard, window) = open(&freezer.copy, &mut app);
+        let (dashboard, mut window) = open(&freezer.copy, &mut app);
+        let clock = AppClock::start(&dashboard, &mut window);
         let mut harness = Self {
             window,
             dashboard,
-            clock: AppClock::new(),
+            clock,
             newest_second: None,
             freezer,
         };
@@ -707,7 +718,7 @@ impl ReferenceHarness {
                 return None;
             }
             let next = self.clock.step(&self.dashboard, &mut self.window);
-            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            self.clock.wait_until(next);
         }
         panic!("a wait took {STEPS_MAX} steps");
     }
@@ -745,23 +756,45 @@ fn open(copy: &Path, app: &mut TestAppContext) -> (Entity<LiveDashboard>, Visual
     )
 }
 
-/// The app's two timers and the display, which a test window has none of: the page's
-/// quarter-second tick, the quick poll that runs while the worker owes an answer, and a 120 Hz
-/// display's frames, each at its own interval on the wall clock.
-/// Each field is when that one fires next.
+/// The app's two timers, its wake and the display, which a test window has none of: the page's
+/// quarter-second tick, the quick poll that runs while the worker owes an answer, the tick the
+/// store wakes the page for as it hands over a View, and a 120 Hz display's frames, each timer
+/// at its own interval on the wall clock. Each timer's field is when it fires next.
 struct AppClock {
     tick: Instant,
     quick_poll: Option<Instant>,
     frame: Instant,
+    /// Whether the store has woken the page since its last wake ran.
+    woken: Arc<AtomicBool>,
 }
 
 impl AppClock {
-    fn new() -> Self {
+    /// Starts the clock and has the store wake the page in `window`, on this thread, as the app's
+    /// wake signals its run loop.
+    fn start(dashboard: &Entity<LiveDashboard>, window: &mut VisualTestContext) -> Self {
         let now = Instant::now();
+        let woken = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&woken);
+        let thread = std::thread::current();
+        let wake = move || {
+            signal.store(true, Ordering::Release);
+            thread.unpark();
+        };
+
+        window.update(|_, cx| crate::live_dashboard::wake_store_with(Box::new(wake), cx));
+        dashboard.update(window, |dashboard, _| dashboard.wait_for_wakes());
         Self {
             tick: now + TICK_INTERVAL,
             quick_poll: None,
             frame: now + FRAME_INTERVAL,
+            woken,
+        }
+    }
+
+    /// Waits until `next`, or until the store wakes the page before it.
+    fn wait_until(&self, next: Instant) {
+        if !self.woken.load(Ordering::Acquire) {
+            std::thread::park_timeout(next.saturating_duration_since(Instant::now()));
         }
     }
 
@@ -776,6 +809,12 @@ impl AppClock {
         // starts it, and stops at the first of its ticks that finds none owed.
         if self.quick_poll.is_none() && awaiting_reply(dashboard, window) {
             self.quick_poll = Some(now + QUICK_POLL_INTERVAL);
+        }
+        if self.woken.swap(false, Ordering::AcqRel) {
+            dashboard.update(window, |dashboard, cx| {
+                dashboard.mark_woken();
+                dashboard.tick(cx);
+            });
         }
         if self.quick_poll.is_some_and(|due| due <= now) {
             dashboard.update(window, LiveDashboard::tick);
