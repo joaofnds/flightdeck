@@ -43,6 +43,9 @@ pub(super) fn install(session: CollectorSession, cx: &mut App) {
         if let Some(timer) = collection.quick_timer.take() {
             timer.set_running(false);
         }
+        // Dropping the wake takes its source off the run loop, so no publication ticks the page
+        // once the session is detached.
+        drop(collection.wake.take());
         collection.session.detach();
         std::future::ready(())
     })
