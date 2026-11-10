@@ -134,26 +134,7 @@ fn follow_a_wall_second(harness: &mut ReferenceHarness) {
 /// then hides the page's window and draws that chart alone for each, answering the cost of a
 /// publication's drawing.
 fn single_chart_cost(harness: &mut ReferenceHarness, counters: &Counters, run: usize) -> Value {
-    harness.open_page(CHART_ROUTE);
-    let mut drawn = Vec::with_capacity(FOLLOWED);
-    for _ in 0..FOLLOWED {
-        harness.take_next_second();
-        drawn.push(
-            harness
-                .dashboard
-                .read_with(&harness.window, |dashboard, _| {
-                    let panel = dashboard
-                        .panels
-                        .iter()
-                        .find(|panel| panel.kind != "timeline")
-                        .expect("CPU & Processes draws a chart");
-                    (Rc::clone(panel), dashboard.chart_look(panel))
-                }),
-        );
-    }
-
-    // The page builds a chart's panel again only when the chart changes, at the end of one of
-    // its buckets, so a publication may leave it as it was, and its plot then draws nothing.
+    let drawn = single_chart_cost_publications(harness);
     let laps = drawn.iter().cycle().take(CHART_LAPS * FOLLOWED);
     let rebuilt = 1 + laps
         .clone()
@@ -161,15 +142,7 @@ fn single_chart_cost(harness: &mut ReferenceHarness, counters: &Counters, run: u
         .filter(|(drawn, next)| !Rc::ptr_eq(&drawn.0, &next.0))
         .count();
     let rebuilt = u64::try_from(rebuilt).unwrap();
-    harness
-        .window
-        .simulate_visibility_change(WindowVisibility::Hidden);
-    let parked = harness.run_until(INPUT_WAIT, |harness| {
-        harness
-            .window
-            .update(|_, cx| crate::live_dashboard::store_activity(cx)["paused"] == true)
-    });
-    assert!(parked.is_some(), "the Store never parked");
+    single_chart_cost_park(harness);
 
     let window = harness
         .window
@@ -208,6 +181,44 @@ fn single_chart_cost(harness: &mut ReferenceHarness, counters: &Counters, run: u
     chart_window.update(|window, _| window.remove_window());
     chart_window.run_until_parked();
     cost
+}
+
+/// Opens `CHART_ROUTE` and takes `FOLLOWED` publications, answering its first chart's panel and
+/// look as the page drew each. The page builds a chart's panel again only when the chart
+/// changes, at the end of one of its buckets, so a publication may leave it as it was, and its
+/// plot then draws nothing.
+fn single_chart_cost_publications(harness: &mut ReferenceHarness) -> Vec<(Rc<Panel>, ChartLook)> {
+    harness.open_page(CHART_ROUTE);
+    let mut drawn = Vec::with_capacity(FOLLOWED);
+    for _ in 0..FOLLOWED {
+        harness.take_next_second();
+        drawn.push(
+            harness
+                .dashboard
+                .read_with(&harness.window, |dashboard, _| {
+                    let panel = dashboard
+                        .panels
+                        .iter()
+                        .find(|panel| panel.kind != "timeline")
+                        .expect("CPU & Processes draws a chart");
+                    (Rc::clone(panel), dashboard.chart_look(panel))
+                }),
+        );
+    }
+    drawn
+}
+
+/// Hides the page's window and waits until the Store parks, so only the chart draws.
+fn single_chart_cost_park(harness: &mut ReferenceHarness) {
+    harness
+        .window
+        .simulate_visibility_change(WindowVisibility::Hidden);
+    let parked = harness.run_until(INPUT_WAIT, |harness| {
+        harness
+            .window
+            .update(|_, cx| crate::live_dashboard::store_activity(cx)["paused"] == true)
+    });
+    assert!(parked.is_some(), "the Store never parked");
 }
 
 /// A window that holds one chart's plot, as its page draws it, as wide as its card was.
