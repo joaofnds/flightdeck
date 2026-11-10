@@ -93,6 +93,9 @@ const INPUT_WAIT: Duration = Duration::from_secs(10);
 const STEPS_MAX: u32 = 1_000_000;
 const FREEZER_REPLY_BYTES_MAX: u64 = 4096;
 
+#[path = "live_launch_cost_tests.rs"]
+mod cost_tests;
+
 /// Lets one cell run at a time, since two at once would time each other's work.
 static CELLS: Mutex<()> = Mutex::new(());
 
@@ -556,10 +559,7 @@ impl ReferenceHarness {
     /// in, opens `route` and answers the app's measurement of the navigation to its fresh
     /// frame.
     fn navigate_after_revealing(&mut self, route: &str) -> Shown {
-        let second = self.reveal("replay-next", 1);
-        let revealed = Instant::now();
-        self.run_until(INPUT_WAIT, |_| TICK_INTERVAL <= revealed.elapsed());
-        self.settle(INPUT_WAIT);
+        let second = self.take_next_second();
         // A Store still taking the second in holds only the one before it, which Overview,
         // drawn from the Store, then draws.
         let pending = self
@@ -588,6 +588,16 @@ impl ReferenceHarness {
             seconds: (route != "self").then_some(held..=second),
             waited,
         }
+    }
+
+    /// Has the freezer reveal the next second and plays the page's tick once and the clock until
+    /// the page settles, so the page takes the second in, and answers that second.
+    fn take_next_second(&mut self) -> u64 {
+        let second = self.reveal("replay-next", 1);
+        let revealed = Instant::now();
+        self.run_until(INPUT_WAIT, |_| TICK_INTERVAL <= revealed.elapsed());
+        self.settle(INPUT_WAIT);
+        second
     }
 
     fn leave_charts(&mut self) {

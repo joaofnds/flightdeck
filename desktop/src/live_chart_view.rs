@@ -20,6 +20,16 @@ use crate::live_source::Snapshot;
 /// page together.
 const CHART_WIDTHS_MAX: usize = 4096;
 
+/// What a chart shows: the reading it inspects and that reading's index, the lines its
+/// legend hides and the window of the range it spans.
+#[derive(Clone)]
+pub(crate) struct ChartLook {
+    pub(crate) index: Option<usize>,
+    pub(crate) inspection: Inspection,
+    pub(crate) hidden: Rc<Vec<String>>,
+    pub(crate) time: Option<charts::TimeWindow>,
+}
+
 /// The source of the readings an arrow step on a chart shows.
 const CHART_STEP_SOURCE: &str = "chart-step";
 
@@ -37,12 +47,14 @@ pub(crate) mod timeline;
 impl LiveDashboard {
     pub fn live_chart(&self, panel: &Rc<Panel>, cx: &mut Context<Self>) -> impl IntoElement {
         self.size_for_card(panel);
-        let index = self.chart_inspection_index(panel);
-        let inspection = chart_inspection(panel, index);
-        let hidden = self.chart_hidden(panel);
+        let ChartLook {
+            index,
+            inspection,
+            hidden,
+            time,
+        } = self.chart_look(panel);
         let scale = charts::axis_scale(panel, inspection, &hidden, "left");
         let trailing = trailing_axes(panel, inspection, &hidden);
-        let time = self.chart_time_window();
         let shown = crate::live_plot::Shown::new(Rc::clone(panel), inspection, hidden, time);
         let (plot, measured) = self.plots.plot(shown, cx);
         let cursor = self.chart_cursor_fraction(panel);
@@ -93,6 +105,17 @@ impl LiveDashboard {
             .child(self.chart_legends(panel, index, cx))
             .children(panel.caption.clone().map(timeline::timeline_caption_text))
             .child(self.chart_width_probe(panel, cx))
+    }
+
+    /// What `panel`'s chart shows as the page draws it now, which its plot and its axes take.
+    pub(crate) fn chart_look(&self, panel: &Panel) -> ChartLook {
+        let index = self.chart_inspection_index(panel);
+        ChartLook {
+            index,
+            inspection: chart_inspection(panel, index),
+            hidden: self.chart_hidden(panel),
+            time: self.chart_time_window(),
+        }
     }
 
     /// Tells `panel` how wide its card was last laid out, which sizes its buckets.
@@ -958,7 +981,7 @@ const APP_LEGEND_SLOTS: usize = crate::live_projection::APP_COLORS.len() + 1;
 const FAN_LEGEND_SLOTS: usize = 2;
 
 /// How tall a chart's plot is.
-const PLOT_HEIGHT: f32 = 192.0;
+pub(crate) const PLOT_HEIGHT: f32 = 192.0;
 
 /// The places the legend of the chart `id` keeps when it draws `lines`. A chart of Apps keeps
 /// one for each line it can draw, since its readings name its Apps, the fan chart a row, and any
