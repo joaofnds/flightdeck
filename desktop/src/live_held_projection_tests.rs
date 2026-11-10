@@ -5,7 +5,7 @@ use collector::recording::identity_text;
 use collector::ring::{Identity, RunIdentity};
 use viewer::store::{AppsSecond, AppsStretch, MachineSecond, MachineStretch, View};
 
-use super::super::{empty_panels, overview, panels};
+use super::super::{JoinedPoints, empty_panels, overview, panels};
 use super::{Observations, OverviewPoints, overview_panels, overview_point_second};
 use crate::data::Panel;
 use crate::live_store_fixtures::{levels, reading_at, selection, trend_point, view};
@@ -468,7 +468,12 @@ mod when_a_chart_draws_one_reading_of_a_stretch {
                 "places": [reach_place(&peak)],
             }});
 
-            let reach = std::slice::from_ref(&reached).reach(&reading, 0).unwrap();
+            let points = JoinedPoints {
+                older: &[],
+                recent: std::slice::from_ref(&reached),
+            };
+
+            let reach = points.reach(&reading, 0).unwrap();
 
             assert_eq!(reach.map(|reach| reach.high), Some(2.0), "{path}");
             let held = point.pointer(&format!("/{path}")).is_some();

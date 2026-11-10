@@ -74,7 +74,10 @@ pub fn reading_value(
     if route == "apps" {
         return Ok(None);
     }
-    let points = std::slice::from_ref(point);
+    let points = &JoinedPoints {
+        older: &[],
+        recent: std::slice::from_ref(point),
+    };
     let specifications = specifications(route, points)?;
     let reading = specifications
         .iter()
@@ -198,19 +201,40 @@ const OBSERVATION_FIELDS: [&str; 7] = [
     "reader_losses",
 ];
 
-/// The older tail followed by the recent readings, which every index of a chart counts through.
-fn joined_points<'a>(earlier: Option<&'a [Value]>, recent: &'a [Value]) -> Cow<'a, [Value]> {
-    match earlier {
-        Some(older) if !older.is_empty() => {
-            let mut joined = [older, recent].concat();
-            // The seconds at the join lie in no point of their own, so the first point after it
-            // shows what their stretch reached.
-            if let Some(first_recent) = joined.get_mut(older.len()) {
-                first_recent["reach"] = older[older.len() - 1]["reach_after"].clone();
-            }
-            Cow::Owned(joined)
+/// The older tail followed by the recent readings, which every index of a chart counts through,
+/// read where the selection holds them, since a copy of every point each publication cost a
+/// chart page more than any one of its charts.
+struct JoinedPoints<'a> {
+    older: &'a [Value],
+    recent: &'a [Value],
+}
+
+impl<'a> JoinedPoints<'a> {
+    fn point(&self, index: usize) -> &'a Value {
+        match index.checked_sub(self.older.len()) {
+            Some(recent) => &self.recent[recent],
+            None => &self.older[index],
         }
-        _ => Cow::Borrowed(recent),
+    }
+
+    /// What the point at `index` reached over the seconds it stands for. The seconds at the join
+    /// lie in no point of their own, so the first point after it shows what their stretch reached.
+    fn point_reach(&self, index: usize) -> &'a Value {
+        if index == self.older.len() {
+            if let Some(last_older) = self.older.last() {
+                return &last_older["reach_after"];
+            }
+        }
+
+        &self.point(index)["reach"]
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &'a Value> + use<'a> {
+        self.older.iter().chain(self.recent)
+    }
+
+    fn last(&self) -> Option<&'a Value> {
+        self.recent.last().or(self.older.last())
     }
 }
 
@@ -241,9 +265,11 @@ pub fn panels(
     } else {
         selection["earlier_trends"].as_array()
     };
-    let joined = joined_points(earlier.map(Vec::as_slice), recent);
-    let points: &[Value] = &joined;
-    if points.len() > OBSERVATIONS_MAX {
+    let points = &JoinedPoints {
+        older: earlier.map_or(&[][..], Vec::as_slice),
+        recent,
+    };
+    if points.count() > OBSERVATIONS_MAX {
         return Err("Live chart exceeds 4096 observations".to_owned());
     }
     let domain = Domain::read(selection, earlier.is_some())?;
@@ -289,7 +315,10 @@ pub fn empty_panels(route: &str) -> Result<Vec<Rc<Panel>>, String> {
         recent_first: 0,
         stride: 1,
     };
-    let points: &[Value] = &[];
+    let points = &JoinedPoints {
+        older: &[],
+        recent: &[],
+    };
     let specifications = specifications(route, points)?;
     let mut result = Vec::with_capacity(specifications.len());
     for specification in &specifications {
@@ -473,15 +502,15 @@ impl Domain {
 }
 
 fn coordinates(
-    points: &[Value],
+    points: &JoinedPoints<'_>,
     domain: &Domain,
     app: bool,
     selected: &Value,
 ) -> Result<Coordinates, String> {
-    assert!(points.len() <= OBSERVATIONS_MAX);
-    let mut positions = Vec::with_capacity(points.len());
-    let mut segments = Vec::with_capacity(points.len());
-    let mut places = Vec::with_capacity(points.len());
+    assert!(points.count() <= OBSERVATIONS_MAX);
+    let mut positions = Vec::with_capacity(points.count());
+    let mut segments = Vec::with_capacity(points.count());
+    let mut places = Vec::with_capacity(points.count());
     let mut identities = BTreeMap::new();
     let target = if selected.is_null() {
         None
@@ -745,23 +774,23 @@ trait Observations {
     fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String>;
 }
 
-impl Observations for [Value] {
+impl Observations for JoinedPoints<'_> {
     fn count(&self) -> usize {
-        self.len()
+        self.older.len() + self.recent.len()
     }
 
     fn wall_ns(&self, index: usize) -> Result<u64, String> {
-        integer(&self[index]["wall_ns"])
+        integer(&self.point(index)["wall_ns"])
     }
 
     fn value(&self, reading: &Reading, index: usize) -> Result<Option<f32>, String> {
-        panel_reading_value(reading, &self[index])
+        panel_reading_value(reading, self.point(index))
     }
 
     fn reach(&self, reading: &Reading, index: usize) -> Result<Option<LineReach>, String> {
         let key = reading.reach.unwrap_or(reading.key);
         let path = viewer::number_path(reading.resource, key, reading.channel);
-        let reach = viewer::number_reach(&self[index]["reach"], &path)
+        let reach = viewer::number_reach(self.point_reach(index), &path)
             .map_err(|error| error.to_string())?;
 
         Ok(reach.and_then(|reach| {
@@ -1234,7 +1263,7 @@ fn gpu_temperature() -> Specification {
     specification
 }
 
-fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, String> {
+fn specifications(route: &str, points: &JoinedPoints<'_>) -> Result<Vec<Specification>, String> {
     let levels = points
         .last()
         .and_then(crate::live_inventory::performance_levels);
@@ -1268,7 +1297,7 @@ fn specifications(route: &str, points: &[Value]) -> Result<Vec<Specification>, S
     })
 }
 
-fn energy(points: &[Value]) -> Result<Vec<Specification>, String> {
+fn energy(points: &JoinedPoints<'_>) -> Result<Vec<Specification>, String> {
     Ok(vec![
         system_power("live-energy"),
         gpu_power(),
@@ -1360,7 +1389,7 @@ fn power_breakdown() -> Specification {
     specification
 }
 
-fn fan_specification(points: &[Value]) -> Result<Specification, String> {
+fn fan_specification(points: &JoinedPoints<'_>) -> Result<Specification, String> {
     const CHANNELS: [(&str, &str); 10] = [
         ("Fan 0", "#73bf69"),
         ("Fan 1", "#f2cc0c"),
@@ -1375,7 +1404,7 @@ fn fan_specification(points: &[Value]) -> Result<Specification, String> {
     ];
     let mut channels = 0;
 
-    for point in points {
+    for point in points.iter() {
         if !point["fan_rpm"].is_null() {
             let values = point["fan_rpm"]
                 .as_array()
