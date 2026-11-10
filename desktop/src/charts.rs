@@ -944,7 +944,8 @@ struct CurveReading {
 }
 
 /// The readings of one segment's run, `run`, in time order, each with the second it was taken
-/// in. A reading taken before the clock's zero has no point.
+/// in. A reading taken before the clock's zero has no point, and neither has one whose time
+/// ends before the window, which a view keeps when no reading lies inside it.
 fn curve_readings(
     values: &[Option<(f32, f32)>],
     run: std::ops::Range<usize>,
@@ -955,6 +956,10 @@ fn curve_readings(
         let second = clock
             .clock
             .second_of(clock.positions[clock.lower + index])?;
+        if clock.clock.end(second) < clock.clock.window.first {
+            return None;
+        }
+
         Some(CurveReading {
             second,
             top,
@@ -1717,6 +1722,21 @@ mod live_tests {
         let mut curves = run_curves(values, run, geometry);
         assert_eq!(curves.len(), 1, "{curves:?}");
         curves.remove(0).points
+    }
+
+    #[test]
+    fn a_reading_that_ends_before_the_window_draws_no_point() {
+        // Goal: a zoom whose window holds no reading keeps the one before it, as `visible` does,
+        // and paints the plot empty. Method: one reading five seconds before a window from 1000.
+        let positions = [-5.0 / 900.0];
+
+        let curves = run_curves(
+            &[Some((10.0, 0.0))],
+            0..1,
+            &live_geometry(1000, 0, &positions),
+        );
+
+        assert!(curves.is_empty());
     }
 
     #[test]
