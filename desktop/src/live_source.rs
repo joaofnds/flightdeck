@@ -897,12 +897,17 @@ fn route_shows_no_reading(route: &str) -> bool {
     route == "self"
 }
 
-/// Whether the read goes without the older tail of a page's selection. The Computer page draws no
-/// chart, so nothing on it reads the tail.
+/// Whether `route` draws no chart, so its selection needs the selected second's summary and none
+/// of the points the charts of the other pages draw.
+fn route_draws_no_chart(route: &str) -> bool {
+    route == "computer"
+}
+
+/// Whether the read goes without the older tail of a page's selection, which only a chart reads.
 fn reader_earlier_skips(request: &Request) -> bool {
     request.earlier == Earlier::Skip
         || request.route == "apps"
-        || request.route == "computer"
+        || route_draws_no_chart(&request.route)
         || route_shows_no_reading(&request.route)
 }
 
@@ -1236,11 +1241,23 @@ fn reader_computer(
         Some(second) if reader.store.is_some() => {
             reader_computer_held(session, &command.request, second)?
         }
-        _ => reader_latest(session)?,
+        _ => reader_summary_only(reader_latest(session)?),
     };
     let snapshot = reader_snapshot_new(command.generation, catalog, selection);
     reader_snapshot_record(reader, command, &snapshot, Histories::Read);
     Ok(Some(snapshot))
+}
+
+/// The selected second's summary of `selection`, as the Store gives a page that draws no chart,
+/// without the chart's points or the line of them the summary sits on.
+fn reader_summary_only(mut selection: Value) -> Value {
+    let mut summary = selection["summary"].take();
+    if let Some(fields) = summary.as_object_mut() {
+        drop(fields.remove("segment"));
+    }
+
+    serde_json::json!({"second": selection["second"].take(),
+        "selected": selection["selected"].take(), "summary": summary})
 }
 
 /// What the Computer page shows of a hold the Store leaves to the saved minutes: the held second,

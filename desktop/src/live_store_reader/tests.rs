@@ -388,6 +388,25 @@ fn a_store_worker_delivers_network_without_reading_or_deriving_the_source() {
 }
 
 #[test]
+fn a_store_worker_delivers_the_computer_summary_without_chart_points() {
+    // Goal: Computer, which draws no chart, gets the selected second's summary and none of the
+    // chart points the other pages draw, which each publication would otherwise rebuild.
+    // Method: present native readings to Computer through the staged Worker.
+    let mut harness = Harness::new();
+    harness.worker.request(request("computer")).unwrap();
+
+    let snapshot = harness.ready();
+
+    assert_eq!(snapshot.selection["selected"]["publication"], 2);
+    assert_eq!(
+        snapshot.selection["summary"]["memory_total_bytes"].as_u64(),
+        Some(9_007_199_254_740_993)
+    );
+    assert_eq!(snapshot.selection.get("trends"), None);
+    harness.assert_source_free();
+}
+
+#[test]
 fn a_store_worker_delivers_memory_and_the_requested_resident_history() {
     // Goal: Memory carries its full captured integer and complete requested App history.
     // Method: present native memory readings with resident history through the staged Worker.

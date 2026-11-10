@@ -23,7 +23,8 @@ pub(super) fn snapshot(
             context
                 .selection_for(
                     &observation,
-                    inspected.is_some(),
+                    inspected.is_some()
+                        || super::super::route_draws_no_chart(&command.request.route),
                     &shared.cancellation,
                     command.epoch,
                 )
