@@ -8,7 +8,8 @@
 //! ```text
 //! FLIGHTDECK_REFERENCE_RECORDING=<W10's hour> FLIGHTDECK_REFERENCE_FREEZER=<resume_bench>
 //! FLIGHTDECK_REFERENCE_OUTPUT=<directory> POLARS_MAX_THREADS=6 POLARS_ASYNC_THREAD_COUNT=1
-//! cargo test --release --features automation --bin flightdeck cost_tests -- --ignored
+//! cargo test --release --manifest-path desktop/Cargo.toml --features automation \
+//!     --bin flightdeck cost_tests -- --ignored
 //! ```
 //!
 //! A page's figure is the cost of a wall second of following the Mac, a second revealed at its

@@ -7,8 +7,9 @@
 //! release build the app ships:
 //!
 //! ```text
-//! POLARS_MAX_THREADS=6 POLARS_ASYNC_THREAD_COUNT=1 cargo test --release --features automation \
-//!     --bin flightdeck burst_tests -- --ignored --nocapture
+//! POLARS_MAX_THREADS=6 POLARS_ASYNC_THREAD_COUNT=1 cargo test --release \
+//!     --manifest-path desktop/Cargo.toml --features automation --bin flightdeck burst_tests \
+//!     -- --ignored --nocapture
 //! ```
 use std::path::PathBuf;
 use std::sync::PoisonError;

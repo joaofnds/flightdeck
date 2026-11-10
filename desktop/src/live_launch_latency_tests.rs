@@ -9,7 +9,8 @@
 //! ```text
 //! FLIGHTDECK_REFERENCE_RECORDING=<W10's hour> FLIGHTDECK_REFERENCE_FREEZER=<resume_bench>
 //! FLIGHTDECK_REFERENCE_OUTPUT=<directory> POLARS_MAX_THREADS=6 POLARS_ASYNC_THREAD_COUNT=1
-//! cargo test --release --features automation --bin flightdeck latency_tests -- --ignored
+//! cargo test --release --manifest-path desktop/Cargo.toml --features automation \
+//!     --bin flightdeck latency_tests -- --ignored
 //! ```
 //!
 //! A figure leaves out the wait for the frame the app draws in, at most one display frame, so
