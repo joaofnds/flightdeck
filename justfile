@@ -19,10 +19,13 @@ default:
 dev: bundle
     open desktop/target/Flightdeck.app
 
-# Build the app with its collector and persister helpers, and package them as one bundle.
+# The app's own check runs on this release build, since a debug build of the app made for the
+# check alone took CI's desktop job 86 seconds. The release profile keeps every assertion.
+# Build the app with its collector and persister helpers, check it, and package them as one bundle.
 bundle:
     cargo build --locked --release -p collector -p persister --bin collector --bin recorder --bin persister
     cargo build --locked --release --manifest-path desktop/Cargo.toml --bin flightdeck
+    desktop/target/release/flightdeck --check
     desktop/target/release/flightdeck --bundle
     desktop/target/Flightdeck.app/Contents/MacOS/flightdeck --bundle --check
 
@@ -119,11 +122,10 @@ desktop-clippy:
     cargo clippy --locked --manifest-path desktop/Cargo.toml --all-targets --features automation \
         -- --deny warnings
 
-# Test the desktop workspace, then run the desktop app's own checks.
+# Test the desktop workspace, then check its text backend.
 desktop-test:
     cargo test --locked --manifest-path desktop/Cargo.toml
     cargo test --locked --manifest-path desktop/Cargo.toml --features automation --bin flightdeck
-    cargo run --locked --manifest-path desktop/Cargo.toml --bin flightdeck -- --check
     cargo run --locked --manifest-path desktop/Cargo.toml --bin text_backend_check -- --check
 
 # It shows what a change to sealing costs, and fails only when the run does, never on a
