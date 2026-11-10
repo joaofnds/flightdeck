@@ -10,6 +10,10 @@ use std::ptr;
 use std::rc::Rc;
 use std::time::Duration;
 
+/// How often the page's own timer ticks, the quarter-second tick every page takes its readings
+/// at.
+pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
+
 pub struct Timer {
     reference: CFRunLoopTimerRef,
     interval: Duration,
@@ -19,7 +23,7 @@ pub struct Timer {
 
 impl Timer {
     pub fn start(callback: impl FnMut() + 'static) -> Result<Self, String> {
-        Self::with_interval(Duration::from_millis(250), callback)
+        Self::with_interval(TICK_INTERVAL, callback)
     }
 
     pub fn with_interval(

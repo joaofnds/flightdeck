@@ -14,6 +14,10 @@ mod app_nap;
 mod background;
 #[path = "collector_lifecycle_application.rs"]
 mod collection;
+#[cfg(test)]
+#[cfg(feature = "automation")]
+#[path = "live_launch_latency_tests.rs"]
+mod latency_tests;
 #[path = "collector_lifecycle.rs"]
 mod lifecycle;
 #[path = "live_preferences.rs"]

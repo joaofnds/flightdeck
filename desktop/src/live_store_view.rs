@@ -64,6 +64,12 @@ pub(crate) fn store_active(cx: &App) -> bool {
     cx.global::<LiveStore>().0.is_active()
 }
 
+/// Takes the installed store out of the app, which stops it once the caller drops it.
+#[cfg(all(test, feature = "automation"))]
+pub(crate) fn uninstall_store(cx: &mut App) -> Store {
+    cx.remove_global::<LiveStore>().0
+}
+
 pub(super) fn store_pending(cx: &App) -> bool {
     cx.try_global::<LiveStore>()
         .is_some_and(|store| store.0.pending())

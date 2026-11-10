@@ -12,7 +12,7 @@ mod tests;
 
 /// How often the app asks the worker for its answer while one is owed, so a page opens within a
 /// frame of the worker finishing its read.
-const QUICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
+pub(super) const QUICK_POLL_INTERVAL: Duration = Duration::from_millis(8);
 
 struct Collection {
     session: CollectorSession,

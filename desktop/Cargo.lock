@@ -1298,6 +1298,7 @@ dependencies = [
  "core-foundation 0.10.0",
  "foreign-types",
  "gpui",
+ "gpui_apple",
  "gpui_macos",
  "image",
  "libc",

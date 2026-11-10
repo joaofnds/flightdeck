@@ -929,6 +929,23 @@ repository clone. Animation remains an opt-in resource cost.
 - Maintenance: generated Apple bindings keep signatures and object ownership explicit instead
   of adding local Objective-C declarations for these APIs.
 
+## Desktop test dependencies
+
+The desktop workspace's tests use this direct dependency. It was already present
+transitively through `gpui_macos`, at the same GPUI revision, and no shipped binary links
+it directly.
+
+### `gpui_apple`
+
+- Used: the latency tests build a GPUI test app with `AppleTextSystem`, the Core Text
+  layout the app's macOS platform uses, so their figures include the app's text shaping.
+  Only that type is named, with the `font-kit` feature `gpui_macos` already enables.
+- Performance: GPUI's test text system lays out no text, so a test on it would leave
+  shaping out of the time it reports. Shaping written here would time different code than
+  the app runs.
+- Maintenance: it moves with the GPUI revision `gpui` and `gpui_macos` pin, so an upgrade
+  changes all three together. A test that only needs a window keeps GPUI's own text system.
+
 ## Persistence measurements
 
 The implementation observations in this section were measured on 2026-10-15, against the

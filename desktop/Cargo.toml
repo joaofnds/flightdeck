@@ -69,6 +69,13 @@ rev = "8766c4ad567693d5c60108ff8f1287a1e046e580"
 default-features = false
 features = ["test-support"]
 
+# The latency tests lay out text with the text system the app's macOS platform uses.
+[dev-dependencies.gpui_apple]
+git = "https://github.com/joaofnds/zed"
+rev = "8766c4ad567693d5c60108ff8f1287a1e046e580"
+default-features = false
+features = ["font-kit"]
+
 [dependencies.gpui]
 git = "https://github.com/joaofnds/zed"
 rev = "8766c4ad567693d5c60108ff8f1287a1e046e580"
