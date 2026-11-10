@@ -70,6 +70,10 @@ fn a_cpu_burst_reaches_the_overview_line() {
                     let line = json!({"minutes": minutes, "burst": burst,
                         "phase_ms": phase.as_millis(), "passed_ms": passed.as_secs_f64() * 1e3});
                     println!("{line}");
+                    assert!(
+                        passed < crate::live_timer::TICK_INTERVAL,
+                        "a burst took longer than the page's tick to reach the line: {line}"
+                    );
                     harness.settle_steady();
                 }
                 let after = harness.asked();
@@ -98,6 +102,8 @@ struct BurstHarness {
 
 impl BurstHarness {
     fn setup(dispatcher: gpui::TestDispatcher, minutes: u64) -> Self {
+        // The range timed before this one ran on this thread and left its last point behind.
+        newest_drawn::forget();
         let collector = Collector::start(minutes * 60);
         let text = std::sync::Arc::new(gpui_apple::AppleTextSystem::new());
         let mut app = TestAppContext::build_with_text_system(dispatcher, Some("burst"), text);

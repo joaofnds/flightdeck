@@ -27,6 +27,11 @@ pub(super) fn remember(panel: &Panel, line: &Line, points: &[RunPoint], geometry
     NEWEST.with_borrow_mut(|newest| newest.insert((panel.id.clone(), line.name.clone()), value));
 }
 
+/// Forgets every line's newest point, so a test reads only what a frame drew after this.
+pub(crate) fn forget() {
+    NEWEST.with_borrow_mut(BTreeMap::clear);
+}
+
 /// The value the newest point of the line `line` on the panel `panel` stood at when this
 /// thread last drew it, or none before it drew one.
 pub(crate) fn value(panel: &str, line: &str) -> Option<f32> {
@@ -37,9 +42,29 @@ pub(crate) fn value(panel: &str, line: &str) -> Option<f32> {
 fn a_drawn_point_reads_as_the_value_it_was_drawn_at() {
     // Goal: the value a test reads is the one the chart drew, on the chart's own scale. Method:
     // draw a point of a line at 70 on a 0 to 100 chart, then read it back.
+    draw_a_cpu_point_at(70.0);
+
+    let drawn = value("live-cpu", "CPU").unwrap();
+    assert!((drawn - 70.0).abs() < 0.001, "{drawn}");
+    assert_eq!(value("live-cpu", "GPU"), None);
+}
+
+#[test]
+fn a_forgotten_point_reads_as_none() {
+    // Goal: a test that times a second window reads none of the first window's points. Method:
+    // draw a point, forget the drawn points, then read the line.
+    draw_a_cpu_point_at(70.0);
+
+    forget();
+
+    assert_eq!(value("live-cpu", "CPU"), None);
+}
+
+/// Draws the newest point of the CPU line of a 0 to 100 CPU chart at `value`.
+fn draw_a_cpu_point_at(value: f32) {
     let panel: Panel = serde_json::from_value(serde_json::json!({
         "id": "live-cpu", "title": "CPU", "unit": "%", "kind": "line",
-        "lines": [{"name": "CPU", "color": "#5794f2", "values": [10.0, 70.0]}],
+        "lines": [{"name": "CPU", "color": "#5794f2", "values": [10.0, value]}],
     }))
     .unwrap();
     let bounds = gpui::Bounds::new(
@@ -56,14 +81,10 @@ fn a_drawn_point_reads_as_the_value_it_was_drawn_at() {
         lower: 0,
         clock: None,
     };
-    let points = [10.0, 70.0].map(|value| RunPoint {
-        top: geometry.point(0, value),
+    let points = [10.0, value].map(|reading| RunPoint {
+        top: geometry.point(0, reading),
         bottom: geometry.point(0, 0.0),
     });
 
     remember(&panel, &panel.lines[0], &points, &geometry);
-
-    let drawn = value("live-cpu", "CPU").unwrap();
-    assert!((drawn - 70.0).abs() < 0.001, "{drawn}");
-    assert_eq!(value("live-cpu", "GPU"), None);
 }
