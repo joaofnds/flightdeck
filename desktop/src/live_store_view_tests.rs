@@ -1584,9 +1584,10 @@ mod when_the_store_wakes_the_page {
         let worker = Worker::start_from_store(recording.root.clone(), handle).unwrap();
         cx.update(|cx| super::super::install_store(store, cx));
         let page = cx.update(|cx| {
-            cx.new(|_| {
+            cx.new(|cx| {
                 let mut page = LiveDashboard::new(worker, "overview".into(), None);
-                page.wait_for_wakes();
+                // The test wakes the page itself, at the moment each test chooses.
+                page.wake_with(Box::new(|| {}), cx);
                 page
             })
         });

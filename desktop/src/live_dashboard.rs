@@ -556,11 +556,14 @@ impl LiveDashboard {
         }
     }
 
-    /// Looks for the store's View only after the store wakes the page, which it does each time
-    /// it leaves one, so the timer's ticks ask the store for nothing. The page looks at its next
-    /// tick all the same, since the store may have left a View before this.
-    pub(crate) fn wait_for_wakes(&mut self) {
-        self.mailbox_watch = store_view::MailboxWatch::FromWake { woken: true };
+    /// Has the app's store wake the page through `waker` each time it leaves a View, and from
+    /// then on looks for the store's View only after a wake, so the timer's ticks ask the store
+    /// for nothing. The page looks at its next tick all the same, since the store may have left
+    /// a View before this. Where the app runs no store, the page goes on looking at every tick.
+    pub(crate) fn wake_with(&mut self, waker: viewer::store::Waker, cx: &gpui::App) {
+        if store_view::wake_store_with(waker, cx) {
+            self.mailbox_watch = store_view::MailboxWatch::FromWake { woken: true };
+        }
     }
 
     /// Marks that the store left a View, which the next tick takes.
@@ -1572,7 +1575,6 @@ pub(crate) use store_view::store_activity;
 pub(crate) use store_view::store_query_handle;
 #[cfg(all(test, feature = "automation"))]
 pub(crate) use store_view::uninstall_store;
-pub(crate) use store_view::wake_store_with;
 
 #[cfg(test)]
 #[path = "live_input_tests.rs"]

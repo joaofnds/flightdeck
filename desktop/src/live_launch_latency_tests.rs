@@ -781,8 +781,9 @@ impl AppClock {
             thread.unpark();
         };
 
-        window.update(|_, cx| crate::live_dashboard::wake_store_with(Box::new(wake), cx));
-        dashboard.update(window, |dashboard, _| dashboard.wait_for_wakes());
+        dashboard.update(window, |dashboard, cx| {
+            dashboard.wake_with(Box::new(wake), cx);
+        });
         Self {
             tick: now + TICK_INTERVAL,
             quick_poll: None,

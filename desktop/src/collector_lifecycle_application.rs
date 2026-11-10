@@ -67,8 +67,9 @@ pub(super) fn start_timer(entity: &Entity<LiveDashboard>, cx: &mut App) -> Resul
         });
     })?;
     let signal = wake.signal();
-    crate::live_dashboard::wake_store_with(Box::new(move || signal.signal()), cx);
-    entity.update(cx, |page, _| page.wait_for_wakes());
+    entity.update(cx, |page, cx| {
+        page.wake_with(Box::new(move || signal.signal()), cx);
+    });
     let timer = Timer::start(move || {
         application.update(|cx| tick(&page, cx));
     })?;
