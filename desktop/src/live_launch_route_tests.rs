@@ -31,6 +31,74 @@ fn no_page_takes_in_a_publication_the_store_took_in() {
 }
 
 #[test]
+fn every_page_reads_a_chart_point_a_retained_second_of_each_chart_it_draws() {
+    // Goal: the check workflow fails when a page is handed more chart points than one a retained
+    // second for each chart it draws, which it builds and parses again on every publication, with
+    // no time or energy threshold. Method: once the Store holds both of the fixture's
+    // publications, read every page the app registers with the fixture's App selected, and count
+    // the points of its machine charts and of its App's history.
+    let mut harness = None;
+    Harness::setup(Input::Sealed(SourceLayout::Identity), &mut harness);
+    let mut harness = harness.unwrap();
+    // A page with no chart names no publication, so the wait is on the Store's View instead.
+    drop(harness.view());
+
+    let mut points = BTreeMap::new();
+    for (route, _) in ROUTES {
+        points.insert(
+            route,
+            chart_points(&harness.read_request(app_selected(route)).unwrap()),
+        );
+    }
+    harness.teardown();
+
+    assert_eq!(
+        points,
+        BTreeMap::from([
+            ("overview", 2),
+            ("cpu", 2),
+            ("apps", 4),
+            ("memory", 2),
+            ("gpu", 2),
+            ("storage", 2),
+            ("energy", 2),
+            ("network", 2),
+            ("battery", 2),
+            ("computer", 0),
+            ("self", 0),
+        ])
+    );
+}
+
+fn app_selected(route: &str) -> Request {
+    let mut request = request(route);
+    request.app = Some(crate::live_source::AppKey {
+        kind: "bundle".into(),
+        bytes_hex: crate::live_source::app_key_bytes_hex(source::APP),
+    });
+
+    request
+}
+
+/// The points of `reading`'s machine charts, recent and older, and of its App's history.
+fn chart_points(reading: &Snapshot) -> usize {
+    let history = reading.history.as_deref().unwrap_or(&Value::Null);
+
+    [
+        &reading.selection["trends"],
+        &reading.selection["earlier_trends"],
+        &history["points"],
+    ]
+    .into_iter()
+    .map(|series| match series {
+        Value::Null => 0,
+        Value::Array(points) => points.len(),
+        other => panic!("chart points that are not a list: {other}"),
+    })
+    .sum()
+}
+
+#[test]
 fn a_second_the_store_leaves_to_the_saved_minutes_takes_in_no_publication() {
     // Goal: the reader that answers a second the Store does not hold leaves the live Mac's
     // readings to the Store. Method: hold a second before any reading on the page of a CPU chart,
