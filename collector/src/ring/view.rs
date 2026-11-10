@@ -155,7 +155,8 @@ impl RingReader {
             .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
         super::binding::read(self.opened.mapping.words(), &self.opened.layout, admitted)
     }
-    /// The exact wire layout, including legacy2/3 versus optional identity4.
+    /// The version of the ring's layout, which tells the legacy and observed layouts from the
+    /// identity one. It does not say whether the event log is cut into segments.
     #[must_use]
     pub fn source_layout_version(&self) -> u64 {
         self.opened.layout.version
@@ -302,30 +303,13 @@ impl RingReader {
         identity: &mut super::IdentityObservation,
         buffers: &mut super::ProgramBuffers,
     ) -> io::Result<(FoundEvent, super::ProgramLengths)> {
+        let (number, record) = match self.opened.step_event()? {
+            super::EventStep::Found(found) => {
+                return Ok((found, super::ProgramLengths::default()));
+            }
+            super::EventStep::Record { number, record } => (number, record),
+        };
         let words = self.opened.mapping.words();
-        let newest = read_newest(&words[layout::HEADER_EVENT_NEWEST])?;
-        let held = super::event_log::held(words, &self.opened.layout, newest);
-        let number = match self.opened.events.step(held) {
-            super::Step::Nothing => {
-                return Ok((FoundEvent::Nothing, super::ProgramLengths::default()));
-            }
-            super::Step::Missed { first, end } => {
-                return Ok((
-                    FoundEvent::Missed { first, end },
-                    super::ProgramLengths::default(),
-                ));
-            }
-            super::Step::Read(number) => number,
-        };
-        let Some(record) = super::event_log::locate(words, &self.opened.layout, number)? else {
-            return Ok((
-                FoundEvent::Missed {
-                    first: number,
-                    end: number + 1,
-                },
-                super::ProgramLengths::default(),
-            ));
-        };
         let record = &words[record];
         let loaded = super::read_finished(record, layout::EVENT_SEQUENCE, number, || {
             let (tick, event) = super::load_event(&record[..layout::EVENT_WORDS])?;

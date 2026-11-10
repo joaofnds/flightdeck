@@ -11,7 +11,9 @@ use crate::u64_from_usize;
 
 /// Marks the start of a ring, so a reader never takes another object for one.
 pub(super) const MAGIC: u64 = u64::from_be_bytes(*b"FLTDRING");
-/// The layout this code writes and reads, which a change to the layout raises.
+/// The layouts this code writes and reads. A change to a layout raises its version, or sets a
+/// header word that a reader built before the change refuses, as `HEADER_EVENT_SEGMENT_EVENTS`
+/// does.
 pub(super) const LAYOUT_VERSION_LEGACY: u64 = 2;
 pub(super) const LAYOUT_VERSION_OBSERVED: u64 = 3;
 pub(super) const LAYOUT_VERSION: u64 = 5;

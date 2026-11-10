@@ -1,4 +1,5 @@
-//! Bounded lifecycle health, independent of diagnostics and canonical history.
+//! Bounded lifecycle health, independent of diagnostics and canonical history. A persister's
+//! record also says how far it has saved a run, which the collector's event log acts on.
 use std::ffi::{c_int, c_void};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -15,6 +16,9 @@ const BYTES: usize = WORDS * size_of::<AtomicU64>();
 const MAGIC: u64 = 0x6664_6374_726c_0002;
 const RECORD_WORDS: usize = 16;
 const RECORD_START: usize = 16;
+/// The values of a health record, which follow its sequence word.
+const RECORD_VALUE_COUNT: usize = 14;
+const _: () = assert!(RECORD_VALUE_COUNT < RECORD_WORDS);
 /// Zero until a stop is requested, then the awake clock at the request. A process compares it with
 /// its own start, so the words beside it name the boot that clock belongs to.
 const STOP_WORD: usize = 5;
@@ -60,6 +64,18 @@ pub struct Health {
     pub next_attempt_ns: u64,
     pub run: Identity,
     pub publication: u64,
+    /// One past the newest event of `run` a persister has saved, and zero where the role
+    /// reports none. A collector's event log lets go of the events before it.
+    pub events_end: u64,
+}
+
+/// What a persister has saved of a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Saved {
+    /// The newest publication saved.
+    pub publication: u64,
+    /// One past the newest event saved.
+    pub events_end: u64,
 }
 
 /// Why the controller last delayed or refused a worker launch.
@@ -279,7 +295,7 @@ impl Control {
             if !sequence.is_multiple_of(2) {
                 continue;
             }
-            let mut values = [0; 13];
+            let mut values = [0; RECORD_VALUE_COUNT];
             for (index, value) in values.iter_mut().enumerate() {
                 *value = self.word(base + index + 1).load(Ordering::SeqCst);
             }
@@ -344,6 +360,7 @@ impl Health {
             next_attempt_ns: 0,
             run: Identity([0; 2]),
             publication: 0,
+            events_end: 0,
         })
     }
 
@@ -354,7 +371,7 @@ impl Health {
         Ok(creation(self.pid)?.is_some_and(|creation| creation == self.creation))
     }
 
-    fn encode(&self) -> [u64; 13] {
+    fn encode(&self) -> [u64; RECORD_VALUE_COUNT] {
         [
             u64::from(self.pid.cast_unsigned()),
             self.creation.unique_id,
@@ -369,10 +386,11 @@ impl Health {
             self.publication,
             super::BUILD,
             self.failure.number(),
+            self.events_end,
         ]
     }
 
-    fn decode(values: &[u64; 13]) -> io::Result<Self> {
+    fn decode(values: &[u64; RECORD_VALUE_COUNT]) -> io::Result<Self> {
         if values[0] != 0 && values[11] != super::BUILD {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
@@ -405,6 +423,7 @@ impl Health {
             next_attempt_ns: values[7],
             run: Identity([values[8], values[9]]),
             publication: values[10],
+            events_end: values[13],
         })
     }
 }
@@ -436,6 +455,13 @@ impl Reporter {
         self.health.run = run;
         self.health.publication = publication;
         self.refresh()
+    }
+
+    /// Reports what a persister has saved of `run`, which it calls only once the save is
+    /// durable, since the collector's event log lets go of the events reported here.
+    pub fn update_saved(&mut self, state: State, run: Identity, saved: Saved) -> io::Result<()> {
+        self.health.events_end = saved.events_end;
+        self.update(state, run, saved.publication)
     }
 
     pub fn retry(
@@ -545,6 +571,7 @@ impl Default for Health {
             next_attempt_ns: 0,
             run: Identity([0; 2]),
             publication: 0,
+            events_end: 0,
         }
     }
 }
@@ -607,6 +634,33 @@ mod tests {
             assert!(health.alive().unwrap());
         });
         assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn reads_the_saved_tick_and_the_saved_events_end_a_persister_reported() {
+        // Goal: a reader of the control file learns how far a persister saved a run's ticks
+        // and how far it saved the run's events, each as the persister reported it.
+        // Method: report two ends that differ through one mapping and read the persister's
+        // record through another.
+        let directory = Directory::new();
+        let control = Control::create(&directory.0).unwrap();
+        let mut reporter = Reporter::new(control, Role::Persister).unwrap();
+        let reader = Control::open(&directory.0).unwrap();
+
+        reporter
+            .update_saved(
+                State::Running,
+                Identity([11, 12]),
+                Saved {
+                    publication: 7,
+                    events_end: 4_097,
+                },
+            )
+            .unwrap();
+
+        let health = reader.read(Role::Persister).unwrap();
+        assert_eq!(health.publication, 7);
+        assert_eq!(health.events_end, 4_097);
     }
 
     #[test]

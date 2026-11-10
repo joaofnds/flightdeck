@@ -7,8 +7,8 @@
 //!
 //! A log that numbers its records round the whole of its room writes every page of it in time,
 //! however few events its ticks hold, and memory the writer has written stays charged to it
-//! until it exits: 126 MB for the collector's log. A segmented log writes the segments it keeps
-//! and those its busiest ticks needed.
+//! until it exits: 126 MB for the collector's log. A segmented log writes the segments that the
+//! ticks in the ring and the events no reader had saved needed at their most.
 
 use std::io;
 use std::ops::Range;
@@ -20,13 +20,6 @@ use crate::u64_from_usize;
 /// The events a segment holds, where the log has room for at least as many. A segment of the
 /// collector's log is 196,608 bytes, twelve pages of 16 KiB.
 pub(super) const SEGMENT_EVENTS: u64 = 1_024;
-/// The segments the writer writes before it starts a span in a segment it wrote before, so the
-/// log goes on holding events of ticks the ring let go.
-const SEGMENTS_KEPT: u64 = 16;
-/// The events those segments hold, the most one tick holds.
-pub(super) const EVENTS_KEPT: u64 = SEGMENT_EVENTS * SEGMENTS_KEPT;
-const _: () = assert!(EVENTS_KEPT == 16_384);
-const _: () = assert!(crate::tracker::EVENTS_PER_TICK_MAX == 16_384);
 
 /// The words of a span's entry in the table: one more than the span, zero where the entry
 /// names no span, and then the span's segment.
@@ -58,13 +51,13 @@ impl Segments {
 
         let segment_events = SEGMENT_EVENTS.min(event_capacity);
         let segment_count = usize_from(event_capacity.div_ceil(segment_events)) + 1;
-        let records = segment_count * usize_from(segment_events);
+        let record_count = segment_count * usize_from(segment_events);
         Self {
             segment_events,
             segment_count,
             records_start,
             record_words,
-            table_start: records_start + records * record_words,
+            table_start: records_start + record_count * record_words,
         }
     }
 
@@ -100,7 +93,7 @@ impl Segments {
     }
 
     /// The first word of the entry of `span` in the table, from the ring's start.
-    fn entry(&self, span: u64) -> usize {
+    fn entry_start(&self, span: u64) -> usize {
         self.table_start + self.entry_index(span) * ENTRY_WORDS
     }
 
@@ -119,6 +112,8 @@ impl Segments {
 /// The writer's own account of the spans the log holds, kept apart from the table in the
 /// mapping, which another process can write, so the writer places events by its own work.
 pub(super) struct Placement {
+    /// How the log is cut, as the layout planned it.
+    log: Segments,
     /// The segment of each span the log holds, at the index of the span's entry in the table.
     segments: Vec<usize>,
     /// The oldest span the log holds.
@@ -130,11 +125,13 @@ pub(super) struct Placement {
 }
 
 impl Placement {
-    /// The placement of a log that holds no span yet and whose first event is `event_first`.
-    pub(super) fn new(log: &Segments, event_first: u64) -> Self {
+    /// The placement of a log cut as `log` that holds no span yet and whose first event is
+    /// `event_first`.
+    pub(super) fn new(log: Segments, event_first: u64) -> Self {
         let span = log.span(event_first);
         Self {
             segments: vec![0; log.segment_count],
+            log,
             span_oldest: span,
             span_end: span,
             unsaved_first: event_first,
@@ -146,6 +143,11 @@ impl Placement {
         self.unsaved_first = self.unsaved_first.max(unsaved_first);
     }
 
+    /// The first event no reader has saved.
+    pub(super) fn unsaved_first(&self) -> u64 {
+        self.unsaved_first
+    }
+
     /// The words of the record for event `number`, from the ring's start, starting its span in
     /// the table where it is the span's first. The writer places its events in order, and
     /// `held_first` is the first event of the oldest tick the ring holds, so no tick the ring
@@ -153,65 +155,64 @@ impl Placement {
     pub(super) fn place(
         &mut self,
         words: &[AtomicU64],
-        log: &Segments,
         number: u64,
         held_first: u64,
     ) -> Range<usize> {
         assert!(held_first <= number);
         assert!(self.unsaved_first <= number);
 
-        let span = log.span(number);
+        let span = self.log.span(number);
         // An event falls in the newest span or starts the one after it.
         assert!(span <= self.span_end);
         if span == self.span_end {
-            let segment = self.place_segment(words, log, log.span(held_first));
-            let entry = log.entry(span);
+            let segment = self.place_segment(words, self.log.span(held_first));
+            let entry = self.log.entry_start(span);
             // A reader takes an entry only where it names the span before and after it reads
             // the segment, so the span is stored last.
             words[entry + ENTRY_SPAN].store(0, Ordering::Release);
             words[entry + ENTRY_SEGMENT].store(u64_from_usize(segment), Ordering::Release);
             words[entry + ENTRY_SPAN].store(span + 1, Ordering::Release);
-            self.segments[log.entry_index(span)] = segment;
+            self.segments[self.log.entry_index(span)] = segment;
             self.span_end = span + 1;
         } else {
             assert_eq!(span + 1, self.span_end);
         }
 
-        log.record(self.segments[log.entry_index(span)], number)
+        self.log
+            .record(self.segments[self.log.entry_index(span)], number)
     }
 
     /// The segment for the span the writer starts next, which lets go of the oldest span where
     /// it takes that span's segment. No tick the ring holds has an event in a span before
     /// `span_held`.
-    fn place_segment(&mut self, words: &[AtomicU64], log: &Segments, span_held: u64) -> usize {
+    fn place_segment(&mut self, words: &[AtomicU64], span_held: u64) -> usize {
         // Each span the log holds has a segment of its own, and the writer took the segments
         // in order from the first, so the first segment it never wrote is their count.
         let span_count = usize_from(self.span_end - self.span_oldest);
-        assert!(span_count <= log.segment_count);
-
-        if span_count < usize_from(SEGMENTS_KEPT).min(log.segment_count) {
-            return span_count;
-        }
+        assert!(span_count <= self.log.segment_count);
 
         // The log lets go of its oldest span only where no tick the ring holds has an event in
-        // it, and then where a reader saved its events or no segment is left to take.
+        // it, and then where a reader saved its events or no segment is left to take. A log
+        // that holds no span counts the one it starts as its oldest, which is never before an
+        // event of a tick the ring holds, so it takes the first segment.
         let free = self.span_oldest < span_held;
-        let saved = self.span_oldest < log.span(self.unsaved_first);
-        let full = span_count == log.segment_count;
+        let saved = self.span_oldest < self.log.span(self.unsaved_first);
+        let full = span_count == self.log.segment_count;
         if free && (saved || full) {
-            let segment = self.segments[log.entry_index(self.span_oldest)];
+            let segment = self.segments[self.log.entry_index(self.span_oldest)];
             // Readers learn the span is gone before any word of its entry or its segment
             // changes, so a record they find changed is one they know to have missed.
             words[HEADER_EVENT_OLDEST]
-                .store(log.span_first(self.span_oldest + 1), Ordering::Release);
-            words[log.entry(self.span_oldest) + ENTRY_SPAN].store(0, Ordering::Release);
+                .store(self.log.span_first(self.span_oldest + 1), Ordering::Release);
+            words[self.log.entry_start(self.span_oldest) + ENTRY_SPAN].store(0, Ordering::Release);
             self.span_oldest += 1;
             return segment;
         }
 
-        // Every span holds an event of a tick the ring holds, and those events fit the log's
-        // room, which fills one segment fewer than the log has.
-        assert!(span_count < log.segment_count);
+        // The events of the ticks the ring holds fit the log's room, which fills one segment
+        // fewer than the log has. So a log with no segment left holds a span before those
+        // events, which is its oldest, and the branch above took it.
+        assert!(span_count < self.log.segment_count);
         span_count
     }
 }
@@ -244,7 +245,7 @@ pub(super) fn locate(
     };
 
     let span = log.span(number);
-    let entry = log.entry(span);
+    let entry = log.entry_start(span);
     let named = words[entry + ENTRY_SPAN].load(Ordering::Acquire);
     let segment = words[entry + ENTRY_SEGMENT].load(Ordering::Acquire);
     let named_after = words[entry + ENTRY_SPAN].load(Ordering::Acquire);
@@ -291,17 +292,21 @@ mod tests {
         (layout, words)
     }
 
+    /// The placement of the log of `layout`, whose first event is `event_first`.
+    fn placement(layout: &Layout, event_first: u64) -> Placement {
+        Placement::new(layout.event_segments.clone().unwrap(), event_first)
+    }
+
     #[test]
     fn places_the_events_of_one_span_in_one_segment_in_order() {
         // Goal: the events of a span lie side by side in its segment, each in a record of its
         // own, where a reader finds them.
         // Method: place the first three events of a log and compare where a reader locates them.
         let (layout, words) = ring(4 * SEGMENT_EVENTS);
-        let log = layout.event_segments.as_ref().unwrap();
-        let mut placement = Placement::new(log, 1);
+        let mut placement = placement(&layout, 1);
 
         let placed: Vec<_> = (1..=3)
-            .map(|number| placement.place(&words, log, number, 1))
+            .map(|number| placement.place(&words, number, 1))
             .collect();
 
         for (number, record) in (1..=3).zip(&placed) {
@@ -315,6 +320,21 @@ mod tests {
     }
 
     #[test]
+    fn starts_in_the_span_of_a_first_event_past_the_first_span() {
+        // Goal: a collector that starts again logs on from the event its last ring ended at,
+        // which is seldom the first of a span.
+        // Method: start a log at an event part-way into its third span, place that event and
+        // locate it.
+        let (layout, words) = ring(4 * SEGMENT_EVENTS);
+        let first = 2 * SEGMENT_EVENTS + 5;
+        let mut placement = placement(&layout, first);
+
+        let placed = placement.place(&words, first, first);
+
+        assert_eq!(Some(placed), locate(&words, &layout, first).unwrap());
+    }
+
+    #[test]
     fn a_span_the_log_let_go_is_not_located() {
         // Goal: a reader never takes a record of a later span for an event of a span the log
         // let go, although both spans share an entry of the table.
@@ -322,12 +342,11 @@ mod tests {
         // each the oldest a tick still holds, so the third finds no segment left to take and
         // starts its span in the first's segment and entry.
         let (layout, words) = ring(1);
-        let log = layout.event_segments.as_ref().unwrap();
-        let mut placement = Placement::new(log, 1);
-        let first = placement.place(&words, log, 1, 1);
-        placement.place(&words, log, 2, 2);
+        let mut placement = placement(&layout, 1);
+        let first = placement.place(&words, 1, 1);
+        placement.place(&words, 2, 2);
 
-        let third = placement.place(&words, log, 3, 3);
+        let third = placement.place(&words, 3, 3);
 
         assert_eq!(first, third);
         assert_eq!(None, locate(&words, &layout, 1).unwrap());
@@ -340,36 +359,51 @@ mod tests {
         // Goal: the log lets go of no event before a reader saved it while it has a segment it
         // never wrote, so a reader that stopped for a while finds the events the log had room
         // for.
-        // Method: place one event more than the segments the log keeps hold, each the oldest a
-        // tick still holds, with no event saved, and locate the first.
-        let (layout, words) = ring(2 * EVENTS_KEPT);
-        let log = layout.event_segments.as_ref().unwrap();
-        let mut placement = Placement::new(log, 1);
+        // Method: place the events of two spans and one more, each the oldest a tick still
+        // holds, with no event saved, and locate the first.
+        let (layout, words) = ring(4 * SEGMENT_EVENTS);
+        let mut placement = placement(&layout, 1);
 
-        for number in 1..=EVENTS_KEPT + 1 {
-            placement.place(&words, log, number, number);
+        for number in 1..=2 * SEGMENT_EVENTS + 1 {
+            placement.place(&words, number, number);
         }
 
         assert!(locate(&words, &layout, 1).unwrap().is_some());
-        assert_eq!(0, words[HEADER_EVENT_OLDEST].load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn keeps_a_saved_span_a_tick_the_ring_holds_has_an_event_in() {
+        // Goal: a reader of a tick the ring holds finds the tick's events, whether or not
+        // another reader saved them.
+        // Method: place the events of one span, the last of them the oldest a tick still holds,
+        // save them all, start the next span and locate that last event.
+        let (layout, words) = ring(4 * SEGMENT_EVENTS);
+        let mut placement = placement(&layout, 1);
+        for number in 1..=SEGMENT_EVENTS {
+            placement.place(&words, number, number);
+        }
+        placement.save(SEGMENT_EVENTS + 1);
+
+        placement.place(&words, SEGMENT_EVENTS + 1, SEGMENT_EVENTS);
+
+        assert!(locate(&words, &layout, SEGMENT_EVENTS).unwrap().is_some());
     }
 
     #[test]
     fn lets_go_of_a_span_a_reader_saved() {
         // Goal: the log starts a span in the segment of a span whose events a reader saved, so
-        // it writes no segment beyond those it keeps.
-        // Method: place the events the segments the log keeps hold, each the oldest a tick still
-        // holds, save them all, place one more and locate the first.
-        let (layout, words) = ring(2 * EVENTS_KEPT);
-        let log = layout.event_segments.as_ref().unwrap();
-        let mut placement = Placement::new(log, 1);
-        for number in 1..=EVENTS_KEPT {
-            placement.place(&words, log, number, number);
+        // it writes no segment it does not need.
+        // Method: place the events of one span, each the oldest a tick still holds, save them
+        // all, place one more and locate the first.
+        let (layout, words) = ring(4 * SEGMENT_EVENTS);
+        let mut placement = placement(&layout, 1);
+        for number in 1..=SEGMENT_EVENTS {
+            placement.place(&words, number, number);
         }
         let first = locate(&words, &layout, 1).unwrap();
-        placement.save(EVENTS_KEPT + 1);
+        placement.save(SEGMENT_EVENTS + 1);
 
-        let last = placement.place(&words, log, EVENTS_KEPT + 1, EVENTS_KEPT + 1);
+        let last = placement.place(&words, SEGMENT_EVENTS + 1, SEGMENT_EVENTS + 1);
 
         assert_eq!(first, Some(last));
         assert_eq!(None, locate(&words, &layout, 1).unwrap());
@@ -385,8 +419,9 @@ mod tests {
         // Method: name a segment one past the log's last in the entry of a placed event.
         let (layout, words) = ring(4 * SEGMENT_EVENTS);
         let log = layout.event_segments.as_ref().unwrap();
-        Placement::new(log, 1).place(&words, log, 1, 1);
-        words[log.entry(0) + ENTRY_SEGMENT].store(5, Ordering::Relaxed);
+        placement(&layout, 1).place(&words, 1, 1);
+        words[log.entry_start(0) + ENTRY_SEGMENT]
+            .store(u64_from_usize(log.segment_count), Ordering::Relaxed);
 
         let located = locate(&words, &layout, 1);
 
@@ -394,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn holds_no_event_older_than_the_header_or_the_writer_names() {
+    fn holds_no_event_past_the_newest_whatever_the_header_names() {
         // Goal: a header another program wrote never moves a reader past the newest event.
         // Method: name an oldest event far past the newest and ask what the log holds.
         let (layout, words) = ring(4 * SEGMENT_EVENTS);

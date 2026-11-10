@@ -240,8 +240,9 @@ fn run_paced_health(
     Ok(reporter.transpose()?)
 }
 
-/// Reports the newest publication saved. The collector's log lets go of the events of a
-/// publication reported here, so every event logged through it is saved before it is reported.
+/// Reports how far the newest run with a saved minute is saved. The collector's event log lets
+/// go of the events before the end reported here, so that end is the store's own frontier,
+/// which a seal moves only once its commit is durable.
 fn report_progress(
     health: &mut Option<collector::recording::control::Reporter>,
     recovery: &Recovery,
@@ -256,10 +257,13 @@ fn report_progress(
             let identity = state
                 .identity
                 .ok_or(crate::Error::Bound("committed run identity"))?;
-            health.update(
+            health.update_saved(
                 collector::recording::control::State::Running,
                 identity.run,
-                state.committed,
+                collector::recording::control::Saved {
+                    publication: state.committed,
+                    events_end: state.next_event,
+                },
             )?;
         } else {
             health.refresh()?;
@@ -444,6 +448,8 @@ struct Recovery {
 struct RunState {
     identity: Option<RunIdentity>,
     next_publication: u64,
+    /// The first event of the run that is not saved, which only the store's frontier and a
+    /// durable seal move, since `report_progress` reports it as saved up to here.
     next_event: u64,
     committed: u64,
     losses: Losses,

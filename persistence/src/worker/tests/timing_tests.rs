@@ -650,6 +650,18 @@ impl Scenario {
         );
     }
 
+    /// Publishes a tick that logged no event.
+    fn publish_quiet(&mut self, run_tick: u64) {
+        self.ring.publish_events(
+            run_tick,
+            &ObservationTimes {
+                continuous_ns: 1 + run_tick * 1_000_000_000,
+                ..self.times
+            },
+            &[],
+        );
+    }
+
     fn pass(&mut self) -> Result<Progress> {
         self.pass_retired(false)
     }
@@ -833,9 +845,22 @@ impl WaitingRing {
     }
 
     fn publish(&mut self, run_tick: u64, times: &ObservationTimes) {
+        let started = [Event::Start {
+            pid: 41,
+            coalition: None,
+        }];
+        self.publish_events(run_tick, times, &started);
+    }
+
+    /// Publishes a tick that logged `events`, at most one start of the process it reads.
+    fn publish_events(&mut self, run_tick: u64, times: &ObservationTimes, events: &[Event]) {
         let mut identity = IdentityObservation::EMPTY;
         publish_readable_identity_process(&mut self.0, &mut identity);
         identity.usage = collector::ring::UsageAvailability::Measured;
+        let event_identities = [IdentityObservation {
+            usage: collector::ring::UsageAvailability::NotApplicable,
+            ..identity
+        }];
         self.0
             .publish_with_disks(
                 &Readings {
@@ -849,19 +874,13 @@ impl WaitingRing {
                     processes_refused: 0,
                     processes_gone: 0,
                     coalitions: &[],
-                    events: &[Event::Start {
-                        pid: 41,
-                        coalition: None,
-                    }],
+                    events,
                     dropped: collector::ring::Dropped::default(),
                 },
                 Some(times),
                 &collector::ring::IdentityPublication {
                     processes: &[identity],
-                    events: &[IdentityObservation {
-                        usage: collector::ring::UsageAvailability::NotApplicable,
-                        ..identity
-                    }],
+                    events: &event_identities[..events.len()],
                 },
                 &collector::ring::SupplementalReadings {
                     battery: Some(&collector::battery::BatteryReading::default()),

@@ -226,21 +226,52 @@ fn run_control(
     }
 }
 
-/// The newest publication of the run `identity` names that the persister reports saved, or
-/// none where it reports another run or nothing this build can read, so that the ring's log
-/// keeps its events as it does with no persister.
+/// One past the newest event of the run `identity` names that the persister reports saved, and
+/// zero where it reports another run or nothing, so that the ring's log keeps its events as it
+/// does with no persister.
 fn run_collect_saved(
     control: &recording::control::Control,
     identity: Option<collector::ring::RunIdentity>,
-) -> Option<u64> {
-    let identity = identity?;
-    // A record caught mid-write reads whole on a later tick, and one another build wrote is no
-    // report this build can trust, so either reports nothing.
-    let Ok(health) = control.read(recording::control::Role::Persister) else {
-        return None;
+) -> u64 {
+    let Some(identity) = identity else {
+        return 0;
     };
 
-    (health.run == identity.run).then_some(health.publication)
+    let health = match control.read(recording::control::Role::Persister) {
+        Ok(health) => health,
+        // A record caught mid-write reads whole on a later tick.
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return 0,
+        Err(error) => {
+            diagnostics::error(format_args!(
+                "collector: persister record unread, so the event log lets go of nothing: {error}"
+            ));
+            return 0;
+        }
+    };
+    if health.run != identity.run {
+        return 0;
+    }
+
+    health.events_end
+}
+
+/// Reports the collector's health after a tick, and tells `ring` which of its events the
+/// persister reports saved.
+fn run_collect_report(
+    health: &mut recording::control::Reporter,
+    ring: &mut Writer,
+) -> io::Result<()> {
+    let run = ring
+        .identity()
+        .map_or(collector::ring::Identity([0; 2]), |identity| identity.run);
+    health.update(
+        recording::control::State::Running,
+        run,
+        ring.publication_newest(),
+    )?;
+    ring.mark_events_saved(run_collect_saved(health.control(), ring.identity()));
+
+    Ok(())
 }
 
 fn run_collect(
@@ -262,16 +293,7 @@ fn run_collect(
             out.begin();
         }
         let requested = if let Some(health) = health {
-            health.update(
-                recording::control::State::Running,
-                run.ring
-                    .identity()
-                    .map_or(collector::ring::Identity([0; 2]), |identity| identity.run),
-                run.ring.publication_newest(),
-            )?;
-            if let Some(publication) = run_collect_saved(health.control(), run.ring.identity()) {
-                run.ring.publications_saved(publication);
-            }
+            run_collect_report(health, &mut run.ring)?;
             health.control().stopping()
         } else {
             false
@@ -1012,7 +1034,11 @@ mod tests {
     use std::panic::AssertUnwindSafe;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use collector::ring::{Found, FoundEvent, Reader};
+    use collector::recording::control::{Control, Reporter, Role as Worker, Saved, State};
+    use collector::ring::{
+        Dropped, Found, FoundEvent, Identity, IdentityObservation, IdentityPublication, Reader,
+        Readings, RunIdentity,
+    };
 
     use super::*;
 
@@ -1219,7 +1245,7 @@ mod tests {
         recording::private::create_private_dir(&recording.root).unwrap();
         let _owner =
             recording::private::FileLock::try_lock(&recording.root.join("recorder.lock")).unwrap();
-        let control = recording::control::Control::create(&recording.root).unwrap();
+        let control = Control::create(&recording.root).unwrap();
         let options = Options {
             seconds: NonZeroU64::new(TICKS_PER_MINUTE),
             rescan_interval: DEFAULT_RESCAN_INTERVAL,
@@ -1239,10 +1265,11 @@ mod tests {
         )
         .unwrap();
         out.submit();
-        let mut health = Some(
-            recording::control::Reporter::new(control, recording::control::Role::Collector)
-                .unwrap(),
-        );
+        // A persister that reports this run saved, so the count covers a tick that takes its
+        // report into the ring.
+        let _persister =
+            persister_reporting(&recording.root, run.ring.identity().unwrap().run, u64::MAX);
+        let mut health = Some(Reporter::new(control, Worker::Collector).unwrap());
         let owner = owner::Owner::bind(None).unwrap();
         // The marker process belongs to the final missed-process diagnostic; make that
         // independent diagnostic unavailable so this measurement covers collection itself.
@@ -1262,35 +1289,157 @@ mod tests {
     }
 
     #[test]
-    fn takes_the_saved_publication_only_from_a_persister_of_the_same_run() {
-        // Goal: the collector tells its ring that events are saved only where the persister
-        // reports the ring's own run, so a persister still saving an earlier run lets go of none
-        // of this run's events.
-        // Method: report a saved publication for one run in the persister's record, and read it
-        // for that run, for another run and for a ring that names no run.
-        use collector::ring::{Identity, RunIdentity};
-        use recording::control::{Control, Reporter, Role as Worker, State};
-
+    fn takes_the_saved_events_end_a_persister_of_the_same_run_reports() {
+        // Goal: the collector takes the end of the saved events from the persister's record
+        // where the record names the ring's own run.
+        // Method: report what is saved of a run in the persister's record and read it for that
+        // run.
         let recording = TestRecording::new("savedrun");
-        recording::private::create_private_dir(&recording.root).unwrap();
-        let control = Control::create(&recording.root).unwrap();
-        let mut persister = Reporter::new(
-            Control::open_writable(&recording.root).unwrap(),
-            Worker::Persister,
-        )
-        .unwrap();
-        let run = |run| RunIdentity {
+        let (control, _persister) = control_reporting(&recording, Identity([3, 4]), 61);
+
+        assert_eq!(61, run_collect_saved(&control, Some(run_identity([3, 4]))));
+    }
+
+    #[test]
+    fn takes_no_saved_events_from_a_persister_of_another_run() {
+        // Goal: a persister still saving an earlier run lets go of none of this run's events.
+        // Method: report what is saved of one run in the persister's record and read it for
+        // another.
+        let recording = TestRecording::new("savedother");
+        let (control, _persister) = control_reporting(&recording, Identity([3, 4]), 61);
+
+        assert_eq!(0, run_collect_saved(&control, Some(run_identity([7, 8]))));
+    }
+
+    #[test]
+    fn takes_no_saved_events_for_a_ring_that_names_no_run() {
+        // Goal: a ring that names no run takes no report, since no record can name it.
+        // Method: report what is saved of a run in the persister's record and read it for a
+        // ring with no run.
+        let recording = TestRecording::new("savednone");
+        let (control, _persister) = control_reporting(&recording, Identity([3, 4]), 61);
+
+        assert_eq!(0, run_collect_saved(&control, None));
+    }
+
+    #[test]
+    fn tells_the_ring_which_events_the_persister_reports_saved() {
+        // Goal: each tick carries the persister's report into the ring, so the log starts over
+        // in a segment whose events are saved, where without the report it keeps them.
+        // Method: in a ring of one slot whose log has room for four ticks of a segment of events
+        // each, log two such ticks, report the first tick's events saved in the persister's
+        // record, run the tick's report, log one event more and read the oldest event the log
+        // holds.
+        let recording = TestRecording::new("savedring");
+        let (control, _persister) =
+            control_reporting(&recording, Identity([3, 4]), SEGMENT_EVENTS + 1);
+        let mut health = Reporter::new(control, Worker::Collector).unwrap();
+        let mut ring = events_ring(&recording, &run_identity([3, 4]));
+        publish_events(&mut ring, 1, SEGMENT_EVENTS);
+        publish_events(&mut ring, 2, SEGMENT_EVENTS);
+
+        run_collect_report(&mut health, &mut ring).unwrap();
+        publish_events(&mut ring, 3, 1);
+
+        let mut reader = Reader::open(&recording.ring.place.lock_path).unwrap();
+        assert!(matches!(
+            reader.read_event().unwrap(),
+            FoundEvent::Event { number, .. } if number == SEGMENT_EVENTS + 1
+        ));
+    }
+
+    /// The events one segment of a ring's event log holds.
+    const SEGMENT_EVENTS: u64 = 1_024;
+
+    fn run_identity(run: [u64; 2]) -> RunIdentity {
+        RunIdentity {
             recording: Identity([1, 2]),
             run: Identity(run),
             boot: Identity([5, 6]),
-        };
-        persister
-            .update(State::Running, Identity([3, 4]), 61)
-            .unwrap();
+        }
+    }
 
-        assert_eq!(Some(61), run_collect_saved(&control, Some(run([3, 4]))));
-        assert_eq!(None, run_collect_saved(&control, Some(run([7, 8]))));
-        assert_eq!(None, run_collect_saved(&control, None));
+    /// The control file of `recording`, with a persister that reports the events of `run`
+    /// before `events_end` saved.
+    fn control_reporting(
+        recording: &TestRecording,
+        run: Identity,
+        events_end: u64,
+    ) -> (Control, Reporter) {
+        recording::private::create_private_dir(&recording.root).unwrap();
+        let control = Control::create(&recording.root).unwrap();
+        let persister = persister_reporting(&recording.root, run, events_end);
+        (control, persister)
+    }
+
+    /// A persister of the recording at `root`, whose control file exists, that reports the
+    /// events of `run` before `events_end` saved.
+    fn persister_reporting(root: &Path, run: Identity, events_end: u64) -> Reporter {
+        let mut persister =
+            Reporter::new(Control::open_writable(root).unwrap(), Worker::Persister).unwrap();
+        let saved = Saved {
+            publication: 1,
+            events_end,
+        };
+        persister.update_saved(State::Running, run, saved).unwrap();
+        persister
+    }
+
+    /// A ring of one slot for the run `identity` names, whose log has room for four segments of
+    /// events.
+    fn events_ring(recording: &TestRecording, identity: &RunIdentity) -> Writer {
+        let shape = Shape {
+            slot_count: 1,
+            cpu_capacity: 1,
+            interface_capacity: 1,
+            core_capacity: 1,
+            state_capacity: 1,
+            fan_capacity: 1,
+            process_capacity: 1,
+            coalition_capacity: 1,
+            event_capacity: 4 * SEGMENT_EVENTS,
+        };
+        Writer::create_with_identity(
+            &recording.ring.place,
+            shape,
+            DictionaryCapacity::default(),
+            identity,
+            1,
+        )
+        .unwrap()
+    }
+
+    /// Publishes a tick that logs `event_count` events.
+    fn publish_events(ring: &mut Writer, run_tick: u64, event_count: u64) {
+        let event_count = usize::try_from(event_count).unwrap();
+        let events: Vec<Event> = (0..event_count).map(|_| Event::Exec { pid: 7 }).collect();
+        let identities = vec![
+            IdentityObservation {
+                pid: 7,
+                ..IdentityObservation::EMPTY
+            };
+            event_count
+        ];
+        let readings = Readings {
+            run_tick,
+            cpus: &[],
+            memory: &collector::machine::Memory::default(),
+            interfaces: &[],
+            ioreport: None,
+            smc: None,
+            processes: &[],
+            processes_refused: 0,
+            processes_gone: 0,
+            coalitions: &[],
+            events: &events,
+            dropped: Dropped::default(),
+        };
+        let published = IdentityPublication {
+            processes: &[],
+            events: &identities,
+        };
+        ring.publish_with_identity(&readings, None, &published)
+            .unwrap();
     }
 
     #[test]

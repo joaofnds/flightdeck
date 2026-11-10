@@ -102,25 +102,86 @@ fn the_event_after_the_last_sealed_observation_commits_without_an_extra_minute()
 }
 
 #[test]
-fn the_publication_reported_saved_has_every_event_through_it_saved() {
-    // Goal: every event logged through the publication the persister reports saved is saved
-    // with it, since the collector's log lets go of the events of a publication reported saved.
-    // Method: seal a minute of three ticks that each log one event, so an event's number is its
-    // publication's, and compare the publication reported with where the saved events end.
-    let mut source = Scenario::new();
-    for tick in [0, 1, 2, 60] {
-        source.publish(tick);
-    }
+fn reports_the_end_of_the_events_a_sealed_minute_saved() {
+    // Goal: the persister reports saved the events its sealed minute holds and none after
+    // them, since the collector's event log lets go of the events before the end reported.
+    // Method: seal a minute of three ticks of which one logged an event, so the events end
+    // where no count of ticks does, report progress into a control file and compare the
+    // persister's record with the saved minute.
+    let mut source = sealed_minute();
 
-    assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+    let reported = reported_progress(&mut source);
 
     let saved = source
         .store
         .saved_newest(&source.registered.identity)
         .unwrap()
         .unwrap();
-    assert_eq!(source.state.committed, 3);
-    assert_eq!(saved.events_end, source.state.committed + 1);
+    assert_eq!(source.registered.identity.run, reported.run);
+    assert_eq!(saved.publication_end, reported.publication + 1);
+    assert_eq!(saved.events_end, reported.events_end);
+}
+
+#[test]
+fn reports_the_same_end_of_saved_events_when_it_starts_again() {
+    // Goal: a persister that starts again reports saved the events the recording holds and
+    // none after them, although it sealed nothing itself.
+    // Method: seal a minute, forget the run's state as a new process does, pass again with
+    // nothing more to seal, and compare the persister's record with the saved minute.
+    let mut source = sealed_minute();
+    source.state = RunState::default();
+    assert!(matches!(source.pass().unwrap(), Progress::Waiting));
+
+    let reported = reported_progress(&mut source);
+
+    let saved = source
+        .store
+        .saved_newest(&source.registered.identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.publication_end, reported.publication + 1);
+    assert_eq!(saved.events_end, reported.events_end);
+}
+
+/// A source with one sealed minute of three ticks, of which only the first logged an event,
+/// and a fourth tick that closed the minute.
+fn sealed_minute() -> Scenario {
+    let mut source = Scenario::new();
+    source.publish(0);
+    source.publish_quiet(1);
+    source.publish_quiet(2);
+    source.publish(60);
+    assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+    source
+}
+
+/// The persister's record after it reports the progress of the run of `source`.
+fn reported_progress(source: &mut Scenario) -> collector::recording::control::Health {
+    use collector::recording::control::{Control, Reporter, Role};
+    // The store of `source` holds its recording's persister lock, which refuses a new control
+    // file, so the record is written beside a recording of its own.
+    let root = Directory::new();
+    let control = Control::create(&root.0).unwrap();
+    let mut health = Some(Reporter::new(control, Role::Persister).unwrap());
+    // The worker names the run of a state when it gives the run that state, which a scenario
+    // that passes one state by hand leaves out.
+    let state = RunState {
+        identity: Some(source.registered.identity),
+        ..std::mem::take(&mut source.state)
+    };
+    let recovery = Recovery {
+        states: [state, RunState::default()],
+        ..Recovery::default()
+    };
+
+    report_progress(&mut health, &recovery).unwrap();
+
+    health
+        .as_ref()
+        .unwrap()
+        .control()
+        .read(Role::Persister)
+        .unwrap()
 }
 
 fn withhold_publication(source: &mut Scenario, published: u64, visible: u64) {

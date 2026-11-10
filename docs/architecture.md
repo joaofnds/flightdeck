@@ -78,10 +78,10 @@ with explicit counters. Slow diagnostics therefore do not control the recording'
 The recorder holds only the controller lock. Workers hold their own acquisition and commit
 locks and publish separate fixed-size health records with native process creation identity.
 The private mapping also binds the recording, cohort authority and source compatibility
-fingerprint. Durable health advances after canonical commit synchronization. The collector
-reads the publication the persister's record reports saved, and its event log keeps every
-event the persister has not saved while it has room ([`collector.md`](collector.md), The
-ring). Recorder loss
+fingerprint. Durable health advances after canonical commit synchronization. The persister's
+record also names the end of the run's events it has saved. The collector reads that end each
+tick, and its event log keeps every event the record has not reported saved while it has room
+([`collector.md`](collector.md), The ring). Recorder loss
 leaves healthy workers running; a relaunch verifies survivors before adopting them.
 A persister operating failure receives bounded retries while acquisition continues.
 

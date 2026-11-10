@@ -24,6 +24,7 @@ mod wake;
 
 use std::fs::File;
 use std::io;
+use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
@@ -694,7 +695,7 @@ impl Writer {
         let slot_events_first = vec![header.event_first; usize_from(layout.shape.slot_count)];
         let event_placement = layout
             .event_segments
-            .as_ref()
+            .clone()
             .map(|log| event_log::Placement::new(log, header.event_first));
 
         Ok(Self {
@@ -736,34 +737,25 @@ impl Writer {
         usize_from(oldest_first + capacity - 1 - self.event)
     }
 
-    /// Takes a reader's report that it saved every publication through `publication` and their
-    /// events with them, so a segmented log may start a span where it kept events of those. A
-    /// report of a publication the ring does not hold tells the writer nothing, since another
-    /// program wrote the report and the writer no longer knows where that publication's events
-    /// ended. A log that numbers its records has no use for the report.
-    pub fn publications_saved(&mut self, publication: u64) {
+    /// Takes a reader's report that it saved every event before `events_end`, so a segmented
+    /// log may start a span in the segment of a span whose events all come before it. Another
+    /// program wrote the report, so it counts only up to the events the writer has logged. A
+    /// log that numbers its records has no use for the report.
+    pub fn mark_events_saved(&mut self, events_end: u64) {
         let Some(placement) = &mut self.event_placement else {
             return;
         };
-        if publication == 0 {
-            return;
-        }
 
-        if publication > self.publication {
-            return;
-        }
+        placement.save(events_end.min(self.event + 1));
+    }
 
-        if self.publication - publication >= self.layout.shape.slot_count {
-            return;
-        }
-
-        // The events of a tick end where those of the next begin.
-        let unsaved_first = if publication == self.publication {
-            self.event + 1
-        } else {
-            self.slot_events_first[self.layout.slot_index(publication + 1)]
-        };
-        placement.save(unsaved_first);
+    /// The first event no reader has reported saved, or none where the log numbers its
+    /// records and so keeps no account of it.
+    #[must_use]
+    pub fn events_unsaved_first(&self) -> Option<u64> {
+        self.event_placement
+            .as_ref()
+            .map(event_log::Placement::unsaved_first)
     }
 
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
@@ -879,9 +871,9 @@ impl Writer {
     }
 }
 
-/// Where the writer logs the events of one publication.
+/// The log as a publication finds it, before its events are written.
 struct EventsLogged<'writer> {
-    /// The newest event written before them.
+    /// The newest event written.
     newest: u64,
     /// The first event of the oldest tick the ring holds while they are written.
     held_first: u64,
@@ -900,11 +892,9 @@ fn publish_inner_events(
     let mut number = logged.newest;
     for (index, event) in readings.events.iter().enumerate() {
         number += 1;
-        let record = match (&layout.event_segments, logged.placement.as_deref_mut()) {
-            (Some(log), Some(placement)) => placement.place(words, log, number, logged.held_first),
-            (None, None) => layout.event(number),
-            // A writer makes its placement from its layout's segments.
-            _ => unreachable!("a segmented log without its placement, or the reverse"),
+        let record = match logged.placement.as_deref_mut() {
+            Some(placement) => placement.place(words, number, logged.held_first),
+            None => layout.event(number),
         };
         let record = &words[record];
         record[EVENT_SEQUENCE].store(2 * number - 1, Ordering::Relaxed);
@@ -1155,22 +1145,35 @@ impl Opened {
         }
     }
 
-    fn read_event(&mut self) -> io::Result<FoundEvent> {
+    /// Steps to the next event the reader has not read, and finds its record.
+    fn step_event(&mut self) -> io::Result<EventStep> {
         let words = self.mapping.words();
         let newest = read_newest(&words[HEADER_EVENT_NEWEST])?;
         let held = event_log::held(words, &self.layout, newest);
         let number = match self.events.step(held) {
-            Step::Nothing => return Ok(FoundEvent::Nothing),
-            Step::Missed { first, end } => return Ok(FoundEvent::Missed { first, end }),
+            Step::Nothing => return Ok(EventStep::Found(FoundEvent::Nothing)),
+            Step::Missed { first, end } => {
+                return Ok(EventStep::Found(FoundEvent::Missed { first, end }));
+            }
             Step::Read(number) => number,
         };
+        // The writer may let go of the event's span after the reader learned what the log held.
         let Some(record) = event_log::locate(words, &self.layout, number)? else {
-            return Ok(FoundEvent::Missed {
+            return Ok(EventStep::Found(FoundEvent::Missed {
                 first: number,
                 end: number + 1,
-            });
+            }));
         };
-        let record = &words[record];
+
+        Ok(EventStep::Record { number, record })
+    }
+
+    fn read_event(&mut self) -> io::Result<FoundEvent> {
+        let (number, record) = match self.step_event()? {
+            EventStep::Found(found) => return Ok(found),
+            EventStep::Record { number, record } => (number, record),
+        };
+        let record = &self.mapping.words()[record];
         match read_finished(record, EVENT_SEQUENCE, number, || {
             load_event(&record[..layout::EVENT_WORDS])
         })? {
@@ -1451,6 +1454,14 @@ struct Numbering {
 fn number_past_max(number: u64) -> io::Error {
     assert!(number > NUMBER_MAX);
     io::Error::from(io::ErrorKind::InvalidData)
+}
+
+/// What a reader's step to its next event found.
+enum EventStep {
+    /// No event to read, or events the log let go of.
+    Found(FoundEvent),
+    /// The words of the record that holds event `number`, from the ring's start.
+    Record { number: u64, record: Range<usize> },
 }
 
 /// What a reader does next with a cursor's numbers.

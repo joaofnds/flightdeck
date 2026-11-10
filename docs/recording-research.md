@@ -512,18 +512,22 @@ identity-event log has room for 655,360 events and reserves
 their table (`collector.md`, The ring). That room is above the 584,210 events the busiest 121
 ticks in a row held in this M5 Pro's recording, measured on 2026-10-30
 (`backlog/evidence/TASK-102/README.md`), since the log holds the events of the 120 ticks in
-the ring while the writer logs the next tick's. A full native ring measured 773,931,008 bytes of shared memory on 2026-10-30, about
-738 MiB of virtual address space, and 1,025,589,248 bytes with 0.2.6's log of
-120 × 16,384 records; other capacity and format combinations have other sizes.
+the ring while the writer logs the next tick's. A full native ring measured 773,931,008 bytes
+of shared memory on 2026-10-30, about 738 MiB of virtual address space, and 1,025,589,248
+bytes with 0.2.6's log of 120 × 16,384 records; other capacity and format combinations have
+other sizes.
 
 The writer reuses the segment of its oldest events once the persister reports them saved or
 the log's room is full, and overwrites only events of ticks the ring no longer holds. A tick
 logs no more events than the log has room for without overwriting an event of a tick the ring
 holds, and the collector drops at admission any event past that room and counts it by kind.
 At the historical 43 to 418 events a second measured on 2026-10-15, 121 ticks hold 5,203 to
-50,578 events, so with a persister that keeps up the writer writes 16 to 51 segments, 3.1 to
-10.0 MB, where a writer that advanced through the whole region wrote all 120 MiB of it in
-about 4.2 hours to 26 minutes, as this one does while no persister reports. That arithmetic
+50,578 events, which lie in 6 to 50 segments, so with a persister that keeps up the writer
+writes one more than those, 7 to 51 segments or 1.4 to 10.0 MB, where a writer that advanced
+through the whole region wrote all 120 MiB of it in about 4.2 hours to 26 minutes, as this
+one does while no persister reports. The measured footprints agree with that count: at 5 and
+at 100 events a tick the writer stood 2 and 13 segments, and two pages, above the same ring
+logging no event (`collector.md`, The ring). That arithmetic
 describes pages eventually touched, not simultaneous residency: backing can remain resident,
 become compressed or be swapped. The registry can retain two rings after a restart. A kernel
 panic or power loss can lose unsealed readings, as decided.
@@ -743,7 +747,13 @@ only the user read them, and arguments may need redacting before they are kept.
 Readers map the ring read-only, so no reader can corrupt it. While publishing, the
 writer waits for no acknowledgment and wakes readers with a broadcast, so no reader
 can stall it. The ring's event log overwrites only events of ticks the ring no longer
-holds, and a reader that fell behind learns what it missed from the gap. The writer holds
+holds, and a reader that fell behind learns what it missed from the gap. Among those events
+the log first overwrites the ones the persister's health record reports saved. That record
+lies in the recording's control file, which only the user can write, so a process of the
+same user that writes a false report there makes the log overwrite events the persister has
+not saved once the ring no longer holds their ticks. It cannot make the log overwrite an
+event of a tick the ring holds, and a reader that asks for an event the log overwrote learns
+that it missed it. The writer holds
 a startup exclusion lock file, and a process of the same user that takes that lock keeps a
 new collector from starting. Public collector startup enters the recorder, whose
 `recorder.lock` permits one controller. Acquisition and persistence retain their own

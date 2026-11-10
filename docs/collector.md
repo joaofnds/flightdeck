@@ -190,16 +190,18 @@ for as long as the ring holds the tick. A reader that reads a tick's events afte
 replaced the tick learns which of them it missed.
 
 The log is cut into segments of 1,024 records, and a table in the ring names the segment that
-holds each run of 1,024 event numbers. The writer starts the next run in the segment of the
-oldest run it holds once no tick the ring holds has an event there and the persister has
-saved that run's events. Each tick the collector reads the newest publication the persister
-reports saved in its health record (`architecture.md`), and takes the report only where it
-names this run and a tick the ring still holds. Otherwise the writer takes a segment it has not
-written, as it always does while it has written fewer than 16. So a burst takes the segments
-it needs, and while the persister is down or behind, the log keeps every event until its room
-is full, as a log that numbers its records round its room does. With its room full the writer
-starts the next run in the oldest run's segment whether or not the persister saved it, and a
-reader that asks for an event of that run learns that it missed it.
+holds each span of 1,024 event numbers. The writer starts the next span in the segment of the
+oldest span it holds once no tick the ring holds has an event there and the persister has
+saved that span's events. The persister reports the end of the events it has saved in its
+health record (`architecture.md`), and moves that end only once the minute that holds the
+events is durable. Each tick the collector reads the report and takes it only where it names
+the collector's own run. Otherwise the writer takes a segment it has not written. So a burst
+takes the segments it needs, and while the persister is down or behind, the log keeps every
+event until its room is full, as a log that numbers its records round its room does. With its
+room full the writer starts the next span in the oldest span's segment whether or not the
+persister saved it, and a reader that asks for an event of that span learns that it missed it.
+The writer gives no segment back. After a burst, or after the persister was down, it goes on
+writing round the segments it has written, though it needs fewer.
 
 The ring is sized when it is made for every process and coalition the collector's limits
 allow. Its exact size depends on those capacities and its format. On this M5 Pro on
@@ -217,19 +219,23 @@ in the ring while the writer logs the next tick's.
 The writer writes a segment only when it needs one, because macOS charges the collector for
 every page of the ring it has written until it exits. A log that numbers its records round
 the whole of its room writes all of it in time, however few events a tick holds. With a ring
-of the collector's slots and event room and no process rows, on this M5 Pro on 2026-11-10,
-1,400,000 events at 100 a tick left the writer's physical footprint 127.2 MB above its start
-under that numbering and 4.5 MB above it with segments and each minute reported saved six
-ticks after it ended. A burst of 3,000 events a tick for 121 ticks then raised the segmented
-log's figure to 71.1 MB, where it stayed through another 1,400,000 quiet events: the log goes
-on using the segments its busiest 121 ticks in a row needed until the collector restarts.
-With no minute reported saved, the segmented log's figure was 127.4 MB, which is 212,992
-bytes above the numbered log's, for the one segment more and the table. Virtual reservation,
-touched backing, resident memory, physical footprint and compressed or swapped pages are
-different quantities; touching every page does not prove they all remain resident together.
+of the collector's slots and event room and no process rows, on this M5 Pro on 2026-11-11,
+1,400,000 events left the writer's physical footprint 127.2 MB above its start under that
+numbering, at 5 events a tick and at 100. With segments, and each minute's events reported
+saved six ticks after the minute ended, they left it 1.8 MB above its start at 5 events a
+tick and 3.9 MB at 100, where the 120 ticks in the ring hold 600 and 12,000 events, against
+1.3 MB for the same ring logging no event. A burst of 3,000 events a tick for 121 ticks then
+raised the segmented log's figure to 71.2 MB, where it stayed through another 1,400,000 quiet
+events: the log goes on using the segments its busiest 121 ticks in a row needed until the
+collector restarts. With nothing reported saved, the segmented log's figure was 127.4 MB,
+which is 229,376 bytes above the numbered log's, of which the one segment more and the table
+are 212,992. Virtual reservation, touched backing, resident memory, physical footprint and
+compressed or swapped pages are different quantities; touching every page does not prove they
+all remain resident together.
 
 The ring's name carries 60 random bits written only to the lock file, so another user cannot
-guess it (Security). The lock file also stops a second collector from writing the same ring.
+guess it (`recording-research.md`, Security). The lock file also stops a second collector from
+writing the same ring.
 
 ## The persister and the recording
 
@@ -538,7 +544,8 @@ Without root, about a third of processes, those of other users such as `launchd`
 and part of their usage through coalition totals. A ring stays in memory or swap after its
 collector exits, and the registry keeps at most the active ring and one earlier one. A lock
 file lost or rewritten by another program makes the next collector name its rings afresh, and
-the rings named under the old lock file stay until the Mac restarts (Security).
+the rings named under the old lock file stay until the Mac restarts (`recording-research.md`,
+Security).
 
 The retention period is one day unless set otherwise, in Settings or, for a recorder run without
 the app, in `retention/period` inside the recording, a file holding a whole number of seconds from

@@ -816,8 +816,8 @@ fn inspect_source_header(words: &[std::sync::atomic::AtomicU64], profile: u8) {
     let events = if value(38) == 0 {
         value(16) * value(22)
     } else {
-        let segments = value(16).div_ceil(value(38)) + 1;
-        segments * value(38) * value(22) + segments * 2
+        let segment_count = value(16).div_ceil(value(38)) + 1;
+        segment_count * value(38) * value(22) + segment_count * 2
     };
     let mut tail = 44
         + value(8) * slot
