@@ -49,8 +49,8 @@ pub use object::{
 };
 use object::{
     LockedName, Mapping, NUMBER_MAX, PROT_READ, PROT_WRITE, RingNames, create_lock, create_object,
-    create_previous, create_unlink, create_unlink_older, open_lock_file, open_ring, place_for_user,
-    ring_name,
+    create_previous, create_unlink, create_unlink_older, open_lock_file, open_ring,
+    open_ring_object, place_for_user, ring_name,
 };
 pub use system::{GPU_NS_MAX, SystemPublication, SystemSnapshot};
 pub use tick::{Dropped, Readings, Tick};
@@ -968,6 +968,8 @@ pub struct Reader {
 struct Opened {
     immutable: Option<[u64; 64]>,
     name: LockedName,
+    /// The ring's object, which the reader maps again to give back the pages it has read.
+    object: std::os::fd::OwnedFd,
     mapping: Mapping,
     publications: Cursor,
     run_start_ns: u64,
@@ -1006,7 +1008,7 @@ impl Opened {
     }
 
     fn open_name(name: LockedName) -> io::Result<Opened> {
-        let (mapping, layout) = open_ring(name.as_str())?;
+        let (mapping, layout, object) = open_ring_object(name.as_str())?;
         let words = mapping.words();
         let first = words[HEADER_PUBLICATION_FIRST].load(Ordering::Relaxed);
         let newest = words[HEADER_PUBLICATION_NEWEST].load(Ordering::Relaxed);
@@ -1035,10 +1037,21 @@ impl Opened {
             publications: Cursor::new(first, layout.publications_held(newest)),
             run_start_ns,
             events,
+            object,
             mapping,
             layout,
             reference_owner: next_reference_owner()?,
         })
+    }
+
+    /// Maps the ring again and unmaps the mapping this reader read through. macOS charges a
+    /// process for every page of a ring it has read for as long as the page stays mapped, so
+    /// a reader that copies a minute of ticks out of the ring would otherwise be charged for
+    /// that minute twice. A mapping macOS refuses leaves the reader the one it has.
+    fn release_pages(&mut self) -> io::Result<()> {
+        self.mapping = self.mapping.read_again(&self.object)?;
+
+        Ok(())
     }
 
     fn read_into(&mut self, tick: &mut Tick) -> io::Result<Found> {
@@ -1807,6 +1820,9 @@ mod event_log_tests;
 
 #[cfg(test)]
 mod disks_tests;
+
+#[cfg(test)]
+mod page_release_tests;
 
 #[cfg(test)]
 mod system_tests;

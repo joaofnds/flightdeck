@@ -287,13 +287,13 @@ fn coherent_timing_does_not_validate_supplemental_payload() {
     );
 }
 
-struct Source {
-    writer: Writer,
-    place: Place,
+pub(super) struct Source {
+    pub(super) writer: Writer,
+    pub(super) place: Place,
 }
 
 impl Source {
-    fn new(version: u64) -> Self {
+    pub(super) fn new(version: u64) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let place = Place {
             lock_path: std::env::temp_dir().join(format!(
@@ -339,7 +339,7 @@ impl Source {
         Self { writer, place }
     }
 
-    fn publish(&mut self, run_tick: u64, times: Option<&ObservationTimes>) {
+    pub(super) fn publish(&mut self, run_tick: u64, times: Option<&ObservationTimes>) {
         if self.writer.layout.version == 2 {
             self.publish_legacy(run_tick);
             return;

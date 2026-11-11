@@ -51,6 +51,9 @@ impl Staging {
                 }
 
                 self.read_publication(reader, tick, publication, losses)?;
+                // The tick is now in the window, and its pages of the ring would stay charged
+                // to this process beside that copy until the window is sealed.
+                reader.release_pages()?;
                 losses.publications += self.publications_pending;
                 self.publications_pending = 0;
 

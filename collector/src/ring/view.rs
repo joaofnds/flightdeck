@@ -87,6 +87,13 @@ impl RingReader {
         Ok(())
     }
 
+    /// Gives back the pages of the ring this reader has read, which macOS charges to it until
+    /// it does. The reader reads on as before, and reads a page again from the ring where it
+    /// needs one again.
+    pub fn release_pages(&mut self) -> io::Result<()> {
+        self.opened.release_pages()
+    }
+
     /// The way another thread ends this reader's `wait`.
     pub fn waker(&self) -> io::Result<RingWaker> {
         let (mapping, _layout) = open_ring(self.name())?;

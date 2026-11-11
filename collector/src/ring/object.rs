@@ -187,6 +187,11 @@ impl Mapping {
     pub(super) fn words(&self) -> &[AtomicU64] {
         unsafe { std::slice::from_raw_parts(self.address.cast::<AtomicU64>(), self.word_count) }
     }
+
+    /// Another mapping to read the same words of `object`, the object this one maps.
+    pub(super) fn read_again(&self, object: &OwnedFd) -> io::Result<Self> {
+        Self::new(object, self.word_count, PROT_READ)
+    }
 }
 
 impl Drop for Mapping {
@@ -613,6 +618,14 @@ fn create_unlink_older_holds_publications(name: &str, generation: u64) -> bool {
 /// Maps the header and then the whole of the ring `name`, after checking that this user owns
 /// it and nobody may write it.
 pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
+    let (mapping, layout, _object) = open_ring_object(name)?;
+
+    Ok((mapping, layout))
+}
+
+/// Opens the ring `name` as `open_ring` does, and returns the object with its mapping, for a
+/// reader that maps the ring again.
+pub(super) fn open_ring_object(name: &str) -> io::Result<(Mapping, Layout, OwnedFd)> {
     let mut buffer = [0; PSHMNAMLEN + 1];
     let name = open_ring_name(name, &mut buffer)?;
     let object = unsafe { shm_open(name.as_ptr(), O_RDONLY) };
@@ -672,7 +685,7 @@ pub(super) fn open_ring(name: &str) -> io::Result<(Mapping, Layout)> {
             return Err(io::Error::from(io::ErrorKind::InvalidData));
         }
     }
-    Ok((mapping, layout))
+    Ok((mapping, layout, object))
 }
 
 fn open_ring_battery(
