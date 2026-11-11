@@ -463,7 +463,7 @@ impl Reporter {
     /// Reports what a persister has saved of `run`, which it calls only once the save is
     /// durable, since the collector's event log lets go of the events reported here.
     pub fn update_saved(&mut self, state: State, run: Identity, saved: Saved) -> io::Result<()> {
-        assert!(self.role == Role::Persister);
+        assert_eq!(self.role, Role::Persister);
 
         self.update_run(state, run, saved)
     }
