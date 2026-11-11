@@ -9,7 +9,7 @@ use model::catalog;
 use crate::schema::{TABLES, Table};
 use crate::{Error, Result, Window};
 
-mod bounds;
+pub(crate) mod bounds;
 mod machine;
 pub(crate) mod metric_projection;
 mod table_writer;

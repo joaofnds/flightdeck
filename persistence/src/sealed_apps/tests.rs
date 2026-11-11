@@ -210,6 +210,43 @@ fn refuses_the_parts_of_a_window_of_more_rows_than_the_table_keeps() {
 }
 
 #[test]
+fn holds_no_process_of_a_window_whose_processes_alone_overfill_the_parts() {
+    // Goal: a window too large for the parts table costs the persister none of the memory its
+    // parts would take, since a Mac that runs that many processes has the least to spare.
+    // Method: read a window of two ticks of two processes with a table that keeps five rows,
+    // which the first tick alone fits and the two together do not, and look at what it held.
+    let mut window = legacy_window(0);
+    stage_legacy(&mut window, 0, &[process(3, 30), process(4, 40)], &[]);
+    stage_legacy(&mut window, 1, &[process(3, 31), process(4, 41)], &[]);
+    let mut state = state();
+    state.window.parts_rows_max = 5;
+
+    read(&mut state, &window).unwrap();
+
+    assert_eq!(state.window.processes.len(), 0);
+    let rows = super::parts::encode_rows(&state.window, &state.programs);
+    assert!(matches!(rows, Err(Error::Bound("sealed parts rows"))));
+}
+
+#[test]
+fn holds_every_process_of_a_window_whose_rows_fill_the_parts_exactly() {
+    // Goal: a window with as many rows as the parts table keeps still gets its parts.
+    // Method: read a window of two ticks of two processes with a table that keeps six rows, a
+    // row for each tick and each process, and look at what it held.
+    let mut window = legacy_window(0);
+    stage_legacy(&mut window, 0, &[process(3, 30), process(4, 40)], &[]);
+    stage_legacy(&mut window, 1, &[process(3, 31), process(4, 41)], &[]);
+    let mut state = state();
+    state.window.parts_rows_max = 6;
+
+    read(&mut state, &window).unwrap();
+
+    assert_eq!(state.window.processes.len(), 4);
+    let rows = super::parts::encode_rows(&state.window, &state.programs);
+    assert_eq!(rows.unwrap().len(), 2);
+}
+
+#[test]
 fn builds_some_rows_of_the_parts_as_the_whole_table_holds_them() {
     // Goal: the parts table is written a row group at a time, so a frame of some of its rows
     // holds what a frame of them all holds at those rows.

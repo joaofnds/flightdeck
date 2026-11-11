@@ -74,7 +74,8 @@ const fn kind_bytes(kind: Kind) -> usize {
     }
 }
 
-pub(super) fn rows(table: Table, window: &Window) -> usize {
+/// The rows the window's ticks make of `table`.
+pub(crate) fn rows(table: Table, window: &Window) -> usize {
     window
         .ticks
         .iter()

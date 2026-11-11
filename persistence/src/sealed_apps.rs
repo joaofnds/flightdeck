@@ -127,7 +127,11 @@ impl State {
             return Err(Error::Bound("sealed Apps ticks"));
         }
 
-        self.window.clear();
+        // Each tick makes a row of the parts and each process of it another, which tells that a
+        // window overfills the parts before any of its rows is held.
+        let processes = crate::encoder::bounds::rows(crate::schema::Table::Processes, sealing);
+        self.window
+            .start(collector::u64_from_usize(sealing.ticks.len() + processes));
         let Self {
             ticks,
             programs,
@@ -140,7 +144,10 @@ impl State {
             ranks.rank(tick.programs, apps.totals(), apps.elapsed_ns());
             window.push(tick, apps, ranks);
             Ok(())
-        })
+        })?;
+        assert!(window.parts_rows_least <= window.parts_rows);
+
+        Ok(())
     }
 }
 
@@ -172,7 +179,6 @@ fn derive_parts(
 
 /// The Apps of each tick of one window, as its tables keep them. A derivation reuses it from
 /// window to window.
-#[derive(Default)]
 struct WindowApps {
     ticks: Vec<TickApps>,
     rankings: Vec<RankingRow>,
@@ -182,6 +188,24 @@ struct WindowApps {
     processes: Vec<ProcessTotals>,
     /// The rows of the parts table the window's ticks make.
     parts_rows: u64,
+    /// The fewest rows the window's ticks can make, counted before any is read.
+    parts_rows_least: u64,
+    /// The rows the parts table keeps, which a test lowers so that a small window fills it.
+    parts_rows_max: u64,
+}
+
+impl Default for WindowApps {
+    fn default() -> Self {
+        Self {
+            ticks: Vec::new(),
+            rankings: Vec::new(),
+            totals: Vec::new(),
+            processes: Vec::new(),
+            parts_rows: 0,
+            parts_rows_least: 0,
+            parts_rows_max: u64::from(PARTS_ROWS_MAX),
+        }
+    }
 }
 
 /// What the tables keep of one tick besides its Apps' totals and processes.
@@ -216,17 +240,22 @@ struct RankingRow {
 }
 
 impl WindowApps {
-    fn clear(&mut self) {
+    /// Empties the window for the ticks of the next, which make `parts_rows_least` rows of the
+    /// parts or more.
+    fn start(&mut self, parts_rows_least: u64) {
         self.ticks.clear();
         self.rankings.clear();
         self.totals.clear();
         self.processes.clear();
         self.parts_rows = 0;
+        self.parts_rows_least = parts_rows_least;
     }
 
-    /// Whether the window's ticks make more rows than the parts table keeps.
+    /// Whether the window's ticks make more rows than the parts table keeps. A window whose
+    /// fewest rows are already more is full before its first tick, so it holds no row of a
+    /// table it will not write.
     fn parts_full(&self) -> bool {
-        self.parts_rows > u64::from(PARTS_ROWS_MAX)
+        self.parts_rows.max(self.parts_rows_least) > self.parts_rows_max
     }
 
     /// Holds what the tables keep of `tick`, whose Apps `apps` derived and `ranks` ranked.
