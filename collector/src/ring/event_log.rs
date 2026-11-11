@@ -124,6 +124,14 @@ pub(super) struct Placement {
     unsaved_first: u64,
 }
 
+/// The segment a span the writer starts takes.
+enum SpanSegment {
+    /// A segment the writer never wrote.
+    Unwritten(usize),
+    /// The segment of the oldest span the log holds, which the log lets go of for it.
+    Oldest(usize),
+}
+
 impl Placement {
     /// The placement of a log cut as `log` that holds no span yet and whose first event is
     /// `event_first`.
@@ -160,7 +168,20 @@ impl Placement {
         // An event falls in the newest span or starts the one after it.
         assert!(span <= self.span_end);
         if span == self.span_end {
-            let segment = self.place_segment(words, self.log.span(held_first));
+            let segment = match self.place_segment(self.log.span(held_first)) {
+                SpanSegment::Unwritten(segment) => segment,
+                SpanSegment::Oldest(segment) => {
+                    // Readers learn the span is gone before any word of its entry or its
+                    // segment changes, so a record they find changed is one they know to have
+                    // missed.
+                    let oldest_after = self.log.span_first(self.span_oldest + 1);
+                    words[HEADER_EVENT_OLDEST].store(oldest_after, Ordering::Release);
+                    words[self.log.entry_start(self.span_oldest) + ENTRY_SPAN]
+                        .store(0, Ordering::Release);
+                    self.span_oldest += 1;
+                    segment
+                }
+            };
             let entry = self.log.entry_start(span);
             // A reader takes an entry only where it names the span before and after it reads
             // the segment, so the span is stored last.
@@ -177,10 +198,10 @@ impl Placement {
             .record(self.segments[self.log.entry_index(span)], number)
     }
 
-    /// The segment for the span the writer starts next, which lets go of the oldest span where
-    /// it takes that span's segment. No tick the ring holds has an event in a span before
+    /// The segment for the span the writer starts next, which is the oldest span's where the
+    /// log lets go of that span for it. No tick the ring holds has an event in a span before
     /// `span_held`.
-    fn place_segment(&mut self, words: &[AtomicU64], span_held: u64) -> usize {
+    fn place_segment(&self, span_held: u64) -> SpanSegment {
         // Each span the log holds has a segment of its own, and the writer took the segments
         // in order from the first, so the first segment it never wrote is their count.
         let span_count = usize_from(self.span_end - self.span_oldest);
@@ -194,21 +215,14 @@ impl Placement {
         let saved = self.span_oldest < self.log.span(self.unsaved_first);
         let full = span_count == self.log.segment_count;
         if free && (saved || full) {
-            let segment = self.segments[self.log.entry_index(self.span_oldest)];
-            // Readers learn the span is gone before any word of its entry or its segment
-            // changes, so a record they find changed is one they know to have missed.
-            words[HEADER_EVENT_OLDEST]
-                .store(self.log.span_first(self.span_oldest + 1), Ordering::Release);
-            words[self.log.entry_start(self.span_oldest) + ENTRY_SPAN].store(0, Ordering::Release);
-            self.span_oldest += 1;
-            return segment;
+            return SpanSegment::Oldest(self.segments[self.log.entry_index(self.span_oldest)]);
         }
 
         // The events of the ticks the ring holds fit the log's room, which fills one segment
         // fewer than the log has. So a log with no segment left holds a span before those
         // events, which is its oldest, and the branch above took it.
         assert!(span_count < self.log.segment_count);
-        span_count
+        SpanSegment::Unwritten(span_count)
     }
 }
 
