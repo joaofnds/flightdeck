@@ -749,15 +749,6 @@ impl Writer {
         placement.save(events_end.min(self.event + 1));
     }
 
-    /// The first event no reader has reported saved, or none where the log numbers its
-    /// records and so keeps no account of it.
-    #[must_use]
-    pub fn events_unsaved_first(&self) -> Option<u64> {
-        self.event_placement
-            .as_ref()
-            .map(event_log::Placement::unsaved_first)
-    }
-
     /// Publishes `readings` in the next slot, overwriting the oldest publication once every
     /// slot holds one, and its events in the log, overwriting only events of ticks the ring no
     /// longer holds, so `readings` carries at most `event_room` events. An identity writer

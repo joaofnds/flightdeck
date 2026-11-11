@@ -143,11 +143,6 @@ impl Placement {
         self.unsaved_first = self.unsaved_first.max(unsaved_first);
     }
 
-    /// The first event no reader has saved.
-    pub(super) fn unsaved_first(&self) -> u64 {
-        self.unsaved_first
-    }
-
     /// The words of the record for event `number`, from the ring's start, starting its span in
     /// the table where it is the span's first. The writer places its events in order, and
     /// `held_first` is the first event of the oldest tick the ring holds, so no tick the ring
