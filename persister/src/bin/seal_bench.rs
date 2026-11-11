@@ -460,7 +460,9 @@ fn run_persister_killed_listed(
     run: &RunIdentity,
     budget: &Arc<ByteBudget>,
 ) -> std::io::Result<Option<u64>> {
-    match Catalog::open(root, budget)?.windows_of(run, &mut ReadWork::default()) {
+    let listed = Catalog::open(root, budget)
+        .and_then(|catalog| catalog.windows_of(run, &mut ReadWork::default()));
+    match listed {
         Ok(windows) => Ok(Some(collector::u64_from_usize(windows.len()))),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error),
@@ -826,6 +828,15 @@ fn milliseconds(nanoseconds: u64) -> String {
     format!("{}.{:03}", microseconds / 1_000, microseconds % 1_000)
 }
 
+/// The awake clock at this process's start, as macOS reports it.
+fn start_awake_ns() -> Result<u64, Box<dyn std::error::Error>> {
+    let own =
+        collector::processes::read_usage(Timebase::read()?, collector::processes::own_pid()?)?
+            .map_err(|_| "this process's own start did not read")?;
+
+    Ok(own.awake_ns_at_start)
+}
+
 /// The generated Mac: its live processes in increasing pid order, and what it reads each tick.
 struct Machine {
     programs: Vec<ProgramReference>,
@@ -834,6 +845,8 @@ struct Machine {
     coalitions: Vec<Coalition>,
     cpus: Vec<CPUTicks>,
     interfaces: Vec<Interface>,
+    /// The awake clock at this process's start, which the first tick is stamped with.
+    awake_ns_start: u64,
 }
 
 /// A live process, whose ordinal is its pid and orders every value generated for it.
@@ -859,12 +872,25 @@ impl Machine {
             interfaces: (0..INTERFACES)
                 .map(start_interface)
                 .collect::<Result<_, _>>()?,
+            awake_ns_start: start_awake_ns()?,
         };
         for _process in 0..processes {
             machine.fork()?;
         }
 
         Ok(machine)
+    }
+
+    /// The clocks of `tick`, a second after the tick before it. A persister takes a run's
+    /// collector for gone once a tick's awake time is before the start of the process registered
+    /// for the run, and then seals the run to its end however few ticks it holds, so the awake
+    /// clock runs on from this process's start.
+    fn publish_times(awake_ns_start: u64, tick: u64) -> ObservationTimes {
+        ObservationTimes {
+            wall_ns: 1_800_000_000_000_000_000 + tick * 1_000_000_000,
+            continuous_ns: tick * 1_000_000_000,
+            awake_ns: awake_ns_start + tick * 1_000_000_000,
+        }
     }
 
     /// Starts a process with the next pid, which is higher than every live one.
@@ -922,11 +948,7 @@ impl Machine {
             events: &events,
             dropped: Dropped::default(),
         };
-        let times = ObservationTimes {
-            wall_ns: 1_800_000_000_000_000_000 + tick * 1_000_000_000,
-            continuous_ns: tick * 1_000_000_000,
-            awake_ns: tick * 1_000_000_000,
-        };
+        let times = Self::publish_times(self.awake_ns_start, tick);
         writer.publish_with_identity(
             &readings,
             Some(&times),
@@ -1459,6 +1481,24 @@ mod tests {
         let held = run_persister_sealed_windows(&windows, &two_windows_of_900_processes());
 
         assert!(held.is_err());
+    }
+
+    #[test]
+    fn stamps_no_tick_before_this_process_started() {
+        // Goal: a persister takes a run's collector for gone once a tick's awake time is before
+        // the start of the process registered for the run, and then seals the run to its end
+        // however few ticks it holds. Method: compare the first tick's awake time with the start
+        // macOS reports for this process.
+        let own = collector::processes::read_usage(
+            Timebase::read().unwrap(),
+            collector::processes::own_pid().unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let times = Machine::publish_times(start_awake_ns().unwrap(), 0);
+
+        assert!(times.awake_ns >= own.awake_ns_at_start);
     }
 
     #[test]
