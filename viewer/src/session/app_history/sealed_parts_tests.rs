@@ -277,6 +277,36 @@ fn a_restart_saves_what_a_persister_that_stayed_up_saves() {
 }
 
 #[test]
+fn a_restart_takes_its_rates_from_a_minute_of_more_processes_than_it_reads_at_once() {
+    // Goal: a restarted persister keeps what one that stayed up keeps where the minute before
+    // holds more process rows than the 16,384 it reads of a saved minute at once.
+    // Method: save three ticks of 6,000 processes in one minute and a fourth in the next, through
+    // one derivation and through one for each minute, and compare what the parts of every App of
+    // the fourth tick show. A saved minute's rows stand in pid order, so of the two processes
+    // measured, pid 7 is among the first 16,384 rows and pid 6,000 is past them.
+    let stayed = recording_of_a_wide_boundary(&persistence::sealed_apps::SealedApps::default());
+    let restarted = recording_of_a_wide_boundary(&persistence::canonical::ready_fixture::Restarted);
+
+    assert!(kept_at_a_boundary(&stayed).contains("publication: 4"));
+    assert_eq!(kept_at_a_boundary(&restarted), kept_at_a_boundary(&stayed));
+}
+
+/// A recording of run ticks 57 to 59 in one minute and tick 60 in the next, each of 6,000
+/// processes of which pid 7 and the last are measured, saved through `derive`.
+fn recording_of_a_wide_boundary(derive: &dyn persistence::worker::Derive) -> Fixture {
+    let mut fixture = Fixture::new_mode(true, 6_000, None);
+    fixture.measured_also = Some(6_000);
+    fixture.start_at_run_tick(57);
+    for second in 1057..=1060 {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal_minute_derived(0, derive);
+    fixture.seal_minute_derived(1, derive);
+
+    fixture
+}
+
+#[test]
 fn a_window_saved_without_derived_tables_replays_what_a_persister_that_stayed_up_keeps() {
     // Goal: a window that lost its derived tables to damage since repaired reads as if nothing
     // happened, since a replay rebuilds it.

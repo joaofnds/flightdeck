@@ -32,6 +32,9 @@ pub struct Fixture {
     continuous_step_ns: u64,
     awake_step_ns: u64,
     usage_override: Option<Usage>,
+    /// A process each reading measures beside pid 7, in pid 7's App and with its usage, which a
+    /// fixture of more than two processes may name.
+    pub measured_also: Option<i32>,
     identity: bool,
     process_capacity: u64,
     owns_root: bool,
@@ -115,6 +118,7 @@ impl Fixture {
             continuous_step_ns: 0,
             awake_step_ns: 0,
             usage_override: None,
+            measured_also: None,
             identity,
             process_capacity,
             owns_root: true,
@@ -188,6 +192,7 @@ impl Fixture {
             continuous_step_ns: 0,
             awake_step_ns: 0,
             usage_override: None,
+            measured_also: None,
             identity,
             process_capacity: 2,
             owns_root: false,
@@ -294,6 +299,12 @@ impl Fixture {
         if let Some(usage) = self.usage_override.take() {
             process.usage = usage;
         }
+        let mut processes = vec![process];
+        if let Some(pid) = self.measured_also {
+            assert!(pid > process.pid);
+            assert!(u64::try_from(pid).unwrap() <= self.process_capacity);
+            processes.push(Process { pid, ..process });
+        }
         let memory = Memory::default();
         let mut readings = Readings {
             run_tick: self.elapsed,
@@ -302,7 +313,7 @@ impl Fixture {
             interfaces,
             ioreport: None,
             smc: None,
-            processes: std::slice::from_ref(&process),
+            processes: &processes,
             processes_refused: 0,
             processes_gone: 0,
             coalitions: &[],
@@ -330,6 +341,7 @@ impl Fixture {
         let current = self.intern(b"current", b"/Apps/Current.app");
         let departed = self.intern(b"departed\xfd", b"/Old.app");
         let processes = if self.process_capacity == 2 {
+            assert!(self.measured_also.is_none());
             vec![
                 observation(1, UsageAvailability::Refused, &refused),
                 observation(7, UsageAvailability::Measured, &current),
@@ -337,7 +349,7 @@ impl Fixture {
         } else {
             (1..=i32::try_from(self.process_capacity).unwrap())
                 .map(|pid| {
-                    if pid == 7 {
+                    if pid == 7 || self.measured_also == Some(pid) {
                         observation(pid, UsageAvailability::Measured, &current)
                     } else {
                         observation(pid, UsageAvailability::Refused, &refused)
@@ -350,7 +362,8 @@ impl Fixture {
             .iter()
             .map(|event| departed_observation(event, &departed))
             .collect();
-        readings.processes_refused = u32::try_from(self.process_capacity - 1).unwrap();
+        let measured = collector::u64_from_usize(readings.processes.len());
+        readings.processes_refused = u32::try_from(self.process_capacity - measured).unwrap();
         self.writer
             .publish_with_identity(
                 readings,

@@ -5,7 +5,7 @@
 //! and this costs what the replay of one minute costs, once a restart.
 use model::columns::TickColumns;
 use model::programs::Programs;
-use polars::prelude::{DataFrame, IntoLazy, LazyFrame, UInt64Type, col, lit};
+use polars::prelude::{DataFrame, Expr, IntoLazy, LazyFrame, UInt64Type, col, lit};
 
 use crate::canonical::ReadWork;
 use crate::canonical::catalog::Catalog;
@@ -76,7 +76,7 @@ fn seed_table(
 ) -> Result<AdmittedTable> {
     let file = seed_file(saved, manifest, table)?;
 
-    AdmittedTable::from_file_budgeted(file, saved.budget)
+    AdmittedTable::from_file_streaming(file, saved.budget)
         .map_err(|error| admission_error(error).into())
 }
 
@@ -150,7 +150,8 @@ fn seed_minute(saved: &SavedRecording<'_>, manifest: &Manifest) -> Result<SeedMi
 }
 
 /// The last tick's process rows, in the columns `read_tick` reads, once every row of the minute
-/// has passed what a replay checks.
+/// has passed what a replay checks. The minute is read from its file a row group at a time, since
+/// all of its rows at once are more than a seal holds where a Mac runs thousands of processes.
 fn seed_rows(
     saved: &SavedRecording<'_>,
     manifest: &Manifest,
@@ -159,17 +160,63 @@ fn seed_rows(
     let table = seed_table(saved, manifest, Table::Processes)?;
     let identity_held = seed_rows_identity_held(&table)?;
     let gpu_held = table.contains_column(PROCESS_GPU_FIELD.0);
-    let (plan, _columns) = table.into_scan()?;
-    let limit =
-        u32::try_from(IDENTITY_ROWS_MAX + 1).map_err(|_| Error::Bound("process identity rows"))?;
-    let frame = plan
-        .limit(limit)
-        .select(process_columns(identity_held, gpu_held))
-        .collect()?;
-    if collector::u64_from_usize(frame.height()) > IDENTITY_ROWS_MAX {
+    let rows_saved = table.row_count();
+    if rows_saved > IDENTITY_ROWS_MAX {
         return Err(Error::Bound("process identity rows"));
     }
-    if identity_held {
+    let saved_rows = SeedTable {
+        names: table.fields().map(|(name, _)| name).collect(),
+        table: &table,
+        columns: process_columns(identity_held, gpu_held),
+        identity_held,
+    };
+    let slice_rows = collector::u64_from_usize(SLICE_ROWS);
+    let mut rows = seed_rows_slice(&saved_rows, minute, 0)?;
+    for slice in 1..rows_saved.div_ceil(slice_rows) {
+        let read = seed_rows_slice(&saved_rows, minute, slice * slice_rows)?;
+        rows.of_tick.vstack_mut_owned(read.of_tick)?;
+        rows.read += read.read;
+    }
+    if rows.read != rows_saved {
+        return Err(Error::Bound("process row count"));
+    }
+
+    Ok(rows.of_tick)
+}
+
+/// The rows of a saved process table a seed holds at once, a row group as a seal writes one.
+const SLICE_ROWS: usize = crate::encoder::ROW_GROUP_ROWS;
+
+/// A saved process table and how a seed reads it.
+struct SeedTable<'table> {
+    table: &'table AdmittedTable,
+    /// The names of the columns the table holds.
+    names: Vec<&'table str>,
+    /// What a seed selects from them.
+    columns: Vec<Expr>,
+    identity_held: bool,
+}
+
+/// What a seed read of one slice of a saved process table.
+struct SeedSlice {
+    /// The rows of the minute's last tick among those read.
+    of_tick: DataFrame,
+    /// How many rows it read.
+    read: u64,
+}
+
+/// The slice of the minute's process rows that starts at row `offset`, refused unless each row
+/// passes what a replay checks.
+fn seed_rows_slice(saved: &SeedTable<'_>, minute: &SeedMinute, offset: u64) -> Result<SeedSlice> {
+    let count = u32::try_from(SLICE_ROWS).map_err(|_| Error::Bound("process identity rows"))?;
+    let frame = saved
+        .table
+        .read_slice_metadata_budgeted(&saved.names, offset, count)
+        .map_err(read_error)?
+        .lazy()
+        .select(saved.columns.clone())
+        .collect()?;
+    if saved.identity_held {
         validate(Table::Processes, &frame, 0..frame.height())?;
     }
     let publication = Cells::<UInt64Type>::named(&frame, "publication")?;
@@ -183,9 +230,12 @@ fn seed_rows(
         }
     }
 
-    Ok(seed_rows_of_tick(frame.lazy(), &minute.last)
-        .select(COLUMNS.map(col))
-        .collect()?)
+    Ok(SeedSlice {
+        read: collector::u64_from_usize(frame.height()),
+        of_tick: seed_rows_of_tick(frame.lazy(), &minute.last)
+            .select(COLUMNS.map(col))
+            .collect()?,
+    })
 }
 
 /// Whether `table` has the identity fields. A table with only some of them is refused.
