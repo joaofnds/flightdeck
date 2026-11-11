@@ -4,9 +4,9 @@ use crate::tracker::Event;
 /// The slots of the rings these tests make, few enough that a tick soon leaves the ring.
 const SLOTS: u64 = 4;
 /// The events the logs of these tests have room for, 64 segments of them.
-const EVENTS: u64 = 64 * event_log::SEGMENT_EVENTS;
+const EVENTS: u64 = 64 * SEGMENT_EVENTS;
 /// The events of each tick of a burst, six segments of them.
-const BURST_TICK_EVENTS: u64 = 6 * event_log::SEGMENT_EVENTS;
+const BURST_TICK_EVENTS: u64 = 6 * SEGMENT_EVENTS;
 
 #[test]
 fn a_quiet_log_whose_events_are_saved_writes_two_segments() {
@@ -51,7 +51,7 @@ fn keeps_the_events_from_the_saved_end_a_reader_reported() {
     // behind the newest, so the last two events of the fourth segment are not saved. Then log
     // half the log's room with no report and read from the first event not saved.
     let mut source = Source::new(layout::EventLog::Segmented);
-    let reported = 4 * event_log::SEGMENT_EVENTS;
+    let reported = 4 * SEGMENT_EVENTS;
     for run_tick in 1..=reported {
         source.publish(run_tick, 1);
         source.writer.mark_events_saved(run_tick - 1);
@@ -75,7 +75,7 @@ fn a_report_of_events_not_yet_logged_saves_only_those_logged() {
     // then log half the log's room with no report and read the events logged after the last
     // report.
     let mut source = Source::new(layout::EventLog::Segmented);
-    let reported = event_log::SEGMENT_EVENTS;
+    let reported = SEGMENT_EVENTS;
     for run_tick in 1..=reported {
         source.publish(run_tick, 1);
         source.writer.mark_events_saved(u64::MAX);
@@ -98,7 +98,7 @@ fn a_burst_keeps_every_event_of_the_ticks_the_ring_holds() {
     // Method: after a quiet stretch, log four ticks of six segments of events each, saving each
     // as it comes, and read all of their events.
     let mut source = Source::new(layout::EventLog::Segmented);
-    let quiet = 2 * event_log::SEGMENT_EVENTS;
+    let quiet = 2 * SEGMENT_EVENTS;
     source.publish_saved(1, quiet);
     let mut reader = RingReader::open(&source.place.lock_path).unwrap();
     reader.seek_event(quiet + 1).unwrap();
@@ -116,7 +116,7 @@ fn a_tick_the_ring_holds_keeps_its_events_in_the_oldest_segment() {
     // Method: log a quiet stretch that ends on the last event of a segment, then one burst tick
     // fewer than the ring has slots, saving each tick, and read the last quiet event.
     let mut source = Source::new(layout::EventLog::Segmented);
-    let quiet = 2 * event_log::SEGMENT_EVENTS;
+    let quiet = 2 * SEGMENT_EVENTS;
     source.publish_saved(1, quiet);
     let mut reader = RingReader::open(&source.place.lock_path).unwrap();
     reader.seek_event(quiet).unwrap();
@@ -138,7 +138,7 @@ fn a_log_writes_no_segment_beyond_those_its_busiest_ticks_needed() {
 
     source.publish_saved(SLOTS + 1, 3 * EVENTS);
 
-    let burst_segments = SLOTS * BURST_TICK_EVENTS / event_log::SEGMENT_EVENTS;
+    let burst_segments = SLOTS * BURST_TICK_EVENTS / SEGMENT_EVENTS;
     assert_eq!(burst_segments + 1, source.segments_written());
 }
 
@@ -150,7 +150,7 @@ fn a_reader_behind_the_saved_events_learns_which_it_missed() {
     // another reader would, and read to the newest event from where the first step ends.
     let mut source = Source::new(layout::EventLog::Segmented);
     let mut reader = RingReader::open(&source.place.lock_path).unwrap();
-    let logged = 8 * event_log::SEGMENT_EVENTS;
+    let logged = 8 * SEGMENT_EVENTS;
     source.publish_saved(1, logged);
 
     let FoundEvent::Missed { first, end } = reader.read_event().unwrap() else {
@@ -175,7 +175,7 @@ fn a_reader_keeps_its_binding_to_the_ring_when_the_log_lets_events_go() {
     let reader = RingReader::open(&source.place.lock_path).unwrap();
     let bound = reader.object_binding().unwrap();
 
-    source.publish_saved(1, 8 * event_log::SEGMENT_EVENTS);
+    source.publish_saved(1, 8 * SEGMENT_EVENTS);
 
     let words = source.writer.mapping.words();
     assert!(words[layout::HEADER_EVENT_OLDEST].load(Ordering::Relaxed) > 1);
@@ -218,7 +218,7 @@ fn a_writer_that_starts_again_logs_on_in_a_later_segment() {
     // Method: log a segment and a half of events, start the writer again on the same lock file,
     // log one event and read it.
     let mut source = Source::new(layout::EventLog::Segmented);
-    let before = event_log::SEGMENT_EVENTS + event_log::SEGMENT_EVENTS / 2;
+    let before = SEGMENT_EVENTS + SEGMENT_EVENTS / 2;
     source.publish_saved(1, before);
     let mut source = source.restarted();
     source.publish(1, 1);
@@ -262,7 +262,7 @@ fn assert_reads_events(reader: &mut RingReader, numbers: std::ops::RangeInclusiv
 /// oldest event put back to the first, as a reader loaded it just before.
 fn source_let_go_unannounced() -> Source {
     let mut source = Source::new(layout::EventLog::Segmented);
-    source.publish_saved(1, 4 * event_log::SEGMENT_EVENTS);
+    source.publish_saved(1, 4 * SEGMENT_EVENTS);
     let words = source.writer.mapping.words();
     assert!(words[layout::HEADER_EVENT_OLDEST].load(Ordering::Relaxed) > 1);
     words[layout::HEADER_EVENT_OLDEST].store(1, Ordering::Relaxed);
@@ -467,11 +467,11 @@ impl Source {
                 layout.events_start + usize_from(record) * layout.event_words + EVENT_SEQUENCE;
             words[sequence].load(Ordering::Relaxed) != 0
         };
-        let segments = EVENTS / event_log::SEGMENT_EVENTS + 1;
+        let segments = EVENTS / SEGMENT_EVENTS + 1;
         let mut count = 0;
         for segment in 0..segments {
-            let first = segment * event_log::SEGMENT_EVENTS;
-            if (first..first + event_log::SEGMENT_EVENTS).any(written) {
+            let first = segment * SEGMENT_EVENTS;
+            if (first..first + SEGMENT_EVENTS).any(written) {
                 count += 1;
             }
         }

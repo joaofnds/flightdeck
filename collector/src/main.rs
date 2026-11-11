@@ -1040,7 +1040,7 @@ mod tests {
     use collector::recording::control::{Control, Reporter, Role as Worker, Saved, State};
     use collector::ring::{
         Dropped, Found, FoundEvent, Identity, IdentityObservation, IdentityPublication, Reader,
-        Readings, RunIdentity,
+        Readings, RunIdentity, SEGMENT_EVENTS,
     };
 
     use super::*;
@@ -1377,9 +1377,6 @@ mod tests {
             FoundEvent::Event { number, .. } if number == SEGMENT_EVENTS + 1
         ));
     }
-
-    /// The events one segment of a ring's event log holds.
-    const SEGMENT_EVENTS: u64 = 1_024;
 
     fn run_identity(run: [u64; 2]) -> RunIdentity {
         RunIdentity {

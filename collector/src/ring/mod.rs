@@ -33,6 +33,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use crate::ioreport::IOReportReadings;
 pub use crate::smc::SmcReadings;
 use event::{load_event, store_event};
+pub use event_log::SEGMENT_EVENTS;
 pub use identity::{
     DictionaryUsage, IdentityAvailability, IdentityObservation, IdentityPublication,
     IdentityUnavailable, PROGRAM_PATH_BYTES_MAX, ProcessCreation, ProcessIdentity, ProgramBuffers,

@@ -19,7 +19,7 @@ use crate::u64_from_usize;
 
 /// The events a segment holds, where the log has room for at least as many. A segment of the
 /// collector's log is 196,608 bytes, twelve pages of 16 KiB.
-pub(super) const SEGMENT_EVENTS: u64 = 1_024;
+pub const SEGMENT_EVENTS: u64 = 1_024;
 
 /// The words of a span's entry in the table: one more than the span, zero where the entry
 /// names no span, and then the span's segment.
