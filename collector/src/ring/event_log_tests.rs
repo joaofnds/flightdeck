@@ -159,6 +159,8 @@ fn a_reader_behind_the_saved_events_learns_which_it_missed() {
 
     assert_eq!(1, first);
     assert!(end > first);
+    // Each tick logged one event, so the ticks the ring holds have the newest `SLOTS` events.
+    assert!(end <= logged - SLOTS + 1);
     assert_reads_events(&mut reader, end..=logged);
     assert_eq!(FoundEvent::Nothing, reader.read_event().unwrap());
 }
