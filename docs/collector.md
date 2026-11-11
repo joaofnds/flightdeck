@@ -459,7 +459,7 @@ written here for that reason, and the choice still waits on the user's ruling (M
 Polars, which takes far more memory and code than collecting does. Running it in its own process
 keeps that memory and any failure away from collection, gives it its own memory limit, and lets
 each process's CPU be measured on its own. The collector's release binary stays under a
-megabyte, while the persister's carries Polars and is over a hundred times larger, and a
+megabyte, while the persister's carries Polars and is over eighty times larger, and a
 persister that dies leaves live readings intact while the recorder attempts recovery.
 
 **Parquet in one-minute windows.** On a synthetic week the research compared sealed Parquet,
