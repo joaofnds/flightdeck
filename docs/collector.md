@@ -199,11 +199,11 @@ reads the report and takes it only where it names the collector's own run. While
 span still has an event of a tick in the ring, or an event the persister has not saved, the
 writer takes a segment it has not written. So a burst takes the segments it needs, and while
 the persister is down or behind, the log keeps every event until its room is full, as a log
-that numbers its records round its room does. With its
-room full the writer starts the next span in the oldest span's segment whether or not the
-persister saved it, and a reader that asks for an event of that span learns that it missed it.
-The writer gives no segment back. After a burst, or after the persister was down, it goes on
-writing round the segments it has written, though it needs fewer.
+that numbers its records round its room does. With its room full the writer starts the next
+span in the oldest span's segment whether or not the persister saved it, and a reader that asks
+for an event of that span learns that it missed it. The writer gives no segment back. After a
+burst, or after the persister was down, it goes on writing round the segments it has written,
+though it needs fewer.
 
 The ring is sized when it is made for every process and coalition the collector's limits
 allow. Its exact size depends on those capacities and its format. On this M5 Pro on
@@ -224,18 +224,17 @@ the whole of its room writes all of it in time, however few events a tick holds.
 of the collector's slots and event room and no process rows, on this M5 Pro on 2026-11-11,
 1,400,000 events left the writer's physical footprint 127.2 MB above its start under that
 numbering, at 5 events a tick and at 100. An MB in this paragraph is 1,000,000 bytes, so the
-log's 120 MiB is 126.0 MB. With segments, and each minute's events reported
-saved six ticks after the minute ended, they left it 1.8 MB above its start at 5 events a
-tick and 3.9 MB at 100, where the 120 ticks in the ring hold 600 and 12,000 events, against
-1.3 MB for the same ring logging no event. A burst of 3,000 events a tick for 121 ticks then
-raised the segmented log's figure to 71.2 MB, where it stayed through another 1,400,000 quiet
-events: the log goes on using the segments its busiest 121 ticks in a row needed until the
-collector restarts. With nothing reported saved, the segmented log's figure was 127.4 MB,
-which is 229,376 bytes above the numbered log's. The one segment more and the table are
-212,992 of them, and nothing measured here accounts for the other 16,384, one page. Virtual
-reservation, touched backing, resident memory, physical footprint and compressed or swapped
-pages are different quantities; touching every page does not prove they all remain resident
-together.
+log's 126,035,984 bytes are 126.0 MB. With segments, and each minute's events reported saved
+six ticks after the minute ended, they left it 1.8 MB above its start at 5 events a tick and
+3.9 MB at 100, where the 120 ticks in the ring hold 600 and 12,000 events, against 1.3 MB for
+the same ring logging no event. A burst of 3,000 events a tick for 121 ticks then raised the
+segmented log's figure to 71.2 MB, where it stayed through another 1,400,000 quiet events: the
+log goes on using the segments its busiest 121 ticks in a row needed until the collector
+restarts. With nothing reported saved, the segmented log's figure was 127.4 MB, which is
+229,376 bytes above the numbered log's. The one segment more and the table are 212,992 of them,
+and nothing measured here accounts for the other 16,384, one page. Virtual reservation, touched
+backing, resident memory, physical footprint and compressed or swapped pages are different
+quantities; touching every page does not prove they all remain resident together.
 
 The ring's name carries 60 random bits written only to the lock file, so another user cannot
 guess it ([Security](recording-research.md#security)). The lock file also stops a second
@@ -294,14 +293,16 @@ for itself and one for each of its Apps and each process of an App. A seal count
 every process, in an App or not, and a window whose count passes 262,144, more than 4,369 a
 tick over a minute, is sealed without its App parts. That is half the 524,288 rows a reader
 takes. An MB in the rest of this paragraph is 1,000,000 bytes, so the recorder's 256 MiB is
-268.4 MB. A persister whose seal kept them all, killed and started again, held 231 to 239 MB at
-5,000 generated processes a tick and 258 MB at 5,600, and exited over the recorder's 256 MiB at
-6,000, where it seals nothing, while a minute without its App parts keeps every reading. On an
-M5 Pro on 2026-11-11 the persister, a process of its own given the recorder's 256 MiB, was
-killed after its first sealed minute and started again, and over nine runs each it sealed three
-generated minutes of 12,000 processes a tick, the most that Mac's `kern.maxproc` lets it list,
-with a lifetime-peak footprint of 241 to 251 MB, six minutes of 6,000 with 152 to 158 MB, and
-ten minutes of 4,096, which keep their App parts, with 190 to 200 MB. Two minutes of 1,050
+268.4 MB. On an M5 Pro on 2026-11-11 a persister built for the measurement with the limit at
+524,288 rows, so that it kept these minutes' App parts, a build the repository does not hold,
+was killed after its first sealed minute and started again. It held 231 to 239 MB at 5,000
+generated processes a tick and 258 MB at 5,600, and at 6,000 it sealed two more minutes and
+then exited over the recorder's 256 MiB. A minute sealed without its App parts keeps every
+reading. On that Mac that day the persister, a process of its own given the recorder's 256 MiB,
+was killed after its first sealed minute and started again, and over nine runs each it sealed
+three generated minutes of 12,000 processes a tick, the most that Mac's `kern.maxproc` lets it
+list, with a lifetime-peak footprint of 241 to 251 MB, six minutes of 6,000 with 152 to 158 MB,
+and ten minutes of 4,096, which keep their App parts, with 190 to 200 MB. Two minutes of 1,050
 processes took 83 MB over three runs. The minutes were generated by
 `persister/src/bin/seal_bench.rs`, so a real Mac that busy may hold more.
 `just test-process-capacity` repeats the three larger runs and fails where a persister exits
