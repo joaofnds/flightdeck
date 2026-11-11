@@ -409,6 +409,26 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_events_saved_when_a_later_report_saves_fewer() {
+        // Goal: a report of fewer saved events than an earlier one takes none of them back,
+        // since a persister that starts again reports nothing saved until it has read the
+        // recording.
+        // Method: place the events of one span, each the oldest a tick still holds, save them
+        // all, report none saved, place one more and locate the first.
+        let (layout, words) = ring(4 * SEGMENT_EVENTS);
+        let mut placement = placement(&layout, 1);
+        for number in 1..=SEGMENT_EVENTS {
+            placement.place(&words, number, number);
+        }
+        placement.save(SEGMENT_EVENTS + 1);
+        placement.save(0);
+
+        placement.place(&words, SEGMENT_EVENTS + 1, SEGMENT_EVENTS + 1);
+
+        assert_eq!(None, locate(&words, &layout, 1).unwrap());
+    }
+
+    #[test]
     fn refuses_a_table_that_names_a_segment_the_log_lacks() {
         // Goal: a table another program wrote never sends a reader past the log's segments.
         // Method: name a segment one past the log's last in the entry of a placed event.
