@@ -143,6 +143,58 @@ fn reports_the_same_end_of_saved_events_when_it_starts_again() {
     assert_eq!(saved.events_end, reported.events_end);
 }
 
+#[test]
+fn reports_no_saved_events_of_a_run_with_no_saved_minute() {
+    // Goal: the persister reports no event saved of a run it has read ticks of and sealed no
+    // minute of, although it knows which event it saves first.
+    // Method: pass over a source whose first minute is still open, report progress and read
+    // the persister's record.
+    let mut source = Scenario::new();
+    source.publish(0);
+    source.publish(1);
+    assert!(matches!(source.pass().unwrap(), Progress::Waiting));
+    assert!(source.state.next_event > 0);
+
+    let reported = reported_progress(&mut source);
+
+    assert_eq!(0, reported.events_end);
+}
+
+#[test]
+fn reports_the_newest_run_with_a_saved_minute() {
+    // Goal: with a saved minute of each of two runs, the persister reports the newer run's,
+    // since the newer run's collector is the one whose log waits on the report.
+    // Method: report the progress of an older and a newer run's state, each with a saved
+    // minute, and read the persister's record.
+    let run = |run: u64| RunIdentity {
+        recording: Identity([1, 2]),
+        run: Identity([run, 0]),
+        boot: Identity([5, 6]),
+    };
+    let older = RunState {
+        identity: Some(run(3)),
+        committed: 3,
+        next_event: 5,
+        ..RunState::default()
+    };
+    let newer = RunState {
+        identity: Some(run(4)),
+        committed: 7,
+        next_event: 11,
+        ..RunState::default()
+    };
+    let recovery = Recovery {
+        states: [older, newer],
+        ..Recovery::default()
+    };
+
+    let reported = reported_recovery(&recovery);
+
+    assert_eq!(Identity([4, 0]), reported.run);
+    assert_eq!(7, reported.publication);
+    assert_eq!(11, reported.events_end);
+}
+
 /// A source with one sealed minute of three ticks, of which only the first logged an event,
 /// and a fourth tick that closed the minute.
 fn sealed_minute() -> Scenario {
@@ -155,26 +207,36 @@ fn sealed_minute() -> Scenario {
     source
 }
 
-/// The persister's record after it reports the progress of the run of `source`.
+/// The persister's record after it reports the progress of the run of `source`, whose state
+/// the source keeps.
 fn reported_progress(source: &mut Scenario) -> collector::recording::control::Health {
-    use collector::recording::control::{Control, Reporter, Role};
-    // The store of `source` holds its recording's persister lock, which refuses a new control
-    // file, so the record is written beside a recording of its own.
-    let root = Directory::new();
-    let control = Control::create(&root.0).unwrap();
-    let mut health = Some(Reporter::new(control, Role::Persister).unwrap());
     // The worker names the run of a state when it gives the run that state, which a scenario
     // that passes one state by hand leaves out.
     let state = RunState {
         identity: Some(source.registered.identity),
         ..std::mem::take(&mut source.state)
     };
-    let recovery = Recovery {
+    let mut recovery = Recovery {
         states: [state, RunState::default()],
         ..Recovery::default()
     };
 
-    report_progress(&mut health, &recovery).unwrap();
+    let reported = reported_recovery(&recovery);
+
+    source.state = std::mem::take(&mut recovery.states[0]);
+    reported
+}
+
+/// The persister's record after it reports the progress of the runs of `recovery`.
+fn reported_recovery(recovery: &Recovery) -> collector::recording::control::Health {
+    use collector::recording::control::{Control, Reporter, Role};
+    // A store holds its recording's persister lock, which refuses a new control file, so the
+    // record is written beside a recording of its own.
+    let root = Directory::new();
+    let control = Control::create(&root.0).unwrap();
+    let mut health = Some(Reporter::new(control, Role::Persister).unwrap());
+
+    report_progress(&mut health, recovery).unwrap();
 
     health
         .as_ref()

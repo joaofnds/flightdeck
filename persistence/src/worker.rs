@@ -448,8 +448,9 @@ struct Recovery {
 struct RunState {
     identity: Option<RunIdentity>,
     next_publication: u64,
-    /// The first event of the run that is not saved, which only the store's frontier and a
-    /// durable seal move, since `report_progress` reports it as saved up to here.
+    /// The first event of the run that is not saved. The store's frontier and a durable seal
+    /// move it, and a run with nothing saved starts it at the first event its ring holds, which
+    /// `report_progress` leaves unreported while `committed` is zero.
     next_event: u64,
     committed: u64,
     losses: Losses,
@@ -1189,6 +1190,7 @@ mod tests {
         run_states(&mut states, &[run]);
 
         assert_eq!(states[0].next_publication, 17);
+        assert_eq!(states[0].next_event, 23);
         assert_eq!(states[0].committed, 11);
         assert_eq!(states[0].losses.publications, 7);
         assert_eq!(states[0].losses.events, 9);
