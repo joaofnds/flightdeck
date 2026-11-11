@@ -741,8 +741,9 @@ earlier run, with each one's ring and collector pid (The persister and the recor
 - `collector/src/bin/recorder.rs`: paced worker supervision, adoption and orderly stop.
 - `collector/src/cost.rs`: the per-source cost meter behind the reports.
 - `collector/src/diagnostics.rs` and `diagnostics/`: bounded report admission and output.
-- `persister/` and `persistence/src/worker.rs`: the loop that seals windows from the ring.
-- `persistence/src/worker/scanning.rs` and `staging.rs`: timing-only readiness and payload staging.
+- `persister/` and `persistence/src/worker.rs`: the loop that seals windows from the ring, and
+  its timing-only readiness.
+- `persistence/src/worker/staging.rs`: payload staging.
 - `persistence/src/resources.rs`: whole-process memory and operation-deadline protection.
 - `persister/src/bin/seal_bench.rs`: the CPU of a seal and the memory of the persister,
   measured on synthetic windows.
