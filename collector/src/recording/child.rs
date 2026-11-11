@@ -12,6 +12,8 @@ use crate::kernel::ESRCH;
 use native::kill;
 
 pub const OWNERSHIP_EXIT_STATUS: u8 = 73;
+/// What the recorder lets its persister hold unless it is given another limit.
+pub const PERSISTER_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 const SIGKILL: i32 = 9;
 
 pub struct Persister {

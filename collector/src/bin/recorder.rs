@@ -505,7 +505,7 @@ fn options() -> io::Result<Options> {
     let mut root = None;
     let mut seconds = None;
     let mut rescan = 0;
-    let mut memory = 256 * 1024 * 1024;
+    let mut memory = recording::child::PERSISTER_MEMORY_BYTES;
     let mut stop = false;
     let mut parent = None;
     for pair in arguments.chunks(2) {

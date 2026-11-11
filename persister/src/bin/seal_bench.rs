@@ -10,8 +10,9 @@
 //!
 //! Given a persister in place of a derivation, it leaves the sealing to that binary as a process
 //! of its own, as the recorder runs it, and prints what the process cost. The run fails unless
-//! the persister sealed every tick and held no more than the memory it was given, so a seal that
-//! outgrows the recorder's limit at some count of processes is found before a Mac that busy is.
+//! the persister sealed every tick and held no more than the memory it was given, which is what
+//! the recorder gives one where the run names none, so a seal that outgrows the recorder's limit
+//! at some count of processes is found before a Mac that busy is.
 //! Given a restart as well, it kills that persister once it has sealed some of the run's windows
 //! and starts it again for the rest, and holds both to the memory, since a persister started
 //! again reads back a minute it did not seal itself.
@@ -31,7 +32,7 @@ use collector::interfaces::{Interface, Name};
 use collector::machine::{CPUTicks, Memory};
 use collector::processes::{Process, Task, Usage};
 use collector::recording::Registration;
-use collector::recording::child::ReapedChild;
+use collector::recording::child::{PERSISTER_MEMORY_BYTES, ReapedChild};
 use collector::ring::{
     DictionaryCapacity, Dropped, IdentityObservation, IdentityPublication, ObservationTimes, Place,
     ProcessCreation, ProcessIdentity, ProgramBytes, ProgramReference, Readings, RunIdentity, Shape,
@@ -46,7 +47,7 @@ use persistence::worker::{Derivation, Derive};
 use persistence::{Losses, Manifest};
 
 const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|restarted|none\n       \
-    seal_bench --windows N --processes N --persister PATH --memory-bytes N \
+    seal_bench --windows N --processes N --persister PATH [--memory-bytes N] \
     [--restart-after-windows N]";
 const TICKS_PER_WINDOW: u64 = 60;
 const WINDOWS_MAX: u64 = 10;
@@ -162,9 +163,9 @@ fn options_from(words: &[String]) -> Result<Options, String> {
 
     let sealing = match (derive, persister, memory_bytes) {
         (Some(derive), None, None) if restart_after_windows.is_none() => Sealing::Worker(derive),
-        (None, Some(path), Some(memory_bytes)) => Sealing::Persister(PersisterOptions {
+        (None, Some(path), memory_bytes) => Sealing::Persister(PersisterOptions {
             path,
-            memory_bytes,
+            memory_bytes: memory_bytes.unwrap_or(PERSISTER_MEMORY_BYTES),
             restart_after_windows,
         }),
         _ => return Err(USAGE.to_owned()),
@@ -1207,11 +1208,33 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_persister_given_no_memory() {
-        // Goal: a persister's memory is chosen, so a run never measures it under the 2 GiB it
-        // takes when given none. Method: name a persister alone.
+    fn gives_a_persister_the_memory_the_recorder_gives_it_where_a_run_names_none() {
+        // Goal: a run holds its persister to what the recorder gives one, so a check that names
+        // no memory cannot fall out of step with the recorder. Method: name a persister alone.
         let options = options_from(&words(
             "--windows 2 --processes 900 --persister /build/persister",
+        ));
+
+        assert_eq!(
+            Ok(Options {
+                windows: 2,
+                processes: 900,
+                sealing: Sealing::Persister(PersisterOptions {
+                    path: PathBuf::from("/build/persister"),
+                    memory_bytes: PERSISTER_MEMORY_BYTES,
+                    restart_after_windows: None,
+                }),
+            }),
+            options
+        );
+    }
+
+    #[test]
+    fn refuses_a_worker_given_memory() {
+        // Goal: the memory is a persister's, since the worker seals inside the benchmark's own
+        // process. Method: name memory beside a derivation.
+        let options = options_from(&words(
+            "--windows 2 --processes 900 --derive apps --memory-bytes 268435456",
         ));
 
         assert!(options.is_err());

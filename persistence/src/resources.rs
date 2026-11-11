@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
 
 pub const WORKING_BYTES_MAX: u64 = 2 * 1024 * 1024 * 1024;
 
+const _: () = {
+    // The recorder holds its persister under the bound a persister keeps when given no limit.
+    assert!(collector::recording::child::PERSISTER_MEMORY_BYTES <= WORKING_BYTES_MAX);
+};
+
 pub(crate) fn producer_owner_changed(pid: i32) -> io::Result<bool> {
     native::producer_owner_changed(pid)
 }
