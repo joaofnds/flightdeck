@@ -4,7 +4,7 @@ use collector::ring::UsageAvailability;
 use model::ranks::{METRICS, Metric};
 
 use super::{SealedApps, State, derive_parts};
-use crate::app_tables::{PARTS_ROWS_MAX, ROW_APP, ROW_HEADER, ROW_PROCESS};
+use crate::app_tables::{ROW_APP, ROW_HEADER, ROW_PROCESS};
 use crate::window_ticks::tests::{
     Ring, identity, legacy_window, observation, process, stage_legacy,
 };
@@ -204,7 +204,6 @@ fn refuses_the_parts_of_a_window_of_more_rows_than_a_seal_keeps() {
     let mut state = state();
     read(&mut state, &window).unwrap();
     state.window.parts_rows = u64::from(super::PARTS_ROWS_SEALED_MAX) + 1;
-    assert!(state.window.parts_rows <= u64::from(PARTS_ROWS_MAX));
 
     let rows = super::parts::encode_rows(&state.window, &state.programs);
 
@@ -228,7 +227,7 @@ fn orders_the_parts_of_a_window_of_as_many_rows_as_a_seal_keeps() {
 }
 
 #[test]
-fn holds_no_process_of_a_window_whose_processes_alone_overfill_the_parts() {
+fn holds_no_process_of_a_window_counted_over_the_rows_a_seal_keeps() {
     // Goal: a window too large for the parts table costs the persister none of the memory its
     // parts would take, since a Mac that runs that many processes has the least to spare.
     // Method: start a window that makes a row more than a seal keeps of the parts, read two
@@ -249,7 +248,7 @@ fn holds_no_process_of_a_window_whose_processes_alone_overfill_the_parts() {
 }
 
 #[test]
-fn holds_every_process_of_a_window_whose_rows_fill_the_parts_exactly() {
+fn holds_every_process_of_a_window_counted_at_the_rows_a_seal_keeps() {
     // Goal: a window with as many rows as the parts table keeps still gets its parts.
     // Method: start a window that makes exactly the rows a seal keeps of the parts, read two
     // ticks of two processes into it, and look at what it held.
