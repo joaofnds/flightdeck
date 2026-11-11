@@ -50,16 +50,21 @@ const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|r
     seal_bench --windows N --processes N --persister PATH [--memory-bytes N] \
     [--restart-after-windows N]";
 const TICKS_PER_WINDOW: u64 = 60;
+/// A run's first window is not a steady one, so it has a second.
+const WINDOWS_MIN: u64 = 2;
 const WINDOWS_MAX: u64 = 10;
 /// Above the 12,000 processes `kern.maxproc` lets an M5 Pro list.
 const PROCESSES_MAX: u64 = 16_384;
-/// Bounds the ring, which holds every process of every tick until the run is sealed, at the ten
-/// windows of 4,096 processes a run took before it took more processes.
-const WINDOW_PROCESSES_MAX: u64 = 10 * 4_096;
-const PERSISTER_POLL: Duration = Duration::from_millis(10);
-/// Bounds the wait for the persister at three minutes, past the two its own watchdog gives one
-/// operation.
-const PERSISTER_POLLS_MAX: u32 = 18_000;
+/// The most processes a run's windows hold between them, its windows times its processes a
+/// tick, which bounds the ring, since the ring holds every process of every tick until the run
+/// is sealed.
+const RUN_PROCESSES_MAX: u64 = WINDOWS_MAX * 4_096;
+const PERSISTER_POLL_MS: u64 = 10;
+const PERSISTER_POLL: Duration = Duration::from_millis(PERSISTER_POLL_MS);
+/// Bounds each wait for the persister at three minutes, where the longest run of the process
+/// capacity check took eight seconds on an M5 Pro, so a persister that hangs fails the run and a
+/// slower Mac still finishes it.
+const PERSISTER_POLLS_MAX: u64 = 18_000;
 /// What reading the recording's list of windows may hold.
 const CATALOG_BYTES_MAX: usize = 1 << 28;
 const PROGRAMS: u64 = 500;
@@ -72,6 +77,14 @@ const INTERFACES: u64 = 34;
 const REFUSED_EVERY: u64 = 3;
 const CLOCK_PROCESS_CPUTIME_ID: c_int = 12;
 const SIGKILL: i32 = 9;
+
+const _: () = {
+    // A run of the fewest windows may have the most processes a tick.
+    assert!(WINDOWS_MIN * PROCESSES_MAX <= RUN_PROCESSES_MAX);
+    // A run of the most windows may have the processes the capacity check gives one.
+    assert!(WINDOWS_MAX * 4_096 <= RUN_PROCESSES_MAX);
+    assert!(PERSISTER_POLLS_MAX * PERSISTER_POLL_MS == 3 * 60 * 1_000);
+};
 
 fn main() -> ExitCode {
     let options = match collector::arguments("seal_bench").and_then(|words| options_from(&words)) {
@@ -137,7 +150,7 @@ fn options_from(words: &[String]) -> Result<Options, String> {
             return Err(USAGE.to_owned());
         };
         match flag.as_str() {
-            "--windows" => windows = Some(options_count(value, 2..=WINDOWS_MAX)?),
+            "--windows" => windows = Some(options_count(value, WINDOWS_MIN..=WINDOWS_MAX)?),
             "--processes" => {
                 processes = Some(options_count(value, FORKS_PER_TICK + 1..=PROCESSES_MAX)?);
             }
@@ -173,10 +186,10 @@ fn options_from(words: &[String]) -> Result<Options, String> {
     let (Some(windows), Some(processes)) = (windows, processes) else {
         return Err(USAGE.to_owned());
     };
-    if windows * processes > WINDOW_PROCESSES_MAX {
+    if windows * processes > RUN_PROCESSES_MAX {
         return Err(format!(
             "{USAGE}\n{windows} windows of {processes} processes are more than \
-            {WINDOW_PROCESSES_MAX} in all"
+            {RUN_PROCESSES_MAX} in all"
         ));
     }
     if restart_after_windows.is_some_and(|sealed| sealed >= windows) {
@@ -233,7 +246,7 @@ fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     match sealed? {
         Sealed::Worker(deriving, marks) => report(options, deriving, &marks),
         Sealed::Persister { killed, finished } => {
-            report_persister(options, killed.as_ref(), &finished);
+            run_report_persister(options, killed.as_ref(), &finished);
             Ok(())
         }
     }
@@ -629,7 +642,7 @@ fn run_persister_sealed_rows(manifest: &Manifest, table: Table) -> Option<u64> {
 
 /// Prints what the persister cost that sealed the run to its end, and on the same line what
 /// the one killed before it cost, where the run killed one.
-fn report_persister(options: &Options, killed: Option<&PersisterRun>, finished: &PersisterRun) {
+fn run_report_persister(options: &Options, killed: Option<&PersisterRun>, finished: &PersisterRun) {
     print!(
         "seal_bench windows={} processes={} memory_bytes={} persister_cpu_ms={} elapsed_ms={} \
         footprint_bytes_max={}",
@@ -1242,8 +1255,8 @@ mod tests {
 
     #[test]
     fn takes_a_run_that_fills_the_ring_to_its_bound() {
-        // Goal: the bound on the ring leaves the longest run of 4,096 processes, which the
-        // benchmark took before it took more processes. Method: ask for ten windows of them.
+        // Goal: the bound on the ring leaves the longest run 4,096 processes a tick, which
+        // the process capacity check runs. Method: ask for ten windows of them.
         let options = options_from(&words("--windows 10 --processes 4096 --derive apps"));
 
         assert!(options.is_ok());
