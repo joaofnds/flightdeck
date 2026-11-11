@@ -177,6 +177,8 @@ fn a_reader_keeps_its_binding_to_the_ring_when_the_log_lets_events_go() {
 
     source.publish_saved(1, 8 * event_log::SEGMENT_EVENTS);
 
+    let words = source.writer.mapping.words();
+    assert!(words[layout::HEADER_EVENT_OLDEST].load(Ordering::Relaxed) > 1);
     assert_eq!(bound, reader.object_binding().unwrap());
 }
 
