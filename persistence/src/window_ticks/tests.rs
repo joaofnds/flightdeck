@@ -406,12 +406,23 @@ pub(crate) struct Ring {
     directory: PathBuf,
     writer: Writer,
     reader: Option<RingReader>,
+    shape: Shape,
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 impl Ring {
     pub(crate) fn new() -> Self {
+        Self::with_process_capacity(SHAPE.process_capacity)
+    }
+
+    /// A ring whose ticks hold up to `process_capacity` processes, for a window of more of them
+    /// than `SHAPE` holds.
+    pub(crate) fn with_process_capacity(process_capacity: u64) -> Self {
+        let shape = Shape {
+            process_capacity,
+            ..SHAPE
+        };
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let directory =
             std::env::temp_dir().join(format!("window-ticks-{}-{number}", std::process::id()));
@@ -424,12 +435,13 @@ impl Ring {
             entries: 4,
             arena_bytes: 32768,
         };
-        let writer = Writer::create_with_identity(&place, SHAPE, capacity, &run(), 0).unwrap();
+        let writer = Writer::create_with_identity(&place, shape, capacity, &run(), 0).unwrap();
         let reader = RingReader::open(&place.lock_path).unwrap();
         Self {
             directory,
             writer,
             reader: Some(reader),
+            shape,
         }
     }
 
@@ -486,10 +498,11 @@ impl Ring {
                 run: run(),
                 window: number,
             },
-            Limits::from_shape(&SHAPE).unwrap(),
+            Limits::from_shape(&self.shape).unwrap(),
         );
-        let mut tick = crate::tick_buffer(&SHAPE).unwrap();
-        let mut identities = Vec::with_capacity(4);
+        let mut tick = crate::tick_buffer(&self.shape).unwrap();
+        let processes_max = usize::try_from(self.shape.process_capacity).unwrap();
+        let mut identities = Vec::with_capacity(processes_max);
         let found = reader
             .read_identity_into(&mut tick, &mut identities)
             .unwrap();

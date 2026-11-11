@@ -311,6 +311,37 @@ fn builds_some_rows_of_the_parts_as_the_whole_table_holds_them() {
 }
 
 #[test]
+fn a_parts_table_of_several_row_groups_keeps_the_bytes_of_its_whole_frame() {
+    // Goal: writing the parts table a row group at a time changes no byte of its file.
+    // Method: read a tick of one App that has a row group of processes, write its parts as one
+    // frame and as a seal writes them, and compare the two files.
+    let processes = crate::encoder::ROW_GROUP_ROWS;
+    let mut ring = Ring::with_process_capacity(collector::u64_from_usize(processes));
+    let helper = ring.intern(b"helper", Some(b"/Apps/Outer.app"));
+    let pids = 1..=i32::try_from(processes).unwrap();
+    let published: Vec<_> = pids.clone().map(|pid| process(pid, 10)).collect();
+    let identities: Vec<_> = pids
+        .map(|pid| identity(pid, UsageAvailability::Measured, helper))
+        .collect();
+    ring.publish(0, &published, &identities, &[], &[]);
+    let window = ring.stage(0);
+    let mut state = state();
+    read(&mut state, &window).unwrap();
+    let rows = super::parts::encode_rows(&state.window, &state.programs).unwrap();
+    assert_eq!(rows.len(), processes + 2);
+    let mut frame = super::parts::encode_frame(&rows, &state.programs).unwrap();
+    let mut whole = Vec::new();
+    crate::encoder::encode_write(&mut frame, &mut whole).unwrap();
+    let pending = Pending::new();
+
+    let table = super::parts::encode(&state.window, &state.programs, &pending.directory()).unwrap();
+
+    assert_eq!(table.rows, collector::u64_from_usize(rows.len()));
+    let by_row_groups = std::fs::read(pending.0.join("app_parts.parquet")).unwrap();
+    assert_eq!(by_row_groups, whole);
+}
+
+#[test]
 fn derives_the_ranks_and_the_parts_of_a_window() {
     // Goal: a sealing window gets both App tables.
     // Method: derive a window into a pending directory and look at what it wrote.
