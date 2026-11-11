@@ -226,20 +226,21 @@ fn run_control(
     }
 }
 
-/// One past the newest event of the run `identity` names that the persister reports saved, and
-/// zero where it reports another run or nothing, so that the ring's log keeps its events as it
-/// does with no persister.
+/// One past the newest event of the run `identity` names that the persister's `record` reports
+/// saved, and zero where the record names another run or nothing or was not read, so that the
+/// ring's log keeps its events as it does with no persister.
 fn run_collect_saved(
-    control: &recording::control::Control,
-    identity: Option<collector::ring::RunIdentity>,
+    record: io::Result<recording::control::Health>,
+    identity: Option<&collector::ring::RunIdentity>,
 ) -> u64 {
     let Some(identity) = identity else {
         return 0;
     };
 
-    let health = match control.read(recording::control::Role::Persister) {
+    let health = match record {
         Ok(health) => health,
-        // A record caught mid-write reads whole on a later tick.
+        // A record caught mid-write reads whole on a later tick, and one a persister left
+        // mid-write as it died reads whole once the persister that follows it reports.
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => return 0,
         Err(error) => {
             diagnostics::error(format_args!(
@@ -261,15 +262,17 @@ fn run_collect_report(
     health: &mut recording::control::Reporter,
     ring: &mut Writer,
 ) -> io::Result<()> {
-    let run = ring
-        .identity()
+    let identity = ring.identity();
+    let run = identity
+        .as_ref()
         .map_or(collector::ring::Identity([0; 2]), |identity| identity.run);
     health.update(
         recording::control::State::Running,
         run,
         ring.publication_newest(),
     )?;
-    ring.mark_events_saved(run_collect_saved(health.control(), ring.identity()));
+    let persister = health.control().read(recording::control::Role::Persister);
+    ring.mark_events_saved(run_collect_saved(persister, identity.as_ref()));
 
     Ok(())
 }
@@ -1266,7 +1269,7 @@ mod tests {
         .unwrap();
         out.submit();
         // A persister that reports this run saved, so the count covers a tick that takes its
-        // report into the ring.
+        // report into the ring, which the read of its record below shows the ticks did.
         let _persister =
             persister_reporting(&recording.root, run.ring.identity().unwrap().run, u64::MAX);
         let mut health = Some(Reporter::new(control, Worker::Collector).unwrap());
@@ -1278,12 +1281,13 @@ mod tests {
             run_collect(&options, owner, &mut run, marker, &mut out, &mut health).unwrap();
         });
         assert_eq!(calls, 0);
-        let current = health
-            .as_ref()
-            .unwrap()
-            .control()
-            .read(recording::control::Role::Collector)
-            .unwrap();
+        let control = health.as_ref().unwrap().control();
+        let saved = run_collect_saved(
+            control.read(Worker::Persister),
+            run.ring.identity().as_ref(),
+        );
+        assert_eq!(u64::MAX, saved);
+        let current = control.read(recording::control::Role::Collector).unwrap();
         assert_eq!(current.publication, run.ring.publication_newest());
         assert!(current.publication > 1);
     }
@@ -1297,7 +1301,9 @@ mod tests {
         let recording = TestRecording::new("savedrun");
         let (control, _persister) = control_reporting(&recording, Identity([3, 4]), 61);
 
-        assert_eq!(61, run_collect_saved(&control, Some(run_identity([3, 4]))));
+        let record = control.read(Worker::Persister);
+
+        assert_eq!(61, run_collect_saved(record, Some(&run_identity([3, 4]))));
     }
 
     #[test]
@@ -1308,7 +1314,9 @@ mod tests {
         let recording = TestRecording::new("savedother");
         let (control, _persister) = control_reporting(&recording, Identity([3, 4]), 61);
 
-        assert_eq!(0, run_collect_saved(&control, Some(run_identity([7, 8]))));
+        let record = control.read(Worker::Persister);
+
+        assert_eq!(0, run_collect_saved(record, Some(&run_identity([7, 8]))));
     }
 
     #[test]
@@ -1319,7 +1327,29 @@ mod tests {
         let recording = TestRecording::new("savednone");
         let (control, _persister) = control_reporting(&recording, Identity([3, 4]), 61);
 
-        assert_eq!(0, run_collect_saved(&control, None));
+        let record = control.read(Worker::Persister);
+
+        assert_eq!(0, run_collect_saved(record, None));
+    }
+
+    #[test]
+    fn takes_no_saved_events_from_a_record_left_mid_write() {
+        // Goal: a persister's record the collector could not read whole lets go of none of the
+        // run's events, whether a write was under way or the persister died in one.
+        // Method: read for a run the error a record left mid-write gives its reader.
+        let record = Err(io::Error::from(io::ErrorKind::WouldBlock));
+
+        assert_eq!(0, run_collect_saved(record, Some(&run_identity([3, 4]))));
+    }
+
+    #[test]
+    fn takes_no_saved_events_from_a_record_that_does_not_decode() {
+        // Goal: a persister's record that does not decode, as one another build wrote, lets go
+        // of none of the run's events.
+        // Method: read for a run the error such a record gives its reader.
+        let record = Err(io::Error::from(io::ErrorKind::InvalidData));
+
+        assert_eq!(0, run_collect_saved(record, Some(&run_identity([3, 4]))));
     }
 
     #[test]
