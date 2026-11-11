@@ -46,9 +46,11 @@ use persistence::schema::Table;
 use persistence::worker::{Derivation, Derive};
 use persistence::{Losses, Manifest};
 
-const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|restarted|none\n       \
-    seal_bench --windows N --processes N --persister PATH [--memory-bytes N] \
-    [--restart-after-windows N]";
+const USAGE: &str = concat!(
+    "usage: seal_bench --windows N --processes N --derive apps|restarted|none\n",
+    "       seal_bench --windows N --processes N --persister PATH [--memory-bytes N] ",
+    "[--restart-after-windows N]",
+);
 const TICKS_PER_WINDOW: u64 = 60;
 /// A run's first window is not a steady one, so it has a second.
 const WINDOWS_MIN: u64 = 2;
