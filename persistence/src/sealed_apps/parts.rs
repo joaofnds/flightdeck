@@ -36,9 +36,14 @@ pub(super) fn encode(
     programs: &Programs,
     pending: &collector::recording::private::PrivateDirectory,
 ) -> Result<TableManifest> {
-    let mut frame = encode_frame(window, programs)?;
+    let rows = encode_rows(window, programs)?;
+    if encode_decoded_bytes(&rows, programs) > DECODED_BYTES_MAX {
+        return Err(Error::Bound("sealed parts bytes"));
+    }
 
-    crate::encode_derived(APP_PARTS, &mut frame, pending)
+    crate::encoder::encode_derived_row_groups(APP_PARTS, rows.len(), pending, |group| {
+        encode_frame(&rows[group], programs)
+    })
 }
 
 /// One row of the table.
@@ -162,16 +167,12 @@ const _: () = {
     assert!(WINDOW_TICKS_MAX <= 1 << 8);
 };
 
-fn encode_frame(window: &WindowApps, programs: &Programs) -> Result<DataFrame> {
-    let rows = encode_rows(window, programs)?;
-    if encode_decoded_bytes(&rows, programs) > DECODED_BYTES_MAX {
-        return Err(Error::Bound("sealed parts bytes"));
-    }
-
-    let mut columns = encode_header_columns(&rows);
-    columns.extend(encode_member_columns(&rows, programs));
-    columns.extend(encode_measure_columns(&rows));
-    columns.extend(encode_amount_columns(&rows));
+/// The frame of `rows`, some of the table's rows in its order.
+pub(super) fn encode_frame(rows: &[PartRow<'_>], programs: &Programs) -> Result<DataFrame> {
+    let mut columns = encode_header_columns(rows);
+    columns.extend(encode_member_columns(rows, programs));
+    columns.extend(encode_measure_columns(rows));
+    columns.extend(encode_amount_columns(rows));
     let names = column_names();
     assert!(
         columns

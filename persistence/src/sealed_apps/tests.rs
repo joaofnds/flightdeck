@@ -210,6 +210,33 @@ fn refuses_the_parts_of_a_window_of_more_rows_than_the_table_keeps() {
 }
 
 #[test]
+fn builds_some_rows_of_the_parts_as_the_whole_table_holds_them() {
+    // Goal: the parts table is written a row group at a time, so a frame of some of its rows
+    // holds what a frame of them all holds at those rows.
+    // Method: read a tick of two Apps and their processes, and compare the frame of the last
+    // three rows with those rows of the frame of all five.
+    let mut ring = Ring::new();
+    let helper = ring.intern(b"helper", Some(b"/Apps/Outer.app"));
+    let tool = ring.intern(b"tool", None);
+    let identities = [
+        identity(1, UsageAvailability::Measured, tool),
+        identity(7, UsageAvailability::Measured, helper),
+    ];
+    ring.publish(0, &[process(1, 10), process(7, 70)], &identities, &[], &[]);
+    let window = ring.stage(0);
+    let mut state = state();
+    read(&mut state, &window).unwrap();
+    let rows = super::parts::encode_rows(&state.window, &state.programs).unwrap();
+    assert_eq!(rows.len(), 5);
+
+    let some = super::parts::encode_frame(&rows[2..], &state.programs).unwrap();
+
+    let whole = super::parts::encode_frame(&rows, &state.programs).unwrap();
+    assert!(some.equals_missing(&whole.slice(2, 3)));
+    assert!(!some.equals_missing(&whole.slice(1, 3)));
+}
+
+#[test]
 fn derives_the_ranks_and_the_parts_of_a_window() {
     // Goal: a sealing window gets both App tables.
     // Method: derive a window into a pending directory and look at what it wrote.

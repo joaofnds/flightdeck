@@ -66,21 +66,26 @@ impl Encoder {
                     continue;
                 }
             }
-            let mut frame = frame_in_file_order(table, window)?.sort(
-                table.catalog().key.to_vec(),
-                SortMultipleOptions {
-                    descending: vec![false],
-                    nulls_last: vec![true],
-                    multithreaded: false,
-                    maintain_order: true,
-                    limit: None,
-                },
-            )?;
             let name = table.name();
-            let rows = collector::u64_from_usize(frame.height());
-            let file = encode_create(pending, &format!("{name}.parquet"))?;
-
-            encode_write(&mut frame, file)?;
+            let rows = if matches!(table, Table::Processes) {
+                encode_processes(window, encode_create(pending, &format!("{name}.parquet"))?)?
+            } else {
+                let mut frame = frame_in_file_order(table, window)?.sort(
+                    table.catalog().key.to_vec(),
+                    SortMultipleOptions {
+                        descending: vec![false],
+                        nulls_last: vec![true],
+                        multithreaded: false,
+                        maintain_order: true,
+                        limit: None,
+                    },
+                )?;
+                encode_write(
+                    &mut frame,
+                    encode_create(pending, &format!("{name}.parquet"))?,
+                )?;
+                collector::u64_from_usize(frame.height())
+            };
             tables.push(TableManifest { name, rows });
         }
 
@@ -104,6 +109,24 @@ pub fn encode_derived(
     Ok(TableManifest { name, rows })
 }
 
+/// Writes a derived table of `rows` rows a row group at a time, as `encode_row_groups` does, for
+/// a table with a row for each process of each tick.
+pub(crate) fn encode_derived_row_groups(
+    name: &'static str,
+    rows: usize,
+    pending: &PrivateDirectory,
+    frame: impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
+) -> Result<TableManifest> {
+    assert!(crate::schema::DERIVED_TABLES.contains(&name));
+    let file = encode_create(pending, &format!("{name}.parquet"))?;
+    encode_row_groups(rows, file, frame)?;
+
+    Ok(TableManifest {
+        name,
+        rows: collector::u64_from_usize(rows),
+    })
+}
+
 fn encode_create(pending: &PrivateDirectory, name: &str) -> Result<std::fs::File> {
     match pending.create_file(name) {
         Ok(file) => Ok(file),
@@ -114,8 +137,64 @@ fn encode_create(pending: &PrivateDirectory, name: &str) -> Result<std::fs::File
     }
 }
 
+/// Writes the processes table to `file` a row group at a time, in the order its file keeps, and
+/// returns its rows. The table has a row for each process of each tick, so a frame of the whole
+/// window, and the sorted copy a frame's sort makes, would take more than the persister may use
+/// on a Mac that runs thousands of processes.
+pub(crate) fn encode_processes(window: &Window, file: impl std::io::Write) -> Result<u64> {
+    let rows = crate::identity_encoder::ProcessRows::in_file_order(window);
+    encode_row_groups(rows.len(), file, |group| {
+        let frame = rows.frame(window, group)?;
+        frame_declared(Table::Processes, window, &frame);
+
+        Ok(frame)
+    })?;
+
+    Ok(collector::u64_from_usize(rows.len()))
+}
+
+/// Writes a table of `rows` rows to `file` a row group at a time, each from the frame that
+/// `frame` builds of the rows it is given, which are already in the order the file keeps. Each
+/// frame is freed before the next is built, so the table takes one row group's memory however
+/// many rows it has.
+pub(crate) fn encode_row_groups(
+    rows: usize,
+    file: impl std::io::Write,
+    mut frame: impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
+) -> Result<()> {
+    let first = encode_row_groups_frame(0..rows.min(ROW_GROUP_ROWS), &mut frame)?;
+    let mut writer = TableWriter::new(&first, file)?;
+    encode_row_groups_write(&mut writer, first)?;
+    for offset in (ROW_GROUP_ROWS..rows).step_by(ROW_GROUP_ROWS) {
+        let group = offset..rows.min(offset + ROW_GROUP_ROWS);
+        encode_row_groups_write(&mut writer, encode_row_groups_frame(group, &mut frame)?)?;
+    }
+
+    writer.finish()
+}
+
+fn encode_row_groups_frame(
+    group: std::ops::Range<usize>,
+    frame: &mut impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
+) -> Result<DataFrame> {
+    crate::work::record(|counts| counts.frames += 1);
+    let rows = group.len();
+    let frame = frame(group)?;
+    assert_eq!(frame.height(), rows);
+
+    Ok(frame)
+}
+
+/// Writes a row group and frees its frame.
+fn encode_row_groups_write<W: std::io::Write>(
+    writer: &mut TableWriter<W>,
+    mut frame: DataFrame,
+) -> Result<()> {
+    writer.write(&mut frame)
+}
+
 /// The rows of a row group, which the last row group of a table may fall short of.
-const ROW_GROUP_ROWS: usize = 16_384;
+pub(crate) const ROW_GROUP_ROWS: usize = 16_384;
 /// What a data page holds before the writer starts the next.
 const DATA_PAGE_BYTES: u64 = 1024 * 1024;
 /// What a table's bytes gather in before they reach its file, the size of a data page.
@@ -169,14 +248,10 @@ fn frame_built(table: Table, window: &Window) -> Result<DataFrame> {
     }
 }
 
-/// The table's frame, with the processes and events already in the order their files keep, so
-/// the sort before writing finds them sorted.
+/// The table's frame, with the events already in the order their file keeps, so the sort before
+/// writing finds them sorted.
 fn frame_in_file_order(table: Table, window: &Window) -> Result<DataFrame> {
     let frame = match table {
-        Table::Processes => {
-            bounds::frame(table, window)?;
-            crate::identity_encoder::processes_in_file_order(window)?
-        }
         Table::Events => {
             bounds::frame(table, window)?;
             crate::identity_encoder::events_in_file_order(window)?

@@ -24,11 +24,39 @@ pub(crate) fn processes(window: &Window) -> Result<DataFrame> {
     processes_frame(window, &processes_rows(window))
 }
 
-/// The processes frame in the order its file keeps, by pid, start and publication, which an
-/// integer sort of the rows reaches sooner than a sort of the frame's columns.
+/// The processes frame of the whole window in the order its file keeps, which the tests compare
+/// the file written a row group at a time with.
+#[cfg(test)]
 pub(crate) fn processes_in_file_order(window: &Window) -> Result<DataFrame> {
     let rows = processes_ordered_rows(window);
     processes_frame(window, &rows)
+}
+
+/// The process rows of a window in the order their file keeps, by pid, start and publication,
+/// which an integer sort of the rows reaches sooner than a sort of a frame's columns.
+pub(crate) struct ProcessRows<'window> {
+    rows: Vec<ProcessRow<'window>>,
+}
+
+impl<'window> ProcessRows<'window> {
+    pub(crate) fn in_file_order(window: &'window Window) -> Self {
+        Self {
+            rows: processes_ordered_rows(window),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The frame of the rows `group` names.
+    pub(crate) fn frame(
+        &self,
+        window: &Window,
+        group: std::ops::Range<usize>,
+    ) -> Result<DataFrame> {
+        processes_frame(window, &self.rows[group])
+    }
 }
 
 /// Projects a bounded section of the production ordered process rows.

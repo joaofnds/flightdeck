@@ -141,7 +141,8 @@ fn process_order_window_identities(window: &mut Window) {
     let last = window.ticks.last_mut().unwrap();
     last.processes.pop().unwrap();
     last.processes_refused = 1;
-    last.identities.as_mut().unwrap().processes[1].usage = crate::schema::availability::REFUSED;
+    let identities = &mut last.identities.as_mut().unwrap().processes;
+    identities.last_mut().unwrap().usage = crate::schema::availability::REFUSED;
 }
 
 fn process_order_projection(window: &Window, expected: &DataFrame) {
@@ -159,4 +160,94 @@ fn process_order_starts(frame: &DataFrame) -> Vec<Option<u64>> {
     assert_eq!(frame.height(), 6);
     let starts = frame.column("awake_ns_at_start").unwrap().u64().unwrap();
     (0..6).map(|position| starts.get(position)).collect()
+}
+
+#[test]
+fn a_processes_table_of_several_row_groups_keeps_the_bytes_of_its_whole_frame() {
+    // Goal: writing the processes table a row group at a time changes no byte of its file.
+    // Method: write a window of three row groups as one frame and by row groups, and compare.
+    let window = row_groups_window(crate::encoder::ROW_GROUP_ROWS + 1, false);
+
+    assert_written_as_its_whole_frame(&window);
+}
+
+#[test]
+fn a_processes_table_with_identities_keeps_the_bytes_of_its_whole_frame() {
+    // Goal: the identity columns and a process whose usage was refused survive the same change.
+    // Method: the same comparison on a window that names its programs and refuses one process.
+    let window = row_groups_window(crate::encoder::ROW_GROUP_ROWS + 1, true);
+
+    assert_written_as_its_whole_frame(&window);
+}
+
+#[test]
+fn a_processes_table_with_no_process_keeps_the_bytes_of_its_whole_frame() {
+    // Goal: a window that read no process still saves a processes table, with no row.
+    // Method: the same comparison on a window whose ticks hold no process.
+    let window = row_groups_window(0, false);
+
+    assert_written_as_its_whole_frame(&window);
+}
+
+#[test]
+fn a_processes_table_builds_one_frame_for_each_of_its_row_groups() {
+    // Goal: no frame holds the rows of the whole window, which at 12,000 processes took more
+    // memory than the persister may use. Method: count the frames built for three row groups.
+    let window = row_groups_window(crate::encoder::ROW_GROUP_ROWS + 1, false);
+    let observation = crate::work::observe();
+
+    crate::encoder::encode_processes(&window, Vec::new()).unwrap();
+
+    assert_eq!(observation.counts().frames, 3);
+}
+
+/// A window of two ticks, each with `processes` processes in pid order, so its table holds twice
+/// that many rows.
+fn row_groups_window(processes: usize, captured: bool) -> Window {
+    let mut shape = encoder_fixture::profile(false);
+    shape.process_capacity = u64::try_from(processes).unwrap();
+    let mut tick = encoder_fixture::tick(&shape);
+    tick.events = 1..1;
+    tick.processes_refused = 0;
+    tick.processes_gone = 0;
+    let identity = WindowIdentity {
+        run: RunIdentity {
+            recording: Identity([1, 2]),
+            run: Identity([3, 4]),
+            boot: Identity([5, 6]),
+        },
+        window: 0,
+    };
+    let mut window = Window::new(identity, Limits::from_shape(&shape).unwrap());
+    for publication in 1..=2 {
+        tick.run_tick = publication - 1;
+        window
+            .push_tick(
+                &Observation {
+                    publication,
+                    wall_ns: None,
+                    continuous_ns: None,
+                    awake_ns: None,
+                },
+                &tick,
+                &[],
+            )
+            .unwrap();
+    }
+    if captured {
+        process_order_window_identities(&mut window);
+    }
+    window
+}
+
+fn assert_written_as_its_whole_frame(window: &Window) {
+    let mut frame = crate::identity_encoder::processes_in_file_order(window).unwrap();
+    let mut whole = Vec::new();
+    crate::encoder::encode_write(&mut frame, &mut whole).unwrap();
+    let mut by_row_groups = Vec::new();
+
+    let rows = crate::encoder::encode_processes(window, &mut by_row_groups).unwrap();
+
+    assert_eq!(rows, collector::u64_from_usize(frame.height()));
+    assert_eq!(by_row_groups, whole);
 }
