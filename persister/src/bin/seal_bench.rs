@@ -38,7 +38,9 @@ use collector::tracker::{Event, Noticed};
 use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
 use persistence::resources::ByteBudget;
+use persistence::schema::Table;
 use persistence::worker::{Derivation, Derive};
+use persistence::{Losses, Manifest};
 
 const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|restarted|none\n       \
     seal_bench --windows N --processes N --persister PATH --memory-bytes N";
@@ -200,7 +202,7 @@ fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
                 Sealing::Persister { path, memory_bytes } => {
                     let run = writer.identity().ok_or("the ring names no run")?;
                     let persister = run_persister(&root, path, *memory_bytes)?;
-                    run_persister_sealed(&root, &run, options.windows * TICKS_PER_WINDOW)?;
+                    run_persister_sealed(&root, &run, options)?;
                     Ok(Sealed::Persister(persister))
                 }
             });
@@ -353,30 +355,73 @@ fn run_persister_reap(
     Ok(None)
 }
 
-/// Refuses the recording at `root` unless the windows it lists of `run` hold each of the
-/// `ticks_published`, since a persister can exit well and have left a tick unsealed.
+/// Refuses the recording at `root` unless the windows it lists of `run` hold every tick the run
+/// published and every process of each, since a persister can exit well and have left one
+/// unsealed.
 fn run_persister_sealed(
     root: &Path,
     run: &RunIdentity,
-    ticks_published: u64,
+    options: &Options,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let budget = Arc::new(ByteBudget::new(CATALOG_BYTES_MAX));
     let windows = Catalog::open(root, &budget)?.windows_of(run, &mut ReadWork::default())?;
-    // The windows are what another process wrote, so a range that does not count is an error
-    // here and never an overflow.
+
+    Ok(run_persister_sealed_windows(&windows, options)?)
+}
+
+/// Refuses `windows` unless together they hold every tick of the run, each window with a row for
+/// every tick its range spans, a row for every process of each and no loss. A range alone
+/// spans a tick the persister lost inside it.
+fn run_persister_sealed_windows(windows: &[Manifest], options: &Options) -> Result<(), String> {
     let mut ticks_sealed = 0_u64;
-    for window in &windows {
-        ticks_sealed = window
+    for manifest in windows {
+        let window = manifest.identity.window;
+        // The windows are what another process wrote, so a count that overflows is an error
+        // here and never a panic.
+        let ticks = manifest
             .publication_end
-            .checked_sub(window.publication_first)
-            .and_then(|ticks| ticks_sealed.checked_add(ticks))
-            .ok_or("persister sealed a window whose ticks do not count")?;
+            .checked_sub(manifest.publication_first)
+            .ok_or(format!("persister sealed window {window} with no range"))?;
+        let processes = ticks
+            .checked_mul(options.processes)
+            .ok_or(format!("persister sealed window {window} of {ticks} ticks"))?;
+        if manifest.losses != Losses::default() {
+            return Err(format!(
+                "persister sealed window {window} with {:?}",
+                manifest.losses
+            ));
+        }
+        for (table, rows) in [(Table::Ticks, ticks), (Table::Processes, processes)] {
+            let sealed = run_persister_sealed_rows(manifest, table);
+            if sealed != Some(rows) {
+                return Err(format!(
+                    "persister sealed window {window} with {sealed:?} rows of {} where the run \
+                    published {rows}",
+                    table.name()
+                ));
+            }
+        }
+        ticks_sealed = ticks_sealed.checked_add(ticks).ok_or(format!(
+            "persister sealed more ticks than count at window {window}"
+        ))?;
     }
+    let ticks_published = options.windows * TICKS_PER_WINDOW;
     if ticks_sealed != ticks_published {
-        return Err(format!("persister sealed {ticks_sealed} of {ticks_published} ticks").into());
+        return Err(format!(
+            "persister sealed {ticks_sealed} of {ticks_published} ticks"
+        ));
     }
 
     Ok(())
+}
+
+/// The rows the sealed window `manifest` says its `table` holds, if it lists that table.
+fn run_persister_sealed_rows(manifest: &Manifest, table: Table) -> Option<u64> {
+    manifest
+        .tables
+        .iter()
+        .find(|sealed| sealed.name == table.name())
+        .map(|sealed| sealed.rows)
 }
 
 fn report_persister(options: &Options, persister: &PersisterRun) {
@@ -955,6 +1000,111 @@ mod tests {
         let options = options_from(&words("--windows 3 --processes 900"));
 
         assert!(options.is_err());
+    }
+
+    /// A sealed window of one run, with the rows its tables of ticks and of processes hold.
+    fn sealed(window: u64, publications: std::ops::Range<u64>, rows: [u64; 2]) -> Manifest {
+        Manifest {
+            identity: persistence::WindowIdentity {
+                run: RunIdentity {
+                    recording: collector::ring::Identity([1, 2]),
+                    run: collector::ring::Identity([3, 4]),
+                    boot: collector::ring::Identity([5, 6]),
+                },
+                window,
+            },
+            publication_first: publications.start,
+            publication_end: publications.end,
+            events_first: 0,
+            events_end: 0,
+            wall_ns: None,
+            continuous_ns: None,
+            awake_ns: None,
+            losses: Losses::default(),
+            data_directory: String::new(),
+            tables: vec![
+                persistence::TableManifest {
+                    name: Table::Ticks.name(),
+                    rows: rows[0],
+                },
+                persistence::TableManifest {
+                    name: Table::Processes.name(),
+                    rows: rows[1],
+                },
+            ],
+            event_batches: 0,
+        }
+    }
+
+    fn two_windows_of_900_processes() -> Options {
+        options_from(&words("--windows 2 --processes 900 --derive none")).unwrap()
+    }
+
+    #[test]
+    fn takes_windows_that_hold_every_tick_and_every_process() {
+        // Goal: a run whose every tick and process was sealed passes. Method: two windows of 60
+        // ticks, newest first as the catalog lists them, each with a row for every tick and for
+        // every process of every tick.
+        let windows = [
+            sealed(1, 61..121, [60, 54_000]),
+            sealed(0, 1..61, [60, 54_000]),
+        ];
+
+        let held = run_persister_sealed_windows(&windows, &two_windows_of_900_processes());
+
+        assert_eq!(Ok(()), held);
+    }
+
+    #[test]
+    fn refuses_a_window_that_lacks_a_tick_inside_its_range() {
+        // Goal: a tick lost inside a window fails the run, although the window's range still
+        // spans it. Method: a window of 60 publications whose table of ticks holds 59 rows.
+        let windows = [
+            sealed(1, 61..121, [59, 54_000]),
+            sealed(0, 1..61, [60, 54_000]),
+        ];
+
+        let held = run_persister_sealed_windows(&windows, &two_windows_of_900_processes());
+
+        assert!(held.is_err());
+    }
+
+    #[test]
+    fn refuses_a_window_that_lacks_a_process_of_a_tick() {
+        // Goal: a process lost from a tick fails the run. Method: a window whose table of
+        // processes holds one row fewer than 60 ticks of 900 processes.
+        let windows = [
+            sealed(1, 61..121, [60, 54_000]),
+            sealed(0, 1..61, [60, 53_999]),
+        ];
+
+        let held = run_persister_sealed_windows(&windows, &two_windows_of_900_processes());
+
+        assert!(held.is_err());
+    }
+
+    #[test]
+    fn refuses_a_window_sealed_with_a_loss() {
+        // Goal: a window the persister sealed while saying it lost a tick fails the run. Method:
+        // a window whose rows count but whose losses name one publication.
+        let mut lossy = sealed(1, 61..121, [60, 54_000]);
+        lossy.losses.publications = 1;
+        let windows = [lossy, sealed(0, 1..61, [60, 54_000])];
+
+        let held = run_persister_sealed_windows(&windows, &two_windows_of_900_processes());
+
+        assert!(held.is_err());
+    }
+
+    #[test]
+    fn refuses_windows_that_end_before_the_run_does() {
+        // Goal: a persister that exited well with the last minute unsealed fails the run. Method:
+        // the first window of a run of two, whole.
+        let windows = [sealed(0, 1..61, [60, 54_000])];
+
+        let held = run_persister_sealed_windows(&windows, &two_windows_of_900_processes());
+
+        assert!(held.is_err());
     }
 
     #[test]
