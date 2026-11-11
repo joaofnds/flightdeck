@@ -109,21 +109,21 @@ pub fn encode_derived(
     Ok(TableManifest { name, rows })
 }
 
-/// Writes a derived table of `rows` rows a row group at a time, as `encode_row_groups` does, for
-/// a table with a row for each process of each tick.
+/// Writes a derived table of `row_count` rows a row group at a time, as `encode_row_groups`
+/// does, for a table with a row for each process of each tick.
 pub(crate) fn encode_derived_row_groups(
     name: &'static str,
-    rows: usize,
+    row_count: usize,
     pending: &PrivateDirectory,
-    frame: impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
+    group_frame: impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
 ) -> Result<TableManifest> {
     assert!(crate::schema::DERIVED_TABLES.contains(&name));
     let file = encode_create(pending, &format!("{name}.parquet"))?;
-    encode_row_groups(rows, file, frame)?;
+    encode_row_groups(row_count, file, group_frame)?;
 
     Ok(TableManifest {
         name,
-        rows: collector::u64_from_usize(rows),
+        rows: collector::u64_from_usize(row_count),
     })
 }
 
@@ -153,21 +153,22 @@ pub(crate) fn encode_processes(window: &Window, file: impl std::io::Write) -> Re
     Ok(collector::u64_from_usize(rows.len()))
 }
 
-/// Writes a table of `rows` rows to `file` a row group at a time, each from the frame that
-/// `frame` builds of the rows it is given, which are already in the order the file keeps. Each
-/// frame is freed before the next is built, so the table takes one row group's memory however
-/// many rows it has.
+/// Writes a table of `row_count` rows to `file` a row group at a time, each from the frame that
+/// `group_frame` builds of the rows it is given, which are already in the order the file keeps.
+/// Each frame is freed before the next is built, so the table takes one row group's memory
+/// however many rows it has.
 pub(crate) fn encode_row_groups(
-    rows: usize,
+    row_count: usize,
     file: impl std::io::Write,
-    mut frame: impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
+    mut group_frame: impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
 ) -> Result<()> {
-    let first = encode_row_groups_frame(0..rows.min(ROW_GROUP_ROWS), &mut frame)?;
+    let first = encode_row_groups_frame(0..row_count.min(ROW_GROUP_ROWS), &mut group_frame)?;
     let mut writer = TableWriter::new(&first, file)?;
     encode_row_groups_write(&mut writer, first)?;
-    for offset in (ROW_GROUP_ROWS..rows).step_by(ROW_GROUP_ROWS) {
-        let group = offset..rows.min(offset + ROW_GROUP_ROWS);
-        encode_row_groups_write(&mut writer, encode_row_groups_frame(group, &mut frame)?)?;
+    for offset in (ROW_GROUP_ROWS..row_count).step_by(ROW_GROUP_ROWS) {
+        let group = offset..row_count.min(offset + ROW_GROUP_ROWS);
+        let frame = encode_row_groups_frame(group, &mut group_frame)?;
+        encode_row_groups_write(&mut writer, frame)?;
     }
 
     writer.finish()
@@ -175,12 +176,12 @@ pub(crate) fn encode_row_groups(
 
 fn encode_row_groups_frame(
     group: std::ops::Range<usize>,
-    frame: &mut impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
+    group_frame: &mut impl FnMut(std::ops::Range<usize>) -> Result<DataFrame>,
 ) -> Result<DataFrame> {
     crate::work::record(|counts| counts.frames += 1);
-    let rows = group.len();
-    let frame = frame(group)?;
-    assert_eq!(frame.height(), rows);
+    let row_count = group.len();
+    let frame = group_frame(group)?;
+    assert_eq!(frame.height(), row_count);
 
     Ok(frame)
 }
