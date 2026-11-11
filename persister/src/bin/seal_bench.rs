@@ -277,6 +277,7 @@ fn run_seal(root: &Path, deriving: Deriving) -> Result<Vec<Mark>, Box<dyn std::e
 
 /// What the persister was given and what it cost as a process of its own, from its start to
 /// its exit.
+#[derive(Debug, PartialEq)]
 struct PersisterRun {
     memory_bytes: u64,
     cpu_ns: u64,
@@ -292,37 +293,55 @@ fn run_persister(
     path: &Path,
     memory_bytes: u64,
 ) -> Result<PersisterRun, Box<dyn std::error::Error>> {
-    let timebase = Timebase::read()?;
-    let started = Instant::now();
-    let mut persister = Command::new(path)
-        .arg("--recording")
-        .arg(root)
-        .arg("--memory-bytes")
-        .arg(memory_bytes.to_string())
-        .spawn()?;
-    let reaped = match run_persister_reap(&persister, timebase) {
-        Ok(Some(reaped)) => reaped,
-        unreaped => {
-            // Nothing else waits for the persister, so it is ended here before the ring it
-            // reads is unlinked.
-            persister.kill()?;
-            persister.wait()?;
-            unreaped?;
-            return Err(format!("persister still ran after {PERSISTER_POLLS_MAX} polls").into());
-        }
+    let mut persister = PersisterChild::start(root, path, memory_bytes)?;
+    let Some(reaped) = run_persister_reap(&mut persister)? else {
+        return Err(format!("persister still ran after {PERSISTER_POLLS_MAX} polls").into());
     };
-    let elapsed_ns = u64::try_from(started.elapsed().as_nanos())?;
+    let elapsed = persister.started.elapsed();
 
-    let footprint_bytes_max = reaped.footprint?.footprint_bytes_max;
     if !reaped.finished.successful() {
-        return Err(format!(
-            "persister {} footprint_bytes_max={footprint_bytes_max} memory_bytes={memory_bytes}",
-            ExitStatus::from_raw(reaped.finished.status)
-        )
-        .into());
+        return Err(run_persister_failure(&reaped, memory_bytes).into());
     }
-    // The persister's watchdog misses what a persister held that exits between two of its
-    // checks.
+
+    run_persister_cost(reaped, memory_bytes, elapsed)
+}
+
+/// Takes the status of `persister` once it exits, with what it cost, or nothing where it still
+/// runs after the last poll.
+fn run_persister_reap(persister: &mut PersisterChild) -> std::io::Result<Option<ReapedChild>> {
+    for _poll in 0..PERSISTER_POLLS_MAX {
+        let reaped = persister.reap()?;
+        if reaped.is_some() {
+            return Ok(reaped);
+        }
+        std::thread::sleep(PERSISTER_POLL);
+    }
+
+    Ok(None)
+}
+
+/// How a persister ended that should not have ended so, with the most it held where that
+/// read, since a persister over its memory exits on its own.
+fn run_persister_failure(reaped: &ReapedChild, memory_bytes: u64) -> String {
+    let status = ExitStatus::from_raw(reaped.finished.status);
+    match &reaped.footprint {
+        Ok(cost) => format!(
+            "persister {status} footprint_bytes_max={} memory_bytes={memory_bytes}",
+            cost.footprint_bytes_max
+        ),
+        Err(error) => format!("persister {status} and its footprint did not read: {error}"),
+    }
+}
+
+/// What the reaped persister cost over `elapsed`, refused where it held more than the
+/// `memory_bytes` it was given. The persister's watchdog misses what a persister held that exits
+/// between two of its checks.
+fn run_persister_cost(
+    reaped: ReapedChild,
+    memory_bytes: u64,
+    elapsed: Duration,
+) -> Result<PersisterRun, Box<dyn std::error::Error>> {
+    let footprint_bytes_max = reaped.footprint?.footprint_bytes_max;
     if footprint_bytes_max > memory_bytes {
         return Err(format!(
             "persister held {footprint_bytes_max} bytes of the {memory_bytes} it was given"
@@ -333,26 +352,67 @@ fn run_persister(
     Ok(PersisterRun {
         memory_bytes,
         cpu_ns: reaped.finished.cpu_ns,
-        elapsed_ns,
+        elapsed_ns: u64::try_from(elapsed.as_nanos())?,
         footprint_bytes_max,
     })
 }
 
-/// Takes the status of `persister` once it exits, with what it cost, or nothing where it still
-/// runs after the last poll.
-fn run_persister_reap(
-    persister: &Child,
+/// A persister this run started, which nothing else waits for. Dropping one not yet reaped ends
+/// it, so no path leaves it reading a ring the run has unlinked.
+struct PersisterChild {
+    child: Child,
     timebase: Timebase,
-) -> std::io::Result<Option<ReapedChild>> {
-    for _poll in 0..PERSISTER_POLLS_MAX {
-        let reaped = collector::recording::child::reap_owned(persister, timebase)?;
-        if reaped.is_some() {
-            return Ok(reaped);
-        }
-        std::thread::sleep(PERSISTER_POLL);
+    started: Instant,
+    /// Whether the persister's pid is still this run's to signal. It is until a reap takes the
+    /// persister's status or fails, since a reap that fails may have taken the status first.
+    unreaped: bool,
+}
+
+impl PersisterChild {
+    fn start(
+        root: &Path,
+        path: &Path,
+        memory_bytes: u64,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let timebase = Timebase::read()?;
+        let started = Instant::now();
+        let child = Command::new(path)
+            .arg("--recording")
+            .arg(root)
+            .arg("--memory-bytes")
+            .arg(memory_bytes.to_string())
+            .spawn()
+            .map_err(|error| format!("persister {} did not start: {error}", path.display()))?;
+
+        Ok(Self {
+            child,
+            timebase,
+            started,
+            unreaped: true,
+        })
     }
 
-    Ok(None)
+    /// Takes the persister's status, with what it cost, if it has exited.
+    fn reap(&mut self) -> std::io::Result<Option<ReapedChild>> {
+        let reaped = collector::recording::child::reap_owned(&self.child, self.timebase);
+        self.unreaped = matches!(reaped, Ok(None));
+
+        reaped
+    }
+}
+
+impl Drop for PersisterChild {
+    fn drop(&mut self) {
+        if self.unreaped {
+            let ended = self.child.kill().and_then(|()| self.child.wait());
+            if let Err(error) = ended {
+                eprintln!(
+                    "seal_bench: persister {} was not ended: {error}",
+                    self.child.id()
+                );
+            }
+        }
+    }
 }
 
 /// Refuses the recording at `root` unless the windows it lists of `run` hold every tick the run
@@ -1000,6 +1060,62 @@ mod tests {
         let options = options_from(&words("--windows 3 --processes 900"));
 
         assert!(options.is_err());
+    }
+
+    /// A persister reaped after it exited well, having held `footprint_bytes_max` at most.
+    fn reaped(footprint_bytes_max: u64) -> ReapedChild {
+        ReapedChild {
+            finished: collector::recording::child::Finished {
+                cpu_ns: 7,
+                status: 0,
+                resident_bytes_max: 0,
+            },
+            footprint: Ok(collector::recording::child::ChildCost {
+                cpu_ns: 7,
+                footprint_bytes: 0,
+                footprint_bytes_max,
+            }),
+        }
+    }
+
+    #[test]
+    fn costs_a_persister_that_held_all_it_was_given() {
+        // Goal: the memory a persister is given is the most it may hold, so one that held all
+        // of it passes. Method: cost a persister reaped at exactly its limit.
+        let cost = run_persister_cost(reaped(1_000), 1_000, Duration::from_nanos(9));
+
+        assert_eq!(
+            Some(PersisterRun {
+                memory_bytes: 1_000,
+                cpu_ns: 7,
+                elapsed_ns: 9,
+                footprint_bytes_max: 1_000,
+            }),
+            cost.ok()
+        );
+    }
+
+    #[test]
+    fn refuses_a_persister_that_held_a_byte_more_than_it_was_given() {
+        // Goal: a persister that exits between two checks of its own watchdog is still held to
+        // its limit. Method: cost one that exited well a byte over.
+        let cost = run_persister_cost(reaped(1_001), 1_000, Duration::from_nanos(9));
+
+        assert!(cost.is_err());
+    }
+
+    #[test]
+    fn refuses_a_persister_whose_footprint_did_not_read() {
+        // Goal: a run never passes on a footprint it did not read. Method: cost a persister
+        // that exited well and whose footprint macOS refused.
+        let unread = ReapedChild {
+            footprint: Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            ..reaped(0)
+        };
+
+        let cost = run_persister_cost(unread, 1_000, Duration::from_nanos(9));
+
+        assert!(cost.is_err());
     }
 
     /// A sealed window of one run, with the rows its tables of ticks and of processes hold.
