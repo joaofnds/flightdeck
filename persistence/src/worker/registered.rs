@@ -440,8 +440,8 @@ fn seal_registered(
     drop(window);
     clock.written();
 
-    seal_publish(attempt, &manifest, reader, budget, &mut clock)?;
-    seal_report(&manifest, &clock, staged_bytes, state);
+    let published = seal_publish(attempt, &manifest, reader, budget, &mut clock)?;
+    seal_report(published, &manifest, &clock, staged_bytes, state);
 
     Ok(())
 }
@@ -576,9 +576,16 @@ fn seal_publish(
     reader: RingReader,
     budget: &Arc<ByteBudget>,
     clock: &mut SealClock,
-) -> Result<()> {
-    seal_publish_proof(attempt.prove_ordinary(manifest, reader, budget)?, clock)
+) -> Result<Published> {
+    seal_publish_proof(attempt.prove_ordinary(manifest, reader, budget)?, clock)?;
+
+    Ok(Published(()))
 }
+
+/// Proof that the store finished publishing a minute, which only `seal_publish` gives. A seal
+/// moves a run's saved events only with it, since the collector's event log reuses the segments
+/// of the events the persister reports saved, and a report ahead of the store would lose them.
+struct Published(());
 
 fn finish_loss(mut publishing: LossPublication<'_>) -> Result<()> {
     for _step in 0..PUBLICATION_STEPS_MAX {
@@ -743,8 +750,8 @@ fn recover_staging_again(
     let staged_bytes = window.staged_bytes();
     drop(window);
     clock.written();
-    seal_publish(attempt, &manifest, reader, budget, &mut clock)?;
-    seal_report(&manifest, &clock, staged_bytes, state);
+    let published = seal_publish(attempt, &manifest, reader, budget, &mut clock)?;
+    seal_report(published, &manifest, &clock, staged_bytes, state);
     // The attempt registered before that mark was raised, so the next minute carries it.
     state.losses.unknown = unknown_since;
 
@@ -752,6 +759,7 @@ fn recover_staging_again(
 }
 
 fn seal_report(
+    Published(()): Published,
     manifest: &crate::Manifest,
     clock: &SealClock,
     staged_bytes: u64,
@@ -1011,7 +1019,9 @@ pub fn seal_first_window_overrun(
         seal_saved(store, &budget),
     )?;
     drop(window);
-    seal_publish(attempt, &manifest, reader, &budget, &mut SealClock::start())
+    seal_publish(attempt, &manifest, reader, &budget, &mut SealClock::start())?;
+
+    Ok(())
 }
 
 #[cfg(test)]
