@@ -450,18 +450,30 @@ impl Reporter {
         self.refresh()
     }
 
+    /// Reports `run` with none of its events saved, so that a record never names a run beside
+    /// the events saved of the run reported before it.
     pub fn update(&mut self, state: State, run: Identity, publication: u64) -> io::Result<()> {
-        self.health.state = state;
-        self.health.run = run;
-        self.health.publication = publication;
-        self.refresh()
+        let saved = Saved {
+            publication,
+            events_end: 0,
+        };
+        self.update_run(state, run, saved)
     }
 
     /// Reports what a persister has saved of `run`, which it calls only once the save is
     /// durable, since the collector's event log lets go of the events reported here.
     pub fn update_saved(&mut self, state: State, run: Identity, saved: Saved) -> io::Result<()> {
+        assert!(self.role == Role::Persister);
+
+        self.update_run(state, run, saved)
+    }
+
+    fn update_run(&mut self, state: State, run: Identity, saved: Saved) -> io::Result<()> {
+        self.health.state = state;
+        self.health.run = run;
+        self.health.publication = saved.publication;
         self.health.events_end = saved.events_end;
-        self.update(state, run, saved.publication)
+        self.refresh()
     }
 
     pub fn retry(
@@ -661,6 +673,33 @@ mod tests {
         let health = reader.read(Role::Persister).unwrap();
         assert_eq!(health.publication, 7);
         assert_eq!(health.events_end, 4_097);
+    }
+
+    #[test]
+    fn reports_no_saved_events_of_a_run_reported_without_them() {
+        // Goal: the saved events a record names are those of the run it names, so a reader
+        // never takes the events saved of one run as saved of the run reported after it.
+        // Method: report the saved events of one run, report another run with none, and read
+        // the record through another mapping.
+        let directory = Directory::new();
+        let control = Control::create(&directory.0).unwrap();
+        let mut reporter = Reporter::new(control, Role::Persister).unwrap();
+        let reader = Control::open(&directory.0).unwrap();
+        let saved = Saved {
+            publication: 7,
+            events_end: 4_097,
+        };
+        reporter
+            .update_saved(State::Running, Identity([11, 12]), saved)
+            .unwrap();
+
+        reporter
+            .update(State::Running, Identity([13, 14]), 1)
+            .unwrap();
+
+        let health = reader.read(Role::Persister).unwrap();
+        assert_eq!(health.run, Identity([13, 14]));
+        assert_eq!(health.events_end, 0);
     }
 
     #[test]
