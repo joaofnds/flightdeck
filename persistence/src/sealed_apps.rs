@@ -28,7 +28,7 @@ const PROGRAMS_CAPACITY: Capacity = Capacity {
 /// of its entries.
 const PROGRAMS_BYTES_MAX: u64 = 72 * 1024 * 1024;
 /// What the Apps and processes a window holds for its parts may take, a row of the table each.
-const HELD_BYTES_MAX: u64 = 256 * 1024 * 1024;
+const HELD_BYTES_MAX: u64 = 128 * 1024 * 1024;
 /// The rows of the parts table a window is sealed with, about 4,100 processes a second. A
 /// window of more is sealed without its parts and a reader leaves its minute to the App rule,
 /// since what a seal holds for the parts beside the staged window would pass the 256 MiB the
@@ -41,8 +41,11 @@ const _: () = {
     assert!(PROGRAMS_CAPACITY.entries == 65_536);
     assert!(PARTS_ROWS_MAX == 1 << 19);
     assert!(PARTS_ROWS_SEALED_MAX <= PARTS_ROWS_MAX);
-    assert!((1 << 19) * size_of::<Totals>() <= 256 * 1024 * 1024);
-    assert!((1 << 19) * size_of::<ProcessTotals>() <= 256 * 1024 * 1024);
+    // A window holds a row for its parts only up to the rows a seal keeps of them.
+    assert!(PARTS_ROWS_SEALED_MAX == 1 << 18);
+    assert!(HELD_BYTES_MAX == 128 * 1024 * 1024);
+    assert!((1 << 18) * size_of::<Totals>() <= 128 * 1024 * 1024);
+    assert!((1 << 18) * size_of::<ProcessTotals>() <= 128 * 1024 * 1024);
     // The window staged for its seal, the index of its run's programs, the Apps and processes
     // held for its parts, the table built from them and the buffer it is written through fit
     // the persister's working bound together.
