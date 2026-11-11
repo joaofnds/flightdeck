@@ -1006,6 +1006,7 @@ mod tests {
         let opened = open_layout(&words, layout.size_bytes()).unwrap();
 
         assert!(opened.event_segments.is_none());
+        assert_eq!(layout.event(1), opened.event(1));
         assert_eq!(layout.size_bytes(), opened.size_bytes());
     }
 
