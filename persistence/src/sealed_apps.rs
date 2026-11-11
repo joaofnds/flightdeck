@@ -29,11 +29,18 @@ const PROGRAMS_CAPACITY: Capacity = Capacity {
 const PROGRAMS_BYTES_MAX: u64 = 72 * 1024 * 1024;
 /// What the Apps and processes a window holds for its parts may take, a row of the table each.
 const HELD_BYTES_MAX: u64 = 256 * 1024 * 1024;
+/// The rows of the parts table a window is sealed with, about 4,100 processes a second. A
+/// window of more is sealed without its parts and a reader leaves its minute to the App rule,
+/// since what a seal holds for the parts beside the staged window would pass the 256 MiB the
+/// recorder gives its persister. A reader still takes the `PARTS_ROWS_MAX` rows an earlier
+/// build could write.
+const PARTS_ROWS_SEALED_MAX: u32 = 1 << 18;
 
 const _: () = {
     assert!(PROGRAMS_CAPACITY.program_bytes == 64 * 1024 * 1024);
     assert!(PROGRAMS_CAPACITY.entries == 65_536);
     assert!(PARTS_ROWS_MAX == 1 << 19);
+    assert!(PARTS_ROWS_SEALED_MAX <= PARTS_ROWS_MAX);
     assert!((1 << 19) * size_of::<Totals>() <= 256 * 1024 * 1024);
     assert!((1 << 19) * size_of::<ProcessTotals>() <= 256 * 1024 * 1024);
     // The window staged for its seal, the index of its run's programs, the Apps and processes
@@ -203,7 +210,7 @@ impl Default for WindowApps {
             processes: Vec::new(),
             parts_rows: 0,
             parts_rows_least: 0,
-            parts_rows_max: u64::from(PARTS_ROWS_MAX),
+            parts_rows_max: u64::from(PARTS_ROWS_SEALED_MAX),
         }
     }
 }

@@ -195,18 +195,36 @@ fn ranks_and_parts_each_app_and_its_processes() {
 }
 
 #[test]
-fn refuses_the_parts_of_a_window_of_more_rows_than_the_table_keeps() {
-    // Goal: a window too large for the parts table writes no parts.
-    // Method: read a window, mark it a row over the table's bound, and order its parts.
+fn refuses_the_parts_of_a_window_of_more_rows_than_a_seal_keeps() {
+    // Goal: a window of more rows than a seal keeps of the parts writes no parts, although a
+    // reader would take that many.
+    // Method: read a window, mark it a row over the seal's bound, and order its parts.
     let mut window = legacy_window(0);
     stage_legacy(&mut window, 0, &[process(3, 30)], &[]);
     let mut state = state();
     read(&mut state, &window).unwrap();
-    state.window.parts_rows = u64::from(PARTS_ROWS_MAX) + 1;
+    state.window.parts_rows = u64::from(super::PARTS_ROWS_SEALED_MAX) + 1;
+    assert!(state.window.parts_rows <= u64::from(PARTS_ROWS_MAX));
 
     let rows = super::parts::encode_rows(&state.window, &state.programs);
 
     assert!(matches!(rows, Err(Error::Bound("sealed parts rows"))));
+}
+
+#[test]
+fn orders_the_parts_of_a_window_of_as_many_rows_as_a_seal_keeps() {
+    // Goal: a window of exactly the rows a seal keeps of the parts still writes its parts.
+    // Method: read a window of one tick whose process is in no App, mark it at the seal's bound,
+    // and order its parts, which are the one row of the tick's facts.
+    let mut window = legacy_window(0);
+    stage_legacy(&mut window, 0, &[process(3, 30)], &[]);
+    let mut state = state();
+    read(&mut state, &window).unwrap();
+    state.window.parts_rows = u64::from(super::PARTS_ROWS_SEALED_MAX);
+
+    let rows = super::parts::encode_rows(&state.window, &state.programs);
+
+    assert_eq!(rows.unwrap().len(), 1);
 }
 
 #[test]
