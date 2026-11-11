@@ -200,7 +200,7 @@ impl Writer {
 
     fn room(&mut self, reader: &mut RingReader) -> Result<()> {
         if self.open_batch.full() {
-            remap(reader)?;
+            reader.release_pages()?;
             self.flush()?;
         }
         Ok(())
@@ -215,7 +215,7 @@ impl Writer {
     }
 
     pub(crate) fn finish(mut self, reader: &mut RingReader, empty_first: u64) -> Result<Index> {
-        remap(reader)?;
+        reader.release_pages()?;
         self.flush()?;
         self.index.first = if self.open_batch.rows_total == 0 {
             empty_first
@@ -304,23 +304,4 @@ fn prefix_read(
         }
     }
     Err(Error::Bound("event stream scan"))
-}
-
-// All native references used by staging were copied into owned rows before this remap.
-fn remap(reader: &mut RingReader) -> Result<()> {
-    let publication = reader.next_publication();
-    let event = reader.next_event();
-    let mut replacement = RingReader::open_generation(reader.name())?;
-    if replacement.identity() != reader.identity()
-        || replacement.source_layout_version() != reader.source_layout_version()
-    {
-        return Err(Error::Bound("event stream source changed"));
-    }
-    replacement.seek_publication(publication)?;
-    replacement.seek_event(event)?;
-    if reader.ended() {
-        replacement.set_writer_gone();
-    }
-    *reader = replacement;
-    Ok(())
 }
