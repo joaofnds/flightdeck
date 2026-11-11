@@ -208,7 +208,10 @@ the same for the desktop workspace through the recipes named `desktop-`, then ru
 `seal-bench`, which prints what sealing a minute costs, and last `bundle-check`, which
 packages the app and compares the bundle's executables with the ones the build made.
 CI also runs `just test-event-capacity` in its capacity job: feature-enabled lint and
-optimized maximum event fidelity checks. This workload is separate from `just check` and is opt-in locally.
+optimized maximum event fidelity checks. The same job runs `just test-process-capacity`, which
+seals generated minutes of up to 12,000 processes in a persister of its own, killed and started
+again, and fails where it holds more than the recorder gives it. This workload is separate from
+`just check` and is opt-in locally.
 
 CI adds only what its runner needs. It skips the tests in modules named `this_mac`, since
 its virtual Mac lacks the hardware they read, and runs the ignored tests that need a second
@@ -222,6 +225,7 @@ optionally the additional workload CI always runs:
 ```sh
 just check
 just test-event-capacity
+just test-process-capacity
 ```
 
 `just coverage` reports the lines the tests run, with the cargo-llvm-cov that `mise.toml`

@@ -152,7 +152,8 @@ jobs:
       - *install-just
       # Full-capacity event fidelity uses the optimized worker and its production deadline.
       - run: just test-event-capacity
-      # The same optimized worker seals a minute of the most processes a Mac lists.
+      # The same optimized worker seals minutes of the most processes an M5 Pro lists, across a
+      # restart, in the memory the recorder gives it.
       - run: just test-process-capacity
       - *refuse-ring-locks
   desktop:
