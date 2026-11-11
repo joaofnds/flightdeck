@@ -1156,15 +1156,15 @@ impl Opened {
         let newest = read_newest(&words[HEADER_EVENT_NEWEST])?;
         let held = event_log::held(words, &self.layout, newest);
         let number = match self.events.step(held) {
-            Step::Nothing => return Ok(EventStep::Found(FoundEvent::Nothing)),
+            Step::Nothing => return Ok(EventStep::NoRecord(FoundEvent::Nothing)),
             Step::Missed { first, end } => {
-                return Ok(EventStep::Found(FoundEvent::Missed { first, end }));
+                return Ok(EventStep::NoRecord(FoundEvent::Missed { first, end }));
             }
             Step::Read(number) => number,
         };
         // The writer may let go of the event's span after the reader learned what the log held.
         let Some(record) = event_log::locate(words, &self.layout, number)? else {
-            return Ok(EventStep::Found(FoundEvent::Missed {
+            return Ok(EventStep::NoRecord(FoundEvent::Missed {
                 first: number,
                 end: number + 1,
             }));
@@ -1175,7 +1175,7 @@ impl Opened {
 
     fn read_event(&mut self) -> io::Result<FoundEvent> {
         let (number, record) = match self.step_event()? {
-            EventStep::Found(found) => return Ok(found),
+            EventStep::NoRecord(found) => return Ok(found),
             EventStep::Record { number, record } => (number, record),
         };
         let record = &self.mapping.words()[record];
@@ -1464,7 +1464,7 @@ fn number_past_max(number: u64) -> io::Error {
 /// What a reader's step to its next event found.
 enum EventStep {
     /// No event to read, or events the log let go of.
-    Found(FoundEvent),
+    NoRecord(FoundEvent),
     /// The words of the record that holds event `number`, from the ring's start.
     Record { number: u64, record: Range<usize> },
 }

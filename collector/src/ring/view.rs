@@ -311,7 +311,7 @@ impl RingReader {
         buffers: &mut super::ProgramBuffers,
     ) -> io::Result<(FoundEvent, super::ProgramLengths)> {
         let (number, record) = match self.opened.step_event()? {
-            super::EventStep::Found(found) => {
+            super::EventStep::NoRecord(found) => {
                 return Ok((found, super::ProgramLengths::default()));
             }
             super::EventStep::Record { number, record } => (number, record),
