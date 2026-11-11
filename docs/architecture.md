@@ -260,7 +260,7 @@ cold-storage performance or a percentile latency target.
 
 For development checks use the [root README's Check section](../README.md#check).
 The CI workflow runs `just check-root` and `just check-desktop`, with the persistence
-package's tests in a job of their own and `just test-event-capacity` and
+package's tests in two jobs of their own and `just test-event-capacity` and
 `just test-process-capacity` in another. The
 [native verification record](../desktop/LIVE.md) distinguishes automated checks
 from observations that still require an interactive Mac session.
