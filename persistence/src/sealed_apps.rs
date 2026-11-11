@@ -142,6 +142,14 @@ impl State {
         let processes = crate::encoder::bounds::rows(crate::schema::Table::Processes, sealing);
         self.window
             .start(collector::u64_from_usize(sealing.ticks.len() + processes));
+        self.read_ticks(sealing)?;
+        assert!(self.window.parts_rows_least <= self.window.parts_rows);
+
+        Ok(())
+    }
+
+    /// Derives the Apps of each tick of `sealing` into the window already started.
+    fn read_ticks(&mut self, sealing: &crate::Window) -> Result<()> {
         let Self {
             ticks,
             programs,
@@ -149,15 +157,13 @@ impl State {
             ranks,
             window,
         } = self;
+
         ticks.read(sealing, programs, |tick| {
             apps.derive(tick.programs, &tick.previous, &tick.selected);
             ranks.rank(tick.programs, apps.totals(), apps.elapsed_ns());
             window.push(tick, apps, ranks);
             Ok(())
-        })?;
-        assert!(window.parts_rows_least <= window.parts_rows);
-
-        Ok(())
+        })
     }
 }
 
@@ -189,6 +195,7 @@ fn derive_parts(
 
 /// The Apps of each tick of one window, as its tables keep them. A derivation reuses it from
 /// window to window.
+#[derive(Default)]
 struct WindowApps {
     ticks: Vec<TickApps>,
     rankings: Vec<RankingRow>,
@@ -200,22 +207,6 @@ struct WindowApps {
     parts_rows: u64,
     /// The fewest rows the window's ticks can make, counted before any is read.
     parts_rows_least: u64,
-    /// The rows the parts table keeps, which a test lowers so that a small window fills it.
-    parts_rows_max: u64,
-}
-
-impl Default for WindowApps {
-    fn default() -> Self {
-        Self {
-            ticks: Vec::new(),
-            rankings: Vec::new(),
-            totals: Vec::new(),
-            processes: Vec::new(),
-            parts_rows: 0,
-            parts_rows_least: 0,
-            parts_rows_max: u64::from(PARTS_ROWS_SEALED_MAX),
-        }
-    }
 }
 
 /// What the tables keep of one tick besides its Apps' totals and processes.
@@ -265,7 +256,7 @@ impl WindowApps {
     /// fewest rows are already more is full before its first tick, so it holds no row of a
     /// table it will not write.
     fn parts_full(&self) -> bool {
-        self.parts_rows.max(self.parts_rows_least) > self.parts_rows_max
+        self.parts_rows.max(self.parts_rows_least) > u64::from(PARTS_ROWS_SEALED_MAX)
     }
 
     /// Holds what the tables keep of `tick`, whose Apps `apps` derived and `ranks` ranked.

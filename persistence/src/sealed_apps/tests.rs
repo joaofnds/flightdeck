@@ -231,15 +231,17 @@ fn orders_the_parts_of_a_window_of_as_many_rows_as_a_seal_keeps() {
 fn holds_no_process_of_a_window_whose_processes_alone_overfill_the_parts() {
     // Goal: a window too large for the parts table costs the persister none of the memory its
     // parts would take, since a Mac that runs that many processes has the least to spare.
-    // Method: read a window of two ticks of two processes with a table that keeps five rows,
-    // which the first tick alone fits and the two together do not, and look at what it held.
+    // Method: start a window that makes a row more than a seal keeps of the parts, read two
+    // ticks of two processes into it, which alone would fit, and look at what it held.
     let mut window = legacy_window(0);
     stage_legacy(&mut window, 0, &[process(3, 30), process(4, 40)], &[]);
     stage_legacy(&mut window, 1, &[process(3, 31), process(4, 41)], &[]);
     let mut state = state();
-    state.window.parts_rows_max = 5;
+    state
+        .window
+        .start(u64::from(super::PARTS_ROWS_SEALED_MAX) + 1);
 
-    read(&mut state, &window).unwrap();
+    state.read_ticks(&window).unwrap();
 
     assert_eq!(state.window.processes.len(), 0);
     let rows = super::parts::encode_rows(&state.window, &state.programs);
@@ -249,19 +251,36 @@ fn holds_no_process_of_a_window_whose_processes_alone_overfill_the_parts() {
 #[test]
 fn holds_every_process_of_a_window_whose_rows_fill_the_parts_exactly() {
     // Goal: a window with as many rows as the parts table keeps still gets its parts.
-    // Method: read a window of two ticks of two processes with a table that keeps six rows, a
-    // row for each tick and each process, and look at what it held.
+    // Method: start a window that makes exactly the rows a seal keeps of the parts, read two
+    // ticks of two processes into it, and look at what it held.
     let mut window = legacy_window(0);
     stage_legacy(&mut window, 0, &[process(3, 30), process(4, 40)], &[]);
     stage_legacy(&mut window, 1, &[process(3, 31), process(4, 41)], &[]);
     let mut state = state();
-    state.window.parts_rows_max = 6;
+    state.window.start(u64::from(super::PARTS_ROWS_SEALED_MAX));
 
-    read(&mut state, &window).unwrap();
+    state.read_ticks(&window).unwrap();
 
     assert_eq!(state.window.processes.len(), 4);
     let rows = super::parts::encode_rows(&state.window, &state.programs);
     assert_eq!(rows.unwrap().len(), 2);
+}
+
+#[test]
+fn counts_the_rows_a_window_makes_of_the_parts_before_it_holds_any() {
+    // Goal: a window is known to overfill the parts before its first tick is read, so the count
+    // it starts with is a row for each tick and each process, no fewer.
+    // Method: read a window of two ticks of two processes in no App, and compare the count it
+    // started with to the rows its ticks made.
+    let mut window = legacy_window(0);
+    stage_legacy(&mut window, 0, &[process(3, 30), process(4, 40)], &[]);
+    stage_legacy(&mut window, 1, &[process(3, 31), process(4, 41)], &[]);
+    let mut state = state();
+
+    read(&mut state, &window).unwrap();
+
+    assert_eq!(state.window.parts_rows_least, 6);
+    assert_eq!(state.window.parts_rows, 6);
 }
 
 #[test]
