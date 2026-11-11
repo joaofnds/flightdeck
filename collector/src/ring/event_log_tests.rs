@@ -265,6 +265,24 @@ fn source_let_go_unannounced() -> Source {
     source
 }
 
+#[test]
+fn a_source_that_started_again_leaves_no_ring_behind() {
+    // Goal: these tests leave no shared memory on the machine that runs them, where a ring
+    // nobody can name stays until the next boot.
+    // Method: start a source again over a ring that holds a publication, end it, and unlink
+    // each ring it made by name, which finds a ring only if the source left it.
+    let mut source = Source::new(layout::EventLog::Segmented);
+    source.publish(1, 1);
+    let first = source.writer.name().to_owned();
+    let source = source.restarted();
+    let second = source.writer.name().to_owned();
+
+    drop(source);
+
+    let left = [first, second].map(|name| unlink_generation(&name).map_err(|error| error.kind()));
+    assert_eq!([Err(io::ErrorKind::NotFound); 2], left);
+}
+
 /// A ring of `SLOTS` slots whose log has room for `EVENTS` events, with its writer.
 struct Source {
     writer: Writer,
@@ -408,6 +426,7 @@ impl Source {
         } = self;
         let layout =
             Layout::versioned(writer.layout.shape, layout::LAYOUT_VERSION_IDENTITY).unwrap();
+        let ended = writer.name().to_owned();
         writer.finish();
         // The next writer takes the lock this one holds.
         drop(writer);
@@ -417,6 +436,13 @@ impl Source {
             WriterOrigin::Legacy,
         )
         .unwrap();
+        // A writer keeps the ring before its own while that ring holds a publication, for a
+        // persister to seal, and the lock file names only the newest, so the ring that ended
+        // goes here.
+        match unlink_generation(&ended) {
+            Ok(()) => {}
+            Err(error) => assert_eq!(io::ErrorKind::NotFound, error.kind()),
+        }
         Self {
             writer,
             place,
