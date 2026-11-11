@@ -662,6 +662,19 @@ impl Scenario {
         );
     }
 
+    /// Publishes a tick that logged `count` execs of the process it reads.
+    fn publish_execs(&mut self, run_tick: u64, count: u64) {
+        let events: Vec<Event> = (0..count).map(|_| Event::Exec { pid: 41 }).collect();
+        self.ring.publish_events(
+            run_tick,
+            &ObservationTimes {
+                continuous_ns: 1 + run_tick * 1_000_000_000,
+                ..self.times
+            },
+            &events,
+        );
+    }
+
     fn pass(&mut self) -> Result<Progress> {
         self.pass_retired(false)
     }
@@ -852,15 +865,17 @@ impl WaitingRing {
         self.publish_events(run_tick, times, &started);
     }
 
-    /// Publishes a tick that logged `events`, at most one start of the process it reads.
+    /// Publishes a tick that logged `events`, each of the process it reads and at most one of
+    /// them its start.
     fn publish_events(&mut self, run_tick: u64, times: &ObservationTimes, events: &[Event]) {
         let mut identity = IdentityObservation::EMPTY;
         publish_readable_identity_process(&mut self.0, &mut identity);
         identity.usage = collector::ring::UsageAvailability::Measured;
-        let event_identities = [IdentityObservation {
+        let event_identity = IdentityObservation {
             usage: collector::ring::UsageAvailability::NotApplicable,
             ..identity
-        }];
+        };
+        let event_identities = vec![event_identity; events.len()];
         self.0
             .publish_with_disks(
                 &Readings {
@@ -880,7 +895,7 @@ impl WaitingRing {
                 Some(times),
                 &collector::ring::IdentityPublication {
                     processes: &[identity],
-                    events: &event_identities[..events.len()],
+                    events: &event_identities,
                 },
                 &collector::ring::SupplementalReadings {
                     battery: Some(&collector::battery::BatteryReading::default()),

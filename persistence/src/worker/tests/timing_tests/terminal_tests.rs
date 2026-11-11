@@ -1,4 +1,5 @@
 use super::*;
+use collector::ring::SEGMENT_EVENTS;
 use std::sync::Arc;
 
 #[test]
@@ -193,6 +194,76 @@ fn reports_the_newest_run_with_a_saved_minute() {
     assert_eq!(Identity([4, 0]), reported.run);
     assert_eq!(7, reported.publication);
     assert_eq!(11, reported.events_end);
+}
+
+#[test]
+fn a_persister_that_starts_again_saves_the_first_event_it_had_not_reported_saved() {
+    // Goal: the collector's log lets go of no event the recording lacks, so a persister that
+    // starts again after the ring lost the tick of its first unsaved event still saves that
+    // event and every one after it.
+    // Method: seal a minute whose events end one short of the log's first segment, give the
+    // writer the persister's report as the collector does, log into a third span of events
+    // with no persister while the ring loses the ticks between, then pass with a new
+    // process's state and read the minute it seals.
+    let (_source, sealed) = restarted_after_saving(SEGMENT_EVENTS - 1);
+
+    assert_eq!(SEGMENT_EVENTS, sealed.events_first);
+    assert_eq!(2 * SEGMENT_EVENTS + 2, sealed.events_end);
+    assert_eq!(0, sealed.losses.events);
+}
+
+#[test]
+fn a_persister_that_starts_again_saves_on_once_the_log_let_its_saved_events_go() {
+    // Goal: once the log has started over in the segment of events the persister reported
+    // saved, a persister that starts again saves every event after them.
+    // Method: as above, with a sealed minute whose events fill the log's first segment, so
+    // the log lets that segment's events go.
+    let (source, sealed) = restarted_after_saving(SEGMENT_EVENTS);
+
+    let missed = FoundEvent::Missed {
+        first: 1,
+        end: SEGMENT_EVENTS + 1,
+    };
+    assert_eq!(missed, event_first(&source));
+    assert_eq!(SEGMENT_EVENTS + 1, sealed.events_first);
+    assert_eq!(2 * SEGMENT_EVENTS + 2, sealed.events_end);
+    assert_eq!(0, sealed.losses.events);
+}
+
+/// A source in a ring of four ticks whose persister sealed a minute of `saved` events,
+/// reported it to the writer and ended, whose writer then logged into a third span of events
+/// while the ring lost the ticks between, and the minute a persister that started again
+/// sealed.
+fn restarted_after_saving(saved: u64) -> (Scenario, Manifest) {
+    let mut source = Scenario::at_retention(Directory::new(), 4, 4 * SEGMENT_EVENTS);
+    source.publish_execs(0, saved);
+    source.publish(60);
+    assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+    let reported = reported_progress(&mut source);
+    source.ring.0.mark_events_saved(reported.events_end);
+
+    source.publish_execs(61, 2 * SEGMENT_EVENTS - saved - 1);
+    for tick in 62..65 {
+        source.publish_quiet(tick);
+    }
+    source.publish(65);
+    source.publish(120);
+    source.state = RunState::default();
+    assert!(matches!(source.pass().unwrap(), Progress::Sealed));
+
+    let sealed = source
+        .store
+        .saved_newest(&source.registered.identity)
+        .unwrap()
+        .unwrap();
+    (source, sealed)
+}
+
+/// What a reader finds where the first event of the log of `source` was.
+fn event_first(source: &Scenario) -> FoundEvent {
+    let mut reader = RingReader::open_generation(source.ring.0.name()).unwrap();
+    reader.seek_event(1).unwrap();
+    reader.read_event().unwrap()
 }
 
 /// A source with one sealed minute of three ticks, of which only the first logged an event,
