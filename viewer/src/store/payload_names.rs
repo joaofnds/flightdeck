@@ -321,10 +321,10 @@ mod tests {
         let mut names = ProcessNames::new(2, &budget).unwrap();
 
         let (first, additions) =
-            super::super::Payload::capture_with_names(&sample, &names).unwrap();
+            super::super::Payload::capture_with_names(&sample, &names, None).unwrap();
         names.commit(additions);
         let (second, additions) =
-            super::super::Payload::capture_with_names(&sample, &names).unwrap();
+            super::super::Payload::capture_with_names(&sample, &names, None).unwrap();
         names.commit(additions);
         let records = trace.finish();
 

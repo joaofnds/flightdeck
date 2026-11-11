@@ -1044,6 +1044,18 @@ fn fixture_payload_charges(fixture: &Fixture) -> Vec<usize> {
     charges
 }
 
+/// The charge of the distinct process rows `payloads` hold, a row several of them share
+/// counted once.
+pub(super) fn row_bytes(payloads: &[&super::Payload]) -> usize {
+    let rows: std::collections::HashSet<_> = payloads
+        .iter()
+        .flat_map(|payload| payload.iter())
+        .map(std::ptr::from_ref)
+        .collect();
+
+    rows.len() * super::Payload::ROW_BYTES
+}
+
 pub(super) fn retained_app_charge(apps: &AppsSecond) -> usize {
     let payload = apps.processes.as_ref().unwrap();
     let mut seen = std::collections::HashSet::new();
@@ -1057,6 +1069,7 @@ pub(super) fn retained_app_charge(apps: &AppsSecond) -> usize {
         }
     }
     payload.bytes()
+        + row_bytes(&[payload])
         + names
         + apps.metadata.bytes()
         + apps.apps.reserved_bytes()

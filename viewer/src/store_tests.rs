@@ -971,9 +971,17 @@ fn a_view_retains_its_payload_and_byte_reservations_after_the_store_stops() {
         .filter_map(super::ProcessRow::executable_name)
         .map(super::ProcessName::reserved_bytes)
         .sum();
+    let process_rows = super::startup_tests::row_bytes(&[first, second]);
     assert_eq!(
         budget.used(),
-        first.bytes() + second.bytes() + machines + metadata + rows + names + process_names
+        first.bytes()
+            + second.bytes()
+            + machines
+            + metadata
+            + rows
+            + names
+            + process_names
+            + process_rows
     );
     for (first, second) in first.iter().zip(second.iter()) {
         assert!(std::ptr::eq(

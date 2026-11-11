@@ -8,9 +8,10 @@ use std::time::{Duration, Instant};
 
 use persistence::resources::{Footprint, Watchdog};
 use serde_json::json;
+use viewer::apps::Amount;
 use viewer::store::{
-    AppDetails, AppRow, AppsSecond, ByteBudget, MachineSecond, Missing, ProcessRow, SampledSecond,
-    Store, View,
+    AppDetails, AppRow, AppsSecond, ByteBudget, MachineSecond, Missing, Payload, ProcessRow,
+    SampledSecond, Store, View,
 };
 
 #[path = "store_payload/name_census.rs"]
@@ -47,6 +48,7 @@ struct PayloadCounts {
     refused: usize,
     too_many: usize,
     processes: usize,
+    processes_distinct: usize,
     processes_max: usize,
 }
 
@@ -145,6 +147,8 @@ impl Arguments {
 
 fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
     let footprint = Footprint::read()?;
+    let walk = RowsWalk::of(view);
+    let walk_ns = u64::try_from(walk.elapsed.as_nanos()).map_err(io::Error::other)?;
     let counts = PayloadCounts::of(view);
     println!(
         "{}",
@@ -162,7 +166,11 @@ fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
             "payload_refused": counts.refused,
             "payload_too_many": counts.too_many,
             "process_rows": counts.processes,
+            "process_rows_distinct": counts.processes_distinct,
             "process_rows_max": counts.processes_max,
+            "process_row_reserved_bytes": Payload::ROW_BYTES,
+            "process_rows_walk_ns": walk_ns,
+            "process_rows_walk_sum": walk.sum,
             "app_row_capacity_bytes_by_reference": view.apps.iter()
                 .map(|apps| apps.apps.capacity() * size_of::<AppRow>()).sum::<usize>(),
             "app_row_initialized_bytes_by_reference": view.apps.iter()
@@ -219,7 +227,81 @@ impl PayloadCounts {
                 Err(Missing::TooMany) => counts.too_many += 1,
             }
         }
+        let mut addresses = Self::of_addresses(view, counts.processes);
+        counts.processes_distinct = Self::of_distinct(&mut addresses);
+
         counts
+    }
+
+    fn of_addresses(view: &View, processes: usize) -> Vec<usize> {
+        let mut addresses = Vec::with_capacity(processes);
+        for payload in payloads(view) {
+            addresses.extend(payload.iter().map(|row| std::ptr::from_ref(row).addr()));
+        }
+        assert_eq!(addresses.len(), processes);
+
+        addresses
+    }
+
+    fn of_distinct(addresses: &mut [usize]) -> usize {
+        addresses.sort_unstable();
+
+        addresses.chunk_by(|left, right| left == right).count()
+    }
+}
+
+/// The seconds of `view` that hold their process rows.
+fn payloads(view: &View) -> impl Iterator<Item = &Payload> {
+    view.apps
+        .iter()
+        .filter_map(|apps| apps.processes.as_deref().ok())
+}
+
+/// One reader's pass over every reading of every held process row, taken before anything else
+/// reads the rows, with a sum that shows what it read.
+struct RowsWalk {
+    elapsed: Duration,
+    sum: u64,
+}
+
+impl RowsWalk {
+    fn of(view: &View) -> Self {
+        let started = Instant::now();
+        let mut sum = 0_u64;
+        for payload in payloads(view) {
+            for row in payload {
+                sum = sum.wrapping_add(Self::of_row(row));
+            }
+        }
+
+        Self {
+            elapsed: started.elapsed(),
+            sum,
+        }
+    }
+
+    fn of_row(row: &ProcessRow) -> u64 {
+        let amounts = [
+            row.cpu_ns(),
+            row.energy_nj(),
+            row.gpu_ns(),
+            row.disk_read_bytes(),
+            row.disk_written_bytes(),
+            row.disk_io_bytes(),
+            row.resident_bytes(),
+            row.footprint_bytes(),
+            row.idle_wakeups(),
+            row.pageins(),
+            row.threads(),
+        ];
+        let mut sum = u64::from(row.pid.unsigned_abs());
+        for amount in amounts {
+            if let Amount::Known(known) = amount {
+                sum = sum.wrapping_add(known);
+            }
+        }
+
+        sum
     }
 }
 
@@ -278,6 +360,21 @@ mod footprint_tests {
             ring_complete: false,
             full_detail_evicted_through_ns: None,
         }
+    }
+
+    #[test]
+    fn a_row_two_seconds_hold_counts_once() {
+        // Goal: a shared row is one row of storage. Method: count two aliases around another owner.
+        let shared = Arc::new(7_u8);
+        let alias = Arc::clone(&shared);
+        let other = Arc::new(7_u8);
+        let mut addresses = vec![
+            Arc::as_ptr(&shared).addr(),
+            Arc::as_ptr(&other).addr(),
+            Arc::as_ptr(&alias).addr(),
+        ];
+
+        assert_eq!(PayloadCounts::of_distinct(&mut addresses), 2);
     }
 
     #[test]

@@ -654,6 +654,7 @@ fn capture_candidate(
                 payload::load_minute_rows(&sample, previous, input.budget, &mut apps);
                 payload::load_minute_payload(
                     &sample,
+                    previous,
                     input.budget,
                     captured.names_capacity,
                     names,

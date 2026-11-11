@@ -594,10 +594,44 @@ fn selected_startup_payloads_share_one_input_name_owner_after_startup_retires() 
     }
     println!("startup_name_work={:?}", records.values());
     drop((startup, held, ring, fixture));
-    assert_eq!(budget.used(), first.bytes() + second.bytes() + name_bytes);
+    assert_eq!(
+        budget.used(),
+        first.bytes()
+            + second.bytes()
+            + name_bytes
+            + crate::store::startup_tests::row_bytes(&[&first, &second])
+    );
     drop((first, second, records));
     assert_eq!(budget.used(), 0);
     assert_eq!(observer.used(), 0);
+}
+
+#[test]
+fn selected_startup_payloads_keep_a_row_their_seconds_repeat_once() {
+    // Goal: the seconds a launch loads share the rows that repeat, as live seconds do.
+    // Method: load the selected minute through the staged startup and compare where its last
+    // two seconds, whose processes read the same, keep each row.
+    let fixture = crate::store::startup_tests::primary_fixture();
+    let operation = Arc::new(crate::Cancellation::default())
+        .operation(0)
+        .unwrap();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
+    held.startup = crate::store::StartupState::Loading;
+    let mut ring = crate::store::native_acceptance::make_ring(&fixture.root, &budget);
+    let input = Input {
+        root: &fixture.root,
+        budget: &budget,
+        operation: &operation,
+    };
+
+    crate::store::startup_tests::drive_primary(&mut Startup::new(), &input, &mut held, &mut ring);
+
+    let earlier = held.apps.get(4).unwrap().processes.as_ref().unwrap();
+    let later = held.apps.get(5).unwrap().processes.as_ref().unwrap();
+    assert_eq!(earlier.len(), 2);
+    assert!(std::ptr::eq(&raw const earlier[0], &raw const later[0]));
+    assert!(std::ptr::eq(&raw const earlier[1], &raw const later[1]));
 }
 
 fn assert_selected_payload_identity(

@@ -45,6 +45,19 @@ fn grows_an_owner_only_by_room_that_fits() {
 }
 
 #[test]
+fn names_the_budget_an_owner_is_charged_to() {
+    // Goal: a holder can tell which budget an owner's bytes count against.
+    // Method: reserve from one of two budgets of equal size and ask the owner about each.
+    let budget = Arc::new(ByteBudget::new(100));
+    let other_budget = Arc::new(ByteBudget::new(100));
+
+    let reservation = budget.reserve(10).unwrap();
+
+    assert!(reservation.charged_to(&budget));
+    assert!(!reservation.charged_to(&other_budget));
+}
+
+#[test]
 fn permits_an_unchanged_or_empty_reservation_without_releasing_twice() {
     // Goal: no-op and full release preserve accounting through the owner's later drop.
     // Method: shrink one owner to its current charge and then to zero.

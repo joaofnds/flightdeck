@@ -1,6 +1,6 @@
 //! Typed process payloads and shared names retain their own admissions, including View owners.
 use std::fmt;
-use std::ops::Deref;
+use std::ops::{Deref, Index};
 use std::sync::Arc;
 
 #[path = "payload_names.rs"]
@@ -28,9 +28,23 @@ use collector::ring::{IdentityUnavailable, ProcessCreation};
 pub struct Payload {
     pub(crate) selected: Observation,
     pub previous: Option<Stamp>,
-    rows: Vec<ProcessRow>,
+    rows: Vec<Arc<SharedRow>>,
     apps: Vec<AppDetails>,
     reservation: ByteReservation,
+}
+
+/// One process row and its admission, held by every second whose reading of the process
+/// equals it.
+#[derive(Debug)]
+struct SharedRow {
+    row: ProcessRow,
+    _reservation: ByteReservation,
+}
+
+/// The process rows of one payload in its sample's order, borrowed from their owners.
+#[derive(Clone, Debug)]
+pub struct Rows<'payload> {
+    rows: std::slice::Iter<'payload, Arc<SharedRow>>,
 }
 
 /// Captured executable bytes and their display spelling, shared across observations.
@@ -95,38 +109,63 @@ pub struct AppDetails {
 }
 
 impl Payload {
+    /// The charge of each distinct process row, however many seconds hold it.
+    pub const ROW_BYTES: usize = SharedRow::BYTES;
+
+    /// The charge of each process a second lists, whether its row is shared or the second's own.
+    pub const ROW_REFERENCE_BYTES: usize = size_of::<Arc<SharedRow>>();
+
     /// Additional App measures, borrowed from their reservation owner.
     #[must_use]
     pub fn apps(&self) -> &[AppDetails] {
         &self.apps
     }
 
+    /// The process rows in the sample's order.
+    #[must_use]
+    pub fn iter(&self) -> Rows<'_> {
+        Rows {
+            rows: self.rows.iter(),
+        }
+    }
+
+    /// The count of process rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Captures `sample`, sharing each row that equals the row `previous`, the payload of the
+    /// second before, holds for the same process.
     pub(super) fn capture_with_names(
         sample: &Sample,
         names: &ProcessNames,
+        previous: Option<&Self>,
     ) -> Result<(Self, NameAdditions), Missing> {
+        if let Some(previous) = previous {
+            assert!(previous.reservation.charged_to(names.budget()));
+        }
+
         let reservation = names
             .budget()
             .reserve(Self::capture_bytes(sample))
             .ok_or(Missing::Budget)?;
         #[cfg(test)]
         let before = names.work_snapshot();
-        let additions = match names.additions(sample) {
-            Ok(additions) => additions,
+        let previous_rows = previous.map_or(&[][..], |payload| &payload.rows);
+        let (additions, rows) = match Self::capture_with_names_parts(sample, names, previous_rows) {
+            Ok(parts) => parts,
             Err(missing) => {
                 #[cfg(test)]
                 names.record_receipt(sample.selected, before, false);
                 return Err(missing);
             }
         };
-        let mut rows = Vec::with_capacity(sample.processes().len());
-        for process in sample.processes() {
-            let name = process
-                .executable_name
-                .as_ref()
-                .map(|name| names.name(name, &additions));
-            rows.push(ProcessRow::capture(process, name));
-        }
 
         let apps = sample
             .apps()
@@ -151,18 +190,105 @@ impl Payload {
         ))
     }
 
-    /// Names own separate reservations; this admission precedes either container allocation.
+    fn capture_with_names_parts(
+        sample: &Sample,
+        names: &ProcessNames,
+        previous_rows: &[Arc<SharedRow>],
+    ) -> Result<(NameAdditions, Vec<Arc<SharedRow>>), Missing> {
+        let additions = names.additions(sample)?;
+        let rows = Self::capture_with_names_rows(sample, names, &additions, previous_rows)?;
+
+        Ok((additions, rows))
+    }
+
+    /// The row of each process of `sample`, which is the row of `previous_rows` where that
+    /// second read the same. One pass over `previous_rows` finds each process while both lists
+    /// ascend by pid, and a list in another order shares fewer rows and reads the same.
+    fn capture_with_names_rows(
+        sample: &Sample,
+        names: &ProcessNames,
+        additions: &NameAdditions,
+        previous_rows: &[Arc<SharedRow>],
+    ) -> Result<Vec<Arc<SharedRow>>, Missing> {
+        let mut rows = Vec::with_capacity(sample.processes().len());
+        let mut previous_index = 0;
+        for process in sample.processes() {
+            let name = process
+                .executable_name
+                .as_ref()
+                .map(|name| names.name(name, additions));
+            let row = ProcessRow::capture(process, name);
+            previous_index += previous_rows[previous_index..]
+                .iter()
+                .take_while(|shared| shared.row.pid < row.pid)
+                .count();
+            let shared = match previous_rows.get(previous_index) {
+                Some(shared) if shared.row == row => Arc::clone(shared),
+                _ => SharedRow::admit(row, names.budget())?,
+            };
+            rows.push(shared);
+        }
+
+        Ok(rows)
+    }
+
+    /// Names and rows own separate reservations; this admission precedes either container
+    /// allocation.
     fn capture_bytes(sample: &Sample) -> usize {
         2 * size_of::<usize>()
             + size_of::<Self>()
-            + sample.processes().len() * size_of::<ProcessRow>()
+            + sample.processes().len() * Self::ROW_REFERENCE_BYTES
             + sample.apps().len() * size_of::<AppDetails>()
     }
 
-    /// This payload's header and containers, excluding separately admitted shared names.
+    /// This payload's header and containers, excluding separately admitted shared names and
+    /// rows.
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.reservation.bytes()
+    }
+}
+
+impl SharedRow {
+    /// One allocation's charge: its two reference counts, the row and this reservation.
+    const BYTES: usize = 2 * size_of::<usize>() + size_of::<Self>();
+
+    fn admit(row: ProcessRow, budget: &Arc<ByteBudget>) -> Result<Arc<Self>, Missing> {
+        let reservation = budget.reserve(Self::BYTES).ok_or(Missing::Budget)?;
+
+        Ok(Arc::new(Self {
+            row,
+            _reservation: reservation,
+        }))
+    }
+}
+
+impl<'payload> Iterator for Rows<'payload> {
+    type Item = &'payload ProcessRow;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.rows.next().map(|shared| &shared.row)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.rows.size_hint()
+    }
+}
+
+impl<'payload> IntoIterator for &'payload Payload {
+    type Item = &'payload ProcessRow;
+    type IntoIter = Rows<'payload>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl Index<usize> for Payload {
+    type Output = ProcessRow;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.rows[index].row
     }
 }
 
@@ -368,25 +494,18 @@ impl CompactAmount {
     }
 }
 
-impl Deref for Payload {
-    type Target = [ProcessRow];
-
-    fn deref(&self) -> &Self::Target {
-        &self.rows
-    }
-}
-
 impl PartialEq for Payload {
     fn eq(&self, other: &Self) -> bool {
         self.selected == other.selected
             && self.previous == other.previous
-            && self.rows == other.rows
+            && self.iter().eq(other.iter())
             && self.apps == other.apps
     }
 }
 
 const _: () = {
     assert!(size_of::<ProcessRow>() <= 152);
+    assert!(size_of::<SharedRow>() <= 168);
     assert!(size_of::<CompactAmount>() <= 9);
     assert!(align_of::<CompactAmount>() == 1);
     assert!(size_of::<AppDetails>() <= 80);
@@ -403,3 +522,7 @@ mod name_tests;
 #[cfg(test)]
 #[path = "payload_namespace_tests.rs"]
 mod namespace_tests;
+
+#[cfg(test)]
+#[path = "payload_row_tests.rs"]
+mod row_tests;

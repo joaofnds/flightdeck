@@ -536,6 +536,7 @@ pub(super) fn sample_second(
     payload::load_minute_rows(&Ok(sample), previous, budget, &mut second);
     payload::load_minute_payload(
         &Ok(sample),
+        previous,
         budget,
         sample.processes().len(),
         &mut names,

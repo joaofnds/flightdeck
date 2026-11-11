@@ -109,6 +109,12 @@ impl ByteReservation {
     pub fn bytes(&self) -> usize {
         self.bytes
     }
+
+    /// Whether these bytes count against `budget` itself, not another budget of equal size.
+    #[must_use]
+    pub fn charged_to(&self, budget: &Arc<ByteBudget>) -> bool {
+        Arc::ptr_eq(&self.budget, budget)
+    }
 }
 
 impl Drop for ByteReservation {

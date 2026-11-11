@@ -1813,7 +1813,7 @@ fn a_sealed_name_namespace_from_another_budget_refuses_without_transferring_char
             assert!(sample.is_ok());
             super::load_minute_rows(&sample, None, &budget, &mut second);
             assert!(second.missing.is_none());
-            super::load_minute_payload(&sample, &budget, count, &mut names, &mut second);
+            super::load_minute_payload(&sample, None, &budget, count, &mut names, &mut second);
             assert!(matches!(
                 second.processes,
                 Err(crate::store::Missing::Budget)
@@ -1863,7 +1863,7 @@ fn a_sealed_index_admission_refusal_preserves_apps_and_the_next_exact_interval()
             assert!(second.metadata.bytes() > 0);
             if seconds.is_empty() {
                 let pressure = budget.reserve(budget.maximum() - budget.used()).unwrap();
-                super::load_minute_payload(&sample, &budget, count, &mut names, &mut second);
+                super::load_minute_payload(&sample, None, &budget, count, &mut names, &mut second);
                 assert!(names.is_none());
                 assert!(matches!(
                     second.processes,
@@ -1874,7 +1874,14 @@ fn a_sealed_index_admission_refusal_preserves_apps_and_the_next_exact_interval()
                 assert!(!second.apps.is_empty());
                 drop(pressure);
             } else {
-                super::load_minute_payload(&sample, &budget, count, &mut names, &mut second);
+                super::load_minute_payload(
+                    &sample,
+                    seconds.last(),
+                    &budget,
+                    count,
+                    &mut names,
+                    &mut second,
+                );
                 let payload = second.processes.as_ref().unwrap();
                 assert_eq!(payload.selected.stamp.publication, 2);
                 assert_eq!(payload.previous.unwrap().publication, 1);
@@ -2034,13 +2041,55 @@ fn a_full_minute_shares_captured_names_between_its_exact_observations() {
         crate::apps::Amount::Known(1)
     );
     drop((machine, seconds, replay_decoder, found, fixture));
-    assert_eq!(budget.used(), first.bytes() + second.bytes() + name_bytes);
+    assert_eq!(
+        budget.used(),
+        first.bytes()
+            + second.bytes()
+            + name_bytes
+            + crate::store::startup_tests::row_bytes(&[&first, &second])
+    );
     assert_eq!(first[1].executable_name().unwrap().bytes, b"current");
     drop(first);
-    assert_eq!(budget.used(), second.bytes() + name_bytes);
+    assert_eq!(
+        budget.used(),
+        second.bytes() + name_bytes + crate::store::startup_tests::row_bytes(&[&second])
+    );
     assert_eq!(second[1].executable_name().unwrap().bytes, b"current");
     drop(second);
     assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn a_full_minute_keeps_a_row_its_seconds_repeat_once() {
+    // Goal: seconds decoded from a sealed minute share the rows that repeat, as live seconds do.
+    // Method: seal three ticks whose processes read the same from the second tick on, load the
+    // minute through the real loader and compare where its second and third seconds keep each
+    // row.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(100);
+    fixture.publish_with_system_rows(101);
+    fixture.publish_with_system_rows(102);
+    fixture.seal();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut found = Vec::new();
+    super::super::find(&fixture.root, &mut found, None).unwrap();
+
+    let (_machine, seconds) = load_minute(
+        &fixture.root,
+        &found[0],
+        &mut Decoder::default(),
+        &budget,
+        &operation,
+        &AdmittedTable::from_file_budgeted,
+    )
+    .unwrap();
+
+    let second = seconds[1].processes.as_ref().unwrap();
+    let third = seconds[2].processes.as_ref().unwrap();
+    assert_eq!(second.len(), 2);
+    assert!(std::ptr::eq(&raw const second[0], &raw const third[0]));
+    assert!(std::ptr::eq(&raw const second[1], &raw const third[1]));
 }
 
 #[test]
@@ -2173,6 +2222,7 @@ impl super::replay::Target for FrameRetryTarget<'_> {
         super::load_minute_rows(&sample, self.seconds.last(), self.budget, &mut second);
         super::load_minute_payload(
             &sample,
+            self.seconds.last(),
             self.budget,
             captured.names_capacity,
             &mut self.names,

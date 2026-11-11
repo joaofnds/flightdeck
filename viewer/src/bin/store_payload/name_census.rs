@@ -2,7 +2,7 @@
 use std::io;
 
 use serde_json::json;
-use viewer::store::{ByteBudget, ProcessName, ProcessRow, View};
+use viewer::store::{ByteBudget, Payload, ProcessName, View};
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Names {
@@ -20,7 +20,7 @@ pub(super) fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
         count = count.checked_add(1).ok_or_else(overflow)?;
         Ok(())
     })?;
-    if count > budget.maximum() / size_of::<ProcessRow>() {
+    if count > budget.maximum() / Payload::ROW_REFERENCE_BYTES {
         return Err(io::Error::other(
             "name occurrences exceed the payload row bound",
         ));

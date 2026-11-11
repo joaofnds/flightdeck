@@ -4,6 +4,7 @@ use super::{Payload, ProcessName, ProcessRow};
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{Bytes, Sample};
+use crate::store::startup_tests::row_bytes;
 use crate::store::{AppsSecond, ByteBudget};
 
 #[test]
@@ -24,12 +25,18 @@ fn a_shared_process_name_keeps_its_charge_after_its_original_payload_is_gone() {
     drop((first, second));
     assert_eq!(
         budget.used(),
-        first_payload.bytes() + second_payload.bytes() + names
+        first_payload.bytes()
+            + second_payload.bytes()
+            + names
+            + row_bytes(&[&first_payload, &second_payload])
     );
 
     drop(first_payload);
 
-    assert_eq!(budget.used(), second_payload.bytes() + names);
+    assert_eq!(
+        budget.used(),
+        second_payload.bytes() + names + row_bytes(&[&second_payload])
+    );
     assert!(
         !second_payload[0]
             .executable_name()
@@ -50,7 +57,7 @@ fn payload_admission_counts_its_containers_without_recharging_shared_names() {
         let payload = apps.processes.as_ref().unwrap();
         let bytes = 2 * size_of::<usize>()
             + size_of::<Payload>()
-            + size_of_val(&payload[..])
+            + payload.len() * size_of::<Arc<super::SharedRow>>()
             + size_of_val(payload.apps());
         assert_eq!(payload.bytes(), bytes);
     }
@@ -78,11 +85,11 @@ fn equal_names_from_independent_sources_keep_separate_admissions() {
 
     assert_eq!(
         first_budget.used(),
-        first_payload.bytes() + name_bytes(&first_payload)
+        first_payload.bytes() + name_bytes(&first_payload) + row_bytes(&[&first_payload])
     );
     assert_eq!(
         other_budget.used(),
-        other_payload.bytes() + name_bytes(&other_payload)
+        other_payload.bytes() + name_bytes(&other_payload) + row_bytes(&[&other_payload])
     );
     drop(first_payload);
     assert_eq!(first_budget.used(), 0);
@@ -142,14 +149,14 @@ fn rejected_name_additions_leave_the_accepted_namespace_unchanged_and_retry_exac
     let before = budget.used();
 
     assert!(matches!(
-        Payload::capture_with_names(&sample, &names),
+        Payload::capture_with_names(&sample, &names, None),
         Err(crate::store::Missing::Budget)
     ));
 
     assert_eq!(budget.used(), before);
     assert_eq!(names.observation().0, 0);
     drop(pressure);
-    let (payload, additions) = Payload::capture_with_names(&sample, &names).unwrap();
+    let (payload, additions) = Payload::capture_with_names(&sample, &names, None).unwrap();
     names.commit(additions);
     assert_eq!(names.observation().0, 2);
     for (actual, expected) in payload.iter().zip(sample.processes()) {
@@ -161,7 +168,10 @@ fn rejected_name_additions_leave_the_accepted_namespace_unchanged_and_retry_exac
         );
     }
     drop(names);
-    assert_eq!(budget.used(), payload.bytes() + name_bytes(&payload));
+    assert_eq!(
+        budget.used(),
+        payload.bytes() + name_bytes(&payload) + row_bytes(&[&payload])
+    );
     drop(payload);
     assert_eq!(budget.used(), 0);
 }

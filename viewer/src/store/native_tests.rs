@@ -108,6 +108,7 @@ fn detachment_retains_native_origin_and_the_original_metadata_reservation() {
         .filter_map(crate::store::ProcessRow::executable_name)
         .map(crate::store::ProcessName::reserved_bytes)
         .sum();
+    let rows = crate::store::startup_tests::row_bytes(&[payload]);
     let payload = payload.bytes();
     let names: usize = second
         .apps
@@ -126,7 +127,7 @@ fn detachment_retains_native_origin_and_the_original_metadata_reservation() {
     );
     assert_eq!(
         budget.used(),
-        detached.bytes() + metadata + payload + names + process_names
+        detached.bytes() + metadata + payload + rows + names + process_names
     );
     drop(detached);
     assert_eq!(budget.used(), 0);

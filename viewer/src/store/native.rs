@@ -369,11 +369,16 @@ impl Prepared {
                 .as_ref()
                 .unwrap_or_else(|| unreachable!("sample"))
                 .get();
-            let (payload, additions) = super::Payload::capture_with_names(sample, input.names)
-                .map_err(|missing| match missing {
-                    Missing::Budget => PrepareError::Admission(Admission::Payload),
-                    _ => unreachable!("payload capture refuses only its byte budget"),
-                })?;
+            let previous_payload = input
+                .previous_apps
+                .and_then(|apps| apps.processes.as_deref().ok());
+            let (payload, additions) =
+                super::Payload::capture_with_names(sample, input.names, previous_payload).map_err(
+                    |missing| match missing {
+                        Missing::Budget => PrepareError::Admission(Admission::Payload),
+                        _ => unreachable!("payload capture refuses only its byte budget"),
+                    },
+                )?;
             self.apps.processes = Ok(Arc::new(payload));
             self.name_additions = Some(additions);
         }

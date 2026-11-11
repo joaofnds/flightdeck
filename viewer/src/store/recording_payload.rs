@@ -717,7 +717,7 @@ fn load_minute_apps(
         |endpoint, sample, losses, count| {
             let mut second = AppsSecond::default();
             load_minute_rows(&sample, apps.last(), budget, &mut second);
-            load_minute_payload(&sample, budget, count, &mut names, &mut second);
+            load_minute_payload(&sample, apps.last(), budget, count, &mut names, &mut second);
             second.observation = Some(crate::live_app_response::Observation {
                 recording: endpoint.identity.recording.0,
                 stamp: endpoint.stamp,
@@ -770,6 +770,7 @@ pub(super) fn load_minute_rows(
 
 pub(super) fn load_minute_payload(
     sample: &persistence::Result<&crate::live_app_response::Sample>,
+    previous: Option<&AppsSecond>,
     budget: &Arc<ByteBudget>,
     count: usize,
     names: &mut Option<super::super::payload::ProcessNames>,
@@ -799,13 +800,15 @@ pub(super) fn load_minute_payload(
         second.processes = Err(super::super::Missing::Budget);
         return;
     }
-    second.processes = match super::super::Payload::capture_with_names(sample, names) {
-        Ok((payload, additions)) => {
-            names.commit(additions);
-            Ok(Arc::new(payload))
-        }
-        Err(missing) => Err(missing),
-    };
+    let previous_payload = previous.and_then(|apps| apps.processes.as_deref().ok());
+    second.processes =
+        match super::super::Payload::capture_with_names(sample, names, previous_payload) {
+            Ok((payload, additions)) => {
+                names.commit(additions);
+                Ok(Arc::new(payload))
+            }
+            Err(missing) => Err(missing),
+        };
 }
 
 /// Replays the process frames of `read` into `decoder`, handing `consume` each second's sample,
