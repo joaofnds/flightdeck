@@ -286,8 +286,13 @@ worker waits would weaken that protection, so its nominal ten checks a second re
 
 The persister's footprint peaks while it seals, so a seal keeps little beside the window it
 staged. It gives the ring's pages back after each tick it stages, and it builds the processes
-table and the App parts one group of 16,384 rows at a time. A window whose App parts would pass
-262,144 rows, about 4,100 processes a tick, is sealed without them. On an M5 Pro on 2026-11-11
+table and the App parts one group of 16,384 rows at a time. A tick makes a row of the App parts
+for itself and one for each of its Apps and processes, and a window whose App parts would pass
+262,144 rows, more than 4,369 a tick over a minute, is sealed without them. That is half the
+524,288 rows a reader takes. A persister whose seal kept them all, killed and started again,
+held 231 to 239 MB at 5,000 generated processes a tick and 258 MB at 5,600, and exited over the
+recorder's 256 MiB at 6,000, where it seals nothing, while a minute without its App parts
+keeps every reading. On an M5 Pro on 2026-11-11
 the persister, a process of its own given the recorder's 256 MiB, was killed after its first
 sealed minute and started again, and over four runs each it sealed three generated minutes of
 12,000 processes a tick, the most that Mac's `kern.maxproc` lets it list, with a lifetime-peak
@@ -327,10 +332,12 @@ Polars SQL. Each table must stay within the recording's admission bounds, and ea
 event row must hold an identity and a usage as the persister writes them, so a damaged or
 oversized minute is refused with its reason, never read as zeros. The store takes a minute's
 Apps from its App parts where the minute keeps parts of the version this build writes. For a
-minute sealed before App parts existed, or with parts of an older version, the decoder derives
-the Apps from the minute's processes and events by the rule the seal uses, and over a real
-recording of 4,296 minutes on 2026-10-23 both gave the same Apps on all 675 minutes that keep
-current parts. The store does not call that derivation yet. An App's rates at a tick come from
+minute sealed before App parts existed, without them because they would pass 262,144 rows, or
+with parts of an older version, the decoder derives the Apps from the minute's processes and
+events by the rule the seal uses, and over a real recording of 4,296 minutes on 2026-10-23 both
+gave the same Apps on all 675 minutes that keep current parts. The store does not call that
+derivation yet, so the live pages show such a minute's Apps as not read, while the App
+histories of a held second replay the minute. An App's rates at a tick come from
 the tick just before it in the same run, as the glossary's rate says, so a minute's first tick
 takes them from the last tick of the minute before, and a run's minutes derive in order. A
 minute derived without the one before it has no App rates at its first tick.
@@ -707,9 +714,9 @@ SQL (The persister and the recording).
 events as it seals the window. App ranks hold the Apps that used the most of each resource in
 each of the window's ticks, and App parts hold every App's row and processes in each tick. A
 window sealed before they existed lacks them, as does a window whose parts would pass 262,144
-rows, and App parts carry a version, so a reader that needs the Apps of a window whose parts it
-does not read derives them from the window's processes and events (The persister and the
-recording).
+rows, and App parts carry a version. A reader that replays windows derives the Apps of a window
+whose parts it does not read from the window's processes and events, and the live window's
+store shows them as not read (The persister and the recording).
 
 **Commit marker.** A hard link, under the recording's `ordinary` directory and its observation
 directories, to the metadata file of a window, made once every file of the window is synced to

@@ -29,11 +29,13 @@ const PROGRAMS_CAPACITY: Capacity = Capacity {
 const PROGRAMS_BYTES_MAX: u64 = 72 * 1024 * 1024;
 /// What the Apps and processes a window holds for its parts may take, a row of the table each.
 const HELD_BYTES_MAX: u64 = 128 * 1024 * 1024;
-/// The rows of the parts table a window is sealed with, about 4,100 processes a second. A
-/// window of more is sealed without its parts and a reader leaves its minute to the App rule,
-/// since what a seal holds for the parts beside the staged window would pass the 256 MiB the
-/// recorder gives its persister. A reader still takes the `PARTS_ROWS_MAX` rows an earlier
-/// build could write.
+/// The rows of the parts table a window is sealed with. A tick makes a row of its own and one
+/// for each of its Apps and processes, so a minute of more than 4,369 of them a tick passes
+/// these rows and is sealed without its parts. A reader that replays minutes then derives its
+/// Apps by the App rule, and the live window's store, which replays none, shows them as not
+/// read. A seal keeps half the `PARTS_ROWS_MAX` rows a reader takes, which an earlier build
+/// could write, since a persister that passes the 256 MiB the recorder gives it exits before
+/// it seals, and a minute without its parts still keeps every reading.
 const PARTS_ROWS_SEALED_MAX: u32 = 1 << 18;
 
 const _: () = {
