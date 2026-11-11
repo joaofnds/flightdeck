@@ -7,32 +7,54 @@
 //! processes a tick, two thirds of them readable, running 500 programs of 63 apps, 37 forks a
 //! second, each with its exec and exit, and 715 coalitions. Its readings change every tick, so
 //! every column compresses as a real one does rather than as a constant.
+//!
+//! Given a persister in place of a derivation, it leaves the sealing to that binary as a process
+//! of its own, as the recorder runs it, and prints what the process cost. The run fails unless
+//! the persister sealed every tick and held no more than the memory it was given, so a seal that
+//! outgrows the recorder's limit at some count of processes is found before a Mac that busy is.
 
 use std::cell::RefCell;
 use std::ffi::c_int;
 use std::ops::RangeInclusive;
-use std::path::Path;
-use std::process::ExitCode;
-use std::time::Instant;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitCode, ExitStatus};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use collector::clock::Timebase;
 use collector::coalitions::Coalition;
 use collector::interfaces::{Interface, Name};
 use collector::machine::{CPUTicks, Memory};
 use collector::processes::{Process, Task, Usage};
 use collector::recording::Registration;
+use collector::recording::child::ReapedChild;
 use collector::ring::{
     DictionaryCapacity, Dropped, IdentityObservation, IdentityPublication, ObservationTimes, Place,
-    ProcessCreation, ProcessIdentity, ProgramBytes, ProgramReference, Readings, Shape,
+    ProcessCreation, ProcessIdentity, ProgramBytes, ProgramReference, Readings, RunIdentity, Shape,
     UsageAvailability, Writer,
 };
 use collector::tracker::{Event, Noticed};
+use persistence::canonical::ReadWork;
+use persistence::canonical::catalog::Catalog;
+use persistence::resources::ByteBudget;
 use persistence::worker::{Derivation, Derive};
 
-const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|restarted|none";
+const USAGE: &str = "usage: seal_bench --windows N --processes N --derive apps|restarted|none\n       \
+    seal_bench --windows N --processes N --persister PATH --memory-bytes N";
 const TICKS_PER_WINDOW: u64 = 60;
-/// Bounds the run, since every tick stays in the ring until the worker seals it.
 const WINDOWS_MAX: u64 = 10;
-const PROCESSES_MAX: u64 = 4_096;
+/// Above the 12,000 processes `kern.maxproc` lets an M5 Pro list.
+const PROCESSES_MAX: u64 = 16_384;
+/// Bounds the ring, which holds every process of every tick until the run is sealed, at the ten
+/// windows of 4,096 processes a run took before it took more processes.
+const WINDOW_PROCESSES_MAX: u64 = 10 * 4_096;
+const PERSISTER_POLL: Duration = Duration::from_millis(10);
+/// Bounds the wait for the persister at three minutes, past the two its own watchdog gives one
+/// operation.
+const PERSISTER_POLLS_MAX: u32 = 18_000;
+/// What reading the recording's list of windows may hold.
+const CATALOG_BYTES_MAX: usize = 1 << 28;
 const PROGRAMS: u64 = 500;
 const APPS: u64 = 63;
 const FORKS_PER_TICK: u64 = 37;
@@ -65,7 +87,16 @@ fn main() -> ExitCode {
 struct Options {
     windows: u64,
     processes: u64,
-    derive: Deriving,
+    sealing: Sealing,
+}
+
+/// What seals the run's windows.
+#[derive(Debug, PartialEq)]
+enum Sealing {
+    /// The worker, in this process.
+    Worker(Deriving),
+    /// The persister at `path`, as a process of its own that may hold `memory_bytes`.
+    Persister { path: PathBuf, memory_bytes: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -80,6 +111,8 @@ fn options_from(words: &[String]) -> Result<Options, String> {
     let mut windows = None;
     let mut processes = None;
     let mut derive = None;
+    let mut persister = None;
+    let mut memory_bytes = None;
     for pair in words.chunks(2) {
         let [flag, value] = pair else {
             return Err(USAGE.to_owned());
@@ -97,16 +130,32 @@ fn options_from(words: &[String]) -> Result<Options, String> {
                     _ => return Err(USAGE.to_owned()),
                 }
             }
+            "--persister" => persister = Some(PathBuf::from(value)),
+            "--memory-bytes" => {
+                let bounds = 1..=persistence::resources::WORKING_BYTES_MAX;
+                memory_bytes = Some(options_count(value, bounds)?);
+            }
             _ => return Err(USAGE.to_owned()),
         }
     }
 
-    match (windows, processes, derive) {
-        (Some(windows), Some(processes), Some(derive)) => Ok(Options {
-            windows,
-            processes,
-            derive,
-        }),
+    let sealing = match (derive, persister, memory_bytes) {
+        (Some(derive), None, None) => Sealing::Worker(derive),
+        (None, Some(path), Some(memory_bytes)) => Sealing::Persister { path, memory_bytes },
+        _ => return Err(USAGE.to_owned()),
+    };
+    match (windows, processes) {
+        (Some(windows), Some(processes)) if windows * processes <= WINDOW_PROCESSES_MAX => {
+            Ok(Options {
+                windows,
+                processes,
+                sealing,
+            })
+        }
+        (Some(windows), Some(processes)) => Err(format!(
+            "{USAGE}\n{windows} windows of {processes} processes are more than \
+            {WINDOW_PROCESSES_MAX} in all"
+        )),
         _ => Err(USAGE.to_owned()),
     }
 }
@@ -144,14 +193,36 @@ fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
         let sealed = registered
             .map_err(Into::into)
             .and_then(|()| run_record(&mut writer, options))
-            .and_then(|()| run_seal(&root, options.derive));
+            .and_then(|()| match &options.sealing {
+                Sealing::Worker(deriving) => {
+                    run_seal(&root, *deriving).map(|marks| Sealed::Worker(*deriving, marks))
+                }
+                Sealing::Persister { path, memory_bytes } => {
+                    let run = writer.identity().ok_or("the ring names no run")?;
+                    let persister = run_persister(&root, path, *memory_bytes)?;
+                    run_persister_sealed(&root, &run, options.windows * TICKS_PER_WINDOW)?;
+                    Ok(Sealed::Persister(persister))
+                }
+            });
         let unlinked = collector::ring::unlink_generation(writer.name());
-        sealed.and_then(|marks| unlinked.map(|()| marks).map_err(Into::into))
+        sealed.and_then(|sealed| unlinked.map(|()| sealed).map_err(Into::into))
     });
     std::fs::remove_dir_all(&root)?;
 
-    let marks = sealed?;
-    report(options, &marks)
+    match sealed? {
+        Sealed::Worker(deriving, marks) => report(options, deriving, &marks),
+        Sealed::Persister(persister) => {
+            report_persister(options, &persister);
+            Ok(())
+        }
+    }
+}
+
+/// What a sealed run leaves to report.
+enum Sealed {
+    /// The CPU time and the clock at the start and the end of each window's derivation.
+    Worker(Deriving, Vec<Mark>),
+    Persister(PersisterRun),
 }
 
 /// Publishes every window of the run and marks the run finished, so the worker seals them all
@@ -200,6 +271,125 @@ fn run_seal(root: &Path, deriving: Deriving) -> Result<Vec<Mark>, Box<dyn std::e
         persistence::worker::Outcome::Complete => Ok(timed.marks.into_inner()),
         persistence::worker::Outcome::Owned => Err("recording owned by another persister".into()),
     }
+}
+
+/// What the persister was given and what it cost as a process of its own, from its start to
+/// its exit.
+struct PersisterRun {
+    memory_bytes: u64,
+    cpu_ns: u64,
+    elapsed_ns: u64,
+    footprint_bytes_max: u64,
+}
+
+/// Seals the recording at `root` with the persister at `path`, which exits once it has sealed
+/// every tick of the finished run, and returns what that process cost. A persister that failed
+/// or held more than `memory_bytes` is an error.
+fn run_persister(
+    root: &Path,
+    path: &Path,
+    memory_bytes: u64,
+) -> Result<PersisterRun, Box<dyn std::error::Error>> {
+    let timebase = Timebase::read()?;
+    let started = Instant::now();
+    let mut persister = Command::new(path)
+        .arg("--recording")
+        .arg(root)
+        .arg("--memory-bytes")
+        .arg(memory_bytes.to_string())
+        .spawn()?;
+    let reaped = match run_persister_reap(&persister, timebase) {
+        Ok(Some(reaped)) => reaped,
+        unreaped => {
+            // Nothing else waits for the persister, so it is ended here before the ring it
+            // reads is unlinked.
+            persister.kill()?;
+            persister.wait()?;
+            unreaped?;
+            return Err(format!("persister still ran after {PERSISTER_POLLS_MAX} polls").into());
+        }
+    };
+    let elapsed_ns = u64::try_from(started.elapsed().as_nanos())?;
+
+    let footprint_bytes_max = reaped.footprint?.footprint_bytes_max;
+    if !reaped.finished.successful() {
+        return Err(format!(
+            "persister {} footprint_bytes_max={footprint_bytes_max} memory_bytes={memory_bytes}",
+            ExitStatus::from_raw(reaped.finished.status)
+        )
+        .into());
+    }
+    // The persister's watchdog misses what a persister held that exits between two of its
+    // checks.
+    if footprint_bytes_max > memory_bytes {
+        return Err(format!(
+            "persister held {footprint_bytes_max} bytes of the {memory_bytes} it was given"
+        )
+        .into());
+    }
+
+    Ok(PersisterRun {
+        memory_bytes,
+        cpu_ns: reaped.finished.cpu_ns,
+        elapsed_ns,
+        footprint_bytes_max,
+    })
+}
+
+/// Takes the status of `persister` once it exits, with what it cost, or nothing where it still
+/// runs after the last poll.
+fn run_persister_reap(
+    persister: &Child,
+    timebase: Timebase,
+) -> std::io::Result<Option<ReapedChild>> {
+    for _poll in 0..PERSISTER_POLLS_MAX {
+        let reaped = collector::recording::child::reap_owned(persister, timebase)?;
+        if reaped.is_some() {
+            return Ok(reaped);
+        }
+        std::thread::sleep(PERSISTER_POLL);
+    }
+
+    Ok(None)
+}
+
+/// Refuses the recording at `root` unless the windows it lists of `run` hold each of the
+/// `ticks_published`, since a persister can exit well and have left a tick unsealed.
+fn run_persister_sealed(
+    root: &Path,
+    run: &RunIdentity,
+    ticks_published: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let budget = Arc::new(ByteBudget::new(CATALOG_BYTES_MAX));
+    let windows = Catalog::open(root, &budget)?.windows_of(run, &mut ReadWork::default())?;
+    // The windows are what another process wrote, so a range that does not count is an error
+    // here and never an overflow.
+    let mut ticks_sealed = 0_u64;
+    for window in &windows {
+        ticks_sealed = window
+            .publication_end
+            .checked_sub(window.publication_first)
+            .and_then(|ticks| ticks_sealed.checked_add(ticks))
+            .ok_or("persister sealed a window whose ticks do not count")?;
+    }
+    if ticks_sealed != ticks_published {
+        return Err(format!("persister sealed {ticks_sealed} of {ticks_published} ticks").into());
+    }
+
+    Ok(())
+}
+
+fn report_persister(options: &Options, persister: &PersisterRun) {
+    println!(
+        "seal_bench windows={} processes={} memory_bytes={} persister_cpu_ms={} elapsed_ms={} \
+        footprint_bytes_max={}",
+        options.windows,
+        options.processes,
+        persister.memory_bytes,
+        milliseconds(persister.cpu_ns),
+        milliseconds(persister.elapsed_ns),
+        persister.footprint_bytes_max,
+    );
 }
 
 /// The process's CPU time and the clock at one moment of the run.
@@ -289,7 +479,11 @@ struct Window {
 }
 
 /// Prints each window, then the median of all but the first, which pays for the worker's start.
-fn report(options: &Options, marks: &[Mark]) -> Result<(), Box<dyn std::error::Error>> {
+fn report(
+    options: &Options,
+    deriving: Deriving,
+    marks: &[Mark],
+) -> Result<(), Box<dyn std::error::Error>> {
     // The run's start, then a start and an end for each window's derivation.
     if marks.len() != 1 + 2 * usize::try_from(options.windows)? {
         return Err(format!("{} marks for {} windows", marks.len(), options.windows).into());
@@ -311,7 +505,7 @@ fn report(options: &Options, marks: &[Mark]) -> Result<(), Box<dyn std::error::E
         derive_cpu_ms_median={} elapsed_ms_median={} footprint_bytes_max={}",
         options.windows,
         options.processes,
-        match options.derive {
+        match deriving {
             Deriving::Apps => "apps",
             Deriving::Restarted => "restarted",
             Deriving::Nothing => "none",
@@ -668,10 +862,72 @@ mod tests {
             Ok(Options {
                 windows: 4,
                 processes: 900,
-                derive: Deriving::Nothing,
+                sealing: Sealing::Worker(Deriving::Nothing),
             }),
             options
         );
+    }
+
+    #[test]
+    fn reads_a_persister_and_its_memory() {
+        // Goal: a run names the persister that seals it and the memory that persister is given.
+        // Method: parse both in place of a derivation, at the most processes a run takes.
+        let options = options_from(&words(
+            "--windows 2 --processes 16384 --persister /build/persister --memory-bytes 268435456",
+        ));
+
+        assert_eq!(
+            Ok(Options {
+                windows: 2,
+                processes: 16_384,
+                sealing: Sealing::Persister {
+                    path: PathBuf::from("/build/persister"),
+                    memory_bytes: 268_435_456,
+                },
+            }),
+            options
+        );
+    }
+
+    #[test]
+    fn refuses_a_persister_given_a_derivation() {
+        // Goal: a persister derives as it ships, so a run names a derivation or a persister and
+        // never both. Method: name both.
+        let options = options_from(&words(
+            "--windows 2 --processes 900 --derive apps --persister /build/persister \
+            --memory-bytes 268435456",
+        ));
+
+        assert!(options.is_err());
+    }
+
+    #[test]
+    fn refuses_a_persister_given_no_memory() {
+        // Goal: a persister's memory is chosen, so a run never measures it under the 2 GiB it
+        // takes when given none. Method: name a persister alone.
+        let options = options_from(&words(
+            "--windows 2 --processes 900 --persister /build/persister",
+        ));
+
+        assert!(options.is_err());
+    }
+
+    #[test]
+    fn takes_a_run_that_fills_the_ring_to_its_bound() {
+        // Goal: the bound on the ring leaves the longest run of 4,096 processes, which the
+        // benchmark took before it took more processes. Method: ask for ten windows of them.
+        let options = options_from(&words("--windows 10 --processes 4096 --derive apps"));
+
+        assert!(options.is_ok());
+    }
+
+    #[test]
+    fn refuses_a_run_that_fills_the_ring_past_its_bound() {
+        // Goal: more processes leave fewer windows, so the ring that holds every tick of the
+        // run stays bounded. Method: ask for ten windows of one process more than fits.
+        let options = options_from(&words("--windows 10 --processes 4097 --derive apps"));
+
+        assert!(options.is_err());
     }
 
     #[test]

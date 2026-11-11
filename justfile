@@ -111,6 +111,14 @@ test-event-capacity:
     cargo build --release --locked -p collector -p persister --bin collector --bin recorder --bin persister
     cargo test --release --locked -p persister --features event-capacity --test event_stream -- --include-ignored --no-capture --test-threads=1
 
+# The persister exits without sealing once it holds more than the 256 MiB the recorder gives
+# it, so this fails when a minute of as many processes as an M5 Pro lists outgrows them.
+# Seal two generated minutes of 12,000 processes in a persister of its own under the recorder's limit.
+test-process-capacity:
+    cargo build --release --locked -p collector -p persister --bin collector --bin recorder --bin persister
+    cargo run --release --locked -p persister --bin seal_bench -- \
+        --windows 2 --processes 12000 --persister target/release/persister --memory-bytes 268435456
+
 # Check the formatting of the desktop workspace.
 desktop-fmt:
     cargo fmt --manifest-path desktop/Cargo.toml --check
