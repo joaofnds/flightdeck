@@ -413,12 +413,7 @@ fn a_store_with_a_budget_reduces_each_saved_reading_once_as_it_adds_the_apps_it_
     drive_complete(&mut startup, &input, &mut held, &mut ring);
     let owed = held.owed.take().unwrap();
 
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut super::recording::LoadBuffers::default(),
-    );
+    super::run_owed_add(&fixture.root, &mut held, &owed);
 
     let mut events = Vec::new();
     trace.snapshot(&mut events).unwrap();

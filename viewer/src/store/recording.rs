@@ -20,8 +20,8 @@ mod catalog;
 pub(super) mod staged;
 
 #[cfg(test)]
-#[path = "recording_buffer_tests.rs"]
-mod buffer_tests;
+#[path = "recording_owed_tests.rs"]
+mod owed_tests;
 
 #[cfg(test)]
 #[path = "recording_discovery_tests.rs"]
@@ -508,11 +508,10 @@ impl Owed {
 pub(super) fn load_owed(
     root: &Path,
     owed: &Owed,
-    buffers: &mut LoadBuffers,
     mut take: impl FnMut(&RunIdentity, &OwedTick, TickApps<'_>),
 ) -> Option<Failure> {
     let mut left_out = None;
-    for mut batch in load_batches(root, &owed.found, buffers) {
+    for mut batch in load_batches(root, &owed.found) {
         for loaded in &mut batch.seconds {
             take(&loaded.run, &loaded.second, loaded.apps.tick());
         }
@@ -548,12 +547,6 @@ pub(super) fn sample_second(
 
 /// The threads that decode the loaded hour's sealed minutes at once.
 const LOADERS_MAX: usize = 6;
-
-/// One retained App decoder buffer per concurrent catch-up batch, owned by the store thread.
-#[derive(Default)]
-pub(super) struct LoadBuffers {
-    apps: [AppMinute; LOADERS_MAX],
-}
 
 /// The ticks a sealed minute holds where none was missed.
 const TICKS_PER_MINUTE: usize = 60;
@@ -634,18 +627,14 @@ impl From<Result<AppsSecond, Missing>> for LoadedApps {
 /// Decodes the minutes of `found`, oldest first, in batches of neighbouring minutes, each
 /// batch on a loader of its own, and adds up their Apps over each stretch. Returns the batches
 /// in the order of `found`.
-fn load_batches(root: &Path, found: &[Found], buffers: &mut LoadBuffers) -> Vec<Batch<OwedTick>> {
+fn load_batches(root: &Path, found: &[Found]) -> Vec<Batch<OwedTick>> {
     let costs = vec![1; found.len()];
     thread::scope(|scope| {
         let mut loaders = Vec::with_capacity(LOADERS_MAX);
-        let mut buffers = buffers.apps.iter_mut();
         for batch in load_batches_split(&costs) {
-            let buffer = buffers
-                .next()
-                .unwrap_or_else(|| unreachable!("one buffer per bounded batch"));
             let minutes = &found[batch];
             let loader = spawn_observed(scope, "flightdeck-loader", move || {
-                load_batch(root, minutes, &mut Fold::new(), buffer)
+                load_batch(root, minutes)
             });
             loaders.push(loader);
         }
@@ -714,20 +703,17 @@ pub(super) fn load_batches_split(costs: &[usize]) -> Vec<Range<usize>> {
     batches
 }
 
-/// Decodes `minutes`, oldest first, with their Apps, which `fold` adds up over each stretch.
-fn load_batch(
-    root: &Path,
-    minutes: &[Found],
-    fold: &mut Fold,
-    apps: &mut AppMinute,
-) -> Batch<OwedTick> {
+/// Decodes `minutes`, oldest first, with their Apps, which it adds up over each stretch.
+fn load_batch(root: &Path, minutes: &[Found]) -> Batch<OwedTick> {
     let mut batch = Batch {
         seconds: Vec::with_capacity(minutes.len() * TICKS_PER_MINUTE),
         left_out: None,
     };
     let mut machine = MachineMinute::default();
+    let mut apps = AppMinute::default();
+    let mut fold = Fold::new();
     for minute in minutes {
-        let Ok(missing) = decode(root, &minute.marker, &mut machine, apps) else {
+        let Ok(missing) = decode(root, &minute.marker, &mut machine, &mut apps) else {
             batch.left_out = Some(Failure::Refused);
             continue;
         };
@@ -735,13 +721,12 @@ fn load_batch(
         let decoded = Decoded {
             run: &minute.run,
             machine: &machine,
-            apps: missing.map_or(Ok(&*apps), Err),
+            apps: missing.map_or(Ok(&apps), Err),
         };
-        load_minute(&decoded, &mut batch.seconds, fold);
+        load_minute(&decoded, &mut batch.seconds, &mut fold);
     }
     fold.finish(&mut batch.seconds);
 
-    apps.clear();
     batch
 }
 

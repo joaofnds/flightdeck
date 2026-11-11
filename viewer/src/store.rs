@@ -312,15 +312,7 @@ impl Store {
                     eprintln!("flightdeck store startup: {error}");
                     return;
                 }
-                let mut load_buffers = recording::LoadBuffers::default();
-                run(
-                    &root,
-                    &mut held,
-                    &mut ring,
-                    &thread_shared,
-                    &mut load_buffers,
-                    &operation,
-                );
+                run(&root, &mut held, &mut ring, &thread_shared, &operation);
                 thread_shared.queries.close();
                 drop(observation);
             })?;
@@ -907,12 +899,7 @@ fn expire_place(second: &MachineSecond) -> Option<(Identity, u64)> {
 
 /// Adds up the Apps a launch owes the store's stretches once the main thread has taken a View
 /// of all the store holds, and hands over a View that holds them.
-fn run_owed(
-    root: &Path,
-    held: &mut Held,
-    mailbox: &Mailbox<View>,
-    load_buffers: &mut recording::LoadBuffers,
-) {
+fn run_owed(root: &Path, held: &mut Held, mailbox: &Mailbox<View>) {
     // The store hands over a View of all it holds before it adds up the Apps a launch owes its
     // stretches, and waits for the main thread to take it, since the pass's loaders would take
     // the cores the window's next frame needs. That View is the launch's first, or a return's
@@ -930,21 +917,16 @@ fn run_owed(
         return;
     };
 
-    run_owed_add(root, held, &owed, load_buffers);
+    run_owed_add(root, held, &owed);
     held.publish(mailbox);
 }
 
 /// Adds the Apps of the minutes `owed` holds to the stretches that hold those minutes' seconds,
 /// as a load of the whole hour adds them up.
-fn run_owed_add(
-    root: &Path,
-    held: &mut Held,
-    owed: &recording::Owed,
-    load_buffers: &mut recording::LoadBuffers,
-) {
+fn run_owed_add(root: &Path, held: &mut Held, owed: &recording::Owed) {
     let mut walk = OwedWalk::default();
     let stretches = &mut held.stretches;
-    let left_out = recording::load_owed(root, owed, load_buffers, |run, second, apps| {
+    let left_out = recording::load_owed(root, owed, |run, second, apps| {
         let Some(start) = walk.step(run, second) else {
             return;
         };
@@ -1247,14 +1229,7 @@ fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
 }
 
 /// Steps until the store is dropped.
-fn run(
-    root: &Path,
-    held: &mut Held,
-    ring: &mut Ring,
-    shared: &Shared,
-    load_buffers: &mut recording::LoadBuffers,
-    operation: &Operation,
-) {
+fn run(root: &Path, held: &mut Held, ring: &mut Ring, shared: &Shared, operation: &Operation) {
     let mut waited = Ok(());
     for _ in 0..STEPS_MAX {
         if shared.stop.load(Ordering::Acquire) {
@@ -1305,7 +1280,7 @@ fn run(
             continue;
         }
         run_ready(held, ring, shared);
-        run_owed(root, held, &shared.mailbox, load_buffers);
+        run_owed(root, held, &shared.mailbox);
         waited = if held.failure.is_some() {
             // A ring that failed may fail again at once, so the thread sleeps instead.
             thread::sleep(WAIT);

@@ -353,12 +353,11 @@ fn a_launch_adds_up_the_apps_it_owes_once_the_main_thread_takes_its_first_view()
     launch(&fixture, &mut held);
     let mailbox = Mailbox::new();
     held.publish(&mailbox);
-    let mut buffers = recording::LoadBuffers::default();
 
-    super::run_owed(&fixture.root, &mut held, &mailbox, &mut buffers);
+    super::run_owed(&fixture.root, &mut held, &mailbox);
     assert!(held.owed.is_some());
     let first = mailbox.take().unwrap();
-    super::run_owed(&fixture.root, &mut held, &mailbox, &mut buffers);
+    super::run_owed(&fixture.root, &mut held, &mailbox);
 
     assert!(first.stretches.is_empty());
     assert!(held.owed.is_none());
@@ -379,14 +378,13 @@ fn a_launch_adds_up_the_apps_it_owes_only_once_the_main_thread_takes_the_newest_
     held.publish(&mailbox);
     assert!(mailbox.take().is_some());
     held.unpublished = true;
-    let mut buffers = recording::LoadBuffers::default();
 
-    super::run_owed(&fixture.root, &mut held, &mailbox, &mut buffers);
+    super::run_owed(&fixture.root, &mut held, &mailbox);
     assert!(held.owed.is_some());
     assert!(mailbox.take().is_none());
     held.publish(&mailbox);
     assert!(mailbox.take().is_some());
-    super::run_owed(&fixture.root, &mut held, &mailbox, &mut buffers);
+    super::run_owed(&fixture.root, &mut held, &mailbox);
 
     assert!(held.owed.is_none());
     assert!(!mailbox.take().unwrap().stretches.is_empty());
@@ -461,12 +459,7 @@ fn a_launch_adds_up_the_apps_it_owes_while_a_view_holds_every_stretch_the_store_
     let shown = published(&mut held);
     let owed = held.owed.take().unwrap();
 
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut recording::LoadBuffers::default(),
-    );
+    super::run_owed_add(&fixture.root, &mut held, &owed);
 
     assert_eq!(held.left_out, None);
     let view = published(&mut held);
@@ -490,12 +483,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_reports_the_hour_incomplete()
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
 
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut recording::LoadBuffers::default(),
-    );
+    super::run_owed_add(&fixture.root, &mut held, &owed);
 
     assert_eq!(held.left_out, Some(super::Failure::Refused));
 }
@@ -512,12 +500,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_goes_on_from_its_newest_secon
     let mut ring = launch(&fixture, &mut held);
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut recording::LoadBuffers::default(),
-    );
+    super::run_owed_add(&fixture.root, &mut held, &owed);
     let launched = published(&mut held);
     std::fs::rename(fixture.root.join("data"), fixture.root.join("offline_data")).unwrap();
     let shared = super::Shared::starting();
@@ -546,12 +529,7 @@ fn a_launch_that_cannot_read_a_minute_it_owes_apps_adds_up_those_of_the_other_mi
     let owed = held.owed.take().unwrap();
     super::tests::empty_ticks_file(&fixture, 0);
 
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut recording::LoadBuffers::default(),
-    );
+    super::run_owed_add(&fixture.root, &mut held, &owed);
 
     let view = published(&mut held);
     let shown = view
@@ -585,12 +563,7 @@ fn a_launch_adds_up_no_apps_it_owes_a_stretch_the_store_let_go_of() {
     }
     let owed = held.owed.take().unwrap();
 
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut recording::LoadBuffers::default(),
-    );
+    super::run_owed_add(&fixture.root, &mut held, &owed);
 
     assert_eq!(held.left_out, None);
     let view = published(&mut held);
@@ -966,12 +939,7 @@ fn assert_owed_apps_add_up(fixture: &Fixture) {
     launch(fixture, &mut held);
     let owed = held.owed.take().unwrap();
 
-    super::run_owed_add(
-        &fixture.root,
-        &mut held,
-        &owed,
-        &mut recording::LoadBuffers::default(),
-    );
+    super::run_owed_add(&fixture.root, &mut held, &owed);
 
     assert_eq!(held.left_out, None);
     assert_stretches_match(&published(&mut held), &whole, "after the launch");
