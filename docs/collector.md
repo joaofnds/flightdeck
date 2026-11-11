@@ -228,10 +228,11 @@ tick and 3.9 MB at 100, where the 120 ticks in the ring hold 600 and 12,000 even
 raised the segmented log's figure to 71.2 MB, where it stayed through another 1,400,000 quiet
 events: the log goes on using the segments its busiest 121 ticks in a row needed until the
 collector restarts. With nothing reported saved, the segmented log's figure was 127.4 MB,
-which is 229,376 bytes above the numbered log's, of which the one segment more and the table
-are 212,992. Virtual reservation, touched backing, resident memory, physical footprint and
-compressed or swapped pages are different quantities; touching every page does not prove they
-all remain resident together.
+which is 229,376 bytes above the numbered log's. The one segment more and the table are
+212,992 of them, and nothing measured here accounts for the other 16,384, one page. Virtual
+reservation, touched backing, resident memory, physical footprint and compressed or swapped
+pages are different quantities; touching every page does not prove they all remain resident
+together.
 
 The ring's name carries 60 random bits written only to the lock file, so another user cannot
 guess it (`recording-research.md`, Security). The lock file also stops a second collector from
