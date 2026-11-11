@@ -998,8 +998,9 @@ mod tests {
 
     #[test]
     fn opens_an_identity_ring_whose_log_is_not_cut_into_segments() {
-        // Goal: a ring a collector before segments made still opens, with its events where
-        // their numbers put them.
+        // Goal: a ring a collector before segments made still opens, as a log that is not cut
+        // into segments, of that collector's size and with its first event where that
+        // collector's layout puts it.
         // Method: open a header of the identity layout whose two segment words are zero.
         let (layout, words) = identity_numbered_header();
 
