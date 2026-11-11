@@ -178,7 +178,8 @@ impl UnknownReading {
 impl Catalog {
     /// Opens the recording at `path`. A root no writer finished setting up holds no recording yet,
     /// which is `NotFound`, one of another format is `Unsupported`, and a damaged one is
-    /// `InvalidData`.
+    /// `InvalidData`. A root a writer changes while it is read is `WouldBlock`, which says nothing
+    /// of the recording, so a reader opens it again.
     pub fn open(path: &Path, budget: &Arc<ByteBudget>) -> io::Result<Self> {
         let root = PrivateDirectory::open(path)?;
         let recording = match classify(&root, &mut [0; 4097])? {
