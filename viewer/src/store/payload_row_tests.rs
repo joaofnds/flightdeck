@@ -166,7 +166,7 @@ fn a_refused_row_leaves_the_budget_as_it_was() {
 }
 
 #[test]
-#[should_panic(expected = "payload.reservation.charged_to(names.budget())")]
+#[should_panic(expected = "the second before is charged to another budget")]
 fn a_second_before_charged_to_another_budget_stops_the_capture() {
     // Goal: a row's charge never stays with a budget other than the one its second is admitted
     // under, so a capture offered such a second stops the program.

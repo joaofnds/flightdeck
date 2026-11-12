@@ -150,6 +150,7 @@ fn refused_app_details_leave_the_budget_as_it_was() {
     // Method: capture a real Sample whose names the store already holds, with room left for the
     // payload's own bytes, its rows and all but one of its details rows.
     let sample = native_sample();
+    assert!(sample.apps().len() > 1);
     let budget = Arc::new(ByteBudget::new(64 * 1024));
     let mut names = ProcessNames::new(sample.processes().len(), &budget).unwrap();
     let (payload, additions) = Payload::capture_with_names(&sample, &names, None).unwrap();
@@ -167,6 +168,26 @@ fn refused_app_details_leave_the_budget_as_it_was() {
 
     assert!(matches!(refused, Err(Missing::Budget)));
     assert_eq!(budget.used(), before);
+}
+
+#[test]
+#[should_panic(expected = "the second before's App rows and App details differ in count")]
+fn a_second_before_whose_apps_and_details_differ_in_count_stops_the_capture() {
+    // Goal: sharing rests on a second's App rows naming the App of each of its App details, so
+    // a capture offered a second before whose two lists differ in count stops the program.
+    // Method: capture one real Sample and offer its payload as a second before that lists no
+    // Apps.
+    let sample = native_sample();
+    let budget = Arc::new(ByteBudget::new(64 * 1024));
+    let mut names = ProcessNames::new(sample.processes().len(), &budget).unwrap();
+    let (payload, additions) = Payload::capture_with_names(&sample, &names, None).unwrap();
+    names.commit(additions);
+    let previous = AppsSecond {
+        processes: Ok(Arc::new(payload)),
+        ..AppsSecond::default()
+    };
+
+    Payload::capture_with_names(&sample, &names, Some(&previous)).unwrap();
 }
 
 /// The additional measures `second` holds for the App of the bundle `app_path`.

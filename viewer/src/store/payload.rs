@@ -17,11 +17,11 @@ use collector::ring::{IdentityUnavailable, ProcessCreation};
 
 /// A complete observation's processes and additional App measures.
 ///
-/// App detail allocations cannot be detached from their byte reservation.
+/// The list of a second's App details cannot be detached from the payload's byte reservation.
 /// ```compile_fail
-/// use viewer::store::{AppDetails, Payload};
-/// fn escape(payload: &mut Payload) -> Vec<AppDetails> {
-///     std::mem::take(&mut payload.apps)
+/// use viewer::store::Payload;
+/// fn escape(payload: &mut Payload) {
+///     drop(std::mem::take(&mut payload.apps));
 /// }
 /// ```
 #[derive(Debug)]
@@ -164,7 +164,15 @@ impl Payload {
     ) -> Result<(Self, NameAdditions), Missing> {
         let previous = Previous::of(previous);
         if let Some(payload) = previous.payload {
-            assert!(payload.reservation.charged_to(names.budget()));
+            assert!(
+                payload.reservation.charged_to(names.budget()),
+                "the second before is charged to another budget"
+            );
+            assert_eq!(
+                payload.apps.len(),
+                previous.apps.len(),
+                "the second before's App rows and App details differ in count"
+            );
         }
 
         let reservation = names

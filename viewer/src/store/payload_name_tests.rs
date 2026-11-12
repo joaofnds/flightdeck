@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{Payload, ProcessName, ProcessRow};
+use super::{AppDetails, Payload, ProcessName, ProcessRow};
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
 use crate::live_app_response::{Bytes, Sample};
@@ -58,7 +58,7 @@ fn payload_admission_counts_its_containers_without_recharging_shared_names() {
         let bytes = 2 * size_of::<usize>()
             + size_of::<Payload>()
             + payload.len() * size_of::<Arc<super::Shared<ProcessRow>>>()
-            + payload.apps().len() * Payload::APP_DETAILS_REFERENCE_BYTES;
+            + payload.apps().len() * size_of::<Arc<super::Shared<AppDetails>>>();
         assert_eq!(payload.bytes(), bytes);
     }
     drop((first, second));
