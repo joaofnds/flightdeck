@@ -107,6 +107,20 @@ pub struct AppDetails {
     pub footprint_bytes: Measure,
 }
 
+/// What a capture shares with: the payload the second before holds, and that second's App
+/// rows, which name the App of each of the payload's App details.
+struct Previous<'second> {
+    payload: Option<&'second Payload>,
+    app_rows: &'second [AppRow],
+}
+
+/// The names a capture adds, its process rows and its App details.
+type Parts = (
+    NameAdditions,
+    Vec<Arc<Shared<ProcessRow>>>,
+    Vec<Arc<Shared<AppDetails>>>,
+);
+
 impl Payload {
     /// The charge of each distinct process row, however many seconds hold it.
     pub const ROW_BYTES: usize = Shared::<ProcessRow>::BYTES;
@@ -170,7 +184,7 @@ impl Payload {
             );
             assert_eq!(
                 payload.apps.len(),
-                previous.apps.len(),
+                previous.app_rows.len(),
                 "the second before's App rows and App details differ in count"
             );
         }
@@ -235,14 +249,14 @@ impl Payload {
                 footprint_bytes: app.footprint_bytes,
             };
             let key = &app.key;
-            let held =
-                super::apps::previous_app(key.kind, &key.bytes, previous.apps, &mut previous_index)
-                    .and_then(|index| previous_details.get(index));
-            let shared = match held {
-                Some(shared) if shared.row == details => Arc::clone(shared),
-                _ => Shared::admit(details, budget)?,
-            };
-            apps.push(shared);
+            let held = super::apps::previous_app(
+                key.kind,
+                &key.bytes,
+                previous.app_rows,
+                &mut previous_index,
+            )
+            .and_then(|index| previous_details.get(index));
+            apps.push(Shared::share(details, held, budget)?);
         }
 
         Ok(apps)
@@ -269,11 +283,8 @@ impl Payload {
                 .iter()
                 .take_while(|shared| shared.row.pid < row.pid)
                 .count();
-            let shared = match previous_rows.get(previous_index) {
-                Some(shared) if shared.row == row => Arc::clone(shared),
-                _ => Shared::admit(row, names.budget())?,
-            };
-            rows.push(shared);
+            let held = previous_rows.get(previous_index);
+            rows.push(Shared::share(row, held, names.budget())?);
         }
 
         Ok(rows)
@@ -296,32 +307,34 @@ impl Payload {
     }
 }
 
-/// What a capture shares with: the payload the second before holds, and that second's App
-/// rows, which name the App of each of the payload's App details.
-struct Previous<'second> {
-    payload: Option<&'second Payload>,
-    apps: &'second [AppRow],
-}
-
 impl<'second> Previous<'second> {
     fn of(second: Option<&'second AppsSecond>) -> Self {
         Self {
             payload: second.and_then(|second| second.processes.as_deref().ok()),
-            apps: second.map_or(&[][..], |second| second.apps.as_slice()),
+            app_rows: second.map_or(&[][..], |second| second.apps.as_slice()),
         }
     }
 }
 
-/// The names a capture adds, its process rows and its App details.
-type Parts = (
-    NameAdditions,
-    Vec<Arc<Shared<ProcessRow>>>,
-    Vec<Arc<Shared<AppDetails>>>,
-);
-
 impl<Row> Shared<Row> {
     /// One allocation's charge: its two reference counts, the row and this reservation.
     const BYTES: usize = 2 * size_of::<usize>() + size_of::<Self>();
+
+    /// `held` where it holds a row equal to `row`, and otherwise `row` admitted as a row of its
+    /// own, so a second never takes a reading other than the one it read.
+    fn share(
+        row: Row,
+        held: Option<&Arc<Self>>,
+        budget: &Arc<ByteBudget>,
+    ) -> Result<Arc<Self>, Missing>
+    where
+        Row: PartialEq,
+    {
+        match held {
+            Some(shared) if shared.row == row => Ok(Arc::clone(shared)),
+            _ => Self::admit(row, budget),
+        }
+    }
 
     fn admit(row: Row, budget: &Arc<ByteBudget>) -> Result<Arc<Self>, Missing> {
         let reservation = budget.reserve(Self::BYTES).ok_or(Missing::Budget)?;
