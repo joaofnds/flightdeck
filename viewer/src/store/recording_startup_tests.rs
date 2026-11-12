@@ -612,6 +612,34 @@ fn selected_startup_payloads_keep_a_row_their_seconds_repeat_once() {
     // Method: load the selected minute through the staged startup and compare where its last
     // two seconds, whose processes read the same, keep each row.
     let fixture = crate::store::startup_tests::primary_fixture();
+
+    let held = loaded_primary(&fixture);
+
+    let earlier = held.apps.get(4).unwrap().processes.as_ref().unwrap();
+    let later = held.apps.get(5).unwrap().processes.as_ref().unwrap();
+    assert_eq!(earlier.len(), 2);
+    assert!(std::ptr::eq(&raw const earlier[0], &raw const later[0]));
+    assert!(std::ptr::eq(&raw const earlier[1], &raw const later[1]));
+}
+
+#[test]
+fn selected_startup_payloads_keep_app_details_their_seconds_repeat_once() {
+    // Goal: the seconds a launch loads share the App details that repeat, as live seconds do.
+    // Method: load the selected minute through the staged startup and compare where its last
+    // two seconds, whose processes read the same, keep each App's details.
+    let fixture = crate::store::startup_tests::primary_fixture();
+
+    let held = loaded_primary(&fixture);
+
+    let earlier = held.apps.get(4).unwrap().processes.as_ref().unwrap();
+    let later = held.apps.get(5).unwrap().processes.as_ref().unwrap();
+    assert_eq!(earlier.apps().len(), 2);
+    assert!(std::ptr::eq(earlier.app(0), later.app(0)));
+    assert!(std::ptr::eq(earlier.app(1), later.app(1)));
+}
+
+/// What the staged startup holds once it has loaded the selected minute of `fixture`.
+fn loaded_primary(fixture: &crate::live::identity_fixture::Fixture) -> Held {
     let operation = Arc::new(crate::Cancellation::default())
         .operation(0)
         .unwrap();
@@ -627,11 +655,7 @@ fn selected_startup_payloads_keep_a_row_their_seconds_repeat_once() {
 
     crate::store::startup_tests::drive_primary(&mut Startup::new(), &input, &mut held, &mut ring);
 
-    let earlier = held.apps.get(4).unwrap().processes.as_ref().unwrap();
-    let later = held.apps.get(5).unwrap().processes.as_ref().unwrap();
-    assert_eq!(earlier.len(), 2);
-    assert!(std::ptr::eq(&raw const earlier[0], &raw const later[0]));
-    assert!(std::ptr::eq(&raw const earlier[1], &raw const later[1]));
+    held
 }
 
 fn assert_selected_payload_identity(

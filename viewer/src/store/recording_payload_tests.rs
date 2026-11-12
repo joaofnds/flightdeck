@@ -2065,6 +2065,34 @@ fn a_full_minute_keeps_a_row_its_seconds_repeat_once() {
     // Method: seal three ticks whose processes read the same from the second tick on, load the
     // minute through the real loader and compare where its second and third seconds keep each
     // row.
+    let seconds = repeating_minute();
+
+    let second = seconds[1].processes.as_ref().unwrap();
+    let third = seconds[2].processes.as_ref().unwrap();
+    assert_eq!(second.len(), 2);
+    assert!(std::ptr::eq(&raw const second[0], &raw const third[0]));
+    assert!(std::ptr::eq(&raw const second[1], &raw const third[1]));
+}
+
+#[test]
+fn a_full_minute_keeps_app_details_its_seconds_repeat_once() {
+    // Goal: seconds decoded from a sealed minute share the App details that repeat, as live
+    // seconds do.
+    // Method: seal three ticks whose processes read the same from the second tick on, load the
+    // minute through the real loader and compare where its second and third seconds keep each
+    // App's details.
+    let seconds = repeating_minute();
+
+    let second = seconds[1].processes.as_ref().unwrap();
+    let third = seconds[2].processes.as_ref().unwrap();
+    assert_eq!(second.apps().len(), 2);
+    assert!(std::ptr::eq(second.app(0), third.app(0)));
+    assert!(std::ptr::eq(second.app(1), third.app(1)));
+}
+
+/// The seconds the real loader makes of one sealed minute of three ticks whose processes read
+/// the same from the second tick on.
+fn repeating_minute() -> Vec<AppsSecond> {
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);
@@ -2085,11 +2113,7 @@ fn a_full_minute_keeps_a_row_its_seconds_repeat_once() {
     )
     .unwrap();
 
-    let second = seconds[1].processes.as_ref().unwrap();
-    let third = seconds[2].processes.as_ref().unwrap();
-    assert_eq!(second.len(), 2);
-    assert!(std::ptr::eq(&raw const second[0], &raw const third[0]));
-    assert!(std::ptr::eq(&raw const second[1], &raw const third[1]));
+    seconds
 }
 
 #[test]

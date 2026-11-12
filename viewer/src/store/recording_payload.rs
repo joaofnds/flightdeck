@@ -800,15 +800,13 @@ pub(super) fn load_minute_payload(
         second.processes = Err(super::super::Missing::Budget);
         return;
     }
-    let previous_payload = previous.and_then(|apps| apps.processes.as_deref().ok());
-    second.processes =
-        match super::super::Payload::capture_with_names(sample, names, previous_payload) {
-            Ok((payload, additions)) => {
-                names.commit(additions);
-                Ok(Arc::new(payload))
-            }
-            Err(missing) => Err(missing),
-        };
+    second.processes = match super::super::Payload::capture_with_names(sample, names, previous) {
+        Ok((payload, additions)) => {
+            names.commit(additions);
+            Ok(Arc::new(payload))
+        }
+        Err(missing) => Err(missing),
+    };
 }
 
 /// Replays the process frames of `read` into `decoder`, handing `consume` each second's sample,

@@ -85,7 +85,7 @@ impl AppsSecond {
         let values = range
             .map(|index| {
                 json::app(
-                    &self.apps[index].presentation(&payload.apps()[index]),
+                    &self.apps[index].presentation(payload.app(index)),
                     index,
                     self.elapsed_ns,
                 )
@@ -109,7 +109,7 @@ impl AppsSecond {
         let mut result =
             presentation_members(&header, payload, Some(detail.app_index), detail.page)?;
         result["app"] = json::app(
-            &app.presentation(&payload.apps()[index]),
+            &app.presentation(payload.app(index)),
             index,
             header.elapsed_ns,
         );

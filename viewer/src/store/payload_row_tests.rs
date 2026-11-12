@@ -109,9 +109,9 @@ fn a_row_stays_shared_when_a_process_listed_before_it_starts() {
 fn seconds_that_repeat_a_row_are_charged_for_it_once() {
     // Goal: the budget counts a row once however many seconds hold it.
     // Method: publish one idle process for three ticks and compare the budget's use with the
-    // payloads' own bytes, the process's name and two allocations of a row, its two counts and
-    // its reservation: the first second's, which has no rate yet, and the one the other two
-    // seconds share.
+    // payloads' own bytes, the process's name, the details of its App and two allocations of a
+    // row, its two counts and its reservation: the first second's, which has no rate yet, and
+    // the one the other two seconds share.
     let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
 
     let payloads = payloads(&budget, &[&[(7, IDLE)], &[(7, IDLE)], &[(7, IDLE)]]);
@@ -121,8 +121,10 @@ fn seconds_that_repeat_a_row_are_charged_for_it_once() {
         .executable_name()
         .unwrap()
         .reserved_bytes();
-    let row_bytes = 2 * size_of::<usize>() + size_of::<super::SharedRow>();
-    assert_eq!(budget.used(), own + name + 2 * row_bytes);
+    let row_bytes = 2 * size_of::<usize>() + size_of::<super::Shared<ProcessRow>>();
+    let details = crate::store::startup_tests::row_bytes(&[&payloads[0], &payloads[1]])
+        - 2 * Payload::ROW_BYTES;
+    assert_eq!(budget.used(), own + name + details + 2 * row_bytes);
 }
 
 #[test]
@@ -164,7 +166,7 @@ fn a_refused_row_leaves_the_budget_as_it_was() {
 }
 
 #[test]
-#[should_panic(expected = "previous.reservation.charged_to(names.budget())")]
+#[should_panic(expected = "payload.reservation.charged_to(names.budget())")]
 fn a_second_before_charged_to_another_budget_stops_the_capture() {
     // Goal: a row's charge never stays with a budget other than the one its second is admitted
     // under, so a capture offered such a second stops the program.
@@ -175,7 +177,11 @@ fn a_second_before_charged_to_another_budget_stops_the_capture() {
     let other_budget = Arc::new(ByteBudget::new(64 * 1024));
     let names = ProcessNames::new(sample.processes().len(), &budget).unwrap();
     let other_names = ProcessNames::new(sample.processes().len(), &other_budget).unwrap();
-    let (previous, _additions) = Payload::capture_with_names(&sample, &other_names, None).unwrap();
+    let (payload, _additions) = Payload::capture_with_names(&sample, &other_names, None).unwrap();
+    let previous = AppsSecond {
+        processes: Ok(Arc::new(payload)),
+        ..AppsSecond::default()
+    };
 
     Payload::capture_with_names(&sample, &names, Some(&previous)).unwrap();
 }
@@ -209,7 +215,7 @@ fn moving(pid: i32, tick: u64) -> Process {
     }
 }
 
-fn task(threads: i32) -> Task {
+pub(super) fn task(threads: i32) -> Task {
     Task {
         threads,
         faults: 0,
@@ -243,13 +249,31 @@ fn payloads(budget: &Arc<ByteBudget>, ticks: &[&[(i32, u64)]]) -> Vec<Arc<Payloa
 }
 
 fn payloads_of(budget: &Arc<ByteBudget>, ticks: &[Vec<Process>]) -> Vec<Arc<Payload>> {
+    seconds_of(budget, ticks, |_| b"/Owner.app")
+        .into_iter()
+        .map(|second| second.processes.unwrap())
+        .collect()
+}
+
+/// The second of each tick of `ticks`, read through the real producer with the second before
+/// it, each process running from the bundle `app_path` gives for its pid.
+pub(super) fn seconds_of(
+    budget: &Arc<ByteBudget>,
+    ticks: &[Vec<Process>],
+    app_path: fn(i32) -> &'static [u8],
+) -> Vec<AppsSecond> {
     let mut fixture = Fixture::new_mode(true, PROCESSES_MAX, None);
     let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
     let mut ring = Ring::with_budget(fixture.root.clone(), Arc::clone(budget));
     ring.follow().unwrap();
     let mut seconds: Vec<AppsSecond> = Vec::with_capacity(ticks.len());
     for (index, processes) in ticks.iter().enumerate() {
-        publish(&mut fixture, u64::try_from(index + 1).unwrap(), processes);
+        publish(
+            &mut fixture,
+            u64::try_from(index + 1).unwrap(),
+            processes,
+            app_path,
+        );
         let mut second = AppsSecond::default();
         ring.read_prepared(budget, &operation, seconds.last(), |_, prepared| {
             second = std::mem::take(&mut prepared.apps);
@@ -260,15 +284,17 @@ fn payloads_of(budget: &Arc<ByteBudget>, ticks: &[Vec<Process>]) -> Vec<Arc<Payl
     }
 
     seconds
-        .into_iter()
-        .map(|second| second.processes.unwrap())
-        .collect()
 }
 
-fn publish(fixture: &mut Fixture, step: u64, readings: &[Process]) {
+fn publish(
+    fixture: &mut Fixture,
+    step: u64,
+    readings: &[Process],
+    app_path: fn(i32) -> &'static [u8],
+) {
     let identities: Vec<_> = readings
         .iter()
-        .map(|process| identity(&mut fixture.writer, process.pid))
+        .map(|process| identity(&mut fixture.writer, process.pid, app_path(process.pid)))
         .collect();
 
     fixture
@@ -301,13 +327,17 @@ fn publish(fixture: &mut Fixture, step: u64, readings: &[Process]) {
         .unwrap();
 }
 
-fn identity(writer: &mut collector::ring::Writer, pid: i32) -> IdentityObservation {
+fn identity(
+    writer: &mut collector::ring::Writer,
+    pid: i32,
+    app_path: &[u8],
+) -> IdentityObservation {
     let mut program = None;
     writer
         .intern_program(
             &ProgramBytes {
                 executable_name: b"worker",
-                app_path: Some(b"/Owner.app"),
+                app_path: Some(app_path),
             },
             &mut program,
         )

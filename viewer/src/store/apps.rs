@@ -311,14 +311,26 @@ fn fill_name(
 }
 
 /// The name `previous` holds for the App of key `kind` and `bytes`, where it holds the App.
-/// `previous` is in key order, as a sample's Apps are, and `previous_index` is where the walk
-/// through it stands.
 fn previous_name(
     kind: KeyKind,
     bytes: &[u8],
     previous: &[AppRow],
     previous_index: &mut usize,
 ) -> Option<Arc<RankedApp>> {
+    previous_app(kind, bytes, previous, previous_index)
+        .map(|index| Arc::clone(&previous[index].name))
+}
+
+/// The index at which `previous` holds the App of key `kind` and `bytes`, where it holds the
+/// App.
+/// `previous` is in key order, as a sample's Apps are, and `previous_index` is where the walk
+/// through it stands.
+pub(super) fn previous_app(
+    kind: KeyKind,
+    bytes: &[u8],
+    previous: &[AppRow],
+    previous_index: &mut usize,
+) -> Option<usize> {
     let key = kind.key(bytes);
 
     for _ in 0..=previous.len() {
@@ -326,7 +338,7 @@ fn previous_name(
 
         match row.name.kind.key(&row.name.bytes).cmp(&key) {
             Ordering::Less => *previous_index += 1,
-            Ordering::Equal => return Some(Arc::clone(&row.name)),
+            Ordering::Equal => return Some(*previous_index),
             Ordering::Greater => return None,
         }
     }

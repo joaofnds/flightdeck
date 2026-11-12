@@ -50,6 +50,8 @@ struct PayloadCounts {
     processes: usize,
     processes_distinct: usize,
     processes_max: usize,
+    app_details: usize,
+    app_details_distinct: usize,
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -149,6 +151,9 @@ fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
     let footprint = Footprint::read()?;
     let walk = RowsWalk::of(view);
     let walk_ns = u64::try_from(walk.elapsed.as_nanos()).map_err(io::Error::other)?;
+    let details_walk = RowsWalk::of_app_details(view);
+    let details_walk_ns =
+        u64::try_from(details_walk.elapsed.as_nanos()).map_err(io::Error::other)?;
     let counts = PayloadCounts::of(view);
     println!(
         "{}",
@@ -171,6 +176,11 @@ fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
             "process_row_reserved_bytes": Payload::ROW_BYTES,
             "process_rows_walk_ns": walk_ns,
             "process_rows_walk_sum": walk.sum,
+            "app_details_walk_ns": details_walk_ns,
+            "app_details_walk_sum": details_walk.sum,
+            "app_details_rows": counts.app_details,
+            "app_details_rows_distinct": counts.app_details_distinct,
+            "app_details_row_reserved_bytes": Payload::APP_DETAILS_BYTES,
             "app_row_capacity_bytes_by_reference": view.apps.iter()
                 .map(|apps| apps.apps.capacity() * size_of::<AppRow>()).sum::<usize>(),
             "app_row_initialized_bytes_by_reference": view.apps.iter()
@@ -220,6 +230,7 @@ impl PayloadCounts {
                     counts.complete += 1;
                     counts.processes += payload.len();
                     counts.processes_max = counts.processes_max.max(payload.len());
+                    counts.app_details += payload.apps().len();
                 }
                 Err(Missing::Unread) => counts.unread += 1,
                 Err(Missing::Budget) => counts.budget += 1,
@@ -227,18 +238,25 @@ impl PayloadCounts {
                 Err(Missing::TooMany) => counts.too_many += 1,
             }
         }
-        let mut addresses = Self::of_addresses(view, counts.processes);
+        let mut addresses = Self::of_addresses(view, counts.processes, Payload::iter);
         counts.processes_distinct = Self::of_distinct(&mut addresses);
+        let mut addresses = Self::of_addresses(view, counts.app_details, Payload::apps);
+        counts.app_details_distinct = Self::of_distinct(&mut addresses);
 
         counts
     }
 
-    fn of_addresses(view: &View, processes: usize) -> Vec<usize> {
-        let mut addresses = Vec::with_capacity(processes);
+    /// Where each row of one kind is kept, for each second that lists it.
+    fn of_addresses<'view, Row: 'view, Rows: Iterator<Item = &'view Row>>(
+        view: &'view View,
+        count: usize,
+        rows: fn(&'view Payload) -> Rows,
+    ) -> Vec<usize> {
+        let mut addresses = Vec::with_capacity(count);
         for payload in payloads(view) {
-            addresses.extend(payload.iter().map(|row| std::ptr::from_ref(row).addr()));
+            addresses.extend(rows(payload).map(|row| std::ptr::from_ref(row).addr()));
         }
-        assert_eq!(addresses.len(), processes);
+        assert_eq!(addresses.len(), count);
 
         addresses
     }
@@ -257,8 +275,8 @@ fn payloads(view: &View) -> impl Iterator<Item = &Payload> {
         .filter_map(|apps| apps.processes.as_deref().ok())
 }
 
-/// One reader's pass over every reading of every held process row, taken before anything else
-/// reads the rows, with a sum that shows what it read.
+/// One reader's pass over every reading of every held row of one kind, taken before anything
+/// else reads those rows, with a sum that shows what it read.
 struct RowsWalk {
     elapsed: Duration,
     sum: u64,
@@ -271,6 +289,25 @@ impl RowsWalk {
         for payload in payloads(view) {
             for row in payload {
                 sum = sum.wrapping_add(Self::of_row(row));
+            }
+        }
+
+        Self {
+            elapsed: started.elapsed(),
+            sum,
+        }
+    }
+
+    fn of_app_details(view: &View) -> Self {
+        let started = Instant::now();
+        let mut sum = 0_u64;
+        for payload in payloads(view) {
+            for details in payload.apps() {
+                sum = sum
+                    .wrapping_add(u64::from(details.live_members))
+                    .wrapping_add(details.disk_read_bytes.known)
+                    .wrapping_add(details.disk_written_bytes.known)
+                    .wrapping_add(details.footprint_bytes.known);
             }
         }
 

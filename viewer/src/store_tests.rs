@@ -232,7 +232,7 @@ fn assert_directional_payload(view: &View) {
     let process = payload.iter().find(|process| process.pid == 7).unwrap();
     assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
     assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
-    let app = &payload.apps()[usize::try_from(process.app_index.unwrap()).unwrap()];
+    let app = payload.app(usize::try_from(process.app_index.unwrap()).unwrap());
     assert_eq!(
         app.disk_read_bytes,
         crate::live_app_response::Measure {

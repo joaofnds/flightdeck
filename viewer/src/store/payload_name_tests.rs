@@ -57,8 +57,8 @@ fn payload_admission_counts_its_containers_without_recharging_shared_names() {
         let payload = apps.processes.as_ref().unwrap();
         let bytes = 2 * size_of::<usize>()
             + size_of::<Payload>()
-            + payload.len() * size_of::<Arc<super::SharedRow>>()
-            + size_of_val(payload.apps());
+            + payload.len() * size_of::<Arc<super::Shared<ProcessRow>>>()
+            + payload.apps().len() * Payload::APP_DETAILS_REFERENCE_BYTES;
         assert_eq!(payload.bytes(), bytes);
     }
     drop((first, second));

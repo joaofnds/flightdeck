@@ -6,7 +6,7 @@ use crate::live::identity_fixture::Fixture;
 use crate::live_apps::{Publication, PublicationEvents};
 use crate::recording::MachineMinute;
 use crate::store::payload::{NameTrace, ProcessNames};
-use crate::store::{AppDetails, AppsSecond, ByteBudget, Payload, ProcessName};
+use crate::store::{AppsSecond, ByteBudget, Payload, ProcessName};
 
 #[test]
 fn a_native_partial_name_refusal_keeps_its_stage_predecessor_and_accepted_names() {
@@ -131,7 +131,7 @@ fn refuse_then_retry(prepared: &mut Prepared, input: &Input<'_>, budget: &Arc<By
     let payload_bytes = 2 * size_of::<usize>()
         + size_of::<Payload>()
         + sample.processes().len() * Payload::ROW_REFERENCE_BYTES
-        + sample.apps().len() * size_of::<AppDetails>();
+        + sample.apps().len() * Payload::APP_DETAILS_REFERENCE_BYTES;
     let scratch = sample.processes().len()
         * (size_of::<&crate::live_app_response::Bytes>() + size_of::<Arc<ProcessName>>());
     let pressure = budget

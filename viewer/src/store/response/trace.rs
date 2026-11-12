@@ -178,7 +178,7 @@ fn response_trace_point(second: &QuerySecond, target: &dyn Selection) -> Result<
         ));
     }
 
-    let app = apps.apps[index].presentation(&payload.apps()[index]);
+    let app = apps.apps[index].presentation(payload.app(index));
 
     Ok(TracePoint::from_app_view(
         &second.observation,
