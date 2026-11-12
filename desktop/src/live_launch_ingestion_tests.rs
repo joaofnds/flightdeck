@@ -93,9 +93,11 @@ impl Harness {
         }
         drop(store);
         if matches!(input, Input::Sealed(_)) {
+            // The worker's watchdog charges the footprint of this whole test binary, which
+            // every test running beside this one adds to, so no limit is this fixture's to keep.
             persistence::worker::run(
                 &root,
-                2 * 1024 * 1024 * 1024,
+                u64::MAX,
                 &persistence::sealed_apps::SealedApps::default(),
             )
             .unwrap();
