@@ -131,6 +131,36 @@ fn a_second_with_no_clock_stops_nothing_expiring_behind_it() {
 }
 
 #[test]
+fn a_store_reads_the_retention_records_once_while_none_changes() {
+    // Goal: a store that publishes every second does not read the retention records at every
+    // publication, since the persister saves them once a minute.
+    // Method: publish three times from a store that holds one second of a recording whose
+    // records stay as they are, and count the reads of the records.
+    let fixture = Fixture::new();
+    expire_boot_before(&fixture.root, RUN.boot, 0);
+    let mut held = Held::new(
+        fixture.root.clone(),
+        Arc::new(ByteBudget::new(256 * 1024 * 1024)),
+    );
+    let second = MachineSecond {
+        publication: 1,
+        run_tick: 1,
+        wall_ns: NS,
+        continuous_ns: Some(NS),
+        ..MachineSecond::default()
+    };
+    let apps = super::apps::TickApps::Missing(&Missing::Unread);
+    assert!(held.take(&RUN, &second, apps));
+    let mailbox = Mailbox::new();
+
+    for _ in 0..3 {
+        held.publish(&mailbox);
+    }
+
+    assert_eq!(held.retention.reads(), 1);
+}
+
+#[test]
 fn a_store_reads_no_minute_wholly_past_the_period() {
     // Goal: a minute with no reading to show is not read, so removal can take it at any moment
     // from under a store that has just listed it, and no refusal follows.

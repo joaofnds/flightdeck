@@ -22,7 +22,7 @@ fn elapsed_seconds(from: &ClockReading, to: &ClockReading) -> u64 {
 
 /// A private root with the retention directory bootstrap makes, removed when the test ends.
 struct Scratch {
-    path: std::path::PathBuf,
+    path: PathBuf,
     root: PrivateDirectory,
     retention: PrivateDirectory,
 }
@@ -682,6 +682,355 @@ fn a_period_that_does_not_read_hides_nothing() {
     let retained = Retained::read(&scratch.path, [THIS_BOOT]);
 
     assert!(retained.holds(THIS_BOOT, Some(0)));
+}
+
+/// A recording whose clock started as `THIS_BOOT` had run 100 seconds, with that boot's record and
+/// the shortest period, so a reading taken `taken` seconds into the boot expires once the clock
+/// has run more than `taken - 40` seconds.
+fn started_scratch() -> Scratch {
+    let scratch = Scratch::new();
+    let start = Clock::started_at(&reading(THIS_BOOT, 100, 0));
+    start.write(&scratch.root).unwrap();
+    boot_offset_save(&scratch.root, THIS_BOOT, start.boot_offset_ns(THIS_BOOT, 0)).unwrap();
+    Period::from_seconds(60)
+        .unwrap()
+        .write(&scratch.root)
+        .unwrap();
+
+    scratch
+}
+
+/// The Mac's clocks once the clock of `started_scratch` has run `seconds`.
+fn after_seconds(seconds: u64) -> ClockReading {
+    reading(THIS_BOOT, 100 + seconds, seconds)
+}
+
+/// A reading the clock of `started_scratch` expires once it has run more than 5 seconds.
+const LATE_NS: u64 = 45 * SECOND_NS;
+
+/// A reading the clock of `started_scratch` has expired from its start.
+const EARLY_NS: u64 = 30 * SECOND_NS;
+
+/// Gives everyone leave to list the directory at `path`, which a private directory never has.
+fn loosen(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn kept_records_are_read_once_while_no_record_changes() {
+    // Goal: a reader that asks many times a second reads the records once, and not at every ask.
+    // Method: ask three times of a recording nothing writes to, count the reads, and look at a
+    // reading the records expire, which an answer with nothing kept behind it would hold.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    reader.retained_at([THIS_BOOT], &after_seconds(0));
+    reader.retained_at([THIS_BOOT], &after_seconds(1));
+
+    let third = reader.retained_at([THIS_BOOT], &after_seconds(2));
+
+    assert_eq!(reader.reads(), 1);
+    assert!(!third.holds(THIS_BOOT, Some(EARLY_NS)));
+}
+
+#[test]
+fn kept_records_are_read_once_while_no_clock_is_saved() {
+    // Goal: a recording no persister has saved a clock in costs its reader one read as well, and
+    // hides nothing.
+    // Method: ask three times of a recording with a boot's record and no clock, and count the
+    // reads.
+    let scratch = Scratch::new();
+    boot_offset_save(&scratch.root, THIS_BOOT, 0).unwrap();
+    let mut reader = Reader::of(scratch.path.clone());
+    reader.retained_at([THIS_BOOT], &after_seconds(0));
+    reader.retained_at([THIS_BOOT], &after_seconds(1));
+
+    let third = reader.retained_at([THIS_BOOT], &after_seconds(2));
+
+    assert_eq!(reader.reads(), 1);
+    assert!(third.holds(THIS_BOOT, Some(0)));
+}
+
+#[test]
+fn kept_records_let_a_reading_expire_as_the_clock_runs() {
+    // Goal: the cutoff follows the clock between reads, so keeping the records keeps no reading
+    // past its period.
+    // Method: ask either side of the moment a reading expires, with no record written between.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+
+    let before = reader.retained_at([THIS_BOOT], &after_seconds(5));
+    let after = reader.retained_at([THIS_BOOT], &after_seconds(6));
+
+    assert!(before.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(!after.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_period_saved_between_asks_is_followed() {
+    // Goal: a period the user changes applies at the reader's next ask.
+    // Method: ask, save a longer period, and ask again at the same moment about a reading the
+    // shorter period had expired.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(10);
+    let first = reader.retained_at([THIS_BOOT], &now);
+
+    Period::from_seconds(120)
+        .unwrap()
+        .write(&scratch.root)
+        .unwrap();
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(!first.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_period_written_over_by_hand_is_followed() {
+    // Goal: a period edited in place, which replaces no file, applies at the next ask all the same.
+    // Method: ask, write a longer period of the same length over the file, so that only the
+    // file's times tell, and ask again at the same moment.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(10);
+    let first = reader.retained_at([THIS_BOOT], &now);
+
+    std::fs::write(scratch.path.join(DIRECTORY_NAME).join(PERIOD_NAME), "99").unwrap();
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(!first.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_clock_saved_between_asks_is_followed() {
+    // Goal: the clock a persister saves is the clock the next ask reads, as where it started again
+    // from a lost record.
+    // Method: ask, save a clock an hour further on, and ask again at the same moment about a
+    // reading the first clock held.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(0);
+    let first = reader.retained_at([THIS_BOOT], &now);
+
+    Clock::started_at(&reading(THIS_BOOT, 100, 3_600))
+        .write(&scratch.root)
+        .unwrap();
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(first.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(!second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_clock_first_saved_between_asks_is_followed() {
+    // Goal: a reader that asked before any persister saved a clock expires readings once one has.
+    // Method: ask of a recording with a boot's record and no clock, save a clock, and ask again.
+    let scratch = Scratch::new();
+    boot_offset_save(&scratch.root, THIS_BOOT, 0).unwrap();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(0);
+    let first = reader.retained_at([THIS_BOOT], &now);
+
+    Clock::started_at(&reading(THIS_BOOT, 100, 0))
+        .write(&scratch.root)
+        .unwrap();
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(first.holds(THIS_BOOT, Some(0)));
+    assert!(!second.holds(THIS_BOOT, Some(0)));
+}
+
+#[test]
+fn a_boot_first_asked_about_later_is_placed() {
+    // Goal: a reader that comes to hold readings of another boot has those expire too.
+    // Method: ask about one boot, then about a second whose record places its reading before the
+    // cutoff.
+    let scratch = started_scratch();
+    boot_offset_save(&scratch.root, NEXT_BOOT, 0).unwrap();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(0);
+
+    let first = reader.retained_at([THIS_BOOT], &now);
+    let second = reader.retained_at([THIS_BOOT, NEXT_BOOT], &now);
+
+    assert!(first.holds(NEXT_BOOT, Some(0)));
+    assert!(!second.holds(NEXT_BOOT, Some(0)));
+}
+
+#[test]
+fn a_boot_record_saved_between_asks_is_followed() {
+    // Goal: a boot whose record is saved after the reader first asked is placed from then on.
+    // Method: ask about a boot with no record, save one that places its reading before the cutoff,
+    // and ask again.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(0);
+    let first = reader.retained_at([NEXT_BOOT], &now);
+
+    boot_offset_save(&scratch.root, NEXT_BOOT, 0).unwrap();
+    let second = reader.retained_at([NEXT_BOOT], &now);
+
+    assert!(first.holds(NEXT_BOOT, Some(0)));
+    assert!(!second.holds(NEXT_BOOT, Some(0)));
+}
+
+#[test]
+fn a_record_that_stops_reading_hides_nothing_from_then_on() {
+    // Goal: damage that arrives after a read costs the cutoff, as it does a reader that reads
+    // every time, and leaves no kept record in force.
+    // Method: ask, damage the period, and ask again about a reading the kept records had expired.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(10);
+    let first = reader.retained_at([THIS_BOOT], &now);
+
+    private::atomic_write_in(&scratch.retention, PERIOD_NAME, b"soon").unwrap();
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(!first.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_boot_record_removed_between_asks_is_followed() {
+    // Goal: a boot whose record the persister removes has no place on the clock from the next
+    // ask, so its readings stay shown, as a read of the records says.
+    // Method: ask about a boot whose record places its reading before the cutoff, remove the
+    // record, and ask again at the same moment.
+    let scratch = started_scratch();
+    boot_offset_save(&scratch.root, NEXT_BOOT, 0).unwrap();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(0);
+    let first = reader.retained_at([NEXT_BOOT], &now);
+
+    scratch
+        .retention
+        .remove_file(&boot_record_name(NEXT_BOOT))
+        .unwrap();
+    let second = reader.retained_at([NEXT_BOOT], &now);
+
+    assert!(!first.holds(NEXT_BOOT, Some(0)));
+    assert!(second.holds(NEXT_BOOT, Some(0)));
+}
+
+#[test]
+fn a_boot_no_longer_asked_about_is_no_longer_placed() {
+    // Goal: an ask places only the boots it names, as a read of the records for those boots does,
+    // whatever boots the reader asked about before.
+    // Method: ask about two boots, then about the first alone, and look at a reading of the
+    // second that its record places before the cutoff.
+    let scratch = started_scratch();
+    boot_offset_save(&scratch.root, NEXT_BOOT, 0).unwrap();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(0);
+
+    let first = reader.retained_at([THIS_BOOT, NEXT_BOOT], &now);
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(!first.holds(NEXT_BOOT, Some(0)));
+    assert!(second.holds(NEXT_BOOT, Some(0)));
+}
+
+#[test]
+fn a_recording_that_stops_being_private_hides_nothing() {
+    // Goal: a recording's directory that is loosened after a read costs the cutoff at the next
+    // ask, as it does a reader that opens the directory every time.
+    // Method: ask, loosen the directory, and ask again about a reading the kept records had
+    // expired.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(10);
+    let first = reader.retained_at([THIS_BOOT], &now);
+
+    loosen(&scratch.path);
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(!first.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_retention_directory_that_stops_being_private_hides_nothing() {
+    // Goal: the directory the records lie in is held to the same as the recording's own.
+    // Method: as for the recording's directory, loosening the one inside it.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(10);
+    let first = reader.retained_at([THIS_BOOT], &now);
+
+    loosen(&scratch.path.join(DIRECTORY_NAME));
+    let second = reader.retained_at([THIS_BOOT], &now);
+
+    assert!(!first.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_recording_no_longer_at_its_path_hides_nothing() {
+    // Goal: a recording that is gone from its path costs the cutoff at the next ask, as it does
+    // a reader that opens the directory every time, although no record is left to compare.
+    // Method: ask, move the recording's directory aside, ask again about a reading the kept
+    // records had expired, and move the directory back for the scratch to remove.
+    let scratch = started_scratch();
+    let mut reader = Reader::of(scratch.path.clone());
+    let now = after_seconds(10);
+    let first = reader.retained_at([THIS_BOOT], &now);
+    let mut aside = scratch.path.clone().into_os_string();
+    aside.push("-aside");
+
+    std::fs::rename(&scratch.path, &aside).unwrap();
+    let second = reader.retained_at([THIS_BOOT], &now);
+    std::fs::rename(&aside, &scratch.path).unwrap();
+
+    assert!(!first.holds(THIS_BOOT, Some(LATE_NS)));
+    assert!(second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn a_boot_record_that_does_not_read_is_read_again_at_every_ask() {
+    // Goal: a boot's record that fails to read is tried again at the next ask, as a reader that
+    // reads every time tries it, since the failure may pass with nothing written.
+    // Method: damage a boot's record, ask twice, and count the reads.
+    let scratch = started_scratch();
+    private::atomic_write_in(&scratch.retention, &boot_record_name(THIS_BOOT), b"damage").unwrap();
+    let mut reader = Reader::of(scratch.path.clone());
+    reader.retained_at([THIS_BOOT], &after_seconds(10));
+
+    let second = reader.retained_at([THIS_BOOT], &after_seconds(10));
+
+    assert_eq!(reader.reads(), 2);
+    assert!(second.holds(THIS_BOOT, Some(LATE_NS)));
+}
+
+#[test]
+fn kept_records_answer_by_the_clocks_the_mac_reads_now() {
+    // Goal: a reader that gives no clock is answered by what the Mac's clocks read now, as a read
+    // of the records is.
+    // Method: save a clock that started as this boot began, with the shortest period, and ask
+    // about a reading taken as the boot began, which only the time this Mac has been up since
+    // expires. The saved clock's wall clock is far ahead, so no other clock expires it.
+    let boot = ClockReading::now().unwrap().boot;
+    let scratch = Scratch::new();
+    let start = Clock::started_at(&ClockReading {
+        boot,
+        continuous_ns: 0,
+        wall_ns: 1 << 62,
+    });
+    start.write(&scratch.root).unwrap();
+    boot_offset_save(&scratch.root, boot, start.boot_offset_ns(boot, 0)).unwrap();
+    Period::from_seconds(60)
+        .unwrap()
+        .write(&scratch.root)
+        .unwrap();
+    let mut reader = Reader::of(scratch.path.clone());
+
+    let retained = reader.retained([boot]);
+
+    assert!(!retained.holds(boot, Some(0)));
+    assert!(!Retained::read(&scratch.path, [boot]).holds(boot, Some(0)));
 }
 
 #[test]

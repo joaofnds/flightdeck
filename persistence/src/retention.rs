@@ -16,6 +16,7 @@ use crate::metadata::TimeBounds;
 use collector::recording::private::{self, PrivateDirectory};
 use collector::ring::Identity;
 use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const BOOT_MAGIC: &[u8; 8] = b"FDRETBT1";
@@ -295,53 +296,27 @@ impl Retained {
     /// it would place stay shown, those of its boot where it is a boot's, since a reader must go on
     /// and keeping errs on the side of the user's readings.
     #[must_use]
-    pub fn read(root: &std::path::Path, boots: impl IntoIterator<Item = Identity>) -> Self {
-        let mut offsets = Vec::new();
-        let cutoff = match Self::read_saved(root, boots, &mut offsets) {
-            Ok(cutoff) => cutoff,
+    pub fn read(root: &Path, boots: impl IntoIterator<Item = Identity>) -> Self {
+        let saved = match Saved::read(root, &boots_distinct(boots)) {
+            Ok(Some(saved)) => saved,
+            Ok(None) => return Self::everything(),
             Err(error) => {
                 retained_report(&error);
-                Cutoff {
-                    expired_below_ns: 0,
-                }
+                return Self::everything();
             }
         };
 
-        Self { cutoff, offsets }
+        now_reported().map_or_else(Self::everything, |now| saved.retained_at(&now))
     }
 
-    fn read_saved(
-        root: &std::path::Path,
-        boots: impl IntoIterator<Item = Identity>,
-        offsets: &mut Vec<(Identity, Option<u64>)>,
-    ) -> io::Result<Cutoff> {
-        let directory = match PrivateDirectory::open(root) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(Cutoff {
-                    expired_below_ns: 0,
-                });
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(saved) = Clock::read_saved(&directory)? else {
-            return Ok(Cutoff {
+    /// Every reading, which a reader returns where no clock has started or a record does not read.
+    fn everything() -> Self {
+        Self {
+            cutoff: Cutoff {
                 expired_below_ns: 0,
-            });
-        };
-        let clock = saved.advanced_to(&ClockReading::now()?);
-        let cutoff = clock.cutoff(Period::read(&directory)?);
-        for boot in boots {
-            if offsets.iter().all(|(known, _)| *known != boot) {
-                let offset_ns = boot_offset_ns(&directory, boot).unwrap_or_else(|error| {
-                    retained_report(&error);
-                    None
-                });
-                offsets.push((boot, offset_ns));
-            }
+            },
+            offsets: Vec::new(),
         }
-
-        Ok(cutoff)
     }
 
     fn offset_ns(&self, boot: Identity) -> Option<u64> {
@@ -402,6 +377,271 @@ impl Retained {
         self.cutoff
             .expired_below_ns
             .saturating_sub(continuous_ns.saturating_add(offset_ns))
+    }
+}
+
+/// What a recording's retention records said of the readings of some boots when they were read.
+struct Saved {
+    clock: Clock,
+    period: Period,
+    offsets: Vec<(Identity, Option<u64>)>,
+    /// Whether every boot's record read. One that did not places no reading, as a boot with no
+    /// record does, and its reader reads it again at the next ask, since the failure may pass.
+    whole: bool,
+}
+
+impl Saved {
+    /// What the records of `root` say of readings of `boots`, each named once, none where no
+    /// persister has saved a clock.
+    fn read(root: &Path, boots: &[Identity]) -> io::Result<Option<Self>> {
+        let directory = match PrivateDirectory::open(root) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(clock) = Clock::read_saved(&directory)? else {
+            return Ok(None);
+        };
+        let period = Period::read(&directory)?;
+        let mut offsets = Vec::with_capacity(boots.len());
+        let mut whole = true;
+        for boot in boots {
+            let offset_ns = match boot_offset_ns(&directory, *boot) {
+                Ok(offset_ns) => offset_ns,
+                Err(error) => {
+                    retained_report(&error);
+                    whole = false;
+                    None
+                }
+            };
+            offsets.push((*boot, offset_ns));
+        }
+
+        Ok(Some(Self {
+            clock,
+            period,
+            offsets,
+            whole,
+        }))
+    }
+
+    /// What these records retain once the Mac's clocks read `now`.
+    fn retained_at(&self, now: &ClockReading) -> Retained {
+        Retained {
+            cutoff: self.clock.advanced_to(now).cutoff(self.period),
+            offsets: self.offsets.clone(),
+        }
+    }
+}
+
+/// A reader of a recording's retention records that keeps what it read between asks. A read opens
+/// the recording's directory, its retention directory and every record, and the app's store asks
+/// at every step, many times a second, while the persister saves the clock once a minute. So this
+/// reader reads again only once a record or one of the two directories has changed, or an ask
+/// names other boots.
+pub struct Reader {
+    root: PathBuf,
+    kept: Option<Kept>,
+    reads: u64,
+}
+
+/// What one read found, with what the two directories and each record's file showed just before
+/// it. It keeps the boots of one ask, so the reader's own bound on those is its bound.
+struct Kept {
+    /// None where the read found no saved clock, or failed.
+    saved: Option<Saved>,
+    boots: Vec<Identity>,
+    statuses: Vec<(PathBuf, Option<PathStatus>)>,
+    /// Whether the read answers until a status changes. One that failed, in a status or in a
+    /// record, is made again at the next ask, as a reader that keeps nothing makes it.
+    stands: bool,
+}
+
+/// What a file or a directory shows without being opened. A save replaces a record's file, which
+/// changes its inode. A write over a record changes its times, and so does a change to a
+/// directory's mode, owner or access list. A write of the same length within one grain of the
+/// volume's times is not told apart from none, and stands until the next change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PathStatus {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl PathStatus {
+    /// The status of what is at `path`, none where nothing is.
+    fn read(path: &Path) -> io::Result<Option<Self>> {
+        use std::os::unix::fs::MetadataExt;
+
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(Some(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                bytes: metadata.len(),
+                modified: (metadata.mtime(), metadata.mtime_nsec()),
+                changed: (metadata.ctime(), metadata.ctime_nsec()),
+            })),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Kept {
+    /// The two directories and the two records an ask reads whatever boots it names.
+    const PATHS_ALWAYS: usize = 4;
+
+    /// Reads the records of `root` for readings of `boots`. Every status is taken before the read,
+    /// so a record that changes between the two is read again at the next ask.
+    fn read(root: &Path, boots: Vec<Identity>) -> Self {
+        let mut stands = true;
+        let statuses = match Self::read_statuses(root, &boots) {
+            Ok(statuses) => statuses,
+            Err(error) => {
+                retained_report(&error);
+                stands = false;
+                Vec::new()
+            }
+        };
+        let saved = match Saved::read(root, &boots) {
+            Ok(saved) => saved,
+            Err(error) => {
+                retained_report(&error);
+                stands = false;
+                None
+            }
+        };
+        if saved.as_ref().is_some_and(|saved| !saved.whole) {
+            stands = false;
+        }
+        if stands {
+            assert_eq!(statuses.len(), Self::PATHS_ALWAYS + boots.len());
+        }
+
+        Self {
+            saved,
+            boots,
+            statuses,
+            stands,
+        }
+    }
+
+    /// What the recording's directory, its retention directory, the clock, the period and the
+    /// record of each of `boots` show.
+    fn read_statuses(
+        root: &Path,
+        boots: &[Identity],
+    ) -> io::Result<Vec<(PathBuf, Option<PathStatus>)>> {
+        let directory = root.join(DIRECTORY_NAME);
+        let mut paths = vec![
+            root.to_path_buf(),
+            directory.clone(),
+            directory.join(CLOCK_NAME),
+            directory.join(PERIOD_NAME),
+        ];
+        paths.extend(
+            boots
+                .iter()
+                .map(|boot| directory.join(boot_record_name(*boot))),
+        );
+        let mut statuses = Vec::with_capacity(paths.len());
+        for path in paths {
+            let status = PathStatus::read(&path)?;
+            statuses.push((path, status));
+        }
+
+        Ok(statuses)
+    }
+
+    /// Whether a read for readings of `boots` would find what this one found: this one stands, it
+    /// was made for those boots, and neither a directory nor a record has changed since.
+    fn answers(&self, boots: &[Identity]) -> bool {
+        if !self.stands || self.boots != boots {
+            return false;
+        }
+
+        self.statuses
+            .iter()
+            .all(|(path, kept)| PathStatus::read(path).is_ok_and(|status| status == *kept))
+    }
+
+    /// What the read retains once the Mac's clocks read `now`, everything where it found no clock.
+    fn retained_at(&self, now: &ClockReading) -> Retained {
+        self.saved
+            .as_ref()
+            .map_or_else(Retained::everything, |saved| saved.retained_at(now))
+    }
+}
+
+impl Reader {
+    /// A reader of the recording at `root`, which reads the records at its first ask.
+    #[must_use]
+    pub fn of(root: PathBuf) -> Self {
+        Self {
+            root,
+            kept: None,
+            reads: 0,
+        }
+    }
+
+    /// What the recording retains now of readings of `boots`, which is what `Retained::read`
+    /// answers.
+    #[must_use]
+    pub fn retained(&mut self, boots: impl IntoIterator<Item = Identity>) -> Retained {
+        match now_reported() {
+            Some(now) => self.retained_at(boots, &now),
+            None => Retained::everything(),
+        }
+    }
+
+    /// How many times this reader has read the records, which is what its asks cost.
+    #[must_use]
+    pub fn reads(&self) -> u64 {
+        self.reads
+    }
+
+    fn retained_at(
+        &mut self,
+        boots: impl IntoIterator<Item = Identity>,
+        now: &ClockReading,
+    ) -> Retained {
+        let boots = boots_distinct(boots);
+        let kept = match self.kept.take() {
+            Some(kept) if kept.answers(&boots) => kept,
+            _ => {
+                self.reads += 1;
+                Kept::read(&self.root, boots)
+            }
+        };
+        let retained = kept.retained_at(now);
+        self.kept = Some(kept);
+
+        retained
+    }
+}
+
+/// Each of `boots` once, in the order it first comes.
+fn boots_distinct(boots: impl IntoIterator<Item = Identity>) -> Vec<Identity> {
+    let mut distinct = Vec::new();
+    for boot in boots {
+        if !distinct.contains(&boot) {
+            distinct.push(boot);
+        }
+    }
+
+    distinct
+}
+
+/// What the Mac's clocks read now, none where they do not read, which is reported.
+fn now_reported() -> Option<ClockReading> {
+    match ClockReading::now() {
+        Ok(now) => Some(now),
+        Err(error) => {
+            retained_report(&error);
+            None
+        }
     }
 }
 
@@ -844,7 +1084,7 @@ fn read_bounded(
 
 /// The names the retention order holds, whatever hour each lies under.
 #[cfg(test)]
-pub(crate) fn order_entry_names(root: &std::path::Path) -> Vec<String> {
+pub(crate) fn order_entry_names(root: &Path) -> Vec<String> {
     let order = root.join(DIRECTORY_NAME).join(ORDER_NAME);
     let mut names = Vec::new();
     if !order.exists() {

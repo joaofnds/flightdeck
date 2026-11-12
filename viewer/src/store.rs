@@ -82,7 +82,7 @@ use apps::TickApps;
 use collector::ring::{Identity, RunIdentity};
 use native::NativeRead;
 use native_acceptance::{make_ring, read_native};
-use persistence::retention::Retained;
+use persistence::retention::Reader;
 use ring::Ring;
 use stretch::Stretches;
 
@@ -421,9 +421,9 @@ impl Drop for Store {
 
 /// What the store thread holds between steps.
 struct Held {
-    /// The recording whose retention period says what the store may hold, none in a test of the
-    /// store's own bounds.
-    root: PathBuf,
+    /// The reader of the recording's retention records, which say what the store may hold, a
+    /// reader of no recording in a test of the store's own bounds.
+    retention: Reader,
     startup: StartupState,
     checked_catalog: Option<recording::CheckedCatalog>,
     source_generation: u64,
@@ -544,7 +544,7 @@ impl Held {
         });
 
         Self {
-            root,
+            retention: Reader::of(root),
             startup: StartupState::Complete,
             checked_catalog: None,
             source_generation: 0,
@@ -737,7 +737,7 @@ impl Held {
             .held()
             .chain(self.span.held())
             .map(|second| Identity(second.boot));
-        let retained = Retained::read(&self.root, boots);
+        let retained = self.retention.retained(boots);
         let mut removed = self.stretches.expire(&retained);
         for _ in 0..self.earlier.expired_count(&retained, expire_place) {
             self.earlier.remove_oldest();
