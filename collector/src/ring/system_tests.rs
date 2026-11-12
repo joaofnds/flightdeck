@@ -385,3 +385,10 @@ impl Fixture {
         )
     }
 }
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        unlink_generation(self.writer.name()).unwrap();
+        std::fs::remove_file(&self.place.lock_path).unwrap();
+    }
+}
