@@ -124,6 +124,32 @@ fn app_details_stay_shared_when_an_app_listed_before_it_arrives() {
 }
 
 #[test]
+fn apps_listed_side_by_side_each_share_with_the_second_before() {
+    // Goal: finding one App in the second before does not hide the App listed after it.
+    // Method: publish two idle Apps for three ticks and compare where the second and third
+    // seconds keep the details of each.
+    let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+
+    let seconds = seconds(
+        &budget,
+        &[
+            &[(5, IDLE), (7, IDLE)],
+            &[(5, IDLE), (7, IDLE)],
+            &[(5, IDLE), (7, IDLE)],
+        ],
+    );
+
+    assert!(std::ptr::eq(
+        details(&seconds[1], EARLY),
+        details(&seconds[2], EARLY)
+    ));
+    assert!(std::ptr::eq(
+        details(&seconds[1], OWNER),
+        details(&seconds[2], OWNER)
+    ));
+}
+
+#[test]
 fn seconds_that_repeat_app_details_are_charged_for_them_once() {
     // Goal: the budget counts a details row once however many seconds hold it.
     // Method: publish one idle App for three ticks and compare the budget's use with the

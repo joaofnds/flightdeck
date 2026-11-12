@@ -324,7 +324,8 @@ fn previous_name(
 /// The index at which `previous` holds the App of key `kind` and `bytes`, where it holds the
 /// App.
 /// `previous` is in key order, as a sample's Apps are, and `previous_index` is where the walk
-/// through it stands.
+/// through it stands. The walk steps past an App it finds, since keys ascend strictly, so no
+/// later key is that App's.
 pub(super) fn previous_app(
     kind: KeyKind,
     bytes: &[u8],
@@ -338,7 +339,12 @@ pub(super) fn previous_app(
 
         match row.name.kind.key(&row.name.bytes).cmp(&key) {
             Ordering::Less => *previous_index += 1,
-            Ordering::Equal => return Some(*previous_index),
+            Ordering::Equal => {
+                let found = *previous_index;
+                *previous_index += 1;
+
+                return Some(found);
+            }
             Ordering::Greater => return None,
         }
     }
