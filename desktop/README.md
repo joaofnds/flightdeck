@@ -130,19 +130,28 @@ when their measurement ends. An attaching GUI never signals another owner's proc
 Xcode and its command-line tools are required. GPUI and its macOS backend come from a
 fork, https://github.com/joaofnds/zed on branch `flightdeck-gpui`, at the revision
 `Cargo.toml` pins. The branch is upstream revision
-`56934ec0560bce8929025497411de7f5322fb6ca` with commits that make two changes. The first
+`56934ec0560bce8929025497411de7f5322fb6ca` with commits that make three changes. The first
 pauses a window's display link once GPUI has asked for no frame for four frames, where
 upstream ticks it at every vsync while the window is visible, 120 times a second on a
 ProMotion display, though a page changes once a second. The second keeps each font's
 sized copy, where upstream makes a new one for every run of text it shapes. On an M5 Pro
 at rest, Overview at the hour range spent 14.7 to 18.4 ms of CPU a second on upstream GPUI
-and 9.0 to 12.9 with both changes. The branch is never rewritten, since the pin names a
-commit on it, so moving to a later upstream revision means carrying the changes onto a
-new branch and pinning that. The fork can go once upstream carries both. The direct macOS
-backend includes AccessKit and avoids resolving unused platform backends. It uses
-`runtime_shaders`, which compiles Metal shaders during startup instead of requiring
-Xcode's separate Metal compiler component. Startup measurements include that cost;
-steady-state measurements begin after warmup. No toolchain or hooks are installed.
+and 9.0 to 12.9 with those two changes. The third writes the vertices of the paths a
+frame draws straight into the frame's buffer for the GPU, where upstream builds a list of
+them for every batch of paths in every frame and frees it. macOS's allocator holds on to
+the freed blocks, so they stay in the `flightdeck` process's memory footprint while its
+window draws. The figures for the third change are the renderer's and not the app's. On
+an M5 Pro, GPUI's renderer drew four paths of 21,690 vertices each a frame, with no window
+and no part of Flightdeck running, built with the optimization and overflow checks of
+this crate's release profile. After 1,200 frames `footprint` read 126 MiB with the change
+and 678 MiB without, and a frame took 488 to 492 µs of CPU where it took 1,007 to 1,042.
+The branch is never rewritten, since the pin names a commit on it, so moving to a later
+upstream revision means carrying the changes onto a new branch and pinning that. The fork
+can go once upstream carries all three. The direct macOS backend includes AccessKit and
+avoids resolving unused platform backends. It uses `runtime_shaders`, which compiles Metal
+shaders during startup instead of requiring Xcode's separate Metal compiler component.
+Startup measurements include that cost; steady-state measurements begin after warmup. No
+toolchain or hooks are installed.
 
 Live mode provides Overview, CPU, Apps, Memory, GPU, Storage,
 Energy, Network, Battery, Computer and Self-monitoring
