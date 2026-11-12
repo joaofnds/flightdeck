@@ -144,7 +144,7 @@ window draws. The figures for the third change are the renderer's and not the ap
 an M5 Pro, GPUI's renderer drew four paths of 21,690 vertices each a frame, with no window
 and no part of Flightdeck running, built with the optimization and overflow checks of
 this crate's release profile. After 1,200 frames `footprint` read 126 MiB with the change
-and 678 MiB without, and a frame took 488 to 492 µs of CPU where it took 1,007 to 1,042.
+and 678 MiB without, and a frame took 201 to 206 µs of CPU where it took 1,000 to 1,029.
 The branch is never rewritten, since the pin names a commit on it, so moving to a later
 upstream revision means carrying the changes onto a new branch and pinning that. The fork
 can go once upstream carries all three. The direct macOS backend includes AccessKit and

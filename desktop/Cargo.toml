@@ -66,25 +66,25 @@ features = ["fixtures"]
 # the GPU. desktop/README.md says why.
 [dev-dependencies.gpui]
 git = "https://github.com/joaofnds/zed"
-rev = "61812292ccad528cda806c65ec117e2843eb49af"
+rev = "c4ef90c515d58490d43ca7e78732a880c1e46b98"
 default-features = false
 features = ["test-support"]
 
 # The latency tests lay out text with the text system the app's macOS platform uses.
 [dev-dependencies.gpui_apple]
 git = "https://github.com/joaofnds/zed"
-rev = "61812292ccad528cda806c65ec117e2843eb49af"
+rev = "c4ef90c515d58490d43ca7e78732a880c1e46b98"
 default-features = false
 features = ["font-kit"]
 
 [dependencies.gpui]
 git = "https://github.com/joaofnds/zed"
-rev = "61812292ccad528cda806c65ec117e2843eb49af"
+rev = "c4ef90c515d58490d43ca7e78732a880c1e46b98"
 default-features = false
 
 [dependencies.gpui_macos]
 git = "https://github.com/joaofnds/zed"
-rev = "61812292ccad528cda806c65ec117e2843eb49af"
+rev = "c4ef90c515d58490d43ca7e78732a880c1e46b98"
 default-features = false
 features = ["font-kit", "runtime_shaders"]
 

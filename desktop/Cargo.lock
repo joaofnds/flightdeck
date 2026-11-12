@@ -698,7 +698,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1010,7 +1010,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1630,7 +1630,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -1697,7 +1697,7 @@ dependencies = [
 [[package]]
 name = "gpui_apple"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "anyhow",
  "async-task",
@@ -1738,7 +1738,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -1777,7 +1777,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -1788,7 +1788,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "schemars",
  "serde",
@@ -1798,7 +1798,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "anyhow",
  "log",
@@ -1959,7 +1959,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4508,7 +4508,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "derive_refineable",
 ]
@@ -4830,7 +4830,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "async-task",
  "backtrace",
@@ -5278,7 +5278,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "heapless",
  "rayon",
@@ -6721,7 +6721,7 @@ dependencies = [
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 dependencies = [
  "tracing",
  "ztracing_macro",
@@ -6730,7 +6730,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/joaofnds/zed?rev=61812292ccad528cda806c65ec117e2843eb49af#61812292ccad528cda806c65ec117e2843eb49af"
+source = "git+https://github.com/joaofnds/zed?rev=c4ef90c515d58490d43ca7e78732a880c1e46b98#c4ef90c515d58490d43ca7e78732a880c1e46b98"
 
 [[package]]
 name = "zune-core"
