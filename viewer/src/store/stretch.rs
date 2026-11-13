@@ -12,6 +12,7 @@ use super::machine_stretch::MachineStretch;
 use super::{APPS_PER_SECOND_MAX, AppRow, AppsSecond, Attribution, Resident};
 use crate::EARLIER_STRIDE_SECONDS;
 use crate::app_attribution_history::AppAttributionMetric;
+use crate::apps::AppKey;
 use crate::live_app_response::{Measure, Metric, Observation, Rankable, RankedApp};
 use collector::ring::{Identity, RunIdentity};
 use persistence::retention::Retained;
@@ -698,6 +699,10 @@ impl Rankable for StretchRow {
         }
         let rate = &self.rates[rate_place(metric)];
         rate.measure(rate.known)
+    }
+
+    fn key(&self) -> AppKey<'_> {
+        self.name.kind.key(&self.name.bytes)
     }
 
     fn ranked(&self) -> Arc<RankedApp> {

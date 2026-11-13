@@ -10,7 +10,7 @@ use collector::ring::RunIdentity;
 
 use super::attribution::Totals;
 use super::stretch::Folded;
-use crate::apps::Stamp;
+use crate::apps::{AppKey, Stamp};
 use crate::live_app_history::CompactMeasure;
 use crate::live_app_response::{
     App, KeyKind, Measure, Metric, Observation, Rankable, Ranked, RankedApp, Ranks, Sample,
@@ -449,6 +449,10 @@ impl Rankable for AppRow {
             Metric::Disk => self.disk_io_bytes.measure(),
             Metric::Gpu => self.gpu_ns.measure(),
         }
+    }
+
+    fn key(&self) -> AppKey<'_> {
+        self.name.kind.key(&self.name.bytes)
     }
 
     fn ranked(&self) -> Arc<RankedApp> {

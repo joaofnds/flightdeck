@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::{HeldRow, add_merged};
+use crate::apps::AppKey;
 use crate::live_app_response::{KeyKind, Measure, Metric, Rankable, RankedApp};
 use crate::store::attribution::PointRow;
 
@@ -13,6 +14,10 @@ struct Point {
 impl Rankable for Point {
     fn measure(&self, _metric: Metric) -> Measure {
         unreachable!("a merge measures no App")
+    }
+
+    fn key(&self) -> AppKey<'_> {
+        self.name.kind.key(&self.name.bytes)
     }
 
     fn ranked(&self) -> Arc<RankedApp> {

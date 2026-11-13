@@ -71,6 +71,9 @@ pub(crate) trait Rankable {
     /// What the App's members used of `metric`.
     fn measure(&self, metric: Metric) -> Measure;
 
+    /// The App's key, which orders Apps with one total.
+    fn key(&self) -> apps::AppKey<'_>;
+
     /// The App as a ranking names it.
     fn ranked(&self) -> Arc<RankedApp>;
 }
@@ -124,6 +127,10 @@ impl Rankable for App {
         }
     }
 
+    fn key(&self) -> apps::AppKey<'_> {
+        self.key.view()
+    }
+
     fn ranked(&self) -> Arc<RankedApp> {
         Arc::new(RankedApp::named(
             self.key.kind,
@@ -141,7 +148,10 @@ fn ranks_app(app: &impl Rankable, elapsed_ns: Option<u64>, metrics: &mut [Rankin
         };
 
         if ranking.entries.len() == RANKS_MAX {
-            if reading.amount < ranking.entries[RANKS_MAX - 1].amount {
+            // Most Apps tie at zero for disk and GPU, so an App with no place in a full
+            // ranking is left here, before its name is taken and its place searched.
+            let last = &ranking.entries[RANKS_MAX - 1];
+            if last.compare_app(reading.amount, &app.key()).is_lt() {
                 continue;
             }
         }
@@ -209,31 +219,29 @@ impl Ranking {
         let index = self
             .entries
             .partition_point(|entry| entry.compare(&candidate).is_lt());
-        if index < RANKS_MAX {
-            self.entries.insert(index, candidate);
-            if self.entries.len() > RANKS_MAX {
-                assert!(self.entries.pop().is_some());
-            }
+        assert!(index < RANKS_MAX);
+
+        self.entries.insert(index, candidate);
+        if self.entries.len() > RANKS_MAX {
+            assert!(self.entries.pop().is_some());
         }
         assert!(self.entries.len() <= RANKS_MAX);
     }
 }
 
 impl Rank {
-    /// The larger total first, then a bundle before an executable, then the key's bytes.
+    /// The larger total first, then the Apps' keys in their order, a bundle before an
+    /// executable and then the key's bytes.
     fn compare(&self, other: &Self) -> Ordering {
-        other
-            .amount
-            .cmp(&self.amount)
-            .then(kind_order(self.app.kind).cmp(&kind_order(other.app.kind)))
-            .then(self.app.bytes.cmp(&other.app.bytes))
+        self.compare_app(other.amount, &other.app.kind.key(&other.app.bytes))
     }
-}
 
-fn kind_order(kind: KeyKind) -> u8 {
-    match kind {
-        KeyKind::Bundle => 0,
-        KeyKind::Executable => 1,
+    /// This rank against an App with the total `amount` and the key `key`, in the order
+    /// `compare` gives two ranks.
+    fn compare_app(&self, amount: u64, key: &apps::AppKey<'_>) -> Ordering {
+        amount
+            .cmp(&self.amount)
+            .then_with(|| self.app.kind.key(&self.app.bytes).cmp(key))
     }
 }
 
