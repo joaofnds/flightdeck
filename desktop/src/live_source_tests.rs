@@ -566,6 +566,109 @@ fn a_handed_over_reader_reads_the_next_windows_page_as_newly_opened() {
 }
 
 #[test]
+fn a_rested_reader_keeps_what_its_session_cached_within_the_interval() {
+    // Goal: a look at an earlier stretch of the recording soon after a reader rests reads what
+    // the session cached, so the reader keeps it until the kept interval is over.
+    // Method: read Overview to the end from the saved minutes, rest the reader as a window that
+    // hides or draws from the store's View does, step it as the worker does a nanosecond before
+    // the interval is over, and compare the session's cache.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    let cached_bytes = reader.session().app_history_bytes();
+    assert!(cached_bytes > 0);
+    let _kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.page_caches_unread_since.unwrap();
+
+    reader.step_resting_at(
+        &recording.root,
+        (rested + super::PAGE_CACHES_KEEP_INTERVAL)
+            .checked_sub(Duration::from_nanos(1))
+            .unwrap(),
+    );
+
+    assert_eq!(reader.session().app_history_bytes(), cached_bytes);
+}
+
+#[test]
+fn a_rested_reader_lets_go_of_what_its_session_cached_once_the_interval_is_over() {
+    // Goal: the app keeps none of what the saved minutes cached for a page for as long as it
+    // runs, so the worker of a reader that has rested for the kept interval lets go of it.
+    // Method: read Overview to the end from the saved minutes, rest the reader as a window that
+    // hides or draws from the store's View does, step it as the worker does once the interval
+    // is over, and read the session's cache.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    assert!(reader.session().app_history_bytes() > 0);
+    let _kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.page_caches_unread_since.unwrap();
+
+    reader.step_resting_at(&recording.root, rested + super::PAGE_CACHES_KEEP_INTERVAL);
+
+    assert_eq!(reader.session().app_history_bytes(), 0);
+}
+
+#[test]
+fn a_page_the_saved_minutes_answer_after_its_reader_rested_keeps_what_the_session_cached() {
+    // Goal: the saved minutes answer a page with what the session cached, so a page they answer
+    // after the reader rested keeps it however long ago the reader rested.
+    // Method: read Overview to the end from the saved minutes, rest the reader, ask for the page
+    // through the kept handle, lease the reader as the worker that read the page does until it
+    // has read it again, step it as the worker does twice the interval later, and compare the
+    // session's cache.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    let cached_bytes = reader.session().app_history_bytes();
+    assert!(cached_bytes > 0);
+    let mut kept = reader.hand_over();
+    kept.request(SealedRecording::request()).unwrap();
+    let mut command = Some(SnapshotReader::command());
+
+    let taken = reader.lease(&recording.root, &mut command, 1);
+    let read = reader.lease(&recording.root, &mut command, 1);
+    super::worker_step(
+        &recording.root,
+        &reader.shared,
+        &mut reader.reader,
+        &mut command,
+        std::time::Instant::now() + 2 * super::PAGE_CACHES_KEEP_INTERVAL,
+    );
+
+    assert_eq!(
+        (taken, read),
+        (super::Lease::Renewed, super::Lease::Renewed)
+    );
+    assert!(reader.shared.mailbox.lock().unwrap().output.is_some());
+    assert_eq!(reader.session().app_history_bytes(), cached_bytes);
+}
+
+#[test]
+fn a_reader_rested_on_a_held_second_lets_go_once_the_interval_is_over() {
+    // Goal: a window shown again on a held second draws the snapshot it kept and asks its reader
+    // for nothing, so a reader rested on a held second lets go as any rested reader does, and a
+    // window left hidden on a hold keeps none of the caches for as long as it stays hidden.
+    // Method: read Overview to the end from the saved minutes, hold a second, rest the reader as
+    // a hidden window's rests, step it as the worker does once the interval is over, and read
+    // the session's cache.
+    let recording = SealedRecording::new();
+    let mut reader = SnapshotReader::new();
+    reader.read_complete(&recording);
+    assert!(reader.session().app_history_bytes() > 0);
+    reader.command.request.second = Some(1001);
+    let _kept = reader.hand_over();
+    reader.receive();
+    let rested = reader.reader.page_caches_unread_since.unwrap();
+
+    reader.step_resting_at(&recording.root, rested + super::PAGE_CACHES_KEEP_INTERVAL);
+
+    assert_eq!(reader.session().app_history_bytes(), 0);
+}
+
+#[test]
 fn a_handed_over_reader_leaves_its_session_where_it_is() {
     // Goal: a reader reads and publishes nothing while it rests, since the store goes on
     // following the recording and reading it here too would take in each minute twice.
@@ -594,7 +697,13 @@ fn a_fresh_replacement_reader_waits_for_a_request_without_opening_live_data() {
     let shared = Arc::new(super::Shared::new());
     let mut reader = SnapshotReader::new();
 
-    super::worker_step(&recording.root, &shared, &mut reader.reader, &mut None);
+    super::worker_step(
+        &recording.root,
+        &shared,
+        &mut reader.reader,
+        &mut None,
+        std::time::Instant::now(),
+    );
 
     assert!(reader.reader.session.is_none());
 }
@@ -870,6 +979,7 @@ impl SnapshotReader {
                 last_route: String::new(),
                 pending: None,
                 deferred_listing_last_second: None,
+                page_caches_unread_since: None,
                 retry_after: std::time::Instant::now(),
             },
             command: Self::command(),
@@ -976,7 +1086,12 @@ impl SnapshotReader {
 
     /// Steps the reader as the worker does while no page reads, and returns its pause.
     fn step_resting(&mut self, root: &std::path::Path) -> Duration {
-        super::worker_step(root, &self.shared, &mut self.reader, &mut None)
+        self.step_resting_at(root, std::time::Instant::now())
+    }
+
+    /// Steps the reader as the worker does at `now` while no page reads, and returns its pause.
+    fn step_resting_at(&mut self, root: &std::path::Path, now: std::time::Instant) -> Duration {
+        super::worker_step(root, &self.shared, &mut self.reader, &mut None, now)
     }
 
     fn lease(

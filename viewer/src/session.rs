@@ -463,6 +463,21 @@ impl Session {
         Ok(last)
     }
 
+    /// Lets go of what the session cached from its reads of a page, the context of its last
+    /// select and the caches of its histories. A later read of them reads the sealed windows
+    /// again. Installing a new span of windows relies on this to drop everything that names a
+    /// window by its place in the list, so a cache added to the session is let go of here.
+    pub(crate) fn forget_page_caches(&mut self) {
+        self.last_context = None;
+        self.cpu_history_cache = None;
+        self.app_sample_cache.get_mut().take();
+        self.app_history_cache.get_mut().take();
+        self.app_process_history_cache.get_mut().take();
+        *self.app_history_ticks.get_mut() = app_history::Ticks::new();
+        *self.app_history_kept_headers.get_mut() = app_history::KeptHeaders::new();
+        self.parts_read.get_mut().take();
+    }
+
     /// The context of `range` the last select read, unless a reading of it has expired since.
     fn select_inner_context_kept(&self, range: ContextRange) -> Option<&LastContext> {
         let last = self

@@ -193,6 +193,169 @@ fn a_store_that_catches_up_takes_the_page_back_from_the_saved_minutes() {
 }
 
 #[test]
+fn a_store_that_takes_the_page_back_keeps_the_saved_app_histories_cached_within_the_interval() {
+    // Goal: a look at an earlier stretch of the recording soon after the Store takes a page back
+    // reads the App histories the saved minutes cached, so they stay until the kept interval is
+    // over.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, let the Store go on until it answers, step the worker a nanosecond
+    // before the interval is over, and compare the session's cache.
+    let (recording, store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    let cached_bytes = adapter.memory_page_from_the_saved_minutes();
+    let taken_over = adapter.store_takes_over(&store);
+
+    adapter.worker_step_at(
+        (taken_over + crate::live_source::PAGE_CACHES_KEEP_INTERVAL)
+            .checked_sub(Duration::from_nanos(1))
+            .unwrap(),
+    );
+
+    assert_eq!(adapter.session().app_history_bytes(), cached_bytes);
+}
+
+#[test]
+fn a_store_that_takes_the_page_back_lets_the_saved_app_histories_go_once_the_interval_is_over() {
+    // Goal: the App histories a page cached from the saved minutes go once the Store has had the
+    // page for the kept interval, so the app keeps none of them for as long as it runs.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, let the Store go on until it answers, step the worker once the interval
+    // is over, and read the session's cache.
+    let (recording, store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.memory_page_from_the_saved_minutes();
+    let taken_over = adapter.store_takes_over(&store);
+
+    adapter.worker_step_at(taken_over + crate::live_source::PAGE_CACHES_KEEP_INTERVAL);
+
+    assert_eq!(adapter.session().app_history_bytes(), 0);
+}
+
+#[test]
+fn a_later_answer_of_the_store_lets_the_saved_app_histories_go_no_later() {
+    // Goal: a page the Store answers each second would otherwise put off letting go of the App
+    // histories for as long as it is read, so the kept interval counts from the Store's first
+    // answer, whatever it answers after.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, let the Store go on until it answers, publish a reading it answers next,
+    // step the worker once the interval since the first answer is over, and read the session's
+    // cache.
+    let (mut recording, store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.memory_page_from_the_saved_minutes();
+    let taken_over = adapter.store_takes_over(&store);
+    recording.publish_resources();
+    let Update::Ready(later) = adapter.update_within(Duration::from_secs(10)) else {
+        panic!("the Store did not answer again");
+    };
+    assert_eq!(later.selection["selected"]["publication"], 4);
+
+    adapter.worker_step_at(taken_over + crate::live_source::PAGE_CACHES_KEEP_INTERVAL);
+
+    assert_eq!(adapter.session().app_history_bytes(), 0);
+}
+
+#[test]
+fn a_page_the_saved_minutes_answer_again_keeps_its_app_histories_cached_past_the_interval() {
+    // Goal: the saved minutes answer a page with the App histories the session cached, so a page
+    // they answer again after the Store had it keeps them however long ago the Store took over.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, let the Store go on until it answers, park it behind the ring again, ask
+    // for the page anew so the saved minutes answer, step the worker twice the interval later,
+    // and read the session's cache.
+    let (mut recording, store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.memory_page_from_the_saved_minutes();
+    adapter.store_takes_over(&store);
+    park_behind_the_ring(&mut recording, &store);
+    adapter.submit(memory_page(), crate::live_source::Context::Select);
+
+    let saved = adapter.finished_within(Duration::from_secs(10));
+    adapter.worker_step_at(Instant::now() + 2 * crate::live_source::PAGE_CACHES_KEEP_INTERVAL);
+
+    assert!(matches!(
+        saved.selection,
+        crate::live_source::Presentation::Legacy(_)
+    ));
+    assert!(adapter.session().app_history_bytes() > 0);
+}
+
+#[test]
+fn a_page_the_saved_minutes_answer_after_the_reader_let_go_caches_its_app_histories_again() {
+    // Goal: once the reader let go of what its session cached, the saved minutes still answer a
+    // page, as they did its first look, and the session caches its App histories again.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, let the Store go on until it answers, step the worker once the interval
+    // is over, park the Store behind the ring again, ask for the page anew so the saved minutes
+    // answer, and read the session's cache.
+    let (mut recording, store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.memory_page_from_the_saved_minutes();
+    let taken_over = adapter.store_takes_over(&store);
+    adapter.worker_step_at(taken_over + crate::live_source::PAGE_CACHES_KEEP_INTERVAL);
+    park_behind_the_ring(&mut recording, &store);
+    adapter.submit(memory_page(), crate::live_source::Context::Select);
+
+    let saved = adapter.finished_within(Duration::from_secs(10));
+
+    assert!(matches!(
+        saved.selection,
+        crate::live_source::Presentation::Legacy(_)
+    ));
+    assert!(adapter.session().app_history_bytes() > 0);
+}
+
+#[test]
+fn a_hover_the_store_answers_leaves_the_app_histories_of_the_held_page_cached() {
+    // Goal: a hover leaves the page it is over to whoever answered that page, so the Store's
+    // answer to a hover never has the session let go of what it cached for a page the saved
+    // minutes answered.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, let the Store go on, ask for the selected second alone as a hover does
+    // until the Store answers, step the worker twice the interval later, and compare the
+    // session's cache.
+    let (recording, store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    adapter.submit(memory_page(), crate::live_source::Context::Select);
+    let saved = adapter.finished_within(Duration::from_secs(10));
+    let cached_bytes = adapter.session().app_history_bytes();
+    assert!(cached_bytes > 0);
+    let mut hover = request("memory");
+    hover.second = saved.selection["second"].as_u64();
+    hover.identity = Some(saved.selection["selected"].clone());
+    store.set_active(true);
+    adapter.submit(hover, crate::live_source::Context::Keep);
+
+    let next = adapter.update_within(Duration::from_secs(10));
+    adapter.worker_step_at(Instant::now() + 2 * crate::live_source::PAGE_CACHES_KEEP_INTERVAL);
+
+    let Update::Ready(hovered) = next else {
+        panic!("the hover failed");
+    };
+    assert!(!matches!(
+        hovered.selection,
+        crate::live_source::Presentation::Legacy(_)
+    ));
+    assert_eq!(adapter.session().app_history_bytes(), cached_bytes);
+}
+
+#[test]
+fn a_page_only_the_saved_minutes_answer_keeps_its_app_histories_cached_past_the_interval() {
+    // Goal: the App histories stay cached for as long as the saved minutes answer the page, so
+    // each of its reads takes from the recording only what it saved since the last.
+    // Method: read the Memory page and its resident history past the wait with the Store parked
+    // behind the ring, step the worker twice the interval later, and compare the session's
+    // cache.
+    let (recording, _store, handle) = store_parked_behind_the_ring();
+    let mut adapter = Adapter::on_root(handle, &recording.root);
+    let cached_bytes = adapter.memory_page_from_the_saved_minutes();
+
+    adapter.worker_step_at(Instant::now() + 2 * crate::live_source::PAGE_CACHES_KEEP_INTERVAL);
+
+    assert_eq!(adapter.session().app_history_bytes(), cached_bytes);
+}
+
+#[test]
 fn a_page_the_saved_minutes_answered_in_part_asks_again_at_the_workers_pace() {
     // Goal: the wait of a second between saved answers never delays the rest of a page's own read.
     // Method: read a page whose histories come a step later past the wait, with the Store parked
@@ -280,6 +443,7 @@ fn a_page_the_store_published_lists_the_saved_minutes_again_once_it_falls_to_the
             histories: crate::live_source::Histories::Defer,
         }),
         deferred_listing_last_second: None,
+        page_caches_unread_since: None,
         retry_after: Instant::now(),
     };
 
@@ -298,6 +462,14 @@ fn a_second_the_store_holds_no_reading_of_reads_the_saved_minutes_at_once() {
     let answer = reader.needs_load(viewer::store::QueryNeedsLoad::MissingObservation);
 
     assert!(matches!(answer, super::super::Answer::Saved));
+}
+
+/// A request for the Memory page with its resident history.
+fn memory_page() -> Request {
+    let mut request = request("memory");
+    request.load_resident_history = true;
+
+    request
 }
 
 /// A Store parked a reading behind its ring, over a saved minute, and a handle to ask it.
@@ -989,6 +1161,7 @@ impl Adapter {
                 last_route: String::new(),
                 pending: None,
                 deferred_listing_last_second: None,
+                page_caches_unread_since: None,
                 retry_after: Instant::now(),
             },
             command: crate::live_source::Command {
@@ -1010,18 +1183,50 @@ impl Adapter {
         )
     }
 
+    /// Reads the Memory page and its resident history to the end from the saved minutes, and
+    /// returns the bytes of the App histories the session cached for it.
+    fn memory_page_from_the_saved_minutes(&mut self) -> usize {
+        self.submit(memory_page(), crate::live_source::Context::Select);
+        self.finished_within(Duration::from_secs(10));
+        let cached_bytes = self.session().app_history_bytes();
+        assert!(cached_bytes > 0);
+
+        cached_bytes
+    }
+
+    /// Lets `store` go on until it answers the page, and returns when the reader noted that the
+    /// Store took the page over.
+    fn store_takes_over(&mut self, store: &viewer::store::Store) -> Instant {
+        store.set_active(true);
+        let Update::Ready(live) = self.update_within(Duration::from_secs(10)) else {
+            panic!("the Store did not answer");
+        };
+        assert!(!matches!(
+            live.selection,
+            crate::live_source::Presentation::Legacy(_)
+        ));
+
+        self.reader.page_caches_unread_since.unwrap()
+    }
+
+    /// Steps the worker once at `now` with the page it reads.
+    fn worker_step_at(&mut self, now: Instant) {
+        let mut command = Some(std::mem::replace(&mut self.command, Self::placeholder()));
+        crate::live_source::worker_step(
+            &self.root,
+            &self.shared,
+            &mut self.reader,
+            &mut command,
+            now,
+        );
+        self.command = command.unwrap();
+    }
+
     /// What the worker's steps publish first, stepping as the worker does with a page to read.
     fn worker_step_published(&mut self) -> Update {
         self.shared.mailbox.lock().unwrap().generation = self.command.generation;
         for _ in 0..1_000 {
-            let mut command = Some(std::mem::replace(&mut self.command, Self::placeholder()));
-            crate::live_source::worker_step(
-                &self.root,
-                &self.shared,
-                &mut self.reader,
-                &mut command,
-            );
-            self.command = command.unwrap();
+            self.worker_step_at(Instant::now());
             if let Some(update) = self.shared.mailbox.lock().unwrap().output.take() {
                 return update;
             }

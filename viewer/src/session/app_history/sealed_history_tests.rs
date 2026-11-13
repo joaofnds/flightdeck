@@ -207,6 +207,36 @@ fn restores_a_process_group_of_a_window_that_keeps_parts_without_reading_its_sav
 }
 
 #[test]
+fn forgets_a_warm_process_group_trace_with_the_page_caches() {
+    // Goal: a session that forgets its page caches lets go of the process group trace it kept
+    // warm, which it keeps apart from an App's.
+    // Method: warm the trace of the group of an App's processes named "current" over two
+    // sealed observations, then forget the page caches.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal_derived(&[], &persistence::sealed_apps::SealedApps::default());
+    let mut session = Session::open(&fixture.root).unwrap();
+    let selected = selected(&session, 1002);
+    let group = GroupTarget {
+        app: CURRENT,
+        executable: b"current",
+    };
+    session
+        .with_app_history(
+            &Selected::ending_at(selected).unwrap(),
+            &group,
+            group_points,
+        )
+        .unwrap();
+    assert!(session.app_process_history_cache.borrow().is_some());
+
+    session.forget_page_caches();
+
+    assert!(session.app_process_history_cache.borrow().is_none());
+}
+
+#[test]
 fn restores_a_replayed_minute_after_a_minute_that_keeps_parts() {
     // Goal: the first observation of a minute sealed without parts takes its rates from the
     // last observation of the minute before, which keeps its parts, as a replay of both gives.

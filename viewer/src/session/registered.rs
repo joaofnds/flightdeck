@@ -292,15 +292,8 @@ impl Session {
             observation.window = place;
             Some(observation)
         });
-        self.last_context = None;
+        self.forget_page_caches();
         self.earlier_tail.get_mut().take();
-        self.cpu_history_cache = None;
-        self.app_sample_cache.get_mut().take();
-        self.app_history_cache.get_mut().take();
-        self.app_process_history_cache.get_mut().take();
-        *self.app_history_ticks.get_mut() = super::app_history::Ticks::new();
-        *self.app_history_kept_headers.get_mut() = super::app_history::KeptHeaders::new();
-        self.parts_read.get_mut().take();
         self.registered.span = Some(Span {
             needed,
             loaded: span,

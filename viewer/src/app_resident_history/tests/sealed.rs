@@ -238,6 +238,40 @@ fn resident_history_drops_the_cached_points_a_smaller_cache_room_cannot_hold() {
 }
 
 #[test]
+fn a_session_that_forgets_its_page_caches_caches_no_app_history_and_reads_the_same_again() {
+    // Goal: a session lets go of every App history point it cached, and the history it reads
+    // afterwards is the one the cached points gave.
+    // Method: take the history over windows that keep their parts, forget the page's caches,
+    // and compare the cache's bytes with those before any history and the history taken again.
+    let fixture = sealed_minutes([true; 4]);
+    let mut session = resident_at(&fixture, 1005);
+    let unread_bytes = session.app_history.total_bytes();
+    let (cached, _reads) = resident_history(&session);
+    assert!(session.app_history.total_bytes() > unread_bytes);
+
+    session.forget_page_caches();
+
+    assert_eq!(session.app_history.total_bytes(), unread_bytes);
+    assert_eq!(resident_history(&session).0, cached);
+}
+
+#[test]
+fn a_session_that_forgets_its_page_caches_reads_the_context_of_its_selection_again() {
+    // Goal: a session lets go of the context its last selection read, so selecting that second
+    // again reads the sealed minutes again.
+    // Method: select a second of four sealed minutes, forget the page's caches, select the
+    // second again, and compare the saved reads before and after.
+    let fixture = sealed_minutes([true; 4]);
+    let mut session = resident_at(&fixture, 1005);
+    let reads = session.history.as_ref().unwrap().source_reads.get();
+
+    session.forget_page_caches();
+    session.select(1005, 0).unwrap();
+
+    assert!(session.history.as_ref().unwrap().source_reads.get() > reads);
+}
+
+#[test]
 fn resident_replay_gives_again_every_observation_left_out_before_a_reset() {
     // Goal: a reset gives back each observation the replay left out, from the windows it
     // replays and from those that keep their parts, as the uncached fallback needs once a

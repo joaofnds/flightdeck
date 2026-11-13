@@ -344,6 +344,28 @@ fn batch_reads_the_facts_of_windows_that_keep_their_parts_once_per_session() {
 }
 
 #[test]
+fn batch_reads_the_facts_of_kept_windows_again_once_the_session_forgot_its_page_caches() {
+    // Goal: a session that forgets its page caches lets go of the facts it read from its
+    // windows' parts, so the next batch reads them again and gives the same histories.
+    // Method: take the batch, forget the page caches, take the batch with a fresh history, and
+    // count the queries of the windows' facts each ran.
+    let fixture = kept_fixture([true; 4]);
+    let mut session = Session::open(&fixture.root).unwrap();
+    let first = saved_batch(&session);
+    let queries = session.kept_header_queries.get();
+
+    session.forget_page_caches();
+    let second = saved_batch(&session);
+
+    assert_eq!(queries, 4);
+    assert_eq!(session.kept_header_queries.get(), 2 * queries);
+    assert_batch(
+        &second,
+        &[first.cpu, first.power, first.disk].map(Result::unwrap),
+    );
+}
+
+#[test]
 fn batch_reads_again_the_facts_of_parts_rewritten_since_the_session_read_them() {
     // Goal: the session's facts of a window's parts never outlive the file they came from.
     // Method: take the batch, rewrite each window's parts so their facts count one App more

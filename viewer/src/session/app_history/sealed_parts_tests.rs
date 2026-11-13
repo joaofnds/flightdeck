@@ -1138,6 +1138,26 @@ fn a_visit_after_its_read_ends_decodes_the_window_again() {
 }
 
 #[test]
+fn a_visit_after_the_session_forgot_its_page_caches_decodes_the_window_again() {
+    // Goal: a session that forgets its page caches lets go of the parts its read decoded, so a
+    // window rewritten since gives what its table now holds.
+    // Method: visit an App's parts within a read, forget the page caches, rewrite the window's
+    // parts to a version this build does not read, and visit them again.
+    let mut fixture = Fixture::new();
+    let mut session = sealed_seconds_with_parts(&mut fixture);
+    let key = app_keys(&replayed_samples(&session, 1001)[1]).remove(0);
+    session.parts_read_begin(key.kind, &key.bytes);
+    let decoded = kept_parts(&session, 1001, &key);
+    session.forget_page_caches();
+    session.unread_kept_parts();
+
+    let visited = kept_parts(&session, 1001, &key);
+
+    assert_eq!(decoded.len(), 2);
+    assert!(visited.is_empty());
+}
+
+#[test]
 fn a_read_decodes_again_the_parts_of_an_app_other_than_its_own() {
     // Goal: a read keeps the parts of the App it reads, and no other App's, so neither App is
     // later given what the read decoded of the other.

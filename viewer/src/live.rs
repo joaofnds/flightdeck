@@ -125,6 +125,26 @@ impl LiveSession {
         Ok(())
     }
 
+    /// Lets go of what the session cached for a page the saved minutes answered: its App
+    /// histories, the ranks and parts of its window, and what the session of its saved minutes
+    /// cached from the page's reads. A later read of them reads those minutes again. The
+    /// selection stays, and so does the older tail, which a page the Store answers reads too.
+    pub fn forget_page_caches(&mut self) {
+        self.app_history = History::new();
+        self.app_ranks = Arc::default();
+        self.parts_app = None;
+        self.app_parts = Arc::default();
+        if let Some(history) = &mut self.history {
+            history.forget_page_caches();
+        }
+    }
+
+    /// The bytes of the App histories the session caches from the saved minutes.
+    #[must_use]
+    pub fn app_history_bytes(&self) -> usize {
+        self.app_history.total_bytes()
+    }
+
     #[must_use]
     pub fn catalog(&self) -> Value {
         let mut catalog = self.history.as_ref().map_or_else(

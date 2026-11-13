@@ -143,6 +143,25 @@ fn select_reads_no_minute_again_for_the_context_it_read_last() {
 }
 
 #[test]
+fn select_reads_its_context_again_after_the_session_forgets_it() {
+    // Goal: a session that forgets its page caches keeps none of the context its last select
+    // read, so a select of the same second reads the sealed minutes again and gives the same
+    // response.
+    // Method: select a second of seven sealed minutes, forget the page caches, select the second
+    // again, and compare the saved reads and the response with the first select's.
+    let fixture = sealed_minutes();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let first = session.select(SECOND_FIRST + 3, 0).unwrap();
+    let reads = session.source_reads.get();
+
+    session.forget_page_caches();
+    let again = session.select(SECOND_FIRST + 3, 0).unwrap();
+
+    assert!(session.source_reads.get() > reads);
+    assert_eq!(again, first);
+}
+
+#[test]
 fn select_copies_the_trends_of_the_context_it_read_last_once() {
     // Goal: selecting a second again copies the trends of the context it keeps into its
     // response once, since the trends of a held second's context are most of what a select of

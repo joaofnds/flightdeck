@@ -251,6 +251,30 @@ fn refuses_canceled_cpu_restoration_without_installing_its_cache_or_changing_sel
 }
 
 #[test]
+fn a_session_that_forgets_its_page_caches_reads_the_cpu_history_of_its_selection_again() {
+    // Goal: a session that let go of what it cached for a page keeps no CPU history of its saved
+    // minutes, and reading the selection's CPU history again gives what it gave before.
+    // Method: read the CPU history of a second only saved minutes hold, forget the page caches,
+    // look at the cache, and read the CPU history again.
+    let fixture = window::fixture::saved_with_apps_after_a_lead_in();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    session.select(1931, 0).unwrap();
+    let first = session.cpu_history(0).unwrap();
+    let saved = |session: &LiveSession| {
+        let history = session.history.as_ref().unwrap();
+        history.cpu_history_cache.is_some()
+    };
+    assert!(saved(&session));
+
+    session.forget_page_caches();
+    let forgotten = !saved(&session);
+    let again = session.cpu_history(0).unwrap();
+
+    assert!(forgotten);
+    assert_eq!(again, first);
+}
+
+#[test]
 fn reads_cpu_history_of_a_selected_second_whose_charts_reach_a_saved_lead_in() {
     // Goal: a selected second whose charts read a saved second before its context still shows
     // its CPU history, which covers only the context's 900 seconds.

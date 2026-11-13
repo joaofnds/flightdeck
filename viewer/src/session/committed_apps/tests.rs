@@ -128,6 +128,28 @@ fn cancels_a_warm_cache_hit_and_releases_its_sample() {
 }
 
 #[test]
+fn a_session_that_forgets_its_page_caches_reads_a_warm_sample_again() {
+    // Goal: a session that let go of what it cached from a page's reads keeps no App sample, and
+    // reading the sample again gives what it gave before.
+    // Method: warm the sample of a sealed second, forget the page caches, look at the cache, and
+    // read the sample again.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1001);
+    fixture.seal();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let selected = session.select(1001, 0).unwrap()["selected"].clone();
+    let warm = session.with_app_sample(&selected, page).unwrap();
+    assert!(session.app_sample_cache.borrow().is_some());
+
+    session.forget_page_caches();
+    let forgotten = session.app_sample_cache.borrow().is_none();
+    let again = session.with_app_sample(&selected, page).unwrap();
+
+    assert!(forgotten);
+    assert_eq!(again, warm);
+}
+
+#[test]
 fn invalidates_a_warm_sample_when_begin_changes_the_epoch() {
     // Goal: beginning a new epoch directly releases the previous epoch's retained sample.
     // Method: cancel after warming, begin the new epoch without an intervening App operation.

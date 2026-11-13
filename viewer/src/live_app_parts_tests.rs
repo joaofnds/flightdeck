@@ -101,6 +101,33 @@ fn part_window_keeps_sharing_the_parts_of_a_covered_window() {
 }
 
 #[test]
+fn a_session_that_forgets_its_page_caches_keeps_the_parts_of_an_app_again() {
+    // Goal: a session that let go of what it cached for a page keeps no part of an App, and
+    // keeping the App's parts again gives the detail it gave before.
+    // Method: keep an App's parts of a saved window, forget the page caches, take the parts,
+    // keep the App's parts again and compare the detail of the selected second.
+    let fixture = saved_only();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let selected = session.select(1001, 0).unwrap()["selected"].clone();
+    let app = selected_app(&session);
+    session.part_window(app.kind, &app.bytes).unwrap();
+    let detail = |session: &LiveSession| {
+        let parts = session.app_parts();
+        let part = parts.get(&observation_key(&selected)).unwrap();
+
+        part.detail(first_page()).unwrap()
+    };
+    let kept = detail(&session);
+
+    session.forget_page_caches();
+    let forgotten = session.app_parts();
+    session.part_window(app.kind, &app.bytes).unwrap();
+
+    assert!(forgotten.get(&observation_key(&selected)).is_none());
+    assert_eq!(detail(&session), kept);
+}
+
+#[test]
 fn part_window_drops_the_parts_of_an_app_of_other_bytes() {
     // Goal: a hover never shows the App selected before as the App selected now.
     // Method: keep one App's parts of a saved window, then those of other bytes of its kind.

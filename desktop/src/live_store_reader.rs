@@ -505,6 +505,10 @@ pub(super) fn read(
             if read_earlier(reader, root, command, shared, &mut snapshot) {
                 snapshot.histories_pending = true;
             }
+            // A hover leaves the page it is over to whoever answered that page.
+            if command.context == Context::Select {
+                super::reader_page_caches_unread(reader, started);
+            }
             snapshot.read_ms = started.elapsed().as_secs_f64() * 1000.0;
             super::reader_snapshot_record(reader, command, &snapshot, histories);
             Some(Update::Ready(snapshot))

@@ -350,6 +350,30 @@ fn invalidates_a_warm_trace_when_begin_advances_the_epoch() {
 }
 
 #[test]
+fn forgets_a_warm_trace_with_the_page_caches() {
+    // Goal: a session that forgets its page caches lets go of the App trace it kept warm.
+    // Method: warm an App's trace over two sealed observations, then forget the page caches.
+    let mut fixture = Fixture::new();
+    fixture.publish_with_system_rows(1001);
+    fixture.publish_with_system_rows(1002);
+    fixture.seal();
+    let mut session = Session::open(&fixture.root).unwrap();
+    let selected = selected(&session, 1002);
+    let target = Target {
+        kind: KeyKind::Bundle,
+        bytes: b"/Apps/Current.app",
+    };
+    session
+        .with_app_history(&Selected::ending_at(selected).unwrap(), &target, points)
+        .unwrap();
+    assert!(session.app_history_cache.borrow().is_some());
+
+    session.forget_page_caches();
+
+    assert!(session.app_history_cache.borrow().is_none());
+}
+
+#[test]
 fn leaves_a_clockless_predecessor_out_of_the_trace_and_its_rate_baseline() {
     // Goal: a clockless saved publication cannot become a plotted point or a rate baseline.
     // Method: retain predecessor counters with absent wall time and request the clocked selection.

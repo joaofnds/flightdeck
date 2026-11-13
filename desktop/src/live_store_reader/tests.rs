@@ -342,6 +342,7 @@ fn a_store_continuation_with_no_reply_uses_the_nonzero_polling_cadence() {
             histories: Histories::Defer,
         }),
         deferred_listing_last_second: None,
+        page_caches_unread_since: None,
         retry_after: Instant::now(),
     };
     let mut command = Command {

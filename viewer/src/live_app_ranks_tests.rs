@@ -173,6 +173,39 @@ fn rank_window_does_not_replay_a_window_it_has_ranked() {
 }
 
 #[test]
+fn a_session_that_forgets_its_page_caches_ranks_its_window_again() {
+    // Goal: a session that let go of what it cached for a page keeps no ranks of its window, and
+    // ranking the window again gives the ranks it gave before.
+    // Method: rank a saved window, forget the page caches, take the ranks, rank the window again
+    // and compare the selected second's ranks.
+    let fixture = saved_only();
+    let mut session = LiveSession::open(&fixture.root).unwrap();
+    let selected = session.select(1001, 0).unwrap()["selected"].clone();
+    session.rank_window().unwrap();
+    let ranked = summary(
+        session
+            .app_ranks()
+            .get(&observation_key(&selected))
+            .unwrap(),
+    );
+
+    session.forget_page_caches();
+    let forgotten = session.app_ranks();
+    session.rank_window().unwrap();
+
+    assert!(forgotten.get(&observation_key(&selected)).is_none());
+    assert_eq!(
+        summary(
+            session
+                .app_ranks()
+                .get(&observation_key(&selected))
+                .unwrap()
+        ),
+        ranked
+    );
+}
+
+#[test]
 fn rank_window_does_not_replay_a_window_whose_replay_failed() {
     // Goal: a saved minute that cannot be read costs one replay, not one on every read.
     // Method: select a second of the later of two saved minutes, damage the earlier minute,

@@ -228,6 +228,13 @@ struct Reader {
     pending: Option<Pending>,
     /// The end of the context whose listing of the saved minutes a step left until it was over.
     deferred_listing_last_second: Option<u64>,
+    /// Since when nothing reads what the session cached for a page the saved minutes answered:
+    /// since the Store answered a page's own read or the reader rested, whichever came first.
+    /// The session lets go of it `PAGE_CACHES_KEEP_INTERVAL` later, which clears this. None
+    /// while the saved minutes answer the page. A later answer of the Store or a later rest
+    /// notes a new instant, so a page the Store goes on answering lets go once an interval, and
+    /// finds nothing to let go of after the first.
+    page_caches_unread_since: Option<Instant>,
     retry_after: Instant,
 }
 
@@ -255,6 +262,14 @@ enum Histories {
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const RETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// How long the session keeps what it cached for a page the saved minutes answered once
+/// nothing reads it, because the Store took that page over or its reader rested: the seconds a
+/// selection's charts hold in full detail. A page that follows the live Mac shares no second
+/// with a context that ended this long ago, so letting go then slows only a return to that
+/// earlier stretch of the recording, which reads it again as its first read did. Replaying a
+/// context's App histories from saved minutes can take seconds, so a return within the interval
+/// reads what the session kept.
+const PAGE_CACHES_KEEP_INTERVAL: Duration = Duration::from_secs(viewer::CHARTED_SECONDS);
 const WORKER_STEPS_MAX: u64 = 7 * 24 * 60 * 60 * 4;
 // Bounds the renewed runs of steps, including those a new window starts.
 const WORKER_LEASES_MAX: u64 = 1 << 20;
@@ -612,6 +627,7 @@ fn worker_run(
         last_route: String::new(),
         pending: None,
         deferred_listing_last_second: None,
+        page_caches_unread_since: None,
         retry_after: Instant::now(),
     };
     for _lease in 0..WORKER_LEASES_MAX {
@@ -649,7 +665,7 @@ fn worker_lease(
             Received::Taken => return Lease::Renewed,
             Received::Broken => return Lease::Ended,
         }
-        let pause = worker_step(root, shared, reader, command);
+        let pause = worker_step(root, shared, reader, command, Instant::now());
         let answer = reader
             .store
             .as_ref()
@@ -675,6 +691,10 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
         Ok(mut mailbox) => {
             if mailbox.rest {
                 mailbox.rest = false;
+                // A resting reader reads nothing until a window asks for a page again. A window
+                // shown again on a held second draws the snapshot it kept, so a hold is no
+                // reason to keep what the session cached for longer.
+                reader_page_caches_unread(reader, Instant::now());
                 *command = None;
                 reader_rest(reader);
             }
@@ -701,15 +721,19 @@ fn worker_receive(shared: &Shared, reader: &mut Reader, command: &mut Option<Com
 }
 
 /// Reads the page the worker reads, if any, and returns how long the worker waits before its
-/// next step. A listing of the saved minutes the step left comes after what it published.
+/// next step. A listing of the saved minutes the step left comes after what it published, and so
+/// does letting go of what the session cached for a page nothing has read for long enough at
+/// `now`, the instant of the step.
 fn worker_step(
     root: &std::path::Path,
     shared: &Shared,
     reader: &mut Reader,
     command: &mut Option<Command>,
+    now: Instant,
 ) -> Duration {
     let pause = worker_step_read(root, shared, reader, command);
     worker_step_list(reader);
+    worker_step_forget(reader, now);
 
     pause
 }
@@ -759,6 +783,31 @@ fn worker_step_list(reader: &mut Reader) {
         Err(error) => eprintln!("flightdeck saved minutes unlisted: {error}"),
     }
     drop(scope);
+}
+
+/// Lets go of what the session cached for a page the saved minutes answered, once nothing has
+/// read it for `PAGE_CACHES_KEEP_INTERVAL` at `now`. Left to stay, it would last as long as the
+/// app runs. It comes after what the step published, so freeing it holds up no reading.
+fn worker_step_forget(reader: &mut Reader, now: Instant) {
+    let Some(since) = reader.page_caches_unread_since else {
+        return;
+    };
+    if now.saturating_duration_since(since) < PAGE_CACHES_KEEP_INTERVAL {
+        return;
+    }
+
+    reader.page_caches_unread_since = None;
+    if let Some(session) = &mut reader.session {
+        session.forget_page_caches();
+    }
+}
+
+/// Notes that nothing reads what the session cached for a page from `now` on, unless that was
+/// noted already.
+fn reader_page_caches_unread(reader: &mut Reader, now: Instant) {
+    if reader.page_caches_unread_since.is_none() {
+        reader.page_caches_unread_since = Some(now);
+    }
 }
 
 /// How long the worker waits before its next step. A page whose readings were just published
@@ -917,6 +966,8 @@ fn reader_snapshot(
     command: &mut Command,
     shared: &Shared,
 ) -> Result<Option<Box<Snapshot>>, String> {
+    // The saved minutes answer this page with what the session cached for it, so that stays.
+    reader.page_caches_unread_since = None;
     let started = Instant::now();
     let published = reader_published(reader, command.generation);
     if reader_snapshot_finished(reader, command, published) {

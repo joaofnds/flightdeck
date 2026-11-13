@@ -219,6 +219,23 @@ fn resident_history_reuses_saved_facts_after_refreshing_endpoint_metadata() {
 }
 
 #[test]
+fn resident_history_queries_the_ticks_again_once_the_session_forgot_its_page_caches() {
+    // Goal: a session that forgets its page caches lets go of the ticks it kept of each saved
+    // window, so the next resident history queries them again and gives the same response.
+    // Method: warm real saved resident facts, forget the page caches, take the history again
+    // and count the tick queries it ran.
+    let (_fixture, mut session) = saved_context();
+    let first = session.app_resident_history().unwrap();
+    let queries = session.history.as_ref().unwrap().tick_queries.get();
+
+    session.forget_page_caches();
+    let repeated = session.app_resident_history().unwrap();
+
+    assert_eq!(repeated, first);
+    assert!(session.history.as_ref().unwrap().tick_queries.get() > queries);
+}
+
+#[test]
 fn resident_history_rejects_replaced_saved_files_on_a_cache_hit() {
     // Goal: unchanged commitment metadata cannot authorize resident facts from a replaced file.
     // Method: warm real saved facts, replace events with identical bytes/new inode, then repeat.
