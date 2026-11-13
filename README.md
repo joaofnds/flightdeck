@@ -199,7 +199,8 @@ collector's older code does not follow it yet.
 GitHub Actions runs the check on every push to `main` and every pull request, under the
 toolchain `.github/workflows/check.yml` names. Its check job runs
 `just check-root` and its desktop job `just check-desktop`, the two recipes `just check`
-runs, so a step added to either runs in CI and on your machine alike. The persistence
+runs, so a step added to either runs in CI and on your machine alike. `just check` runs the
+formatting and lint recipes of both workspaces before any test. The persistence
 package's tests, the slowest of the root workspace, run in persistence and store-recovery jobs
 of their own through `test_packages` and `test_arguments`, so `check-root` in CI tests every
 other package. `check-root` formats,

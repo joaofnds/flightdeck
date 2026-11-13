@@ -75,8 +75,10 @@ release level="patch":
     git tag "$next" && \
     echo "Tagged $next."
 
+# check-desktop comes after the root workspace's tests, so desktop-lint is named ahead of it, and
+# a formatting or lint failure of the desktop workspace ends the check before any test runs.
 # Run the CI check on this Mac, with no test skipped for lack of hardware.
-check: check-root check-desktop
+check: desktop-lint check-root check-desktop
 
 # Check the root workspace as CI's check, persistence and store-recovery jobs do between them.
 check-root: fmt clippy test
@@ -84,7 +86,12 @@ check-root: fmt clippy test
 # The bundle-check comes last, after every other cargo run, so the bundle CI hands to a
 # release is the one whose executables it compared with the build's.
 # Check the desktop workspace and the bundle as CI's desktop job does.
-check-desktop: desktop-fmt desktop-clippy desktop-test seal-bench bundle-check
+check-desktop: desktop-lint desktop-test seal-bench bundle-check
+
+# check and check-desktop both name it, so the desktop workspace's formatting and lint recipes
+# are listed once.
+# Check the formatting of the desktop workspace and lint it.
+desktop-lint: desktop-fmt desktop-clippy
 
 # Check the formatting of the root workspace.
 fmt:
