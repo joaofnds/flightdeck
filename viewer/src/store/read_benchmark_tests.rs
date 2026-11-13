@@ -1,0 +1,1228 @@
+//! Opt-in measurement of what the live store costs on a recording: each read of its span,
+//! taking a second, loading the hour and the bytes its rows take. A change to how the store
+//! holds its seconds runs it before and after, and every digest must come out the same. It
+//! builds only with the `read-benchmark` feature, and `just read-benchmark <a recording>` runs
+//! each test in a process of its own, since two of them read the process's footprint.
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hint::black_box;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+use persistence::engine::{THREAD_DEFAULTS, ThreadCounts};
+use persistence::resources::Footprint;
+use serde_json::Value;
+
+use super::query::{CheckedCoverage, Queries};
+use super::recording::{self, Continuity};
+use super::{
+    AppDetails, AppRow, AppsSecond, AppsStretch, ByteBudget, COHORT_MAX, Cohorts,
+    CompleteMachineState, ContextRanks, Held, Leaders, MachineSecond, Mailbox, Payload, ProcessRow,
+    QueryContext, QueryOutcome, QueryRequest, QuerySelection, Readings, Response, RunIdentity,
+    SECONDS_HELD_MAX, SECONDS_MAX, SampledSecond, SourceGeneration, TickApps, View, WallSeconds,
+    coverage,
+};
+use crate::app_process_groups_history::{
+    AppProcessGroupsHistory, ProcessGroup, ProcessGroupsPoint,
+};
+use crate::cancellation::Cancellation;
+use crate::live_app_response::{
+    AppIdentity, METRICS, Page, Rank, Rankable, RankedApp, Ranking, Ranks,
+};
+use crate::session::ContextRange;
+use crate::{AppAttributionMetric, WindowRanks};
+
+/// The times each read runs, of which the report gives the median and the highest.
+const RUNS: usize = 100;
+/// The engine threads the app runs with, which the loads are timed on.
+const APP_THREAD_COUNTS: ThreadCounts = ThreadCounts {
+    maximum: 6,
+    ..THREAD_DEFAULTS
+};
+/// How far back the earlier second that is ranked lies, in a span twice as long or longer.
+const SECONDS_BACK: usize = 600;
+/// How far back the second a fixed context selects lies, near enough that the span still
+/// holds every second the context charts.
+const FIXED_SECONDS_BACK: u64 = 60;
+/// The rows a page asks for.
+const PAGE_ROWS: u32 = 100;
+/// The seconds a continued load takes, those of the minutes one load may group, where the
+/// recording holds three times as many.
+const CONTINUED_SECONDS: u64 = 360;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+
+#[test]
+fn reads_of_the_live_span_cost() {
+    // Goal: say what each read of a View costs on a real recording's newest hour.
+    // Method: load the hour's sealed minutes as the store does, publish a View and time each
+    // read the charts and the rankings make of it.
+    let mut loaded = load_hour(&prepared_root(), take_every_second);
+    let view = publish(&mut loaded.held);
+    let cohort = leading_apps(&view);
+    println!(
+        "span of {} seconds and {} stretches, {} Apps at the newest, a cohort of {}",
+        view.apps.len(),
+        view.stretches.len(),
+        view.apps.last().unwrap().apps.len(),
+        cohort.len(),
+    );
+
+    time_ranks(&view);
+    time_leaders(&view);
+    time_charts(&view, &cohort);
+}
+
+#[test]
+fn reads_of_a_context_that_follows_the_newest_second_cost() {
+    // Goal: say what building a query context that follows the newest second costs, and each
+    // read the pages make of it.
+    // Method: load the hour as the store does, serve the query as the store's thread does and
+    // time each read of the context it answers with.
+    let mut loaded = load_hour(&prepared_root(), take_every_second);
+
+    time_context("followed", &mut loaded, QuerySelection::FollowLatest);
+}
+
+#[test]
+fn reads_of_a_context_fixed_on_an_earlier_second_cost() {
+    // Goal: say what building a query context fixed on an earlier second costs, and each read
+    // the pages make of it.
+    // Method: load the hour as the store does, serve a query of a second a minute back as the
+    // store's thread does and time each read of the context it answers with.
+    let mut loaded = load_hour(&prepared_root(), take_every_second);
+    let fixed = QuerySelection::Second {
+        second: newest_wall_second(&loaded.held) - FIXED_SECONDS_BACK,
+        alternative: 0,
+    };
+
+    time_context("fixed", &mut loaded, fixed);
+}
+
+#[test]
+fn taking_a_second_costs() {
+    // Goal: say what taking one second into the span and publishing a View of it costs, with
+    // every earlier View let go and with one View held through every take reported, as a hold
+    // keeps one.
+    // Method: load the hour as the store does, publish after every take and time the two
+    // together, over the takes that fill the span the store ends with.
+    let root = prepared_root();
+
+    let takes = timed_takes(&root, None);
+    let reported_from = takes_reported_from(takes.elapsed_ns.len());
+    assert!(
+        takes.elapsed_ns.len() - reported_from > SECONDS_HELD_MAX,
+        "the recording holds too few seconds for a View to stay held past the store's spare \
+         buffers"
+    );
+    report_takes("take a second and publish", &takes, reported_from);
+    drop(takes);
+    let takes_held = timed_takes(&root, Some(reported_from));
+    report_takes(
+        "take a second and publish, an earlier View held",
+        &takes_held,
+        reported_from,
+    );
+}
+
+#[test]
+fn loading_the_hour_costs() {
+    // Goal: say what loading the newest hour costs in time and in memory.
+    // Method: load the hour's sealed minutes as the store does, once in this process, and read
+    // the process's footprint and the store's budget when the load ends.
+    let root = prepared_root();
+
+    let started = Instant::now();
+    let mut loaded = load_hour(&root, take_every_second);
+    let elapsed = started.elapsed();
+    let memory = Memory::read(&loaded.budget);
+
+    println!("load of the hour: {} ns", elapsed.as_nanos());
+    report_memory("once the hour is loaded", &memory);
+    report_span("the loaded span", &publish(&mut loaded.held));
+}
+
+#[test]
+fn continuing_a_load_costs() {
+    // Goal: say what a load that continues from the store's newest second costs in time and in
+    // memory, when the recording holds six minutes the store has not taken, or a third of a
+    // recording shorter than eighteen.
+    // Method: load the hour but for those newest minutes, then load from the newest second
+    // held as the store's refresh does, and read the footprint before and after.
+    let root = prepared_root();
+    let cutoff_ns = continued_cutoff_ns(&root);
+    let mut loaded = load_hour(&root, |held, run, second, apps| {
+        take_through(cutoff_ns, held, run, second, apps);
+    });
+    let before = Memory::read(&loaded.budget);
+
+    let started = Instant::now();
+    let taken = continue_load(&root, &mut loaded);
+    let elapsed = started.elapsed();
+    let after = Memory::read(&loaded.budget);
+
+    println!(
+        "continued load: {} ns, {taken} seconds handed over",
+        elapsed.as_nanos(),
+    );
+    report_memory("before the continued load", &before);
+    report_memory("after the continued load", &after);
+    report_span("the loaded span", &publish(&mut loaded.held));
+}
+
+#[test]
+fn rows_of_the_live_span_repeat() {
+    // Goal: say how many bytes the span's rows take, how many of its process rows and App
+    // details the store shares between seconds, and how many process rows differ from the row
+    // of the second before only by the App index.
+    // Method: load the hour as the store does and compare each process's row with its row of
+    // the second before, by address and then field by field.
+    let mut loaded = load_hour(&prepared_root(), take_every_second);
+    let view = publish(&mut loaded.held);
+
+    let app_bytes = report_apps(&view);
+    let details_bytes = report_details(&view);
+    let process_bytes = report_processes(&view);
+    println!(
+        "rows of the span as held: {} bytes",
+        app_bytes + details_bytes + process_bytes,
+    );
+}
+
+/// What a load left behind: the seconds held and the budget their rows are charged to.
+struct Loaded {
+    held: Held,
+    budget: Arc<ByteBudget>,
+}
+
+/// The recording to read, with the engine that reads it ready as the app readies it.
+fn prepared_root() -> PathBuf {
+    let optimized = !cfg!(debug_assertions);
+    assert!(
+        optimized,
+        "the benchmark times the build people use: cargo test --release"
+    );
+    persistence::engine::initialize_process_with(APP_THREAD_COUNTS).unwrap();
+    let root = std::env::var_os("FLIGHTDECK_REFERENCE_RECORDING")
+        .expect("FLIGHTDECK_REFERENCE_RECORDING names the recording to read");
+
+    PathBuf::from(root)
+}
+
+/// Loads the newest hour of `root` as the store does, handing each second to `take`.
+fn load_hour(
+    root: &Path,
+    mut take: impl FnMut(&mut Held, &RunIdentity, &MachineSecond, TickApps<'_>),
+) -> Loaded {
+    let budget = Arc::new(ByteBudget::new(super::BYTES_MAX));
+    let mut held = Held::new(root.to_path_buf(), Arc::clone(&budget));
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut handed_over = 0_usize;
+    let outcome =
+        recording::load_payload_hour(root, &budget, &operation, None, |run, second, apps| {
+            handed_over += 1;
+            take(&mut held, run, second, apps);
+        })
+        .unwrap();
+    assert!(
+        handed_over > 0,
+        "the load handed over no second, as when the recording's retention period has run out"
+    );
+    held.left_out = outcome.left_out;
+    assert!(held.left_out.is_none());
+    coverage::accept_catalog(
+        &mut held,
+        outcome.checked_catalog.or(outcome.continued_catalog),
+    )
+    .unwrap();
+    held.ring_complete = true;
+
+    Loaded { held, budget }
+}
+
+fn take_every_second(
+    held: &mut Held,
+    run: &RunIdentity,
+    second: &MachineSecond,
+    apps: TickApps<'_>,
+) {
+    assert!(held.take(run, second, apps));
+}
+
+/// Takes `second` where it is no later than `cutoff_ns`, which leaves the seconds past it for
+/// a continued load.
+fn take_through(
+    cutoff_ns: u64,
+    held: &mut Held,
+    run: &RunIdentity,
+    second: &MachineSecond,
+    apps: TickApps<'_>,
+) {
+    if second.wall_ns <= cutoff_ns {
+        assert!(held.take(run, second, apps));
+    }
+}
+
+/// The wall time of the last second a load takes before the continued one, which leaves that
+/// load `CONTINUED_SECONDS` of the hour of `root`, or a third of an hour shorter than three
+/// times that.
+fn continued_cutoff_ns(root: &Path) -> u64 {
+    let (mut oldest_ns, mut newest_ns) = (u64::MAX, 0);
+    drop(load_hour(root, |_, _, second, _| {
+        oldest_ns = oldest_ns.min(second.wall_ns);
+        newest_ns = newest_ns.max(second.wall_ns);
+    }));
+    // The seconds and the third of them floor, which a continued load of a second less does
+    // not show.
+    let recorded_seconds = (newest_ns - oldest_ns) / NANOSECONDS_PER_SECOND;
+    let continued_seconds = CONTINUED_SECONDS.min(recorded_seconds / 3);
+
+    newest_ns - continued_seconds * NANOSECONDS_PER_SECOND
+}
+
+/// Loads what `root` holds past the newest second of `loaded`, as the store's refresh does,
+/// and says how many seconds the load handed over.
+fn continue_load(root: &Path, loaded: &mut Loaded) -> usize {
+    let since = loaded.held.newest;
+    let held = &mut loaded.held;
+    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
+    let mut taken = 0_usize;
+    let outcome = recording::load_payload_since(
+        root,
+        &loaded.budget,
+        &operation,
+        since.as_ref(),
+        |continuity, run, second, apps| {
+            assert!(
+                continuity == Continuity::Extend,
+                "the load replaced the seconds held, which times no continued load"
+            );
+            assert!(held.take(run, second, apps));
+            taken += 1;
+        },
+    )
+    .unwrap();
+    coverage::accept_catalog(held, outcome.checked_catalog.or(outcome.continued_catalog)).unwrap();
+
+    taken
+}
+
+fn publish(held: &mut Held) -> Arc<View> {
+    let mailbox = Mailbox::new();
+    held.publish(&mailbox);
+
+    mailbox.take().unwrap()
+}
+
+/// The second of the wall clock the newest second held lies in.
+fn newest_wall_second(held: &Held) -> u64 {
+    let newest_ns = held.span.held().map(|second| second.wall_ns).max().unwrap();
+
+    // The second floors.
+    newest_ns / NANOSECONDS_PER_SECOND
+}
+
+/// The Apps that lead the newest second's CPU ranking, which a chart by App draws.
+fn leading_apps(view: &View) -> Vec<Arc<RankedApp>> {
+    let ranks = view.apps.last().unwrap().ranks().unwrap();
+    let apps: Vec<_> = ranks.metrics[0]
+        .entries
+        .iter()
+        .take(COHORT_MAX)
+        .map(|rank| Arc::clone(&rank.app))
+        .collect();
+    assert!(!apps.is_empty(), "the newest second ranks no App by CPU");
+
+    apps
+}
+
+fn time_ranks(view: &View) {
+    let newest = view.apps.last().unwrap();
+    // The half floors, so a short span ranks its middle second and never its first.
+    let back = SECONDS_BACK.min((view.apps.len() - 1) / 2);
+    let earlier = &view.apps[view.apps.len() - 1 - back];
+
+    time("rank the newest second", || newest.ranks(), ranks_digest);
+    time(
+        &format!("rank the second {back} seconds back"),
+        || earlier.ranks(),
+        ranks_digest,
+    );
+    time(
+        "rank every second of the span",
+        || {
+            view.apps
+                .iter()
+                .map(|second| second.ranks())
+                .collect::<Vec<_>>()
+        },
+        |seconds| {
+            let mut hasher = DefaultHasher::new();
+            for ranks in seconds {
+                hash_ranked(ranks, &mut hasher);
+            }
+
+            hasher.finish()
+        },
+    );
+}
+
+fn time_leaders(view: &View) {
+    let window = WallSeconds {
+        first: view.seconds.first().unwrap().wall_ns / NANOSECONDS_PER_SECOND,
+        last: view.seconds.last().unwrap().wall_ns / NANOSECONDS_PER_SECOND,
+    };
+    let mut leaders = Leaders::new();
+
+    time_leaders_over("with", view, &view.stretches, &mut leaders, window);
+    time_leaders_over("without", view, &[], &mut leaders, window);
+}
+
+fn time_leaders_over(
+    label: &str,
+    view: &View,
+    stretches: &[Arc<AppsStretch>],
+    leaders: &mut Leaders,
+    window: WallSeconds,
+) {
+    time(
+        &format!("choose the leaders of the span {label} its stretches"),
+        || {
+            let mut cohorts = Cohorts::with_room();
+            let readings = Readings {
+                seconds: &view.seconds,
+                apps: &view.apps,
+                stretches,
+            };
+            leaders.choose(&readings, window, &mut cohorts);
+            cohorts
+        },
+        cohorts_digest,
+    );
+}
+
+fn time_charts(view: &View, cohort: &[Arc<RankedApp>]) {
+    time(
+        "attribution of the cohort at every second of the span",
+        || {
+            view.apps
+                .iter()
+                .map(|second| second.attribution(AppAttributionMetric::Cpu, cohort))
+                .collect::<Vec<_>>()
+        },
+        digest,
+    );
+    time(
+        "resident memory of the cohort at every second of the span",
+        || {
+            view.apps
+                .iter()
+                .map(|second| second.resident(cohort))
+                .collect::<Vec<_>>()
+        },
+        digest,
+    );
+}
+
+/// Times building the context a query of `selection` is answered with, and each read of it.
+fn time_context(label: &str, loaded: &mut Loaded, selection: QuerySelection) {
+    let app = Arc::clone(&leading_apps(&publish(&mut loaded.held))[0]);
+    let queries = Queries::new();
+
+    time(
+        &format!("build a {label} context"),
+        || context(loaded, &queries, selection),
+        context_digest,
+    );
+    let context = context(loaded, &queries, selection);
+    time_context_histories(label, &context, &app);
+    time_context_pages(label, &context, &app);
+}
+
+/// The coverage the store proves of what `held` holds, built as the store builds it but for
+/// the check of its ring, since the benchmark opens no ring.
+fn checked_coverage(held: &Held) -> CheckedCoverage {
+    let catalog = held.checked_catalog.as_ref().unwrap();
+    let source = SourceGeneration {
+        recording: catalog.recording,
+        generation: held.source_generation,
+    };
+    let range = ContextRange {
+        first_ns: catalog.first_ns.unwrap_or(0),
+        end_ns: (newest_wall_second(held) + 1) * NANOSECONDS_PER_SECOND,
+    };
+
+    CheckedCoverage::new(source, range)
+}
+
+/// The context the store answers a query of `selection` with, served as its thread serves one.
+fn context(loaded: &Loaded, queries: &Queries, selection: QuerySelection) -> Arc<QueryContext> {
+    let handle = queries.handle(std::thread::current());
+    handle
+        .submit(QueryRequest {
+            epoch: 0,
+            source: None,
+            selection,
+        })
+        .unwrap();
+    queries.serve(
+        &loaded.held,
+        Some(&checked_coverage(&loaded.held)),
+        &loaded.budget,
+    );
+
+    match handle.take().unwrap().outcome {
+        QueryOutcome::Ready(context) => context,
+        outcome => panic!("expected a context, found {outcome:?}"),
+    }
+}
+
+fn context_digest(context: &Arc<QueryContext>) -> u64 {
+    let seconds = context.seconds();
+
+    digest(&(
+        context.selected().observation,
+        context.context_last_second(),
+        seconds.len(),
+        seconds.first().map(|second| second.observation),
+        seconds.last().map(|second| second.observation),
+    ))
+}
+
+fn time_context_histories(label: &str, context: &Arc<QueryContext>, app: &RankedApp) {
+    let cancellation = Arc::new(Cancellation::default());
+    let groups = context
+        .app_process_groups_history(app.kind, &app.bytes, &cancellation, 0)
+        .unwrap();
+    let executable = groups
+        .groups
+        .iter()
+        .find_map(|group| match group {
+            ProcessGroup::Named(name) => Some(name.clone()),
+            ProcessGroup::Other => None,
+        })
+        .unwrap();
+
+    time(
+        &format!("{label}: ranks of every second"),
+        || context.app_ranks().unwrap(),
+        |ranks| window_digest(context, ranks),
+    );
+    time(
+        &format!("{label}: resident history"),
+        || context.app_resident_history(&cancellation, 0).unwrap(),
+        history_digest,
+    );
+    time(
+        &format!("{label}: attribution history"),
+        || {
+            context
+                .app_attribution_history(AppAttributionMetric::Cpu, &cancellation, 0)
+                .unwrap()
+        },
+        history_digest,
+    );
+    time(
+        &format!("{label}: trace of one App"),
+        || {
+            context
+                .app_history(app.kind, &app.bytes, &cancellation, 0)
+                .unwrap()
+        },
+        history_digest,
+    );
+    time(
+        &format!("{label}: trace of one executable name"),
+        || {
+            context
+                .app_process_history(app.kind, &app.bytes, &executable, &cancellation, 0)
+                .unwrap()
+        },
+        history_digest,
+    );
+    time(
+        &format!("{label}: process groups of one App"),
+        || {
+            context
+                .app_process_groups_history(app.kind, &app.bytes, &cancellation, 0)
+                .unwrap()
+        },
+        |groups| groups_digest(groups),
+    );
+}
+
+fn time_context_pages(label: &str, context: &Arc<QueryContext>, app: &RankedApp) {
+    let cancellation = Arc::new(Cancellation::default());
+    let selected = context.selected().observation;
+    let page = Page {
+        offset: 0,
+        limit: PAGE_ROWS,
+    };
+    let detail = context
+        .app_detail_for(&selected, app.kind, &app.bytes, page, &cancellation, 0)
+        .unwrap();
+    assert!(!detail.is_null(), "the second selected holds no such App");
+
+    time(
+        &format!("{label}: the page of Apps"),
+        || {
+            context
+                .apps_page_for(&selected, page, &cancellation, 0)
+                .unwrap()
+        },
+        response_digest,
+    );
+    time(
+        &format!("{label}: the page of one App's processes"),
+        || {
+            context
+                .app_detail_for(&selected, app.kind, &app.bytes, page, &cancellation, 0)
+                .unwrap()
+        },
+        response_digest,
+    );
+    time(
+        &format!("{label}: the page of processes outside any App"),
+        || {
+            context
+                .ungrouped_page_for(&selected, page, &cancellation, 0)
+                .unwrap()
+        },
+        response_digest,
+    );
+}
+
+/// What publishing after every take of a load cost.
+struct Takes {
+    /// What each take and its publish took, in the order the load handed the seconds over.
+    elapsed_ns: Vec<u128>,
+    /// The span the load ended with.
+    view: Arc<View>,
+}
+
+/// Loads the hour of `root` publishing a View after every take, and keeps hold of the View
+/// published after take `view_held_after`, counted from one, until the load ends, where it
+/// names one.
+fn timed_takes(root: &Path, view_held_after: Option<usize>) -> Takes {
+    let mailbox = Mailbox::new();
+    let mut elapsed_ns = Vec::new();
+    let mut view_held = None;
+    let mut loaded = load_hour(root, |held, run, second, apps| {
+        let started = Instant::now();
+        assert!(held.take(run, second, apps));
+        held.publish(&mailbox);
+        elapsed_ns.push(started.elapsed().as_nanos());
+        let view = mailbox.take().unwrap();
+        if Some(elapsed_ns.len()) == view_held_after {
+            view_held = Some(view);
+        }
+    });
+    let view = publish(&mut loaded.held);
+    drop(view_held);
+
+    Takes { elapsed_ns, view }
+}
+
+/// How many of a load's first takes a report leaves out, so that it covers the takes that fill
+/// the span the store ends with. It leaves out the first at least, after which a View can be
+/// held through every take reported.
+fn takes_reported_from(take_count: usize) -> usize {
+    take_count.saturating_sub(SECONDS_MAX).max(1)
+}
+
+fn report_takes(label: &str, takes: &Takes, reported_from: usize) {
+    let reported = &takes.elapsed_ns[reported_from..];
+    let mut sorted = reported.to_vec();
+    sorted.sort_unstable();
+    // The mean floors, which loses under a nanosecond, and the median of an even count is the
+    // higher of its two middle takes.
+    let mean = reported.iter().sum::<u128>() / u128::try_from(reported.len()).unwrap();
+
+    println!(
+        "{label}: mean {mean} ns, median {} ns, slowest {} ns over the newest {} of {} takes",
+        sorted[sorted.len() / 2],
+        sorted[sorted.len() - 1],
+        reported.len(),
+        takes.elapsed_ns.len(),
+    );
+    report_span("the span those takes left", &takes.view);
+}
+
+/// The memory of this process and of the store's budget at one moment.
+struct Memory {
+    footprint: Footprint,
+    budget_bytes: usize,
+    budget_bytes_peak: usize,
+}
+
+impl Memory {
+    fn read(budget: &ByteBudget) -> Self {
+        Self {
+            footprint: Footprint::read().unwrap(),
+            budget_bytes: budget.used(),
+            budget_bytes_peak: budget.used_peak(),
+        }
+    }
+}
+
+fn report_memory(label: &str, memory: &Memory) {
+    println!(
+        "{label}: footprint {} bytes, footprint peak {} bytes, budget {} bytes, budget peak {} \
+         bytes",
+        memory.footprint.current_bytes,
+        memory.footprint.lifetime_bytes_max,
+        memory.budget_bytes,
+        memory.budget_bytes_peak,
+    );
+}
+
+/// Says which seconds the span of `view` holds and a digest of each part of their readings, so
+/// that two spans that differ say where.
+fn report_span(label: &str, view: &View) {
+    println!(
+        "{label}: {} seconds from wall second {} to {}, digests: machine seconds {:016x}, Apps \
+         {:016x}, earlier seconds {:016x}, sampled seconds {:016x}",
+        view.seconds.len(),
+        view.seconds.first().unwrap().wall_ns / NANOSECONDS_PER_SECOND,
+        view.seconds.last().unwrap().wall_ns / NANOSECONDS_PER_SECOND,
+        machine_digest(&view.seconds),
+        apps_digest(view),
+        machine_digest(&view.earlier),
+        sampled_digest(view),
+    );
+}
+
+/// Says how many App rows the span holds and how often the Apps held change from one second
+/// to the next, and gives the bytes the rows take.
+fn report_apps(view: &View) -> usize {
+    let mut apps_before: Vec<&AppIdentity> = Vec::new();
+    let (mut rows, mut bytes) = (0_usize, 0_usize);
+    let (mut sets_changed, mut apps_changed) = (0_usize, 0_usize);
+    for second in &view.apps {
+        let rows_held = second.apps.as_slice();
+        let apps: Vec<&AppIdentity> = rows_held
+            .iter()
+            .map(|row| app_identity(&row.name))
+            .collect();
+        rows += rows_held.len();
+        bytes += size_of_val(rows_held);
+        if !apps_before.is_empty() && apps != apps_before {
+            sets_changed += 1;
+            apps_changed += apps.iter().filter(|app| !apps_before.contains(app)).count();
+            apps_changed += apps_before.iter().filter(|app| !apps.contains(app)).count();
+        }
+        apps_before = apps;
+    }
+
+    println!("App rows: {rows} in {bytes} bytes, the Apps held changed at {sets_changed} seconds");
+    println!("Apps that came or went at those seconds: {apps_changed}");
+    bytes
+}
+
+/// Says how many App details the span's seconds name and how many the store holds once, and
+/// gives the bytes they take as held.
+fn report_details(view: &View) -> usize {
+    let mut distinct: HashSet<*const AppDetails> = HashSet::new();
+    let mut references = 0_usize;
+    let payloads = view
+        .apps
+        .iter()
+        .filter_map(|second| second.processes.as_ref().ok());
+    for payload in payloads {
+        for details in payload.apps() {
+            references += 1;
+            distinct.insert(std::ptr::from_ref(details));
+        }
+    }
+    let bytes = references * Payload::APP_DETAILS_REFERENCE_BYTES
+        + distinct.len() * Payload::APP_DETAILS_BYTES;
+
+    println!(
+        "App details as held: {bytes} bytes, {references} named, {} held once",
+        distinct.len(),
+    );
+    bytes
+}
+
+/// Says how the span's process rows repeat from one second to the next, and gives the bytes
+/// they take as held.
+fn report_processes(view: &View) -> usize {
+    let census = ProcessCensus::of(view);
+    let bytes = census.rows * Payload::ROW_REFERENCE_BYTES + census.distinct * Payload::ROW_BYTES;
+
+    println!(
+        "process rows: {}, of them {} shared with the second before",
+        census.rows, census.shared,
+    );
+    println!(
+        "  {} of a process the second before does not hold",
+        census.arrived
+    );
+    println!(
+        "  {} that differ in a reading, {} of all in the App index",
+        census.readings_differ, census.index_differs,
+    );
+    println!("  {} that differ only in the App index", census.index_only);
+    println!(
+        "process rows as held: {bytes} bytes, {} rows held once",
+        census.distinct,
+    );
+    bytes
+}
+
+/// What comparing each process row of a span with the row of the same process a second before
+/// counts.
+#[derive(Default)]
+struct ProcessCensus {
+    rows: usize,
+    /// The rows the store holds once, however many seconds name them.
+    distinct: usize,
+    /// The rows that are the row of the second before, at the same address.
+    shared: usize,
+    /// The rows of a process the second before does not hold.
+    arrived: usize,
+    readings_differ: usize,
+    index_differs: usize,
+    index_only: usize,
+}
+
+impl ProcessCensus {
+    fn of(view: &View) -> Self {
+        let mut census = Self::default();
+        let mut before: HashMap<(i32, String), &ProcessRow> = HashMap::new();
+        let mut now: HashMap<(i32, String), &ProcessRow> = HashMap::new();
+        let mut distinct: HashSet<*const ProcessRow> = HashSet::new();
+        for second in &view.apps {
+            let Ok(payload) = &second.processes else {
+                before.clear();
+                continue;
+            };
+            now.clear();
+            for row in payload.iter() {
+                distinct.insert(std::ptr::from_ref(row));
+                let key = (row.pid, format!("{:?}", row.creation));
+                census.count(before.get(&key).copied(), row);
+                now.insert(key, row);
+            }
+            std::mem::swap(&mut before, &mut now);
+        }
+        census.distinct = distinct.len();
+
+        census
+    }
+
+    /// Counts `row` against `before`, the row of its process a second before, where that
+    /// second holds one.
+    fn count(&mut self, before: Option<&ProcessRow>, row: &ProcessRow) {
+        self.rows += 1;
+        match before {
+            Some(old) if std::ptr::eq(old, row) => self.shared += 1,
+            Some(old) => {
+                let same = same_readings(old, row);
+                self.index_only += usize::from(same && old.app_index != row.app_index);
+                self.readings_differ += usize::from(!same);
+                self.index_differs += usize::from(old.app_index != row.app_index);
+            }
+            None => self.arrived += 1,
+        }
+    }
+}
+
+/// Whether two rows of one process hold the same readings, whatever App index each carries.
+fn same_readings(old: &ProcessRow, row: &ProcessRow) -> bool {
+    old.executable_name() == row.executable_name()
+        && old.program_unavailable == row.program_unavailable
+        && old.cpu_ns() == row.cpu_ns()
+        && old.energy_nj() == row.energy_nj()
+        && old.gpu_ns() == row.gpu_ns()
+        && old.disk_read_bytes() == row.disk_read_bytes()
+        && old.disk_written_bytes() == row.disk_written_bytes()
+        && old.disk_io_bytes() == row.disk_io_bytes()
+        && old.resident_bytes() == row.resident_bytes()
+        && old.footprint_bytes() == row.footprint_bytes()
+        && old.idle_wakeups() == row.idle_wakeups()
+        && old.pageins() == row.pageins()
+        && old.threads() == row.threads()
+        && old.app_attribution == row.app_attribution
+        && old.state == row.state
+}
+
+/// A digest of the readings of the Mac at each of `seconds`.
+fn machine_digest(seconds: &[Arc<MachineSecond>]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for second in seconds {
+        hash_machine(second, &mut hasher);
+    }
+
+    hasher.finish()
+}
+
+/// Adds every reading of the Mac at `second` to `hasher`, and nothing of the budget its
+/// complete readings are charged to, which those readings print with their own.
+fn hash_machine(second: &MachineSecond, hasher: &mut DefaultHasher) {
+    let summary = MachineSecond {
+        complete: CompleteMachineState::Unread,
+        cpu_refused: None,
+        ..second.clone()
+    };
+    digest(&summary).hash(hasher);
+    let refusal = match &second.complete {
+        CompleteMachineState::Refused(reason) => Some(*reason),
+        CompleteMachineState::Unread | CompleteMachineState::Available(_) => None,
+    };
+    let complete = second.complete().map(|complete| complete.summary(second));
+    let readings = (
+        refusal,
+        complete,
+        second.cpu_counters(),
+        second.cpu_interval(),
+    );
+    digest(&readings).hash(hasher);
+}
+
+/// A digest of the Apps of every second of the span: each second's ranks and facts with each of
+/// its App rows and process rows.
+fn apps_digest(view: &View) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for second in &view.apps {
+        hash_ranked(&second.ranks(), &mut hasher);
+        hash_second(second, &mut hasher);
+    }
+
+    hasher.finish()
+}
+
+/// A digest of every sampled second a View holds.
+fn sampled_digest(view: &View) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for second in &view.sampled {
+        hash_sampled(second, &mut hasher);
+    }
+
+    hasher.finish()
+}
+
+fn hash_second(second: &AppsSecond, hasher: &mut DefaultHasher) {
+    let AppsSecond {
+        metadata,
+        processes,
+        missing,
+        observation,
+        consecutive,
+        elapsed_ns,
+        membership_complete,
+        ungrouped_members,
+        live_ungrouped_members,
+        usage_refused,
+        usage_gone,
+        apps,
+        totals,
+    } = second;
+    let facts = (
+        observation,
+        consecutive,
+        elapsed_ns,
+        membership_complete,
+        ungrouped_members,
+        live_ungrouped_members,
+        usage_refused,
+        usage_gone,
+        metadata.origin,
+        missing,
+        totals,
+    );
+    digest(&facts).hash(hasher);
+    let apps = apps.as_slice();
+    for row in apps {
+        let measures = METRICS.map(|metric| row.measure(metric));
+        let facts = (
+            app_identity(&row.name),
+            row.members,
+            row.membership_complete,
+        );
+        digest(&(facts, measures)).hash(hasher);
+    }
+    match processes {
+        Ok(payload) => {
+            digest(&(payload.selected, payload.previous)).hash(hasher);
+            for details in payload.apps() {
+                digest(details).hash(hasher);
+            }
+            for row in payload.iter() {
+                hash_process_row(row, apps, hasher);
+            }
+        }
+        Err(missing) => digest(missing).hash(hasher),
+    }
+}
+
+/// Adds every reading of a sampled second to `hasher`, naming each App by its identity alone.
+fn hash_sampled(second: &SampledSecond, hasher: &mut DefaultHasher) {
+    hash_machine(&second.machine, hasher);
+    digest(&second.observation).hash(hasher);
+    match second.ranks() {
+        Ok(ranks) => {
+            let facts = (
+                ranks.selected,
+                ranks.app_count,
+                ranks.membership_complete,
+                ranks.ungrouped_members,
+            );
+            digest(&facts).hash(hasher);
+            for ranking in &ranks.metrics {
+                let facts = (
+                    ranking.metric,
+                    ranking.unavailable,
+                    ranking.overflowed,
+                    ranking.partial,
+                );
+                digest(&facts).hash(hasher);
+                for rank in ranking.entries() {
+                    let facts = (
+                        app_identity(rank.app),
+                        rank.amount,
+                        rank.rate,
+                        rank.measured_members,
+                        rank.unavailable_members,
+                    );
+                    digest(&facts).hash(hasher);
+                }
+            }
+        }
+        Err(missing) => digest(missing).hash(hasher),
+    }
+}
+
+/// Adds every reading of `row` to `hasher`, with the App of `apps` the row belongs to named by
+/// its identity, so the digest stays the same wherever the store keeps that App's index.
+fn hash_process_row(row: &ProcessRow, apps: &[AppRow], hasher: &mut DefaultHasher) {
+    let app = row
+        .app_index
+        .map(|index| app_identity(&apps[usize::try_from(index).unwrap()].name));
+    let facts = (
+        row.pid,
+        row.creation,
+        app,
+        row.executable_name().map(|name| &name.bytes),
+        row.program_unavailable,
+        row.app_attribution,
+        row.state,
+    );
+    let amounts = [
+        row.cpu_ns(),
+        row.energy_nj(),
+        row.gpu_ns(),
+        row.disk_read_bytes(),
+        row.disk_written_bytes(),
+        row.disk_io_bytes(),
+        row.resident_bytes(),
+        row.footprint_bytes(),
+        row.idle_wakeups(),
+        row.pageins(),
+        row.threads(),
+    ];
+    digest(&(facts, amounts)).hash(hasher);
+}
+
+fn app_identity(app: &RankedApp) -> &AppIdentity {
+    app
+}
+
+/// A digest of the ranks `ranks` holds for each second of `context`.
+fn window_digest(context: &QueryContext, ranks: &ContextRanks<WindowRanks>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for second in context.seconds() {
+        match ranks.selected_ranks_for(&second.observation) {
+            Ok(ranks) => hash_ranks(&ranks, &mut hasher),
+            Err(error) => digest(&error).hash(&mut hasher),
+        }
+    }
+
+    hasher.finish()
+}
+
+fn ranks_digest<E: Debug>(ranks: &Result<Ranks, E>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    hash_ranked(ranks, &mut hasher);
+
+    hasher.finish()
+}
+
+fn hash_ranked<E: Debug>(ranks: &Result<Ranks, E>, hasher: &mut DefaultHasher) {
+    match ranks {
+        Ok(ranks) => hash_ranks(ranks, hasher),
+        Err(error) => digest(error).hash(hasher),
+    }
+}
+
+/// Adds every reading of `ranks` to `hasher`. It names each App by its identity alone, since a
+/// ranked App prints the budget its name is charged to, which changes as the store works.
+fn hash_ranks(ranks: &Ranks, hasher: &mut DefaultHasher) {
+    let Ranks {
+        selected,
+        app_count,
+        membership_complete,
+        ungrouped_members,
+        metrics,
+    } = ranks;
+    digest(&(selected, app_count, membership_complete, ungrouped_members)).hash(hasher);
+    for ranking in metrics {
+        let Ranking {
+            metric,
+            entries,
+            unavailable,
+            overflowed,
+            partial,
+        } = ranking;
+        digest(&(metric, unavailable, overflowed, partial)).hash(hasher);
+        for rank in entries {
+            let Rank {
+                app,
+                amount,
+                rate,
+                measured_members,
+                unavailable_members,
+            } = rank;
+            let facts = (
+                app_identity(app),
+                amount,
+                rate,
+                measured_members,
+                unavailable_members,
+            );
+            digest(&facts).hash(hasher);
+        }
+    }
+}
+
+fn cohorts_digest(cohorts: &Cohorts) -> u64 {
+    let Cohorts {
+        seconds,
+        cpu,
+        power,
+        disk,
+        gpu,
+        resident,
+        refused,
+    } = cohorts;
+    let mut hasher = DefaultHasher::new();
+    (seconds, refused).hash(&mut hasher);
+    for cohort in [cpu, power, disk, gpu, resident] {
+        cohort.len().hash(&mut hasher);
+        for app in cohort {
+            digest(app_identity(app)).hash(&mut hasher);
+        }
+    }
+
+    hasher.finish()
+}
+
+fn groups_digest(history: &AppProcessGroupsHistory) -> u64 {
+    let AppProcessGroupsHistory {
+        selected,
+        app_kind,
+        app_bytes,
+        context_seconds,
+        named_group_count,
+        context_observations_unavailable,
+        groups,
+        points,
+    } = history;
+    let facts = (
+        selected,
+        app_kind,
+        app_bytes,
+        context_seconds,
+        named_group_count,
+        context_observations_unavailable,
+    );
+    let mut hasher = DefaultHasher::new();
+    digest(&facts).hash(&mut hasher);
+    for group in groups {
+        match group {
+            ProcessGroup::Named(name) => name.hash(&mut hasher),
+            ProcessGroup::Other => 0_u8.hash(&mut hasher),
+        }
+    }
+    for point in points {
+        hash_groups_point(point, &mut hasher);
+    }
+
+    hasher.finish()
+}
+
+fn hash_groups_point(point: &ProcessGroupsPoint, hasher: &mut DefaultHasher) {
+    let ProcessGroupsPoint {
+        observation,
+        elapsed_ns,
+        source_available,
+        membership_complete,
+        unnamed_members,
+        readings,
+        live,
+    } = point;
+    let facts = (
+        observation,
+        elapsed_ns,
+        source_available,
+        membership_complete,
+        unnamed_members,
+        live,
+    );
+    digest(&facts).hash(hasher);
+    for reading in readings {
+        digest(&(reading.present, reading.members, reading.measures)).hash(hasher);
+    }
+}
+
+/// A digest of a history or a trace but for the bytes its context takes, which say how the
+/// store holds the context's seconds and nothing of what they read.
+fn history_digest(response: &Response<Value>) -> u64 {
+    let mut history = (**response).clone();
+    let context_bytes = history["coverage"]
+        .as_object_mut()
+        .and_then(|coverage| coverage.remove("context_metadata_bytes"));
+    assert!(
+        context_bytes.is_some(),
+        "the history says the bytes its context takes"
+    );
+
+    digest(&history)
+}
+
+fn response_digest<T: Debug>(response: &Response<T>) -> u64 {
+    digest(&**response)
+}
+
+/// A digest of how `value` prints, for values that print the readings they hold and nothing of
+/// how the store holds them, which leaves out a ranked App.
+fn digest(value: &impl Debug) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{value:?}").hash(&mut hasher);
+
+    hasher.finish()
+}
+
+/// Runs `read` `RUNS` times and says its median and highest time, and `digest` of what the last
+/// run read, which is taken outside the time.
+fn time<T>(label: &str, mut read: impl FnMut() -> T, digest: impl Fn(&T) -> u64) {
+    let mut elapsed_ns = Vec::with_capacity(RUNS);
+    let mut digest_last = 0;
+    for run in 0..RUNS {
+        let started = Instant::now();
+        let value = black_box(read());
+        elapsed_ns.push(started.elapsed().as_nanos());
+        if run == RUNS - 1 {
+            digest_last = digest(&value);
+        }
+    }
+    elapsed_ns.sort_unstable();
+
+    // The median of the even count is the higher of its two middle runs.
+    println!(
+        "{label}: median {} ns, highest {} ns, digest {digest_last:016x}",
+        elapsed_ns[RUNS / 2],
+        elapsed_ns[RUNS - 1],
+    );
+}

@@ -31,6 +31,10 @@ mod startup_tests;
 mod activity_tests;
 
 #[cfg(test)]
+#[cfg(feature = "read-benchmark")]
+mod read_benchmark_tests;
+
+#[cfg(test)]
 mod resume_tests;
 
 #[cfg(test)]
