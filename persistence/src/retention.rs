@@ -60,6 +60,10 @@ pub struct Period {
 
 impl Period {
     pub const DEFAULT: Self = Self { seconds: 86_400 };
+    /// The longest period a recording takes, ten years.
+    pub const LONGEST: Self = Self {
+        seconds: Self::SECONDS_MAX,
+    };
     const SECONDS_MIN: u64 = 60;
     const SECONDS_MAX: u64 = 10 * 366 * 86_400;
 

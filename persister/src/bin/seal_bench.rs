@@ -19,7 +19,9 @@
 
 use std::cell::RefCell;
 use std::ffi::c_int;
+use std::fs::DirBuilder;
 use std::ops::{Range, RangeInclusive};
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus};
@@ -33,6 +35,7 @@ use collector::machine::{CPUTicks, Memory};
 use collector::processes::{Process, Task, Usage};
 use collector::recording::Registration;
 use collector::recording::child::{PERSISTER_MEMORY_BYTES, ReapedChild};
+use collector::recording::private::PrivateDirectory;
 use collector::ring::{
     DictionaryCapacity, Dropped, IdentityObservation, IdentityPublication, ObservationTimes, Place,
     ProcessCreation, ProcessIdentity, ProgramBytes, ProgramReference, Readings, RunIdentity, Shape,
@@ -42,6 +45,7 @@ use collector::tracker::{Event, Noticed};
 use persistence::canonical::ReadWork;
 use persistence::canonical::catalog::Catalog;
 use persistence::resources::ByteBudget;
+use persistence::retention::Period;
 use persistence::schema::Table;
 use persistence::worker::{Derivation, Derive};
 use persistence::{Losses, Manifest};
@@ -49,7 +53,8 @@ use persistence::{Losses, Manifest};
 const USAGE: &str = concat!(
     "usage: seal_bench --windows N --processes N --derive apps|restarted|none\n",
     "       seal_bench --windows N --processes N --persister PATH [--memory-bytes N] ",
-    "[--restart-after-windows N]",
+    "[--restart-after-windows N]\n",
+    "       either run takes --recording DIRECTORY and keeps its recording there",
 );
 const TICKS_PER_WINDOW: u64 = 60;
 /// A run's first window is not a steady one, so it has a second.
@@ -116,6 +121,9 @@ struct Options {
     windows: u64,
     processes: u64,
     sealing: Sealing,
+    /// Where the run starts its recording and leaves it for another tool to read, a directory
+    /// that is not there yet. A run that names none removes its recording.
+    recording_kept: Option<PathBuf>,
 }
 
 /// What seals the run's windows.
@@ -152,6 +160,7 @@ fn options_from(words: &[String]) -> Result<Options, String> {
     let mut persister = None;
     let mut memory_bytes = None;
     let mut restart_after_windows = None;
+    let mut recording_kept = None;
     for pair in words.chunks(2) {
         let [flag, value] = pair else {
             return Err(USAGE.to_owned());
@@ -170,6 +179,7 @@ fn options_from(words: &[String]) -> Result<Options, String> {
                 }
             }
             "--persister" => persister = Some(PathBuf::from(value)),
+            "--recording" => recording_kept = Some(PathBuf::from(value)),
             "--memory-bytes" => {
                 let bounds = 1..=persistence::resources::WORKING_BYTES_MAX;
                 memory_bytes = Some(options_count(value, bounds)?);
@@ -209,6 +219,7 @@ fn options_from(words: &[String]) -> Result<Options, String> {
         windows,
         processes,
         sealing,
+        recording_kept,
     })
 }
 
@@ -225,8 +236,44 @@ fn options_count(value: &str, bounds: RangeInclusive<u64>) -> Result<u64, String
 
 fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
     persistence::engine::initialize_process()?;
-    let root = std::env::temp_dir().join(format!("seal_bench-{}", std::process::id()));
-    drop(persistence::Store::open(&root)?);
+    let root = run_root(options.recording_kept.as_deref())?;
+    let sealed = run_recording(&root, options);
+    // A run that failed leaves no recording either, so nothing reads half of one as the run's.
+    if options.recording_kept.is_none() || sealed.is_err() {
+        std::fs::remove_dir_all(&root)?;
+    }
+
+    match sealed? {
+        Sealed::Worker(deriving, marks) => report(options, deriving, &marks),
+        Sealed::Persister { killed, finished } => {
+            run_report_persister(options, killed.as_ref(), &finished);
+            Ok(())
+        }
+    }
+}
+
+/// Creates the directory the run's recording goes in, which must not be there yet, so a run
+/// never adds readings to a recording that holds some. A kept recording's path is made
+/// absolute, since the store looks its directory's parent up to sync it.
+fn run_root(recording_kept: Option<&Path>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let root = match recording_kept {
+        Some(root) => std::path::absolute(root)?,
+        None => std::env::temp_dir().join(format!("seal_bench-{}", std::process::id())),
+    };
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .map_err(|error| format!("{}: {error}", root.display()))?;
+
+    Ok(root)
+}
+
+/// Seals the run into a recording at `root`, a directory that holds nothing yet.
+fn run_recording(root: &Path, options: &Options) -> Result<Sealed, Box<dyn std::error::Error>> {
+    drop(persistence::Store::open(root)?);
+    if options.recording_kept.is_some() {
+        run_retention(root)?;
+    }
 
     let place = Place {
         lock_path: root.join("ring.lock"),
@@ -237,26 +284,17 @@ fn run(options: &Options) -> Result<(), Box<dyn std::error::Error>> {
         arena_bytes: 1024 * 1024,
     };
     let started =
-        Registration::start_with_identity(&root, &place, record_shape(options), capacity, 0);
+        Registration::start_with_identity(root, &place, record_shape(options), capacity, 0);
 
     // The ring outlives this process in shared memory unless it is unlinked, whatever failed.
-    let sealed = started.map_err(Into::into).and_then(|started| {
+    started.map_err(Into::into).and_then(|started| {
         let (mut writer, registered) = started.into_parts();
         let sealed = registered
             .map_err(Into::into)
-            .and_then(|()| run_sealing(&mut writer, &root, options));
+            .and_then(|()| run_sealing(&mut writer, root, options));
         let unlinked = collector::ring::unlink_generation(writer.name());
         sealed.and_then(|sealed| unlinked.map(|()| sealed).map_err(Into::into))
-    });
-    std::fs::remove_dir_all(&root)?;
-
-    match sealed? {
-        Sealed::Worker(deriving, marks) => report(options, deriving, &marks),
-        Sealed::Persister { killed, finished } => {
-            run_report_persister(options, killed.as_ref(), &finished);
-            Ok(())
-        }
-    }
+    })
 }
 
 /// What a sealed run leaves to report.
@@ -269,6 +307,13 @@ enum Sealed {
         killed: Option<PersisterRun>,
         finished: PersisterRun,
     },
+}
+
+/// Gives the recording at `root` the longest retention period. The run's ticks start at the
+/// Mac's boot on the continuous clock, so on a Mac up longer than the default period another
+/// tool would read a kept recording as expired.
+fn run_retention(root: &Path) -> std::io::Result<()> {
+    Period::LONGEST.write(&PrivateDirectory::open(root)?)
 }
 
 /// Publishes every window of the run to the recording at `root` and has what `options` names
@@ -1152,9 +1197,87 @@ mod tests {
                 windows: 4,
                 processes: 900,
                 sealing: Sealing::Worker(Deriving::Nothing),
+                recording_kept: None,
             }),
             options
         );
+    }
+
+    #[test]
+    fn reads_the_directory_a_run_keeps_its_recording_in() {
+        // Goal: a run can name where it leaves its recording. Method: name a directory beside
+        // a derivation.
+        let options = options_from(&words(
+            "--windows 3 --processes 12000 --derive apps --recording /scratch/kept.recording",
+        ));
+
+        assert_eq!(
+            Ok(Options {
+                windows: 3,
+                processes: 12_000,
+                sealing: Sealing::Worker(Deriving::Apps),
+                recording_kept: Some(PathBuf::from("/scratch/kept.recording")),
+            }),
+            options
+        );
+    }
+
+    /// A path in the temporary directory that no other test names, removed when the test ends
+    /// where the test made something there.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            Self(std::env::temp_dir().join(format!("seal_bench-{}-{name}", std::process::id())))
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn starts_a_kept_recording_in_a_directory_of_its_own() {
+        // Goal: a run that keeps its recording gets the directory it named. Method: name a
+        // path that is not there and look for a directory at it.
+        let scratch = Scratch::new("starts");
+
+        let root = run_root(Some(&scratch.0)).unwrap();
+
+        assert_eq!(root, scratch.0);
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn refuses_a_directory_that_is_there_already() {
+        // Goal: a run never adds readings to a recording that holds some. Method: name a
+        // directory that holds a file and read the file afterwards.
+        let scratch = Scratch::new("refuses");
+        std::fs::create_dir(&scratch.0).unwrap();
+        std::fs::write(scratch.0.join("reading"), b"held").unwrap();
+
+        let root = run_root(Some(&scratch.0));
+
+        assert!(root.is_err());
+        assert_eq!(std::fs::read(scratch.0.join("reading")).unwrap(), b"held");
+    }
+
+    #[test]
+    fn gives_a_kept_recording_the_longest_retention_period() {
+        // Goal: another tool reads a kept recording however long the Mac has been up. Method:
+        // start a recording as a kept run does and read its period back.
+        let scratch = Scratch::new("retention");
+        let root = run_root(Some(&scratch.0)).unwrap();
+        drop(persistence::Store::open(&root).unwrap());
+
+        run_retention(&root).unwrap();
+
+        let period = Period::read(&PrivateDirectory::open(&root).unwrap()).unwrap();
+        assert_eq!(period, Period::LONGEST);
     }
 
     #[test]
@@ -1174,6 +1297,7 @@ mod tests {
                     memory_bytes: 268_435_456,
                     restart_after_windows: None,
                 }),
+                recording_kept: None,
             }),
             options
         );
@@ -1197,6 +1321,7 @@ mod tests {
                     memory_bytes: 268_435_456,
                     restart_after_windows: Some(1),
                 }),
+                recording_kept: None,
             }),
             options
         );
@@ -1254,6 +1379,7 @@ mod tests {
                     memory_bytes: PERSISTER_MEMORY_BYTES,
                     restart_after_windows: None,
                 }),
+                recording_kept: None,
             }),
             options
         );
