@@ -87,6 +87,58 @@ mod take {
     }
 }
 
+mod ranks {
+    use super::{KeyKind, kept_second, kept_second_naming};
+    use crate::live_app_response::Ranks;
+
+    const BUNDLES: [&[u8]; 10] = [
+        b"/A.app", b"/B.app", b"/C.app", b"/D.app", b"/E.app", b"/F.app", b"/G.app", b"/H.app",
+        b"/I.app", b"/J.app",
+    ];
+
+    #[test]
+    fn names_the_ten_apps_first_by_key_of_more_that_hold_one_total() {
+        // Goal: a second's ranking names the ten Apps first by key where more than ten hold one
+        // total. Method: keep a minute naming twelve bundles that each hold no resident memory,
+        // and read the ranking by resident memory.
+        let mut keys = BUNDLES.to_vec();
+        keys.extend_from_slice(&[b"/K.app", b"/L.app"]);
+        let second = kept_second(&keys);
+
+        let ranks = second.ranks().unwrap();
+
+        assert_eq!(resident_keys(&ranks), BUNDLES);
+    }
+
+    mod when_an_executable_holds_the_total_of_ten_bundles {
+        use super::{BUNDLES, KeyKind, kept_second_naming, resident_keys};
+
+        #[test]
+        fn names_the_bundles_alone() {
+            // Goal: a second's ranking places a bundle before an executable with the same
+            // total, whatever their keys. Method: keep a minute naming ten bundles and then an
+            // executable whose key's bytes come before every bundle's, each holding no resident
+            // memory, and read the ranking by resident memory.
+            let mut apps = BUNDLES.map(|key| (KeyKind::Bundle, key)).to_vec();
+            apps.push((KeyKind::Executable, b"-zsh"));
+            let second = kept_second_naming(&apps);
+
+            let ranks = second.ranks().unwrap();
+
+            assert_eq!(resident_keys(&ranks), BUNDLES);
+        }
+    }
+
+    /// The keys of the Apps `ranks` names by resident memory, first to last.
+    fn resident_keys(ranks: &Ranks) -> Vec<Vec<u8>> {
+        ranks.metrics[1]
+            .entries
+            .iter()
+            .map(|rank| rank.app.bytes.clone())
+            .collect()
+    }
+}
+
 mod attribution {
     use std::sync::Arc;
 
@@ -192,16 +244,36 @@ fn kept_second_of(keys: &[&[u8]], sample: &SampleRow) -> AppsSecond {
     kept_second_in(AppsSecond::with_room(), keys, sample)
 }
 
+/// The second `AppsSecond::keep` makes of a minute whose one observation names `apps`, each by
+/// its kind and its key, in that order, and measured no interval.
+fn kept_second_naming(apps: &[(KeyKind, &[u8])]) -> AppsSecond {
+    let keys: Vec<&[u8]> = apps.iter().map(|(_, key)| *key).collect();
+
+    kept_second_holding(AppsSecond::with_room(), apps, &sample_naming(&keys))
+}
+
 /// The second `AppsSecond::keep` makes in `second` of a minute whose one observation,
 /// `sample`, names the bundles `keys`, in that order.
-fn kept_second_in(mut second: AppsSecond, keys: &[&[u8]], sample: &SampleRow) -> AppsSecond {
+fn kept_second_in(second: AppsSecond, keys: &[&[u8]], sample: &SampleRow) -> AppsSecond {
+    let apps: Vec<(KeyKind, &[u8])> = keys.iter().map(|key| (KeyKind::Bundle, *key)).collect();
+
+    kept_second_holding(second, &apps, sample)
+}
+
+/// The second `AppsSecond::keep` makes in `second` of a minute whose one observation,
+/// `sample`, names `apps`, each by its kind and its key, in that order.
+fn kept_second_holding(
+    mut second: AppsSecond,
+    apps: &[(KeyKind, &[u8])],
+    sample: &SampleRow,
+) -> AppsSecond {
     let mut minute = AppMinute::default();
-    for key in keys {
+    for (kind, key) in apps {
         let key_offset = minute.keys.len();
         minute.keys.extend_from_slice(key);
         minute.apps.push(AppRow {
             publication: 1,
-            kind: KeyKind::Bundle,
+            kind: *kind,
             key_offset,
             key_size: key.len(),
             members: 1,

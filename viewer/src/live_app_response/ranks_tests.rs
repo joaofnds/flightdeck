@@ -20,6 +20,21 @@ fn ranks_the_largest_apps_wherever_they_sit_in_the_sample() {
 }
 
 #[test]
+fn leaves_out_the_apps_that_used_less_than_the_ten_before_them() {
+    // Goal: an App that used less than every App of a full ranking stays out of it.
+    // Method: rank six hundred Apps whose totals fall with their position.
+    let sample = sample((0..600).rev().map(app).collect());
+
+    let ranks = sample.ranks().unwrap();
+
+    let largest = (590..600).rev().collect::<Vec<u64>>();
+    assert_eq!(
+        ranks.metrics.iter().map(amounts).collect::<Vec<_>>(),
+        vec![largest; 5]
+    );
+}
+
+#[test]
 fn ranks_each_metric_by_its_own_measure() {
     // Goal: CPU, resident memory, power, disk and GPU each rank the App that used most of it.
     // Method: rank Apps that each lead one measure, beside one that leads the measures no
@@ -144,6 +159,93 @@ fn ranks_an_app_tied_with_the_tenth_by_its_key_after_ten_have_filled_the_ranks()
 }
 
 #[test]
+fn leaves_out_an_app_tied_with_the_tenth_whose_key_sorts_after_it() {
+    // Goal: an App whose total equals a full ranking's stays out of it when its key sorts
+    // after theirs, as most Apps do where they all read no disk and use no GPU.
+    // Method: rank ten equal Apps, then an eleventh with their total whose key sorts last.
+    let apps = (1..=11).map(tied_app).collect::<Vec<App>>();
+
+    let ranks = sample(apps).ranks().unwrap();
+
+    let first_ten = (1..=10).map(|byte| vec![byte]).collect::<Vec<Vec<u8>>>();
+    assert_eq!(
+        ranks.metrics.iter().map(keys).collect::<Vec<_>>(),
+        vec![first_ten; 5]
+    );
+}
+
+#[test]
+fn ranks_a_bundle_tied_with_the_tenth_first_after_ten_executables_have_filled_the_ranks() {
+    // Goal: a bundle whose total equals a full ranking's takes its first rank from the
+    // executables there, though its key bytes sort after theirs.
+    // Method: rank ten equal executables, then a bundle with their total and a larger key byte.
+    let mut apps = (1..=10).map(tied_app).collect::<Vec<App>>();
+    apps.push(tied_bundle(11));
+
+    let ranks = sample(apps).ranks().unwrap();
+
+    let bundle_first = std::iter::once(11)
+        .chain(1..=9)
+        .map(|byte| vec![byte])
+        .collect::<Vec<Vec<u8>>>();
+    assert_eq!(
+        ranks.metrics.iter().map(keys).collect::<Vec<_>>(),
+        vec![bundle_first; 5]
+    );
+}
+
+#[test]
+fn leaves_out_an_executable_tied_with_ten_bundles_that_have_filled_the_ranks() {
+    // Goal: an executable whose total equals a full ranking of bundles stays out of it, though
+    // its key bytes sort before theirs.
+    // Method: rank ten equal bundles, then an executable with their total and a smaller key
+    // byte.
+    let mut apps = (2..=11).map(tied_bundle).collect::<Vec<App>>();
+    apps.push(tied_app(1));
+
+    let ranks = sample(apps).ranks().unwrap();
+
+    let bundles = (2..=11).map(|byte| vec![byte]).collect::<Vec<Vec<u8>>>();
+    assert_eq!(
+        ranks.metrics.iter().map(keys).collect::<Vec<_>>(),
+        vec![bundles; 5]
+    );
+}
+
+#[test]
+fn ranks_the_same_ten_of_more_tied_apps_whatever_order_they_come_in() {
+    // Goal: which ten of more Apps with one total are ranked, and in what order, follows from
+    // their keys alone, never from where each sits in the sample.
+    // Method: rank seven tied executables and seven tied bundles whose key bytes sort after
+    // the executables', in two hundred orders from a fixed generator.
+    let apps = (1..=7)
+        .map(tied_app)
+        .chain((8..=14).map(tied_bundle))
+        .collect::<Vec<App>>();
+    let bundles_then_executables = (8..=14)
+        .chain(1..=3)
+        .map(|byte| vec![byte])
+        .collect::<Vec<Vec<u8>>>();
+    let mut seed = 1;
+
+    for _ in 0..200 {
+        let ordered = reordered(&apps, &mut seed);
+        let order = ordered
+            .iter()
+            .map(|app| app.key.bytes[0])
+            .collect::<Vec<u8>>();
+
+        let ranks = sample(ordered).ranks().unwrap();
+
+        assert_eq!(
+            ranks.metrics.iter().map(keys).collect::<Vec<_>>(),
+            vec![bundles_then_executables.clone(); 5],
+            "the Apps came in the order {order:?}"
+        );
+    }
+}
+
+#[test]
 fn ranks_by_exact_totals_where_their_rates_are_equal() {
     // Goal: a difference of one above float precision still decides the order.
     // Method: rank two CPU totals that differ by one past the 53-bit mantissa.
@@ -181,6 +283,22 @@ fn keeps_measured_zero_partial_unmeasured_and_overflowed_totals_apart() {
     assert_eq!(amounts(cpu), vec![3, 0]);
     assert_eq!(cpu.entries[0].unavailable_members, 2);
     assert_eq!(cpu.entries[1].rate, Some(0.0));
+}
+
+#[test]
+fn counts_a_partial_app_that_a_full_ranking_leaves_out() {
+    // Goal: an App a full ranking has no place for still counts among its partial totals.
+    // Method: rank ten Apps, then a smaller one whose CPU total missed two members.
+    let mut apps = (1..=10).map(app).collect::<Vec<App>>();
+    let mut partial = app(0);
+    partial.cpu_ns.unavailable_members = 2;
+    apps.push(partial);
+
+    let ranks = sample(apps).ranks().unwrap();
+
+    let cpu = &ranks.metrics[0];
+    assert_eq!(cpu.partial, 1);
+    assert_eq!(amounts(cpu), (1..=10).rev().collect::<Vec<u64>>());
 }
 
 #[test]
@@ -296,6 +414,26 @@ fn tied_app(byte: u8) -> App {
     app.key.bytes = vec![byte];
 
     app
+}
+
+/// A bundle with the total every tied App shares, told apart by its one key byte.
+fn tied_bundle(byte: u8) -> App {
+    let mut app = tied_app(byte);
+    app.key.kind = KeyKind::Bundle;
+
+    app
+}
+
+/// The Apps in another order at each call, from a fixed generator so that a failure repeats.
+fn reordered(apps: &[App], seed: &mut u64) -> Vec<App> {
+    let mut apps = apps.to_vec();
+    for count in (2..=apps.len()).rev() {
+        *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        let index = usize::try_from(*seed >> 33).unwrap() % count;
+        apps.swap(index, count - 1);
+    }
+
+    apps
 }
 
 fn app(amount: u64) -> App {
