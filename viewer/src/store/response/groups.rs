@@ -9,7 +9,6 @@ use crate::app_process_groups_history::reduce::{Capture, Phase, Reduction};
 use crate::cancellation::Operation;
 use crate::live_app_history::cohort;
 use crate::live_app_response::{KeyKind, Selected};
-use crate::store::ProcessRow;
 
 impl QueryContext {
     /// The shared CPU-mean process cohort, reduced directly from retained selected-App members.
@@ -92,9 +91,7 @@ fn response_groups_visit(
 
         let (header, payload) = apps.presentation()?;
         let app_index = u32::try_from(index).map_err(|_| Error::Bound("live App index"))?;
-        let processes = payload
-            .iter()
-            .filter(|process| process.app_index == Some(app_index));
+        let processes = payload.members(Some(app_index));
         let capture = Capture {
             observation: &second.observation,
             elapsed_ns: header.elapsed_ns,
@@ -106,7 +103,7 @@ fn response_groups_visit(
         cohort::visit_borrowed(
             &capture,
             apps.apps[index].members,
-            processes.map(ProcessRow::presentation),
+            processes.map(|process| process.presentation(Some(app_index))),
             reduction,
             phase,
             operation,

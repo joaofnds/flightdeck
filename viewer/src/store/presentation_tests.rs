@@ -379,8 +379,7 @@ fn pages(second: &AppsSecond) -> Vec<Value> {
             .processes
             .as_ref()
             .unwrap()
-            .iter()
-            .filter(|process| process.app_index == Some(app_index))
+            .members(Some(app_index))
             .count();
         for offset in (0..count).step_by(512) {
             pages.push(

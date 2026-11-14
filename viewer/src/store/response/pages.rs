@@ -127,9 +127,7 @@ fn response_app_bytes(app: &AppRow) -> usize {
 }
 
 fn response_members_bytes(payload: &Payload, app_index: Option<u32>, page: Page) -> Result<usize> {
-    let processes = payload
-        .iter()
-        .filter(|process| process.app_index == app_index);
+    let processes = payload.members(app_index);
     let range = json::page_range(
         page,
         processes.clone().count(),

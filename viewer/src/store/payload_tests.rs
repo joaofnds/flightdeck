@@ -81,7 +81,7 @@ fn complete_process_rows_fit_the_preflight_storage_allowance() {
     // Goal: the measured million-process live span can coexist with retained readers.
     // Method: reject a row layout above the lossless compact representation's allowance.
     assert!(
-        size_of::<ProcessRow>() <= 152,
+        size_of::<ProcessRow>() <= 144,
         "row bytes {}",
         size_of::<ProcessRow>()
     );

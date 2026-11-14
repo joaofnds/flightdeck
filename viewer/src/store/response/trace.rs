@@ -158,13 +158,10 @@ fn response_trace_point(second: &QuerySecond, target: &dyn Selection) -> Result<
     if let Some(executable) = target.executable() {
         let app_index = u32::try_from(index).map_err(|_| Error::Bound("live App index"))?;
         let mut totals = crate::apps::AppTotals::default();
-        for process in payload
-            .iter()
-            .filter(|process| process.app_index == Some(app_index))
-        {
+        for process in payload.members(Some(app_index)) {
             if let Some(name) = process.executable_name() {
                 if name.bytes == executable {
-                    add_process_view(&mut totals, &process.presentation());
+                    add_process_view(&mut totals, &process.presentation(Some(app_index)));
                 }
             }
         }

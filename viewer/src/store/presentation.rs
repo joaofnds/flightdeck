@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::{AppRow, AppsSecond, Missing};
 use crate::live_app_response::json::{self, AppView, Header};
 use crate::live_app_response::{Detail, MEMBERS_MAX, Page};
-use crate::store::{AppDetails, ByteBudget, ByteReservation, Payload, ProcessRow};
+use crate::store::{AppDetails, ByteBudget, ByteReservation, Payload};
 
 /// A query's App metadata, independent of pool slots and sharing the complete payload owner.
 #[derive(Debug)]
@@ -196,12 +196,15 @@ fn presentation_members(
     app_index: Option<u32>,
     page: Page,
 ) -> Result<Value> {
-    let processes = payload
-        .iter()
-        .filter(|process| process.app_index == app_index);
+    let processes = payload.members(app_index);
     let count = processes.clone().count();
 
-    json::processes_page(header, processes.map(ProcessRow::presentation), count, page)
+    json::processes_page(
+        header,
+        processes.map(|process| process.presentation(app_index)),
+        count,
+        page,
+    )
 }
 
 impl AppRow {

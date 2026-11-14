@@ -229,10 +229,11 @@ fn both_adapters_keep_distinct_nonzero_read_and_write_intervals() {
 
 fn assert_directional_payload(view: &View) {
     let payload = view.apps[1].processes.as_ref().unwrap();
-    let process = payload.iter().find(|process| process.pid == 7).unwrap();
+    let index = payload.iter().position(|process| process.pid == 7).unwrap();
+    let process = &payload[index];
     assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
     assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
-    let app = payload.app(usize::try_from(process.app_index.unwrap()).unwrap());
+    let app = payload.app(usize::try_from(payload.app_index(index).unwrap()).unwrap());
     assert_eq!(
         app.disk_read_bytes,
         crate::live_app_response::Measure {
@@ -348,7 +349,7 @@ fn a_view_identifies_the_second_publication_and_its_unattributed_process() {
     let processes = selected.processes.as_ref().unwrap();
     assert_eq!(processes.len(), 1);
     assert_eq!(processes[0].pid, 7);
-    assert_eq!(processes[0].app_index, None);
+    assert_eq!(processes.app_index(0), None);
     assert_eq!(selected.observation, Some(alternatives[1]));
 }
 
@@ -1023,7 +1024,7 @@ fn sealed_legacy_processes_remain_queryable_without_app_attribution() {
 
     assert_saved_app_readings(&actual, &expected);
     assert_eq!(
-        actual.apps[1].processes.as_ref().unwrap()[0].app_index,
+        actual.apps[1].processes.as_ref().unwrap().app_index(0),
         None
     );
 }
@@ -1121,8 +1122,8 @@ fn both_adapters_keep_gone_and_refused_processes_without_app_identity() {
     assert_saved_app_readings(&actual, &expected);
     let rows = actual.apps[1].processes.as_ref().unwrap();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].app_index, None);
-    assert_eq!(rows[1].app_index, None);
+    assert_eq!(rows.app_index(0), None);
+    assert_eq!(rows.app_index(1), None);
     assert_eq!(
         rows[0].cpu_ns(),
         crate::apps::Amount::Unavailable(crate::apps::Unavailable::Gone)

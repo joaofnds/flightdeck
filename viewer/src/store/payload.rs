@@ -29,9 +29,17 @@ pub struct Payload {
     pub(crate) selected: Observation,
     pub previous: Option<Stamp>,
     rows: Vec<Arc<Shared<ProcessRow>>>,
+    /// The App index of each of `rows`, at the same place. It is held apart from the shared rows
+    /// because an App arriving or leaving moves the index of every process of the Apps after it,
+    /// and a process whose readings repeat keeps sharing its row whatever its index.
+    app_indexes: Vec<AppIndex>,
     apps: Vec<Arc<Shared<AppDetails>>>,
     reservation: ByteReservation,
 }
+
+/// A process's App as the App's place among the Apps of its second, or no App, in four bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AppIndex(u32);
 
 /// One row and its admission, held by every second whose reading equals it.
 #[derive(Debug)]
@@ -44,6 +52,17 @@ struct Shared<Row> {
 #[derive(Debug)]
 pub struct Rows<'payload, Row> {
     rows: std::slice::Iter<'payload, Arc<Shared<Row>>>,
+}
+
+/// The process rows of one payload whose App index is one index, in the sample's order. It reads
+/// each row's index from the payload's indexes and no row it passes over.
+#[derive(Clone, Debug)]
+pub struct Members<'payload> {
+    rows: std::iter::Zip<
+        std::slice::Iter<'payload, Arc<Shared<ProcessRow>>>,
+        std::slice::Iter<'payload, AppIndex>,
+    >,
+    app_index: AppIndex,
 }
 
 /// Captured executable bytes and their display spelling, shared across observations.
@@ -74,7 +93,6 @@ pub struct ProcessName {
 pub struct ProcessRow {
     pub pid: i32,
     pub creation: Option<ProcessCreation>,
-    pub app_index: Option<u32>,
     executable_name: Option<Arc<ProcessName>>,
     pub program_unavailable: Option<IdentityUnavailable>,
     cpu_ns: CompactAmount,
@@ -114,10 +132,11 @@ struct Previous<'second> {
     app_rows: &'second [AppRow],
 }
 
-/// The names a capture adds, its process rows and its App details.
+/// The names a capture adds, its process rows, their App indexes and its App details.
 type Parts = (
     NameAdditions,
     Vec<Arc<Shared<ProcessRow>>>,
+    Vec<AppIndex>,
     Vec<Arc<Shared<AppDetails>>>,
 );
 
@@ -125,8 +144,10 @@ impl Payload {
     /// The charge of each distinct process row, however many seconds hold it.
     pub const ROW_BYTES: usize = Shared::<ProcessRow>::BYTES;
 
-    /// The charge of each process a second lists, whether its row is shared or the second's own.
-    pub const ROW_REFERENCE_BYTES: usize = size_of::<Arc<Shared<ProcessRow>>>();
+    /// The charge of each process a second lists, whether its row is shared or the second's own:
+    /// the reference to its row and its App index.
+    pub const ROW_REFERENCE_BYTES: usize =
+        size_of::<Arc<Shared<ProcessRow>>>() + size_of::<AppIndex>();
 
     /// The charge of each distinct row of an App's additional measures, however many seconds
     /// hold it.
@@ -156,6 +177,23 @@ impl Payload {
         Rows {
             rows: self.rows.iter(),
         }
+    }
+
+    /// The process rows whose App is the App at `app_index` of the sample's Apps, or that belong
+    /// to no App where `app_index` is `None`, in the sample's order.
+    #[must_use]
+    pub fn members(&self, app_index: Option<u32>) -> Members<'_> {
+        Members {
+            rows: self.rows.iter().zip(self.app_indexes.iter()),
+            app_index: AppIndex::of(app_index),
+        }
+    }
+
+    /// The App index of the process row at `row_index`: its App's place among the sample's Apps,
+    /// or `None` where the process belongs to no App.
+    #[must_use]
+    pub fn app_index(&self, row_index: usize) -> Option<u32> {
+        self.app_indexes[row_index].get()
     }
 
     /// The count of process rows.
@@ -195,21 +233,22 @@ impl Payload {
             .ok_or(Missing::Budget)?;
         #[cfg(test)]
         let before = names.work_snapshot();
-        let (additions, rows, apps) = match Self::capture_with_names_parts(sample, names, &previous)
-        {
-            Ok(parts) => parts,
-            Err(missing) => {
-                #[cfg(test)]
-                names.record_receipt(sample.selected, before, false);
-                return Err(missing);
-            }
-        };
+        let (additions, rows, app_indexes, apps) =
+            match Self::capture_with_names_parts(sample, names, &previous) {
+                Ok(parts) => parts,
+                Err(missing) => {
+                    #[cfg(test)]
+                    names.record_receipt(sample.selected, before, false);
+                    return Err(missing);
+                }
+            };
 
         Ok((
             Self {
                 selected: sample.selected,
                 previous: sample.previous,
                 rows,
+                app_indexes,
                 apps,
                 reservation,
             },
@@ -225,9 +264,11 @@ impl Payload {
         let previous_rows = previous.payload.map_or(&[][..], |payload| &payload.rows);
         let additions = names.additions(sample)?;
         let rows = Self::capture_with_names_rows(sample, names, &additions, previous_rows)?;
+        let app_indexes = Self::capture_with_names_app_indexes(sample);
+        assert_eq!(rows.len(), app_indexes.len());
         let apps = Self::capture_with_names_apps(sample, names.budget(), previous)?;
 
-        Ok((additions, rows, apps))
+        Ok((additions, rows, app_indexes, apps))
     }
 
     /// The additional measures of each App of `sample`, which are the ones the second before
@@ -290,8 +331,22 @@ impl Payload {
         Ok(rows)
     }
 
-    /// Names, rows and App details own separate reservations; this admission precedes either
-    /// container allocation.
+    /// The App index of each process of `sample`, in the sample's order.
+    fn capture_with_names_app_indexes(sample: &Sample) -> Vec<AppIndex> {
+        let app_count = sample.apps().len();
+        let mut app_indexes = Vec::with_capacity(sample.processes().len());
+        for process in sample.processes() {
+            if let Some(index) = process.app_index {
+                assert!(collector::usize_from_u32(index) < app_count);
+            }
+            app_indexes.push(AppIndex::of(process.app_index));
+        }
+
+        app_indexes
+    }
+
+    /// Names, rows and App details own separate reservations; this admission precedes the
+    /// allocation of the payload's containers.
     fn capture_bytes(sample: &Sample) -> usize {
         2 * size_of::<usize>()
             + size_of::<Self>()
@@ -312,6 +367,29 @@ impl<'second> Previous<'second> {
         Self {
             payload: second.and_then(|second| second.processes.as_deref().ok()),
             app_rows: second.map_or(&[][..], |second| second.apps.as_slice()),
+        }
+    }
+}
+
+impl AppIndex {
+    /// No App, a value no App index takes.
+    const NONE: Self = Self(u32::MAX);
+
+    fn of(app_index: Option<u32>) -> Self {
+        match app_index {
+            Some(index) => {
+                assert!(index < Self::NONE.0);
+                Self(index)
+            }
+            None => Self::NONE,
+        }
+    }
+
+    fn get(self) -> Option<u32> {
+        if self.0 < Self::NONE.0 {
+            Some(self.0)
+        } else {
+            None
         }
     }
 }
@@ -368,6 +446,20 @@ impl<'payload, Row> Iterator for Rows<'payload, Row> {
 
 impl<Row> ExactSizeIterator for Rows<'_, Row> {}
 
+impl<'payload> Iterator for Members<'payload> {
+    type Item = &'payload ProcessRow;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let app_index = self.app_index;
+        self.rows
+            .find_map(|(shared, index)| (*index == app_index).then_some(&shared.row))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.rows.size_hint().1)
+    }
+}
+
 impl<'payload> IntoIterator for &'payload Payload {
     type Item = &'payload ProcessRow;
     type IntoIter = Rows<'payload, ProcessRow>;
@@ -386,11 +478,15 @@ impl Index<usize> for Payload {
 }
 
 impl ProcessRow {
-    pub(crate) fn presentation(&self) -> crate::live_app_response::json::ProcessView<'_> {
+    /// The row as a page shows it, as a process of the App at `app_index` of its second's Apps.
+    pub(crate) fn presentation(
+        &self,
+        app_index: Option<u32>,
+    ) -> crate::live_app_response::json::ProcessView<'_> {
         crate::live_app_response::json::ProcessView {
             pid: self.pid,
             creation: self.creation,
-            app_index: self.app_index,
+            app_index,
             executable_name: self
                 .executable_name()
                 .map(|name| (name.bytes.as_slice(), name.display.as_str())),
@@ -482,7 +578,6 @@ impl ProcessRow {
         Self {
             pid: process.pid,
             creation: process.creation,
-            app_index: process.app_index,
             executable_name,
             program_unavailable: process.program_unavailable,
             cpu_ns: CompactAmount::capture(process.cpu_ns),
@@ -592,13 +687,18 @@ impl PartialEq for Payload {
         self.selected == other.selected
             && self.previous == other.previous
             && self.iter().eq(other.iter())
+            && self.app_indexes == other.app_indexes
             && self.apps().eq(other.apps())
     }
 }
 
 const _: () = {
-    assert!(size_of::<ProcessRow>() <= 152);
-    assert!(size_of::<Shared<ProcessRow>>() <= 168);
+    assert!(size_of::<AppIndex>() == 4);
+    // Every App index is below `AppIndex::NONE`, compared by bit length, since a `const` cannot
+    // widen a `u32` to a `usize` but by a cast.
+    assert!(super::APPS_PER_SECOND_MAX.ilog2() < AppIndex::NONE.0.ilog2());
+    assert!(size_of::<ProcessRow>() <= 144);
+    assert!(size_of::<Shared<ProcessRow>>() <= 160);
     assert!(size_of::<CompactAmount>() <= 9);
     assert!(align_of::<CompactAmount>() == 1);
     assert!(size_of::<AppDetails>() <= 80);

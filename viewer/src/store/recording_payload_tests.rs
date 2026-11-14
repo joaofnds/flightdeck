@@ -1237,8 +1237,8 @@ fn events_loader_assert_original(
     );
     assert_eq!(apps[0].ungrouped_members, 1);
     assert_eq!(apps[1].ungrouped_members, 1);
-    assert_eq!(first[0].app_index, None);
-    assert_eq!(second[0].app_index, None);
+    assert_eq!(first.app_index(0), None);
+    assert_eq!(second.app_index(0), None);
     assert_eq!(
         second[0].program_unavailable,
         Some(collector::ring::IdentityUnavailable::Unsupported)

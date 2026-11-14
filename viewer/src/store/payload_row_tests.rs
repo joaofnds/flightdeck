@@ -7,7 +7,7 @@ use collector::ring::{
 };
 
 use super::name_tests::native_sample;
-use super::{Payload, ProcessNames, ProcessRow};
+use super::{AppIndex, Payload, ProcessNames, ProcessRow};
 use crate::apps::Amount;
 use crate::cancellation::Cancellation;
 use crate::live::identity_fixture::Fixture;
@@ -106,6 +106,61 @@ fn a_row_stays_shared_when_a_process_listed_before_it_starts() {
 }
 
 #[test]
+fn a_row_stays_shared_when_an_app_listed_before_its_app_starts() {
+    // Goal: an App arriving does not cost a new row for every process of the Apps after it,
+    // although each such process's App index moves.
+    // Method: publish one idle process, add at the third tick a process of an App whose bundle
+    // path sorts first, and compare where the second and third seconds keep the first's row.
+    let budget = Arc::new(ByteBudget::new(BUDGET_BYTES));
+    let ticks = ticks(&[&[(7, IDLE)], &[(7, IDLE)], &[(7, IDLE), (9, IDLE)]]);
+
+    let seconds = seconds_of(&budget, &ticks, |pid| match pid {
+        9 => b"/Arrival.app",
+        _ => b"/Owner.app",
+    });
+
+    let owner = |second: &AppsSecond| {
+        second
+            .apps
+            .iter()
+            .position(|app| app.name.bytes == b"/Owner.app")
+    };
+    assert_eq!(owner(&seconds[1]), Some(0));
+    assert_eq!(owner(&seconds[2]), Some(1));
+    let payloads: Vec<&Payload> = seconds
+        .iter()
+        .map(|second| second.processes.as_deref().unwrap())
+        .collect();
+    assert!(std::ptr::eq(row(payloads[1], 7), row(payloads[2], 7)));
+    assert_eq!(app_index(payloads[1], 7), Some(0));
+    assert_eq!(app_index(payloads[2], 7), Some(1));
+}
+
+#[test]
+fn payloads_that_place_a_process_in_another_app_differ() {
+    // Goal: two payloads are equal only where each process belongs to the same App, since the
+    // App index is held apart from the rows the two may share.
+    // Method: capture a real Sample, build two payloads holding its rows and App details, one
+    // with its App indexes and one with its first process moved to another App, and compare
+    // each with the captured payload.
+    let sample = native_sample();
+    let budget = Arc::new(ByteBudget::new(64 * 1024));
+    let names = ProcessNames::new(sample.processes().len(), &budget).unwrap();
+    let (payload, _additions) = Payload::capture_with_names(&sample, &names, None).unwrap();
+    let mut moved = payload.app_indexes.clone();
+    moved[0] = match moved[0].get() {
+        Some(_) => AppIndex::NONE,
+        None => AppIndex::of(Some(0)),
+    };
+
+    let same = holding(&payload, payload.app_indexes.clone(), &budget);
+    let other = holding(&payload, moved, &budget);
+
+    assert_eq!(payload, same);
+    assert_ne!(payload, other);
+}
+
+#[test]
 fn seconds_that_repeat_a_row_are_charged_for_it_once() {
     // Goal: the budget counts a row once however many seconds hold it.
     // Method: publish one idle process for three ticks and compare the budget's use with the
@@ -190,6 +245,23 @@ fn row(payload: &Payload, pid: i32) -> &ProcessRow {
     payload.iter().find(|row| row.pid == pid).unwrap()
 }
 
+/// A payload holding the rows and App details of `payload` with the App indexes `app_indexes`.
+fn holding(payload: &Payload, app_indexes: Vec<AppIndex>, budget: &Arc<ByteBudget>) -> Payload {
+    Payload {
+        selected: payload.selected,
+        previous: payload.previous,
+        rows: payload.rows.clone(),
+        app_indexes,
+        apps: payload.apps.clone(),
+        reservation: budget.reserve(payload.bytes()).unwrap(),
+    }
+}
+
+/// The App index `payload` gives process `pid`.
+fn app_index(payload: &Payload, pid: i32) -> Option<u32> {
+    payload.app_index(payload.iter().position(|row| row.pid == pid).unwrap())
+}
+
 /// What process `pid` has read by `tick`. Each reading stays as it was until its own tick, the
 /// third for CPU time through the eleventh for threads, and moves by the same step from then on,
 /// so each second from the third differs from the one before it in one reading.
@@ -227,8 +299,14 @@ pub(super) fn task(threads: i32) -> Task {
 
 /// The payload of each tick of `ticks`, each process given as its pid and the CPU time it has
 /// spent by that tick, read through the real producer with the second before it.
-fn payloads(budget: &Arc<ByteBudget>, ticks: &[&[(i32, u64)]]) -> Vec<Arc<Payload>> {
-    let ticks: Vec<Vec<Process>> = ticks
+fn payloads(budget: &Arc<ByteBudget>, readings: &[&[(i32, u64)]]) -> Vec<Arc<Payload>> {
+    payloads_of(budget, &ticks(readings))
+}
+
+/// The processes of each tick of `readings`, each given as its pid and the CPU time it has spent
+/// by that tick.
+fn ticks(readings: &[&[(i32, u64)]]) -> Vec<Vec<Process>> {
+    readings
         .iter()
         .map(|processes| {
             processes
@@ -243,9 +321,7 @@ fn payloads(budget: &Arc<ByteBudget>, ticks: &[&[(i32, u64)]]) -> Vec<Arc<Payloa
                 })
                 .collect()
         })
-        .collect();
-
-    payloads_of(budget, &ticks)
+        .collect()
 }
 
 fn payloads_of(budget: &Arc<ByteBudget>, ticks: &[Vec<Process>]) -> Vec<Arc<Payload>> {

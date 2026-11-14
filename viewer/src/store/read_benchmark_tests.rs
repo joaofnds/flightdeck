@@ -174,8 +174,8 @@ fn continuing_a_load_costs() {
 #[test]
 fn rows_of_the_live_span_repeat() {
     // Goal: say how many bytes the span's rows take, how many of its process rows and App
-    // details the store shares between seconds, and how many process rows differ from the row
-    // of the second before only by the App index.
+    // details the store shares between seconds, and how many process rows the store holds apart
+    // from the row of the second before although they read the same and their App index moved.
     // Method: load the hour as the store does and compare each process's row with its row of
     // the second before, by address and then field by field.
     let mut loaded = load_hour(&prepared_root(), take_every_second);
@@ -760,10 +760,13 @@ fn report_processes(view: &View) -> usize {
         census.arrived
     );
     println!(
-        "  {} that differ in a reading, {} of all in the App index",
+        "  {} that differ in a reading, {} of all, shared or not, in the App index",
         census.readings_differ, census.index_differs,
     );
-    println!("  {} that differ only in the App index", census.index_only);
+    println!(
+        "  {} held apart though equal in every reading, whose App index moved",
+        census.index_only
+    );
     println!(
         "process rows as held: {bytes} bytes, {} rows held once",
         census.distinct,
@@ -783,15 +786,21 @@ struct ProcessCensus {
     /// The rows of a process the second before does not hold.
     arrived: usize,
     readings_differ: usize,
+    /// The rows whose App index is not the one of the second before, shared or not.
     index_differs: usize,
+    /// The rows held apart from the row of the second before although equal to it in every
+    /// reading, whose App index moved.
     index_only: usize,
 }
+
+/// A process row of a second and the App index the second gives it.
+type Listed<'view> = (Option<u32>, &'view ProcessRow);
 
 impl ProcessCensus {
     fn of(view: &View) -> Self {
         let mut census = Self::default();
-        let mut before: HashMap<(i32, String), &ProcessRow> = HashMap::new();
-        let mut now: HashMap<(i32, String), &ProcessRow> = HashMap::new();
+        let mut before: HashMap<(i32, String), Listed> = HashMap::new();
+        let mut now: HashMap<(i32, String), Listed> = HashMap::new();
         let mut distinct: HashSet<*const ProcessRow> = HashSet::new();
         for second in &view.apps {
             let Ok(payload) = &second.processes else {
@@ -799,11 +808,12 @@ impl ProcessCensus {
                 continue;
             };
             now.clear();
-            for row in payload.iter() {
+            for (index, row) in payload.iter().enumerate() {
                 distinct.insert(std::ptr::from_ref(row));
                 let key = (row.pid, format!("{:?}", row.creation));
-                census.count(before.get(&key).copied(), row);
-                now.insert(key, row);
+                let listed = (payload.app_index(index), row);
+                census.count(before.get(&key).copied(), listed);
+                now.insert(key, listed);
             }
             std::mem::swap(&mut before, &mut now);
         }
@@ -812,24 +822,29 @@ impl ProcessCensus {
         census
     }
 
-    /// Counts `row` against `before`, the row of its process a second before, where that
-    /// second holds one.
-    fn count(&mut self, before: Option<&ProcessRow>, row: &ProcessRow) {
+    /// Counts `listed` against `before`, the row of its process a second before and its App
+    /// index there, where that second holds one.
+    fn count(&mut self, before: Option<Listed>, listed: Listed) {
+        let (app_index, row) = listed;
         self.rows += 1;
-        match before {
-            Some(old) if std::ptr::eq(old, row) => self.shared += 1,
-            Some(old) => {
-                let same = same_readings(old, row);
-                self.index_only += usize::from(same && old.app_index != row.app_index);
-                self.readings_differ += usize::from(!same);
-                self.index_differs += usize::from(old.app_index != row.app_index);
-            }
-            None => self.arrived += 1,
+        let Some((old_app_index, old)) = before else {
+            self.arrived += 1;
+            return;
+        };
+
+        let moved = old_app_index != app_index;
+        self.index_differs += usize::from(moved);
+        if std::ptr::eq(old, row) {
+            self.shared += 1;
+        } else {
+            let same = same_readings(old, row);
+            self.index_only += usize::from(same && moved);
+            self.readings_differ += usize::from(!same);
         }
     }
 }
 
-/// Whether two rows of one process hold the same readings, whatever App index each carries.
+/// Whether two rows of one process hold the same readings.
 fn same_readings(old: &ProcessRow, row: &ProcessRow) -> bool {
     old.executable_name() == row.executable_name()
         && old.program_unavailable == row.program_unavailable
@@ -949,8 +964,8 @@ fn hash_second(second: &AppsSecond, hasher: &mut DefaultHasher) {
             for details in payload.apps() {
                 digest(details).hash(hasher);
             }
-            for row in payload.iter() {
-                hash_process_row(row, apps, hasher);
+            for (index, row) in payload.iter().enumerate() {
+                hash_process_row((payload.app_index(index), row), apps, hasher);
             }
         }
         Err(missing) => digest(missing).hash(hasher),
@@ -994,12 +1009,11 @@ fn hash_sampled(second: &SampledSecond, hasher: &mut DefaultHasher) {
     }
 }
 
-/// Adds every reading of `row` to `hasher`, with the App of `apps` the row belongs to named by
-/// its identity, so the digest stays the same wherever the store keeps that App's index.
-fn hash_process_row(row: &ProcessRow, apps: &[AppRow], hasher: &mut DefaultHasher) {
-    let app = row
-        .app_index
-        .map(|index| app_identity(&apps[usize::try_from(index).unwrap()].name));
+/// Adds every reading of a listed row to `hasher`, with the App of `apps` the row belongs to named
+/// by its identity, so the digest stays the same wherever the store keeps that App's index.
+fn hash_process_row(listed: Listed, apps: &[AppRow], hasher: &mut DefaultHasher) {
+    let (app_index, row) = listed;
+    let app = app_index.map(|index| app_identity(&apps[usize::try_from(index).unwrap()].name));
     let facts = (
         row.pid,
         row.creation,
