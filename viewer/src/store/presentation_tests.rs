@@ -193,61 +193,6 @@ fn incomplete_app_details_cannot_be_presented_as_complete() {
 }
 
 #[test]
-fn detached_contexts_share_complete_payloads_without_retaining_a_store_pool_slot() {
-    // Goal: pinned App queries outlive their pool slot without duplicating process/name rows.
-    // Method: detach a real captured second, compare payload ownership, then drop the source.
-    let (second, expected) = native_second(true, 2);
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
-    let detached = second.detached(&budget).unwrap();
-    assert!(Arc::ptr_eq(
-        second.processes.as_ref().unwrap(),
-        detached.processes.as_ref().unwrap(),
-    ));
-    drop(second);
-
-    let shown = pages(&detached);
-
-    assert_eq!(shown, expected);
-    assert!(budget.used() > 0);
-    drop(detached);
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn detachment_refuses_its_own_retained_byte_budget_before_copying_apps() {
-    // Goal: a pinned context cannot retain unreserved App metadata or names.
-    // Method: detach a real populated second under a one-byte budget.
-    let (second, _) = native_second(true, 2);
-    let budget = Arc::new(ByteBudget::new(1));
-
-    let result = second.detached(&budget);
-
-    assert!(matches!(result, Err(Missing::Budget)));
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn detached_missing_processes_preserve_independent_compact_app_facts() {
-    // Goal: a missing process facet cannot erase otherwise retained App metadata on pinning.
-    // Method: detach an explicit process refusal and compare rows, reason and page refusal.
-    let (mut second, _) = native_second(true, 2);
-    second.processes = Err(Missing::Refused(String::from("fixture payload refusal")));
-    let budget = Arc::new(ByteBudget::new(1024 * 1024));
-
-    let detached = second.detached(&budget).unwrap();
-
-    assert_eq!(detached.apps, second.apps);
-    assert_eq!(detached.processes, second.processes);
-    assert!(matches!(
-        detached.apps_page(page(0)),
-        Err(Error::Bound("live App empty sample"))
-    ));
-    assert_eq!(budget.used(), detached.bytes());
-    drop(detached);
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
 fn admits_a_page_of_every_app_one_second_holds() {
     // Goal: a retained second lists every App it can hold on one page, as a Sample does, so the
     // App picker sorts and searches them all.

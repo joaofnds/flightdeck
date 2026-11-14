@@ -109,7 +109,7 @@ fn primary_sealed(
 
 #[test]
 fn a_following_primary_keeps_following_native_progress_through_complete() {
-    // Goal: detached Primary ownership cannot silently turn FollowLatest into an exact pin.
+    // Goal: holding a Primary context cannot silently turn FollowLatest into an exact pin.
     // Method: append a native successor while the actual Primary output is held.
     let (mut harness, primary, hold) = primary_sealed(None);
     harness.recording.as_mut().unwrap().publish_resources();
@@ -156,7 +156,7 @@ fn a_followed_complete_context_reacquires_the_source_after_a_restart() {
 
 #[test]
 fn a_followed_primary_context_reacquires_the_source_after_a_restart() {
-    // Goal: a detached Primary keeps logical following through source replacement.
+    // Goal: a held Primary context keeps logical following through source replacement.
     // Method: restart the real source while the existing Worker Pending checkpoint is held.
     let (mut harness, primary, hold) = primary_sealed(None);
     let generation = primary.generation;
@@ -266,6 +266,34 @@ fn a_kept_refresh_waits_for_a_store_behind_the_newest_reading() {
     harness.assert_no_update_over_several_polls();
     harness.store_active();
     assert_eq!(harness.ready_strict().generation, generation);
+}
+
+#[test]
+fn a_held_second_read_on_another_page_answers_from_its_fixed_context() {
+    // Goal: a read of the second a complete fixed context holds answers from that context while
+    // the Store's span still holds the second, with no new Store query.
+    // Method: hold the newest second until its context is complete, keep the Store a reading
+    // behind, which a new query waits out, then read the same second on another page.
+    let mut harness = Harness::new();
+    harness.worker.request(request("memory")).unwrap();
+    let shown = harness.ready();
+    let second = shown.selection["selected"]["wall_ns"].as_u64().unwrap() / 1_000_000_000;
+    let mut held = request("memory");
+    held.second = Some(second);
+    harness.worker.request(held).unwrap();
+    let held = harness.ready();
+    assert!(harness.worker.last_output_complete());
+    harness.store_behind_the_newest_reading();
+    let mut other = request("network");
+    other.second = Some(second);
+
+    let generation = harness.worker.request(other).unwrap();
+
+    let answered = harness.ready_strict();
+    assert_eq!(answered.generation, generation);
+    assert_eq!(answered.selection["selected"], held.selection["selected"]);
+    assert_eq!(answered.selection["summary"]["network_rx_bps"], 1.0);
+    harness.store_active();
 }
 
 #[test]

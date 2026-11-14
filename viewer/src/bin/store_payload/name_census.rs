@@ -79,10 +79,10 @@ fn visit<'view>(
     view: &'view View,
     mut take: impl FnMut(&'view ProcessName) -> io::Result<()>,
 ) -> io::Result<()> {
-    for apps in &view.apps {
-        if let Ok(payload) = &apps.processes {
-            for process in payload.iter() {
-                if let Some(name) = process.executable_name() {
+    for apps in view.apps.seconds() {
+        if let Ok(processes) = apps.processes() {
+            for process in processes.iter() {
+                if let Some(name) = process.row().executable_name() {
                     take(name)?;
                 }
             }

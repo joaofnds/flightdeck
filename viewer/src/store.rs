@@ -4,6 +4,7 @@
 
 mod apps;
 mod attribution;
+mod block;
 mod buffers;
 mod cohorts;
 mod context_cpu;
@@ -57,11 +58,13 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 pub use crate::byte_budget::{ByteBudget, ByteReservation};
-pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, DetachedAppsSecond, Missing};
+pub use apps::{APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, Missing};
 pub use attribution::{
     Attribution, AttributionReading, COHORT_MAX, Completeness, OtherReading, Resident,
     ResidentOther, Totals,
 };
+use block::Block;
+pub use block::{AppAt, AppsCursor, AppsSpan, ProcessAt, Processes, Second, Seconds};
 pub use buffers::{Buffers, Mailbox, Span, Waker};
 pub use cohorts::{Cohorts, Leaders, Readings, WallSeconds};
 pub use machine_stretch::{Category, Gauge, MachinePlace, MachineStretch, Rate, pressure_level};
@@ -105,8 +108,9 @@ pub(crate) mod tests;
 const SECONDS_MAX: usize = 1_080;
 
 /// The seconds the store takes on buffers it already has while a View the main thread holds keeps
-/// the span's. Past them each second makes a new buffer, so a View held longer, as a hold does,
-/// stops nothing, and the store holds at most this many buffers and the span that View keeps.
+/// the span's. Past them each second taken or installed makes a new buffer in an old one's slot,
+/// so a View or a query context held longer, as a hold or a Primary is, stops nothing, and the
+/// store holds at most this many buffers and the seconds that View or context keeps.
 const SECONDS_HELD_MAX: usize = 64;
 
 /// The older seconds of the loaded hour the store holds, one in every stretch of
@@ -167,8 +171,8 @@ pub struct View {
     /// The seconds of the live span, every second the store holds of the newest 18 minutes,
     /// oldest first.
     pub seconds: Vec<Arc<MachineSecond>>,
-    /// Each App's totals at each second of `seconds`, in the same order.
-    pub apps: Vec<Arc<AppsSecond>>,
+    /// Each App's totals at each second of `seconds`, in the same order, in the store's blocks.
+    pub apps: AppsSpan,
     /// The older seconds of the loaded hour, before `seconds`, oldest first.
     pub earlier: Vec<Arc<MachineSecond>>,
     /// Each App's readings added up over each stretch of `EARLIER_STRIDE_SECONDS` of the loaded
@@ -197,8 +201,8 @@ impl View {
     pub fn alternatives(&self, second: u64) -> Vec<Observation> {
         let mut observations: Vec<_> = self
             .apps
-            .iter()
-            .filter_map(|apps| apps.observation)
+            .seconds()
+            .filter_map(Second::observation)
             .filter(|observation| {
                 observation.wall_ns.map(|wall| wall / 1_000_000_000) == Some(second)
             })
@@ -209,11 +213,10 @@ impl View {
 
     /// Finds the publication only when its recording, identity and every stored clock agree.
     #[must_use]
-    pub fn observation(&self, observation: &Observation) -> Option<&AppsSecond> {
+    pub fn observation(&self, observation: &Observation) -> Option<Second<'_>> {
         self.apps
-            .iter()
-            .find(|apps| apps.observation.as_ref() == Some(observation))
-            .map(AsRef::as_ref)
+            .seconds()
+            .find(|apps| apps.observation().as_ref() == Some(observation))
     }
 }
 
@@ -441,7 +444,7 @@ struct Held {
     sampled: Span<SampledSecond>,
     span: Span<MachineSecond>,
     /// Each App's totals at each second of `span`, in the same order.
-    apps: Span<AppsSecond>,
+    apps: block::BlockSpan,
     earlier: Span<MachineSecond>,
     /// Each App's readings added up over each stretch of the seconds of `earlier` and `span`.
     stretches: Stretches,
@@ -531,12 +534,15 @@ impl Held {
 
     fn new(root: PathBuf, budget: Arc<ByteBudget>) -> Self {
         let seconds = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, MachineSecond::default);
-        let apps = Buffers::new(SECONDS_MAX + SECONDS_HELD_MAX, AppsSecond::default);
+        let apps = Buffers::new(
+            SECONDS_MAX + block::BLOCK_DEPARTED_MAX + SECONDS_HELD_MAX,
+            AppsSecond::default,
+        );
         let earlier = Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, MachineSecond::default);
         let views = Buffers::new(VIEWS_MAX, || View {
             version: 0,
             seconds: Vec::with_capacity(SECONDS_MAX),
-            apps: Vec::with_capacity(SECONDS_MAX),
+            apps: AppsSpan::with_capacity(SECONDS_MAX),
             earlier: Vec::with_capacity(EARLIER_MAX),
             stretches: Vec::with_capacity(STRETCHES_MAX),
             sampled: Vec::with_capacity(EARLIER_MAX),
@@ -562,7 +568,7 @@ impl Held {
                 Buffers::new(EARLIER_MAX + EARLIER_HELD_MAX, SampledSecond::empty),
             ),
             span: Span::new(SECONDS_MAX, seconds),
-            apps: Span::new(SECONDS_MAX, apps),
+            apps: block::BlockSpan::new(SECONDS_MAX, apps),
             earlier: Span::new(EARLIER_MAX, earlier),
             stretches: Stretches::new(STRETCHES_MAX, STRETCHES_HELD_MAX),
             owed: None,
@@ -658,10 +664,10 @@ impl Held {
             .apps
             .leaving()
             .unwrap_or_else(|| unreachable!("departing Apps"));
-        if apps.missing == Some(Missing::Unread) {
+        if apps.missing() == Some(&Missing::Unread) {
             return Ok(Some(SampledSecond::unread(
                 kept,
-                apps.observation
+                apps.observation()
                     .unwrap_or_else(|| unreachable!("departing identity")),
             )));
         }
@@ -687,14 +693,14 @@ impl Held {
         };
         let previous = self.apps.newest_held().map(Arc::clone);
         let tick = take_observation(run, second);
-        self.apps.push(|buffer| {
+        self.apps.push(second.wall_ns, |buffer| {
             buffer.take(apps, previous.as_deref());
             if buffer.observation.is_none() {
                 buffer.observation = Some(tick);
             }
             buffer.consecutive = take_consecutive(previous.as_deref(), buffer);
         });
-        let Some(newest) = self.apps.newest() else {
+        let Some(newest) = self.apps.newest_held() else {
             unreachable!("the span just took the second in");
         };
         if let Some(observation) = newest.observation {
@@ -785,7 +791,7 @@ impl Held {
             assert!(view.sampled.is_empty());
             let capacity = (
                 view.seconds.capacity(),
-                view.apps.capacity(),
+                view.apps.block_capacity(),
                 view.earlier.capacity(),
                 view.stretches.capacity(),
                 view.sampled.capacity(),
@@ -793,7 +799,7 @@ impl Held {
 
             view.version = version;
             view.seconds.extend(span.held().map(Arc::clone));
-            view.apps.extend(apps.held().map(Arc::clone));
+            apps.publish(&mut view.apps);
             view.earlier.extend(earlier.held().map(Arc::clone));
             if let Some(stretches) = stretches {
                 view.stretches.extend(stretches.held().map(Arc::clone));
@@ -809,7 +815,7 @@ impl Held {
             assert_eq!(view.apps.len(), view.seconds.len());
             let held = (
                 view.seconds.capacity(),
-                view.apps.capacity(),
+                view.apps.block_capacity(),
                 view.earlier.capacity(),
                 view.stretches.capacity(),
                 view.sampled.capacity(),
@@ -1197,10 +1203,11 @@ fn startup_staged_native(
     Ok(progress)
 }
 
+/// What a blocked launch waits on to change: the bytes charged, the sampled buffers free and
+/// the newest second. App buffers are not among them, since an install never waits for one.
 #[derive(PartialEq, Eq)]
 struct StartupCapacity {
     bytes: usize,
-    apps: usize,
     sampled: usize,
     newest: Option<(RunIdentity, u64)>,
 }
@@ -1208,10 +1215,6 @@ struct StartupCapacity {
 impl StartupCapacity {
     fn improved(&self, previous: &Self) -> bool {
         if self.bytes < previous.bytes {
-            return true;
-        }
-
-        if self.apps > previous.apps {
             return true;
         }
 
@@ -1226,7 +1229,6 @@ impl StartupCapacity {
 fn startup_capacity(held: &Held, budget: &ByteBudget) -> StartupCapacity {
     StartupCapacity {
         bytes: budget.used(),
-        apps: held.apps.free(),
         sampled: held.sampled.free(),
         newest: held.newest.map(|newest| (newest.run, newest.publication)),
     }

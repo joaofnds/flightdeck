@@ -4,9 +4,9 @@ use std::sync::Arc;
 use super::apps::TickApps;
 use super::stretch::{Folded, Folding, StretchRow};
 use super::{
-    APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsStretch, Cohorts, Held, Leaders,
-    MachinePlace, MachineSecond, Mailbox, MemorySecond, Missing, Readings, SECONDS_HELD_MAX,
-    SECONDS_MAX, STRETCHES_MAX, View, WallSeconds, recording,
+    APPS_PER_SECOND_MAX, AppRow, AppRows, AppsSecond, AppsSpan, AppsStretch, Cohorts, Held,
+    Leaders, MachinePlace, MachineSecond, Mailbox, MemorySecond, Missing, Readings,
+    SECONDS_HELD_MAX, SECONDS_MAX, STRETCHES_MAX, View, WallSeconds, recording,
 };
 use crate::AppAttributionMetric;
 use crate::live::identity_fixture::Fixture;
@@ -667,7 +667,8 @@ fn a_window_chooses_the_apps_its_seconds_choose_one_by_one() {
     // interval, the cut stretch, or a second of 125 counted twice would put in another order.
     let view = window_view();
     let mut leaders = Leaders::new();
-    let from_stretches = window_from_stretches(&view);
+    let tail = view.apps.skipping(STRETCHED_SECONDS_COUNT);
+    let from_stretches = window_from_stretches(&view, &tail);
     let one_by_one = window_one_by_one(&view);
 
     let chosen = chosen_over(
@@ -722,7 +723,11 @@ fn a_window_chooses_the_leaders_of_each_resource_by_what_they_used_of_it() {
         last: 129,
     };
 
-    let chosen = chosen_over(&mut Leaders::new(), &window_from_stretches(&view), window);
+    let chosen = chosen_over(
+        &mut Leaders::new(),
+        &window_from_stretches(&view, &view.apps.skipping(STRETCHED_SECONDS_COUNT)),
+        window,
+    );
 
     assert_eq!(chosen.cpu, ["/A.app", "/B.app", "/C.app"]);
     assert_eq!(chosen.power, ["/B.app", "/C.app", "/A.app"]);
@@ -745,7 +750,11 @@ fn a_window_that_ends_with_a_stretch_counts_all_of_its_seconds() {
         last: 129,
     };
 
-    let chosen = chosen_over(&mut leaders, &window_from_stretches(&view), window);
+    let chosen = chosen_over(
+        &mut leaders,
+        &window_from_stretches(&view, &view.apps.skipping(STRETCHED_SECONDS_COUNT)),
+        window,
+    );
     let expected = chosen_over(&mut leaders, &window_one_by_one(&view), window);
 
     assert_eq!(chosen.cpu, expected.cpu);
@@ -796,7 +805,7 @@ fn a_window_chooses_into_no_cohorts_without_room_for_their_apps() {
     // of no seconds, which chooses no App, into cohorts built by `Default`.
     let readings = Readings {
         seconds: &[],
-        apps: &[],
+        apps: &AppsSpan::default(),
         stretches: &[],
     };
     let mut cohorts = Cohorts::default();
@@ -1016,12 +1025,17 @@ fn window_view() -> Arc<View> {
     published(&mut held)
 }
 
+/// How many of a `window_view`'s oldest seconds, 100 to 124, `window_from_stretches` reads
+/// only through the stretches that hold them.
+const STRETCHED_SECONDS_COUNT: usize = 25;
+
 /// The readings of `view`, a `window_view`, that hold seconds 125 to 139 one by one and the
 /// stretches of 100 to 129.
-fn window_from_stretches(view: &View) -> Readings<'_> {
+fn window_from_stretches<'view>(view: &'view View, apps: &'view AppsSpan) -> Readings<'view> {
+    assert_eq!(apps.len(), view.apps.len() - STRETCHED_SECONDS_COUNT);
     Readings {
-        seconds: &view.seconds[25..],
-        apps: &view.apps[25..],
+        seconds: &view.seconds[STRETCHED_SECONDS_COUNT..],
+        apps,
         stretches: &view.stretches,
     }
 }

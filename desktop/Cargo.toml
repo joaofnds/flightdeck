@@ -60,6 +60,10 @@ features = [
 path = "../persistence"
 features = ["fixtures"]
 
+[dev-dependencies.viewer]
+path = "../viewer"
+features = ["fixtures"]
+
 # GPUI comes from a fork of zed, upstream revision 56934ec0560bce8929025497411de7f5322fb6ca
 # with commits on branch flightdeck-gpui that pause an idle window's display link, keep
 # each font's sized copy and write a frame's path vertices straight into its buffer for

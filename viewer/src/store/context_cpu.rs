@@ -40,7 +40,7 @@ impl QueryContext {
             .machine()
             .cpu_interval()?
             .ok_or(Error::Bound("CPU reading unavailable"))?;
-        let current = identity(observation, selected.apps().metadata.origin);
+        let current = identity(observation, selected.apps().origin());
         let mut previous = None;
         detail_previous(self, selected, interval.previous, &mut previous)?;
         let unavailable = if previous.is_some() {
@@ -89,7 +89,7 @@ impl QueryContext {
         }
         let selected = identity(
             &self.selected().observation,
-            self.selected().apps().metadata.origin,
+            self.selected().apps().origin(),
         );
         let value = crate::cpu_history::project(&crate::cpu_history::Request {
             selected: &selected,
@@ -121,7 +121,7 @@ fn detail_previous(
     }
     for before in context.seconds() {
         if detail_previous_matches(&before.observation, &current.observation, previous) {
-            *output = Some(identity(&before.observation, before.apps().metadata.origin));
+            *output = Some(identity(&before.observation, before.apps().origin()));
 
             return Ok(());
         }

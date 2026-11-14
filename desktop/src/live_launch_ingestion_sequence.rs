@@ -322,7 +322,7 @@ fn a_nonfinite_publication_holds_back_no_successor() {
     let accepted = parts_released(sequence.harness.read("apps"));
     let first = sequence.harness.view_at(1);
     assert_eq!(accepted.selection["selected"]["publication"], 1);
-    let first_identity = first.apps.last().unwrap().observation.unwrap();
+    let first_identity = newest_apps(&first).observation().unwrap();
     assert_eq!(first_identity.stamp.publication, 1);
 
     sequence.publish(1, |readings| {
@@ -330,8 +330,8 @@ fn a_nonfinite_publication_holds_back_no_successor() {
     });
     sequence.harness.read_publication("apps", 2);
     let second = sequence.harness.view_at(2);
-    assert_eq!(second.apps.last().unwrap().elapsed_ns, Some(1_000_000_000));
-    assert_store_app_amounts(second.apps.last().unwrap(), 2);
+    assert_eq!(newest_apps(&second).elapsed_ns(), Some(1_000_000_000));
+    assert_store_app_amounts(newest_apps(&second), 2);
 
     sequence.publish(2, |_| {});
     let successor = parts_released(sequence.harness.read_publication("apps", 3));
@@ -351,8 +351,8 @@ fn a_nonfinite_publication_holds_back_no_successor() {
         inspected.selection["selected"],
         accepted.selection["selected"]
     );
-    assert_eq!(third.apps.last().unwrap().elapsed_ns, Some(1_000_000_000));
-    assert_store_app_amounts(third.apps.last().unwrap(), 1);
+    assert_eq!(newest_apps(&third).elapsed_ns(), Some(1_000_000_000));
+    assert_store_app_amounts(newest_apps(&third), 1);
     assert_eq!(accepted.apps, inspected.apps);
     assert_eq!(accepted.detail, inspected.detail);
     let events = sequence.harness.events();
@@ -382,12 +382,18 @@ fn a_nonfinite_publication_holds_back_no_successor() {
     sequence.cleanup();
 }
 
-fn assert_store_app_amounts(apps: &viewer::store::AppsSecond, count: usize) {
+/// The newest App second `view` holds, as a reader of a View reads it.
+fn newest_apps(view: &viewer::store::View) -> viewer::store::Second<'_> {
+    view.apps.newest().unwrap()
+}
+
+fn assert_store_app_amounts(apps: viewer::store::Second<'_>, count: usize) {
     use std::sync::Arc;
     use viewer::AppAttributionMetric;
-    assert_eq!(apps.apps.len(), count);
-    let main = apps
-        .apps
+    assert_eq!(apps.app_count(), count);
+    let mut cursor = viewer::store::AppsCursor::default();
+    let main = cursor
+        .apps(apps)
         .iter()
         .find(|app| app.name.bytes == source::APP)
         .unwrap();
@@ -494,11 +500,11 @@ fn an_exact_successor_of_a_nonfinite_publication_reads_after_it_is_overwritten()
     });
     sequence.harness.read_publication("apps", 2);
     let second = sequence.harness.view_at(2);
-    assert_store_app_amounts(second.apps.last().unwrap(), 2);
+    assert_store_app_amounts(newest_apps(&second), 2);
     sequence.publish(2, |_| {});
     sequence.harness.read_publication("apps", 3);
     let third = sequence.harness.view_at(3);
-    assert_store_app_amounts(third.apps.last().unwrap(), 1);
+    assert_store_app_amounts(newest_apps(&third), 1);
 
     sequence.overrun_refusal();
     let mut input = serde_json::Value::Null;
@@ -520,7 +526,7 @@ fn an_exact_successor_of_a_nonfinite_publication_reads_after_it_is_overwritten()
 
     assert_eq!(sixth.seconds.last().unwrap().publication, 6);
     assert_eq!(third.seconds.last().unwrap().publication, 3);
-    assert_store_app_amounts(third.apps.last().unwrap(), 1);
+    assert_store_app_amounts(newest_apps(&third), 1);
     assert_selected_c(&selected, &inspected);
     assert_ordinary_c_once(&sequence.harness.events());
     output::record_sequence_case(
@@ -580,8 +586,8 @@ fn withholds_app_rates_across_a_physically_spaced_run_tick_gap() {
         "exited_verified"
     );
     assert_eq!(successor.apps.as_ref().unwrap()["app_count"], 2);
-    assert_eq!(second.apps.last().unwrap().apps.len(), 2);
-    assert_eq!(second.apps.last().unwrap().elapsed_ns, None);
+    assert_eq!(newest_apps(&second).app_count(), 2);
+    assert_eq!(newest_apps(&second).elapsed_ns(), None);
     output::record_sequence_case(
         "spaced-run-tick-gap",
         &sequence.harness,

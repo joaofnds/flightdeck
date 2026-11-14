@@ -67,8 +67,10 @@ fn pause_keeps_the_displayed_publication_among_same_second_siblings() {
         ..first.clone()
     };
     let mut view = view(1, &[], &[first.clone(), shown.clone()]);
-    view.apps[0] = Arc::new(apps_of(&first, "Browser", 100_000_000));
-    view.apps[1] = Arc::new(apps_of(&shown, "Browser", 900_000_000));
+    view.apps
+        .replace(0, Arc::new(apps_of(&first, "Browser", 100_000_000)));
+    view.apps
+        .replace(1, Arc::new(apps_of(&shown, "Browser", 900_000_000)));
     dashboard.take_view(Arc::new(view));
 
     let held = dashboard.pause_target();
@@ -127,7 +129,9 @@ fn a_recent_hover_finds_the_exact_sibling_instead_of_the_last_in_its_second() {
         )),
     };
     let mut held = view(1, &[], &[old.clone(), newer.clone()]);
-    held.apps = vec![Arc::new(old_apps), Arc::new(apps_of(&newer, "Newer", 20))];
+    held.apps = [Arc::new(old_apps), Arc::new(apps_of(&newer, "Newer", 20))]
+        .into_iter()
+        .collect();
     dashboard.take_view(Arc::new(held));
 
     let reading = dashboard.store_view_held(&target).unwrap();
@@ -953,7 +957,10 @@ fn newer_view() -> Arc<View> {
 fn ranked_view() -> Arc<View> {
     let seconds = newer_seconds();
     let mut view = view(1, &[], &seconds);
-    view.apps[2] = Arc::new(apps_of(&seconds[2], "Brave Browser", 750_000_000));
+    view.apps.replace(
+        2,
+        Arc::new(apps_of(&seconds[2], "Brave Browser", 750_000_000)),
+    );
     Arc::new(view)
 }
 

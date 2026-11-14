@@ -287,7 +287,7 @@ fn moving(pid: i32, tick: u64) -> Process {
     }
 }
 
-pub(super) fn task(threads: i32) -> Task {
+pub(in crate::store) fn task(threads: i32) -> Task {
     Task {
         threads,
         faults: 0,
@@ -333,7 +333,7 @@ fn payloads_of(budget: &Arc<ByteBudget>, ticks: &[Vec<Process>]) -> Vec<Arc<Payl
 
 /// The second of each tick of `ticks`, read through the real producer with the second before
 /// it, each process running from the bundle `app_path` gives for its pid.
-pub(super) fn seconds_of(
+pub(in crate::store) fn seconds_of(
     budget: &Arc<ByteBudget>,
     ticks: &[Vec<Process>],
     app_path: fn(i32) -> &'static [u8],

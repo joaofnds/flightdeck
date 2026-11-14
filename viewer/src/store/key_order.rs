@@ -19,6 +19,9 @@ pub(super) trait HeldRow<R> {
 
 /// Writes into `merged` the rows of `held` with those of `incoming` added with `add`, in key
 /// order. Returns false where they come to more than `apps_max` Apps.
+// Out of line, since choosing the leaders of a span took 7% longer with this merge compiled
+// into its caller.
+#[inline(never)]
 pub(super) fn add_merged<H: HeldRow<R>, R: PointRow>(
     held: &mut Vec<H>,
     incoming: &[R],

@@ -65,7 +65,7 @@ fn reads_of_the_live_span_cost() {
         "span of {} seconds and {} stretches, {} Apps at the newest, a cohort of {}",
         view.apps.len(),
         view.stretches.len(),
-        view.apps.last().unwrap().apps.len(),
+        view.apps.newest().unwrap().app_count(),
         cohort.len(),
     );
 
@@ -325,7 +325,7 @@ fn newest_wall_second(held: &Held) -> u64 {
 
 /// The Apps that lead the newest second's CPU ranking, which a chart by App draws.
 fn leading_apps(view: &View) -> Vec<Arc<RankedApp>> {
-    let ranks = view.apps.last().unwrap().ranks().unwrap();
+    let ranks = view.apps.newest().unwrap().ranks().unwrap();
     let apps: Vec<_> = ranks.metrics[0]
         .entries
         .iter()
@@ -338,10 +338,10 @@ fn leading_apps(view: &View) -> Vec<Arc<RankedApp>> {
 }
 
 fn time_ranks(view: &View) {
-    let newest = view.apps.last().unwrap();
+    let newest = view.apps.newest().unwrap();
     // The half floors, so a short span ranks its middle second and never its first.
     let back = SECONDS_BACK.min((view.apps.len() - 1) / 2);
-    let earlier = &view.apps[view.apps.len() - 1 - back];
+    let earlier = view.apps.second(view.apps.len() - 1 - back);
 
     time("rank the newest second", || newest.ranks(), ranks_digest);
     time(
@@ -353,8 +353,8 @@ fn time_ranks(view: &View) {
         "rank every second of the span",
         || {
             view.apps
-                .iter()
-                .map(|second| second.ranks())
+                .seconds()
+                .map(super::Second::ranks)
                 .collect::<Vec<_>>()
         },
         |seconds| {
@@ -407,7 +407,7 @@ fn time_charts(view: &View, cohort: &[Arc<RankedApp>]) {
         "attribution of the cohort at every second of the span",
         || {
             view.apps
-                .iter()
+                .seconds()
                 .map(|second| second.attribution(AppAttributionMetric::Cpu, cohort))
                 .collect::<Vec<_>>()
         },
@@ -417,7 +417,7 @@ fn time_charts(view: &View, cohort: &[Arc<RankedApp>]) {
         "resident memory of the cohort at every second of the span",
         || {
             view.apps
-                .iter()
+                .seconds()
                 .map(|second| second.resident(cohort))
                 .collect::<Vec<_>>()
         },
@@ -699,7 +699,7 @@ fn report_apps(view: &View) -> usize {
     let mut apps_before: Vec<&AppIdentity> = Vec::new();
     let (mut rows, mut bytes) = (0_usize, 0_usize);
     let (mut sets_changed, mut apps_changed) = (0_usize, 0_usize);
-    for second in &view.apps {
+    for second in view.apps.iter() {
         let rows_held = second.apps.as_slice();
         let apps: Vec<&AppIdentity> = rows_held
             .iter()
@@ -802,7 +802,7 @@ impl ProcessCensus {
         let mut before: HashMap<(i32, String), Listed> = HashMap::new();
         let mut now: HashMap<(i32, String), Listed> = HashMap::new();
         let mut distinct: HashSet<*const ProcessRow> = HashSet::new();
-        for second in &view.apps {
+        for second in view.apps.iter() {
             let Ok(payload) = &second.processes else {
                 before.clear();
                 continue;
@@ -900,7 +900,7 @@ fn hash_machine(second: &MachineSecond, hasher: &mut DefaultHasher) {
 /// its App rows and process rows.
 fn apps_digest(view: &View) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for second in &view.apps {
+    for second in view.apps.iter() {
         hash_ranked(&second.ranks(), &mut hasher);
         hash_second(second, &mut hasher);
     }

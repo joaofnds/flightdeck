@@ -40,7 +40,13 @@ fn rollback_selection_follows_source_order_through_complete() {
         complete.selected().observation,
         selected.selected().observation
     );
-    let payload = complete.selected().apps().processes.as_ref().unwrap();
+    let payload = complete
+        .selected()
+        .apps()
+        .stored()
+        .processes
+        .as_ref()
+        .unwrap();
     let process = payload.iter().find(|process| process.pid == 7).unwrap();
     assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
     assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
@@ -254,7 +260,7 @@ fn assert_cohorts(held: &mut Held, count: usize) {
 }
 
 #[test]
-fn full_staged_retention_reuses_sample_spares_and_keeps_a_detached_primary_immutable() {
+fn full_staged_retention_reuses_sample_spares_and_keeps_a_fixed_primary_immutable() {
     // Goal: full real retention progresses past both spare bounds while a Primary stays immutable.
     // Method: seal 2375 ticks, replace 12 older targets in one minute, then append 65 native ticks.
     let mut fixture = large_fixture();
@@ -288,6 +294,57 @@ fn full_staged_retention_reuses_sample_spares_and_keeps_a_detached_primary_immut
     assert_eq!(budget.used(), 0);
 }
 
+#[test]
+fn a_launch_completes_while_a_fixed_context_holds_every_spare_buffer() {
+    // Goal: a Primary context held through the launch, with every App buffer held, neither
+    // stops it nor grows the store's buffers, the context goes on reading the seconds it held
+    // while the span reads the installed ones, and once both are dropped nothing stays charged.
+    // Method: over the fewest buffers a span of six takes, take a Primary context, hold every
+    // other App buffer and check that none is free, finish the launch, compare the buffer
+    // count and each of the context's seconds with the span's, then drop the store's side
+    // before the context.
+    let fixture = crate::store::startup_tests::primary_fixture();
+    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
+    let mut stage = GuardStage::new(&fixture, &budget);
+    stage.held.span = crate::store::Span::new(
+        6,
+        crate::store::Buffers::new(7, crate::store::MachineSecond::default),
+    );
+    stage.held.apps = crate::store::block::BlockSpan::with_fewest_buffers(6);
+    primary(&mut stage, &fixture, &budget);
+    let context = query_context(&mut stage.held, &mut stage.ring);
+    assert!(context.selected().fixed());
+    let others = stage.held.apps.hold_every_free_buffer();
+    assert_eq!(stage.held.apps.free_count(), 0);
+    let count = stage.held.apps.buffer_count();
+
+    stage.complete(&fixture, &budget);
+
+    assert!(stage.held.startup == StartupState::Complete);
+    assert_eq!(stage.held.apps.buffer_count(), count);
+    let mut unread_count = 0;
+    for (index, second) in context.seconds().iter().enumerate() {
+        let installed = stage
+            .held
+            .apps
+            .span()
+            .seconds()
+            .find(|apps| apps.observation() == Some(second.observation))
+            .unwrap();
+        assert_eq!(installed.missing(), None, "second {index}");
+        if second.apps().missing() == Some(&Missing::Unread) {
+            unread_count += 1;
+        }
+    }
+    assert!(unread_count > 0);
+    drop(others);
+    drop(stage);
+    assert!(context.bytes() > 0);
+    assert!(budget.used() >= context.bytes());
+    drop(context);
+    assert_eq!(budget.used(), 0);
+}
+
 fn assert_large_primary(held: &Held, primary: &crate::store::QueryContext) {
     assert_eq!(held.span.len(), 1080);
     assert_eq!(held.span.get(0).unwrap().publication, 1296);
@@ -314,7 +371,7 @@ fn assert_large_primary(held: &Held, primary: &crate::store::QueryContext) {
         primary
             .seconds()
             .iter()
-            .all(crate::store::QuerySecond::detached)
+            .all(crate::store::QuerySecond::fixed)
     );
     assert_primary_selected(primary);
 }

@@ -146,7 +146,7 @@ impl StoreReader {
             return payload::snapshot(context, command, shared, None).map(Answer::Ready);
         }
         if let Some(context) = &self.context {
-            if detached_context_answers(context, command)? {
+            if fixed_context_answers(context, command)? {
                 return payload::snapshot(context, command, shared, None).map(Answer::Ready);
             }
         }
@@ -452,15 +452,16 @@ impl StoreReader {
     }
 }
 
-/// Whether the whole context of a second the Store's span has left answers a read of that second.
-fn detached_context_answers(context: &QueryContext, command: &Command) -> Result<bool, String> {
+/// Whether the whole context of a fixed second answers a read of that second, which it does
+/// whether or not the Store's span still holds the second.
+fn fixed_context_answers(context: &QueryContext, command: &Command) -> Result<bool, String> {
     if command.request.second != Some(context.selected_second()) {
         return Ok(false);
     }
     if context.readiness() != QueryReadiness::Complete {
         return Ok(false);
     }
-    if !context.selected().detached() {
+    if !context.selected().fixed() {
         return Ok(false);
     }
     let Some(identity) = &command.request.identity else {

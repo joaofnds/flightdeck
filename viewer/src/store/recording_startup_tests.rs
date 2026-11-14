@@ -179,26 +179,24 @@ fn a_changed_manifest_after_machine_loading_refuses_the_process_upgrade() {
 #[test]
 fn sealed_candidate_survives_pool_denial_without_repeating_accepted_app_work() {
     // Goal: an admitted sealed result survives a real retained pool owner until installation.
-    // Method: pin the selected placeholder, stall history twice, then release and finish.
+    // Only an older second waits now, and it keeps only its resident ranks, so the previous
+    // publication, elapsed time, disk bytes, disk rate and process rows can no longer be asked
+    // of the stalled second. They are asked of the newest recent second, which installs before
+    // the stall, since a recent second never waits.
+    // Method: pin the sampled buffer an older second needs, stall its install twice, then
+    // release the owner, finish, and read the stalled second and the newest recent one.
     let fixture = crate::store::startup_tests::primary_fixture();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let trace =
         persistence::work::ingestion::Trace::new(fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
     let mut stage = GuardStage::new(&fixture, &budget);
-    let pinned = stage.primary_with_no_spare(&fixture, &budget);
+    let pinned = stage.primary_with_no_sampled_spare(&fixture, &budget);
     let source_generation = stage.held.source_generation;
     let accepted = stage.accepted();
-    let identity = stage.held.apps.get(0).unwrap().observation.unwrap();
+    let identity = stage.held.sampled.get(0).unwrap().observation;
 
-    assert!(matches!(
-        stage.advance(&fixture, &budget).unwrap(),
-        Advance::Progress
-    ));
-    assert!(matches!(
-        stage.advance(&fixture, &budget).unwrap(),
-        Advance::Blocked
-    ));
+    stage.block(&fixture, &budget);
     assert_eq!(stage.accepted(), accepted);
     assert!(matches!(
         stage.advance(&fixture, &budget).unwrap(),
@@ -212,15 +210,25 @@ fn sealed_candidate_survives_pool_denial_without_repeating_accepted_app_work() {
     assert_eq!(stage.held.source_generation, source_generation);
     assert!(stage.held.startup == crate::store::StartupState::Complete);
     assert_eq!(app_work(&trace, &identity), 1);
-    assert_stalled_identity(&stage.held, &identity);
-    let apps = stage.held.apps.get(1).unwrap();
-    assert_eq!(apps.observation.unwrap().stamp.publication, 2);
+    assert_installed_sample(&stage.held, &identity);
+    let ranks = assert_newest_recent_second(&stage.held);
+    drop((stage, ranks, scope));
+    assert_eq!(budget.used(), 0);
+}
+
+/// That the newest recent second, publication 6, holds the rows and rates its second before,
+/// publication 5, gives it, and returns its ranks.
+fn assert_newest_recent_second(held: &Held) -> crate::live_app_response::Ranks {
+    let apps = held.apps.get(1).unwrap();
+    assert_eq!(apps.observation.unwrap().stamp.publication, 6);
     assert_eq!(apps.elapsed_ns, Some(1_000_000_000));
     let payload = apps.processes.as_ref().unwrap();
-    assert_eq!(payload.previous.unwrap().publication, 1);
+    assert_eq!(payload.previous.unwrap().publication, 5);
     let process = payload.iter().find(|process| process.pid == 7).unwrap();
     assert_eq!(process.disk_read_bytes(), crate::apps::Amount::Known(17));
     assert_eq!(process.disk_written_bytes(), crate::apps::Amount::Known(43));
+    assert_eq!(process.resident_bytes(), crate::apps::Amount::Known(11));
+    assert_eq!(process.footprint_bytes(), crate::apps::Amount::Known(12));
     let ranks = apps.ranks().unwrap();
     let disk = ranks
         .metrics
@@ -234,49 +242,41 @@ fn sealed_candidate_survives_pool_denial_without_repeating_accepted_app_work() {
         .unwrap();
     assert_eq!(app.amount, 60);
     assert!((app.rate.unwrap() - 60.0).abs() <= f64::EPSILON * 60.0);
-    drop((stage, ranks, scope));
-    assert_eq!(budget.used(), 0);
+
+    ranks
 }
 
-fn assert_stalled_identity(held: &Held, identity: &Observation) {
-    let apps = held.apps.get(0).unwrap();
-    assert_eq!(apps.observation, Some(*identity));
-    assert_eq!(apps.missing, None);
-    let payload = apps.processes.as_ref().unwrap();
-    let process = payload.iter().find(|process| process.pid == 7).unwrap();
-    assert_eq!(process.resident_bytes(), crate::apps::Amount::Known(11));
-    assert_eq!(process.footprint_bytes(), crate::apps::Amount::Known(12));
-    let ranks = apps.ranks().unwrap();
+/// That the older second `identity` holds its Apps' ranks, resident memory among them.
+fn assert_installed_sample(held: &Held, identity: &Observation) {
+    let sample = held.sampled.get(0).unwrap();
+    assert_eq!(sample.observation, *identity);
+    let ranks = sample.ranks().unwrap();
     assert_eq!(ranks.selected, *identity);
     let resident = ranks
         .metrics
         .iter()
-        .find(|rank| rank.metric == crate::live_app_response::Metric::Resident)
+        .find(|ranking| ranking.metric == crate::live_app_response::Metric::Resident)
         .unwrap();
-    let app = resident
-        .entries
-        .iter()
-        .find(|entry| entry.app.bytes.as_slice() == b"/Apps/Current.app")
+    let entry = resident
+        .entries()
+        .find(|rank| rank.app.bytes.as_slice() == b"/Apps/Current.app")
         .unwrap();
-    assert_eq!(app.amount, 11);
+    assert_eq!(entry.amount, 11);
 }
 
 #[test]
 fn sealed_candidate_rejects_a_changed_witness_before_installation() {
     // Goal: a pending admitted sealed result cannot certify a changed source.
-    // Method: stall history with a real pool owner, change its seal, then release the owner.
+    // Method: stall an older install with a real sampled pool owner, change its seal, then
+    // release the owner.
     let fixture = crate::store::startup_tests::primary_fixture();
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut stage = GuardStage::new(&fixture, &budget);
-    let pinned = stage.primary_with_no_spare(&fixture, &budget);
-    stage.advance(&fixture, &budget).unwrap();
-    assert!(matches!(
-        stage.advance(&fixture, &budget).unwrap(),
-        Advance::Blocked
-    ));
+    let pinned = stage.primary_with_no_sampled_spare(&fixture, &budget);
+    stage.block(&fixture, &budget);
     let accepted = stage.accepted();
     let source_generation = stage.held.source_generation;
-    let marker = fixture.marker(0);
+    let marker = fixture.marker(1);
     crate::store::tests::change_saved_manifest(&fixture.root, &marker);
     drop(pinned);
 
@@ -287,6 +287,10 @@ fn sealed_candidate_rejects_a_changed_witness_before_installation() {
         if error.kind() == std::io::ErrorKind::InvalidData)
     );
     assert_eq!(stage.accepted(), accepted);
+    assert_eq!(
+        stage.held.sampled.get(0).unwrap().ranks(),
+        Err(&Missing::Unread)
+    );
     assert_eq!(stage.held.source_generation, source_generation);
     assert!(stage.held.startup == crate::store::StartupState::Primary);
     drop(stage);
@@ -330,21 +334,27 @@ impl GuardStage {
         )
     }
 
-    fn primary_with_no_spare(
+    /// Drives the launch to Primary over two recent seconds and one older one, holding the
+    /// sampled buffer the first older second was written into, so no sampled buffer is free
+    /// and the next older second waits to be installed.
+    fn primary_with_no_sampled_spare(
         &mut self,
         fixture: &crate::live::identity_fixture::Fixture,
         budget: &Arc<ByteBudget>,
-    ) -> Arc<AppsSecond> {
-        self.held.apps =
-            crate::store::Span::new(6, crate::store::Buffers::new(7, AppsSecond::default));
-        for _ in 0..MINUTES_MAX {
-            self.advance(fixture, budget).unwrap();
-            if self.startup.phase == Phase::SelectedBoundary {
+    ) -> Arc<SampledSecond> {
+        use crate::store::{Buffers, MachineSecond, Span};
+        self.held.span = Span::new(2, Buffers::new(3, MachineSecond::default));
+        self.held.apps = crate::store::block::BlockSpan::with_fewest_buffers(2);
+        self.held.earlier = Span::new(1, Buffers::new(2, MachineSecond::default));
+        self.held.sampled = Span::new(1, Buffers::new(2, SampledSecond::empty));
+        for _ in 0..MINUTES_MAX * 2 {
+            if self.startup.cursor.next_minute_index == 2 {
                 break;
             }
+            self.advance(fixture, budget).unwrap();
         }
-        assert!(self.startup.phase == Phase::SelectedBoundary);
-        let pinned = Arc::clone(self.held.apps.newest_held().unwrap());
+        assert_eq!(self.startup.cursor.next_minute_index, 2);
+        let pinned = Arc::clone(self.held.sampled.newest_held().unwrap());
         crate::store::startup_tests::drive_primary(
             &mut self.startup,
             &Input {
@@ -355,8 +365,22 @@ impl GuardStage {
             &mut self.held,
             &mut self.ring,
         );
-        assert_eq!(self.held.apps.free(), 0);
+        assert_eq!(self.held.sampled.free(), 0);
         pinned
+    }
+
+    /// Advances until the launch waits for a buffer.
+    fn block(
+        &mut self,
+        fixture: &crate::live::identity_fixture::Fixture,
+        budget: &Arc<ByteBudget>,
+    ) {
+        for _ in 0..MINUTES_MAX * 2 {
+            if matches!(self.advance(fixture, budget).unwrap(), Advance::Blocked) {
+                return;
+            }
+        }
+        panic!("the launch did not wait for a buffer");
     }
 
     fn complete(

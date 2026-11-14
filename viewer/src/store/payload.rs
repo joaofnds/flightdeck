@@ -719,7 +719,7 @@ mod namespace_tests;
 
 #[cfg(test)]
 #[path = "payload_row_tests.rs"]
-mod row_tests;
+pub(super) mod row_tests;
 
 #[cfg(test)]
 #[path = "payload_app_tests.rs"]

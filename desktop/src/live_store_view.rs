@@ -10,7 +10,7 @@ use std::sync::Arc;
 use gpui::{App, Global};
 use num_traits::ToPrimitive;
 use serde_json::{Value, json};
-use viewer::store::{AppsSecond, Cohorts, Leaders, MachineSecond, Store, View, WallSeconds};
+use viewer::store::{Cohorts, Leaders, MachineSecond, Second, Store, View, WallSeconds};
 
 use super::LiveDashboard;
 use crate::data::Panel;
@@ -756,8 +756,8 @@ impl LiveDashboard {
 
         assert_eq!(view.apps.len(), view.seconds.len());
         let observation = match view.seconds.iter().rposition(at_second) {
-            Some(index) => view.apps[index].observation.as_ref()?,
-            None => view
+            Some(index) => view.apps.second(index).observation()?,
+            None => *view
                 .sampled
                 .iter()
                 .rfind(|sample| sample.machine.wall_ns / NANOSECONDS_PER_SECOND == second)
@@ -775,17 +775,18 @@ impl LiveDashboard {
     pub(crate) fn store_view_held(&self, target: &Target) -> Option<HeldSecond> {
         let view = self.followed_store_view()?;
         assert_eq!(view.apps.len(), view.seconds.len());
+        // From the newest, so a recent target ends the search early.
         let recent = view
             .seconds
             .iter()
-            .zip(&view.apps)
-            .rposition(|(second, apps)| {
-                store_view_matches(target, second, apps.observation.as_ref())
+            .zip(view.apps.seconds())
+            .rfind(|(second, apps)| {
+                store_view_matches(target, second, apps.observation().as_ref())
             });
-        if let Some(index) = recent {
+        if let Some((second, apps)) = recent {
             return Some(HeldSecond {
-                second: Some(Arc::clone(&view.seconds[index])),
-                rankings: Some(store_view_ranks(&view.apps[index])),
+                second: Some(Arc::clone(second)),
+                rankings: Some(store_view_ranks(apps)),
             });
         }
         let earlier = view
@@ -929,7 +930,7 @@ fn draw_store_view_panels_histories(
 /// Apps by.
 fn draw_store_view_rankings(view: &View) -> Rankings {
     assert_eq!(view.apps.len(), view.seconds.len());
-    let Some(apps) = view.apps.last() else {
+    let Some(apps) = view.apps.newest() else {
         unreachable!("a View the page draws holds a second");
     };
 
@@ -937,7 +938,7 @@ fn draw_store_view_rankings(view: &View) -> Rankings {
 }
 
 /// The top Apps of `apps`, ranked by the rule the worker ranks a second's Apps by.
-fn store_view_ranks(apps: &AppsSecond) -> Rankings {
+fn store_view_ranks(apps: Second<'_>) -> Rankings {
     from_selected(apps.ranks().map_err(|missing| missing.to_string()))
 }
 

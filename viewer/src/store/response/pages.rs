@@ -7,7 +7,7 @@ use super::{QueryContext, QuerySecond, Response};
 use crate::Cancellation;
 use crate::live_app_response::json;
 use crate::live_app_response::{Detail, KeyKind, Observation, Page};
-use crate::store::{AppRow, Payload, ProcessRow};
+use crate::store::{AppRow, AppsCursor, ProcessRow, Processes};
 
 const HEADER_BYTES: usize = 256 * size_of::<Value>();
 const ROW_BYTES: usize = 768 * size_of::<Value>();
@@ -57,15 +57,16 @@ impl QueryContext {
         let second = self
             .inspect(observation)
             .map_err(|_| Error::Bound("live App stale detail"))?;
-        let (_, payload) = second.apps().presentation()?;
-        let reservation = self.reserve_response(response_members_bytes(payload, None, page)?)?;
+        let (_, processes) = second.apps().presentation()?;
+        let reservation = self.reserve_response(response_members_bytes(processes, None, page)?)?;
 
         operation.run(|| Response::json(reservation, second.apps().ungrouped_page(page)?))
     }
 
     fn response_apps_page(&self, second: &QuerySecond, page: Page) -> Result<Response<Value>> {
         second.apps().presentation()?;
-        let apps = &second.apps().apps;
+        let mut cursor = AppsCursor::default();
+        let apps = cursor.apps(second.apps());
         let range = json::page_range(
             page,
             apps.len(),
@@ -85,19 +86,15 @@ impl QueryContext {
         page: Page,
     ) -> Result<Response<Value>> {
         let apps = second.apps();
-        let (_, payload) = apps.presentation()?;
-        let index = apps
-            .apps
-            .iter()
-            .position(|app| app.name.kind.key(&app.name.bytes) == kind.key(bytes));
-        let Some(index) = index else {
+        let (_, processes) = apps.presentation()?;
+        let Some(app) = apps.app_of(kind, bytes) else {
             let reservation = self.reserve_response(size_of::<Response<Value>>())?;
 
             return Response::json(reservation, Value::Null);
         };
-        let app_index = u32::try_from(index).map_err(|_| Error::Bound("live App index"))?;
-        let bytes = response_members_bytes(payload, Some(app_index), page)?
-            + response_app_bytes(&apps.apps[index]);
+        let app_index = u32::try_from(app.index()).map_err(|_| Error::Bound("live App index"))?;
+        let bytes = response_members_bytes(processes, Some(app_index), page)?
+            + response_app_bytes(app.row());
         let reservation = self.reserve_response(bytes)?;
 
         Response::json(
@@ -126,8 +123,12 @@ fn response_app_bytes(app: &AppRow) -> usize {
     ROW_BYTES + 12 * app.name.bytes.len() + 2 * app.name.display_name.len()
 }
 
-fn response_members_bytes(payload: &Payload, app_index: Option<u32>, page: Page) -> Result<usize> {
-    let processes = payload.members(app_index);
+fn response_members_bytes(
+    processes: Processes<'_>,
+    app_index: Option<u32>,
+    page: Page,
+) -> Result<usize> {
+    let processes = processes.members(app_index);
     let range = json::page_range(
         page,
         processes.clone().count(),
@@ -138,7 +139,7 @@ fn response_members_bytes(payload: &Payload, app_index: Option<u32>, page: Page)
         + processes
             .skip(range.start)
             .take(range.len())
-            .map(response_process_bytes)
+            .map(|process| response_process_bytes(process.row()))
             .sum::<usize>())
 }
 

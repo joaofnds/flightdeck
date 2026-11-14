@@ -108,7 +108,7 @@ fn from_view_point(
     let (resident, available, completeness) = match apps {
         OverviewApps::Second(apps) => (
             apps.resident(cohort),
-            apps.missing.is_none(),
+            apps.missing().is_none(),
             apps.completeness(),
         ),
         OverviewApps::Stretch(stretch) => (

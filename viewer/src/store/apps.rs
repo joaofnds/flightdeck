@@ -26,9 +26,12 @@ mod tests;
 #[path = "presentation_tests.rs"]
 mod presentation_tests;
 
+#[cfg(test)]
+#[path = "app_identity_tests.rs"]
+mod app_identity_tests;
+
 #[path = "presentation.rs"]
 mod presentation;
-pub use presentation::DetachedAppsSecond;
 
 #[path = "app_rows.rs"]
 mod app_rows;
@@ -237,7 +240,7 @@ impl AppsSecond {
         &mut self,
         sample: &Sample,
         previous: Option<&Self>,
-        budget: Option<&Arc<super::ByteBudget>>,
+        budget: &Arc<super::ByteBudget>,
     ) {
         let apps = sample.apps();
         if apps.len() > APPS_PER_SECOND_MAX {
@@ -296,17 +299,21 @@ impl AppsSecond {
     }
 }
 
+/// The name the second holds for `app`: the one `previous` holds, or a copy charged to
+/// `budget`, or `None` where the budget refuses it.
 fn fill_name(
     app: &App,
     previous: Option<Arc<RankedApp>>,
-    budget: Option<&Arc<super::ByteBudget>>,
+    budget: &Arc<super::ByteBudget>,
 ) -> Option<Arc<RankedApp>> {
-    match budget {
-        Some(budget) => match previous {
-            Some(name) => RankedApp::retained(&name, budget),
-            None => RankedApp::captured(app, budget),
-        },
-        None => Some(previous.unwrap_or_else(|| app.ranked())),
+    match previous {
+        Some(name) => {
+            // Every name a second holds was charged when a second first held it, so sharing it
+            // charges nothing more.
+            assert!(name.reserved_bytes() > 0);
+            Some(name)
+        }
+        None => RankedApp::captured(app, budget),
     }
 }
 

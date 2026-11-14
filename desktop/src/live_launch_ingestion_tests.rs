@@ -411,18 +411,19 @@ fn withholds_app_rates_but_keeps_exit_evidence_after_a_missed_run_tick() {
     assert_eq!(snapshot.apps.as_deref().unwrap()["app_count"], 2);
     assert_eq!(snapshot.apps.as_deref().unwrap()["process_count"], 4);
     assert_eq!(detail["processes"][0]["pid"], 41001);
-    let stored = view.apps.last().unwrap();
-    assert_eq!(stored.apps.len(), 2);
+    let newest = view.apps.newest().unwrap();
+    assert_eq!(newest.app_count(), 2);
     let exited_detail = exited.detail.as_ref().unwrap();
     assert_gap_intervals(exited_detail);
     assert_eq!(exited_detail["processes"][0]["pid"], 42001);
     assert_eq!(exited_detail["processes"][0]["state"], "exited_verified");
-    assert_eq!(stored.observation.unwrap().run_tick, 2);
-    assert_eq!(stored.elapsed_ns, None);
-    assert!(!stored.consecutive);
-    let name = std::sync::Arc::clone(&stored.apps[0].name);
+    assert_eq!(newest.observation().unwrap().run_tick, 2);
+    assert_eq!(newest.elapsed_ns(), None);
+    assert!(!newest.consecutive());
+    let mut cursor = viewer::store::AppsCursor::default();
+    let name = std::sync::Arc::clone(&cursor.apps(newest)[0].name);
     assert_eq!(name.bytes, source::APP);
-    let charted = stored.attribution(viewer::AppAttributionMetric::Cpu, &[name]);
+    let charted = newest.attribution(viewer::AppAttributionMetric::Cpu, &[name]);
     let reading = charted.apps[0].unwrap();
     assert_eq!(reading.rate, None);
     let measure = reading.measure.unwrap();
@@ -504,7 +505,7 @@ fn a_nonfinite_power_reading_leaves_the_second_readable_beside_its_missing_power
     assert!(snapshot.selection["summary"]["power_watts"].is_null());
     assert!(snapshot.selection["summary"]["memory_total_bytes"].is_null());
     assert_eq!(view.seconds.last().unwrap().power_watts, None);
-    assert_eq!(view.apps.last().unwrap().missing, None);
+    assert_eq!(view.apps.newest().unwrap().missing(), None);
     harness.teardown();
     let events = harness.events();
     assert_eq!(count(&events, Producer::Worker, Kind::AttemptFailed, 2), 0);
@@ -542,7 +543,7 @@ fn an_app_refusal_leaves_the_machine_readings_beside_it() {
         8_589_934_592_u64
     );
     assert!(matches!(
-        view.apps.last().unwrap().missing,
+        view.apps.newest().unwrap().missing(),
         Some(viewer::store::Missing::Refused(_))
     ));
     harness.teardown();

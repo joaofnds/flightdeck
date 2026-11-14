@@ -11,7 +11,7 @@ use super::attribution::{COHORT_MAX, METRICS, ranked_metric};
 use super::key_order::{self, key_of};
 use super::stretch::StretchRow;
 use super::{
-    AppRow, AppsSecond, AppsStretch, EARLIER_STRIDE_SECONDS, MachineSecond, SECONDS_MAX,
+    AppRow, AppsCursor, AppsSpan, AppsStretch, EARLIER_STRIDE_SECONDS, MachineSecond, SECONDS_MAX,
     STRETCHES_MAX,
 };
 use crate::app_attribution_history::AppAttributionMetric;
@@ -102,7 +102,7 @@ pub struct Readings<'view> {
     /// The seconds the View holds one by one, oldest first.
     pub seconds: &'view [Arc<MachineSecond>],
     /// Each App's totals at each of `seconds`, in the same order.
-    pub apps: &'view [Arc<AppsSecond>],
+    pub apps: &'view AppsSpan,
     /// The closed stretches, oldest first, each adding up the seconds of `seconds` that lie in
     /// it.
     pub stretches: &'view [Arc<AppsStretch>],
@@ -238,7 +238,9 @@ impl Leaders {
         run: Range<usize>,
         stretches: &[Arc<AppsStretch>],
     ) -> bool {
-        for index in run {
+        let mut cursor = AppsCursor::default();
+        let seconds = readings.apps.seconds_from(run.start);
+        for (index, second) in run.zip(seconds) {
             let id = super::stretch(&readings.seconds[index]);
             if stretches
                 .binary_search_by_key(&id, |stretch| stretch.stretch)
@@ -247,9 +249,8 @@ impl Leaders {
                 continue;
             }
 
-            let second = &readings.apps[index];
-            let elapsed_ns = second.elapsed_ns.filter(|elapsed_ns| *elapsed_ns > 0);
-            if !self.choose_add(&second.apps, |entry, row| {
+            let elapsed_ns = second.elapsed_ns().filter(|elapsed_ns| *elapsed_ns > 0);
+            if !self.choose_add(cursor.apps(second), |entry, row| {
                 choose_add_second(entry, row, elapsed_ns);
             }) {
                 return false;
@@ -359,6 +360,8 @@ fn choose_stretches(
 }
 
 /// Adds `row`, an App's readings at a second that measured its Apps over `elapsed_ns`.
+// Out of line, since the merge that calls this for each App ran slower with it compiled in.
+#[inline(never)]
 fn choose_add_second(entry: &mut Entry, row: &AppRow, elapsed_ns: Option<u64>) {
     if let Some(elapsed_ns) = elapsed_ns {
         for (place, metric) in METRICS.into_iter().enumerate() {
@@ -375,6 +378,8 @@ fn choose_add_second(entry: &mut Entry, row: &AppRow, elapsed_ns: Option<u64>) {
 }
 
 /// Adds `row`, an App's readings added up over a stretch.
+// Out of line, since the merge that calls this for each App ran slower with it compiled in.
+#[inline(never)]
 fn choose_add_stretch(entry: &mut Entry, row: &StretchRow) {
     for (place, metric) in METRICS.into_iter().enumerate() {
         if let Some((amount, elapsed_ns)) = row.rate_measured(ranked_metric(metric)) {

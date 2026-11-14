@@ -401,7 +401,7 @@ impl Prepared {
                 .apps
                 .replace_admitted(count, budget)
                 .map_err(|_| PrepareError::Admission(Admission::AppMetadata))?;
-            self.apps.fill(sample.get(), previous, Some(budget));
+            self.apps.fill(sample.get(), previous, budget);
             self.apps.observation = Some(sample.get().selected);
             if self.apps.missing == Some(Missing::Budget) {
                 self.apps = AppsSecond::default();

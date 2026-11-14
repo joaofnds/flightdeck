@@ -1,7 +1,9 @@
 //! The buffers the store writes its readings into, allocated when the store starts, and the
 //! mailbox it leaves its Views in. Neither thread waits on the other: a buffer is written again
-//! only once no View holds it, a store that finds every buffer held makes a new one, and the main
-//! thread takes a new View only when no store step is handing one over.
+//! only once nothing but the buffers holds it, a store that finds every buffer held makes a new
+//! one in the slot of the one written longest ago, and the main thread takes a new View only
+//! when no store step is handing one over. So a View or a query context, however long it is
+//! held, never stops the store or its launch, and keeps alive only the readings it holds.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, TryLockError};
@@ -44,11 +46,12 @@ impl<T> Buffers<T> {
         Some(self.write_at(index, fill))
     }
 
-    /// A buffer written by `fill`, made new where every buffer is held. The next buffer is the
-    /// one written longest ago, which a span has let go of once it is full, so its new one takes
-    /// its place and only the View holding it keeps it alive. The readings in memory are these
-    /// buffers and what the Views hold.
-    fn write_replacing(&mut self, fill: impl FnOnce(&mut T)) -> Arc<T> {
+    /// A buffer written by `fill`, made new where every buffer is held. The new one takes the
+    /// slot of the one written longest ago, which only its holders then keep alive: a View, a
+    /// query context, or the span where it still holds that reading. The count of buffers never
+    /// grows, and the readings in memory are these buffers and what the span, the Views and
+    /// the contexts hold.
+    pub(super) fn write_replacing(&mut self, fill: impl FnOnce(&mut T)) -> Arc<T> {
         let index = self.write_index().unwrap_or_else(|| {
             self.all[self.next] = Arc::new((self.make)());
             self.next
@@ -88,6 +91,11 @@ impl<T> Buffers<T> {
                 clear(buffer);
             }
         }
+    }
+
+    /// How many buffers there are, held or not.
+    pub(super) fn count(&self) -> usize {
+        self.all.len()
     }
 
     /// How many buffers nothing but these buffers holds.

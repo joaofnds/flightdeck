@@ -32,16 +32,22 @@ pub fn charted(seconds: &[MachineSecond; 4]) -> (View, Cohorts) {
     view.apps_loaded = true;
     let used = [("A", 500_000_000), ("B", 250_000_000), ("C", 125_000_000)];
     for (index, consecutive) in [(0, false), (1, true), (3, false)] {
-        view.apps[index] = Arc::new(AppsSecond {
-            consecutive,
-            ..apps_at(&seconds[index], &used)
-        });
+        view.apps.replace(
+            index,
+            Arc::new(AppsSecond {
+                consecutive,
+                ..apps_at(&seconds[index], &used)
+            }),
+        );
     }
-    view.apps[2] = Arc::new(AppsSecond {
-        observation: Some(apps_at_observation(&seconds[2])),
-        consecutive: true,
-        ..AppsSecond::default()
-    });
+    view.apps.replace(
+        2,
+        Arc::new(AppsSecond {
+            observation: Some(apps_at_observation(&seconds[2])),
+            consecutive: true,
+            ..AppsSecond::default()
+        }),
+    );
     let cohorts = Cohorts {
         seconds: seconds.len(),
         cpu: vec![ranked("A"), ranked("B")],
@@ -59,12 +65,15 @@ pub fn sliding(seconds: &[MachineSecond], cohort: &[&str]) -> (View, Cohorts) {
     let mut view = view(1, &[], seconds);
     view.apps_loaded = true;
     let used = [("A", 500_000_000), ("B", 250_000_000), ("C", 125_000_000)];
-    for (apps, second) in view.apps.iter_mut().zip(seconds) {
-        *apps = Arc::new(AppsSecond {
-            consecutive: second.wall_ns / NANOSECONDS_PER_SECOND == 102,
-            ..apps_at(second, &used)
-        });
-    }
+    view.apps = seconds
+        .iter()
+        .map(|second| {
+            Arc::new(AppsSecond {
+                consecutive: second.wall_ns / NANOSECONDS_PER_SECOND == 102,
+                ..apps_at(second, &used)
+            })
+        })
+        .collect();
     let cpu: Vec<_> = cohort.iter().map(|name| ranked(name)).collect();
     let cohorts = Cohorts {
         seconds: seconds.len(),
@@ -221,7 +230,8 @@ pub fn hour_until(newest: u64) -> (View, Cohorts) {
         .collect();
     let mut view = view(1, &earlier, &live);
     view.apps_loaded = true;
-    view.apps = apps(live_first..newest + 1);
+    let live_apps = apps(live_first..newest + 1);
+    view.apps = live_apps.iter().cloned().collect();
     let older = [
         apps(live_first - 20..live_first - 10),
         apps(live_first - 10..live_first),
@@ -229,7 +239,7 @@ pub fn hour_until(newest: u64) -> (View, Cohorts) {
     view.stretches = older
         .iter()
         .map(Vec::as_slice)
-        .chain(view.apps[..view.apps.len() - 1].chunks(10))
+        .chain(live_apps[..live_apps.len() - 1].chunks(10))
         .zip((live_first - 20) / 10..)
         .map(|(seconds, stretch)| Arc::new(AppsStretch::of_seconds(stretch, seconds)))
         .collect();

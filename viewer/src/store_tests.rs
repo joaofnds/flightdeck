@@ -161,7 +161,7 @@ fn assert_saved_app_readings(saved: &View, live: &View) {
     use super::native::Origin;
     assert_eq!(saved.apps.len(), live.apps.len());
     assert!(saved.apps.len() <= super::SECONDS_MAX);
-    for (saved, live) in saved.apps.iter().zip(&live.apps) {
+    for (saved, live) in saved.apps.iter().zip(live.apps.iter()) {
         assert_eq!(
             saved.metadata.origin,
             Origin::Saved(persistence::Losses::default())
@@ -346,11 +346,11 @@ fn a_view_identifies_the_second_publication_and_its_unattributed_process() {
     assert_eq!(alternatives.len(), 2);
     assert_eq!(alternatives[1].stamp.publication, 2);
     let selected = view.observation(&alternatives[1]).unwrap();
-    let processes = selected.processes.as_ref().unwrap();
+    let processes = selected.processes().unwrap();
     assert_eq!(processes.len(), 1);
-    assert_eq!(processes[0].pid, 7);
-    assert_eq!(processes.app_index(0), None);
-    assert_eq!(selected.observation, Some(alternatives[1]));
+    assert_eq!(processes.at(0).row().pid, 7);
+    assert_eq!(processes.at(0).app_index(), None);
+    assert_eq!(selected.observation(), Some(alternatives[1]));
 }
 
 #[test]
@@ -2272,20 +2272,18 @@ mod when_the_seconds_hold_more_apps_than_a_chart_draws {
     fn shown_by_store_of(view: &View, metric: AppAttributionMetric) -> Vec<Attribution> {
         let cohorts = charted_cohorts(view);
         let cohort = cohorts.of(metric);
-        let drawn = &view.apps[view.apps.len() - cohorts.seconds..];
+        let drawn = view.apps.seconds_from(view.apps.len() - cohorts.seconds);
 
         drawn
-            .iter()
             .map(|second| second.attribution(metric, cohort))
             .collect()
     }
 
     fn shown_by_store_of_resident(view: &View) -> Vec<Resident> {
         let cohorts = charted_cohorts(view);
-        let drawn = &view.apps[view.apps.len() - cohorts.seconds..];
+        let drawn = view.apps.seconds_from(view.apps.len() - cohorts.seconds);
 
         drawn
-            .iter()
             .map(|second| second.resident(&cohorts.resident))
             .collect()
     }
@@ -2393,7 +2391,7 @@ type Drawn<'second> = (
 );
 
 /// What a page draws of each of `apps`, which leaves out where the store took the second from.
-fn drawn(apps: &[Arc<super::AppsSecond>]) -> Vec<Drawn<'_>> {
+fn drawn(apps: &super::AppsSpan) -> Vec<Drawn<'_>> {
     apps.iter()
         .map(|second| {
             (
@@ -2416,24 +2414,47 @@ fn held_through(view: &View, wall_second: u64) -> bool {
 
 #[test]
 fn a_retained_view_stops_no_ingestion_past_the_spare_slots() {
-    // Goal: a View held as long as the user likes, as a hold does, leaves the store taking seconds
-    // and the View as it was. Method: pin a full span, exhaust every spare slot, take one more.
+    // Goal: a View held as long as the user likes, as a hold does, leaves the store taking
+    // seconds and the View as it was, even once the View and the span hold every App buffer.
+    // Method: pin a full span, take as many seconds as there are spare App buffers, check that
+    // none is free, take one more, and compare the buffer count, the span's seconds and the
+    // View's.
     let mut held = super::Held::without_recording();
     let full = u64::try_from(super::SECONDS_MAX).unwrap();
     for second in 1..=full {
-        assert!(held.take(&RUN, &second_at(second), UNREAD));
+        assert!(
+            held.take(&RUN, &second_at(second), UNREAD),
+            "second {second}"
+        );
     }
     let reader = published(&mut held);
-    let last = full + u64::try_from(super::SECONDS_HELD_MAX).unwrap();
+    let spare = u64::try_from(held.apps.buffer_count() - super::SECONDS_MAX).unwrap();
+    let last = full + spare;
     for second in full + 1..=last {
-        assert!(held.take(&RUN, &second_at(second), UNREAD));
+        assert!(
+            held.take(&RUN, &second_at(second), UNREAD),
+            "second {second}"
+        );
     }
+    assert_eq!(held.apps.free_count(), 0);
+    let count = held.apps.buffer_count();
 
     let accepted = held.take(&RUN, &second_at(last + 1), UNREAD);
 
     assert!(accepted);
+    assert_eq!(held.apps.buffer_count(), count);
     assert_eq!(held.span.newest().unwrap().publication, last + 1);
+    let publication = |second: super::Second<'_>| second.observation().unwrap().stamp.publication;
+    let span = held.apps.span();
+    assert_eq!(
+        span.seconds().next().map(publication),
+        Some(last + 2 - full)
+    );
+    assert_eq!(span.newest().map(publication), Some(last + 1));
     assert_eq!(reader.seconds.last().unwrap().publication, full);
+    assert_eq!(reader.apps.len(), super::SECONDS_MAX);
+    assert_eq!(reader.apps.seconds().next().map(publication), Some(1));
+    assert_eq!(reader.apps.newest().map(publication), Some(full));
 }
 
 #[test]

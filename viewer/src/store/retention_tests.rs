@@ -28,7 +28,7 @@ fn complete_retention_admits_an_explicit_refusal_before_evicting_its_recent_owne
     let budget = Arc::new(super::ByteBudget::new(1024 * 1024));
     let mut held = Held::without_recording_with_payload(Arc::clone(&budget));
     held.span = super::Span::new(1, super::Buffers::new(2, MachineSecond::default));
-    held.apps = super::Span::new(1, super::Buffers::new(2, super::AppsSecond::default));
+    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(1);
     let mut refused = super::AppsSecond::default();
     refused.take(super::TickApps::Refused("store tick events"), None);
     refused.observation = Some(super::take_observation(&RUN, &second(1)));
@@ -110,7 +110,8 @@ fn an_eviction_records_the_departed_time_without_moving_an_older_view() {
 fn a_retained_view_keeps_the_eviction_boundary_it_was_published_with() {
     // Goal: the eviction boundary names what ingestion actually evicted, and a View keeps the
     // boundary of its own span however far the store goes on past it.
-    // Method: retain a full View, consume every spare buffer, then take one further publication.
+    // Method: retain a full View, take as many seconds as there are spare machine buffers,
+    // then take one further publication.
     let mut held = full_span();
     let original = publish(&mut held);
     let count = u64::try_from(super::SECONDS_HELD_MAX).unwrap();

@@ -89,7 +89,7 @@ fn retired_private_apps_release_budget_before_the_next_real_source_capture() {
         1,
         crate::store::Buffers::new(2, crate::store::MachineSecond::default),
     );
-    held.apps = crate::store::Span::new(1, crate::store::Buffers::new(2, AppsSecond::default));
+    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(1);
     let mut ring = make_ring(&fixture.root, &budget);
     ring.follow().unwrap();
     read_native(&mut held, &mut ring, &operation).unwrap();
@@ -171,7 +171,7 @@ fn staged_before_primary(
         2,
         crate::store::Buffers::new(3, crate::store::MachineSecond::default),
     );
-    held.apps = crate::store::Span::new(2, crate::store::Buffers::new(3, AppsSecond::default));
+    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(2);
     held.startup = crate::store::StartupState::Loading;
     let mut ring = make_ring(input.root, input.budget);
     let mut startup = crate::store::recording::staged::Startup::new();

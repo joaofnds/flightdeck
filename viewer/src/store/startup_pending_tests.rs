@@ -6,9 +6,15 @@ use crate::store::{Buffers, MachineSecond, Span, StartupState};
 use persistence::work::ingestion::{Event, Key, Kind, Purpose, Trace};
 
 #[test]
-fn pending_recent_candidates_age_to_older_and_outside_without_rederivation() {
-    // Goal: native progress reclassifies admitted history without losing its source predecessor.
-    // Method: pin a retired recent spare, then append two real ticks between denied retries.
+fn recent_candidates_install_past_a_retired_reader_without_rederivation() {
+    // Goal: a reader holding a recent second's buffer stops no install, even with every App
+    // buffer held, and native progress after the installs derives no history twice. A recent
+    // install never waits, since its new block takes a buffer's slot where every buffer is
+    // held, so no recent candidate is left pending to age into the older seconds or out of the
+    // recording, and the launch asserts that a waiting candidate is never recent.
+    // Method: pin a retired recent second, hold every other App buffer, install the history,
+    // append two real ticks, then finish, compare the span's seconds with the retired one and
+    // count each publication's derivations.
     let mut run = PendingStage::new(recent_fixture(), 6, RECENT_TICKS);
     let budget = Arc::clone(&run.budget);
     let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
@@ -18,48 +24,24 @@ fn pending_recent_candidates_age_to_older_and_outside_without_rederivation() {
     assert_eq!(retired.observation, Some(run.observation(6)));
     assert_eq!(retired.missing, Some(Missing::Unread));
     run.reach_primary();
-    assert_eq!(Arc::strong_count(&retired), 2);
-    run.assert_recent_push_room();
+    let others = run.stage.held.apps.hold_every_free_buffer();
+    assert_eq!(run.stage.held.apps.free_count(), 0);
+    let count = run.stage.held.apps.buffer_count();
     run.reach_phase(Phase::History);
     assert!(!run.turn());
-    run.assert_pending_recent(1);
-    run.assert_progress(&ReplayPosition {
-        minute: 0,
-        next_endpoint: 0,
-        previous: None,
-    });
-    assert_stable_denial(&mut run, &trace, 1);
-    let opened = table_work(&trace, &run.key(0));
+    assert!(run.stage.startup.pending.is_none());
+    assert!(run.blocked.is_none());
 
     run.fixture.publish_with_usage(1064, &usage(122));
     assert!(!run.turn());
-    assert_recent_aged_to_older(&run, &trace);
-    assert_reopened(&trace, &run.key(0), &opened);
-    let reopened = table_work(&trace, &run.key(0));
-    assert_stable_denial(&mut run, &trace, 2);
-
     run.fixture.publish_with_usage(1065, &usage(123));
     assert!(!run.turn());
-    run.assert_native(Interval {
-        selected: 8,
-        previous: 7,
-    });
-    assert!(matches!(
-        target(&run.stage.held, &run.observation(2)),
-        Target::Outside
-    ));
-    assert!(run.stage.startup.pending.is_none());
-    run.assert_progress(&ReplayPosition {
-        minute: 0,
-        next_endpoint: 2,
-        previous: Some(2),
-    });
-    run.assert_unread(&[3, 4]);
-    assert_eq!(table_work(&trace, &run.key(0)), reopened);
-    assert_history_work(&trace, &run, &[1, 2]);
-    drop(retired);
     run.complete();
 
+    assert_eq!(run.stage.held.apps.buffer_count(), count);
+    let installed = run.recent(6);
+    assert!(!std::ptr::eq(installed, Arc::as_ptr(&retired)));
+    assert_eq!(installed.missing, None);
     run.assert_retained(&Retained {
         recent: &[3, 4, 5, 6, 7, 8],
         older: &[1],
@@ -70,7 +52,7 @@ fn pending_recent_candidates_age_to_older_and_outside_without_rederivation() {
     });
     assert_sampled_resident(run.sampled(1), &run.observation(1));
     assert_history_work(&trace, &run, &[1, 2, 3, 4]);
-    drop((run, scope));
+    drop((retired, others, run, scope));
     assert_eq!(budget.used(), 0);
 }
 
@@ -95,7 +77,6 @@ fn pending_older_candidate_resolves_outside_without_overwriting_the_native_sampl
         older: &[3],
     });
     run.assert_sampled_push_room();
-    assert_eq!(run.stage.held.apps.free(), 1);
     run.reach_phase(Phase::History);
     assert!(!run.turn());
     run.assert_pending_older(3);
@@ -144,26 +125,28 @@ fn pending_older_candidate_resolves_outside_without_overwriting_the_native_sampl
 #[test]
 fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     // Goal: a queued query cannot bypass witness validation while history is capacity-blocked.
-    // Method: receive a real Primary control, change its pending seal, then query the same caller.
-    let mut run = PendingStage::new(recent_fixture(), 6, RECENT_TICKS);
+    // Method: hold the sampled buffer an older install needs, over seconds more than fifteen
+    // minutes older than the recent ones so the query reaches none that left the span, receive
+    // a real Primary control, change the pending seal, then query the same caller.
+    let mut run = PendingStage::older();
     let budget = Arc::clone(&run.budget);
     let trace = Trace::new(run.fixture.writer.identity().unwrap().recording);
     let scope = trace.enter();
-    run.reach_phase(Phase::SelectedBoundary);
-    let pinned = Arc::clone(run.stage.held.apps.newest_held().unwrap());
+    run.reach_loaded(2);
+    let pinned = Arc::clone(run.sampled_held());
     run.reach_primary();
     run.reach_phase(Phase::History);
     assert!(!run.turn());
-    run.assert_pending_recent(1);
+    run.assert_pending_older(3);
     let handle = run.shared.queries.handle(std::thread::current());
-    let selected = run.observation(6);
+    let selected = run.observation(7);
 
     let retained = run.primary_reply(&handle);
 
     assert_primary_query(&retained, &selected);
     let accepted = run.stage.accepted();
     let root = run.fixture.root.clone();
-    crate::store::tests::change_saved_manifest(&root, &run.stage.startup.minutes[0].found.marker);
+    crate::store::tests::change_saved_manifest(&root, &run.stage.startup.minutes[1].found.marker);
     let token = run.submit_primary_query(&handle);
     assert_eq!(
         token,
@@ -184,15 +167,15 @@ fn a_queued_primary_query_rejects_a_changed_witness_before_serving_a_reply() {
     assert!(run.shared.queries.requested());
     assert!(run.shared.mailbox.take().is_none());
     assert_eq!(run.stage.accepted(), accepted);
-    run.assert_pending_recent(1);
+    run.assert_pending_older(3);
     run.assert_progress(&ReplayPosition {
-        minute: 0,
+        minute: 1,
         next_endpoint: 0,
-        previous: None,
+        previous: Some(2),
     });
-    assert_eq!(run.stage.held.newest.unwrap().publication, 6);
+    assert_eq!(run.stage.held.newest.unwrap().publication, 7);
     assert_eq!(
-        publication_work(&trace, &run.observation(1), Kind::AppDerivation),
+        publication_work(&trace, &run.observation(3), Kind::AppDerivation),
         1
     );
     assert_primary_query(&retained, &selected);
@@ -243,6 +226,16 @@ const RECENT_TICKS: &[[u64; 3]] = &[
     [7, 122, 1064],
     [8, 123, 1065],
 ];
+/// The publication, run tick and wall second of each tick of `far_older_fixture`.
+const FAR_OLDER_TICKS: &[[u64; 3]] = &[
+    [1, 0, 1000],
+    [2, 1, 1010],
+    [3, 60, 1020],
+    [4, 61, 2000],
+    [5, 62, 2001],
+    [6, 120, 2002],
+    [7, 121, 2003],
+];
 const OLDER_TICKS: &[[u64; 3]] = &[
     [1, 0, 1000],
     [2, 1, 1001],
@@ -261,10 +254,7 @@ impl PendingStage {
             recent_capacity,
             Buffers::new(recent_capacity + 1, MachineSecond::default),
         );
-        stage.held.apps = Span::new(
-            recent_capacity,
-            Buffers::new(recent_capacity + 1, AppsSecond::default),
-        );
+        stage.held.apps = crate::store::block::BlockSpan::with_fewest_buffers(recent_capacity);
         Self {
             stage,
             shared: startup_shared(),
@@ -273,6 +263,16 @@ impl PendingStage {
             fixture,
             ticks,
         }
+    }
+
+    /// A launch over four recent seconds and three older ones more than fifteen minutes before
+    /// them, of which the sampled buffers keep one, so a reader of the first older second
+    /// leaves no sampled buffer free.
+    fn older() -> Self {
+        let mut run = Self::new(far_older_fixture(), 4, FAR_OLDER_TICKS);
+        run.stage.held.earlier = Span::new(1, Buffers::new(2, MachineSecond::default));
+        run.stage.held.sampled = Span::new(1, Buffers::new(2, SampledSecond::empty));
+        run
     }
 
     fn turn(&mut self) -> bool {
@@ -434,47 +434,12 @@ impl PendingStage {
         self.stage.held.sampled.newest_held().unwrap()
     }
 
-    fn assert_recent_push_room(&self) {
-        assert_eq!(self.stage.held.apps.free(), 0);
-        assert_eq!(self.stage.held.apps.len(), 6);
-        assert_eq!(
-            Arc::strong_count(self.stage.held.apps.held().next().unwrap()),
-            2
-        );
-        self.assert_pairing();
-    }
-
     fn assert_sampled_push_room(&self) {
         let sampled = &self.stage.held.sampled;
         assert_eq!(sampled.free(), 0);
         assert_eq!(sampled.len(), 1);
         assert_eq!(Arc::strong_count(sampled.held().next().unwrap()), 2);
         self.assert_pairing();
-    }
-
-    fn assert_pending_recent(&self, publication: u64) {
-        let candidate = self.stage.startup.pending.as_ref().unwrap();
-        let observation = self.observation(publication);
-        assert_eq!(candidate.observation, observation);
-        assert!(matches!(
-            target(&self.stage.held, &observation),
-            Target::Recent(_)
-        ));
-        assert!(candidate.sampled.is_none());
-        assert_recent_resident(&candidate.apps, &observation);
-        assert!(candidate.before.as_ref().unwrap().is_admitted());
-        assert_eq!(
-            candidate
-                .before
-                .as_ref()
-                .unwrap()
-                .previous()
-                .0
-                .observation(),
-            observation
-        );
-        assert!(self.blocked.is_some());
-        self.assert_recent_push_room();
     }
 
     fn assert_pending_older(&self, publication: u64) {
@@ -523,14 +488,6 @@ impl PendingStage {
         assert!(self.stage.held.startup == StartupState::Primary);
         assert_eq!(self.stage.held.source_generation, 1);
         assert!(self.stage.held.failure.is_none());
-    }
-
-    fn assert_unread(&self, publications: &[u64]) {
-        for publication in publications {
-            let apps = self.recent(*publication);
-            assert_eq!(apps.missing, Some(Missing::Unread));
-            assert_eq!(apps.processes.as_ref().unwrap_err(), &Missing::Unread);
-        }
     }
 
     fn assert_native(&self, interval: Interval) {
@@ -619,22 +576,42 @@ fn assert_primary_query(context: &crate::store::QueryContext, selected: &Observa
         }
     );
     assert_eq!(context.selected().observation, *selected);
-    assert_eq!(context.context_last_second(), 1063);
-    assert_eq!(context.seconds().len(), 6);
+    assert_eq!(context.context_last_second(), 2003);
+    assert_eq!(context.seconds().len(), 4);
     assert!(
         context
             .seconds()
             .iter()
-            .all(crate::store::QuerySecond::detached)
+            .all(crate::store::QuerySecond::fixed)
     );
     assert_eq!(context.selected().machine().cpu_percent, Some(50.0));
     let selection = context
         .selection(&Arc::new(crate::Cancellation::default()), 0)
         .unwrap();
-    assert_eq!(selection["selected"]["publication"], 6);
+    assert_eq!(selection["selected"]["publication"], 7);
     assert_eq!(selection["selected"]["run_tick"], 121);
-    assert_eq!(selection["selected"]["wall_ns"], 1_063_000_000_000_u64);
+    assert_eq!(selection["selected"]["wall_ns"], 2_003_000_000_000_u64);
     assert_eq!(selection["summary"]["cpu_percent"], 50.0);
+}
+
+/// Three seconds in three stretches of ten wall seconds, then four more than fifteen minutes
+/// later, sealed in three minutes so the third older second leaves the span while the first
+/// one's sampled buffer can still be held.
+fn far_older_fixture() -> Fixture {
+    let mut fixture = Fixture::new();
+    fixture.publish_with_usage(1000, &usage(0));
+    fixture.publish_with_usage(1010, &usage(1));
+    fixture.seal_minute(0);
+    fixture.skip_run_ticks(58);
+    fixture.publish_with_usage(1020, &usage(60));
+    fixture.publish_with_usage(2000, &usage(61));
+    fixture.publish_with_usage(2001, &usage(62));
+    fixture.seal_minute(1);
+    fixture.skip_run_ticks(57);
+    fixture.publish_with_usage(2002, &usage(120));
+    fixture.publish_with_usage(2003, &usage(121));
+    fixture.seal_minute(2);
+    fixture
 }
 
 fn recent_fixture() -> Fixture {
@@ -872,25 +849,6 @@ fn assert_older_resolved(run: &PendingStage, trace: &Trace) {
     );
     assert_eq!(
         publication_work(trace, &run.observation(4), Kind::CommittedFrameCapture),
-        1
-    );
-}
-
-fn assert_recent_aged_to_older(run: &PendingStage, trace: &Trace) {
-    run.assert_native(Interval {
-        selected: 7,
-        previous: 6,
-    });
-    assert_sampled_resident(run.sampled(1), &run.observation(1));
-    run.assert_pending_recent(2);
-    run.assert_progress(&ReplayPosition {
-        minute: 0,
-        next_endpoint: 1,
-        previous: Some(1),
-    });
-    run.assert_unread(&[2, 3, 4]);
-    assert_eq!(
-        publication_work(trace, &run.observation(1), Kind::AppDerivation),
         1
     );
 }

@@ -1,7 +1,7 @@
 //! Older machine samples own their exact identity and bounded hover rankings together.
 use std::sync::Arc;
 
-use super::{AppsSecond, MachineSecond, Missing};
+use super::{AppRow, AppsCursor, AppsSecond, MachineSecond, Missing, Second};
 use crate::apps::Stamp;
 use crate::byte_budget::{ByteBudget, ByteReservation};
 use crate::live_app_response::{
@@ -81,20 +81,19 @@ impl SampledSecond {
     /// Admission precedes retention mutation. Explicit presentation refusals remain resolved.
     pub(super) fn admitted(
         machine: &MachineSecond,
-        apps: &AppsSecond,
+        apps: Second<'_>,
         budget: &Arc<ByteBudget>,
     ) -> Result<Self, Missing> {
-        if apps.missing == Some(Missing::Budget) {
+        if apps.missing() == Some(&Missing::Budget) {
             return Err(Missing::Budget);
         }
 
-        let reservation = budget
-            .reserve(Self::take_bytes(apps))
-            .ok_or(Missing::Budget)?;
+        let bytes = Self::take_bytes(AppsCursor::default().apps(apps), apps.missing());
+        let reservation = budget.reserve(bytes).ok_or(Missing::Budget)?;
         Ok(Self {
             machine: machine.clone(),
             observation: apps
-                .observation
+                .observation()
                 .unwrap_or_else(|| unreachable!("sampled identity")),
             ranks: apps.ranks(),
             reservation: Some(reservation),
@@ -147,7 +146,7 @@ impl SampledSecond {
         self.observation = apps.observation.unwrap_or_else(|| unreachable!());
         assert_eq!(self.observation.stamp.publication, machine.publication);
         assert_eq!(self.observation.wall_ns, Some(machine.wall_ns));
-        let reservation = budget.reserve(Self::take_bytes(apps));
+        let reservation = budget.reserve(Self::take_bytes(&apps.apps, apps.missing.as_ref()));
         match reservation {
             Some(reservation) => {
                 self.ranks = apps.ranks();
@@ -157,9 +156,8 @@ impl SampledSecond {
         }
     }
 
-    fn take_bytes(apps: &AppsSecond) -> usize {
+    fn take_bytes(apps: &[AppRow], missing: Option<&Missing>) -> usize {
         let name_bytes = apps
-            .apps
             .iter()
             .map(|app| {
                 size_of::<RankedApp>()
@@ -169,7 +167,7 @@ impl SampledSecond {
             })
             .max()
             .unwrap_or(0);
-        let refusal_bytes = match &apps.missing {
+        let refusal_bytes = match missing {
             Some(Missing::Refused(reason)) => reason.len(),
             _ => 0,
         };

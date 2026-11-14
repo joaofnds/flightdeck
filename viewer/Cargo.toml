@@ -18,6 +18,8 @@ long-recording = []
 # What the live store costs on a recording, which takes a recording to read and minutes of loads
 # and so stays out of the checks: `just read-benchmark <a recording>`.
 read-benchmark = []
+# What another crate's tests build a View by hand through.
+fixtures = []
 
 [dev-dependencies]
 persistence = { path = "../persistence", features = ["fixtures"] }

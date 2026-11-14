@@ -104,8 +104,8 @@ fn from_view_point(
     let (attribution, elapsed_ns, available, completeness) = match apps {
         OverviewApps::Second(apps) => (
             apps.attribution(metric.source(), cohort),
-            apps.elapsed_ns,
-            apps.missing.is_none(),
+            apps.elapsed_ns(),
+            apps.missing().is_none(),
             apps.completeness(),
         ),
         OverviewApps::Stretch(stretch) => (

@@ -290,6 +290,24 @@ const _: () = {
 };
 
 impl Sample {
+    /// A sample of `selected` that measured `elapsed_ns`, found every process and grouped it into
+    /// `apps`, which ascend by key, and holds none of the processes.
+    #[cfg(test)]
+    pub(crate) fn of_apps(selected: Observation, elapsed_ns: Option<u64>, apps: Vec<App>) -> Self {
+        Self {
+            selected,
+            previous: None,
+            elapsed_ns,
+            membership_complete: true,
+            ungrouped_members: 0,
+            live_ungrouped_members: 0,
+            usage_refused: 0,
+            usage_gone: 0,
+            apps,
+            processes: Vec::new(),
+        }
+    }
+
     /// Applies capture's aggregate and presentation admission without retaining a presentation.
     /// A rate predecessor needs its accepted raw frame, rather than copies of the App rows.
     #[cfg(test)]

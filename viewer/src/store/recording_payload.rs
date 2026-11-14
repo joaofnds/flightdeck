@@ -758,7 +758,7 @@ pub(super) fn load_minute_rows(
             second.take(TickApps::Missing(&missing), previous);
             return;
         }
-        second.fill(sample, previous, Some(budget));
+        second.fill(sample, previous, budget);
     } else {
         second.take(
             TickApps::Refused(reason.as_deref().unwrap_or_else(|| unreachable!("refusal"))),

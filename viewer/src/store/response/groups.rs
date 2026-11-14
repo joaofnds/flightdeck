@@ -9,6 +9,7 @@ use crate::app_process_groups_history::reduce::{Capture, Phase, Reduction};
 use crate::cancellation::Operation;
 use crate::live_app_history::cohort;
 use crate::live_app_response::{KeyKind, Selected};
+use crate::store::ProcessAt;
 
 impl QueryContext {
     /// The shared CPU-mean process cohort, reduced directly from retained selected-App members.
@@ -69,29 +70,25 @@ fn response_groups_visit(
     for second in context.seconds() {
         operation.check()?;
         let apps = second.apps();
-        if apps.missing.is_some() {
+        if apps.missing().is_some() {
             reduction.begin(&response_groups_capture(second, false), phase)?;
             continue;
         }
-        if apps.observation != Some(second.observation) {
+        if apps.observation() != Some(second.observation) {
             return Err(Error::Bound("live App stale detail"));
         }
-        let index = apps
-            .apps
-            .iter()
-            .position(|app| app.name.kind.key(&app.name.bytes) == kind.key(bytes));
-        let Some(index) = index else {
+        let Some(app) = apps.app_of(kind, bytes) else {
             reduction.begin(&response_groups_capture(second, true), phase)?;
             continue;
         };
-        if apps.processes.is_err() {
+        if apps.processes().is_err() {
             reduction.begin(&response_groups_capture(second, false), phase)?;
             continue;
         }
 
-        let (header, payload) = apps.presentation()?;
-        let app_index = u32::try_from(index).map_err(|_| Error::Bound("live App index"))?;
-        let processes = payload.members(Some(app_index));
+        let (header, processes) = apps.presentation()?;
+        let app_index = u32::try_from(app.index()).map_err(|_| Error::Bound("live App index"))?;
+        let processes = processes.members(Some(app_index));
         let capture = Capture {
             observation: &second.observation,
             elapsed_ns: header.elapsed_ns,
@@ -102,8 +99,8 @@ fn response_groups_visit(
         };
         cohort::visit_borrowed(
             &capture,
-            apps.apps[index].members,
-            processes.map(|process| process.presentation(Some(app_index))),
+            app.row().members,
+            processes.map(ProcessAt::presentation),
             reduction,
             phase,
             operation,
@@ -116,9 +113,9 @@ fn response_groups_visit(
 fn response_groups_capture(second: &QuerySecond, available: bool) -> Capture<'_> {
     Capture {
         observation: &second.observation,
-        elapsed_ns: second.apps().elapsed_ns,
+        elapsed_ns: second.apps().elapsed_ns(),
         source_available: available,
-        membership_complete: second.apps().membership_complete,
+        membership_complete: second.apps().completeness().membership_complete,
         unnamed_members: available.then_some(0),
         live: true,
     }

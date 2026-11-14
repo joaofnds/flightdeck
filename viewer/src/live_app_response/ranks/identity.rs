@@ -51,35 +51,20 @@ impl RankedApp {
         Ok(Self::named(kind, bytes, display_name))
     }
 
-    pub(crate) fn retained(name: &Arc<Self>, budget: &Arc<ByteBudget>) -> Option<Arc<Self>> {
-        if name.reservation.is_some() {
-            return Some(Arc::clone(name));
-        }
-
-        Self::copy(name.kind, &name.bytes, &name.display_name, budget)
-    }
-
+    /// A copy of `app`'s identity charged to `budget`, or `None` where the budget refuses it.
     pub(crate) fn captured(app: &App, budget: &Arc<ByteBudget>) -> Option<Arc<Self>> {
-        Self::copy(app.key.kind, &app.key.bytes, &app.display_name, budget)
-    }
-
-    fn copy(
-        kind: KeyKind,
-        bytes: &[u8],
-        display_name: &str,
-        budget: &Arc<ByteBudget>,
-    ) -> Option<Arc<Self>> {
+        let (kind, bytes, display_name) = (app.key.kind, &app.key.bytes, &app.display_name);
         let requested = (2 * size_of::<usize>() + size_of::<Self>())
             .checked_add(bytes.len())?
             .checked_add(display_name.len())?;
         let reservation = budget.reserve(requested)?;
 
-        let mut retained = Self::named(kind, bytes.to_vec(), display_name.to_owned());
-        assert!(retained.bytes.capacity() <= bytes.len());
-        assert!(retained.display_name.capacity() <= display_name.len());
-        retained.reservation = Some(reservation);
+        let mut captured = Self::named(kind, bytes.clone(), display_name.clone());
+        assert!(captured.bytes.capacity() <= bytes.len());
+        assert!(captured.display_name.capacity() <= display_name.len());
+        captured.reservation = Some(reservation);
 
-        Some(Arc::new(retained))
+        Some(Arc::new(captured))
     }
 
     /// Charge held by this identity, excluding any enclosing rows, ranks or contexts.

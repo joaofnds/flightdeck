@@ -35,7 +35,11 @@ fn the_running_store_answers_a_covered_pin_without_replaying_its_sources() {
 
     assert_eq!(pinned.selected().observation, selected);
     assert_eq!(pinned.context_last_second(), last);
-    assert!(pinned.selected().detached());
+    assert!(pinned.selected().fixed());
+    assert!(Arc::ptr_eq(
+        pinned.selected().block(),
+        followed.selected().block()
+    ));
     let mut after = Vec::new();
     trace.snapshot(&mut after).unwrap();
     for kind in [

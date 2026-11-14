@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use num_traits::ToPrimitive;
 use viewer::store::{
-    AppsSecond, AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, Reduction, View,
+    AppsStretch, MachinePlace, MachineSecond, MachineStretch, Mark, Reduction, Second, View,
 };
 
 use super::{
@@ -224,7 +224,7 @@ fn overview_panels_second(view: &View, index: usize) -> &MachineSecond {
 /// span, or those of a stretch of its older part.
 #[derive(Clone, Copy)]
 pub enum OverviewApps<'view> {
-    Second(&'view AppsSecond),
+    Second(Second<'view>),
     Stretch(&'view AppsStretch),
 }
 
@@ -247,7 +247,7 @@ impl OverviewAppPoint<'_> {
     #[must_use]
     pub fn retention_limited(&self) -> bool {
         match self.apps {
-            Some(OverviewApps::Second(apps)) => apps.missing.is_some(),
+            Some(OverviewApps::Second(apps)) => apps.missing().is_some(),
             Some(OverviewApps::Stretch(stretch)) => !stretch.holds_apps(),
             None => true,
         }
@@ -312,7 +312,11 @@ fn overview_app_points_apps<'view>(
     assert_eq!(seconds.len(), indices.len());
     assert_eq!(domain.stride, viewer::EARLIER_STRIDE_SECONDS);
 
+    // The indices rise, so one walk of the live span meets each live second they name.
+    assert!(indices.is_sorted_by(|before, after| before < after));
+
     let mut stretches = view.stretches.iter().peekable();
+    let mut live_seconds = view.apps.seconds().enumerate();
     let mut apps = Vec::with_capacity(seconds.len());
     for (second, index) in seconds.iter().zip(indices) {
         let wall_second = second.wall_ns / NANOSECONDS_PER_SECOND;
@@ -321,7 +325,13 @@ fn overview_app_points_apps<'view>(
             apps.push(held.map(|held| OverviewApps::Stretch(held)));
         } else {
             let live = index.checked_sub(view.earlier.len());
-            apps.push(live.map(|live| OverviewApps::Second(&view.apps[live])));
+            let second = live.map(|live| {
+                let Some((_, second)) = live_seconds.find(|(index, _)| *index == live) else {
+                    unreachable!("the live span holds the second an index names");
+                };
+                second
+            });
+            apps.push(second.map(OverviewApps::Second));
         }
     }
     apps

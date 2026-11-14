@@ -1831,10 +1831,13 @@ fn hour_whose_app_peaks_at(peak: u64) -> viewer::store::View {
         .iter()
         .position(|second| second.wall_ns / 1_000_000_000 == peak)
         .unwrap();
-    view.apps[index] = Arc::new(apps_at(
-        &view.seconds[index],
-        &[("A", 900_000_000), ("B", 250_000_000), ("C", 125_000_000)],
-    ));
+    view.apps.replace(
+        index,
+        Arc::new(apps_at(
+            &view.seconds[index],
+            &[("A", 900_000_000), ("B", 250_000_000), ("C", 125_000_000)],
+        )),
+    );
     view
 }
 
@@ -1871,7 +1874,9 @@ fn hour_with_a_second_reading_of(
         ..viewer::store::MachineSecond::clone(&view.seconds[index])
     };
     view.seconds.insert(index + 1, Arc::new(read_again));
-    view.apps.insert(index + 1, Arc::clone(&view.apps[index]));
+    let mut apps: Vec<_> = view.apps.stored_seconds().cloned().collect();
+    apps.insert(index + 1, Arc::clone(&apps[index]));
+    view.apps = apps.into_iter().collect();
     for (read, at) in (publication..).zip(index + 1..view.seconds.len()) {
         let second = viewer::store::MachineSecond {
             run: [7, 8],
@@ -1884,7 +1889,7 @@ fn hour_with_a_second_reading_of(
         observation.stamp.run = [7, 8];
         observation.stamp.publication = read;
         view.seconds[at] = Arc::new(second);
-        view.apps[at] = Arc::new(apps);
+        view.apps.replace(at, Arc::new(apps));
     }
     view
 }
@@ -1915,7 +1920,7 @@ fn hour_with_a_brief_app_at(peak: u64) -> viewer::store::View {
             let seconds: Vec<_> = view
                 .seconds
                 .iter()
-                .zip(&view.apps)
+                .zip(view.apps.stored_seconds())
                 .filter(|(second, _)| second.wall_ns / 10_000_000_000 == held.stretch)
                 .map(|(_, apps)| Arc::clone(apps))
                 .collect();

@@ -154,7 +154,7 @@ fn resuming_preserves_the_first_unsealed_readings_machine_and_app_rates() {
         .unwrap();
     assert!(expected.follows());
     assert_eq!(*resumed.seconds[index], expected);
-    assert_eq!(resumed.apps[index], expected_apps);
+    assert_eq!(resumed.apps[index], *expected_apps);
 }
 
 #[test]
@@ -621,8 +621,11 @@ fn seconds_of(view: &super::View) -> Vec<u64> {
 
 #[test]
 fn ordinary_ingestion_delivers_every_reading_while_a_retained_view_holds_the_buffers() {
-    // Goal: live ingestion hands over a replacement even when its current View holds old buffers.
-    // Method: retain a full span, queue 65 real ring ticks, take the next View, then finish.
+    // Goal: live ingestion hands over a replacement View while a retained View holds the
+    // buffers of a full span.
+    // Method: retain a full span, queue 65 real ring ticks, one more than the spare machine
+    // buffers, take the next View, then finish. The App buffers have more spares than that, so
+    // the tests of `BlockSpan` reach every App buffer held.
     let mut fixture = pressure_recording();
     let run = fixture.writer.identity().unwrap();
     let mut held = super::Held::without_recording();

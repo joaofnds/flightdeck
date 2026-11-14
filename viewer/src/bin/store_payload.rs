@@ -10,8 +10,8 @@ use persistence::resources::{Footprint, Watchdog};
 use serde_json::json;
 use viewer::apps::Amount;
 use viewer::store::{
-    AppDetails, AppRow, AppsSecond, ByteBudget, MachineSecond, Missing, Payload, ProcessRow,
-    SampledSecond, Store, View,
+    AppDetails, AppRow, AppsSecond, ByteBudget, MachineSecond, Missing, Payload, ProcessAt,
+    ProcessRow, Processes, SampledSecond, Store, View,
 };
 
 #[path = "store_payload/name_census.rs"]
@@ -181,10 +181,10 @@ fn report(view: &View, budget: &ByteBudget) -> io::Result<()> {
             "app_details_rows": counts.app_details,
             "app_details_rows_distinct": counts.app_details_distinct,
             "app_details_row_reserved_bytes": Payload::APP_DETAILS_BYTES,
-            "app_row_capacity_bytes_by_reference": view.apps.iter()
-                .map(|apps| apps.apps.capacity() * size_of::<AppRow>()).sum::<usize>(),
-            "app_row_initialized_bytes_by_reference": view.apps.iter()
-                .map(|apps| apps.apps.len() * size_of::<AppRow>()).sum::<usize>(),
+            "app_row_capacity_bytes_by_reference": view.apps.seconds()
+                .map(|apps| apps.app_row_capacity() * size_of::<AppRow>()).sum::<usize>(),
+            "app_row_initialized_bytes_by_reference": view.apps.seconds()
+                .map(|apps| apps.app_count() * size_of::<AppRow>()).sum::<usize>(),
             "reserved_bytes": budget.used(),
             "reserved_bytes_max": budget.maximum(),
             "reserved_bytes_peak": budget.used_peak(),
@@ -224,13 +224,13 @@ fn report_footprint(phase: &str, budget: &ByteBudget) -> io::Result<()> {
 impl PayloadCounts {
     fn of(view: &View) -> Self {
         let mut counts = Self::default();
-        for apps in &view.apps {
-            match &apps.processes {
-                Ok(payload) => {
+        for apps in view.apps.seconds() {
+            match apps.processes() {
+                Ok(processes) => {
                     counts.complete += 1;
-                    counts.processes += payload.len();
-                    counts.processes_max = counts.processes_max.max(payload.len());
-                    counts.app_details += payload.apps().len();
+                    counts.processes += processes.len();
+                    counts.processes_max = counts.processes_max.max(processes.len());
+                    counts.app_details += processes.app_details_count();
                 }
                 Err(Missing::Unread) => counts.unread += 1,
                 Err(Missing::Budget) => counts.budget += 1,
@@ -238,30 +238,33 @@ impl PayloadCounts {
                 Err(Missing::TooMany) => counts.too_many += 1,
             }
         }
-        let mut addresses = Self::of_addresses(view, counts.processes, Payload::iter);
-        counts.processes_distinct = Self::of_distinct(&mut addresses);
-        let mut addresses = Self::of_addresses(view, counts.app_details, Payload::apps);
-        counts.app_details_distinct = Self::of_distinct(&mut addresses);
+        counts.processes_distinct = Self::of_distinct(view, counts.processes, |processes| {
+            processes.iter().map(ProcessAt::row)
+        });
+        counts.app_details_distinct =
+            Self::of_distinct(view, counts.app_details, Processes::details);
 
         counts
     }
 
-    /// Where each row of one kind is kept, for each second that lists it.
-    fn of_addresses<'view, Row: 'view, Rows: Iterator<Item = &'view Row>>(
+    /// How many distinct rows `rows` gives across the seconds of `view` that hold their
+    /// processes, `count` of them in all, telling rows apart by where they lie in memory.
+    fn of_distinct<'view, Row: 'view, Rows: Iterator<Item = &'view Row>>(
         view: &'view View,
         count: usize,
-        rows: fn(&'view Payload) -> Rows,
-    ) -> Vec<usize> {
+        rows: impl Fn(Processes<'view>) -> Rows,
+    ) -> usize {
         let mut addresses = Vec::with_capacity(count);
-        for payload in payloads(view) {
-            addresses.extend(rows(payload).map(|row| std::ptr::from_ref(row).addr()));
+        for processes in payloads(view) {
+            addresses.extend(rows(processes).map(|row| std::ptr::from_ref(row).addr()));
         }
         assert_eq!(addresses.len(), count);
 
-        addresses
+        Self::of_distinct_addresses(&mut addresses)
     }
 
-    fn of_distinct(addresses: &mut [usize]) -> usize {
+    /// How many distinct addresses `addresses` holds, sorting it.
+    fn of_distinct_addresses(addresses: &mut [usize]) -> usize {
         addresses.sort_unstable();
 
         addresses.chunk_by(|left, right| left == right).count()
@@ -269,10 +272,8 @@ impl PayloadCounts {
 }
 
 /// The seconds of `view` that hold their process rows.
-fn payloads(view: &View) -> impl Iterator<Item = &Payload> {
-    view.apps
-        .iter()
-        .filter_map(|apps| apps.processes.as_deref().ok())
+fn payloads(view: &View) -> impl Iterator<Item = Processes<'_>> {
+    view.apps.seconds().filter_map(|apps| apps.processes().ok())
 }
 
 /// One reader's pass over every reading of every held row of one kind, taken before anything
@@ -286,9 +287,9 @@ impl RowsWalk {
     fn of(view: &View) -> Self {
         let started = Instant::now();
         let mut sum = 0_u64;
-        for payload in payloads(view) {
-            for row in payload {
-                sum = sum.wrapping_add(Self::of_row(row));
+        for processes in payloads(view) {
+            for process in processes.iter() {
+                sum = sum.wrapping_add(Self::of_row(process.row()));
             }
         }
 
@@ -301,8 +302,8 @@ impl RowsWalk {
     fn of_app_details(view: &View) -> Self {
         let started = Instant::now();
         let mut sum = 0_u64;
-        for payload in payloads(view) {
-            for details in payload.apps() {
+        for processes in payloads(view) {
+            for details in processes.details() {
                 sum = sum
                     .wrapping_add(u64::from(details.live_members))
                     .wrapping_add(details.disk_read_bytes.known)
@@ -387,7 +388,7 @@ mod footprint_tests {
         View {
             version,
             seconds: Vec::new(),
-            apps: Vec::new(),
+            apps: viewer::store::AppsSpan::default(),
             earlier: Vec::new(),
             stretches: Vec::new(),
             sampled: Vec::new(),
@@ -411,7 +412,7 @@ mod footprint_tests {
             Arc::as_ptr(&alias).addr(),
         ];
 
-        assert_eq!(PayloadCounts::of_distinct(&mut addresses), 2);
+        assert_eq!(PayloadCounts::of_distinct_addresses(&mut addresses), 2);
     }
 
     #[test]

@@ -73,7 +73,7 @@ impl QueryContext {
             size_of::<ContextRanks<std::result::Result<Ranks, super::Missing>>>()
                 + 5 * (RANKS_MAX + 1) * size_of::<Rank>()
                 + response_rank_display_bytes(second)
-                + match &second.apps().missing {
+                + match second.apps().missing() {
                     Some(super::Missing::Refused(reason)) => reason.len(),
                     _ => 0,
                 },
@@ -305,7 +305,8 @@ fn response_in_range(second: &QuerySecond, range: ContextRange) -> bool {
 }
 
 fn response_rank_display_bytes(second: &QuerySecond) -> usize {
-    let apps = &second.apps().apps;
+    let mut cursor = super::AppsCursor::default();
+    let apps = cursor.apps(second.apps());
     let rows = 5 * apps.len().min(RANKS_MAX);
     let names = apps
         .iter()

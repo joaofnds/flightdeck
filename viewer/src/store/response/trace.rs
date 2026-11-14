@@ -135,51 +135,48 @@ impl QueryContext {
 
 fn response_trace_point(second: &QuerySecond, target: &dyn Selection) -> Result<TracePoint> {
     let apps = second.apps();
-    if apps.missing.is_some() {
+    if apps.missing().is_some() {
         return Ok(TracePoint::unavailable(&second.observation));
     }
-    if apps.observation != Some(second.observation) {
+    if apps.observation() != Some(second.observation) {
         return Err(Error::Bound("live App stale detail"));
     }
-    let index = apps.apps.iter().position(|app| {
-        app.name.kind.key(&app.name.bytes) == target.app().kind.key(target.app().bytes)
-    });
-    let Some(index) = index else {
+    let Some(app) = apps.app_of(target.app().kind, target.app().bytes) else {
         return Ok(TracePoint::from_app_view(
             &second.observation,
-            apps.elapsed_ns,
+            apps.elapsed_ns(),
             None,
         ));
     };
-    let Ok(payload) = &apps.processes else {
+    let Ok(processes) = apps.processes() else {
         return Ok(TracePoint::unavailable(&second.observation));
     };
     apps.presentation()?;
     if let Some(executable) = target.executable() {
-        let app_index = u32::try_from(index).map_err(|_| Error::Bound("live App index"))?;
+        let app_index = u32::try_from(app.index()).map_err(|_| Error::Bound("live App index"))?;
         let mut totals = crate::apps::AppTotals::default();
-        for process in payload.members(Some(app_index)) {
-            if let Some(name) = process.executable_name() {
+        for process in processes.members(Some(app_index)) {
+            if let Some(name) = process.row().executable_name() {
                 if name.bytes == executable {
-                    add_process_view(&mut totals, &process.presentation(Some(app_index)));
+                    add_process_view(&mut totals, &process.presentation());
                 }
             }
         }
-        totals.membership_complete = apps.membership_complete;
+        totals.membership_complete = apps.completeness().membership_complete;
         let present = (totals.members > 0).then_some(&totals);
 
         return Ok(TracePoint::from_totals(
             &second.observation,
-            apps.elapsed_ns,
+            apps.elapsed_ns(),
             present,
         ));
     }
 
-    let app = apps.apps[index].presentation(payload.app(index));
+    let app = app.presentation()?;
 
     Ok(TracePoint::from_app_view(
         &second.observation,
-        apps.elapsed_ns,
+        apps.elapsed_ns(),
         Some(&app),
     ))
 }

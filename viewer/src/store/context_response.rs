@@ -118,7 +118,7 @@ impl QueryContext {
             .inspect(observation)
             .map_err(|_| Error::Bound("selected observation"))?;
         let mut reservation = self.reserve_response(POINT_BYTES_MAX)?;
-        let selected_identity = identity(observation, selected.apps().metadata.origin);
+        let selected_identity = identity(observation, selected.apps().origin());
         if keep_context {
             let mut summary = point(selected);
             let object = summary.as_object_mut().ok_or(Error::Bound("point shape"))?;
@@ -147,7 +147,7 @@ impl QueryContext {
             .filter(|second| {
                 super::selection::at_second(&second.observation, self.selected_second())
             })
-            .map(|second| identity(&second.observation, second.apps().metadata.origin))
+            .map(|second| identity(&second.observation, second.apps().origin()))
             .collect();
         operation.check()?;
 

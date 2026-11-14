@@ -10,7 +10,7 @@ use crate::app_attribution_history::{self, AppAttributionMetric};
 use crate::cancellation::Operation;
 use crate::live::resident_history::{self, Source};
 use crate::live_app_response::{Metric, Rankable, Selected};
-use crate::store::AppsSecond;
+use crate::store::{AppsCursor, Second};
 
 impl QueryContext {
     /// The existing resident cohort/point reduction, fed solely by retained compact App rows.
@@ -36,11 +36,12 @@ impl QueryContext {
     fn response_resident(&self, operation: &Operation) -> Result<Value> {
         let selected = Selected::new(self.selected().observation, self.context_last_second())?;
         let mut reduction = resident_history::Reduction::new(&selected, operation);
+        let mut cursor = AppsCursor::default();
         for second in self.seconds() {
             if response_apps_available(second)? {
                 reduction.observe(
                     &response_capture(second),
-                    response_residents(second.apps()),
+                    response_residents(&mut cursor, second.apps()),
                     Source::Live,
                 )?;
             }
@@ -50,7 +51,7 @@ impl QueryContext {
             if response_apps_available(second)? {
                 reduction.project(
                     &response_capture(second),
-                    response_residents(second.apps()),
+                    response_residents(&mut cursor, second.apps()),
                     Source::Live,
                 )?;
             }
@@ -89,11 +90,12 @@ impl QueryContext {
     ) -> Result<Value> {
         let selected = Selected::new(self.selected().observation, self.context_last_second())?;
         let mut reduction = app_attribution_history::Reduction::new(&selected, metric, operation);
+        let mut cursor = AppsCursor::default();
         for second in self.seconds() {
             if response_apps_available(second)? {
                 reduction.observe(
                     &response_attribution_capture(second),
-                    response_attribution_readings(second.apps(), metric),
+                    response_attribution_readings(&mut cursor, second.apps(), metric),
                     Source::Live,
                 )?;
             }
@@ -103,7 +105,7 @@ impl QueryContext {
             if response_apps_available(second)? {
                 reduction.project(
                     &response_attribution_capture(second),
-                    response_attribution_readings(second.apps(), metric),
+                    response_attribution_readings(&mut cursor, second.apps(), metric),
                     Source::Live,
                 )?;
             }
@@ -127,27 +129,31 @@ impl QueryContext {
 
 fn response_apps_available(second: &QuerySecond) -> Result<bool> {
     let apps = second.apps();
-    if apps.observation != Some(second.observation) {
+    if apps.observation() != Some(second.observation) {
         return Err(Error::Bound("live App stale detail"));
     }
 
-    Ok(apps.missing.is_none())
+    Ok(apps.missing().is_none())
 }
 
 fn response_capture(second: &QuerySecond) -> resident_history::Capture {
-    let apps = second.apps();
+    let completeness = second.apps().completeness();
 
     resident_history::Capture {
         observation: second.observation,
-        membership_complete: apps.membership_complete,
-        ungrouped_members: apps.live_ungrouped_members,
-        usage_refused: apps.usage_refused,
-        usage_gone: apps.usage_gone,
+        membership_complete: completeness.membership_complete,
+        ungrouped_members: completeness.live_ungrouped_members,
+        usage_refused: completeness.usage_refused,
+        usage_gone: completeness.usage_gone,
     }
 }
 
-fn response_residents(apps: &AppsSecond) -> impl Iterator<Item = resident_history::AppReading<'_>> {
-    apps.apps
+fn response_residents<'cursor>(
+    cursor: &'cursor mut AppsCursor,
+    apps: Second<'cursor>,
+) -> impl Iterator<Item = resident_history::AppReading<'cursor>> {
+    cursor
+        .apps(apps)
         .iter()
         .map(|app| resident_history::AppReading {
             key: app.name.kind.key(&app.name.bytes),
@@ -158,18 +164,19 @@ fn response_residents(apps: &AppsSecond) -> impl Iterator<Item = resident_histor
 
 fn response_attribution_capture(second: &QuerySecond) -> app_attribution_history::Capture {
     let mut coverage = response_capture(second);
-    coverage.ungrouped_members = second.apps().ungrouped_members;
+    coverage.ungrouped_members = second.apps().completeness().ungrouped_members;
 
     app_attribution_history::Capture {
         coverage,
-        elapsed_ns: second.apps().elapsed_ns,
+        elapsed_ns: second.apps().elapsed_ns(),
     }
 }
 
-fn response_attribution_readings(
-    apps: &AppsSecond,
+fn response_attribution_readings<'cursor>(
+    cursor: &'cursor mut AppsCursor,
+    apps: Second<'cursor>,
     metric: AppAttributionMetric,
-) -> impl Iterator<Item = app_attribution_history::Reading<'_>> {
+) -> impl Iterator<Item = app_attribution_history::Reading<'cursor>> {
     let metric = match metric {
         AppAttributionMetric::Cpu => Metric::Cpu,
         AppAttributionMetric::Power => Metric::Power,
@@ -177,7 +184,8 @@ fn response_attribution_readings(
         AppAttributionMetric::Gpu => Metric::Gpu,
     };
 
-    apps.apps
+    cursor
+        .apps(apps)
         .iter()
         .map(move |app| app_attribution_history::Reading {
             key: app.name.kind.key(&app.name.bytes),

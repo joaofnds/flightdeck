@@ -1,4 +1,5 @@
 use super::QueryContext;
+use crate::store::AppsCursor;
 
 pub(super) const RESIDENT_POINT_BYTES: usize = 512 * size_of::<serde_json::Value>();
 pub(super) const ATTRIBUTION_POINT_BYTES: usize = 768 * size_of::<serde_json::Value>();
@@ -8,8 +9,9 @@ pub(super) const TRACE_POINT_BYTES: usize = 768 * size_of::<serde_json::Value>()
 pub(super) fn history_result_bytes(context: &QueryContext, point_bytes: usize) -> usize {
     let mut names = 0;
     let mut name_bytes = 0;
+    let mut cursor = AppsCursor::default();
     for second in context.seconds() {
-        for app in &second.apps().apps {
+        for app in cursor.apps(second.apps()) {
             names = (names + 1).min(8);
             name_bytes =
                 name_bytes.max(12 * app.name.bytes.len() + 2 * app.name.display_name.len());

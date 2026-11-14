@@ -62,7 +62,7 @@ pub(crate) fn points<P: KeptPoint>(
             continue;
         };
         let (observation, follows) = match apps {
-            OverviewApps::Second(apps) => (apps.observation, apps.consecutive),
+            OverviewApps::Second(apps) => (apps.observation(), apps.consecutive()),
             OverviewApps::Stretch(stretch) => (stretch.observation, true),
         };
         let Some(observation) = &observation else {
@@ -103,7 +103,7 @@ impl<P: KeptPoint> Kept<P> {
         let (stretches, seconds): (Vec<P>, Vec<P>) = kept.into_iter().partition(KeptPoint::stretch);
         let first = |stretch: bool| {
             drawn.iter().find_map(|point| match point.apps? {
-                OverviewApps::Second(apps) if !stretch => apps.observation,
+                OverviewApps::Second(apps) if !stretch => apps.observation(),
                 OverviewApps::Stretch(held) if stretch => held.observation,
                 _ => None,
             })

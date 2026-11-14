@@ -40,7 +40,7 @@ fn primary_startup_serves_selected_apps_before_historical_apps() {
     assert_selected_minute(&held);
     let primary = query_context(&mut held, &mut ring);
     assert_eq!(primary.readiness(), super::QueryReadiness::Primary);
-    assert!(primary.seconds().iter().all(super::QuerySecond::detached));
+    assert!(primary.seconds().iter().all(super::QuerySecond::fixed));
     assert_pending_histories(&primary, &budget);
     let machine = held.span.newest().unwrap().clone();
     drive_complete(&mut startup, &input, &mut held, &mut ring);
@@ -178,7 +178,7 @@ fn assert_canonical_ticks_work(events: &[persistence::work::ingestion::Event]) {
 #[test]
 fn cancellation_between_primary_and_complete_releases_only_unretained_startup_owners() {
     // Goal: a cancelled historical continuation cannot authorize Complete or drop a reader's data.
-    // Method: retain a real detached Primary, cancel before history, then release each owner.
+    // Method: retain a real fixed Primary, cancel before history, then release each owner.
     let fixture = primary_fixture();
     let cancellation = Arc::new(crate::Cancellation::default());
     let operation = Arc::clone(&cancellation).operation(0).unwrap();
@@ -224,7 +224,7 @@ fn a_store_preallocates_no_app_rows_its_budget_did_not_admit() {
         count += 1;
     });
 
-    assert_eq!(count, super::SECONDS_MAX + super::SECONDS_HELD_MAX);
+    assert_eq!(count, held.apps.buffer_count());
     assert_eq!(budget.used(), 0);
 }
 
@@ -580,7 +580,7 @@ fn the_first_historical_sample_uses_its_own_pruned_source_boundary() {
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.span = super::Span::new(2, super::Buffers::new(3, super::MachineSecond::default));
-    held.apps = super::Span::new(2, super::Buffers::new(3, AppsSecond::default));
+    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(2);
     held.startup = super::StartupState::Loading;
     let mut ring = super::native_acceptance::make_ring(&fixture.root, &budget);
     let mut startup = super::recording::staged::Startup::new();
@@ -681,7 +681,7 @@ fn history_begins_at_its_first_represented_minute_without_opening_an_evicted_bou
     let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
     let mut held = super::Held::without_recording_with_payload(Arc::clone(&budget));
     held.span = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
-    held.apps = super::Span::new(1, super::Buffers::new(2, AppsSecond::default));
+    held.apps = crate::store::block::BlockSpan::with_fewest_buffers(1);
     held.earlier = super::Span::new(1, super::Buffers::new(2, super::MachineSecond::default));
     held.sampled = super::Span::new(1, super::Buffers::new(2, super::SampledSecond::empty));
     held.startup = super::StartupState::Loading;

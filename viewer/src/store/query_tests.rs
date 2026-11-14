@@ -117,7 +117,12 @@ fn an_exact_pin_keeps_the_displayed_identity_and_endpoint_after_alternatives_cha
     assert_eq!(context.alternatives(100).next().unwrap().stamp.run, [0, 0]);
     assert_eq!(context.selected().observation, observation);
     assert_eq!(context.context_last_second(), 100);
-    assert!(context.selected().detached());
+    assert!(context.selected().fixed());
+    assert!(
+        held.apps
+            .blocks()
+            .any(|block| Arc::ptr_eq(block, context.selected().block()))
+    );
 }
 
 #[test]
@@ -148,8 +153,10 @@ fn a_verified_gap_is_unavailable_without_requesting_a_load() {
 
 #[test]
 fn a_kept_context_allows_twenty_minutes_of_subsequent_publications() {
-    // Goal: a pinned context cannot consume the Store's 64 spare pool slots.
-    // Method: pin a full span, accept 1,200 more seconds, and inspect the original identity.
+    // Goal: a context kept through twenty minutes of takes stops none of them, since the store
+    // makes a new buffer wherever the context still holds one.
+    // Method: fix a context on a full span's newest second, take 1,200 more seconds, and
+    // inspect the selected identity.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(1);
     fixture.seal();
@@ -257,7 +264,12 @@ fn queries_perform_no_source_reads_frames_or_app_derivations() {
     drop(scope);
 
     assert!(events.is_empty());
-    assert!(!context.selected().detached());
+    assert!(!context.selected().fixed());
+    assert!(
+        held.apps
+            .blocks()
+            .any(|block| Arc::ptr_eq(block, context.selected().block()))
+    );
     assert_eq!(budget.used(), retained_bytes + context.bytes());
     assert!(std::ptr::eq(
         held.span.newest().unwrap(),
@@ -265,11 +277,17 @@ fn queries_perform_no_source_reads_frames_or_app_derivations() {
     ));
     assert!(std::ptr::eq(
         held.apps.newest().unwrap(),
-        context.selected().apps()
+        context.selected().apps().stored()
     ));
     assert!(Arc::ptr_eq(
         held.apps.newest().unwrap().processes.as_ref().unwrap(),
-        context.selected().apps().processes.as_ref().unwrap(),
+        context
+            .selected()
+            .apps()
+            .stored()
+            .processes
+            .as_ref()
+            .unwrap(),
     ));
     assert!(std::ptr::eq(
         held.span.newest().unwrap().complete().unwrap(),
@@ -280,7 +298,8 @@ fn queries_perform_no_source_reads_frames_or_app_derivations() {
 #[test]
 fn fixed_context_payloads_keep_their_budget_until_the_last_reader_releases_them() {
     // Goal: a selected context's complete allocations retain their original budget owners.
-    // Method: detach a real loaded observation, drop the Store, then release the context.
+    // Method: fix a context on a real loaded observation, drop the Store, then release the
+    // context.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.seal();
@@ -295,21 +314,83 @@ fn fixed_context_payloads_keep_their_budget_until_the_last_reader_releases_them(
         .unwrap();
     queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
     let context = ready(handle.take().unwrap().outcome);
-    assert!(context.selected().detached());
+    assert!(context.selected().fixed());
+    assert!(
+        held.apps
+            .blocks()
+            .any(|block| Arc::ptr_eq(block, context.selected().block()))
+    );
     assert!(Arc::ptr_eq(
         held.apps.newest().unwrap().processes.as_ref().unwrap(),
-        context.selected().apps().processes.as_ref().unwrap()
+        context
+            .selected()
+            .apps()
+            .stored()
+            .processes
+            .as_ref()
+            .unwrap()
     ));
 
     drop(held);
 
     assert!(budget.used() > context.bytes());
     assert_eq!(
-        context.selected().apps().observation.unwrap(),
+        context.selected().apps().stored().observation.unwrap(),
         context.selected().observation
     );
     drop(context);
     assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn a_fixed_context_holds_the_blocks_of_its_range_and_copies_no_app_row() {
+    // Goal: a context fixed on a second shares each of the store's blocks its range reaches,
+    // not only the selected second's, rather than holding a copy of each second's App rows,
+    // and charges the budget for no App row.
+    // Method: load a real sealed minute whose four seconds cross a block boundary, two in each
+    // block, fix a context on the newest, and compare the block each second reads with the
+    // store's by pointer, the rows of the selected second with the store's, and its charge.
+    let mut fixture = Fixture::new();
+    for second in [1_018, 1_019, 1_020, 1_021] {
+        fixture.publish_with_system_rows(second);
+    }
+    fixture.seal();
+    let (held, budget) = load(&fixture);
+    let blocks: Vec<&Arc<crate::store::block::Block>> = held.apps.blocks().collect();
+    assert_eq!(blocks.len(), 2);
+    let queries = Queries::new();
+    let handle = queries.handle(std::thread::current());
+    let retained_bytes = budget.used();
+    handle
+        .submit(request(QuerySelection::Second {
+            second: 1_021,
+            alternative: 0,
+        }))
+        .unwrap();
+
+    queries.serve(&held, Some(&coverage(&fixture, 0)), &budget);
+
+    let context = ready(handle.take().unwrap().outcome);
+    let walls: Vec<Option<u64>> = context
+        .seconds()
+        .iter()
+        .map(|second| second.observation.wall_ns)
+        .collect();
+    assert_eq!(
+        walls,
+        [1_018, 1_019, 1_020, 1_021].map(|second| Some(second * 1_000_000_000))
+    );
+    for (second_index, block_index) in [(0, 0), (1, 0), (2, 1), (3, 1)] {
+        assert!(
+            Arc::ptr_eq(context.seconds()[second_index].block(), blocks[block_index]),
+            "second {second_index}"
+        );
+    }
+    assert!(std::ptr::eq(
+        held.apps.newest().unwrap().apps.as_slice(),
+        context.selected().apps().stored().apps.as_slice()
+    ));
+    assert_eq!(budget.used(), retained_bytes + context.bytes());
 }
 
 #[test]
@@ -443,9 +524,9 @@ fn latest_requests_replace_untaken_work_and_cancellation_keeps_displayed_data() 
 }
 
 #[test]
-fn cancellation_during_detachment_stops_at_the_next_observation_and_releases_admission() {
-    // Goal: obsolete detachment does not keep copying the remaining context's App rows.
-    // Method: supersede a real three-observation build after its first detached observation.
+fn cancellation_during_a_build_stops_at_the_next_observation_and_releases_admission() {
+    // Goal: an obsolete build stops at its next observation and gives back its admission.
+    // Method: supersede a real three-observation build after its first observation.
     let mut fixture = Fixture::new();
     fixture.publish_with_system_rows(100);
     fixture.publish_with_system_rows(101);

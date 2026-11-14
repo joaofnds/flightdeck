@@ -15,7 +15,7 @@ use crate::recording::{
     Before, MachineMinute, Refused, ScopedSealedMinute, SealedSource, read_machine_and_endpoints,
 };
 use crate::store::apps::TickApps;
-use crate::store::{AppsSecond, Held, Missing, SampledSecond};
+use crate::store::{AppsSecond, Held, Missing, SampledSecond, Second};
 use payload::replay::{Captured, Progress, Target as ReplayTarget};
 
 #[cfg(test)]
@@ -540,6 +540,12 @@ fn process_minute(
         .unwrap_or_else(|| unreachable!("machine witness"));
     let sealed = witness.open(input, &minute.found)?;
     if let Some(mut candidate) = pending.take() {
+        // Only an older second waits, since a recent one always installs, and the span never
+        // reaches back to an older second, so a waiting candidate is never recent.
+        assert!(matches!(
+            target(held, &candidate.observation),
+            Target::Older(_) | Target::Outside
+        ));
         input.operation.check()?;
         if !install_ready(&mut candidate, held, input.budget)? {
             *pending = Some(candidate);
@@ -587,8 +593,9 @@ enum Target {
 fn target(held: &Held, observation: &Observation) -> Target {
     if let Some(index) = held
         .apps
-        .held()
-        .position(|apps| apps.observation == Some(*observation))
+        .span()
+        .seconds()
+        .position(|apps| apps.observation() == Some(*observation))
     {
         return Target::Recent(index);
     }
@@ -646,7 +653,9 @@ fn capture_candidate(
         };
         let target = target(held, &observation);
         let previous = match target {
-            Target::Recent(index) => index.checked_sub(1).and_then(|index| held.apps.get(index)),
+            Target::Recent(index) => index
+                .checked_sub(1)
+                .and_then(|index| held.apps.stored(index)),
             Target::Older(_) | Target::Outside => None,
         };
         match target {
@@ -683,6 +692,9 @@ fn capture_candidate(
     })
 }
 
+/// Installs `candidate` where its second now lies. Returns `false`, changing nothing, where an
+/// older second's sampled buffers are all held, so the launch waits for one. A recent second
+/// always installs, since its new block takes a buffer's slot where every buffer is held.
 fn install(
     candidate: &mut Candidate,
     held: &mut Held,
@@ -693,15 +705,12 @@ fn install(
         Target::Outside => Ok(true),
         Target::Recent(index) => {
             assert!(candidate.sampled.is_none());
-            let previous = held
-                .apps
-                .get(index)
-                .unwrap_or_else(|| unreachable!("recent target"));
-            candidate.apps.consecutive = previous.consecutive;
-            candidate.apps.metadata.origin = previous.metadata.origin;
-            Ok(held
-                .apps
-                .replace(index, |apps| mem::swap(apps, &mut candidate.apps)))
+            let previous = held.apps.span().second(index);
+            candidate.apps.consecutive = previous.consecutive();
+            candidate.apps.metadata.origin = previous.origin();
+            held.apps
+                .replace(index, |apps| mem::swap(apps, &mut candidate.apps));
+            Ok(true)
         }
         Target::Older(index) => {
             let sampled = &mut held.sampled;
@@ -711,7 +720,7 @@ fn install(
                     .unwrap_or_else(|| unreachable!("older sample"))
                     .machine;
                 candidate.sampled = Some(
-                    SampledSecond::admitted(machine, &candidate.apps, budget)
+                    SampledSecond::admitted(machine, Second::unheld(&candidate.apps), budget)
                         .map_err(|_| Failure::Blocked)?,
                 );
                 candidate.apps = AppsSecond::default();

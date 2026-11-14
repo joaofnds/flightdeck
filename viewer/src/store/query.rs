@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use collector::ring::Identity;
 
-use super::apps::DetachedAppsSecond;
 use super::selection;
-use super::{AppsSecond, ByteBudget, ByteReservation, Failure, Held, MachineSecond, Missing};
+use super::{Block, ByteBudget, ByteReservation, Failure, Held, MachineSecond, Missing, Second};
 use crate::live_app_response::Observation;
 use crate::session::{ContextRange, ContextSelection};
 
@@ -21,7 +20,8 @@ use crate::session::{ContextRange, ContextSelection};
 #[path = "query_tests.rs"]
 mod tests;
 
-/// One displayed context and one replacement may retain detached data at the same time.
+/// One displayed context and one replacement may hold blocks the store has let go of at the
+/// same time.
 const CONTEXTS_MAX: usize = 2;
 
 /// A checked source/catalog generation, independent of display publication versions.
@@ -39,8 +39,9 @@ pub(crate) struct CheckedCoverage {
     requires_ring: bool,
 }
 
-/// A followed context briefly borrows Store pool owners; a fixed selection detaches them.
-/// Neither retains raw frames or derived samples.
+/// A followed context shares the store's machine buffers and the blocks holding its Apps. A
+/// fixed context copies its machine readings and shares the blocks, which the store never
+/// writes again. Neither holds raw frames or derived samples.
 #[derive(Debug)]
 pub struct QueryContext {
     readiness: QueryReadiness,
@@ -62,6 +63,7 @@ pub struct QuerySecond {
     pub observation: Observation,
     machine: Arc<MachineSecond>,
     apps: QueryApps,
+    retention: Retention,
     outside_cpu_predecessor: Option<ObservationHeader>,
 }
 
@@ -71,13 +73,15 @@ pub(super) struct ObservationHeader {
     pub origin: super::native::Origin,
 }
 
+/// The block holding a context's second, shared with the store and every View that holds it,
+/// and the second's index in it.
 #[derive(Debug)]
-enum QueryApps {
-    Held(Arc<AppsSecond>),
-    Detached(Box<DetachedAppsSecond>),
+struct QueryApps {
+    block: Arc<Block>,
+    index: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Retention {
     Followed,
     Fixed,
@@ -142,7 +146,6 @@ pub enum QueryUnavailable {
     InvalidAlternative,
     ContextLimit,
     Budget,
-    Apps(Missing),
     SourceFailure(Failure),
     Closed,
 }
@@ -270,18 +273,11 @@ impl QueryContext {
             .ok_or(QueryNeedsLoad::MissingObservation)
     }
 
-    /// Admitted context bytes, excluding the shared immutable machine and process owners.
+    /// The bytes admitted for the context, the machine readings a fixed context copies
+    /// included, leaving out the machine buffers and the blocks of Apps it shares.
     #[must_use]
     pub fn bytes(&self) -> usize {
         self.reservation.bytes.bytes()
-            + self
-                .seconds
-                .iter()
-                .map(|second| match &second.apps {
-                    QueryApps::Held(_) => 0,
-                    QueryApps::Detached(apps) => apps.bytes(),
-                })
-                .sum::<usize>()
     }
 }
 
@@ -296,17 +292,21 @@ impl QuerySecond {
     }
 
     #[must_use]
-    pub fn apps(&self) -> &AppsSecond {
-        match &self.apps {
-            QueryApps::Held(apps) => apps,
-            QueryApps::Detached(apps) => apps,
-        }
+    pub fn apps(&self) -> Second<'_> {
+        self.apps.block.second(self.apps.index)
     }
 
-    /// Followed contexts borrow pool owners briefly; fixed selections always detach them.
+    /// Whether the context is fixed on its second, so it answers a read of that second whatever
+    /// the store's span has done since. A followed context moves with the newest second.
     #[must_use]
-    pub fn detached(&self) -> bool {
-        matches!(self.apps, QueryApps::Detached(_))
+    pub fn fixed(&self) -> bool {
+        matches!(self.retention, Retention::Fixed)
+    }
+
+    /// The block holding the second's Apps.
+    #[cfg(test)]
+    pub(super) fn block(&self) -> &Arc<Block> {
+        &self.apps.block
     }
 }
 
@@ -359,7 +359,7 @@ fn build(
     if let Err(outcome) = build_available(held, coverage, request) {
         return Some(outcome);
     }
-    let Some(newest) = held.apps.newest().and_then(|apps| apps.observation) else {
+    let Some(newest) = held.apps.span().newest().and_then(Second::observation) else {
         return Some(QueryOutcome::Unavailable(QueryUnavailable::NoReadings));
     };
     let selection = match build_selection(&newest, &request.selection) {
@@ -397,12 +397,12 @@ fn build_target(
     range: ContextRange,
 ) -> Result<BuildTarget, QueryOutcome> {
     if held.startup == super::StartupState::Primary {
-        if held.apps.held().any(|apps| {
-            if apps.observation != Some(selected) {
+        if held.apps.span().seconds().any(|apps| {
+            if apps.observation() != Some(selected) {
                 return false;
             }
 
-            apps.missing == Some(Missing::Unread)
+            apps.missing() == Some(&Missing::Unread)
         }) {
             return Err(QueryOutcome::NeedsLoad(QueryNeedsLoad::AppsPending));
         }
@@ -532,8 +532,9 @@ fn build_selected(
         QuerySelection::Exact { observation, .. } => {
             return held
                 .apps
-                .held()
-                .filter_map(|apps| apps.observation)
+                .span()
+                .seconds()
+                .filter_map(Second::observation)
                 .find(|held| held == observation)
                 .ok_or(QueryOutcome::Unavailable(QueryUnavailable::NoObservation));
         }
@@ -542,11 +543,12 @@ fn build_selected(
             alternative,
         } => (*second, *alternative),
     };
-    let mut alternatives = Vec::with_capacity(held.apps.len());
+    let mut alternatives = Vec::with_capacity(held.apps.span().len());
     alternatives.extend(
         held.apps
-            .held()
-            .filter_map(|apps| apps.observation)
+            .span()
+            .seconds()
+            .filter_map(Second::observation)
             .filter(|observation| selection::at_second(observation, second)),
     );
     alternatives.sort_by(selection::compare);
@@ -604,7 +606,7 @@ fn build_context(
     contexts: &Arc<AtomicUsize>,
     current: impl Fn() -> bool,
 ) -> Result<Option<QueryContext>, QueryUnavailable> {
-    assert_eq!(held.span.len(), held.apps.len());
+    assert_eq!(held.span.len(), held.apps.span().len());
     assert!(held.span.len() <= super::SECONDS_MAX);
     let count = held
         .span
@@ -622,7 +624,7 @@ fn build_context(
         budget,
         size_of::<QueryContext>() + 2 * size_of::<usize>() + count * second_bytes,
     )?;
-    let Some(seconds) = build_seconds(held, target, budget, count, current)? else {
+    let Some(seconds) = build_seconds(held, target, count, current) else {
         return Ok(None);
     };
 
@@ -633,15 +635,16 @@ fn build_context(
         status: held.source_status,
         latest: held
             .apps
+            .span()
             .newest()
-            .and_then(|apps| apps.observation)
+            .and_then(Second::observation)
             .unwrap_or_else(|| unreachable!("a query selects an accepted observation")),
         latest_origin: held
             .apps
+            .span()
             .newest()
             .unwrap_or_else(|| unreachable!("a query selects accepted Apps"))
-            .metadata
-            .origin,
+            .origin(),
         followed: target.followed,
         selection: target.selection,
         selected: target.selected,
@@ -653,39 +656,47 @@ fn build_context(
 fn build_seconds(
     held: &Held,
     target: &BuildTarget,
-    budget: &Arc<ByteBudget>,
     count: usize,
     current: impl Fn() -> bool,
-) -> Result<Option<Vec<QuerySecond>>, QueryUnavailable> {
+) -> Option<Vec<QuerySecond>> {
     let mut seconds = Vec::with_capacity(count);
     let mut previous: Option<ObservationHeader> = None;
-    for (machine, apps) in held.span.held().zip(held.apps.held()) {
-        if !current() {
-            return Ok(None);
-        }
-        if in_range(machine.wall_ns, target.range) {
-            let observation = apps
-                .observation
-                .unwrap_or_else(|| unreachable!("every accepted second has an identity"));
-            assert_eq!(observation.stamp.publication, machine.publication);
-            let (machine, apps) = build_owners(machine, apps, target.retention, budget)?;
-            seconds.push(QuerySecond {
+    let mut machines = held.span.held();
+    for (block, indices) in held.apps.span().block_ranges() {
+        for index in indices {
+            let machine = machines
+                .next()
+                .unwrap_or_else(|| unreachable!("both spans hold the same seconds"));
+            if !current() {
+                return None;
+            }
+            let apps = block.second(index);
+            if in_range(machine.wall_ns, target.range) {
+                let observation = apps
+                    .observation()
+                    .unwrap_or_else(|| unreachable!("every accepted second has an identity"));
+                assert_eq!(observation.stamp.publication, machine.publication);
+                let (machine, apps) = build_owners(machine, block, index, target.retention);
+                seconds.push(QuerySecond {
+                    observation,
+                    machine,
+                    apps,
+                    retention: target.retention,
+                    outside_cpu_predecessor: previous.filter(|header| {
+                        header
+                            .observation
+                            .wall_ns
+                            .is_some_and(|wall| !in_range(wall, target.range))
+                    }),
+                });
+            }
+            previous = apps.observation().map(|observation| ObservationHeader {
                 observation,
-                machine,
-                apps,
-                outside_cpu_predecessor: previous.filter(|header| {
-                    header
-                        .observation
-                        .wall_ns
-                        .is_some_and(|wall| !in_range(wall, target.range))
-                }),
+                origin: apps.origin(),
             });
         }
-        previous = apps.observation.map(|observation| ObservationHeader {
-            observation,
-            origin: apps.metadata.origin,
-        });
     }
+    assert!(machines.next().is_none());
     seconds.sort_by(|before, after| selection::compare(&before.observation, &after.observation));
     assert_eq!(seconds.len(), count);
     assert!(
@@ -694,32 +705,28 @@ fn build_seconds(
             .any(|second| second.observation == target.selected)
     );
 
-    Ok(Some(seconds))
+    Some(seconds)
 }
 
+/// The second's machine readings and Apps as a context of `retention` holds them. A fixed
+/// context copies the machine readings so it holds no machine buffer, and shares the block
+/// holding the Apps, which the store never writes again.
 fn build_owners(
     machine: &Arc<MachineSecond>,
-    apps: &Arc<AppsSecond>,
+    block: &Arc<Block>,
+    index: usize,
     retention: Retention,
-    budget: &Arc<ByteBudget>,
-) -> Result<(Arc<MachineSecond>, QueryApps), QueryUnavailable> {
-    match retention {
-        Retention::Followed => Ok((Arc::clone(machine), QueryApps::Held(Arc::clone(apps)))),
-        Retention::Fixed => {
-            let apps = apps.detached(budget).map_err(|missing| {
-                if missing == Missing::Budget {
-                    QueryUnavailable::Budget
-                } else {
-                    QueryUnavailable::Apps(missing)
-                }
-            })?;
+) -> (Arc<MachineSecond>, QueryApps) {
+    let machine = match retention {
+        Retention::Followed => Arc::clone(machine),
+        Retention::Fixed => Arc::new(machine.as_ref().clone()),
+    };
+    let apps = QueryApps {
+        block: Arc::clone(block),
+        index,
+    };
 
-            Ok((
-                Arc::new(machine.as_ref().clone()),
-                QueryApps::Detached(Box::new(apps)),
-            ))
-        }
-    }
+    (machine, apps)
 }
 
 fn in_range(wall_ns: u64, range: ContextRange) -> bool {

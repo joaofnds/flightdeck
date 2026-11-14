@@ -86,54 +86,6 @@ fn prepared_retries_keep_exact_cumulative_reader_losses() {
 }
 
 #[test]
-fn detachment_retains_native_origin_and_the_original_metadata_reservation() {
-    // Goal: pinning facts preserves provenance and the owner charged for their App metadata.
-    // Method: detach a prepared native second and drop the source and all original retainers.
-    let mut fixture = Fixture::new();
-    publish(&mut fixture, 1, Some(3.0), true);
-    let budget = Arc::new(ByteBudget::new(256 * 1024 * 1024));
-    let operation = Arc::new(Cancellation::default()).operation(0).unwrap();
-    let mut ring = crate::store::ring::Ring::with_budget(fixture.root.clone(), Arc::clone(&budget));
-    ring.follow().unwrap();
-    let mut second = crate::store::AppsSecond::default();
-    ring.read_prepared(&budget, &operation, None, |_, prepared| {
-        second = std::mem::take(&mut prepared.apps);
-        true
-    })
-    .unwrap();
-    let metadata = second.metadata.bytes();
-    let payload = second.processes.as_ref().unwrap();
-    let process_names: usize = payload
-        .iter()
-        .filter_map(crate::store::ProcessRow::executable_name)
-        .map(crate::store::ProcessName::reserved_bytes)
-        .sum();
-    let rows = crate::store::startup_tests::row_bytes(&[payload]);
-    let payload = payload.bytes();
-    let names: usize = second
-        .apps
-        .iter()
-        .map(|app| app.name.reserved_bytes())
-        .sum();
-
-    let detached = second.detached(&budget).unwrap();
-    drop(second);
-    drop(ring);
-    drop(fixture);
-
-    assert_eq!(
-        detached.metadata.origin,
-        super::Origin::Live(persistence::Losses::default())
-    );
-    assert_eq!(
-        budget.used(),
-        detached.bytes() + metadata + payload + rows + names + process_names
-    );
-    drop(detached);
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
 fn a_terminal_workspace_admission_retry_keeps_the_saved_predecessor() {
     // Goal: importing a saved predecessor charges its capacities before consuming it.
     // Method: leave only native workspace room, refuse import, then free room and retry C.

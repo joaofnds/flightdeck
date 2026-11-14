@@ -10,7 +10,7 @@ use collector::clock::Timebase;
 use collector::processes::{Usage, read_usage};
 use persistence::resources::Footprint;
 use serde_json::json;
-use viewer::store::{Store, View};
+use viewer::store::{Second, Store, View};
 
 #[path = "resume_bench/fixture_control.rs"]
 mod fixture_control;
@@ -187,7 +187,7 @@ impl Meter {
         let after = self.read()?;
         let footprint = Footprint::read()?;
         let cpu_ns = after.user_ns + after.system_ns - before.user_ns - before.system_ns;
-        let app_rows: usize = view.apps.iter().map(|apps| apps.apps.len()).sum();
+        let app_rows: usize = view.apps.seconds().map(Second::app_count).sum();
         println!(
             "{}",
             json!({
